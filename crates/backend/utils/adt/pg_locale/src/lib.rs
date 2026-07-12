@@ -252,6 +252,12 @@ pub fn set_default_locale_c_for_tests() {
     DEFAULT_LOCALE.with(|d| d.set(Some(&C_LOCALE)));
 }
 
+/// Non-panicking probe: init_database_collation has run (fail-closed gates
+/// that would otherwise trip the DEFAULT_COLLATION expect in test/boot envs).
+pub fn default_locale_installed() -> bool {
+    DEFAULT_LOCALE.with(Cell::get).is_some()
+}
+
 #[cold]
 fn cache_lookup_failed(collid: Oid) -> Box<PgError> {
     PgError::error(format!("cache lookup failed for collation {collid}")).into()

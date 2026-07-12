@@ -39,7 +39,8 @@ pub use compile::{
     exec_build_merge_projection_info_subplans, exec_build_projection_info_subplans,
     exec_init_expr, exec_init_expr_subplans,
     exec_init_expr_subplans_agg, exec_init_expr_with_case_test,
-    exec_init_qual, exec_init_qual_subplans, expr_type, AggBind, AggOrderedSpec, AggTransSpec,
+    exec_init_qual, exec_init_qual_subplans, expr_type, lane_scan_qual, AggBind, AggOrderedSpec,
+    AggTransSpec, LaneBoolTest, LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix,
     SubplanCompileEnv, WinBind, INDEX_VAR, INNER_VAR, OUTER_VAR,
 };
 pub use interp::{
@@ -48,9 +49,10 @@ pub use interp::{
     Resume, RetSlot, RetSlots, Suspension,
 };
 pub use steps::{
-    agg_count_star_advance, qual_bitmap_cmp_const, AggPerGroup, CmpOp, ExprState,
-    GroupedColsCell, Kernel, OutRef, ProjArithOp, ScanCmpClauses, ScanProjCol, ScanProjCols,
-    SlotSrc, Step, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,
+    agg_count_star_advance, qual_bitmap_cmp_const, qual_bitmap_contains, AggPerGroup, CmpOp,
+    ExprState, GroupedColsCell, Kernel, OutRef, ProjArithOp, ProjKeyCall, ScanCmpClauses,
+    ScanContainsClause, ScanProjCol, ScanProjCols, ScanProjExprKey, SlotSrc, Step,
+    PROJ_KEY_MAX_ARGS, PROJ_KEY_MAX_CALLS, SCAN_CMP_MAX_CLAUSES, SCAN_PROJ_MAX_COLS,
 };
 pub use types_portal::params::ParamBind;
 pub use xmlops::map_sql_value_to_xml_value;

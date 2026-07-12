@@ -3622,7 +3622,7 @@ pub(crate) fn copy_PlanRowMark(_mcx: Mcx<'_>, s: &PlanRowMark) -> PgResult<PlanR
 pub(crate) fn copy_PlannedStmt<'d>(mcx: Mcx<'d>, s: &PlannedStmt<'_>) -> PgResult<PlannedStmt<'d>> {
     Ok(PlannedStmt {
         commandType: s.commandType,
-        queryId: s.queryId,
+        queryId: types_nodes::SyncCell::new(s.queryId.get()),
         planId: s.planId,
         hasReturning: s.hasReturning,
         hasModifyingCTE: s.hasModifyingCTE,

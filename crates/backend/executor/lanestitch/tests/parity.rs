@@ -169,8 +169,9 @@ const FLOAT_FAMS: &[(ColTy, ColTy, &[CmpOp])] = &[
 ];
 
 /// Random program over `tys`-typed columns: 1..=4 clauses drawn from
-/// {int cmp-const, float cmp-const (non-NaN), int cmp-var, arith clause}.
-/// Returns None if the draw needs a column type the layout lacks.
+/// {int cmp-const, float cmp-const (non-NaN), int cmp-var, float cmp-var
+/// (NaN-dense lanes), arith clause}. Skips a draw if the layout lacks the
+/// needed column type.
 fn gen_program(r: &mut Lcg, tys: &[ColTy], allow_arith: bool) -> Program {
     let mut prog = Program::new();
     let nclauses = 1 + r.below(4) as usize;
@@ -188,8 +189,23 @@ fn gen_program(r: &mut Lcg, tys: &[ColTy], allow_arith: bool) -> Program {
         }
     };
     for _ in 0..nclauses {
-        let kind = r.below(if allow_arith { 4 } else { 3 });
+        let kind = r.below(if allow_arith { 5 } else { 4 });
         match kind {
+            3 => {
+                // float cmp-var (same- or cross-width): the FCmpVar fused
+                // shape — NaN lanes are common (F32/F64 pools are NaN-dense).
+                let (a_ty, b_ty, ops) = FLOAT_FAMS[r.below(FLOAT_FAMS.len() as u64) as usize];
+                let (Some(ca), Some(cb)) = (col_of(tys, a_ty, r), col_of(tys, b_ty, r)) else {
+                    continue;
+                };
+                let op = ops[r.below(ops.len() as u64) as usize];
+                prog.steps.extend([
+                    Step::LoadLane { col: ca, out: 0 },
+                    Step::LoadLane { col: cb, out: 1 },
+                    Step::Cmp { op, a: 0, b: 1, out: 2 },
+                    Step::Qual { a: 2 },
+                ]);
+            }
             0 => {
                 // int/oid cmp-const
                 let (lane_ty, k_ty, ops) = INT_FAMS[r.below(INT_FAMS.len() as u64) as usize];
@@ -583,15 +599,19 @@ fn fail_closed_refusals() {
     // NaN const: the fcmp conds are exact only for a non-NaN rhs — refuse.
     let p = cmp_const_prog(CmpOp::Float8Gt, Datum::from_f64(f64::NAN));
     assert!(StitchedProgram::compile(&p, 1).is_none(), "NaN const must refuse");
-    // Float var-var: no NaN-exact generic stencil — refuse.
+    // Float var-var OUTSIDE the fused window (result feeds a NullTest, not
+    // the Qual directly): the generic register-file Cmp stencil still has
+    // no NaN-exact cond — refuse. (The fused [load,load,cmp,qual] window
+    // compiles via the FCmpVar NaN-mask stencils — see float_var_var_*.)
     let mut p = Program::new();
     p.steps = vec![
         Step::LoadLane { col: 0, out: 0 },
         Step::LoadLane { col: 1, out: 1 },
         Step::Cmp { op: CmpOp::Float8Lt, a: 0, b: 1, out: 2 },
-        Step::Qual { a: 2 },
+        Step::NullTest { a: 2, out: 3, kind: NullTestKind::IsNotNull },
+        Step::Qual { a: 3 },
     ];
-    assert!(StitchedProgram::compile(&p, 2).is_none(), "float var-var must refuse");
+    assert!(StitchedProgram::compile(&p, 2).is_none(), "generic-window float cmp must refuse");
     // Volatile programs refuse.
     let mut p = cmp_const_prog(CmpOp::Int4Gt, Datum::from_i32(5));
     p.volatile = true;
@@ -1173,6 +1193,7 @@ fn fuzz_parity_new_vocab() {
     let mut compiles = 0u32;
     let mut stitched = 0u32;
     let mut replays = 0u32;
+    let mut simd_bodies = 0u32;
     for case in 0..500u32 {
         let prog = gen_new_vocab_program(&mut r);
         let Some(jit) = StitchedProgram::compile(&prog, tys.len()) else {
@@ -1180,6 +1201,9 @@ fn fuzz_parity_new_vocab() {
             return;
         };
         compiles += 1;
+        if jit.is_simd() {
+            simd_bodies += 1;
+        }
         let nrows = geometries[r.below(geometries.len() as u64) as usize];
         let null_pct = [0u64, 0, 10, 50, 100][r.below(5) as usize];
         let cols = gen_batch_data(&mut r, tys, nrows as usize, null_pct);
@@ -1200,6 +1224,12 @@ fn fuzz_parity_new_vocab() {
     assert!(compiles >= 400, "too few compiles: {compiles}");
     assert!(stitched >= 200, "too few stitched batches: {stitched}");
     assert!(replays >= 3, "too few refuse-and-replay cases: {replays}");
+    // NullTest/BoolTest/SAOP clauses now ride the NEON vector pass: arith-
+    // free draws (a majority) must classify SIMD.
+    assert!(
+        simd_pinned_off() || simd_bodies >= 100,
+        "too few SIMD bodies in the grown vocabulary: {simd_bodies}"
+    );
 }
 
 /// One random clause from the grown vocabulary over a fixed 4-column layout
@@ -1276,11 +1306,16 @@ fn gen_new_vocab_program(r: &mut Lcg) -> Program {
             }
             4 => {
                 // SAOP int4 IN-list on col1, sometimes with a NULL element.
+                // Half the non-NULL elements draw from the u16 domain so the
+                // SVE2 MATCH stencil admits (and parity-fuzzes) on SVE2
+                // hardware; the rest keep the full-range NEON coverage.
                 let nelem = r.below(6) as usize; // 0..5 (incl. empty)
                 let mut elems: Vec<NullableDatum> = (0..nelem)
                     .map(|_| {
                         if r.chance(15) {
                             NullableDatum::null()
+                        } else if r.chance(50) {
+                            nd(Datum::from_i32(r.below(0x1_0000) as i32))
                         } else {
                             nd(gen_value(r, ColTy::I32))
                         }
@@ -1298,10 +1333,17 @@ fn gen_new_vocab_program(r: &mut Lcg) -> Program {
                 ]);
             }
             _ => {
-                // SAOP oid IN-list on col3.
+                // SAOP oid IN-list on col3 (u16-domain-biased like arm 4).
                 let nelem = 1 + r.below(5) as usize;
-                let elems: Vec<NullableDatum> =
-                    (0..nelem).map(|_| nd(gen_value(r, ColTy::Oid))).collect();
+                let elems: Vec<NullableDatum> = (0..nelem)
+                    .map(|_| {
+                        if r.chance(50) {
+                            nd(canon_oid(r.below(0x1_0000) as u32))
+                        } else {
+                            nd(gen_value(r, ColTy::Oid))
+                        }
+                    })
+                    .collect();
                 let op = [CmpOp::OidEq, CmpOp::OidLt, CmpOp::OidGe][r.below(3) as usize];
                 let arr = p.push_array(elems);
                 p.steps.extend([
@@ -1313,6 +1355,247 @@ fn gen_new_vocab_program(r: &mut Lcg) -> Program {
         }
     }
     p
+}
+
+// ==========================================================================
+// Widened SIMD tier (lane-v2-simdbreadth): float var-var (FCmpVar), fused
+// NullTest/BoolTest, and SAOP promoted from the per-row bits loop into the
+// NEON vector pass. Every shape parity-fuzzed on both the 64-row block path
+// and the scalar tail, plus engagement pins (the shapes must actually take
+// the SIMD tier when it isn't pinned off).
+// ==========================================================================
+
+fn fcmp_var_prog(op: CmpOp) -> Program {
+    let mut p = Program::new();
+    p.steps = vec![
+        Step::LoadLane { col: 0, out: 0 },
+        Step::LoadLane { col: 1, out: 1 },
+        Step::Cmp { op, a: 0, b: 1, out: 2 },
+        Step::Qual { a: 2 },
+    ];
+    p
+}
+
+/// Adversarial float pools: multiple NaN payloads (quiet/signaling-pattern,
+/// both signs — PG treats every NaN as one value), signed zeros, infinities,
+/// denormals, and sign edges.
+fn f64_edge(i: usize) -> Datum {
+    let pool = [
+        f64::NAN,
+        f64::from_bits(0x7FF8_0000_0000_0001), // quiet NaN, nonzero payload
+        f64::from_bits(0xFFF8_0000_0000_0000), // negative quiet NaN
+        f64::from_bits(0x7FF0_0000_0000_0001), // signaling-pattern NaN
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        -0.0,
+        0.0,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        5e-324, // smallest denormal
+        1.0,
+        -1.5,
+        f64::MAX,
+        f64::MIN,
+    ];
+    Datum::from_f64(pool[i % pool.len()])
+}
+
+fn f32_edge(i: usize) -> Datum {
+    let pool = [
+        f32::NAN,
+        f32::from_bits(0x7FC0_0001), // quiet NaN, nonzero payload
+        f32::from_bits(0xFFC0_0000), // negative quiet NaN
+        f32::from_bits(0x7F80_0001), // signaling-pattern NaN
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        -0.0,
+        0.0,
+        f32::MIN_POSITIVE,
+        1e-45, // smallest denormal
+        1.0,
+        -1.5,
+        f32::MAX,
+        f32::MIN,
+    ];
+    Datum::from_f32(pool[i % pool.len()])
+}
+
+/// Float var-var over every family and relation, NaN-payload-dense lanes,
+/// SIMD blocks and scalar tails: exact pgf_* (float.h) parity on both tiers.
+#[test]
+fn float_var_var_nan_ordering() {
+    if !lanestitch::available() {
+        return;
+    }
+    let fams: &[(ColTy, ColTy, &[CmpOp])] = FLOAT_FAMS;
+    let mut r = Lcg(0xF10A7);
+    for &(a_ty, b_ty, ops) in fams {
+        for &op in ops {
+            let prog = fcmp_var_prog(op);
+            let jit = StitchedProgram::compile(&prog, 2)
+                .expect("fused float var-var must compile");
+            assert!(
+                simd_pinned_off() || jit.is_simd(),
+                "float var-var must take the NEON tier ({op:?})"
+            );
+            for &nrows in &[63u32, 64, 65, 130, 257] {
+                for &null_pct in &[0u64, 20] {
+                    // Edge-pool lanes with different strides so every
+                    // (edge, edge) pair occurs, plus random fill.
+                    let mk = |ty: ColTy, stride: usize, r: &mut Lcg| -> ColData {
+                        let values = (0..nrows as usize)
+                            .map(|i| {
+                                if r.chance(75) {
+                                    match ty {
+                                        ColTy::F32 => f32_edge(i * stride + stride - 1),
+                                        _ => f64_edge(i * stride + stride - 1),
+                                    }
+                                } else {
+                                    gen_value(r, ty)
+                                }
+                            })
+                            .collect();
+                        let isnull = (0..nrows as usize).map(|_| r.chance(null_pct)).collect();
+                        ColData { values, isnull }
+                    };
+                    let cols = vec![mk(a_ty, 1, &mut r), mk(b_ty, 7, &mut r)];
+                    let want = interp_outcome(&prog, &cols, nrows).unwrap();
+                    let got = stitched_outcome(&jit, &prog, &cols, nrows).unwrap();
+                    assert_eq!(want, got, "{op:?} nrows={nrows} null%={null_pct}");
+                }
+            }
+        }
+    }
+}
+
+/// The promoted shapes must actually engage the NEON tier: single-clause
+/// NullTest / BoolTest / SAOP programs (previously Generic -> scalar body)
+/// now classify SIMD, and their parity holds on block-boundary geometries.
+#[test]
+fn simd_engagement_of_promoted_shapes() {
+    if !lanestitch::available() {
+        return;
+    }
+    let mut progs: Vec<(&str, Program)> = Vec::new();
+    for kind in [NullTestKind::IsNull, NullTestKind::IsNotNull] {
+        progs.push(("nulltest", nulltest_prog(kind)));
+    }
+    for kind in [
+        BoolTestKind::IsTrue,
+        BoolTestKind::IsNotTrue,
+        BoolTestKind::IsFalse,
+        BoolTestKind::IsNotFalse,
+    ] {
+        progs.push(("booltest", booltest_prog(kind)));
+    }
+    for op in [CmpOp::Int4Eq, CmpOp::Int4Ne, CmpOp::Int4Lt, CmpOp::Int4Ge] {
+        let elems: Vec<NullableDatum> =
+            [-3, 0, 5, 7, 9].iter().map(|&v| nd(Datum::from_i32(v))).collect();
+        progs.push(("saop", saop_prog(op, elems)));
+    }
+    // Empty and full-cap IN-lists, and one with NULL elements.
+    progs.push(("saop-empty", saop_prog(CmpOp::Int4Eq, vec![])));
+    progs.push((
+        "saop-full",
+        saop_prog(
+            CmpOp::Int4Eq,
+            (0..128).map(|v| nd(Datum::from_i32(v * 3 - 40))).collect(),
+        ),
+    ));
+    let mut with_null: Vec<NullableDatum> =
+        [2, 4].iter().map(|&v| nd(Datum::from_i32(v))).collect();
+    with_null.push(NullableDatum::null());
+    progs.push(("saop-nullelem", saop_prog(CmpOp::Int4Ne, with_null)));
+
+    let mut r = Lcg(0x51D3);
+    for (name, prog) in &progs {
+        let jit = StitchedProgram::compile(prog, 1).expect("promoted shape must compile");
+        assert!(
+            simd_pinned_off() || jit.is_simd(),
+            "{name} must take the NEON tier"
+        );
+        for &nrows in &[1u32, 63, 64, 65, 129, 1000] {
+            for &np in &[0u64, 25, 100] {
+                let cols = gen_batch_data(&mut r, &[ColTy::I32], nrows as usize, np);
+                let want = interp_outcome(prog, &cols, nrows).unwrap();
+                let got = stitched_outcome(&jit, prog, &cols, nrows).unwrap();
+                assert_eq!(want, got, "{name} nrows={nrows} null%={np}");
+            }
+        }
+    }
+
+    // An arith clause still refuses the tier for the whole program (the
+    // reordering legality rests on it).
+    let mut p = nulltest_prog(NullTestKind::IsNotNull);
+    let k = p.push_const(nd(Datum::from_i32(1)));
+    let k2 = p.push_const(nd(Datum::from_i32(0)));
+    p.steps.extend([
+        Step::LoadLane { col: 0, out: 0 },
+        Step::LoadConst { k, out: 1 },
+        Step::Arith { op: ArithOp::Add4, a: 0, b: 1, out: 2 },
+        Step::LoadConst { k: k2, out: 3 },
+        Step::Cmp { op: CmpOp::Int4Gt, a: 2, b: 3, out: 4 },
+        Step::Qual { a: 4 },
+    ]);
+    let jit = StitchedProgram::compile(&p, 1).unwrap();
+    assert!(!jit.is_simd(), "an arith clause must refuse the SIMD tier");
+}
+
+/// A kitchen-sink mixed program: every vector-pass shape in one qual (int
+/// cmp-const, float cmp-const, float var-var, oid cmp, NullTest, BoolTest,
+/// SAOP) — one NEON pass builds the whole word; parity across geometries.
+#[test]
+fn simd_all_shapes_one_program() {
+    let mut prog = Program::new();
+    let k = prog.push_const(nd(Datum::from_i32(-100)));
+    let kf = prog.push_const(nd(Datum::from_f64(0.25)));
+    let arr = prog.push_array(
+        [1i32, 3, 5, 700, -2].iter().map(|&v| nd(Datum::from_i32(v))).collect(),
+    );
+    prog.steps = vec![
+        // int4 cmp-const
+        Step::LoadLane { col: 0, out: 0 },
+        Step::LoadConst { k, out: 1 },
+        Step::Cmp { op: CmpOp::Int4Ge, a: 0, b: 1, out: 2 },
+        Step::Qual { a: 2 },
+        // float8 cmp-const
+        Step::LoadLane { col: 1, out: 0 },
+        Step::LoadConst { k: kf, out: 1 },
+        Step::Cmp { op: CmpOp::Float8Le, a: 0, b: 1, out: 2 },
+        Step::Qual { a: 2 },
+        // float var-var (f64 vs f32)
+        Step::LoadLane { col: 1, out: 0 },
+        Step::LoadLane { col: 2, out: 1 },
+        Step::Cmp { op: CmpOp::Float84Gt, a: 0, b: 1, out: 2 },
+        Step::Qual { a: 2 },
+        // NullTest
+        Step::LoadLane { col: 3, out: 0 },
+        Step::NullTest { a: 0, out: 1, kind: NullTestKind::IsNotNull },
+        Step::Qual { a: 1 },
+        // BoolTest
+        Step::LoadLane { col: 0, out: 0 },
+        Step::BoolTest { a: 0, out: 1, kind: BoolTestKind::IsNotFalse },
+        Step::Qual { a: 1 },
+        // SAOP
+        Step::LoadLane { col: 0, out: 0 },
+        Step::SaopAny { a: 0, out: 1, op: CmpOp::Int4Ne, arr },
+        Step::Qual { a: 1 },
+    ];
+    let tys = &[ColTy::I32, ColTy::F64, ColTy::F32, ColTy::I64];
+    let Some(jit) = StitchedProgram::compile(&prog, 4) else {
+        assert!(!lanestitch::available());
+        return;
+    };
+    assert!(simd_pinned_off() || jit.is_simd(), "all-vector program must take the NEON tier");
+    let mut r = Lcg(0xA11);
+    for &nrows in &[63u32, 64, 65, 191, 1024] {
+        for &np in &[0u64, 15, 60] {
+            let cols = gen_batch_data(&mut r, tys, nrows as usize, np);
+            let want = interp_outcome(&prog, &cols, nrows).unwrap();
+            let got = stitched_outcome(&jit, &prog, &cols, nrows).unwrap();
+            assert_eq!(want, got, "nrows={nrows} null%={np}");
+        }
+    }
 }
 
 // ---- projection tier ------------------------------------------------------
@@ -1569,7 +1852,7 @@ fn proj_selected_rows_only() {
     assert!(!bufs.isnull[0][1]);
 
     // Same program, overflowing row selected: Refused, no error object.
-    let mut sel = SelVec::all(2);
+    let sel = SelVec::all(2);
     let mut bufs = OutBufs::new(1, 2);
     let mut lanes = bufs.lanes();
     assert_eq!(
@@ -1651,4 +1934,240 @@ fn proj_drift_fails_open() {
     let mut bufs = OutBufs::new(1, 4);
     let mut lanes = bufs.lanes();
     assert_eq!(body.run_into(4, &[], &sel.words[..1], &mut lanes), ProjOutcome::Drift);
+}
+
+// ==========================================================================
+// SVE2 stencil tier (lane-v2-sve2tier): both GO kernels of the SVE2 spike
+// (notes/sve2-spike-2026-07-14.md) parity-proven against the interpreter
+// oracle. On non-SVE2 hardware (Apple Silicon dev boxes: SVE never) these
+// exercise the NEON tier and the assertions still hold; on the fleet's
+// Graviton nodes they exercise the SVE bodies. The fleet job runs this
+// suite with PGRUST_LANESTITCH_SVE2 unset, =off, and =force — "SVE parity
+// green on c8gd" is the merge gate for any stencil change.
+// ==========================================================================
+
+/// K3 — SVE2 MATCH IN-lists: Eq SAOP clauses whose non-NULL elements all
+/// sit in the u16 domain (the dict-code / small-int production shape), over
+/// lanes mixing element hits, near-misses, out-of-domain values whose low
+/// 16 bits collide with an element (the in-domain-mask trap), negatives,
+/// and NULLs. Multi-clause programs cover candidate-register allocation
+/// alongside the NEON const bank.
+#[test]
+fn sve2_match_saop_parity() {
+    if !lanestitch::available() {
+        return;
+    }
+    let mut r = Lcg(0x5CE2_0001);
+    let tys: &[ColTy] = &[ColTy::I16, ColTy::I32, ColTy::I64, ColTy::Oid];
+    // (lane column, Eq op, element ceiling): int2 lanes cap elements at
+    // i16::MAX (canonical-datum contract — a 40000 "int2 const" would not
+    // be a canonical int2 image).
+    let fams: &[(u16, CmpOp, u64)] = &[
+        (0, CmpOp::Int2Eq, 0x8000),
+        (1, CmpOp::Int4Eq, 0x1_0000),
+        (2, CmpOp::Int8Eq, 0x1_0000),
+        (3, CmpOp::OidEq, 0x1_0000),
+        (2, CmpOp::Int84Eq, 0x1_0000),
+        (1, CmpOp::Int48Eq, 0x1_0000),
+    ];
+    let geometries: &[u32] = &[63, 64, 65, 128, 191, 1000, MAX_ROWS as u32];
+    let mut match_bodies = 0u32;
+    for case in 0..240u32 {
+        let (col, op, ceil) = fams[case as usize % fams.len()];
+        let k = [1usize, 2, 4, 7, 8, 9, 16, 24, 48][r.below(9) as usize];
+        let mut prog = Program::new();
+        let mut elem_vals: Vec<u64> = (0..k).map(|_| r.below(ceil)).collect();
+        let mut elems: Vec<NullableDatum> =
+            elem_vals.iter().map(|&v| nd(Datum::from_i64(v as i64))).collect();
+        if r.chance(25) {
+            // NULL elements are invisible to a qual'd SAOP — admission
+            // counts only non-NULL elements.
+            elems.push(NullableDatum::null());
+        }
+        let arr = prog.push_array(elems);
+        prog.steps.extend([
+            Step::LoadLane { col, out: 0 },
+            Step::SaopAny { a: 0, out: 1, op, arr },
+            Step::Qual { a: 1 },
+        ]);
+        if r.chance(40) {
+            // A fused const clause: MATCH candidate registers must coexist
+            // with the NEON const bank.
+            let kk = prog.push_const(nd(Datum::from_i32(r.below(200) as i32 - 100)));
+            prog.steps.extend([
+                Step::LoadLane { col: 1, out: 0 },
+                Step::LoadConst { k: kk, out: 1 },
+                Step::Cmp { op: CmpOp::Int4Le, a: 0, b: 1, out: 2 },
+                Step::Qual { a: 2 },
+            ]);
+        }
+        if r.chance(30) {
+            // A second MATCH-eligible clause: multi-clause register budget.
+            let k2 = 1 + r.below(16) as usize;
+            let elems2: Vec<NullableDatum> =
+                (0..k2).map(|_| nd(Datum::from_i64(r.below(0x1_0000) as i64))).collect();
+            let arr2 = prog.push_array(elems2);
+            prog.steps.extend([
+                Step::LoadLane { col: 1, out: 0 },
+                Step::SaopAny { a: 0, out: 1, op: CmpOp::Int4Eq, arr: arr2 },
+                Step::Qual { a: 1 },
+            ]);
+        }
+        let Some(jit) = StitchedProgram::compile(&prog, tys.len()) else {
+            assert!(!lanestitch::available(), "MATCH-shape program refused (case {case})");
+            return;
+        };
+        assert!(jit.is_simd(), "SAOP program must classify SIMD (case {case})");
+        if jit.sve_match_clauses() > 0 {
+            match_bodies += 1;
+        }
+        let nrows = geometries[r.below(geometries.len() as u64) as usize];
+        // Adversarial lanes: element hits, low-16 collisions ABOVE the u16
+        // domain (must NOT match), sign-extended negatives, boundary words.
+        if elem_vals.is_empty() {
+            elem_vals.push(1);
+        }
+        let mut cols = gen_batch_data(&mut r, tys, nrows as usize, 10);
+        for row in 0..nrows as usize {
+            let e = elem_vals[r.below(elem_vals.len() as u64) as usize];
+            let v: i64 = match r.below(6) {
+                0 => e as i64,                       // exact hit
+                1 => e as i64 ^ 1,                   // near miss
+                2 => e as i64 | 0x1_0000,            // low16 collision, out of domain
+                3 => -(e as i64) - 1,                // negative (sign-extended)
+                4 => e as i64 | (1i64 << 47),        // high-bit garbage collision
+                _ => r.below(0x1_0000) as i64,       // random in-domain
+            };
+            // Canonical datum image per lane family (the spec.rs contract —
+            // a raw wide word in a narrow lane is NOT a legal batch); the
+            // truncation keeps every trap class that fits the family.
+            let d = match col {
+                0 => Datum::from_i16(v as i16),
+                1 => Datum::from_i32(v as i32),
+                3 => canon_oid(v as u32),
+                _ => Datum::from_i64(v),
+            };
+            cols[col as usize].values[row] = d;
+        }
+        let want = interp_outcome(&prog, &cols, nrows);
+        let got = stitched_outcome(&jit, &prog, &cols, nrows);
+        assert_eq!(want, got, "case {case} nrows {nrows} k {k} op {op:?}");
+    }
+    // Engagement pin: on SVE2 hardware every one of these programs is
+    // MATCH-eligible (Eq, u16-domain, k <= 48 within the register budget).
+    assert!(
+        !lanestitch::sve2_active() || match_bodies >= 200,
+        "too few MATCH bodies on SVE2 hardware: {match_bodies}"
+    );
+}
+
+/// K1 — the adaptive SVE COMPACT survivor path: a vector clause with
+/// per-block survivor counts engineered to straddle the measured crossover
+/// (blocks alternate ~5 and ~40 survivors of 64), ANDed with a Generic
+/// (unfused) clause that owns the per-survivor iteration. Parity across
+/// geometries covering blocks + scalar tails, NULL densities, and full
+/// selectivity sweeps.
+#[test]
+fn sve2_survivor_extraction_parity() {
+    if !lanestitch::available() {
+        return;
+    }
+    let mut r = Lcg(0x5CE2_0002);
+    let tys: &[ColTy] = &[ColTy::I32, ColTy::I32];
+    for &(lo_pct, hi_pct) in &[(0u64, 0u64), (5, 60), (10, 15), (50, 50), (100, 100), (2, 98)] {
+        let mut prog = Program::new();
+        let k = prog.push_const(nd(Datum::from_i32(0)));
+        prog.steps.extend([
+            Step::LoadLane { col: 0, out: 0 },
+            Step::LoadConst { k, out: 1 },
+            Step::Cmp { op: CmpOp::Int4Gt, a: 0, b: 1, out: 2 },
+            Step::Qual { a: 2 },
+        ]);
+        // Generic clause (no fused window matches LoadLane->NullTest->
+        // BoolTest): pure and non-erroring, so it rides the SIMD body's
+        // per-survivor section — bit-iteration on NEON, the COMPACT dense
+        // list above the crossover on SVE2.
+        prog.steps.extend([
+            Step::LoadLane { col: 1, out: 0 },
+            Step::NullTest { a: 0, out: 1, kind: NullTestKind::IsNotNull },
+            Step::BoolTest { a: 1, out: 2, kind: BoolTestKind::IsTrue },
+            Step::Qual { a: 2 },
+        ]);
+        let Some(jit) = StitchedProgram::compile(&prog, tys.len()) else {
+            assert!(!lanestitch::available());
+            return;
+        };
+        assert!(jit.is_simd());
+        assert_eq!(
+            jit.has_sve_survivor_path(),
+            lanestitch::sve2_active(),
+            "survivor-path presence must track the active tier"
+        );
+        for &nrows in &[64u32, 65, 127, 128, 191, 640, 1000, MAX_ROWS as u32] {
+            let mut cols = gen_batch_data(&mut r, tys, nrows as usize, 0);
+            for row in 0..nrows as usize {
+                // Alternate survivor density per 64-row block: straddles
+                // SVE_SURVIVOR_CROSSOVER so consecutive blocks take
+                // different arms of the adaptive branch.
+                let pct = if (row / 64) % 2 == 0 { lo_pct } else { hi_pct };
+                cols[0].values[row] =
+                    Datum::from_i32(if r.chance(pct) { 1 + r.below(100) as i32 } else { -1 });
+                cols[0].isnull[row] = r.chance(5);
+                // The generic clause fails NULL and zero rows.
+                cols[1].values[row] = Datum::from_i32(r.below(2) as i32);
+                cols[1].isnull[row] = r.chance(20);
+            }
+            let want = interp_outcome(&prog, &cols, nrows);
+            let got = stitched_outcome(&jit, &prog, &cols, nrows);
+            assert_eq!(want, got, "lo {lo_pct} hi {hi_pct} nrows {nrows}");
+        }
+    }
+}
+
+/// The MATCH admission edges stay fail-closed to the NEON stencil: non-Eq
+/// relations, any element above the u16 domain, and register-budget
+/// overflow must still stitch (SIMD) and stay parity-exact — they just
+/// carry zero MATCH clauses.
+#[test]
+fn sve2_match_admission_edges() {
+    if !lanestitch::available() {
+        return;
+    }
+    let tys: &[ColTy] = &[ColTy::I16, ColTy::I32, ColTy::I64, ColTy::Oid];
+    let mk = |op: CmpOp, vals: &[i64]| -> Program {
+        let mut p = Program::new();
+        let arr = p.push_array(vals.iter().map(|&v| nd(Datum::from_i64(v))).collect());
+        p.steps.extend([
+            Step::LoadLane { col: 1, out: 0 },
+            Step::SaopAny { a: 0, out: 1, op, arr },
+            Step::Qual { a: 1 },
+        ]);
+        p
+    };
+    // (program, MATCH-eligible on SVE2 hardware?)
+    let cases: &[(Program, bool)] = &[
+        (mk(CmpOp::Int4Eq, &[1, 2, 65535]), true),
+        (mk(CmpOp::Int4Ne, &[1, 2, 3]), false),    // relation
+        (mk(CmpOp::Int4Lt, &[7]), false),          // relation
+        (mk(CmpOp::Int4Eq, &[1, 65536]), false),   // element out of domain
+        (mk(CmpOp::Int4Eq, &[-1, 3]), false),      // negative element
+        (mk(CmpOp::Int4Eq, &(0..80i64).collect::<Vec<_>>()), false), // > MAX_MATCH_ELEMS
+    ];
+    let mut r = Lcg(0x5CE2_0003);
+    for (i, (prog, eligible)) in cases.iter().enumerate() {
+        let Some(jit) = StitchedProgram::compile(prog, tys.len()) else {
+            assert!(!lanestitch::available());
+            return;
+        };
+        assert!(jit.is_simd(), "case {i}");
+        assert_eq!(
+            jit.sve_match_clauses() > 0,
+            *eligible && lanestitch::sve2_active(),
+            "case {i}: MATCH admission drifted"
+        );
+        let cols = gen_batch_data(&mut r, tys, 500, 15);
+        let want = interp_outcome(prog, &cols, 500);
+        let got = stitched_outcome(&jit, prog, &cols, 500);
+        assert_eq!(want, got, "case {i}");
+    }
 }

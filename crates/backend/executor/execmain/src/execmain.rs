@@ -32,6 +32,11 @@ seam_core::tap!(pub fn tap_executor_start(h: QueryDescHandle));
 seam_core::tap!(pub fn tap_executor_run(h: QueryDescHandle));
 seam_core::tap!(pub fn tap_executor_finish(h: QueryDescHandle));
 seam_core::tap!(pub fn tap_executor_end(h: QueryDescHandle));
+// _leave taps: C consumers wrap standard_ExecutorRun/Finish in PG_TRY to
+// track nesting depth; the seam guarantees the leave fires on the error path
+// too (PG_FINALLY parity).
+seam_core::tap!(pub fn tap_executor_run_leave(h: QueryDescHandle));
+seam_core::tap!(pub fn tap_executor_finish_leave(h: QueryDescHandle));
 
 // One parked ExecutorState context (C's context_freelists): raw pointer keeps
 // the TLS payload !needs_drop; nested executors overflow to a plain delete.
@@ -231,7 +236,7 @@ pub(crate) fn executor_rearm_seam(
     params: ParamListHandle,
 ) -> PgResult<bool> {
     let reused = querydesc::with_qd(h, |qd| {
-        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
+        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId.get(), false);
         // CreateQueryDesc parity: the QueryDesc owns a registration on its
         // snapshot for the life of this execution.
         qd.snapshot = snapmgr::RegisterSnapshot(snapshot.as_ref())?;
@@ -261,10 +266,20 @@ pub(crate) fn executor_rearm_seam(
 // standard_executor_end moves it out instead). false = ran the normal
 // ExecutorEnd + free path; the caller's cleanup hook is consumed either way.
 pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool> {
-    let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
-    if fire_triggers {
-        ::trigger::AfterTriggerEndQuery()?;
-    }
+    // This path replaces ExecutorFinish + ExecutorEnd for parked portals, so
+    // it must fire the same taps the split seams do or a consumer
+    // (pg_stat_statements) silently loses these executions.
+    tap_executor_finish::call_if(|f| f(h));
+    let r = (|| -> PgResult<()> {
+        let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
+        if fire_triggers {
+            ::trigger::AfterTriggerEndQuery()?;
+        }
+        Ok(())
+    })();
+    tap_executor_finish_leave::call_if(|f| f(h));
+    r?;
+    tap_executor_end::call_if(|f| f(h));
     let parked = querydesc::with_qd(h, |qd| -> PgResult<bool> {
         if skeleton_disarm_in_place(qd)?.is_none() {
             standard_executor_end(qd)?;
@@ -342,7 +357,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
 pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<()> {
     tap_executor_start::call_if(|f| f(h));
     querydesc::with_qd(h, |qd| {
-        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId, false);
+        backend_status_seams::pgstat_report_query_id::call(qd.plannedstmt().queryId.get(), false);
         standard_executor_start(qd, eflags)
     })
 }
@@ -354,18 +369,27 @@ pub(crate) fn executor_run_seam(
     dest: &mut DestReceiver<'_>,
 ) -> PgResult<()> {
     tap_executor_run::call_if(|f| f(h));
-    querydesc::with_qd(h, |qd| standard_executor_run(qd, direction, count, dest))
+    let r = querydesc::with_qd(h, |qd| standard_executor_run(qd, direction, count, dest));
+    tap_executor_run_leave::call_if(|f| f(h));
+    r
 }
 
 pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
     // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
-    let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
-    if fire_triggers {
-        ::trigger::AfterTriggerEndQuery()?;
-    }
-    Ok(())
+    // C divergence: C runs AfterTriggerEndQuery inside the totaltime
+    // Instr window (standard_ExecutorFinish); here it falls outside, so a
+    // consumer's per-statement time/bufusage exclude after-trigger work.
+    let r = (|| -> PgResult<()> {
+        let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
+        if fire_triggers {
+            ::trigger::AfterTriggerEndQuery()?;
+        }
+        Ok(())
+    })();
+    tap_executor_finish_leave::call_if(|f| f(h));
+    r
 }
 
 /// `ExecutorRewind` (execMain.c).
@@ -926,9 +950,12 @@ pub fn standard_executor_run<'m>(
         qd.already_executed = true;
         upm
     };
+    if let Some(t) = qd.totaltime.as_deref_mut() {
+        ::instrument::instr_start_node(t);
+    }
     let tup_desc = qd.tup_desc.clone();
     let exec = qd.exec.as_mut().expect("ExecutorRun before ExecutorStart");
-    exec.with_mut_mcx(|_mcx, data| {
+    let nprocessed = exec.with_mut_mcx(|_mcx, data| {
         debug_assert!(data.estate.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
         data.estate.es_processed = 0;
         if send_tuples {
@@ -942,8 +969,12 @@ pub fn standard_executor_run<'m>(
         if send_tuples {
             dest.shutdown()?;
         }
-        Ok(())
-    })
+        Ok::<u64, Box<types_error::PgError>>(data.estate.es_processed)
+    })?;
+    if let Some(t) = qd.totaltime.as_deref_mut() {
+        ::instrument::instr_stop_node(t, nprocessed as f64);
+    }
+    Ok(())
 }
 
 /// `ExecutePlan` (execMain.c): THE per-tuple loop.
@@ -1027,15 +1058,22 @@ fn exit_parallel_mode_outlined() {
 // it after this returns (registry-borrow discipline) — es_finished has no
 // reader during the firing loop.
 pub fn standard_executor_finish(qd: &mut QueryDescData) -> PgResult<bool> {
+    if let Some(t) = qd.totaltime.as_deref_mut() {
+        ::instrument::instr_start_node(t);
+    }
     let exec = qd.exec.as_mut().expect("ExecutorFinish before ExecutorStart");
-    exec.with_mut(|data| {
+    let fire = exec.with_mut(|data| {
         let es = &mut data.estate;
         debug_assert!(es.es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY == 0);
         assert!(!es.es_finished, "ExecutorFinish called twice");
         exec_postprocess_plan(es)?;
         es.es_finished = true;
         Ok::<bool, Box<types_error::PgError>>(es.es_top_eflags & EXEC_FLAG_SKIP_TRIGGERS == 0)
-    })
+    })?;
+    if let Some(t) = qd.totaltime.as_deref_mut() {
+        ::instrument::instr_stop_node(t, 0.0);
+    }
+    Ok(fire)
 }
 
 // ExecPostprocessPlan (execMain.c): run wCTE ModifyTable subplans to

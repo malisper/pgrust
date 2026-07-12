@@ -236,10 +236,20 @@ pub fn init_seams() {
     });
 }
 
-// planner_hook (hook-surface.md section 2): wraps standard_planner so a
-// future pgss can time track_planning. Empty by default (S1 ships no
-// consumer).
-seam_core::tap!(pub fn tap_planner());
+// planner_hook (hook-surface.md section 2): enter/leave pair so a consumer
+// (pg_stat_statements) can time track_planning and track nesting depth. The
+// leave fires on the error path too (C PG_FINALLY parity), with ok=false so
+// no stats are stored. Empty by default (S1 ships no consumer).
+seam_core::tap!(pub fn tap_planner_enter(query_id: i64));
+seam_core::tap!(
+    pub fn tap_planner_leave<'a>(
+        ok: bool,
+        query_id: i64,
+        stmt_location: i32,
+        stmt_len: i32,
+        query_string: &'a str,
+    )
+);
 
 pub fn planner<'mcx>(
     mcx: Mcx<'mcx>,
@@ -248,8 +258,13 @@ pub fn planner<'mcx>(
     cursor_options: i32,
     bound_params: ParamListHandle,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    tap_planner::call_if(|f| f());
-    let result = standard_planner(mcx, parse, query_string, cursor_options, bound_params)?;
+    let (query_id, stmt_location, stmt_len) = (parse.queryId, parse.stmt_location, parse.stmt_len);
+    tap_planner_enter::call_if(|f| f(query_id));
+    let result = standard_planner(mcx, parse, query_string, cursor_options, bound_params);
+    tap_planner_leave::call_if(|f| {
+        f(result.is_ok(), query_id, stmt_location, stmt_len, query_string)
+    });
+    let result = result?;
     backend_status_seams::pgstat_report_plan_id::call(result.planId, false);
     Ok(result)
 }
@@ -415,7 +430,7 @@ pub fn standard_planner<'mcx>(
     let glob = core::mem::replace(&mut run.glob, run::Glob::new());
     let stmt = PlannedStmt {
         commandType: parse.commandType,
-        queryId: parse.queryId,
+        queryId: types_nodes::SyncCell::new(parse.queryId),
         planId: 0,
         hasReturning: !parse.returningList.is_nil(),
         hasModifyingCTE: parse.hasModifyingCTE,

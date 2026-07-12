@@ -59,4 +59,5 @@ schemacmds = { path = "../schemacmds" }
 commands_comment = { path = "../comment" }
 explain = { path = "../explain" }
 extension_seams = { path = "../extension_seams" }
+objectaddress_seams = { path = "../../catalog/objectaddress_seams" }
 adt_quote = { path = "../../utils/adt/quote" }

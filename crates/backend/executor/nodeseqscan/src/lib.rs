@@ -64,6 +64,38 @@ pub struct SeqScanState<'mcx> {
     // gates (EPQ, direction) stay in the lane. None = not yet evaluated.
     // Reset on park (rebind may change the backing scan).
     lane_verdict: Option<bool>,
+    // Memoized STANDALONE-ownership verdict for cbstore scans (lane-v2):
+    // admitted only with an armed qual kernel; the arm outcome is static per
+    // node, and the admission cascade must not re-run per pulled tuple (the
+    // per-pull walk measured +20% on kernel-less count(*) shapes). Reset
+    // with lane_verdict on park.
+    cb_standalone: Option<bool>,
+    // Memoized PREWHERE-arm refusal (walker/translate refused the qual —
+    // static per node: the qual never changes). Refused shapes must not
+    // re-pay the translate cascade (LIKE-kernel builds, the regex probe
+    // compile) per feed event or rescan — the refusal-audit "admission-
+    // attempt tax" (coordinator rider, 2026-07-14). Never set on success.
+    cb_prewhere_refused: bool,
+    // The memoized-false standalone verdict's REASON split: true = the
+    // tiny-input row floor refused (before any arm cascade ran), so the
+    // per-pull refusal accounting ticks tiny-input-floor instead of
+    // admission-economics. Reset with cb_standalone on park.
+    cb_tiny: bool,
+    // cbstore relations only: plan-derived column need-set + zone-mappable
+    // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
+    cb_scan: Option<std::boxed::Box<CbScanInfo>>,
+}
+
+/// Plan-derived cbstore scan settings (built once at init, applied to every
+/// freshly opened scan desc — serial open and both parallel init paths).
+struct CbScanInfo {
+    /// Columns the scan reads (qual + targetlist Vars; whole row when a
+    /// whole-row Var appears). Only these columns' chunks decode.
+    needed: Vec<bool>,
+    /// Zone-map-mappable `Var CMP Const` conjuncts of the scan qual
+    /// (advisory pruning only; the executor still evaluates the full qual
+    /// on surviving rows).
+    zone: Vec<::tableam::ZoneQual>,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -133,12 +165,33 @@ struct BatchSoa<'mcx> {
     // kernel, 2+ = the multi-clause census the lane admits).
     quals: [(u16, ::execexpr::CmpOp, ::datum::Datum); ::execexpr::SCAN_CMP_MAX_CLAUSES],
     nquals: u8,
+    // Contains-LIKE kernel qual (the strsearch census) over the varkey-staged
+    // qual column; exclusive with `quals` (nquals stays 0).
+    contains: Option<::execexpr::ScanContainsClause>,
     // Tier-2 stitched-JIT state; armed only by the lane driver on drain
     // pipelines feeding breakers (`seq_scan_stitch_arm`).
     stitch: Option<QualStitch>,
     // Stitched-projection state (Phase-3 projection stitching); armed only
     // by the lane driver on drain pipelines (`seq_scan_proj_stitch_arm`).
     proj: Option<ProjStitch<'mcx>>,
+    // PREWHERE v1 lane qual (cbstore scans under lane-v2 only; phase4 design
+    // §3): the fail-closed translation of the scan qual — staged clauses in
+    // ascending cost order (zone folds + per-clause late materialization at
+    // window staging), the dict text tier, and the hybrid requal split. When
+    // armed it OWNS the selection bitmap; the kernel `quals`/stitch tiers
+    // are bypassed for this scan.
+    lane: Option<Box<::laneexec::LaneQualProg>>,
+    // Hybrid lane qual: the sel bits are a conservative PRE-FILTER (the
+    // qual's vectorizable clause prefix); every selected row re-runs the
+    // FULL original qual per row at fetch. Exact-bitmap consumers
+    // (`seq_scan_batch_qual_sel`, the qual census) refuse these batches.
+    lane_requal: bool,
+    // Dict-GROUP consumer column (cbstore dict-code grouping, cbstore-v2
+    // plan Stage 2.1): the agg feed reads this column as codes+dict past the
+    // qual, so the post-qual gather-to-Raw must SKIP it (the feed is the
+    // dict-code consumer PREWHERE v1 said didn't exist yet). None = every
+    // dict-answered qual lane gathers back to Raw as before.
+    dict_group: Option<u16>,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -336,6 +389,25 @@ impl<'mcx> SeqScanState<'mcx> {
         self.lane_verdict = Some(v);
     }
 
+    /// Memoized standalone cbstore ownership verdict (see the field doc).
+    pub fn cb_standalone_verdict(&self) -> Option<bool> {
+        self.cb_standalone
+    }
+
+    pub fn set_cb_standalone_verdict(&mut self, v: bool) {
+        self.cb_standalone = Some(v);
+    }
+
+    /// The memoized-false standalone verdict was the tiny-input floor's (the
+    /// per-pull accounting attributes the refusal to the right reason).
+    pub fn cb_standalone_tiny(&self) -> bool {
+        self.cb_tiny
+    }
+
+    pub fn set_cb_standalone_tiny(&mut self) {
+        self.cb_tiny = true;
+    }
+
     pub fn release_parallel(&mut self) {
         self.parallel = None;
     }
@@ -395,8 +467,19 @@ impl<'mcx> SeqScanState<'mcx> {
             0,
             PgVec::new_in(mcx),
         )?);
+        self.apply_cb_scan_settings();
         self.arm_slot_jit_deform(estate);
         Ok(())
+    }
+
+    // cbstore need-set + zone quals onto a freshly opened scan desc (serial
+    // open_scandesc and both parallel init paths).
+    fn apply_cb_scan_settings(&mut self) {
+        if let Some(cb) = self.cb_scan.as_deref() {
+            let sd = self.ss.ss_currentScanDesc.as_mut().unwrap();
+            ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
+            ::tableam::table_scan_push_zone_quals(sd, &cb.zone);
+        }
     }
 
     // Rung 1 (per-row lazy path): arm the scan slot with a kernel sized to
@@ -502,6 +585,40 @@ pub fn seq_scan_batch_supported_parallel<'mcx>(
     Ok(::tableam::table_scan_supports_pagebatch_parallel(scandesc))
 }
 
+/// Metadata-aggregate admission (lane-v2 metaagg arm): a BARE cbstore scan —
+/// variant Plain (no qual, no projection), no zone-mappable quals — over an
+/// AM that carries footer metadata. v1 requires literally no qual: a qual
+/// (even one fully staged as zone quals) keeps the scan drive. Opens the
+/// scan desc.
+pub fn seq_scan_meta_agg_ok<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if node.variant != SeqScanVariant::Plain
+        || node.ss.qual.is_some()
+        || !node.cb_scan.as_deref().is_some_and(|cb| cb.zone.is_empty())
+    {
+        return Ok(false);
+    }
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_supports_meta_count(
+        node.ss.ss_currentScanDesc.as_ref().unwrap(),
+    ))
+}
+
+/// Metadata MIN/MAX/COUNT/SUM one-shot answer; None = the scan drive owns it
+/// (parallel scan, uncovered column type, or a heap AM). Consumes no scan
+/// position.
+pub fn seq_scan_meta_agg<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    cols: &[u16],
+    sum_cols: &[u16],
+) -> PgResult<Option<::tableam::MetaAggScan>> {
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_meta_agg(node.ss.ss_currentScanDesc.as_ref().unwrap(), cols, sum_cols)
+}
+
 /// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
 /// stays disarmed (per-row lazy deform) unless the prefix is all fixed-width.
 /// `multi`: admit multi-clause kernel quals (AND of scan-Var-CMP-Const) to
@@ -515,6 +632,14 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     force: bool,
     multi: bool,
 ) {
+    if let Some(b) = &node.batch_soa {
+        // An armed PREWHERE lane owns this scan's staging: keep it whenever
+        // its forced full-prefix deform covers the ask (qual-only and
+        // narrower asks are subsumed — the owned bitmap serves them).
+        if b.lane.is_some() && b.key_col.is_none() && b.plan.ncols() as i32 >= prefix {
+            return;
+        }
+    }
     if prefix <= 0 {
         node.batch_soa = None;
         return;
@@ -577,8 +702,12 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                     |c| c.clauses,
                 ),
                 nquals: qual.map_or(0, |c| c.n),
+                contains: None,
                 stitch: None,
                 proj: None,
+                lane: None,
+                lane_requal: false,
+                dict_group: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -587,6 +716,276 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
             mcx,
         )
     });
+}
+
+/// PREWHERE v1 kill switch (A/B tooling): `PGRUST_LANE_V2_PREWHERE=0`/`off`
+/// keeps cbstore lane quals on the kernel-bitmap/per-row paths. Default ON —
+/// the master `PGRUST_LANE_V2` switch still gates every caller.
+fn prewhere_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_PREWHERE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// PREWHERE v1 arm for a cbstore scan under the lane (phase4 design §3):
+/// translate the scan qual fail-closed (`lane_scan_qual` walker ->
+/// `translate_scan_qual`) into staged clauses (ascending static cost class,
+/// pg_statistic-refined), the dict text tier, and the hybrid requal split;
+/// arm the forced full-prefix SoA deform covering max(qual columns,
+/// `min_prefix` — the feed's own column ask) and install the program on the
+/// batch state. On success the staged window drive in
+/// `seq_scan_next_pagebatch` owns the qual (zone folds + per-clause late
+/// materialization + selection bitmap; requal survivors re-run the full
+/// original qual at fetch) and granule decode goes lazy (per-column on
+/// demand; `store_slot` completes the needed set for surviving rows only).
+/// False = refused; the caller's heap-shaped arms proceed unchanged
+/// (byte-safe either way). Idempotent: an armed lane whose prefix covers the
+/// ask is kept.
+#[cold]
+pub fn seq_scan_cb_prewhere_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    min_prefix: i32,
+) -> PgResult<bool> {
+    if node.cb_scan.is_none() || !prewhere_enabled() {
+        return Ok(false);
+    }
+    if let Some(b) = node.batch_soa.as_deref() {
+        if b.lane.is_some() {
+            return Ok(b.plan.ncols() as i32 >= min_prefix);
+        }
+    }
+    // Refusal memo: the qual is static per node — a refused translate must
+    // not re-run (kernel builds, the regex probe compile) per feed event,
+    // rescan, or memoized-standalone pull (the admission-attempt tax).
+    if node.cb_prewhere_refused {
+        return Ok(false);
+    }
+    let Some(q) = node.ss.qual.as_deref() else { return Ok(false) };
+    let shape = match ::execexpr::lane_scan_qual(q) {
+        Ok(s) => s,
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            node.cb_prewhere_refused = true;
+            return Ok(false);
+        }
+    };
+    // Dict text lanes are a cbstore capability (heap has no text SoA lane).
+    let mut lq = match ::laneexec::translate_scan_qual(&shape, true) {
+        Ok(lq) => lq,
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            node.cb_prewhere_refused = true;
+            return Ok(false);
+        }
+    };
+    node.ensure_scandesc(estate)?;
+    // Prewhere clause order: refine the static cost classes with live
+    // pg_statistic selectivity; a stats-free relation keeps the static
+    // order (equality < range < LIKE). Static order only in v1 — the
+    // observed-pass-rate re-refinement is deferred (phase4 design §3).
+    let relid = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation").rd_id;
+    lq.order_staged_with_stats(estate.es_query_cxt, relid);
+    // Full-prefix deform (qual_only=false, forced): lane quals read several
+    // columns and the lane sel skips the gather for non-survivors — the same
+    // economics as the kernel bitmap. The prefix must also cover the feed's
+    // own SoA reads (`min_prefix`); an uncoverable ask refuses wholesale so
+    // the caller's arms rebuild their own staging.
+    let prefix = (lq.max_attnum as i32 + 1).max(min_prefix);
+    seq_scan_batch_soa_prepare(node, estate, prefix, false, true, true);
+    if node.batch_soa.is_none() {
+        // Text-qual staging (likeband): the fixed-width prefix refused — a
+        // text column sits inside the qual prefix (the LIKE band's Q21-class
+        // shape). That proof is a heap tuple-walk requirement only; the
+        // cbstore window deform fills ANY column type per column
+        // (`batch_deform_col` publishes decoded pointer Datums for text) and
+        // the staged evaluators already consume them (dict lanes /
+        // `eval_raw_rows` over the Raw pointer lane). Arm the same lane over
+        // a VIRTUAL prefix plan carrying only the column count: this
+        // function is unreachable for heap scans (`cb_scan` gate above), the
+        // cbstore deform consumes exactly `ncols()`, and the slot publish is
+        // the virtual-slot no-op — the missing offset chain is never walked.
+        let mcx = estate.es_query_cxt;
+        node.batch_soa =
+            ::exectuples::SoaDeformPlan::virtual_prefix(mcx, prefix as usize).map(|plan| {
+                ::mcx::PgBox::new_in(
+                    BatchSoa {
+                        soa: ::exectuples::SoaBatch::new_in(mcx, plan.ncols()),
+                        plan,
+                        qual_armed: true,
+                        qual_only: false,
+                        key_col: None,
+                        varkey: None,
+                        key_read_col: 0,
+                        publish: true,
+                        quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                            ::execexpr::SCAN_CMP_MAX_CLAUSES],
+                        nquals: 0,
+                        contains: None,
+                        stitch: None,
+                        proj: None,
+                        lane: None,
+                        lane_requal: false,
+                        dict_group: None,
+                        sel: [0; ::exectuples::SOA_BM_WORDS],
+                        nwords: 0,
+                        cur_word: 0,
+                        cur_bits: 0,
+                    },
+                    mcx,
+                )
+            });
+    }
+    match node.batch_soa.as_deref_mut() {
+        Some(b) => {
+            b.qual_armed = true;
+            b.lane_requal = lq.requal;
+            // Dict-lane arming: the AM's batch fill answers these columns as
+            // codes+dict (zero decode); the dict tier evaluates on the memo
+            // and the drive gathers survivors' lanes back to Raw for the
+            // SoA-reading consumers (v1 — no dict-code-carrying consumer
+            // exists yet).
+            for c in lq.dict_cols() {
+                b.soa.set_dict_want(c);
+            }
+            ::laneexec::log_compiled(lq.nclauses, lq.requal);
+            if lq.ndict() > 0 {
+                ::laneexec::log_dict_clauses(lq.ndict());
+            }
+            b.lane = Some(lq);
+            // Post-qual materialization: granule decode per column on
+            // demand — undeformed clauses' columns never decode, store_slot
+            // completes the needed set on the first surviving row.
+            let sd = node.ss.ss_currentScanDesc.as_mut().unwrap();
+            ::tableam::table_scan_set_lazy_decode(sd, true);
+            lane_trace("cbstore prewhere armed");
+            Ok(true)
+        }
+        None => {
+            // Residual staging refusal: only `virtual_prefix`'s u16 bound
+            // can fail now (the fixed-width-prefix refusal died with the
+            // virtual plan — likeband). Kept distinct so the gates can prove
+            // the old reason no longer fires.
+            ::laneexec::log_refused("qual prefix exceeds the staging bound");
+            node.cb_prewhere_refused = true;
+            Ok(false)
+        }
+    }
+}
+
+pub fn seq_scan_cb_dictgroup_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+    key: u16,
+) -> bool {
+    seq_scan_cb_columnar_arm(node, estate, prefix, Some(key))
+}
+
+/// The dict-group columnar arm generalized over the dict registration
+/// (expr-key grouping tranche): `dict_key = None` arms the same offset-free
+/// columnar staging with NO column opted into dict lanes — every window
+/// fills decoded Datums (the expr-key ARITH class over cbstore, whose
+/// grouping-key inputs may sit past varlena columns the heap fixed-width
+/// prefix plan refuses). `Some(key)` is `seq_scan_cb_dictgroup_arm` exactly.
+pub fn seq_scan_cb_columnar_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+    dict_key: Option<u16>,
+) -> bool {
+    if node.cb_scan.is_none() || prefix <= 0 {
+        return false;
+    }
+    if let Some(key) = dict_key {
+        if (key as i32) >= prefix {
+            return false;
+        }
+    }
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        // Idempotent: a matching armed batch is kept (a dict-free ask is
+        // served by ANY covering staging — the dict registration, if one
+        // exists, belongs to a co-resident consumer).
+        if b.plan.ncols() as i32 >= prefix && b.dict_group == dict_key {
+            return true;
+        }
+        if b.key_col.is_some() || b.varkey.is_some() {
+            return false;
+        }
+        // A live PREWHERE lane owns the batch: register the dict-group
+        // consumer on it when its forced full prefix covers the ask (the
+        // fill answers the key as codes+dict from the next window on; the
+        // gather-to-Raw skip keeps the codes up past the qual).
+        if b.lane.is_some() && b.plan.ncols() as i32 >= prefix {
+            if let Some(key) = dict_key {
+                b.soa.set_dict_want(key);
+                b.dict_group = Some(key);
+            }
+            return true;
+        }
+    }
+    let mcx = estate.es_query_cxt;
+    let Some(plan) = ::exectuples::SoaDeformPlan::columnar(mcx, prefix as usize) else {
+        return false;
+    };
+    let mut soa = ::exectuples::SoaBatch::new_in(mcx, plan.ncols());
+    if let Some(key) = dict_key {
+        soa.set_dict_want(key);
+    }
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa,
+            plan,
+            qual_armed: false,
+            qual_only: false,
+            key_col: None,
+            varkey: None,
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            contains: None,
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
+            dict_group: dict_key,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    lane_trace(if dict_key.is_some() {
+        "cbstore dict-group staging armed"
+    } else {
+        "cbstore columnar staging armed"
+    });
+    true
+}
+
+/// Materialize a dict-answered column's lane into its Raw Datum cells for the
+/// CURRENT staged batch (`SoaBatch::gather_dict_lane` — byte-identical to the
+/// filler's own Raw fill), clearing the lane. The expr-key feed calls this
+/// AFTER its per-code key derivation so fold/resid consumers can read the
+/// same column's decoded values. No-op when the window answered Raw.
+#[inline]
+pub fn seq_scan_batch_gather_dict(node: &mut SeqScanState<'_>, c: usize) {
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.soa.gather_dict_lane(c);
+    }
+}
+
+/// The registered dict-group consumer column, when the dict-group arm (or a
+/// PREWHERE co-arm) holds. The agg feed re-checks this per build — a rebuilt
+/// batch (a later consumer re-armed the staging) drops the registration and
+/// the feed falls back to the Raw key path, byte-safely.
+#[inline]
+pub fn seq_scan_batch_dictgroup_col(node: &SeqScanState<'_>) -> Option<u16> {
+    node.batch_soa.as_deref().and_then(|b| b.dict_group)
 }
 
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
@@ -612,11 +1011,26 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             _ => return false,
         },
     };
+    arm_key_soa(node, estate, attnum)
+}
+
+/// Shared key-column staging body (fused-sort direct key feed + the lane's
+/// top-k cutoff pre-filter): arm a key-only `BatchSoa` (publish off, no qual)
+/// staging scan column `attnum` per page batch — the fixed-width prefix
+/// deform when the plan covers it, else the varlena key pass. Idempotent when
+/// the same key is already armed; refuses (false) rather than disturb a
+/// `BatchSoa` armed for anything else (kernel qual bitmap / stitch /
+/// different key), since `seq_scan_next_pagebatch`'s column-selection rule
+/// stages exactly one consumer's columns.
+fn arm_key_soa<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
     if let Some(b) = &node.batch_soa {
-        if b.key_col == Some(attnum) {
-            return true;
-        }
+        return b.key_col == Some(attnum);
     }
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     let mcx = estate.es_query_cxt;
     let atts: &[_] = &rel.rd_att.compact_attrs;
     let (plan, varkey) =
@@ -645,8 +1059,12 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
                 ::execexpr::SCAN_CMP_MAX_CLAUSES],
             nquals: 0,
+            contains: None,
             stitch: None,
             proj: None,
+            lane: None,
+            lane_requal: false,
+                dict_group: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -655,6 +1073,47 @@ pub fn seq_scan_sortkey_direct<'mcx>(
         mcx,
     ));
     true
+}
+
+/// Arm the staged key lane for the lane sort breaker's streaming top-k
+/// cutoff: stage scan column `attnum` (the sort's leading key, resolved by
+/// the lane) per page batch so the pre-filter can compare a whole staged
+/// batch against the tuplesort's k-th boundary vectorized. Requires a
+/// qual-less scan (the pre-filter skips rows without running their emit
+/// body, so no per-row evaluation may be observable) and a free or matching
+/// `BatchSoa`. False = not stageable; the sort feed proceeds unfiltered.
+pub fn seq_scan_topk_key_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
+    if node.ss.qual.is_some() {
+        return false;
+    }
+    arm_key_soa(node, estate, attnum)
+}
+
+/// The staged key lane of the CURRENT page batch for the top-k cutoff
+/// pre-filter: `(values, isnull, fallback_words)` slices over the first `n`
+/// staged rows (fallback bits mark rows the deform skipped — narrow tuples —
+/// which the pre-filter must pass through). `None` = lane not armed or the
+/// staging did not cover this batch; the caller feeds unfiltered.
+#[inline]
+pub fn seq_scan_topk_key_lane<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+    n: u32,
+) -> Option<(&'a [::datum::Datum], &'a [bool], &'a [u64])> {
+    let b = node.batch_soa.as_deref()?;
+    b.key_col?;
+    if b.soa.nrows() < n {
+        return None;
+    }
+    let c = b.key_read_col as usize;
+    Some((
+        &b.soa.col_values(c)[..n as usize],
+        &b.soa.col_isnull(c)[..n as usize],
+        b.soa.fallback_words(),
+    ))
 }
 
 /// Arm the varlena lane feed for the lane-v2 agg fold: stage per-row datum
@@ -693,8 +1152,76 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
                 ::execexpr::SCAN_CMP_MAX_CLAUSES],
             nquals: 0,
+            contains: None,
             stitch: None,
             proj: None,
+            lane: None,
+            lane_requal: false,
+            dict_group: None,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    true
+}
+
+/// Arm the contains-LIKE kernel qual (the lane-v2 strsearch tier,
+/// `notes/strsearch-parity-2026-07-12.md`): the scan qual is exactly one
+/// `scan_var LIKE '%literal%'` clause (execexpr's `scan_contains_clause`
+/// census). The text column stages per-row varlena pointers via the varkey
+/// pass into SoA column 0; `seq_scan_next_pagebatch` then runs one
+/// `qual_bitmap_contains` pass per staged batch. Rows whose datum is
+/// compressed/external are undecidable in the kernel — they take the
+/// forced-fallback bit and the per-row program (which detoasts exactly as C
+/// does) re-checks them, so semantics stay byte-identical. False = not
+/// armable (no census clause / unstageable column / collation lookup fails —
+/// the per-row path then raises that error itself / another batch feed
+/// already owns the node); the scalar per-row path continues unchanged.
+pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(c) = node.ss.qual.as_deref().and_then(|q| q.scan_contains_clause()) else {
+        return false;
+    };
+    if let Some(b) = &node.batch_soa {
+        // Memo hit on our own arm; any other armed feed wins (fail closed).
+        return b.contains.is_some() && b.varkey.is_some();
+    }
+    // The per-row matcher resolves the collation once per call
+    // (generic_match_text -> pg_newlocale_from_collation); a failing lookup
+    // must surface as ITS error, not a silently-filtering kernel.
+    if ::pg_locale::pg_newlocale_from_collation(c.collation).is_err() {
+        return false;
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, c.attnum as usize) else {
+        return false;
+    };
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa: ::exectuples::SoaBatch::new_in(mcx, 1),
+            plan: ::exectuples::SoaDeformPlan::unused(mcx),
+            qual_armed: true,
+            qual_only: true,
+            key_col: None,
+            varkey: Some(vk),
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            contains: Some(c),
+            stitch: None,
+            proj: None,
+            lane: None,
+            lane_requal: false,
+                dict_group: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -766,7 +1293,32 @@ pub fn seq_scan_batch_soa<'a, 'mcx>(
 #[inline]
 pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option<&'a [u64]> {
     let b = node.batch_soa.as_deref()?;
-    b.qual_armed.then_some(&b.sel[..])
+    // Hybrid lane quals: the bits are a conservative pre-filter (survivors
+    // still re-run the full qual per row) — never expose them as the whole
+    // qual's verdicts.
+    (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
+}
+
+/// PREWHERE lane program armed on the batch staging (cbstore scans). The
+/// staged SoA columns fill LAZILY under this arm (per-clause late
+/// materialization; the completing deform runs only for survivor windows), so
+/// a columnar reader above the scan must confine itself to SELECTED rows —
+/// unselected cells may be stale (see `seq_scan_batch_lane_sel`).
+#[inline]
+pub fn seq_scan_batch_lane_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.lane.is_some())
+}
+
+/// Conservative staged-batch selection words when a PREWHERE lane owns the
+/// qual: bitmap hits plus forced fallback bits, INCLUDING requal-pending rows
+/// (hybrid lane quals re-run the full qual per survivor at fetch, so these
+/// bits are a superset of the true survivors — usable as a proof domain for
+/// batch-level guards over rows the consumer will touch, never as verdicts).
+/// None = no lane armed / nothing staged for the current batch.
+#[inline]
+pub fn seq_scan_batch_lane_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    (b.lane.is_some() && b.nwords > 0).then(|| &b.sel[..b.nwords as usize])
 }
 
 pub fn seq_scan_next_pagebatch<'mcx>(
@@ -783,6 +1335,132 @@ pub fn seq_scan_next_pagebatch<'mcx>(
             let b = &mut **b;
             if let Some(vk) = &b.varkey {
                 ::tableam::table_scan_batch_stage_varkey(scandesc, vk, &mut b.soa);
+                // Contains-LIKE kernel qual (strsearch tier): one bitmap
+                // pass over the staged varlena pointer lane. Undecidable
+                // rows (compressed/external datums) become forced-fallback
+                // bits: they join the selection so `seq_scan_batch_fetch`
+                // re-checks them with the per-row program (which detoasts
+                // exactly as C does) — same rows, same order, same errors.
+                if b.qual_armed {
+                    if let Some(c) = &b.contains {
+                        let nwords = (n as usize).div_ceil(64);
+                        let mut undecided = [0u64; ::exectuples::SOA_BM_WORDS];
+                        // SAFETY: staged varkey lane — every non-null cell
+                        // is a live in-page varlena pointer readable through
+                        // its header (`soa_stage_varkey`'s contract; null
+                        // and narrow rows carry isnull/fallback bits).
+                        unsafe {
+                            ::execexpr::qual_bitmap_contains(
+                                c.needle(),
+                                &b.soa.col_values(0)[..n as usize],
+                                &b.soa.col_isnull(0)[..n as usize],
+                                &mut b.sel,
+                                &mut undecided,
+                            );
+                        }
+                        b.soa.mark_fallback_words(&undecided[..nwords]);
+                        for (w, fb) in
+                            b.sel[..nwords].iter_mut().zip(b.soa.fallback_words())
+                        {
+                            *w |= fb;
+                        }
+                        b.nwords = nwords as u32;
+                        b.cur_word = 0;
+                        b.cur_bits = b.sel[0];
+                    }
+                }
+                return Ok(n);
+            }
+            // PREWHERE v1 staged drive (cbstore lane quals; phase4 design
+            // §3): staged clauses run cheapest-first, each (a) folding
+            // against the staged granule's zone metadata — AllFail clears
+            // the window without touching data, AllPass skips the clause's
+            // evaluation — then (b) deforming ONLY its own columns (late
+            // materialization: undeformed clauses' columns never decode) and
+            // ANDing into the selection bitmap, with an early-out once the
+            // bitmap empties. Surviving windows complete to the full fill
+            // set so every downstream SoA reader sees exactly the unstaged
+            // deform; dict-answered lanes gather back to Raw (no dict-code
+            // consumer past the qual in v1). Requal tails re-run the FULL
+            // original qual per survivor at fetch (error identity / LIMIT
+            // truncation / volatile counts — the per-row drive's by
+            // construction). Below two staged clauses the whole-prefix lane
+            // eval is the same one deform + one pass.
+            if let Some(lq) = b.lane.as_deref_mut() {
+                let nwords = (n as usize).div_ceil(64);
+                b.sel[..nwords].fill(u64::MAX);
+                if n % 64 != 0 {
+                    b.sel[nwords - 1] = (1u64 << (n % 64)) - 1;
+                }
+                if lq.nstaged() >= 2 {
+                    lq.log_staged_once();
+                    b.soa.begin(n);
+                    for k in 0..lq.nstaged() {
+                        if !b.sel[..nwords].iter().any(|&w| w != 0) {
+                            break;
+                        }
+                        // Compressed-domain fold: a `Var CMP Const` clause
+                        // whose staged granule is uniformly pass/fail skips
+                        // its column decode and per-row eval entirely. The
+                        // zone qual derives through the SAME extraction that
+                        // built the pruning zone quals, so the folded
+                        // verdict is byte-identical to the pruning path's.
+                        if let Some(zs) = lq.staged_zone_src(k) {
+                            if let Some((attnum, op, val)) =
+                                cb_zone_from_parts(zs.col + 1, zs.fn_oid, zs.commuted, zs.konst)
+                            {
+                                let zq = ::tableam::ZoneQual { attnum, op, val };
+                                match ::tableam::table_scan_staged_granule_verdict(scandesc, &zq)
+                                {
+                                    ::tableam::ZoneVerdict::AllPass => continue,
+                                    ::tableam::ZoneVerdict::AllFail => {
+                                        b.sel[..nwords].fill(0);
+                                        break;
+                                    }
+                                    ::tableam::ZoneVerdict::Mixed => {}
+                                }
+                            }
+                        }
+                        for &c in lq.staged_cols(k) {
+                            ::tableam::table_scan_batch_deform_col(scandesc, c, &mut b.soa);
+                        }
+                        lq.eval_staged(k, &b.soa, n, &mut b.sel)?;
+                    }
+                    if b.sel[..nwords].iter().any(|&w| w != 0) {
+                        // Survivors: complete the deform to the full fill
+                        // set (idempotent per column; dict-wanted columns
+                        // re-answer as lanes and gather below — except a
+                        // registered dict-code consumer's column, whose
+                        // codes the dict-group feed reads directly).
+                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        for c in lq.dict_cols() {
+                            if b.dict_group != Some(c) {
+                                b.soa.gather_dict_lane(c as usize);
+                            }
+                        }
+                    }
+                } else {
+                    ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                    ::laneexec::eval_lane_qual(lq, &b.soa, n, &mut b.sel)?;
+                    for c in lq.dict_cols() {
+                        if b.dict_group != Some(c) {
+                            b.soa.gather_dict_lane(c as usize);
+                        }
+                    }
+                }
+                // cbstore stages no fallback rows; keep the OR for the
+                // contract with `seq_scan_batch_fetch` anyway.
+                for (w, fb) in b.sel[..nwords].iter_mut().zip(b.soa.fallback_words()) {
+                    *w |= fb;
+                }
+                b.nwords = nwords as u32;
+                b.cur_word = 0;
+                b.cur_bits = b.sel[0];
+                if let Some(p) = &mut b.proj {
+                    // The stitched projection never co-arms with a lane qual
+                    // (`seq_scan_proj_stitch_arm` refuses); belt anyway.
+                    p.staged = false;
+                }
                 return Ok(n);
             }
             // Single-clause qual-only staging deforms just the qual column;
@@ -1159,6 +1837,11 @@ fn stitch_cmp(
 /// the clause list into the stitch program.
 pub fn seq_scan_stitch_arm(node: &mut SeqScanState<'_>) {
     let Some(b) = node.batch_soa.as_deref_mut() else { return };
+    // A PREWHERE lane qual owns the bitmap (staged clauses + dict tier +
+    // requal); the kernel `quals` it may shadow must not run a second tier.
+    if b.lane.is_some() {
+        return;
+    }
     if !b.qual_armed
         || b.nquals < STITCH_MIN_CLAUSES
         || b.stitch.is_some()
@@ -1300,6 +1983,12 @@ pub fn seq_scan_proj_stitch_arm<'mcx>(
     let Some(cols) = proj.pi_state.scan_proj_cols() else { return };
     let result_slot = proj.pi_result_slot;
     let Some(b) = node.batch_soa.as_deref_mut() else { return };
+    // Never co-arm with a PREWHERE lane qual: its bits may be a requal
+    // pre-filter, and the stitched-projection emit fast lane bypasses the
+    // per-row qual re-check entirely.
+    if b.lane.is_some() {
+        return;
+    }
     if !b.qual_armed || b.proj.is_some() || (b.plan.ncols() as i32) < prefix {
         return;
     }
@@ -1390,7 +2079,9 @@ pub fn seq_scan_batch_qual_count<'mcx>(
     let mut count = 0u32;
     {
         let Some(b) = node.batch_soa.as_deref() else { return Ok(None) };
-        if !b.qual_armed {
+        if !b.qual_armed || b.lane_requal {
+            // A hybrid lane qual's bits are a pre-filter, not verdicts; the
+            // census cannot count off them.
             return Ok(None);
         }
         for (w, fb) in b.soa.fallback_words()[..nwords].iter().enumerate() {
@@ -1423,7 +2114,11 @@ pub fn seq_scan_batch_fetch<'mcx>(
             if b.sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
                 return Ok(false);
             }
-            if !b.soa.is_fallback(i) {
+            // Hybrid lane quals (`lane_requal`): the bit is a conservative
+            // pre-filter — fall through to the full per-row qual below
+            // (error identity/order and volatile-call counts are the
+            // original evaluator's by construction).
+            if !b.soa.is_fallback(i) && !b.lane_requal {
                 seq_scan_batch_store(node, estate, i);
                 return Ok(true);
             }
@@ -1911,6 +2606,10 @@ pub fn exec_init_seq_scan_rel<'mcx>(
             (true, true) => SeqScanVariant::WithQualProject,
         }
     };
+    let cb_scan = match rel_am_is_cbstore(ss.ss_currentRelation.as_ref().unwrap()) {
+        false => None,
+        true => Some(std::boxed::Box::new(cb_scan_info(node, &ss)?)),
+    };
     Ok(SeqScanState {
         ss,
         variant,
@@ -1924,12 +2623,189 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         lane_pos: 0,
         lane_n: 0,
         lane_verdict: None,
+        cb_standalone: None,
+        cb_prewhere_refused: false,
+        cb_tiny: false,
+        cb_scan,
+    })
+}
+
+fn rel_am_is_cbstore(rel: &Relation<'_>) -> bool {
+    ::tableam::TableAm::of(rel) == Some(::tableam::TableAm::Cbstore)
+}
+
+/// A cbstore relation drives this scan (lane arm gates; the lane's cbscan
+/// engagement class ticks on this).
+pub fn seq_scan_is_cbstore(node: &SeqScanState<'_>) -> bool {
+    node.cb_scan.is_some()
+}
+
+/// Total committed rows of a cbstore scan's Part (footer metadata only; opens
+/// the scan descriptor if needed — the same open the drive does anyway).
+/// None = heap. The lane's tiny-input admission floor reads this BEFORE the
+/// arm cascade runs.
+pub fn seq_scan_cb_total_rows<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<u64>> {
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_cb_total_rows(node.ss.ss_currentScanDesc.as_ref().unwrap()))
+}
+
+// Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
+fn cb_scan_info<'mcx>(
+    node: &SeqScan<'mcx>,
+    ss: &ScanState<'mcx>,
+) -> PgResult<CbScanInfo> {
+    use ::nodes_core::NodeWalker as _;
+    use ::types_nodes::NodeTag;
+
+    let rel = ss.ss_currentRelation.as_ref().unwrap();
+    let natts = rel.rd_att.natts as usize;
+    let scanrelid = node.scan.scanrelid as i32;
+
+    struct Cx {
+        scanrelid: i32,
+        needed: Vec<bool>,
+        wholerow: bool,
+        syscol: bool,
+    }
+    impl<'mcx> ::nodes_core::NodeWalker<'mcx> for Cx {
+        fn visit(&mut self, n: ::types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if n.node_tag() == NodeTag::T_Var {
+                let v = n.as_var().unwrap();
+                if v.varno == self.scanrelid && v.varlevelsup == 0 {
+                    if v.varattno == 0 {
+                        self.wholerow = true;
+                    } else if v.varattno < 0 {
+                        self.syscol = true;
+                    } else if (v.varattno as usize) <= self.needed.len() {
+                        self.needed[(v.varattno - 1) as usize] = true;
+                    }
+                }
+                return Ok(false);
+            }
+            ::nodes_core::expression_tree_walker(n, self)
+        }
+    }
+    let mut cx = Cx { scanrelid, needed: vec![false; natts], wholerow: false, syscol: false };
+    for n in node.scan.plan.qual.iter() {
+        cx.visit(n)?;
+    }
+    for n in node.scan.plan.targetlist.iter() {
+        cx.visit(n)?;
+    }
+    if cx.syscol {
+        return Err(Box::new(PgError::error(
+            "cbstore does not support system columns".to_string(),
+        )));
+    }
+    if cx.wholerow {
+        cx.needed.iter_mut().for_each(|b| *b = true);
+    }
+
+    let mut zone: Vec<::tableam::ZoneQual> = Vec::new();
+    for n in node.scan.plan.qual.iter() {
+        if let Some((attnum, op, val)) = cb_zone_conjunct(n, scanrelid) {
+            zone.push(::tableam::ZoneQual { attnum, op, val });
+        }
+    }
+    Ok(CbScanInfo { needed: cx.needed, zone })
+}
+
+// Zone-mappable scan-qual conjunct: a top-level `Var CMP Const` OpExpr of
+// this relation over the int/date/timestamp cross-type compare families.
+fn cb_zone_conjunct(
+    n: ::types_nodes::Node<'_>,
+    scanrelid: i32,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::types_nodes::NodeTag;
+    if n.node_tag() != NodeTag::T_OpExpr {
+        return None;
+    }
+    let op = n.as_op_expr()?;
+    if op.args.len() != 2 {
+        return None;
+    }
+    let a = op.args.iter().next()?;
+    let b = op.args.iter().nth(1)?;
+    let (var, konst, flip) = match (a.node_tag(), b.node_tag()) {
+        (NodeTag::T_Var, NodeTag::T_Const) => (a.as_var()?, b.as_const()?, false),
+        (NodeTag::T_Const, NodeTag::T_Var) => (b.as_var()?, a.as_const()?, true),
+        _ => return None,
+    };
+    if var.varno != scanrelid || var.varlevelsup != 0 || var.varattno <= 0 || konst.constisnull {
+        return None;
+    }
+    cb_zone_from_parts(var.varattno as u16, op.opfuncid, flip, konst.constvalue)
+}
+
+// Shared zone-qual extraction (op/const-width/flip) for a `Var CMP Const`
+// with the const on the `commuted` side. attnum is 1-based. Also the staged
+// prewhere fold's source, so folded verdicts derive from byte-identical
+// (attnum, op, val) to the pruning path.
+fn cb_zone_from_parts(
+    attnum: u16,
+    fn_oid: u32,
+    commuted: bool,
+    konst: ::datum::Datum,
+) -> Option<(u16, ::tableam::ZoneCmp, i64)> {
+    use ::tableam::ZoneCmp as Z;
+    let (cmp, cw) = cb_zone_cmp(fn_oid)?;
+    let val = match cw {
+        2 => konst.as_i16() as i64,
+        4 => konst.as_i32() as i64,
+        _ => konst.as_i64(),
+    };
+    let cmp = if commuted {
+        match cmp {
+            Z::Lt => Z::Gt,
+            Z::Le => Z::Ge,
+            Z::Gt => Z::Lt,
+            Z::Ge => Z::Le,
+            other => other,
+        }
+    } else {
+        cmp
+    };
+    Some((attnum, cmp, val))
+}
+
+// (comparison, const width) by pg_proc oid; const width is the CONST side
+// of the cross-type families (int2/4/8 x int2/4/8, date, timestamp,
+// date-vs-timestamp).
+#[rustfmt::skip]
+fn cb_zone_cmp(fnoid: u32) -> Option<(::tableam::ZoneCmp, u8)> {
+    use ::tableam::ZoneCmp as Z;
+    Some(match fnoid {
+        63 => (Z::Eq, 2), 145 => (Z::Ne, 2), 64 => (Z::Lt, 2), 148 => (Z::Le, 2),
+        146 => (Z::Gt, 2), 151 => (Z::Ge, 2),
+        65 => (Z::Eq, 4), 144 => (Z::Ne, 4), 66 => (Z::Lt, 4), 149 => (Z::Le, 4),
+        147 => (Z::Gt, 4), 150 => (Z::Ge, 4),
+        467 => (Z::Eq, 8), 468 => (Z::Ne, 8), 469 => (Z::Lt, 8), 471 => (Z::Le, 8),
+        470 => (Z::Gt, 8), 472 => (Z::Ge, 8),
+        158 => (Z::Eq, 4), 164 => (Z::Ne, 4), 160 => (Z::Lt, 4), 166 => (Z::Le, 4),
+        162 => (Z::Gt, 4), 168 => (Z::Ge, 4),
+        159 => (Z::Eq, 2), 165 => (Z::Ne, 2), 161 => (Z::Lt, 2), 167 => (Z::Le, 2),
+        163 => (Z::Gt, 2), 169 => (Z::Ge, 2),
+        474 => (Z::Eq, 4), 475 => (Z::Ne, 4), 476 => (Z::Lt, 4), 478 => (Z::Le, 4),
+        477 => (Z::Gt, 4), 479 => (Z::Ge, 4),
+        852 => (Z::Eq, 8), 853 => (Z::Ne, 8), 854 => (Z::Lt, 8), 856 => (Z::Le, 8),
+        855 => (Z::Gt, 8), 857 => (Z::Ge, 8),
+        1086 => (Z::Eq, 4), 1091 => (Z::Ne, 4), 1087 => (Z::Lt, 4), 1088 => (Z::Le, 4),
+        1089 => (Z::Gt, 4), 1090 => (Z::Ge, 4),
+        2052 => (Z::Eq, 8), 2053 => (Z::Ne, 8), 2054 => (Z::Lt, 8), 2055 => (Z::Le, 8),
+        2057 => (Z::Gt, 8), 2056 => (Z::Ge, 8),
+        1152 => (Z::Eq, 8), 1153 => (Z::Ne, 8), 1154 => (Z::Lt, 8), 1155 => (Z::Le, 8),
+        1157 => (Z::Gt, 8), 1156 => (Z::Ge, 8),
+        _ => return None,
     })
 }
 
 /// `ExecEndSeqScan`.
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
+    node.cb_scan = None;
     stitch_trace_summary(node);
     // Releases the plan's deform-JIT kernel Rc and the stitched body's code
     // block (forget-exempt in batch.rs / here).
@@ -1957,6 +2833,9 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.lane_pos = 0;
     node.lane_n = 0;
     node.lane_verdict = None;
+    node.cb_standalone = None;
+    node.cb_prewhere_refused = false;
+    node.cb_tiny = false;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -2021,6 +2900,7 @@ pub fn exec_seq_scan_initialize_dsm<'mcx>(
     )?;
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(std::sync::Arc::clone(&shared));
     Ok(shared)
@@ -2043,6 +2923,7 @@ pub fn exec_seq_scan_initialize_worker<'mcx>(
     let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     debug_assert!(node.ss.ss_currentScanDesc.is_none());
     node.ss.ss_currentScanDesc = Some(table_beginscan_parallel(mcx, rel, &shared)?);
+    node.apply_cb_scan_settings();
     node.arm_slot_jit_deform(estate);
     node.parallel = Some(shared);
     Ok(())
@@ -2056,15 +2937,15 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict;
-        bloom, parallel
+        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny;
+        bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
     // blocks) are released in exec_end_seq_scan / skeleton_park via
     // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, sel, nwords, cur_word, cur_bits; stitch, proj,
+        nquals, lane_requal, dict_group, contains, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

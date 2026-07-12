@@ -65,19 +65,16 @@ pub fn init_seams() {
 // variant: the tag is free and every match is a direct call.
 pub enum TableScanDesc<'mcx> {
     Heap(HeapScanDescData<'mcx>),
+    // Boxed: cold at scan-begin, keeps the enum heap-sized for the hot arm.
+    Cbstore(std::boxed::Box<::cbstore::CbScanDescData<'mcx>>),
 }
-
-// Tagless while heap is the only AM: per-tuple dispatch costs nothing.
-const _: () = assert!(
-    core::mem::size_of::<TableScanDesc<'static>>()
-        == core::mem::size_of::<HeapScanDescData<'static>>()
-);
 
 impl<'mcx> TableScanDesc<'mcx> {
     #[inline]
     pub fn base(&self) -> &TableScanDescData<'mcx> {
         match self {
             TableScanDesc::Heap(h) => &h.rs_base,
+            TableScanDesc::Cbstore(c) => &c.rs_base,
         }
     }
 
@@ -85,6 +82,7 @@ impl<'mcx> TableScanDesc<'mcx> {
     pub fn base_mut(&mut self) -> &mut TableScanDescData<'mcx> {
         match self {
             TableScanDesc::Heap(h) => &mut h.rs_base,
+            TableScanDesc::Cbstore(c) => &mut c.rs_base,
         }
     }
 }
@@ -127,6 +125,58 @@ fn no_table_am(relation: &Relation<'_>) -> ! {
 #[inline(never)]
 fn unported(unit: &'static str) -> ! {
     panic!("backend-access-tableam reached unported unit: {unit}")
+}
+
+// cbstore arms (scan-only columnar AM; docs/design/cbstore-impl.md §7.2).
+mod cb {
+    use super::*;
+
+    pub(super) fn scan_begin<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        snapshot: Snapshot<'mcx>,
+        flags: u32,
+        parallel: Option<NonNull<ParallelBlockTableScanDescData>>,
+    ) -> PgResult<TableScanDesc<'mcx>> {
+        let rs_base = TableScanDescData {
+            rs_rd: rel.alias(),
+            rs_snapshot: snapshot,
+            rs_nkeys: 0,
+            rs_key: PgVec::new_in(mcx),
+            rs_mintid: ItemPointerData::default(),
+            rs_maxtid: ItemPointerData::default(),
+            rs_flags: flags,
+            rs_parallel: parallel,
+            rs_am: TableAm::Cbstore,
+        };
+        Ok(TableScanDesc::Cbstore(std::boxed::Box::new(::cbstore::CbScanDescData::new(
+            rs_base,
+        )?)))
+    }
+
+    // Shared parallel descriptor: phs_nallocated is the row-group claim
+    // cursor (docs/design/cbstore-impl.md S2); block fields stay unused.
+    pub(super) fn parallelscan_initialize(
+        rel: &Relation<'_>,
+        pscan: &mut ParallelBlockTableScanDescData,
+    ) -> usize {
+        pscan.phs_locator = rel.rd_locator.get();
+        pscan.phs_syncscan = false;
+        pscan.phs_nblocks = 0;
+        pscan.phs_startblock.store(0, std::sync::atomic::Ordering::Relaxed);
+        pscan.phs_nallocated.store(0, std::sync::atomic::Ordering::Relaxed);
+        0
+    }
+
+    pub(super) fn parallelscan_reinitialize(pscan: &ParallelBlockTableScanDescData) {
+        pscan.phs_nallocated.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cb_refused(what: &'static str) -> ! {
+    panic!("cbstore does not support {what} (unreachable without indexes/DML)")
 }
 
 // heapam_handler.c's heapam_methods: read lane bound directly onto heapam /
@@ -791,6 +841,7 @@ pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
     if let Some(am) = TableAm::of(relation) {
         match am {
             TableAm::Heap => heap::slot_callbacks(relation),
+            TableAm::Cbstore => TupleSlotKind::Virtual,
         }
     } else if relation.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
         // FDWs historically expect heap tuples in their slots.
@@ -829,6 +880,10 @@ pub fn table_beginscan<'mcx>(
     let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Cbstore => {
+            let _ = (nkeys, &key);
+            cb::scan_begin(mcx, relation, snapshot, flags, None)
+        }
     }
 }
 
@@ -850,6 +905,10 @@ pub fn table_beginscan_strat<'mcx>(
     }
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Cbstore => {
+            let _ = (nkeys, &key);
+            cb::scan_begin(mcx, relation, snapshot, flags, None)
+        }
     }
 }
 
@@ -871,6 +930,7 @@ pub fn table_beginscan_bm<'mcx>(
     let flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
     match am(rel) {
         TableAm::Heap => heap::scan_begin(mcx, rel, snapshot, 0, PgVec::new_in(mcx), None, flags),
+        TableAm::Cbstore => Err(::cbstore::unsupported("bitmap scans")),
     }
 }
 
@@ -897,6 +957,7 @@ pub fn table_beginscan_sampling<'mcx>(
     }
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, snapshot, nkeys, key, None, flags),
+        TableAm::Cbstore => Err(::cbstore::unsupported("TABLESAMPLE")),
     }
 }
 
@@ -908,6 +969,7 @@ pub fn table_beginscan_tid<'mcx>(
     let flags = SO_TYPE_TIDSCAN;
     match am(rel) {
         TableAm::Heap => heap::scan_begin(mcx, rel, snapshot, 0, PgVec::new_in(mcx), None, flags),
+        TableAm::Cbstore => Err(::cbstore::unsupported("TID scans")),
     }
 }
 
@@ -918,12 +980,73 @@ pub fn table_beginscan_analyze<'mcx>(
     let flags = SO_TYPE_ANALYZE;
     match am(relation) {
         TableAm::Heap => heap::scan_begin(mcx, relation, None, 0, PgVec::new_in(mcx), None, flags),
+        TableAm::Cbstore => cb::scan_begin(mcx, relation, None, flags, None),
+    }
+}
+
+// Ingest-time per-column NDV from the cbstore part footer (0 = unknown).
+pub fn cbstore_footer_ndv(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    ::cbstore::footer_ndv(rel)
+}
+
+// v5 whole-part per-column sorted-asc flags (false = unknown); None while
+// the table has no committed footer.
+pub fn cbstore_footer_sorted(rel: &Relation<'_>) -> PgResult<Option<Vec<bool>>> {
+    ::cbstore::footer_sorted(rel)
+}
+
+// Per-column on-disk chunk bytes from the cbstore part footer (planner
+// column-fraction seqscan disk costing); None while the table has no
+// committed footer.
+pub fn cbstore_footer_col_bytes(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    ::cbstore::footer_col_bytes(rel)
+}
+
+// cbstore's AM-specific sample acquisition (C table_relation_analyze lets the
+// AM supply the whole acquirefunc): row-group enumeration + random row fetch.
+pub fn cbstore_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {
+    match scan {
+        TableScanDesc::Cbstore(c) => c.analyze_visible_rgs(),
+        TableScanDesc::Heap(_) => panic!("cbstore_analyze_visible_rgs: heap scan"),
+    }
+}
+
+pub fn cbstore_analyze_fetch_row(
+    scan: &mut TableScanDesc<'_>,
+    rg: u32,
+    row: u32,
+    slot: &mut SlotData<'_>,
+) -> bool {
+    match scan {
+        TableScanDesc::Cbstore(c) => c.gather_row(rg, row, slot),
+        TableScanDesc::Heap(_) => panic!("cbstore_analyze_fetch_row: heap scan"),
     }
 }
 
 pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_end(h),
+        TableScanDesc::Cbstore(mut c) => {
+            if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
+                eprintln!(
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}",
+                    c.windows_staged,
+                    c.granules_scanned,
+                    c.granules_pruned,
+                    c.blocks_pruned,
+                    c.granules_bound_skipped
+                );
+            }
+            if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
+                let snap = c
+                    .rs_temp_snapshot
+                    .take()
+                    .expect("SO_TEMP_SNAPSHOT scan carries its registered snapshot");
+                ::snapmgr::UnregisterSnapshot(Some(&snap));
+            }
+            drop(c);
+            Ok(())
+        }
     }
 }
 
@@ -946,6 +1069,11 @@ pub fn table_rescan<'mcx>(
 ) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_rescan(h, key, false, false, false, false),
+        TableScanDesc::Cbstore(c) => {
+            let _ = key;
+            c.reset_position();
+            Ok(())
+        }
     }
 }
 
@@ -961,6 +1089,11 @@ pub fn table_rescan_set_params<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_rescan(h, key, true, allow_strat, allow_sync, allow_pagemode)
         }
+        TableScanDesc::Cbstore(c) => {
+            let _ = key;
+            c.reset_position();
+            Ok(())
+        }
     }
 }
 
@@ -975,6 +1108,12 @@ pub fn table_scan_getnextslot<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_getnextslot(mcx, h, direction, slot),
+        TableScanDesc::Cbstore(c) => {
+            if direction == ScanDirection::BackwardScanDirection {
+                return Err(::cbstore::unsupported("backward scans"));
+            }
+            c.getnextslot(slot)
+        }
     }
 }
 
@@ -983,6 +1122,14 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
         TableScanDesc::Heap(h) => {
             (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0 && h.rs_base.rs_parallel.is_none()
         }
+        // DELIBERATELY false (was `true` on the old branch): this is the
+        // INCUMBENT fused drives' gate (fused agg/sort/hash batched paths in
+        // the row executor) plus the lane's admission-economics probe. The
+        // lane-v2 pipeline owns cbstore batching through the PARALLEL
+        // variant below instead; keeping the incumbents off cbstore keeps
+        // lane-OFF the pure per-row Volcano drive (`getnextslot`) — the
+        // byte-parity oracle for every cbstore lane path (phase4 design §6).
+        TableScanDesc::Cbstore(_) => false,
     }
 }
 
@@ -997,6 +1144,22 @@ pub fn table_scan_supports_pagebatch(scan: &TableScanDesc<'_>) -> bool {
 pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool {
     match scan {
         TableScanDesc::Heap(h) => (h.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0,
+        // The CbstoreSource tranche: the lane owns cbstore scan staging
+        // (`next_window` windows <= WINDOW_ROWS, RG/granule/block pruning
+        // inside produce). Serial and parallel both admit — the window feed
+        // claims row groups through the shared `phs_nallocated` cursor
+        // exactly as the per-tuple drive does, partitioning RGs across
+        // workers without gaps or overlaps.
+        TableScanDesc::Cbstore(_) => true,
+    }
+}
+
+/// Total committed cbstore rows (footer metadata; no decode) — the lane's
+/// tiny-input admission floor. None = heap (the floor is cbstore-only today).
+pub fn table_scan_cb_total_rows(scan: &TableScanDesc<'_>) -> Option<u64> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => Some(c.total_rows()),
     }
 }
 
@@ -1004,6 +1167,114 @@ pub fn table_scan_supports_pagebatch_parallel(scan: &TableScanDesc<'_>) -> bool 
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {
         TableScanDesc::Heap(h) => h.rs_nblocks,
+        TableScanDesc::Cbstore(c) => c.nblocks(),
+    }
+}
+
+/// cbstore column projection: only these attributes' chunks are decoded.
+/// Heap scans always materialize whole tuples — no-op.
+pub fn table_scan_set_needed_attrs(scan: &mut TableScanDesc<'_>, needed: &[bool]) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.set_needed_attrs(needed),
+    }
+}
+
+/// cbstore post-qual materialization (cbstore_prewhere): granule decode
+/// becomes per-column on demand — deform pulls only the columns it fills,
+/// store_slot completes the needed set for surviving rows. Heap no-op.
+pub fn table_scan_set_lazy_decode(scan: &mut TableScanDesc<'_>, on: bool) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.set_lazy_decode(on),
+    }
+}
+
+/// cbstore zone-map pruning conjuncts (advisory-only; executor still
+/// evaluates the full qual on surviving rows).
+pub fn table_scan_push_zone_quals(scan: &mut TableScanDesc<'_>, quals: &[ZoneQual]) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.push_zone_quals(quals),
+    }
+}
+
+/// Zone-ordered adaptive granule traversal (cbstore serial scans over
+/// exact-zone int-family columns; docs/design/cbstore-zone-adaptive.md).
+/// false = refused; the physical claim order stays.
+pub fn table_scan_arm_adaptive_order(
+    scan: &mut TableScanDesc<'_>,
+    col: usize,
+    desc: bool,
+    strict: bool,
+) -> PgResult<bool> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(false),
+        TableScanDesc::Cbstore(c) => c.arm_adaptive_order(col, desc, strict),
+    }
+}
+
+/// Consumer bound feedback for an armed adaptive scan (top-k heap floor or
+/// running MIN/MAX best); no-op when unarmed.
+pub fn table_scan_update_scan_bound(scan: &mut TableScanDesc<'_>, key: ::datum::Datum) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.set_adaptive_bound(key),
+    }
+}
+
+/// Footer value min/max covering every row of the staged window (cbstore
+/// granule zone entry; int-family columns only). None = no zone metadata.
+pub fn table_scan_window_value_minmax(
+    scan: &TableScanDesc<'_>,
+    col: usize,
+) -> Option<(i64, i64)> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => c.staged_window_value_minmax(col),
+    }
+}
+
+/// Metadata COUNT(*) capability (cbstore: footer row counts per
+/// wholly-visible RG, fail-open per RG otherwise).
+pub fn table_scan_supports_meta_count(scan: &TableScanDesc<'_>) -> bool {
+    matches!(scan, TableScanDesc::Cbstore(_))
+}
+
+/// Metadata COUNT(*) feed: visible-row count of one row group; 0 = exhausted.
+pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32> {
+    match scan {
+        TableScanDesc::Cbstore(c) => c.next_meta_count(),
+        TableScanDesc::Heap(_) => unreachable!("meta count is cbstore-only"),
+    }
+}
+
+pub use ::cbstore::MetaAggScan;
+
+/// Metadata MIN/MAX/COUNT/SUM answer (cbstore zone maps + footer row counts
+/// + footer sums); None = the AM has no exact metadata answer for these
+/// columns.
+pub fn table_scan_meta_agg(
+    scan: &TableScanDesc<'_>,
+    cols: &[u16],
+    sum_cols: &[u16],
+) -> PgResult<Option<MetaAggScan>> {
+    match scan {
+        TableScanDesc::Cbstore(c) => c.meta_agg_scan(cols, sum_cols),
+        TableScanDesc::Heap(_) => Ok(None),
+    }
+}
+
+/// Compressed-domain constant-fold of `q` against the currently staged
+/// cbstore granule (int/date/timestamp). Heap has no granule metadata, so
+/// its verdict is always Mixed (the staged drive is cbstore-only anyway).
+pub fn table_scan_staged_granule_verdict(
+    scan: &TableScanDesc<'_>,
+    q: &ZoneQual,
+) -> ZoneVerdict {
+    match scan {
+        TableScanDesc::Heap(_) => ZoneVerdict::Mixed,
+        TableScanDesc::Cbstore(c) => c.staged_granule_verdict(q),
     }
 }
 
@@ -1011,6 +1282,7 @@ pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
 pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_getnextpagebatch(h),
+        TableScanDesc::Cbstore(c) => c.next_window(),
     }
 }
 
@@ -1023,6 +1295,21 @@ pub fn table_scan_batch_deform<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa, qual_col_only),
+        TableScanDesc::Cbstore(c) => c.batch_deform(plan.ncols() as usize, soa, qual_col_only),
+    }
+}
+
+/// Prewhere staged deform: fill (or dict-answer) one staged column of the
+/// cbstore window. Callable only on cbstore scans (the staged qual drive is
+/// cbstore-shaped); the caller owns soa.begin and the needed-set contract.
+pub fn table_scan_batch_deform_col<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    c: u16,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+) {
+    match scan {
+        TableScanDesc::Heap(_) => unreachable!("staged deform is cbstore-only"),
+        TableScanDesc::Cbstore(cb) => cb.batch_deform_col(c as usize, soa),
     }
 }
 
@@ -1034,6 +1321,7 @@ pub fn table_scan_batch_stage_varkey<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_stage_varkey(h, plan, soa),
+        TableScanDesc::Cbstore(c) => c.batch_stage_varkey(plan.key() as usize, soa),
     }
 }
 
@@ -1047,6 +1335,32 @@ pub fn table_scan_batch_store_slot<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_store_slot(mcx, h, i, slot),
+        TableScanDesc::Cbstore(c) => c.store_slot(i, slot),
+    }
+}
+
+/// Staged cbstore window base for ref-carrying consumers: (row group,
+/// rg-global row index of staged row 0); per-row refs are base + i. None =
+/// heap or nothing staged (ref mode never starts).
+pub fn table_scan_window_ref(scan: &TableScanDesc<'_>) -> Option<(u32, u32)> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => c.window_ref(),
+    }
+}
+
+/// Materialize rg-global row `row` of row group `rg` into `slot` under the
+/// scan's current needed set (the ref-carrying bounded-sort drain). false =
+/// unsupported AM; the caller must have materialized eagerly at feed time.
+pub fn table_scan_gather_row<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    rg: u32,
+    row: u32,
+    slot: &mut SlotData<'mcx>,
+) -> bool {
+    match scan {
+        TableScanDesc::Heap(_) => false,
+        TableScanDesc::Cbstore(c) => c.gather_row(rg, row, slot),
     }
 }
 
@@ -1064,6 +1378,7 @@ pub fn table_scan_bitmap_next_pagebatch<'mcx>(
         TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_next_pagebatch(
             h, tbm, iterator, recheck, lossy_pages, exact_pages,
         ),
+        TableScanDesc::Cbstore(_) => cb_refused("bitmap scans"),
     }
 }
 
@@ -1077,6 +1392,7 @@ pub fn table_scan_bitmap_batch_store_slot<'mcx>(
 ) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::bitmap::heap_scan_bitmap_batch_store(mcx, h, i, slot),
+        TableScanDesc::Cbstore(_) => cb_refused("bitmap scans"),
     }
 }
 
@@ -1092,10 +1408,13 @@ pub fn table_beginscan_tidrange<'mcx>(
         TableAm::Heap => {
             let mut sscan =
                 heap::scan_begin(mcx, rel, snapshot, 0, PgVec::new_in(mcx), None, flags)?;
-            let TableScanDesc::Heap(h) = &mut sscan;
-            heap::scan_set_tidrange(h, mintid, maxtid);
+            match &mut sscan {
+                TableScanDesc::Heap(h) => heap::scan_set_tidrange(h, mintid, maxtid),
+                _ => unreachable!(),
+            }
             Ok(sscan)
         }
+        TableAm::Cbstore => Err(::cbstore::unsupported("TID range scans")),
     }
 }
 
@@ -1112,6 +1431,7 @@ pub fn table_rescan_tidrange<'mcx>(
             heap::scan_set_tidrange(h, mintid, maxtid);
             Ok(())
         }
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("TID range scans")),
     }
 }
 
@@ -1123,6 +1443,7 @@ pub fn table_scan_getnextslot_tidrange<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_getnextslot_tidrange(mcx, h, direction, slot),
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("TID range scans")),
     }
 }
 
@@ -1151,6 +1472,7 @@ pub fn table_parallelscan_estimate(
 
     let am_sz = match am(rel) {
         TableAm::Heap => heap::parallelscan_estimate(rel),
+        TableAm::Cbstore => std::mem::size_of::<ParallelBlockTableScanDescData>(),
     };
     sz = add_size(sz, am_sz)?;
 
@@ -1164,6 +1486,7 @@ pub fn table_parallelscan_initialize(
 ) -> PgResult<()> {
     let snapshot_off = match am(rel) {
         TableAm::Heap => heap::parallelscan_initialize(rel, &mut target.pscan)?,
+        TableAm::Cbstore => cb::parallelscan_initialize(rel, &mut target.pscan),
     };
     target.pscan.phs_snapshot_off = snapshot_off;
 
@@ -1188,6 +1511,7 @@ pub fn table_parallelscan_reinitialize(
 ) {
     match am(rel) {
         TableAm::Heap => heap::parallelscan_reinitialize(rel, pscan),
+        TableAm::Cbstore => cb::parallelscan_reinitialize(pscan),
     }
 }
 
@@ -1227,8 +1551,18 @@ pub fn table_beginscan_parallel<'mcx>(
                 Some(pscan_ptr),
                 flags,
             )?;
-            let TableScanDesc::Heap(h) = &mut scan;
-            h.rs_temp_snapshot = registered;
+            match &mut scan {
+                TableScanDesc::Heap(h) => h.rs_temp_snapshot = registered,
+                _ => unreachable!(),
+            }
+            Ok(scan)
+        }
+        TableAm::Cbstore => {
+            let mut scan = cb::scan_begin(mcx, relation, snapshot, flags, Some(pscan_ptr))?;
+            match &mut scan {
+                TableScanDesc::Cbstore(c) => c.rs_temp_snapshot = registered,
+                _ => unreachable!(),
+            }
             Ok(scan)
         }
     }
@@ -1241,6 +1575,7 @@ pub fn table_index_fetch_begin<'mcx>(rel: &Relation<'mcx>) -> IndexFetchTableDat
         TableAm::Heap => {
             IndexFetchTableData::Heap(::heapam_handler::heapam_index_fetch_begin(rel))
         }
+        TableAm::Cbstore => cb_refused("index scans"),
     }
 }
 
@@ -1340,6 +1675,7 @@ pub fn table_index_delete_tuples<'mcx>(
 ) -> PgResult<TransactionId> {
     match am(rel) {
         TableAm::Heap => heap::index_delete_tuples(mcx, rel, delstate),
+        TableAm::Cbstore => cb_refused("index scans"),
     }
 }
 
@@ -1361,12 +1697,14 @@ pub fn table_tuple_fetch_row_version<'mcx>(
         TableAm::Heap => {
             ::heapam_handler::heapam_fetch_row_version(mcx, rel, tid, snapshot, slot)
         }
+        TableAm::Cbstore => Err(::cbstore::unsupported("TID row fetches")),
     }
 }
 
 pub fn table_tuple_tid_valid(scan: &mut TableScanDesc<'_>, tid: &ItemPointerData) -> bool {
     match scan {
         TableScanDesc::Heap(h) => ::heapam_handler::heapam_tuple_tid_valid(h, tid),
+        TableScanDesc::Cbstore(_) => false,
     }
 }
 
@@ -1396,6 +1734,7 @@ pub fn table_tuple_get_latest_tid<'mcx>(
 
     match scan {
         TableScanDesc::Heap(h) => ::heapam_handler::heapam_tuple_get_latest_tid(h, tid),
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("TID row fetches")),
     }
 }
 
@@ -1406,6 +1745,7 @@ pub fn table_tuple_satisfies_snapshot<'mcx>(
 ) -> PgResult<bool> {
     match am(rel) {
         TableAm::Heap => ::heapam_handler::heapam_tuple_satisfies_snapshot(rel, slot, snapshot),
+        TableAm::Cbstore => Err(::cbstore::unsupported("tuple visibility rechecks")),
     }
 }
 
@@ -1421,6 +1761,11 @@ pub fn table_tuple_insert<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::tuple_insert(mcx, rel, slot, cid, options, bistate),
+        TableAm::Cbstore => {
+            let _ = (cid, options, bistate);
+            exectuples::exec_materialize_slot(slot, mcx)?;
+            ::cbstore::tuple_insert(rel, slot)
+        }
     }
 }
 
@@ -1438,6 +1783,7 @@ pub fn table_tuple_insert_speculative<'mcx>(
         TableAm::Heap => {
             heap::tuple_insert_speculative(mcx, rel, slot, cid, options, bistate, spec_token)
         }
+        TableAm::Cbstore => Err(::cbstore::unsupported("INSERT ... ON CONFLICT")),
     }
 }
 
@@ -1450,6 +1796,7 @@ pub fn table_tuple_complete_speculative<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::tuple_complete_speculative(mcx, rel, slot, spec_token, succeeded),
+        TableAm::Cbstore => Err(::cbstore::unsupported("INSERT ... ON CONFLICT")),
     }
 }
 
@@ -1463,14 +1810,20 @@ pub fn table_multi_insert<'mcx>(
 ) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::multi_insert(mcx, rel, slots, cid, options, bistate),
+        TableAm::Cbstore => {
+            let _ = (mcx, cid, options, bistate);
+            ::cbstore::multi_insert(rel, slots)
+        }
     }
 }
 
 // heapam_methods leaves the optional finish_bulk_insert slot NULL, so for the
 // only shipped AM the C inline is a no-op after the rd_tableam probe.
 pub fn table_finish_bulk_insert(rel: &Relation<'_>, _options: i32) -> PgResult<()> {
-    let _ = am(rel);
-    Ok(())
+    match am(rel) {
+        TableAm::Heap => Ok(()),
+        TableAm::Cbstore => ::cbstore::finish_bulk_insert(rel),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1497,6 +1850,7 @@ pub fn table_tuple_delete<'mcx>(
             tmfd,
             changingPart,
         ),
+        TableAm::Cbstore => Err(::cbstore::unsupported("DELETE")),
     }
 }
 
@@ -1528,6 +1882,7 @@ pub fn table_tuple_update<'mcx>(
             lockmode,
             update_indexes,
         ),
+        TableAm::Cbstore => Err(::cbstore::unsupported("UPDATE")),
     }
 }
 
@@ -1557,6 +1912,7 @@ pub fn table_tuple_lock<'mcx>(
             flags,
             tmfd,
         ),
+        TableAm::Cbstore => Err(::cbstore::unsupported("row locking")),
     }
 }
 
@@ -1568,37 +1924,44 @@ pub fn table_relation_set_new_filelocator(
     relpersistence: i8,
 ) -> PgResult<(TransactionId, TransactionId)> {
     match am(rel) {
-        TableAm::Heap => heap::relation_set_new_filelocator(rel, newrlocator, relpersistence),
+        // Storage create/reset is AM-independent (main fork file); cbstore
+        // reuses the heap arm — an empty file is a valid empty part.
+        TableAm::Heap | TableAm::Cbstore => {
+            heap::relation_set_new_filelocator(rel, newrlocator, relpersistence)
+        }
     }
 }
 
 pub fn table_relation_copy_data(rel: &Relation<'_>, newrlocator: &RelFileLocator) -> PgResult<()> {
     match am(rel) {
         TableAm::Heap => heap::relation_copy_data(rel, newrlocator),
+        TableAm::Cbstore => Err(::cbstore::unsupported("CLUSTER / rewrites")),
     }
 }
 
 pub fn table_relation_nontransactional_truncate(rel: &Relation<'_>) -> PgResult<()> {
     match am(rel) {
-        TableAm::Heap => heap::relation_nontransactional_truncate(rel),
+        TableAm::Heap | TableAm::Cbstore => heap::relation_nontransactional_truncate(rel),
     }
 }
 
 pub fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool {
     match am(rel) {
         TableAm::Heap => heap::relation_needs_toast_table(rel),
+        TableAm::Cbstore => false,
     }
 }
 
 pub fn table_relation_toast_am(rel: &Relation<'_>) -> ::types_core::Oid {
     match am(rel) {
         TableAm::Heap => heap::relation_toast_am(rel),
+        TableAm::Cbstore => 0,
     }
 }
 
 pub fn table_relation_size(rel: &Relation<'_>, forkNumber: ForkNumber) -> PgResult<u64> {
     match am(rel) {
-        TableAm::Heap => heap::relation_size(rel, forkNumber),
+        TableAm::Heap | TableAm::Cbstore => heap::relation_size(rel, forkNumber),
     }
 }
 
@@ -1611,6 +1974,7 @@ pub fn table_scan_analyze_next_block<'mcx>(
 ) -> PgResult<bool> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_analyze_next_block(mcx, h, next_buffer),
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("ANALYZE")),
     }
 }
 
@@ -1626,6 +1990,7 @@ pub fn table_scan_analyze_next_tuple<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_analyze_next_tuple(mcx, h, oldest_xmin, liverows, deadrows, slot)
         }
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("ANALYZE")),
     }
 }
 
@@ -1646,6 +2011,7 @@ pub fn table_scan_bitmap_next_tuple<'mcx>(
         TableScanDesc::Heap(h) => {
             heap::scan_bitmap_next_tuple(mcx, h, tbm, iterator, slot, recheck, lossy_pages, exact_pages)
         }
+        TableScanDesc::Cbstore(_) => cb_refused("bitmap scans"),
     }
 }
 
@@ -1661,6 +2027,7 @@ pub fn table_scan_sample_next_block<'mcx>(
     }
     match scan {
         TableScanDesc::Heap(h) => heap::scan_sample_next_block(mcx, h, scanstate),
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("TABLESAMPLE")),
     }
 }
 
@@ -1677,6 +2044,7 @@ pub fn table_scan_sample_next_tuple<'mcx>(
     }
     match scan {
         TableScanDesc::Heap(h) => heap::scan_sample_next_tuple(mcx, h, scanstate, slot),
+        TableScanDesc::Cbstore(_) => Err(::cbstore::unsupported("TABLESAMPLE")),
     }
 }
 
@@ -1828,6 +2196,19 @@ pub fn table_relation_estimate_size(
     tuples: &mut f64,
     allvisfrac: &mut f64,
 ) -> PgResult<()> {
+    // cbstore: heap density math against the compressed body underestimates
+    // rows ~5x; tuples = footer row count (cbstore-impl.md §7.2). allvisfrac
+    // 0.0: no visibility map, and it only feeds index-only-scan costing,
+    // which cbstore refuses. A footerless (never-loaded) table falls through
+    // to C's never-analyzed convention below.
+    if am(rel) == TableAm::Cbstore {
+        if let Some(nrows) = ::cbstore::footer_rows(rel)? {
+            *pages = relation_nblocks(rel)?;
+            *tuples = nrows as f64;
+            *allvisfrac = 0.0;
+            return Ok(());
+        }
+    }
     let curpages =
         bufmgr_seams::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
     let fillfactor = rel.get_fillfactor(HEAP_DEFAULT_FILLFACTOR);

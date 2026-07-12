@@ -1081,7 +1081,7 @@ fn build_stmt_list(
                     utilityStmt: q.utilityStmt,
                     stmt_location: q.stmt_location,
                     stmt_len: q.stmt_len,
-                    queryId: q.queryId,
+                    queryId: ::types_nodes::SyncCell::new(q.queryId),
                     ..PlannedStmt::default()
                 });
             } else {

@@ -523,6 +523,7 @@ fn fc_multirange_gist_compress(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
         offset: entry.offset,
         leafkey: false,
         page_is_leaf: entry.page_is_leaf,
+        rel_natts: 0,
     };
     // SAFETY: GISTENTRY is Copy/no-drop; byref image copy.
     let bytes = unsafe {

@@ -115,6 +115,73 @@ pub struct BrinOptions {
     pub autosummarize: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CbstoreCodec {
+    Auto,
+    Lz4,
+    Zstd,
+    Plain,
+}
+
+pub const CBSTORE_CLUSTER_KEY_MAX: usize = 512;
+pub const CBSTORE_CODEC_COLS_MAX: usize = 2048;
+
+// cbstore AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// Strings live in fixed inline buffers so RdOptions stays Copy; lengths are
+// validated at option-parse time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CbstoreOptions {
+    pub codec: CbstoreCodec,
+    pub zstd_level: i32,
+    cluster_key_len: u16,
+    cluster_key_buf: [u8; CBSTORE_CLUSTER_KEY_MAX],
+    codec_cols_len: u16,
+    codec_cols_buf: [u8; CBSTORE_CODEC_COLS_MAX],
+}
+
+impl Default for CbstoreOptions {
+    fn default() -> CbstoreOptions {
+        CbstoreOptions {
+            codec: CbstoreCodec::Auto,
+            zstd_level: 3,
+            cluster_key_len: 0,
+            cluster_key_buf: [0; CBSTORE_CLUSTER_KEY_MAX],
+            codec_cols_len: 0,
+            codec_cols_buf: [0; CBSTORE_CODEC_COLS_MAX],
+        }
+    }
+}
+
+impl CbstoreOptions {
+    /// false = value too long (caller reports the option error).
+    pub fn set_cluster_key(&mut self, v: &str) -> bool {
+        if v.len() > CBSTORE_CLUSTER_KEY_MAX {
+            return false;
+        }
+        self.cluster_key_buf[..v.len()].copy_from_slice(v.as_bytes());
+        self.cluster_key_len = v.len() as u16;
+        true
+    }
+
+    pub fn set_codec_cols(&mut self, v: &str) -> bool {
+        if v.len() > CBSTORE_CODEC_COLS_MAX {
+            return false;
+        }
+        self.codec_cols_buf[..v.len()].copy_from_slice(v.as_bytes());
+        self.codec_cols_len = v.len() as u16;
+        true
+    }
+
+    pub fn cluster_key(&self) -> &str {
+        // Buffers only ever hold set_* validated UTF-8.
+        core::str::from_utf8(&self.cluster_key_buf[..self.cluster_key_len as usize]).unwrap()
+    }
+
+    pub fn codec_cols(&self) -> &str {
+        core::str::from_utf8(&self.codec_cols_buf[..self.codec_cols_len as usize]).unwrap()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RdOptions {
     Std(StdRdOptions),
@@ -125,6 +192,7 @@ pub enum RdOptions {
     Gist(GistOptions),
     SpGist(SpGistOptions),
     Brin(BrinOptions),
+    Cbstore(CbstoreOptions),
     Hnsw(HnswOptions),
 }
 
@@ -145,6 +213,14 @@ impl RdOptions {
         }
     }
 
+    #[inline]
+    pub fn cbstore(&self) -> Option<&CbstoreOptions> {
+        match self {
+            RdOptions::Cbstore(o) => Some(o),
+            _ => None,
+        }
+    }
+
     // RelationGetFillFactor is used by C against whichever option struct the
     // relkind/AM parsed; variants without a fillfactor member fall to default.
     #[inline]
@@ -155,7 +231,8 @@ impl RdOptions {
             RdOptions::Hash(o) => Some(o.fillfactor),
             RdOptions::Gist(o) => Some(o.fillfactor),
             RdOptions::SpGist(o) => Some(o.fillfactor),
-            RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_) | RdOptions::Hnsw(_) => None,
+            RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_)
+            | RdOptions::Cbstore(_) | RdOptions::Hnsw(_) => None,
         }
     }
 

@@ -81,6 +81,7 @@ partcache = { path = "../../../utils/cache/partcache" }
 partbounds = { path = "../../../partitioning/partbounds" }
 partprune = { path = "../../../partitioning/partprune" }
 tableam = { path = "../../../access/table/tableam" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
 indexam = { path = "../../../access/index/indexam" }
 indexam_seams = { path = "../../../access/index/indexam_seams" }
 brin = { path = "../../../access/brin/brin" }

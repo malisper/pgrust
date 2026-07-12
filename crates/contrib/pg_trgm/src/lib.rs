@@ -7,9 +7,11 @@
 //! the gin_trgm_seams installed here (the gin_* symbols below exist only for
 //! CREATE EXTENSION's C-symbol validation and error if invoked via fmgr).
 //!
-//! The RegExp / RegExpICase strategies need trgm_regexp.c's NFA engine
-//! (createTrgmNFA / trigramsMatchGraph, ~2360 lines) — unported; they raise
-//! a loud error from both opclasses.
+//! The RegExp / RegExpICase strategies run trgm_regexp.c's NFA engine
+//! (src/regexp.rs): extract_query compiles the pattern and returns required
+//! trigrams plus a packed graph; consistent evaluates the graph per entry.
+//! Both GiST consistent/distance keep C's fn_extra cache of the extracted
+//! query trigrams (and graph) across calls.
 //!
 //! Thresholds: C's DefineCustomRealVariable GUCs ride this repo's placeholder
 //! custom-GUC store (SET pg_trgm.* works); reads parse the placeholder string
@@ -17,13 +19,16 @@
 //! errors when the value is read, not at SET time.
 
 pub mod gist;
+pub mod regexp;
 pub mod trgm;
 
 use datum::Datum;
 use mcx::MemoryContext;
+use gin_vocab::TrgmPackedGraph;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_fmgr::{
-    byref_result, varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
+    byref_result, varlena_result, FmgrInfo, FnExtra, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
 };
 use types_gist::{GistEntryVector, GistSplitVec, GISTENTRY};
 use types_tuple::varatt;
@@ -43,7 +48,10 @@ const LIBRARY: &str = "pg_trgm";
 const DEFAULT_COLLATION_OID: types_core::Oid = 100;
 
 fn legacy_crc32(bytes: &[u8]) -> u32 {
-    crc32c::traditional_crc32(bytes)
+    // trgm_op.c compact_trigram uses INIT/COMP/FIN_LEGACY_CRC32 — the
+    // REFLECTED-table legacy variant (pg_crc.h), NOT the zlib/Ethernet one.
+    // (Train-6 audit blocker B1.)
+    crc32c::legacy_crc32_lexeme(bytes)
 }
 
 fn make_env() -> TrgmEnv<'static> {
@@ -178,7 +186,7 @@ fn fc_similarity_dist(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 
 fn fc_similarity_op(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(Datum::from_bool(
-        similarity_value(fcinfo)? >= similarity_threshold() as f32,
+        similarity_value(fcinfo)? as f64 >= similarity_threshold(),
     ))
 }
 
@@ -201,17 +209,17 @@ macro_rules! fc_word_ops {
 
 fc_word_ops! {
     fc_word_similarity_op: swapped=false flags=WORD_SIMILARITY_CHECK_ONLY,
-        from_bool(|r: f32| r >= word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= word_similarity_threshold());
     fc_word_similarity_commutator_op: swapped=true flags=WORD_SIMILARITY_CHECK_ONLY,
-        from_bool(|r: f32| r >= word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= word_similarity_threshold());
     fc_word_similarity_dist_op: swapped=false flags=0,
         from_f32(|r: f32| 1.0 - r);
     fc_word_similarity_dist_commutator_op: swapped=true flags=0,
         from_f32(|r: f32| 1.0 - r);
     fc_strict_word_similarity_op: swapped=false flags=WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
-        from_bool(|r: f32| r >= strict_word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= strict_word_similarity_threshold());
     fc_strict_word_similarity_commutator_op: swapped=true flags=WORD_SIMILARITY_CHECK_ONLY | WORD_SIMILARITY_STRICT,
-        from_bool(|r: f32| r >= strict_word_similarity_threshold() as f32);
+        from_bool(|r: f32| r as f64 >= strict_word_similarity_threshold());
     fc_strict_word_similarity_dist_op: swapped=false flags=WORD_SIMILARITY_STRICT,
         from_f32(|r: f32| 1.0 - r);
     fc_strict_word_similarity_dist_commutator_op: swapped=true flags=WORD_SIMILARITY_STRICT,
@@ -257,16 +265,26 @@ fn trgm_extract_value(payload: &[u8]) -> PgResult<Vec<i32>> {
     Ok(keys_of(&generate_trgm(payload, &env, &legacy_crc32)))
 }
 
-fn trgm_extract_query(payload: &[u8], strategy: u16) -> PgResult<(Vec<i32>, i32)> {
+fn trgm_extract_query(
+    payload: &[u8],
+    strategy: u16,
+    collation: types_core::Oid,
+) -> PgResult<(Vec<i32>, i32, Option<TrgmPackedGraph>)> {
     let env = make_env();
-    let trg = match strategy {
+    let (trg, graph) = match strategy {
         SIMILARITY_STRATEGY
         | WORD_SIMILARITY_STRATEGY
         | STRICT_WORD_SIMILARITY_STRATEGY
-        | EQUAL_STRATEGY => generate_trgm(payload, &env, &legacy_crc32),
-        LIKE_STRATEGY | ILIKE_STRATEGY => generate_wildcard_trgm(payload, &env, &legacy_crc32),
+        | EQUAL_STRATEGY => (generate_trgm(payload, &env, &legacy_crc32), None),
+        LIKE_STRATEGY | ILIKE_STRATEGY => {
+            (generate_wildcard_trgm(payload, &env, &legacy_crc32), None)
+        }
         REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
-            return Err(gist::unported_regexp("gin_extract_query_trgm").into())
+            match regexp::create_trgm_nfa(payload, collation, &env, &legacy_crc32)? {
+                Some((trg, graph)) if !trg.is_empty() => (trg, Some(graph)),
+                // Regex processing gave no usable trigrams: full index scan.
+                _ => return Ok((Vec::new(), GIN_SEARCH_MODE_ALL, None)),
+            }
         }
         other => {
             return Err(
@@ -276,10 +294,15 @@ fn trgm_extract_query(payload: &[u8], strategy: u16) -> PgResult<(Vec<i32>, i32)
     };
     let keys = keys_of(&trg);
     let search_mode = if keys.is_empty() { GIN_SEARCH_MODE_ALL } else { 0 };
-    Ok((keys, search_mode))
+    Ok((keys, search_mode, graph))
 }
 
-fn trgm_consistent(check: &[i8], strategy: u16, nkeys: usize) -> PgResult<(bool, bool)> {
+fn trgm_consistent(
+    check: &[i8],
+    strategy: u16,
+    nkeys: usize,
+    graph: Option<&mut TrgmPackedGraph>,
+) -> PgResult<(bool, bool)> {
     // All lanes served here are inexact.
     let res = match strategy {
         SIMILARITY_STRATEGY | WORD_SIMILARITY_STRATEGY | STRICT_WORD_SIMILARITY_STRATEGY => {
@@ -293,7 +316,15 @@ fn trgm_consistent(check: &[i8], strategy: u16, nkeys: usize) -> PgResult<(bool,
             (0..nkeys).all(|i| check[i] != GIN_FALSE)
         }
         REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
-            return Err(gist::unported_regexp("gin_trgm_consistent").into())
+            if nkeys < 1 {
+                // Regex processing gave no result: full index scan.
+                true
+            } else {
+                let boolcheck: Vec<bool> = (0..nkeys).map(|i| check[i] != GIN_FALSE).collect();
+                graph
+                    .expect("pg_trgm: regexp scan key without a packed graph")
+                    .matches(&boolcheck)
+            }
         }
         other => {
             return Err(
@@ -304,7 +335,12 @@ fn trgm_consistent(check: &[i8], strategy: u16, nkeys: usize) -> PgResult<(bool,
     Ok((res, true))
 }
 
-fn trgm_triconsistent(check: &[i8], strategy: u16, nkeys: usize) -> PgResult<i8> {
+fn trgm_triconsistent(
+    check: &[i8],
+    strategy: u16,
+    nkeys: usize,
+    graph: Option<&mut TrgmPackedGraph>,
+) -> PgResult<i8> {
     Ok(match strategy {
         SIMILARITY_STRATEGY | WORD_SIMILARITY_STRATEGY | STRICT_WORD_SIMILARITY_STRATEGY => {
             let nlimit = index_strategy_get_limit(strategy)?;
@@ -323,7 +359,21 @@ fn trgm_triconsistent(check: &[i8], strategy: u16, nkeys: usize) -> PgResult<i8>
             }
         }
         REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
-            return Err(gist::unported_regexp("gin_trgm_triconsistent").into())
+            if nkeys < 1 {
+                GIN_MAYBE
+            } else {
+                // Promoting MAYBE to TRUE is conservative: the graph is a
+                // monotone boolean function.
+                let boolcheck: Vec<bool> = (0..nkeys).map(|i| check[i] != GIN_FALSE).collect();
+                if graph
+                    .expect("pg_trgm: regexp scan key without a packed graph")
+                    .matches(&boolcheck)
+                {
+                    GIN_MAYBE
+                } else {
+                    GIN_FALSE
+                }
+            }
         }
         other => {
             return Err(
@@ -477,52 +527,120 @@ fn fc_gtrgm_decompress(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
     entry_result(fcinfo, &retval)
 }
 
-fn query_trgms(fcinfo: &Fcinfo, strategy: u16, fname: &str) -> PgResult<Vec<Trgm>> {
+// C's gtrgm_consistent_cache (fn_extra): the extracted query trigrams —
+// trigram extraction and especially the regexp NFA are too expensive to
+// redo per index page. `trigrams` None = regex gave no usable extraction.
+struct GtrgmCache {
+    strategy: u16,
+    query: Vec<u8>,
+    trigrams: Option<Vec<Trgm>>,
+    graph: Option<TrgmPackedGraph>,
+}
+
+fn gtrgm_cached<'f>(
+    f: &'f mut Option<&mut FmgrInfo>,
+    fcinfo: &Fcinfo,
+    strategy: u16,
+) -> PgResult<&'f mut GtrgmCache> {
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let qimg = detoasted_image(mcx, fcinfo.arg(1))?;
     let payload = &qimg[4..];
-    let env = make_env();
-    match strategy {
-        SIMILARITY_STRATEGY
-        | WORD_SIMILARITY_STRATEGY
-        | STRICT_WORD_SIMILARITY_STRATEGY
-        | EQUAL_STRATEGY
-        | gist::DISTANCE_STRATEGY
-        | gist::WORD_DISTANCE_STRATEGY
-        | gist::STRICT_WORD_DISTANCE_STRATEGY => Ok(generate_trgm(payload, &env, &legacy_crc32)),
-        LIKE_STRATEGY | ILIKE_STRATEGY => Ok(generate_wildcard_trgm(payload, &env, &legacy_crc32)),
-        REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => Err(gist::unported_regexp(fname).into()),
-        other => Err(PgError::error(format!("unrecognized strategy number: {other}")).into()),
+    let flinfo = f
+        .as_mut()
+        .expect("pg_trgm: gist support proc called without flinfo");
+
+    let hit = flinfo.fn_extra.as_ref().is_some_and(|e| {
+        let c = e.downcast_ref::<GtrgmCache>();
+        c.strategy == strategy && c.query == payload
+    });
+    if !hit {
+        let env = make_env();
+        let (trigrams, graph) = match strategy {
+            SIMILARITY_STRATEGY
+            | WORD_SIMILARITY_STRATEGY
+            | STRICT_WORD_SIMILARITY_STRATEGY
+            | EQUAL_STRATEGY
+            | gist::DISTANCE_STRATEGY
+            | gist::WORD_DISTANCE_STRATEGY
+            | gist::STRICT_WORD_DISTANCE_STRATEGY => {
+                (Some(generate_trgm(payload, &env, &legacy_crc32)), None)
+            }
+            LIKE_STRATEGY | ILIKE_STRATEGY => {
+                (Some(generate_wildcard_trgm(payload, &env, &legacy_crc32)), None)
+            }
+            REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+                match regexp::create_trgm_nfa(payload, fcinfo.fncollation, &env, &legacy_crc32)? {
+                    Some((trg, graph)) if !trg.is_empty() => (Some(trg), Some(graph)),
+                    _ => (None, None),
+                }
+            }
+            other => {
+                return Err(
+                    PgError::error(format!("unrecognized strategy number: {other}")).into(),
+                )
+            }
+        };
+        flinfo.fn_extra = Some(FnExtra::new(GtrgmCache {
+            strategy,
+            query: payload.to_vec(),
+            trigrams,
+            graph,
+        }));
     }
+    Ok(flinfo
+        .fn_extra
+        .as_mut()
+        .expect("just installed")
+        .downcast_mut::<GtrgmCache>())
 }
 
-fn fc_gtrgm_consistent(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtrgm_consistent(mut f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let strategy = fcinfo.arg(2).as_u32() as u16;
-    let qtrg = query_trgms(fcinfo, strategy, "gtrgm_consistent")?;
     let key = gist::decode_key(key_image(entry.key))?;
-    let nlimit = match strategy {
-        SIMILARITY_STRATEGY | WORD_SIMILARITY_STRATEGY | STRICT_WORD_SIMILARITY_STRATEGY => {
-            index_strategy_get_limit(strategy)?
+    let cache = gtrgm_cached(&mut f, fcinfo, strategy)?;
+    let (res, rc) = match strategy {
+        REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+            let GtrgmCache { trigrams, graph, .. } = cache;
+            let res = match graph {
+                Some(graph) => gist::consistent_regexp(
+                    entry.page_is_leaf,
+                    &key,
+                    trigrams.as_deref(),
+                    graph,
+                )?,
+                // Trigram-free query: recheck everywhere.
+                None => true,
+            };
+            (res, true)
         }
-        _ => 0.0,
+        _ => {
+            let nlimit = match strategy {
+                SIMILARITY_STRATEGY
+                | WORD_SIMILARITY_STRATEGY
+                | STRICT_WORD_SIMILARITY_STRATEGY => index_strategy_get_limit(strategy)?,
+                _ => 0.0,
+            };
+            let qtrg = cache.trigrams.as_deref().expect("non-regexp cache has trigrams");
+            gist::consistent(entry.page_is_leaf, &key, qtrg, strategy, nlimit)?
+        }
     };
-    let (res, rc) = gist::consistent(entry.page_is_leaf, &key, &qtrg, strategy, nlimit)?;
     let recheck = fcinfo.arg(4).as_usize() as *mut bool;
     // SAFETY: recheck out-param live in the caller frame.
     unsafe { *recheck = rc };
     Ok(Datum::from_bool(res))
 }
 
-fn fc_gtrgm_distance(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+fn fc_gtrgm_distance(mut f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     // SAFETY: gist fmgr protocol.
     let entry = unsafe { entry_arg(fcinfo, 0) };
     let strategy = fcinfo.arg(2).as_u32() as u16;
-    let qtrg = query_trgms(fcinfo, strategy, "gtrgm_distance")?;
     let key = gist::decode_key(key_image(entry.key))?;
-    let (res, rc) = gist::distance(entry.page_is_leaf, &key, &qtrg, strategy)?;
+    let cache = gtrgm_cached(&mut f, fcinfo, strategy)?;
+    let qtrg = cache.trigrams.as_deref().expect("distance cache has trigrams");
+    let (res, rc) = gist::distance(entry.page_is_leaf, &key, qtrg, strategy)?;
     let recheck = fcinfo.arg(4).as_usize() as *mut bool;
     // SAFETY: recheck out-param live in the caller frame.
     unsafe { *recheck = rc };

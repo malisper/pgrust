@@ -479,6 +479,59 @@ pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
     clamp_row_est(rows * get_parallel_divisor(parallel_workers))
 }
 
+
+// Gather setup price: cbstore-fed parallel plans pay the measured
+// thread-native startup (consts::DEFAULT_CBSTORE_PARALLEL_SETUP_COST
+// provenance), heap plans keep C's parallel_setup_cost. The Gather may sit
+// on an upper rel (grouped rel over a partial agg), whose amflags are
+// empty — scan the simple-rel array instead: any cbstore baserel in the
+// (sub)query prices the whole plan's Gathers.
+fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
+    if cbstore_feeds_plan(run) {
+        // Stage-4 pool arming (guc_tables::lane_pool): a session that set
+        // `pgrust.lane_parallel_pool` is asking for the parallel shape —
+        // drop the provisional pre-pool surcharge back to the regular knob
+        // so the forced-DOP partial paths actually win.
+        if guc_tables::lane_pool::lane_parallel_pool_armed() {
+            gucs::parallel_setup_cost()
+        } else {
+            gucs::cbstore_parallel_setup_cost()
+        }
+    } else {
+        gucs::parallel_setup_cost()
+    }
+}
+
+// Per-tuple Gather transfer price: cbstore-fed plans pay the measured P0b
+// chunked-transport rate (consts::DEFAULT_CBSTORE_PARALLEL_TUPLE_COST
+// provenance), heap plans keep C's parallel_tuple_cost. Same selector as
+// gather_setup_cost.
+fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
+    if cbstore_feeds_plan(run) {
+        // Armed pool sessions price Gather transfer at the regular rate too:
+        // the measured cbstore chunked-transport rate (0.005/tuple) is cheap
+        // enough that at high forced DOP the planner starts preferring
+        // ship-every-row-to-the-leader plans (HashAggregate ABOVE Gather)
+        // over the partial-agg shape the pool exists for. Heap semantics for
+        // armed cbstore plans; the measured rate stays for unarmed costing.
+        if guc_tables::lane_pool::lane_parallel_pool_armed() {
+            gucs::parallel_tuple_cost()
+        } else {
+            gucs::cbstore_parallel_tuple_cost()
+        }
+    } else {
+        gucs::parallel_tuple_cost()
+    }
+}
+
+pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {
+    run.root.simple_rel_array.iter().any(|slot| {
+        slot.is_some_and(|rid| {
+            run.root.rel(rid).amflags & types_pathnodes::AMFLAG_CBSTORE != 0
+        })
+    })
+}
+
 // cost_gather (costsize.c); no parameterized Gather paths exist (required
 // outer is empty at every ported call site).
 pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId, rows: Option<f64>) {
@@ -490,13 +543,15 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
         let sub = run.root.path(g.subpath.expect("Gather subpath")).base();
         (sub.startup_cost, sub.total_cost, sub.disabled_nodes)
     };
+    let setup_cost = gather_setup_cost(run);
+    let tuple_cost = gather_tuple_cost(run);
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
     let mut startup_cost = sub_startup;
     let mut run_cost = sub_total - sub_startup;
-    startup_cost += gucs::parallel_setup_cost();
-    run_cost += gucs::parallel_tuple_cost() * p.rows;
+    startup_cost += setup_cost;
+    run_cost += tuple_cost * p.rows;
     p.disabled_nodes = sub_disabled;
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
@@ -520,6 +575,8 @@ pub fn cost_gather_merge(
         g.num_workers
     };
     debug_assert!(num_workers > 0);
+    let setup_cost = gather_setup_cost(run);
+    let tuple_cost = gather_tuple_cost(run);
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
@@ -533,12 +590,89 @@ pub fn cost_gather_merge(
     startup_cost += comparison_cost * n * log_n;
     run_cost += p.rows * comparison_cost * log_n;
     run_cost += gucs::cpu_operator_cost() * p.rows;
-    startup_cost += gucs::parallel_setup_cost();
-    run_cost += gucs::parallel_tuple_cost() * p.rows * 1.05;
+    startup_cost += setup_cost;
+    run_cost += tuple_cost * p.rows * 1.05;
 
     p.disabled_nodes = input_disabled_nodes + if gucs::enable_gathermerge() { 0 } else { 1 };
     p.startup_cost = startup_cost + input_startup_cost;
     p.total_cost = startup_cost + run_cost + input_total_cost;
+}
+
+// cbstore column-fraction disk costing (pgrust-only, AMFLAG_CBSTORE-gated;
+// the Q38 sort-vs-hash fix): a cbstore seqscan opens with a plan-derived
+// column need-set and never touches the other columns' chunks, so the honest
+// disk term is the referenced columns' share of the part's on-disk bytes.
+// C's costing structure (pages you read x spc_seq_page_cost) is kept — only
+// the page count is corrected for a columnar AM, exactly as heap's page
+// count is honest for a row store. Referenced = the rel's reltarget +
+// baserestrictinfo (+ any pushed-down ppi clauses) Vars; a whole-row Var
+// reads everything. Heap rels (and footer-less cbstore) return 1.0.
+//
+// Why this matters beyond realism: the uncorrected all-columns disk term is
+// a large shared constant in every candidate plan's total, which at scale
+// compresses REAL differences (e.g. hash-vs-sort grouping) inside
+// add_path's 1% STD_FUZZ_FACTOR, where the sorted path wins the pathkey
+// tiebreak (CB Q38 @100M planned Sort+GroupAggregate ~17x slower than the
+// hash plan it fuzzily displaced).
+fn cbstore_scan_col_fraction(
+    run: &mut PlannerRun<'_>,
+    rel: RelId,
+    path_id: types_pathnodes::PathId,
+) -> f64 {
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    {
+        let r = run.root.rel(rel);
+        if r.amflags & types_pathnodes::AMFLAG_CBSTORE == 0 || r.cbstore_col_bytes.is_empty() {
+            return 1.0;
+        }
+    }
+    let mcx = run.mcx;
+    let varno = run.root.rel(rel).relid as i32;
+    let mut attrs = types_nodes::Bitmapset::empty();
+    let exprs =
+        types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel).exprs);
+    for &eid in exprs.iter() {
+        vars::pull_varattnos(mcx, *run.root.expr_node(eid), varno, &mut attrs)
+            .expect("pull_varattnos over reltarget");
+    }
+    let mut rids =
+        types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel(rel).baserestrictinfo);
+    if let Some(ppi) = run.root.path(path_id).base().param_info.as_deref() {
+        let ppi_clauses = types_pathnodes::relids::pgvec_clone_shallow(mcx, &ppi.ppi_clauses);
+        for &rid in ppi_clauses.iter() {
+            rids.push(rid);
+        }
+    }
+    for &rid in rids.iter() {
+        let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+        vars::pull_varattnos(mcx, clause, varno, &mut attrs)
+            .expect("pull_varattnos over baserestrictinfo");
+    }
+    // Whole-row reference reads every column.
+    if attrs.is_member(0 - FirstLowInvalidHeapAttributeNumber) {
+        return 1.0;
+    }
+    let col_bytes = &run.root.rel(rel).cbstore_col_bytes;
+    let mut needed: u64 = 0;
+    let mut total: u64 = 0;
+    for (i, &b) in col_bytes.iter().enumerate() {
+        total += b;
+        let attno = i as i32 + 1;
+        if attrs.is_member(attno - FirstLowInvalidHeapAttributeNumber) {
+            needed += b;
+        }
+    }
+    // A referenced attno past the footer's column count means the byte map
+    // does not describe this descriptor; fall back to C costing.
+    for m in 0..attrs.nwords() as i32 * 64 {
+        if attrs.is_member(m) && m + FirstLowInvalidHeapAttributeNumber > col_bytes.len() as i32 {
+            return 1.0;
+        }
+    }
+    if total == 0 {
+        return 1.0;
+    }
+    (needed as f64 / total as f64).clamp(0.0, 1.0)
 }
 
 pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId) {
@@ -562,7 +696,8 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
 
     let mut startup_cost = 0.0;
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
-    let disk_run_cost = spc_seq_page_cost * pages as f64;
+    let disk_run_cost =
+        spc_seq_page_cost * pages as f64 * cbstore_scan_col_fraction(run, rel, path_id);
 
     let qpqual_cost =
         get_restriction_qual_cost(run, rel, path_id).expect("cost_qual_eval over ppi_clauses");

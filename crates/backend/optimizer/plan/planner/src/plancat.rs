@@ -19,7 +19,7 @@ const INDOPTION_NULLS_FIRST: i16 = 1 << 1;
 const RELKIND_MATVIEW: u8 = b'm';
 const RELKIND_TOASTVALUE: u8 = b't';
 const RELKIND_SEQUENCE: u8 = b'S';
-pub(crate) const AMFLAG_HAS_TID_RANGE: u32 = 1 << 0;
+pub(crate) const AMFLAG_HAS_TID_RANGE: u32 = types_pathnodes::AMFLAG_HAS_TID_RANGE;
 
 fn relkind_has_table_am(relkind: u8) -> bool {
     matches!(relkind, RELKIND_RELATION | RELKIND_MATVIEW | RELKIND_TOASTVALUE)
@@ -311,11 +311,60 @@ pub fn get_relation_info<'mcx>(
     crate::extended_stats::get_relation_statistics(run, rel, relation.rd_id)?;
 
     {
+        let is_cbstore = tableam_vocab::is_cbstore_am_oid(relation.rd_rel.relam);
+        let sorted_attnos = if is_cbstore && ::costsize::gucs::cbstore_scan_pathkeys() {
+            cbstore_sorted_pathkey_attnos(run, &relation)?
+        } else {
+            PgVec::new_in(run.mcx)
+        };
+        // Per-column on-disk bytes for column-fraction seqscan disk costing
+        // (costsize::cbstore_scan_col_fraction); footer-less parts leave it
+        // empty (fraction 1.0 = C behavior).
+        let col_bytes = if is_cbstore && ::costsize::gucs::cbstore_colfrac_cost() {
+            match ::tableam::cbstore_footer_col_bytes(&relation)? {
+                Some(v) => {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    pv
+                }
+                None => PgVec::new_in(run.mcx),
+            }
+        } else {
+            PgVec::new_in(run.mcx)
+        };
+        // Ingest-time per-column NDV for no-pg_statistic group-key
+        // estimation (selfuncs::add_unique_group_var); footer-less parts
+        // leave it empty (ratio fallback = prior behavior).
+        let col_ndv = if is_cbstore && ::costsize::gucs::cbstore_footer_ndv_est() {
+            match ::tableam::cbstore_footer_ndv(&relation)? {
+                Some(v) => {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    pv
+                }
+                None => PgVec::new_in(run.mcx),
+            }
+        } else {
+            PgVec::new_in(run.mcx)
+        };
         let r = run.root.rel_mut(rel);
         r.serverid = 0;
         r.has_fdwroutine = false;
-        // Heap AM always provides scan_bitmap/scan_tid_range.
-        r.amflags |= AMFLAG_HAS_TID_RANGE;
+        if is_cbstore {
+            // cbstore refuses TID/TID-range and bitmap scans; the flag also
+            // routes Gather costing to cbstore_parallel_setup_cost.
+            r.amflags |= types_pathnodes::AMFLAG_CBSTORE;
+            r.cbstore_sorted_attnos = sorted_attnos;
+            r.cbstore_col_bytes = col_bytes;
+            r.cbstore_col_ndv = col_ndv;
+        } else {
+            // Heap AM always provides scan_bitmap/scan_tid_range.
+            r.amflags |= AMFLAG_HAS_TID_RANGE;
+        }
     }
 
     get_relation_foreign_keys(run, rel, &relation, inhparent)?;
@@ -1475,4 +1524,52 @@ pub fn get_dependent_generated_columns<'mcx>(
     }
     table::table_close(relation, NoLock)?;
     Ok(dependent_cols)
+}
+
+// cbstore v5 footer sorted columns admissible as ascending scan pathkeys.
+// int/date/timestamp default btree order IS the footer tracker's signed
+// order; text requires a memcmp-ordered collation (collate_is_c); bpchar's
+// space-padded comparison never matches byte order and cbstore admits no
+// other types.
+fn cbstore_sorted_pathkey_attnos<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relation: &Relation<'_>,
+) -> PgResult<PgVec<'mcx, i16>> {
+    let mut out: PgVec<'mcx, i16> = PgVec::new_in(run.mcx);
+    let Some(sorted) = ::tableam::cbstore_footer_sorted(relation)? else {
+        return Ok(out);
+    };
+    use types_core::catalog::{DATEOID, INT2OID, INT4OID, INT8OID, TEXTOID, TIMESTAMPOID,
+        VARCHAROID};
+    for (i, a) in relation.rd_att.attrs.iter().enumerate() {
+        if !sorted.get(i).copied().unwrap_or(false) || a.attisdropped {
+            continue;
+        }
+        let ok = match a.atttypid {
+            INT2OID | INT4OID | INT8OID | DATEOID | TIMESTAMPOID => true,
+            TEXTOID | VARCHAROID => collate_sorts_bytewise(a.attcollation),
+            _ => false,
+        };
+        if ok {
+            out.push(i as i16 + 1);
+        }
+    }
+    Ok(out)
+}
+
+fn collate_sorts_bytewise(coll: Oid) -> bool {
+    use types_core::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID};
+    if !types_core::OidIsValid(coll) {
+        return false;
+    }
+    if coll == DEFAULT_COLLATION_OID && !::pg_locale::default_locale_installed() {
+        return false;
+    }
+    if coll != C_COLLATION_OID
+        && coll != DEFAULT_COLLATION_OID
+        && !syscache_seams::lookup_pg_collation_locale_row::is_installed()
+    {
+        return false;
+    }
+    matches!(::pg_locale::pg_newlocale_from_collation(coll), Ok(l) if l.collate_is_c)
 }

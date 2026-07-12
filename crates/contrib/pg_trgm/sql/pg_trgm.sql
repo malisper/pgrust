@@ -1,6 +1,3 @@
--- Trimmed from contrib/pg_trgm/sql/pg_trgm.sql (PG 18.3): the ~ / ~*
--- regexp-strategy queries are removed (trgm_regexp.c NFA engine unported;
--- those strategies raise a loud error). Everything else is verbatim.
 CREATE EXTENSION pg_trgm;
 
 -- Check whether any of our opclasses fail amvalidate
@@ -36,6 +33,7 @@ select t,similarity(t,'qwertyu0988') as sml from test_trgm where t % 'qwertyu098
 select t,similarity(t,'gwertyu0988') as sml from test_trgm where t % 'gwertyu0988' order by sml desc, t;
 select t,similarity(t,'gwertyu1988') as sml from test_trgm where t % 'gwertyu1988' order by sml desc, t;
 select t <-> 'q0987wertyu0988', t from test_trgm order by t <-> 'q0987wertyu0988' limit 2;
+select count(*) from test_trgm where t ~ '[qwerty]{2}-?[qwerty]{2}';
 
 create index trgm_idx on test_trgm using gist (t gist_trgm_ops);
 set enable_seqscan=off;
@@ -46,6 +44,7 @@ select t,similarity(t,'gwertyu1988') as sml from test_trgm where t % 'gwertyu198
 explain (costs off)
 select t <-> 'q0987wertyu0988', t from test_trgm order by t <-> 'q0987wertyu0988' limit 2;
 select t <-> 'q0987wertyu0988', t from test_trgm order by t <-> 'q0987wertyu0988' limit 2;
+select count(*) from test_trgm where t ~ '[qwerty]{2}-?[qwerty]{2}';
 
 drop index trgm_idx;
 create index trgm_idx on test_trgm using gist (t gist_trgm_ops(siglen=0));
@@ -63,6 +62,7 @@ select t,similarity(t,'gwertyu1988') as sml from test_trgm where t % 'gwertyu198
 explain (costs off)
 select t <-> 'q0987wertyu0988', t from test_trgm order by t <-> 'q0987wertyu0988' limit 2;
 select t <-> 'q0987wertyu0988', t from test_trgm order by t <-> 'q0987wertyu0988' limit 2;
+select count(*) from test_trgm where t ~ '[qwerty]{2}-?[qwerty]{2}';
 
 drop index trgm_idx;
 create index trgm_idx on test_trgm using gin (t gin_trgm_ops);
@@ -71,6 +71,7 @@ set enable_seqscan=off;
 select t,similarity(t,'qwertyu0988') as sml from test_trgm where t % 'qwertyu0988' order by sml desc, t;
 select t,similarity(t,'gwertyu0988') as sml from test_trgm where t % 'gwertyu0988' order by sml desc, t;
 select t,similarity(t,'gwertyu1988') as sml from test_trgm where t % 'gwertyu1988' order by sml desc, t;
+select count(*) from test_trgm where t ~ '[qwerty]{2}-?[qwerty]{2}';
 
 -- check handling of indexquals that generate no searchable conditions
 explain (costs off)
@@ -131,6 +132,29 @@ select * from test2 where t ilike '%BCD%';
 select * from test2 where t ilike 'qua%';
 select * from test2 where t like '%z foo bar%';
 select * from test2 where t like '  z foo%';
+explain (costs off)
+  select * from test2 where t ~ '[abc]{3}';
+explain (costs off)
+  select * from test2 where t ~* 'DEF';
+select * from test2 where t ~ '[abc]{3}';
+select * from test2 where t ~ 'a[bc]+d';
+select * from test2 where t ~ '(abc)*$';
+select * from test2 where t ~* 'DEF';
+select * from test2 where t ~ 'dEf';
+select * from test2 where t ~* '^q';
+select * from test2 where t ~* '[abc]{3}[def]{3}';
+select * from test2 where t ~* 'ab[a-z]{3}';
+select * from test2 where t ~* '(^| )qua';
+select * from test2 where t ~ 'q.*rk$';
+select * from test2 where t ~ 'q';
+select * from test2 where t ~ '[a-z]{3}';
+select * from test2 where t ~* '(a{10}|b{10}|c{10}){10}';
+select * from test2 where t ~ 'z foo bar';
+select * from test2 where t ~ ' z foo bar';
+select * from test2 where t ~ '  z foo bar';
+select * from test2 where t ~ '  z foo';
+select * from test2 where t ~ 'qua(?!foo)';
+select * from test2 where t ~ '/\d+/-\d';
 -- test = operator
 explain (costs off)
   select * from test2 where t = 'abcdef';
@@ -163,6 +187,29 @@ select * from test2 where t ilike '%BCD%';
 select * from test2 where t ilike 'qua%';
 select * from test2 where t like '%z foo bar%';
 select * from test2 where t like '  z foo%';
+explain (costs off)
+  select * from test2 where t ~ '[abc]{3}';
+explain (costs off)
+  select * from test2 where t ~* 'DEF';
+select * from test2 where t ~ '[abc]{3}';
+select * from test2 where t ~ 'a[bc]+d';
+select * from test2 where t ~ '(abc)*$';
+select * from test2 where t ~* 'DEF';
+select * from test2 where t ~ 'dEf';
+select * from test2 where t ~* '^q';
+select * from test2 where t ~* '[abc]{3}[def]{3}';
+select * from test2 where t ~* 'ab[a-z]{3}';
+select * from test2 where t ~* '(^| )qua';
+select * from test2 where t ~ 'q.*rk$';
+select * from test2 where t ~ 'q';
+select * from test2 where t ~ '[a-z]{3}';
+select * from test2 where t ~* '(a{10}|b{10}|c{10}){10}';
+select * from test2 where t ~ 'z foo bar';
+select * from test2 where t ~ ' z foo bar';
+select * from test2 where t ~ '  z foo bar';
+select * from test2 where t ~ '  z foo';
+select * from test2 where t ~ 'qua(?!foo)';
+select * from test2 where t ~ '/\d+/-\d';
 -- test = operator
 explain (costs off)
   select * from test2 where t = 'abcdef';
