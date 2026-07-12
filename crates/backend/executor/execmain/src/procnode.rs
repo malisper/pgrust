@@ -1421,6 +1421,14 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: the no-FROM row / the
+    // projection stream over the sort breaker): falls through to the
+    // UNCHANGED exec_result on refuse. Lane logic + refuse-set in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_result(rs, estate)? {
+            return Ok(r);
+        }
+    }
     exec_result(rs, estate)
 }
 
@@ -1626,6 +1634,20 @@ fn agg_arm<'mcx>(
             // exec_hash_join on refuse. Lane logic + refuse-set in `lanev2`.
             if crate::lanev2::enabled() {
                 if let Some(r) = crate::lanev2::try_own_agg_over_hash_join(agg, hj, estate)? {
+                    return Ok(r);
+                }
+            }
+        }
+        PlanStateNode::SubqueryScan(sqs) => {
+            // Lane-executor-v2 dispatch hook (wave-4 glue: hash-agg breaker
+            // over a SubqueryScan over lane scans — pipelines chaining
+            // through the subquery boundary). Falls through to the UNCHANGED
+            // per-tuple agg over exec_scan on refuse. Lane logic + refuse-set
+            // in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_subquery_scan(agg, sqs, estate)?
+                {
                     return Ok(r);
                 }
             }
@@ -2106,6 +2128,14 @@ fn group_arm<'mcx>(
     g: &mut PgBox<'mcx, GroupNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: streaming sorted grouping
+    // over the sort breaker): falls through to the UNCHANGED exec_group on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_group(g, estate)? {
+            return Ok(r);
+        }
+    }
     let g = &mut **g;
     let outer = &mut g.outer;
     ::nodegroup::exec_group(&mut g.state, estate, |e| exec_proc_node(outer, e))
@@ -2220,6 +2250,14 @@ fn subquery_scan_arm<'mcx>(
     s: &mut PgBox<'mcx, SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-4 glue: pass-through
+    // filter/project over the sort breaker): falls through to the UNCHANGED
+    // exec_scan on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_subquery_scan(s, estate)? {
+            return Ok(r);
+        }
+    }
     ::execscan::exec_scan(&mut **s, estate)
 }
 
