@@ -32,6 +32,12 @@
 //!   * `SubqueryScan` — one OWNED tick per lane-owned feed event (the
 //!     child sort feed for the bare hook; the agg build event for the
 //!     agg-over-subquery composition); refusals per offered call.
+//!   * `Append` — one OWNED tick per memoized structural verdict (per Append
+//!     node per (re)init, like the seqscan class); structural child refusals
+//!     once per memoized verdict, dynamic EPQ/backward/parallel gates per
+//!     offered call.
+//!   * `ProjectSet` — never owned (a documented wholesale refuse, design §4);
+//!     one REFUSED tick per offered call.
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but
@@ -68,9 +74,11 @@ pub(super) enum ShapeClass {
     Group = 7,
     ResultNode = 8,
     SubqueryScan = 9,
+    Append = 10,
+    ProjectSet = 11,
 }
 
-const N_CLASSES: usize = 10;
+const N_CLASSES: usize = 12;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -84,6 +92,8 @@ impl ShapeClass {
         ShapeClass::Group,
         ShapeClass::ResultNode,
         ShapeClass::SubqueryScan,
+        ShapeClass::Append,
+        ShapeClass::ProjectSet,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -98,6 +108,8 @@ impl ShapeClass {
             ShapeClass::Group => "group",
             ShapeClass::ResultNode => "result",
             ShapeClass::SubqueryScan => "subqueryscan",
+            ShapeClass::Append => "append",
+            ShapeClass::ProjectSet => "projectset",
         }
     }
 }
@@ -177,9 +189,18 @@ pub(super) enum RefuseReason {
     /// node type, or a lane-ownable child whose own refuse-set refused (the
     /// specific reason ticks under the child's class).
     ChildNotLaneOwned = 23,
+    /// ProjectSet: refused wholesale (documented refuse, design §4). The SRF
+    /// ValuePerCall/Materialize multi-call protocol is per-tuple stateful
+    /// (`pending_srf_tuples` resume, `args_valid` arg pinning, Materialize
+    /// tuplestore read-back); an expanding-`TupleOp` hosting is model-
+    /// compatible in principle but has no lane-owned child shape to chain
+    /// onto in practice (ProjectSet children are scans, which refuse
+    /// standalone ownership) — zero upside today. Re-evaluated when the
+    /// design's "SRFs = expanding operator" phase item lands.
+    SrfSetExpansion = 24,
 }
 
-const N_REASONS: usize = 24;
+const N_REASONS: usize = 25;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -208,6 +229,7 @@ impl RefuseReason {
             RefuseReason::JoinShape => "join-shape",
             RefuseReason::MultiBatch => "multi-batch",
             RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
+            RefuseReason::SrfSetExpansion => "srf-set-expansion",
         }
     }
 
@@ -238,6 +260,7 @@ impl RefuseReason {
             JoinShape,
             MultiBatch,
             ChildNotLaneOwned,
+            SrfSetExpansion,
         ][i]
     }
 }
