@@ -32,4 +32,5 @@ timeout_seams = { path = "../../utils/misc/timeout_seams" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 xlogutils = { path = "../../access/transam/xlogutils" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 libc = "0.2"

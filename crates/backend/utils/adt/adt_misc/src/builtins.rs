@@ -427,14 +427,13 @@ pub fn fc_pg_last_xact_replay_timestamp(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    // recoveryLastXTime's only writer is the recovery-target stop machinery
-    // (archive recovery / PITR), which this build never runs: GetLatestXTime
-    // is invariantly 0, which C maps to NULL.
-    Ok(fcinfo.return_null())
+    let xtime = xlogrecovery::GetLatestXTime();
+    if xtime == 0 {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i64(xtime))
 }
 
-// Hot-standby query service is unported, so RecoveryInProgress() is always
-// false in a live query and the in-recovery tails stay unreachable-loud.
 fn check_recovery_control() -> PgResult<()> {
     if !transam_xlog::RecoveryInProgress() {
         return Err(recovery_not_in_progress_err("Recovery control functions"));
@@ -442,16 +441,27 @@ fn check_recovery_control() -> PgResult<()> {
     Ok(())
 }
 
+#[cold]
+#[inline(never)]
+fn promotion_ongoing_err(fname: &str) -> Box<types_error::PgError> {
+    Box::new(
+        types_error::PgError::error("standby promotion is ongoing")
+            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(format!("{fname} cannot be executed after promotion is triggered.")),
+    )
+}
+
 pub fn fc_pg_wal_replay_pause(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_recovery_control()?;
-    panic!(
-        "pg_wal_replay_pause: recovery pause machinery unported — no SetRecoveryPause/\
-         GetRecoveryPauseState/RecoveryPauseState substrate; WakeupRecovery itself panics \
-         (crates/backend/postmaster/startup/src/lib.rs)"
-    );
+    if xlogrecovery::PromoteIsTriggered() {
+        return Err(promotion_ongoing_err("pg_wal_replay_pause()"));
+    }
+    xlogrecovery::SetRecoveryPause(true);
+    xlogrecovery::WakeupRecovery();
+    Ok(Datum::null())
 }
 
 pub fn fc_pg_wal_replay_resume(
@@ -459,7 +469,11 @@ pub fn fc_pg_wal_replay_resume(
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_recovery_control()?;
-    panic!("pg_wal_replay_resume: recovery pause machinery unported (see fc_pg_wal_replay_pause)");
+    if xlogrecovery::PromoteIsTriggered() {
+        return Err(promotion_ongoing_err("pg_wal_replay_resume()"));
+    }
+    xlogrecovery::SetRecoveryPause(false);
+    Ok(Datum::null())
 }
 
 pub fn fc_pg_is_wal_replay_paused(
@@ -467,17 +481,26 @@ pub fn fc_pg_is_wal_replay_paused(
     _fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_recovery_control()?;
-    panic!("pg_is_wal_replay_paused: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)");
+    Ok(Datum::from_bool(
+        xlogrecovery::GetRecoveryPauseState() != xlogrecovery::targets::RECOVERY_NOT_PAUSED,
+    ))
 }
 
 pub fn fc_pg_get_wal_replay_pause_state(
     _flinfo: Option<&mut FmgrInfo>,
-    _fcinfo: &mut Fcinfo,
+    fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_recovery_control()?;
-    panic!(
-        "pg_get_wal_replay_pause_state: GetRecoveryPauseState unported (see fc_pg_wal_replay_pause)"
-    );
+    let statestr = match xlogrecovery::GetRecoveryPauseState() {
+        xlogrecovery::targets::RECOVERY_PAUSE_REQUESTED => "pause requested",
+        xlogrecovery::targets::RECOVERY_PAUSED => "paused",
+        _ => "not paused",
+    };
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(varlena::cstring_to_text(
+        mcx,
+        statestr.as_bytes(),
+    )?))
 }
 
 pub fn fc_pg_create_restore_point(

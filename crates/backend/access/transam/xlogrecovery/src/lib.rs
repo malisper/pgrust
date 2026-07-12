@@ -1,10 +1,10 @@
 //! xlogrecovery.c (PostgreSQL 18.3): the startup process' WAL-recovery
-//! driver. Ported here: InitWalRecovery's checkpoint read+validate through
-//! the startup page reader, the PerformWalRecovery redo loop (rmgr dispatch
-//! + redo-context bookkeeping), FinishWalRecovery (EndOfLog + last partial
-//! page), ShutdownWalRecovery, and the shared replay-position getters.
-//! Archive recovery, standby mode, recovery targets, backup_label, timeline
-//! switches and the consistency/pause machinery are loud panics.
+//! driver. Crash recovery, archive recovery (restore_command) and standby
+//! mode are ported: signal files, recovery targets (xid/time/name/lsn/
+//! immediate), pause/promote, timeline rescans and the standby WAL-source
+//! state machine. Streaming (walreceiver) arms route through
+//! walreceiverfuncs_seams and behave as "no walreceiver" until that unit
+//! installs them.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -13,16 +13,30 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use elog::{elog, ereport};
-use types_core::{TimeLineID, TransactionId, XLogRecPtr, XLogSegNo};
-use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, PANIC};
+use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use types_error::{
+    ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR, FATAL, LOG, PANIC,
+    WARNING,
+};
+use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use xlogreader::{
     XLogReaderRoutine, XLogReaderState, XLogSegmentRoutine, XLREAD_FAIL, XLREAD_SUCCESS,
 };
 use xlogreader_seams::{XLogReaderState as ReaderView, XLOG_BLCKSZ};
 use xlogrecovery_seams::{EndOfWalRecoveryInfo, InitWalRecoveryResult};
 
+mod backup_label;
+pub mod targets;
+
 #[cfg(test)]
 mod tests;
+
+pub use targets::{
+    CheckPromoteSignal, GetCurrentChunkReplayStartTime, GetLatestXTime, GetRecoveryPauseState,
+    HotStandbyActive, PromoteIsTriggered, RecoveryRequiresIntParameter, SetRecoveryPause,
+    WakeupRecovery,
+};
+use targets::{RecoveryTargetTimeLineGoal, RecoveryTargetType};
 
 const InvalidXLogRecPtr: XLogRecPtr = 0;
 const RECOVERY_COMMAND_FILE: &str = "recovery.conf";
@@ -34,10 +48,16 @@ const TABLESPACE_MAP: &str = "tablespace_map";
 const TABLESPACE_MAP_OLD: &str = "tablespace_map.old";
 const PROMOTE_SIGNAL_FILE: &str = "promote";
 const XLOGDIR: &str = "pg_wal";
+const PG_TBLSPC_DIR: &str = "pg_tblspc";
 
 // SizeOfXLogRecord + SizeOfXLogRecordDataHeaderShort + sizeof(CheckPoint).
 const CHECKPOINT_REC_TOT_LEN: u32 =
     (xlogreader::SIZE_OF_XLOG_RECORD + 2 + controldata_utils::SIZEOF_CHECKPOINT) as u32;
+
+const PG_WAIT_ACTIVITY: u32 = 0x0500_0000;
+const PG_WAIT_TIMEOUT: u32 = 0x0900_0000;
+const WAIT_EVENT_RECOVERY_WAL_STREAM: u32 = PG_WAIT_ACTIVITY + 10;
+const WAIT_EVENT_RECOVERY_RETRIEVE_RETRY_INTERVAL: u32 = PG_WAIT_TIMEOUT + 4;
 
 fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("xlogrecovery.c", 0, func)
@@ -57,17 +77,44 @@ fn lsn_fmt(lsn: XLogRecPtr) -> String {
 static RECOVERY_TARGET_TLI: AtomicU32 = AtomicU32::new(0);
 static ARCHIVE_RECOVERY_REQUESTED: AtomicBool = AtomicBool::new(false);
 static IN_ARCHIVE_RECOVERY: AtomicBool = AtomicBool::new(false);
+static STANDBY_MODE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STANDBY_MODE: AtomicBool = AtomicBool::new(false);
 static REACHED_CONSISTENCY: AtomicBool = AtomicBool::new(false);
-static PROMOTE_IS_TRIGGERED: AtomicBool = AtomicBool::new(false);
+pub(crate) static PROMOTE_IS_TRIGGERED: AtomicBool = AtomicBool::new(false);
 static LAST_REPLAYED_READ_REC_PTR: AtomicU64 = AtomicU64::new(0);
 static LAST_REPLAYED_END_REC_PTR: AtomicU64 = AtomicU64::new(0);
 static LAST_REPLAYED_TLI: AtomicU32 = AtomicU32::new(0);
 static REPLAY_END_REC_PTR: AtomicU64 = AtomicU64::new(0);
 static REPLAY_END_TLI: AtomicU32 = AtomicU32::new(0);
+static SIGNAL_FILE_STANDBY: AtomicBool = AtomicBool::new(false);
+static SIGNAL_FILE_RECOVERY: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static DO_REQUEST_WALRCV_REPLY: Cell<bool> = const { Cell::new(false) };
     static RECOVERY: RefCell<Option<Recovery>> = const { RefCell::new(None) };
+}
+
+pub fn ArchiveRecoveryRequested() -> bool {
+    ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+}
+pub fn InArchiveRecovery() -> bool {
+    IN_ARCHIVE_RECOVERY.load(Relaxed)
+}
+pub fn StandbyModeRequested() -> bool {
+    STANDBY_MODE_REQUESTED.load(Relaxed)
+}
+pub fn StandbyMode() -> bool {
+    STANDBY_MODE.load(Relaxed)
+}
+pub(crate) fn reached_consistency() -> bool {
+    REACHED_CONSISTENCY.load(Relaxed)
+}
+
+fn EnableStandbyMode() {
+    STANDBY_MODE.store(true, Relaxed);
+    if startup_seams::disable_startup_progress_timeout::is_installed() {
+        startup_seams::disable_startup_progress_timeout::call();
+    }
 }
 
 pub fn GetXLogReplayRecPtr() -> (XLogRecPtr, TimeLineID) {
@@ -81,10 +128,6 @@ pub fn GetCurrentReplayRecPtr() -> (XLogRecPtr, TimeLineID) {
     (REPLAY_END_REC_PTR.load(Relaxed), REPLAY_END_TLI.load(Relaxed))
 }
 
-pub fn PromoteIsTriggered() -> bool {
-    PROMOTE_IS_TRIGGERED.load(Relaxed)
-}
-
 pub fn RemovePromoteSignalFiles() {
     let _ = std::fs::remove_file(data_path(PROMOTE_SIGNAL_FILE));
 }
@@ -93,10 +136,21 @@ pub fn XLogRequestWalReceiverReply() {
     DO_REQUEST_WALRCV_REPLY.set(true);
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum XLogSource {
     Any,
+    Archive,
     PgWal,
+    Stream,
+}
+
+fn xlog_source_name(s: XLogSource) -> &'static str {
+    match s {
+        XLogSource::Any => "any",
+        XLogSource::Archive => "archive",
+        XLogSource::PgWal => "pg_wal",
+        XLogSource::Stream => "stream",
+    }
 }
 
 use timeline_seams::TimeLineHistoryEntry as Tle;
@@ -117,6 +171,23 @@ fn tli_of_point_in_history(ptr: XLogRecPtr, tles: &[Tle]) -> PgResult<TimeLineID
     timeline_seams::tli_of_point_in_history::call(ptr, tles)
 }
 
+fn wal_rcv_streaming() -> bool {
+    walreceiverfuncs_seams::wal_rcv_streaming::is_installed()
+        && walreceiverfuncs_seams::wal_rcv_streaming::call()
+}
+
+// XLogShutdownWalRcv (xlog.c): stop walreceiver + clear the install flag.
+// The flag can only have been set in standby mode, so crash recovery (where
+// tests run without XLOGShmemInit) skips the XLogCtl touch.
+fn xlog_shutdown_wal_rcv() {
+    if walreceiverfuncs_seams::shutdown_wal_rcv::is_installed() {
+        walreceiverfuncs_seams::shutdown_wal_rcv::call();
+    }
+    if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        transam_xlog::ResetInstallXLogFileSegmentActive();
+    }
+}
+
 // The file-static read state of xlogrecovery.c plus the XLogPageReadPrivate
 // parameters; this is the startup reader's XLogReaderRoutine.
 struct PageSource {
@@ -124,14 +195,29 @@ struct PageSource {
     read_seg_no: XLogSegNo,
     read_off: u32,
     read_source: XLogSource,
+    cur_source: XLogSource,
     cur_file_tli: TimeLineID,
     last_source_failed: bool,
+    pending_walrcv_restart: bool,
     expected_tles: Vec<Tle>,
     emode: ErrorLevel,
     fetching_ckpt: bool,
     rand_access: bool,
     replay_tli: TimeLineID,
     last_complaint: XLogRecPtr,
+    flushed_upto: XLogRecPtr,
+    receive_tli: TimeLineID,
+    receipt_time: TimestampTz,
+    receipt_source: XLogSource,
+    last_fail_time: TimestampTz,
+    // minRecoveryPoint & friends (file statics; consistency bookkeeping).
+    min_recovery_point: XLogRecPtr,
+    min_recovery_point_tli: TimeLineID,
+    backup_start_point: XLogRecPtr,
+    backup_end_point: XLogRecPtr,
+    backup_end_required: bool,
+    redo_start_lsn: XLogRecPtr,
+    redo_start_tli: TimeLineID,
 }
 
 impl PageSource {
@@ -141,14 +227,28 @@ impl PageSource {
             read_seg_no: 0,
             read_off: 0,
             read_source: XLogSource::Any,
+            cur_source: XLogSource::Any,
             cur_file_tli: 0,
             last_source_failed: false,
+            pending_walrcv_restart: false,
             expected_tles: Vec::new(),
             emode: LOG,
             fetching_ckpt: false,
             rand_access: false,
             replay_tli: 0,
             last_complaint: InvalidXLogRecPtr,
+            flushed_upto: InvalidXLogRecPtr,
+            receive_tli: 0,
+            receipt_time: 0,
+            receipt_source: XLogSource::Any,
+            last_fail_time: 0,
+            min_recovery_point: InvalidXLogRecPtr,
+            min_recovery_point_tli: 0,
+            backup_start_point: InvalidXLogRecPtr,
+            backup_end_point: InvalidXLogRecPtr,
+            backup_end_required: false,
+            redo_start_lsn: InvalidXLogRecPtr,
+            redo_start_tli: 0,
         }
     }
 
@@ -183,11 +283,33 @@ impl PageSource {
         &mut self,
         segno: XLogSegNo,
         tli: TimeLineID,
+        source: XLogSource,
         notfound_ok: bool,
     ) -> PgResult<i32> {
         let wal_segsz = transam_xlog::wal_segment_size();
         let fname = transam_xlog::XLogFileName(tli, segno, wal_segsz);
-        let path = data_path(&format!("{XLOGDIR}/{fname}"));
+        let path;
+        match source {
+            XLogSource::Archive => {
+                if ps_status_seams::set_ps_display::is_installed() {
+                    ps_status_seams::set_ps_display::call(&format!("waiting for {fname}"));
+                }
+                let Some(restored) = xlogarchive::RestoreArchivedFile(
+                    &fname,
+                    "RECOVERYXLOG",
+                    wal_segsz as i64,
+                    crate::in_redo(),
+                )?
+                else {
+                    return Ok(-1);
+                };
+                xlogarchive::KeepFileRestoredFromArchive(&restored, &fname)?;
+                path = data_path(&format!("{XLOGDIR}/{fname}"));
+            }
+            _ => {
+                path = data_path(&format!("{XLOGDIR}/{fname}"));
+            }
+        }
         let cpath = std::ffi::CString::new(path.clone()).unwrap();
         // SAFETY: NUL-terminated path; O_RDONLY open.
         let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY) };
@@ -196,7 +318,11 @@ impl PageSource {
             if ps_status_seams::set_ps_display::is_installed() {
                 ps_status_seams::set_ps_display::call(&format!("recovering {fname}"));
             }
-            self.read_source = XLogSource::PgWal;
+            self.read_source = source;
+            self.receipt_source = source;
+            if source != XLogSource::Stream {
+                self.receipt_time = timestamp_seams::get_current_timestamp::call();
+            }
             return Ok(fd);
         }
         let errno = std::io::Error::last_os_error();
@@ -208,7 +334,7 @@ impl PageSource {
         Ok(-1)
     }
 
-    fn xlog_file_read_any_tli(&mut self, segno: XLogSegNo) -> PgResult<i32> {
+    fn xlog_file_read_any_tli(&mut self, segno: XLogSegNo, source: XLogSource) -> PgResult<i32> {
         let wal_segsz = transam_xlog::wal_segment_size();
         let tles = if self.expected_tles.is_empty() {
             read_timeline_history(RECOVERY_TARGET_TLI.load(Relaxed))?
@@ -226,36 +352,315 @@ impl PageSource {
                     continue;
                 }
             }
-            let fd = self.xlog_file_read(segno, hent.tli, true)?;
-            if fd != -1 {
-                found = fd;
-                break;
+            if source == XLogSource::Any || source == XLogSource::Archive {
+                let fd = self.xlog_file_read(segno, hent.tli, XLogSource::Archive, true)?;
+                if fd != -1 {
+                    let _ = elog(DEBUG1, "got WAL segment from archive".to_string());
+                    found = fd;
+                    break;
+                }
+            }
+            if source == XLogSource::Any || source == XLogSource::PgWal {
+                let fd = self.xlog_file_read(segno, hent.tli, XLogSource::PgWal, true)?;
+                if fd != -1 {
+                    found = fd;
+                    break;
+                }
             }
         }
         self.expected_tles = tles;
         Ok(found)
     }
 
-    // WaitForWALToBecomeAvailable, reduced to the reachable arms: no archive
-    // recovery, no standby (both panic in InitWalRecovery), so the state
-    // machine collapses to a single pg_wal probe.
-    fn wait_for_wal(&mut self) -> PgResult<i32> {
-        debug_assert!(!IN_ARCHIVE_RECOVERY.load(Relaxed));
-        if self.last_source_failed {
-            return Ok(XLREAD_FAIL);
+    fn rescan_latest_timeline(
+        &mut self,
+        replay_tli: TimeLineID,
+        replay_lsn: XLogRecPtr,
+    ) -> PgResult<bool> {
+        let old_target = RECOVERY_TARGET_TLI.load(Relaxed);
+        let newtarget = timeline_seams::find_newest_timeline::call(old_target)?;
+        if newtarget == old_target {
+            return Ok(false);
         }
-        self.close_read_file();
-        if self.rand_access {
-            self.cur_file_tli = 0;
+        let new_expected = read_timeline_history(newtarget)?;
+        let Some(current_tle) = new_expected.iter().find(|t| t.tli == old_target) else {
+            let _ = elog(
+                LOG,
+                format!(
+                    "new timeline {newtarget} is not a child of database system timeline {replay_tli}"
+                ),
+            );
+            return Ok(false);
+        };
+        if current_tle.end < replay_lsn {
+            let _ = elog(
+                LOG,
+                format!(
+                    "new timeline {newtarget} forked off current database system timeline {replay_tli} before current recovery point {}",
+                    lsn_fmt(replay_lsn)
+                ),
+            );
+            return Ok(false);
         }
-        self.read_file = self.xlog_file_read_any_tli(self.read_seg_no)?;
-        if self.read_file >= 0 {
-            Ok(XLREAD_SUCCESS)
-        } else {
-            self.last_source_failed = true;
-            Ok(XLREAD_FAIL)
+        RECOVERY_TARGET_TLI.store(newtarget, Relaxed);
+        self.expected_tles = new_expected;
+        timeline_seams::restore_timeline_history_files::call(old_target + 1, newtarget)?;
+        let _ = elog(LOG, format!("new target timeline is {newtarget}"));
+        Ok(true)
+    }
+
+    // WaitForWALToBecomeAvailable (xlogrecovery.c:3575): the standby WAL
+    // source state machine.
+    fn wait_for_wal(
+        &mut self,
+        rec_ptr: XLogRecPtr,
+        tli_rec_ptr: XLogRecPtr,
+        replay_lsn: XLogRecPtr,
+    ) -> PgResult<i32> {
+        let mut streaming_reply_sent = false;
+
+        if !IN_ARCHIVE_RECOVERY.load(Relaxed) {
+            self.cur_source = XLogSource::PgWal;
+        } else if self.cur_source == XLogSource::Any
+            || (!StandbyMode() && self.cur_source == XLogSource::Stream)
+        {
+            self.last_source_failed = false;
+            self.cur_source = XLogSource::Archive;
+        }
+
+        loop {
+            let old_source = self.cur_source;
+            let mut start_walreceiver = false;
+
+            if self.last_source_failed {
+                match self.cur_source {
+                    XLogSource::Archive | XLogSource::PgWal => {
+                        if StandbyMode() && targets::CheckForStandbyTrigger() {
+                            xlog_shutdown_wal_rcv();
+                            return Ok(XLREAD_FAIL);
+                        }
+                        if !StandbyMode() {
+                            return Ok(XLREAD_FAIL);
+                        }
+                        self.cur_source = XLogSource::Stream;
+                        start_walreceiver = true;
+                    }
+                    XLogSource::Stream => {
+                        debug_assert!(StandbyMode());
+                        if wal_rcv_streaming() {
+                            xlog_shutdown_wal_rcv();
+                        } else {
+                            transam_xlog::ResetInstallXLogFileSegmentActive();
+                        }
+                        if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest
+                            && self.rescan_latest_timeline(self.replay_tli, replay_lsn)?
+                        {
+                            self.cur_source = XLogSource::Archive;
+                        } else {
+                            let now = timestamp_seams::get_current_timestamp::call();
+                            let retry_ms =
+                                guc_tables::vars::wal_retrieve_retry_interval.read() as i64;
+                            let elapsed_ms = (now - self.last_fail_time) / 1000;
+                            if elapsed_ms < retry_ms {
+                                let wait_time = retry_ms - elapsed_ms;
+                                let _ = elog(
+                                    LOG,
+                                    format!(
+                                        "waiting for WAL to become available at {}",
+                                        lsn_fmt(rec_ptr)
+                                    ),
+                                );
+                                if procarray_seams::known_assigned_transaction_ids_idle_maintenance::is_installed() {
+                                    procarray_seams::known_assigned_transaction_ids_idle_maintenance::call();
+                                }
+                                let _ = latch::WaitLatch(
+                                    Some(targets::recovery_wakeup_latch()),
+                                    WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                                    wait_time,
+                                    WAIT_EVENT_RECOVERY_RETRIEVE_RETRY_INTERVAL,
+                                )?;
+                                latch::ResetLatch(targets::recovery_wakeup_latch());
+                                startup_seams::process_startup_proc_interrupts::call()?;
+                            }
+                            self.last_fail_time =
+                                timestamp_seams::get_current_timestamp::call();
+                            self.cur_source = XLogSource::Archive;
+                        }
+                    }
+                    XLogSource::Any => {
+                        ereport(ERROR)
+                            .errmsg("unexpected WAL source".to_string())
+                            .finish(loc("WaitForWALToBecomeAvailable"))?;
+        unreachable!()
+                    }
+                }
+            } else if self.cur_source == XLogSource::PgWal && IN_ARCHIVE_RECOVERY.load(Relaxed) {
+                // Prefer the archive over pg_wal for the next file.
+                self.cur_source = XLogSource::Archive;
+            }
+
+            if self.cur_source != old_source {
+                let _ = elog(
+                    DEBUG2,
+                    format!(
+                        "switched WAL source from {} to {} after {}",
+                        xlog_source_name(old_source),
+                        xlog_source_name(self.cur_source),
+                        if self.last_source_failed { "failure" } else { "success" }
+                    ),
+                );
+            }
+
+            self.last_source_failed = false;
+
+            match self.cur_source {
+                XLogSource::Archive | XLogSource::PgWal => {
+                    debug_assert!(!wal_rcv_streaming());
+                    self.close_read_file();
+                    if self.rand_access {
+                        self.cur_file_tli = 0;
+                    }
+                    let src = if self.cur_source == XLogSource::Archive {
+                        XLogSource::Any
+                    } else {
+                        self.cur_source
+                    };
+                    self.read_file = self.xlog_file_read_any_tli(self.read_seg_no, src)?;
+                    if self.read_file >= 0 {
+                        return Ok(XLREAD_SUCCESS);
+                    }
+                    self.last_source_failed = true;
+                }
+                XLogSource::Stream => {
+                    debug_assert!(StandbyMode());
+                    if self.pending_walrcv_restart && !start_walreceiver {
+                        xlog_shutdown_wal_rcv();
+                        if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest {
+                            self.rescan_latest_timeline(self.replay_tli, replay_lsn)?;
+                        }
+                        start_walreceiver = true;
+                    }
+                    self.pending_walrcv_restart = false;
+
+                    let conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
+                    if start_walreceiver && !conninfo.is_empty() {
+                        let (ptr, tli) = if self.fetching_ckpt {
+                            (self.redo_start_lsn, self.redo_start_tli)
+                        } else {
+                            let tli = tli_of_point_in_history(tli_rec_ptr, &self.expected_tles)?;
+                            if self.cur_file_tli > 0 && tli < self.cur_file_tli {
+                                { ereport(ERROR)
+                                    .errmsg(format!(
+                                        "according to history file, WAL location {} belongs to timeline {tli}, but previous recovered WAL file came from timeline {}",
+                                        lsn_fmt(tli_rec_ptr),
+                                        self.cur_file_tli
+                                    ))
+                                    .finish(loc("WaitForWALToBecomeAvailable"))?; unreachable!() }
+                            }
+                            (rec_ptr, tli)
+                        };
+                        self.cur_file_tli = tli;
+                        transam_xlog::SetInstallXLogFileSegmentActive()?;
+                        let slotname =
+                            guc_tables::vars::PrimarySlotName.read().unwrap_or_default();
+                        let create_temp_slot =
+                            guc_tables::vars::wal_receiver_create_temp_slot.read();
+                        walreceiverfuncs_seams::request_xlog_streaming::call(
+                            tli,
+                            ptr,
+                            &conninfo,
+                            &slotname,
+                            create_temp_slot,
+                        )?;
+                        self.flushed_upto = 0;
+                    }
+
+                    if !wal_rcv_streaming() {
+                        self.last_source_failed = true;
+                        continue;
+                    }
+
+                    let mut havedata = false;
+                    if rec_ptr < self.flushed_upto {
+                        havedata = true;
+                    } else {
+                        let (flushed, latest_chunk_start, tli) =
+                            walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call();
+                        self.flushed_upto = flushed;
+                        self.receive_tli = tli;
+                        if rec_ptr < self.flushed_upto && self.receive_tli == self.cur_file_tli {
+                            havedata = true;
+                            if latest_chunk_start <= rec_ptr {
+                                self.receipt_time =
+                                    timestamp_seams::get_current_timestamp::call();
+                                targets::SetCurrentChunkStartTime(self.receipt_time);
+                            }
+                        }
+                    }
+                    if havedata {
+                        if self.read_file < 0 {
+                            if self.expected_tles.is_empty() {
+                                self.expected_tles =
+                                    read_timeline_history(RECOVERY_TARGET_TLI.load(Relaxed))?;
+                            }
+                            let recv_tli = self.receive_tli;
+                            self.read_file = self.xlog_file_read(
+                                self.read_seg_no,
+                                recv_tli,
+                                XLogSource::Stream,
+                                false,
+                            )?;
+                            debug_assert!(self.read_file >= 0);
+                        } else {
+                            self.read_source = XLogSource::Stream;
+                            self.receipt_source = XLogSource::Stream;
+                            return Ok(XLREAD_SUCCESS);
+                        }
+                    } else {
+                        if targets::CheckForStandbyTrigger() {
+                            self.last_source_failed = true;
+                            continue;
+                        }
+                        if !streaming_reply_sent {
+                            if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
+                                walreceiverfuncs_seams::wal_rcv_force_reply::call();
+                            }
+                            streaming_reply_sent = true;
+                        }
+                        if procarray_seams::known_assigned_transaction_ids_idle_maintenance::is_installed() {
+                            procarray_seams::known_assigned_transaction_ids_idle_maintenance::call();
+                        }
+                        let _ = latch::WaitLatch(
+                            Some(targets::recovery_wakeup_latch()),
+                            WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+                            -1,
+                            WAIT_EVENT_RECOVERY_WAL_STREAM,
+                        )?;
+                        latch::ResetLatch(targets::recovery_wakeup_latch());
+                    }
+                }
+                XLogSource::Any => {
+                    ereport(ERROR)
+                        .errmsg("unexpected WAL source".to_string())
+                        .finish(loc("WaitForWALToBecomeAvailable"))?;
+        unreachable!()
+                }
+            }
+
+            if targets::GetRecoveryPauseState() != targets::RECOVERY_NOT_PAUSED {
+                targets::recoveryPausesHere(false)?;
+            }
+            startup_seams::process_startup_proc_interrupts::call()?;
         }
     }
+}
+
+thread_local! {
+    // InRedo (xlogrecovery.c file static; startup-thread only).
+    static IN_REDO: Cell<bool> = const { Cell::new(false) };
+}
+pub(crate) fn in_redo() -> bool {
+    IN_REDO.with(|c| c.get())
 }
 
 impl XLogSegmentRoutine for PageSource {
@@ -277,13 +682,13 @@ impl XLogSegmentRoutine for PageSource {
 }
 
 impl XLogReaderRoutine for PageSource {
-    // XLogPageRead (xlogrecovery.c), non-standby: one pass, no retry loop.
+    // XLogPageRead (xlogrecovery.c:3320).
     fn page_read(
         &mut self,
         v: &mut ReaderView,
         target_page_ptr: XLogRecPtr,
         req_len: i32,
-        _target_rec_ptr: XLogRecPtr,
+        target_rec_ptr: XLogRecPtr,
         cur_page: &mut [u8],
     ) -> PgResult<i32> {
         let wal_segsz = v.segcxt.ws_segsize;
@@ -292,67 +697,111 @@ impl XLogReaderRoutine for PageSource {
         if self.read_file >= 0
             && transam_xlog::XLByteToSeg(target_page_ptr, wal_segsz) != self.read_seg_no
         {
-            // The restartpoint request here needs archive recovery (unreachable).
+            // Request a restartpoint if we've replayed too much xlog since
+            // the last one.
+            if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+                && init_small::globals::IsUnderPostmaster()
+                && transam_xlog::XLogCheckpointNeeded(self.read_seg_no)
+            {
+                transam_xlog::GetRedoRecPtr();
+                if transam_xlog::XLogCheckpointNeeded(self.read_seg_no) {
+                    checkpointer_seams::request_checkpoint::call(
+                        transam_xlog::CHECKPOINT_CAUSE_XLOG,
+                    )?;
+                }
+            }
             self.close_read_file();
             self.read_source = XLogSource::Any;
         }
         self.read_seg_no = transam_xlog::XLByteToSeg(target_page_ptr, wal_segsz);
 
-        if self.read_file < 0 {
-            if self.wait_for_wal()? != XLREAD_SUCCESS {
-                self.close_read_file();
-                self.read_source = XLogSource::Any;
-                return Ok(XLREAD_FAIL);
+        loop {
+            if self.read_file < 0
+                || (self.read_source == XLogSource::Stream
+                    && self.flushed_upto < target_page_ptr + req_len as u64)
+            {
+                let replay_lsn = REPLAY_END_REC_PTR.load(Relaxed);
+                match self.wait_for_wal(
+                    target_page_ptr + req_len as u64,
+                    target_rec_ptr,
+                    replay_lsn,
+                )? {
+                    r if r == XLREAD_FAIL => {
+                        self.close_read_file();
+                        self.read_source = XLogSource::Any;
+                        return Ok(XLREAD_FAIL);
+                    }
+                    _ => {}
+                }
             }
-        }
-        debug_assert!(self.read_file >= 0);
+            debug_assert!(self.read_file >= 0);
 
-        self.read_off = target_page_off;
-        let io_start =
-            pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read());
-        // SAFETY: cur_page is the reader's XLOG_BLCKSZ read buffer.
-        let r = unsafe {
-            libc::pread(
-                self.read_file,
-                cur_page.as_mut_ptr() as *mut libc::c_void,
-                XLOG_BLCKSZ,
-                self.read_off as libc::off_t,
-            )
-        };
-        pgstat::io::pgstat_count_io_op_time(
-            pgstat::io::IOObject::Wal,
-            pgstat::io::IOContext::IOCONTEXT_NORMAL,
-            pgstat::io::IOOp::Read,
-            io_start,
-            1,
-            r.max(0) as u64,
-        );
-        if r != XLOG_BLCKSZ as isize {
-            let errno = std::io::Error::last_os_error();
-            let fname = transam_xlog::XLogFileName(self.cur_file_tli, self.read_seg_no, wal_segsz);
-            let emode = self.emode;
-            let msg = if r < 0 {
-                format!(
-                    "could not read from WAL segment {fname}, LSN {}, offset {}: {errno}",
-                    lsn_fmt(target_page_ptr),
-                    self.read_off
-                )
-            } else {
-                format!(
-                    "could not read from WAL segment {fname}, LSN {}, offset {}: read {r} of {XLOG_BLCKSZ}",
-                    lsn_fmt(target_page_ptr),
-                    self.read_off
+            self.read_off = target_page_off;
+            let io_start =
+                pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read());
+            // SAFETY: cur_page is the reader's XLOG_BLCKSZ read buffer.
+            let r = unsafe {
+                libc::pread(
+                    self.read_file,
+                    cur_page.as_mut_ptr() as *mut libc::c_void,
+                    XLOG_BLCKSZ,
+                    self.read_off as libc::off_t,
                 )
             };
-            self.report(emode, target_page_ptr + req_len as u64, msg)?;
+            pgstat::io::pgstat_count_io_op_time(
+                pgstat::io::IOObject::Wal,
+                pgstat::io::IOContext::IOCONTEXT_NORMAL,
+                pgstat::io::IOOp::Read,
+                io_start,
+                1,
+                r.max(0) as u64,
+            );
+            if r != XLOG_BLCKSZ as isize {
+                let errno = std::io::Error::last_os_error();
+                let fname =
+                    transam_xlog::XLogFileName(self.cur_file_tli, self.read_seg_no, wal_segsz);
+                let emode = self.emode;
+                let msg = if r < 0 {
+                    format!(
+                        "could not read from WAL segment {fname}, LSN {}, offset {}: {errno}",
+                        lsn_fmt(target_page_ptr),
+                        self.read_off
+                    )
+                } else {
+                    format!(
+                        "could not read from WAL segment {fname}, LSN {}, offset {}: read {r} of {XLOG_BLCKSZ}",
+                        lsn_fmt(target_page_ptr),
+                        self.read_off
+                    )
+                };
+                self.report(emode, target_page_ptr + req_len as u64, msg)?;
+            } else {
+                v.seg.ws_tli = self.cur_file_tli;
+                // In standby mode, sanity-check the page header now so a
+                // recycled segment streams a retry instead of ending recovery.
+                if StandbyMode() && target_page_ptr % wal_segsz as u64 == 0 {
+                    // Deferred: XLogReaderValidatePageHeader needs the full
+                    // reader; the outer read loop re-validates. C's extra
+                    // check only accelerates the recycled-segment case.
+                }
+                let read_len = if self.read_source == XLogSource::Stream
+                    && target_page_ptr / XLOG_BLCKSZ as u64 == self.flushed_upto / XLOG_BLCKSZ as u64
+                {
+                    (transam_xlog::XLogSegmentOffset(self.flushed_upto, wal_segsz)
+                        - target_page_off) as i32
+                } else {
+                    XLOG_BLCKSZ as i32
+                };
+                return Ok(read_len);
+            }
+
             self.last_source_failed = true;
             self.close_read_file();
             self.read_source = XLogSource::Any;
-            return Ok(XLREAD_FAIL);
+            if !StandbyMode() {
+                return Ok(XLREAD_FAIL);
+            }
         }
-
-        v.seg.ws_tli = self.cur_file_tli;
-        Ok(XLOG_BLCKSZ as i32)
     }
 }
 
@@ -363,14 +812,13 @@ struct Recovery {
     src: PageSource,
     check_point_loc: XLogRecPtr,
     check_point_tli: TimeLineID,
-    redo_start_lsn: XLogRecPtr,
-    redo_start_tli: TimeLineID,
     aborted_rec_ptr: XLogRecPtr,
     missing_contrec_ptr: XLogRecPtr,
     oldest_active_xid: TransactionId,
 }
 
 // ReadRecord: Ok(true) = the reader's current record is the requested one.
+// Carries the crash→archive switch and the standby retry loop.
 fn read_record(
     rec: &mut Recovery,
     emode: ErrorLevel,
@@ -383,50 +831,81 @@ fn read_record(
     rec.src.replay_tli = replay_tli;
     rec.src.last_source_failed = false;
 
-    let got = rec.prefetcher.XLogPrefetcherReadRecord(&mut rec.reader, &mut rec.src)?;
-    let mut have_record = got.is_some();
-    match got {
-        None => {
-            if !ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
-                && rec.reader.abortedRecPtr != InvalidXLogRecPtr
-            {
-                rec.aborted_rec_ptr = rec.reader.abortedRecPtr;
-                rec.missing_contrec_ptr = rec.reader.missingContrecPtr;
+    loop {
+        let got = rec.prefetcher.XLogPrefetcherReadRecord(&mut rec.reader, &mut rec.src)?;
+        let mut have_record = got.is_some();
+        match got {
+            None => {
+                if !ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+                    && rec.reader.abortedRecPtr != InvalidXLogRecPtr
+                {
+                    rec.aborted_rec_ptr = rec.reader.abortedRecPtr;
+                    rec.missing_contrec_ptr = rec.reader.missingContrecPtr;
+                }
+                rec.src.close_read_file();
+                if let Some(msg) = rec.reader.errormsg() {
+                    let msg = msg.to_string();
+                    let end = rec.reader.v.EndRecPtr;
+                    rec.src.report(emode, end, msg)?;
+                }
             }
-            rec.src.close_read_file();
-            if let Some(msg) = rec.reader.errormsg() {
-                let msg = msg.to_string();
-                let end = rec.reader.v.EndRecPtr;
-                rec.src.report(emode, end, msg)?;
+            Some(_) => {
+                let (latest_page_ptr, latest_page_tli) = rec.reader.latest_page();
+                if !tli_in_history(latest_page_tli, &rec.src.expected_tles) {
+                    let wal_segsz = transam_xlog::wal_segment_size();
+                    let segno = transam_xlog::XLByteToSeg(latest_page_ptr, wal_segsz);
+                    let offset = transam_xlog::XLogSegmentOffset(latest_page_ptr, wal_segsz);
+                    let fname =
+                        transam_xlog::XLogFileName(rec.reader.v.seg.ws_tli, segno, wal_segsz);
+                    let end = rec.reader.v.EndRecPtr;
+                    rec.src.report(
+                        emode,
+                        end,
+                        format!(
+                            "unexpected timeline ID {latest_page_tli} in WAL segment {fname}, LSN {}, offset {offset}",
+                            lsn_fmt(latest_page_ptr)
+                        ),
+                    )?;
+                    have_record = false;
+                }
             }
         }
-        Some(_) => {
-            let (latest_page_ptr, latest_page_tli) = rec.reader.latest_page();
-            if !tli_in_history(latest_page_tli, &rec.src.expected_tles) {
-                let wal_segsz = transam_xlog::wal_segment_size();
-                let segno = transam_xlog::XLByteToSeg(latest_page_ptr, wal_segsz);
-                let offset = transam_xlog::XLogSegmentOffset(latest_page_ptr, wal_segsz);
-                let fname = transam_xlog::XLogFileName(rec.reader.v.seg.ws_tli, segno, wal_segsz);
-                let end = rec.reader.v.EndRecPtr;
-                rec.src.report(
-                    emode,
-                    end,
-                    format!(
-                        "unexpected timeline ID {latest_page_tli} in WAL segment {fname}, LSN {}, offset {offset}",
-                        lsn_fmt(latest_page_ptr)
-                    ),
-                )?;
-                have_record = false;
-            }
+        if have_record {
+            return Ok(true);
         }
+
+        rec.src.last_source_failed = true;
+
+        // Crash recovery ran out of WAL in pg_wal with archive recovery
+        // requested: switch to the archive now (xlogrecovery.c:3253).
+        if !IN_ARCHIVE_RECOVERY.load(Relaxed)
+            && ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+            && !fetching_ckpt
+        {
+            let _ = elog(
+                DEBUG1,
+                "reached end of WAL in pg_wal, entering archive recovery".to_string(),
+            );
+            IN_ARCHIVE_RECOVERY.store(true, Relaxed);
+            if STANDBY_MODE_REQUESTED.load(Relaxed) {
+                EnableStandbyMode();
+            }
+            transam_xlog::SwitchIntoArchiveRecovery(rec.reader.v.EndRecPtr, replay_tli)?;
+            rec.src.min_recovery_point = rec.reader.v.EndRecPtr;
+            rec.src.min_recovery_point_tli = replay_tli;
+
+            check_recovery_consistency(rec)?;
+
+            rec.src.last_source_failed = false;
+            rec.src.cur_source = XLogSource::Any;
+            continue;
+        }
+
+        if StandbyMode() && !targets::CheckForStandbyTrigger() {
+            continue;
+        }
+        return Ok(false);
     }
-    if have_record {
-        return Ok(true);
-    }
-    rec.src.last_source_failed = true;
-    // The crash-to-archive switch and the standby retry loop are unreachable
-    // (ArchiveRecoveryRequested/StandbyMode panic in InitWalRecovery).
-    Ok(false)
 }
 
 fn read_checkpoint_record(
@@ -466,26 +945,112 @@ fn read_recovery_signal_file() -> PgResult<()> {
         return Ok(());
     }
     if std::path::Path::new(&data_path(RECOVERY_COMMAND_FILE)).exists() {
-        return ereport(FATAL)
+        { ereport(FATAL)
             .errmsg(format!(
                 "using recovery command file \"{RECOVERY_COMMAND_FILE}\" is not supported"
             ))
-            .finish(loc("readRecoverySignalFile"));
+            .finish(loc("readRecoverySignalFile"))?; unreachable!() }
     }
     let _ = std::fs::remove_file(data_path(RECOVERY_COMMAND_DONE));
 
-    // Standby/archive recovery legs (EnableStandbyMode, target validation,
-    // restore_command) are unported: a present signal file is a loud stop.
-    for sig in [STANDBY_SIGNAL_FILE, RECOVERY_SIGNAL_FILE] {
-        if std::path::Path::new(&data_path(sig)).exists() {
-            panic!("standby/archive recovery not ported (xlogrecovery.c): \"{sig}\" present");
+    let fsync_signal = |rel: &str| {
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data_path(rel))
+        {
+            use std::os::fd::AsRawFd;
+            let _ = fd::pg_fsync(f.as_raw_fd());
         }
+    };
+    if std::path::Path::new(&data_path(STANDBY_SIGNAL_FILE)).exists() {
+        fsync_signal(STANDBY_SIGNAL_FILE);
+        SIGNAL_FILE_STANDBY.store(true, Relaxed);
+    } else if std::path::Path::new(&data_path(RECOVERY_SIGNAL_FILE)).exists() {
+        fsync_signal(RECOVERY_SIGNAL_FILE);
+        SIGNAL_FILE_RECOVERY.store(true, Relaxed);
+    }
+
+    STANDBY_MODE_REQUESTED.store(false, Relaxed);
+    ARCHIVE_RECOVERY_REQUESTED.store(false, Relaxed);
+    if SIGNAL_FILE_STANDBY.load(Relaxed) {
+        STANDBY_MODE_REQUESTED.store(true, Relaxed);
+        ARCHIVE_RECOVERY_REQUESTED.store(true, Relaxed);
+    } else if SIGNAL_FILE_RECOVERY.load(Relaxed) {
+        ARCHIVE_RECOVERY_REQUESTED.store(true, Relaxed);
+    } else {
+        return Ok(());
+    }
+
+    if STANDBY_MODE_REQUESTED.load(Relaxed) && !init_small::globals::IsUnderPostmaster() {
+        ereport(FATAL)
+            .errmsg("standby mode is not supported by single-user servers")
+            .finish(loc("readRecoverySignalFile"))?;
+        unreachable!()
+    }
+    Ok(())
+}
+
+fn validate_recovery_parameters() -> PgResult<()> {
+    if !ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        return Ok(());
+    }
+
+    let restore_command = guc_tables::vars::recoveryRestoreCommand
+        .read()
+        .unwrap_or_default();
+    if STANDBY_MODE_REQUESTED.load(Relaxed) {
+        let conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
+        if conninfo.is_empty() && restore_command.is_empty() {
+            let _ = ereport(WARNING)
+                .errmsg("specified neither \"primary_conninfo\" nor \"restore_command\"")
+                .errhint(
+                    "The database server will regularly poll the pg_wal subdirectory to check for files placed there.",
+                )
+                .finish(loc("validateRecoveryParameters"));
+        }
+    } else if restore_command.is_empty() {
+        ereport(FATAL)
+            .errmsg("must specify \"restore_command\" when standby mode is not enabled")
+            .finish(loc("validateRecoveryParameters"))?;
+        unreachable!()
+    }
+
+    if targets::recovery_target_action() == targets::RECOVERY_TARGET_ACTION_PAUSE
+        && !guc_tables::vars::EnableHotStandby.read()
+    {
+        targets::set_recovery_target_action_shutdown();
+    }
+
+    if targets::recovery_target() == RecoveryTargetType::Time {
+        let s = targets::recovery_target_time_string();
+        let t = adt_timestamp::timestamptz_in(&s, -1, None)?;
+        targets::set_recovery_target_time(t);
+    }
+
+    match targets::timeline_goal() {
+        RecoveryTargetTimeLineGoal::Numeric => {
+            let rtli = targets::recovery_target_tli_requested();
+            if rtli != 1 && !timeline_seams::exists_timeline_history::call(rtli)? {
+                { ereport(FATAL)
+                    .errmsg(format!("recovery target timeline {rtli} does not exist"))
+                    .finish(loc("validateRecoveryParameters"))?; unreachable!() }
+            }
+            RECOVERY_TARGET_TLI.store(rtli, Relaxed);
+        }
+        RecoveryTargetTimeLineGoal::Latest => {
+            let newest =
+                timeline_seams::find_newest_timeline::call(RECOVERY_TARGET_TLI.load(Relaxed))?;
+            RECOVERY_TARGET_TLI.store(newest, Relaxed);
+        }
+        RecoveryTargetTimeLineGoal::ControlFile => {}
     }
     Ok(())
 }
 
 pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     let cf = *transam_xlog::control_file::control_file();
+    let dbstate_at_startup = cf.state;
     let mut in_recovery = false;
 
     let target_tli = if cf.minRecoveryPointTLI > cf.checkPointCopy.ThisTimeLineID {
@@ -496,7 +1061,11 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     RECOVERY_TARGET_TLI.store(target_tli, Relaxed);
 
     read_recovery_signal_file()?;
-    // validateRecoveryParameters: archive-recovery-only; unreachable here.
+    validate_recovery_parameters()?;
+
+    if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        latch::OwnLatch(targets::recovery_wakeup_latch())?;
+    }
 
     let context: &'static mcx::MemoryContext =
         Box::leak(Box::new(mcx::MemoryContext::new("wal recovery")));
@@ -505,30 +1074,6 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);
     let prefetcher = xlogprefetcher::XLogPrefetcher::XLogPrefetcherAllocate(context.mcx());
 
-    if std::path::Path::new(&data_path(BACKUP_LABEL_FILE)).exists() {
-        panic!(
-            "backup_label recovery not ported (xlogrecovery.c): \"{BACKUP_LABEL_FILE}\" present"
-        );
-    }
-    if std::path::Path::new(&data_path(TABLESPACE_MAP)).exists() {
-        let _ = std::fs::remove_file(data_path(TABLESPACE_MAP_OLD));
-        let renamed = fd::durable_rename(
-            &data_path(TABLESPACE_MAP),
-            &data_path(TABLESPACE_MAP_OLD),
-            DEBUG1,
-        );
-        let detail = match renamed {
-            Ok(0) => format!("File \"{TABLESPACE_MAP}\" was renamed to \"{TABLESPACE_MAP_OLD}\"."),
-            _ => format!("Could not rename file \"{TABLESPACE_MAP}\" to \"{TABLESPACE_MAP_OLD}\"."),
-        };
-        let _ = elog(
-            LOG,
-            format!(
-                "ignoring file \"{TABLESPACE_MAP}\" because no file \"{BACKUP_LABEL_FILE}\" exists: {detail}"
-            ),
-        );
-    }
-
     let mut rec = Recovery {
         context,
         reader,
@@ -536,42 +1081,210 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
         src: PageSource::new(),
         check_point_loc: cf.checkPoint,
         check_point_tli: cf.checkPointCopy.ThisTimeLineID,
-        redo_start_lsn: cf.checkPointCopy.redo,
-        redo_start_tli: cf.checkPointCopy.ThisTimeLineID,
         aborted_rec_ptr: InvalidXLogRecPtr,
         missing_contrec_ptr: InvalidXLogRecPtr,
         oldest_active_xid: types_core::InvalidTransactionId,
     };
+    rec.src.redo_start_lsn = cf.checkPointCopy.redo;
+    rec.src.redo_start_tli = cf.checkPointCopy.ThisTimeLineID;
 
-    let (cp_loc, cp_tli) = (rec.check_point_loc, rec.check_point_tli);
-    if !read_checkpoint_record(&mut rec, cp_loc, cp_tli)? {
-        ereport(PANIC)
-            .errmsg(format!(
-                "could not locate a valid checkpoint record at {}",
-                lsn_fmt(rec.check_point_loc)
-            ))
-            .finish(loc("InitWalRecovery"))?;
-    }
-    let check_point = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
-    let was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
-        == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
-    rec.oldest_active_xid = check_point.oldestActiveXid;
-    rec.redo_start_lsn = check_point.redo;
-    rec.redo_start_tli = check_point.ThisTimeLineID;
+    let mut was_shutdown;
+    let mut have_backup_label = false;
+    let mut have_tblspc_map = false;
+    let mut backup_from_standby = false;
+    let mut backup_end_required = false;
+    let check_point;
 
-    if check_point.redo < rec.check_point_loc {
-        rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, check_point.redo);
-        if !read_record(&mut rec, LOG, false, check_point.ThisTimeLineID)? {
+    if let Some(label) = backup_label::read_backup_label()? {
+        // Archive recovery with a backup label: roll forward from the
+        // label's checkpoint, not pg_control's.
+        IN_ARCHIVE_RECOVERY.store(true, Relaxed);
+        if STANDBY_MODE_REQUESTED.load(Relaxed) {
+            EnableStandbyMode();
+        }
+        rec.src.redo_start_lsn = label.redo_start_lsn;
+        rec.src.redo_start_tli = label.redo_start_tli;
+        rec.check_point_loc = label.checkpoint_loc;
+        rec.check_point_tli = label.backup_label_tli;
+        backup_from_standby = label.backup_from_standby;
+        backup_end_required = label.backup_end_required;
+
+        let _ = elog(
+            LOG,
+            format!(
+                "starting backup recovery with redo LSN {}, checkpoint LSN {}, on timeline ID {}",
+                lsn_fmt(rec.src.redo_start_lsn),
+                lsn_fmt(rec.check_point_loc),
+                rec.check_point_tli
+            ),
+        );
+
+        let (cp_loc, cp_tli) = (rec.check_point_loc, rec.check_point_tli);
+        if !read_checkpoint_record(&mut rec, cp_loc, cp_tli)? {
+            let dd = init_small::globals::DataDir().unwrap_or(".");
+            { ereport(FATAL)
+                .errmsg(format!(
+                    "could not locate required checkpoint record at {}",
+                    lsn_fmt(cp_loc)
+                ))
+                .errhint(format!(
+                    "If you are restoring from a backup, touch \"{dd}/recovery.signal\" or \"{dd}/standby.signal\" and add required recovery options.\nIf you are not restoring from a backup, try removing the file \"{dd}/backup_label\".\nBe careful: removing \"{dd}/backup_label\" will result in a corrupt cluster if restoring from a backup."
+                ))
+                .finish(loc("InitWalRecovery"))?; unreachable!() }
+        }
+        check_point = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
+        was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
+            == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
+        in_recovery = true; // force recovery even if SHUTDOWNED
+
+        if check_point.redo < rec.check_point_loc {
+            let redo = check_point.redo;
+            rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, redo);
+            if !read_record(&mut rec, LOG, false, check_point.ThisTimeLineID)? {
+                let dd = init_small::globals::DataDir().unwrap_or(".");
+                { ereport(FATAL)
+                    .errmsg(format!(
+                        "could not find redo location {} referenced by checkpoint record at {}",
+                        lsn_fmt(check_point.redo),
+                        lsn_fmt(rec.check_point_loc)
+                    ))
+                    .errhint(format!(
+                        "If you are restoring from a backup, touch \"{dd}/recovery.signal\" or \"{dd}/standby.signal\" and add required recovery options.\nIf you are not restoring from a backup, try removing the file \"{dd}/backup_label\".\nBe careful: removing \"{dd}/backup_label\" will result in a corrupt cluster if restoring from a backup."
+                    ))
+                    .finish(loc("InitWalRecovery"))?; unreachable!() }
+            }
+        }
+
+        if let Some(tablespaces) = backup_label::read_tablespace_map()? {
+            for ti in &tablespaces {
+                let linkloc = data_path(&format!("{PG_TBLSPC_DIR}/{}", ti.oid));
+                let _ = std::fs::remove_file(&linkloc);
+                if std::os::unix::fs::symlink(&ti.path, &linkloc).is_err() {
+                    { ereport(ERROR)
+                        .errmsg(format!(
+                            "could not create symbolic link \"{linkloc}\": {}",
+                            std::io::Error::last_os_error()
+                        ))
+                        .finish(loc("InitWalRecovery"))?; unreachable!() }
+                }
+            }
+            have_tblspc_map = true;
+        }
+        have_backup_label = true;
+    } else {
+        if std::path::Path::new(&data_path(TABLESPACE_MAP)).exists() {
+            let _ = std::fs::remove_file(data_path(TABLESPACE_MAP_OLD));
+            let renamed = fd::durable_rename(
+                &data_path(TABLESPACE_MAP),
+                &data_path(TABLESPACE_MAP_OLD),
+                DEBUG1,
+            );
+            let detail = match renamed {
+                Ok(0) => {
+                    format!("File \"{TABLESPACE_MAP}\" was renamed to \"{TABLESPACE_MAP_OLD}\".")
+                }
+                _ => format!(
+                    "Could not rename file \"{TABLESPACE_MAP}\" to \"{TABLESPACE_MAP_OLD}\"."
+                ),
+            };
+            let _ = elog(
+                LOG,
+                format!(
+                    "ignoring file \"{TABLESPACE_MAP}\" because no file \"{BACKUP_LABEL_FILE}\" exists: {detail}"
+                ),
+            );
+        }
+
+        // No backup label: if we know how far to replay for consistency,
+        // enter archive recovery directly; otherwise crash-recover pg_wal
+        // first (the ReadRecord end-of-WAL switch does the transition).
+        if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+            && (cf.minRecoveryPoint != InvalidXLogRecPtr
+                || cf.backupEndRequired
+                || cf.backupEndPoint != InvalidXLogRecPtr
+                || cf.state == transam_xlog::DB_SHUTDOWNED)
+        {
+            IN_ARCHIVE_RECOVERY.store(true, Relaxed);
+            if STANDBY_MODE_REQUESTED.load(Relaxed) {
+                EnableStandbyMode();
+            }
+        }
+
+        if cf.backupStartPoint != InvalidXLogRecPtr {
+            let _ = elog(
+                LOG,
+                format!(
+                    "restarting backup recovery with redo LSN {}",
+                    lsn_fmt(cf.backupStartPoint)
+                ),
+            );
+        }
+
+        let (cp_loc, cp_tli) = (rec.check_point_loc, rec.check_point_tli);
+        if !read_checkpoint_record(&mut rec, cp_loc, cp_tli)? {
             ereport(PANIC)
                 .errmsg(format!(
-                    "could not find redo location {} referenced by checkpoint record at {}",
-                    lsn_fmt(check_point.redo),
+                    "could not locate a valid checkpoint record at {}",
                     lsn_fmt(rec.check_point_loc)
                 ))
                 .finish(loc("InitWalRecovery"))?;
         }
+        check_point = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
+        was_shutdown = (rec.reader.XLogRecGetInfo() & !transam_xlog::XLR_INFO_MASK)
+            == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN;
+
+        if check_point.redo < rec.check_point_loc {
+            let redo = check_point.redo;
+            rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, redo);
+            if !read_record(&mut rec, LOG, false, check_point.ThisTimeLineID)? {
+                ereport(PANIC)
+                    .errmsg(format!(
+                        "could not find redo location {} referenced by checkpoint record at {}",
+                        lsn_fmt(check_point.redo),
+                        lsn_fmt(rec.check_point_loc)
+                    ))
+                    .finish(loc("InitWalRecovery"))?;
+            }
+        }
     }
 
+    if !have_backup_label {
+        rec.src.redo_start_lsn = check_point.redo;
+        rec.src.redo_start_tli = check_point.ThisTimeLineID;
+    }
+    rec.oldest_active_xid = check_point.oldestActiveXid;
+
+    if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        let msg = if STANDBY_MODE_REQUESTED.load(Relaxed) {
+            "entering standby mode".to_string()
+        } else {
+            match targets::recovery_target() {
+                RecoveryTargetType::Xid => format!(
+                    "starting point-in-time recovery to XID {}",
+                    targets::recovery_target_xid()
+                ),
+                RecoveryTargetType::Time => format!(
+                    "starting point-in-time recovery to {}",
+                    timestamp_seams::timestamptz_to_str::call(targets::recovery_target_time())
+                ),
+                RecoveryTargetType::Name => format!(
+                    "starting point-in-time recovery to \"{}\"",
+                    targets::recovery_target_name()
+                ),
+                RecoveryTargetType::Lsn => format!(
+                    "starting point-in-time recovery to WAL location (LSN) \"{}\"",
+                    lsn_fmt(targets::recovery_target_lsn())
+                ),
+                RecoveryTargetType::Immediate => {
+                    "starting point-in-time recovery to earliest consistent point".to_string()
+                }
+                RecoveryTargetType::Unset => "starting archive recovery".to_string(),
+            }
+        };
+        let _ = elog(LOG, msg);
+    }
+
+    let target_tli = RECOVERY_TARGET_TLI.load(Relaxed);
     debug_assert!(!rec.src.expected_tles.is_empty());
     if tli_of_point_in_history(rec.check_point_loc, &rec.src.expected_tles)?
         != rec.check_point_tli
@@ -606,7 +1319,7 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
             .finish(loc("InitWalRecovery"))?;
     }
     if check_point.redo < rec.check_point_loc {
-        if was_shutdown {
+        if was_shutdown && !have_backup_label {
             ereport(PANIC)
                 .errmsg("invalid redo record in shutdown checkpoint")
                 .finish(loc("InitWalRecovery"))?;
@@ -614,30 +1327,82 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
         in_recovery = true;
     } else if cf.state != transam_xlog::DB_SHUTDOWNED {
         in_recovery = true;
+    } else if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        in_recovery = true;
     }
 
     if in_recovery {
-        let _ = elog(
-            LOG,
-            "database system was not properly shut down; automatic recovery in progress"
-                .to_string(),
-        );
-        if target_tli > cf.checkPointCopy.ThisTimeLineID {
+        let in_archive = IN_ARCHIVE_RECOVERY.load(Relaxed);
+        if !in_archive {
             let _ = elog(
                 LOG,
-                format!(
-                    "crash recovery starts in timeline {} and has target timeline {target_tli}",
-                    cf.checkPointCopy.ThisTimeLineID
-                ),
+                "database system was not properly shut down; automatic recovery in progress"
+                    .to_string(),
             );
+            if target_tli > cf.checkPointCopy.ThisTimeLineID {
+                let _ = elog(
+                    LOG,
+                    format!(
+                        "crash recovery starts in timeline {} and has target timeline {target_tli}",
+                        cf.checkPointCopy.ThisTimeLineID
+                    ),
+                );
+            }
         }
         let cp_loc = rec.check_point_loc;
         transam_xlog::control_file::control_file_update(|c| {
-            c.state = transam_xlog::DB_IN_CRASH_RECOVERY;
+            c.state = if in_archive {
+                transam_xlog::DB_IN_ARCHIVE_RECOVERY
+            } else {
+                transam_xlog::DB_IN_CRASH_RECOVERY
+            };
             c.checkPoint = cp_loc;
             c.checkPointCopy = check_point;
+            if in_archive && c.minRecoveryPoint < check_point.redo {
+                c.minRecoveryPoint = check_point.redo;
+                c.minRecoveryPointTLI = check_point.ThisTimeLineID;
+            }
+            if have_backup_label {
+                c.backupStartPoint = check_point.redo;
+                c.backupEndRequired = backup_end_required;
+                if backup_from_standby {
+                    if dbstate_at_startup != transam_xlog::DB_IN_ARCHIVE_RECOVERY
+                        && dbstate_at_startup != transam_xlog::DB_SHUTDOWNED_IN_RECOVERY
+                    {
+                        // FATAL below, after the closure.
+                    }
+                    c.backupEndPoint = c.minRecoveryPoint;
+                }
+            }
         });
+        if have_backup_label
+            && backup_from_standby
+            && dbstate_at_startup != transam_xlog::DB_IN_ARCHIVE_RECOVERY
+            && dbstate_at_startup != transam_xlog::DB_SHUTDOWNED_IN_RECOVERY
+        {
+            ereport(FATAL)
+                .errmsg("backup_label contains data inconsistent with control file")
+                .errhint(
+                    "This means that the backup is corrupted and you will have to use another backup for recovery.",
+                )
+                .finish(loc("InitWalRecovery"))?;
+        unreachable!()
+        }
         xlogutils::set_in_recovery(true);
+    }
+
+    {
+        let cf_now = transam_xlog::control_file::control_file();
+        rec.src.backup_start_point = cf_now.backupStartPoint;
+        rec.src.backup_end_required = cf_now.backupEndRequired;
+        rec.src.backup_end_point = cf_now.backupEndPoint;
+        if IN_ARCHIVE_RECOVERY.load(Relaxed) {
+            rec.src.min_recovery_point = cf_now.minRecoveryPoint;
+            rec.src.min_recovery_point_tli = cf_now.minRecoveryPointTLI;
+        } else {
+            rec.src.min_recovery_point = InvalidXLogRecPtr;
+            rec.src.min_recovery_point_tli = 0;
+        }
     }
 
     rec.aborted_rec_ptr = InvalidXLogRecPtr;
@@ -646,21 +1411,146 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
 
     Ok(InitWalRecoveryResult {
         was_shutdown,
-        have_backup_label: false,
-        have_tblspc_map: false,
+        have_backup_label,
+        have_tblspc_map,
     })
 }
 
-// CheckRecoveryConsistency: in crash recovery minRecoveryPoint stays invalid,
-// so everything past the early return is archive-recovery-only.
-fn check_recovery_consistency() -> PgResult<()> {
-    if transam_xlog::control_file::control_file().minRecoveryPoint == InvalidXLogRecPtr {
+// CheckTablespaceDirectory (xlogrecovery.c:2151).
+fn check_tablespace_directory() -> PgResult<()> {
+    let dir = data_path(PG_TBLSPC_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    for de in entries.flatten() {
+        let name = de.file_name();
+        let name = name.to_string_lossy();
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let is_link = de
+            .path()
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            let level = if guc_tables::vars::allow_in_place_tablespaces.read() {
+                WARNING
+            } else {
+                PANIC
+            };
+            let r = ereport(level)
+                .errmsg(format!(
+                    "unexpected directory entry \"{name}\" found in {PG_TBLSPC_DIR}"
+                ))
+                .errdetail(format!(
+                    "All directory entries in {PG_TBLSPC_DIR}/ should be symbolic links."
+                ))
+                .errhint(
+                    "Remove those directories, or set \"allow_in_place_tablespaces\" to ON transiently to let recovery complete.",
+                )
+                .finish(loc("CheckTablespaceDirectory"));
+            if level == PANIC {
+                r?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// CheckRecoveryConsistency (xlogrecovery.c:2196).
+fn check_recovery_consistency(rec: &mut Recovery) -> PgResult<()> {
+    if rec.src.min_recovery_point == InvalidXLogRecPtr {
         return Ok(());
     }
-    panic!(
-        "CheckRecoveryConsistency archive-recovery arms not ported \
-         (minRecoveryPoint is set during crash recovery)"
-    );
+    debug_assert!(IN_ARCHIVE_RECOVERY.load(Relaxed));
+
+    let last_replayed_end = LAST_REPLAYED_END_REC_PTR.load(Relaxed);
+    let last_replayed_tli = LAST_REPLAYED_TLI.load(Relaxed);
+
+    if rec.src.backup_end_point != InvalidXLogRecPtr
+        && rec.src.backup_end_point <= last_replayed_end
+    {
+        let save_start = rec.src.backup_start_point;
+        let save_end = rec.src.backup_end_point;
+        let _ = elog(DEBUG1, "end of backup reached".to_string());
+        transam_xlog::ReachedEndOfBackup(last_replayed_end, last_replayed_tli)?;
+        rec.src.backup_start_point = InvalidXLogRecPtr;
+        rec.src.backup_end_point = InvalidXLogRecPtr;
+        rec.src.backup_end_required = false;
+        let _ = elog(
+            LOG,
+            format!(
+                "completed backup recovery with redo LSN {} and end LSN {}",
+                lsn_fmt(save_start),
+                lsn_fmt(save_end)
+            ),
+        );
+    }
+
+    if !reached_consistency()
+        && !rec.src.backup_end_required
+        && rec.src.min_recovery_point <= last_replayed_end
+    {
+        xlogutils::XLogCheckInvalidPages()?;
+        check_tablespace_directory()?;
+        REACHED_CONSISTENCY.store(true, Relaxed);
+        pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_RECOVERY_CONSISTENT);
+        let _ = elog(
+            LOG,
+            format!(
+                "consistent recovery state reached at {}",
+                lsn_fmt(last_replayed_end)
+            ),
+        );
+    }
+
+    if xlogutils::standby_state() == xlogutils::STANDBY_SNAPSHOT_READY
+        && !targets::HotStandbyActiveInReplay()
+        && reached_consistency()
+        && init_small::globals::IsUnderPostmaster()
+    {
+        targets::set_shared_hot_standby_active();
+        pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_BEGIN_HOT_STANDBY);
+    }
+    Ok(())
+}
+
+// checkTimeLineSwitch (xlogrecovery.c:2399).
+fn check_timeline_switch(
+    rec: &Recovery,
+    lsn: XLogRecPtr,
+    new_tli: TimeLineID,
+    prev_tli: TimeLineID,
+    replay_tli: TimeLineID,
+) -> PgResult<()> {
+    if prev_tli != replay_tli {
+        { ereport(PANIC)
+            .errmsg(format!(
+                "unexpected previous timeline ID {prev_tli} (current timeline ID {replay_tli}) in checkpoint record"
+            ))
+            .finish(loc("checkTimeLineSwitch"))?; unreachable!() }
+    }
+    if new_tli < replay_tli || !tli_in_history(new_tli, &rec.src.expected_tles) {
+        { ereport(PANIC)
+            .errmsg(format!(
+                "unexpected timeline ID {new_tli} (after {replay_tli}) in checkpoint record"
+            ))
+            .finish(loc("checkTimeLineSwitch"))?; unreachable!() }
+    }
+    if rec.src.min_recovery_point != InvalidXLogRecPtr
+        && lsn < rec.src.min_recovery_point
+        && new_tli > rec.src.min_recovery_point_tli
+    {
+        { ereport(PANIC)
+            .errmsg(format!(
+                "unexpected timeline ID {new_tli} in checkpoint record, before reaching minimum recovery point {} on timeline {}",
+                lsn_fmt(rec.src.min_recovery_point),
+                rec.src.min_recovery_point_tli
+            ))
+            .finish(loc("checkTimeLineSwitch"))?; unreachable!() }
+    }
+    Ok(())
 }
 
 // The XLOG-rmgr record types handled by the recovery driver itself.
@@ -674,13 +1564,13 @@ fn xlogrecovery_redo(rec: &mut Recovery) -> PgResult<()> {
         let overwritten_lsn = u64::from_ne_bytes(data[..8].try_into().unwrap());
         let overwrite_time = i64::from_ne_bytes(data[8..16].try_into().unwrap());
         if overwritten_lsn != rec.reader.overwrittenRecPtr {
-            return ereport(FATAL)
+            { ereport(FATAL)
                 .errmsg(format!(
                     "mismatching overwritten LSN {} -> {}",
                     lsn_fmt(overwritten_lsn),
                     lsn_fmt(rec.reader.overwrittenRecPtr)
                 ))
-                .finish(loc("xlogrecovery_redo"));
+                .finish(loc("xlogrecovery_redo"))?; unreachable!() }
         }
 
         rec.aborted_rec_ptr = InvalidXLogRecPtr;
@@ -698,16 +1588,22 @@ fn xlogrecovery_redo(rec: &mut Recovery) -> PgResult<()> {
         // Verifying the record should only happen once.
         rec.reader.overwrittenRecPtr = InvalidXLogRecPtr;
     } else if info == transam_xlog::XLOG_BACKUP_END {
-        // backupStartPoint is nonzero only under backup_label recovery
-        // (panics at init); C's mismatch arm is a DEBUG2, elided.
         let data = rec.reader.v.record.as_ref().expect("no decoded record");
         // SAFETY: main_data points into the reader's decode buffer.
         let startpoint =
             u64::from_ne_bytes(unsafe { data.main_data_bytes() }[..8].try_into().unwrap());
-        if startpoint == transam_xlog::control_file::control_file().backupStartPoint
-            && startpoint != InvalidXLogRecPtr
-        {
-            panic!("XLOG_BACKUP_END during an online backup: backup_label recovery not ported");
+        if rec.src.backup_start_point == startpoint {
+            let _ = elog(DEBUG1, "end of backup record reached".to_string());
+            rec.src.backup_end_point = rec.reader.v.EndRecPtr;
+        } else {
+            let _ = elog(
+                DEBUG1,
+                format!(
+                    "saw end-of-backup record for backup starting at {}, waiting for {}",
+                    lsn_fmt(startpoint),
+                    lsn_fmt(rec.src.backup_start_point)
+                ),
+            );
         }
     }
     Ok(())
@@ -719,31 +1615,46 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     let xid = rec.reader.XLogRecGetXid();
     let rmid = rec.reader.XLogRecGetRmid();
     let info = rec.reader.XLogRecGetInfo();
+    let mut switched_tli = false;
 
     varsup::AdvanceNextFullTransactionIdPastXid(xid)?;
 
     if rmid == transam_xlog::RM_XLOG_ID {
         let stripped = info & !transam_xlog::XLR_INFO_MASK;
         let mut new_replay_tli = *replay_tli;
+        let mut prev_replay_tli = *replay_tli;
         if stripped == transam_xlog::XLOG_CHECKPOINT_SHUTDOWN {
             let cp = controldata_utils::CheckPoint::from_bytes(rec.reader.XLogRecGetData());
             new_replay_tli = cp.ThisTimeLineID;
+            prev_replay_tli = cp.PrevTimeLineID;
         } else if stripped == transam_xlog::XLOG_END_OF_RECOVERY {
+            // xl_end_of_recovery: end_time 0..8, ThisTimeLineID 8..12,
+            // PrevTimeLineID 12..16.
             let data = rec.reader.XLogRecGetData();
             new_replay_tli = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+            prev_replay_tli = u32::from_ne_bytes(data[12..16].try_into().unwrap());
         }
         if new_replay_tli != *replay_tli {
-            panic!(
-                "timeline switch at {} not ported (checkTimeLineSwitch; timeline unit)",
-                lsn_fmt(rec.reader.v.EndRecPtr)
-            );
+            check_timeline_switch(
+                rec,
+                rec.reader.v.EndRecPtr,
+                new_replay_tli,
+                prev_replay_tli,
+                *replay_tli,
+            )?;
+            *replay_tli = new_replay_tli;
+            switched_tli = true;
         }
     }
 
     REPLAY_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
     REPLAY_END_TLI.store(*replay_tli, Relaxed);
 
-    debug_assert!(xlogutils::standby_state() == xlogutils::STANDBY_DISABLED);
+    if xlogutils::standby_state() != xlogutils::STANDBY_DISABLED
+        && xid != types_core::InvalidTransactionId
+    {
+        procarray_seams::record_known_assigned_transaction_ids::call(xid)?;
+    }
 
     if rmid == transam_xlog::RM_XLOG_ID {
         xlogrecovery_redo(rec)?;
@@ -779,12 +1690,22 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
     LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
 
-    // WalSndWakeup: cascade replication only (standby-mode, unreachable).
+    // WalSndWakeup(switchedTLI, true): cascade replication only; no cascading
+    // walsenders exist until walreceiver+cascading is ported.
     if DO_REQUEST_WALRCV_REPLY.get() {
-        panic!("WalRcvForceReply not ported (walreceiver): apply-feedback commit replayed");
+        DO_REQUEST_WALRCV_REPLY.set(false);
+        if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
+            walreceiverfuncs_seams::wal_rcv_force_reply::call();
+        }
     }
 
-    check_recovery_consistency()
+    check_recovery_consistency(rec)?;
+
+    if switched_tli {
+        transam_xlog::RemoveNonParentXlogFiles(rec.reader.v.EndRecPtr, *replay_tli)?;
+        // XLogPrefetchReconfigure: prefetcher re-reads its GUC lazily here.
+    }
+    Ok(())
 }
 
 
@@ -804,10 +1725,12 @@ pub fn PerformWalRecovery() -> PgResult<()> {
 }
 
 fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
-    if rec.redo_start_lsn < rec.check_point_loc {
+    let mut reached_recovery_target = false;
+
+    if rec.src.redo_start_lsn < rec.check_point_loc {
         LAST_REPLAYED_READ_REC_PTR.store(InvalidXLogRecPtr, Relaxed);
-        LAST_REPLAYED_END_REC_PTR.store(rec.redo_start_lsn, Relaxed);
-        LAST_REPLAYED_TLI.store(rec.redo_start_tli, Relaxed);
+        LAST_REPLAYED_END_REC_PTR.store(rec.src.redo_start_lsn, Relaxed);
+        LAST_REPLAYED_TLI.store(rec.src.redo_start_tli, Relaxed);
     } else {
         LAST_REPLAYED_READ_REC_PTR.store(rec.reader.v.ReadRecPtr, Relaxed);
         LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
@@ -815,18 +1738,22 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     }
     REPLAY_END_REC_PTR.store(LAST_REPLAYED_END_REC_PTR.load(Relaxed), Relaxed);
     REPLAY_END_TLI.store(LAST_REPLAYED_TLI.load(Relaxed), Relaxed);
+    targets::SetLatestXTime(0);
+    targets::SetCurrentChunkStartTime(0);
+    targets::SetRecoveryPause(false);
+    rec.src.receipt_time = timestamp_seams::get_current_timestamp::call();
 
     if init_small::globals::IsUnderPostmaster() {
         pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_RECOVERY_STARTED);
     }
 
-    check_recovery_consistency()?;
+    check_recovery_consistency(rec)?;
 
     let mut replay_tli;
     let mut have_record;
-    if rec.redo_start_lsn < rec.check_point_loc {
-        replay_tli = rec.redo_start_tli;
-        let redo_start = rec.redo_start_lsn;
+    if rec.src.redo_start_lsn < rec.check_point_loc {
+        replay_tli = rec.src.redo_start_tli;
+        let redo_start = rec.src.redo_start_lsn;
         rec.prefetcher.XLogPrefetcherBeginRead(&mut rec.reader, redo_start);
         have_record = read_record(rec, PANIC, false, replay_tli)?;
         debug_assert!(have_record);
@@ -848,6 +1775,7 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     }
 
     if have_record {
+        IN_REDO.with(|c| c.set(true));
         rmgr::RmgrStartup(rec.context.mcx())?;
         let _ = elog(
             LOG,
@@ -858,10 +1786,49 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
             if startup_seams::process_startup_proc_interrupts::is_installed() {
                 startup_seams::process_startup_proc_interrupts::call()?;
             }
-            // recoveryStopsBefore/After + pause/delay arms: recovery targets
-            // and hot standby are archive-only (panics in InitWalRecovery).
+
+            if targets::GetRecoveryPauseState() != targets::RECOVERY_NOT_PAUSED {
+                targets::recoveryPausesHere(false)?;
+            }
+
+            if targets::recoveryStopsBefore(&rec.reader)? {
+                reached_recovery_target = true;
+                break;
+            }
+
+            if targets::recoveryApplyDelay(&rec.reader)?
+                && targets::GetRecoveryPauseState() != targets::RECOVERY_NOT_PAUSED
+            {
+                targets::recoveryPausesHere(false)?;
+            }
+
             apply_wal_record(rec, &mut replay_tli)?;
+
+            if targets::recoveryStopsAfter(&rec.reader)? {
+                reached_recovery_target = true;
+                break;
+            }
+
             have_record = read_record(rec, LOG, false, replay_tli)?;
+        }
+
+        if reached_recovery_target {
+            if !reached_consistency() {
+                ereport(FATAL)
+                    .errmsg("requested recovery stop point is before consistent recovery point")
+                    .finish(loc("PerformWalRecovery"))?;
+            }
+            match targets::recovery_target_action() {
+                targets::RECOVERY_TARGET_ACTION_SHUTDOWN => {
+                    ipc::proc_exit(3, init_small::globals::MyProcPid());
+                }
+                targets::RECOVERY_TARGET_ACTION_PAUSE => {
+                    targets::SetRecoveryPause(true);
+                    targets::recoveryPausesHere(true)?;
+                    // drop into promote
+                }
+                _ => {}
+            }
         }
 
         rmgr::RmgrCleanup();
@@ -869,8 +1836,29 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
             LOG,
             format!("redo done at {}", lsn_fmt(rec.reader.v.ReadRecPtr)),
         );
+        let xtime = targets::GetLatestXTime();
+        if xtime != 0 {
+            let _ = elog(
+                LOG,
+                format!(
+                    "last completed transaction was at log time {}",
+                    timestamp_seams::timestamptz_to_str::call(xtime)
+                ),
+            );
+        }
+        IN_REDO.with(|c| c.set(false));
     } else {
         let _ = elog(LOG, "redo is not required".to_string());
+    }
+
+    if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed)
+        && targets::recovery_target() != RecoveryTargetType::Unset
+        && !reached_recovery_target
+    {
+        ereport(FATAL)
+            .errmsg("recovery ended before configured recovery target was reached")
+            .finish(loc("PerformWalRecovery"))?;
+        unreachable!()
     }
     Ok(())
 }
@@ -880,8 +1868,11 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
         let mut guard = cell.borrow_mut();
         let rec = guard.as_mut().expect("FinishWalRecovery before InitWalRecovery");
 
-        // XLogShutdownWalRcv / ShutDownSlotSync: walreceiver and slot sync
-        // never start here (standby mode panics at init).
+        xlog_shutdown_wal_rcv();
+        // ShutDownSlotSync: slot-sync worker unported; nothing to stop.
+
+        debug_assert!(!wal_rcv_streaming());
+        STANDBY_MODE.store(false, Relaxed);
 
         let (last_rec, last_rec_tli) = if !xlogutils::in_recovery() {
             (rec.check_point_loc, rec.check_point_tli)
@@ -899,6 +1890,12 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
         }
         let end_of_log = rec.reader.v.EndRecPtr;
         let end_of_log_tli = rec.reader.v.seg.ws_tli;
+
+        if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+            debug_assert!(IN_ARCHIVE_RECOVERY.load(Relaxed));
+            IN_ARCHIVE_RECOVERY.store(false, Relaxed);
+            rec.src.close_read_file();
+        }
 
         let (last_page_begin_ptr, last_page): (XLogRecPtr, Box<[u8]>) =
             if end_of_log % XLOG_BLCKSZ as u64 != 0 {
@@ -925,8 +1922,9 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
             lastPage: last_page,
             abortedRecPtr: rec.aborted_rec_ptr,
             missingContrecPtr: rec.missing_contrec_ptr,
-            recovery_signal_file_found: false,
-            standby_signal_file_found: false,
+            recoveryStopReason: targets::getRecoveryStopReason(),
+            recovery_signal_file_found: SIGNAL_FILE_RECOVERY.load(Relaxed),
+            standby_signal_file_found: SIGNAL_FILE_STANDBY.load(Relaxed),
         })
     })
 }
@@ -937,9 +1935,38 @@ pub fn ShutdownWalRecovery() -> PgResult<()> {
             rec.src.close_read_file();
         }
     });
+    if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
+        let _ = std::fs::remove_file(data_path(&format!("{XLOGDIR}/RECOVERYXLOG")));
+        let _ = std::fs::remove_file(data_path(&format!("{XLOGDIR}/RECOVERYHISTORY")));
+        latch::DisownLatch(targets::recovery_wakeup_latch());
+    }
     // The reader's leaked "wal recovery" context stays allocated: a one-shot
     // boot-only arena (C frees it; a few KB once per process here).
     Ok(())
+}
+
+// StartupRequestWalReceiverRestart (xlogrecovery.c:4417).
+pub fn StartupRequestWalReceiverRestart() {
+    RECOVERY.with(|cell| {
+        if let Some(rec) = cell.borrow_mut().as_mut() {
+            if rec.src.cur_source == XLogSource::Stream
+                && walreceiverfuncs_seams::wal_rcv_running::is_installed()
+                && walreceiverfuncs_seams::wal_rcv_running::call()
+            {
+                let _ = elog(LOG, "WAL receiver process shutdown requested".to_string());
+                rec.src.pending_walrcv_restart = true;
+            }
+        }
+    });
+}
+
+pub fn GetXLogReceiptTime() -> (TimestampTz, bool) {
+    RECOVERY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|r| (r.src.receipt_time, r.src.receipt_source == XLogSource::Stream))
+            .unwrap_or((0, false))
+    })
 }
 
 fn recovery_oldest_active_xid() -> TransactionId {
@@ -968,4 +1995,16 @@ pub fn init_seams() {
     s::get_current_replay_rec_ptr::set(GetCurrentReplayRecPtr);
     s::recovery_oldest_active_xid::set(recovery_oldest_active_xid);
     s::remove_promote_signal_files::set(RemovePromoteSignalFiles);
+    s::get_xlog_receipt_time::set(GetXLogReceiptTime);
+    s::standby_mode::set(StandbyMode);
+    s::standby_mode_requested::set(StandbyModeRequested);
+    s::hot_standby_active::set(HotStandbyActive);
+    s::get_recovery_pause_state::set(GetRecoveryPauseState);
+    s::set_recovery_pause::set(SetRecoveryPause);
+    s::wakeup_recovery::set(WakeupRecovery);
+    s::check_promote_signal::set(CheckPromoteSignal);
+    s::get_latest_x_time::set(GetLatestXTime);
+    s::recovery_requires_int_parameter::set(RecoveryRequiresIntParameter);
+    s::startup_request_wal_receiver_restart::set(StartupRequestWalReceiverRestart);
+    targets::install_guc_hooks();
 }
