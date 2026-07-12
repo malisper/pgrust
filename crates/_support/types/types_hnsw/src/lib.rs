@@ -1,5 +1,5 @@
-//! hnsw.h vocabulary (pgvector) shared by indexam dispatch and the hnsw AM
-//! crates — scan state lives here so relscan's IndexScanOpaque can hold it.
+//! hnsw.h vocabulary (pgvector): scan state lives here so relscan's
+//! IndexScanOpaque can hold it without a cycle through the AM crates.
 
 use mcx::PgVec;
 use types_core::{BlockNumber, Oid};
@@ -19,7 +19,6 @@ pub const HNSW_PAGE_ID: u16 = 0xFF90;
 pub const HNSW_METAPAGE_BLKNO: BlockNumber = 0;
 pub const HNSW_HEAD_BLKNO: BlockNumber = 1;
 
-// Page-lock slots (must equal reserved page numbers; C uses LockPage on them).
 pub const HNSW_UPDATE_LOCK: BlockNumber = 0;
 pub const HNSW_SCAN_LOCK: BlockNumber = 1;
 
@@ -62,7 +61,6 @@ pub struct HnswSupport {
     pub collation: Oid,
 }
 
-// A disk-loaded element in scan state (C HnswElement, on-disk rendering).
 #[derive(Clone, Copy)]
 pub struct HnswScanElement {
     pub blkno: BlockNumber,
@@ -76,7 +74,6 @@ pub struct HnswScanElement {
     pub distance: f64,
 }
 
-// Min-heap on distance over a PgVec (C pairingheap of discarded candidates).
 pub struct DistanceMinHeap<'mcx> {
     pub items: PgVec<'mcx, HnswScanElement>,
 }
@@ -132,8 +129,7 @@ impl<'mcx> DistanceMinHeap<'mcx> {
     }
 }
 
-// C HnswScanOpaqueData, serial on-disk scan rendering. `w` is ordered
-// furthest-first (C's list from emptying the W max-heap); last() = nearest.
+// C HnswScanOpaqueData; `w` is furthest-first, last() = nearest.
 pub struct HnswScanOpaqueData<'mcx> {
     pub mcx: mcx::Mcx<'mcx>,
     pub first: bool,
@@ -141,11 +137,9 @@ pub struct HnswScanOpaqueData<'mcx> {
     pub tuples: i64,
     pub previous_distance: f64,
     pub max_memory: usize,
-    // Approximates C MemoryContextMemAllocated(so->tmpCtx) for the iterative
-    // scan memory cap; counts candidate/visited bytes retained per iteration.
+    // Approximates C MemoryContextMemAllocated(tmpCtx) for the iterative cap.
     pub mem_used: usize,
     pub iterative: i32,
-    // Detoasted (and normalized) query value image; None = NULL ORDER BY arg.
     pub value: Option<PgVec<'mcx, u8>>,
     pub support: HnswSupport,
     pub max_dimensions: i32,
