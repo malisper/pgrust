@@ -349,3 +349,178 @@ fn probe_fold_matches_per_row() {
         }
     }
 }
+
+/// Reference-checked Int128 build: fold (sum, count) per 2-word key across
+/// the salt threshold, growth, and (optionally) two-level conversion — both
+/// hash kinds (Int128 is Salt8-only by construction).
+fn i128_roundtrip(n: usize, card: u64, expect_two_level: bool) {
+    for hash in [HashKind::Fmix, HashKind::Crc] {
+        let mut t = LaneAggTable::with_config(KeyRepr::Int128, 16, 64, hash, EntryLayout::Salt8);
+        let mut reference: HashMap<[u64; 2], (i64, i64)> = HashMap::new();
+        for i in 0..n {
+            let r = (i as u64 % card).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            // Both words carry key material (lo/hi split of a 96-bit-ish
+            // composite — the packed multi-key shape).
+            let k = [r ^ 0xDEAD_BEEF, r >> 7];
+            let pr = t.probe_i128(k, t.hash_key_i128(k));
+            // SAFETY: 16 zeroed state bytes.
+            unsafe {
+                let s = states_i64(pr.states);
+                if pr.is_new {
+                    assert_eq!((*s, *s.add(1)), (0, 0), "new states must be zeroed");
+                }
+                *s = (*s).wrapping_add(r as i64);
+                *s.add(1) += 1;
+            }
+            let e = reference.entry(k).or_insert((0, 0));
+            e.0 = e.0.wrapping_add(r as i64);
+            e.1 += 1;
+        }
+        assert_eq!(t.len(), reference.len());
+        assert_eq!(t.is_two_level(), expect_two_level);
+        let mut seen = 0usize;
+        for i in 0..t.nrows() {
+            let k = t.row_key_i128(i).expect("no NULL group in this test");
+            let s = states_i64(t.row_states(i));
+            // SAFETY: live row states.
+            let (sum, cnt) = unsafe { (*s, *s.add(1)) };
+            assert_eq!(reference[&k], (sum, cnt), "key {k:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, reference.len());
+    }
+}
+
+#[test]
+fn i128_small_salt_disabled() {
+    i128_roundtrip(50_000, 1_000, false);
+}
+
+#[test]
+fn i128_across_salt_enable_threshold() {
+    i128_roundtrip(80_000, 40_000, false);
+}
+
+#[test]
+fn i128_two_level_conversion() {
+    i128_roundtrip(600_000, 300_000, true);
+}
+
+#[test]
+fn i128_word_boundaries_distinct() {
+    // Keys differing in exactly one word (including hi-word-only diffs) must
+    // stay distinct groups; extreme words exercise the full compare.
+    let mut t = LaneAggTable::new(KeyRepr::Int128, 8, 4);
+    let keys = [
+        [0u64, 0u64],
+        [1, 0],
+        [0, 1],
+        [u64::MAX, 0],
+        [0, u64::MAX],
+        [u64::MAX, u64::MAX],
+        [0, 0],
+        [0, 1],
+    ];
+    for k in keys {
+        let pr = t.probe_i128(k, t.hash_key_i128(k));
+        // SAFETY: 8 zeroed state bytes.
+        unsafe { *states_i64(pr.states) += 1 };
+    }
+    assert_eq!(t.len(), 6);
+    let mut got: Vec<([u64; 2], i64)> = (0..t.nrows())
+        .map(|i| {
+            // SAFETY: live row.
+            (t.row_key_i128(i).unwrap(), unsafe { *states_i64(t.row_states(i)) })
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ([0, 0], 2),
+            ([0, 1], 2),
+            ([0, u64::MAX], 1),
+            ([1, 0], 1),
+            ([u64::MAX, 0], 1),
+            ([u64::MAX, u64::MAX], 1),
+        ]
+    );
+}
+
+#[test]
+fn i128_batch_modes_agree_with_per_row() {
+    // probe_i128_batch (all prefetch modes) and probe_fold_i128 must agree
+    // with per-row probe_i128 across growth + two-level conversion.
+    let n = 300_000usize;
+    let card = 140_000u64; // crosses TWO_LEVEL_THRESHOLD
+    let keys: Vec<[u64; 2]> = (0..n)
+        .map(|i| {
+            let r = (i as u64 * 48271 % card).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            [r, r >> 13]
+        })
+        .collect();
+    for hash in [HashKind::Fmix, HashKind::Crc] {
+        let dump = |t: &LaneAggTable| -> Vec<([u64; 2], i64, i64)> {
+            let mut v: Vec<_> = (0..t.nrows())
+                .map(|i| {
+                    let s = states_i64(t.row_states(i));
+                    // SAFETY: live rows.
+                    unsafe { (t.row_key_i128(i).unwrap(), *s, *s.add(1)) }
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let mut per_row = LaneAggTable::with_config(KeyRepr::Int128, 16, 64, hash, EntryLayout::Salt8);
+        for &k in &keys {
+            let pr = per_row.probe_i128(k, per_row.hash_key_i128(k));
+            // SAFETY: zeroed 16-byte states.
+            unsafe {
+                let p = states_i64(pr.states);
+                *p = (*p).wrapping_add(k[0] as i64);
+                *p.add(1) += 1;
+            }
+        }
+        assert!(per_row.is_two_level());
+        for mode in [PrefetchMode::None, PrefetchMode::PreTouch, PrefetchMode::Adaptive] {
+            let mut t =
+                LaneAggTable::with_config(KeyRepr::Int128, 16, 64, hash, EntryLayout::Salt8);
+            let mut hashes = Vec::new();
+            let mut out = Vec::new();
+            let mut new_out = Vec::new();
+            // Feed in table-growing sub-batches so prefetch engages mid-way.
+            for chunk in keys.chunks(65_536) {
+                out.clear();
+                new_out.clear();
+                t.probe_i128_batch(chunk, mode, &mut hashes, &mut out, &mut new_out);
+                assert_eq!(out.len(), chunk.len());
+                for (j, &s) in out.iter().enumerate() {
+                    // SAFETY: probe-returned live states.
+                    unsafe {
+                        let p = states_i64(s);
+                        *p = (*p).wrapping_add(chunk[j][0] as i64);
+                        *p.add(1) += 1;
+                    }
+                }
+            }
+            assert_eq!(dump(&t), dump(&per_row), "hash={hash:?} mode={mode:?}");
+        }
+    }
+}
+
+#[test]
+fn i128_reset_reuses() {
+    let mut t = LaneAggTable::new(KeyRepr::Int128, 8, 4);
+    for i in 0..10_000u64 {
+        let k = [i, i ^ 0xF0F0];
+        let pr = t.probe_i128(k, t.hash_key_i128(k));
+        // SAFETY: zeroed states.
+        unsafe { *states_i64(pr.states) += 1 };
+    }
+    assert_eq!(t.len(), 10_000);
+    t.reset();
+    assert_eq!(t.len(), 0);
+    let pr = t.probe_i128([5, 6], t.hash_key_i128([5, 6]));
+    assert!(pr.is_new);
+    assert_eq!(t.len(), 1);
+}

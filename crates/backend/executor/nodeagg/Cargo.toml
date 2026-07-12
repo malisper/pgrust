@@ -40,6 +40,7 @@ init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 pqformat = { path = "../../libpq/pqformat" }
+varlena = { path = "../../utils/adt/varlena" }
 
 [dev-dependencies]
 detoast = { path = "../../access/common/detoast" }

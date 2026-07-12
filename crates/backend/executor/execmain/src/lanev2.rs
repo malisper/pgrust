@@ -260,7 +260,8 @@ fn arm_scan_staging<'mcx>(
                 // the feed then keeps the arrival probe — byte-safe either way.
                 let force = ::nodeagg::agg_lanefold_plan(agg)
                     .is_some_and(|plan| !plan.cols.is_empty())
-                    || scan_k2_wanted(agg);
+                    || scan_k2_wanted(agg)
+                    || scan_mk_plan_wanted(agg);
                 let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
                 ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
@@ -274,7 +275,9 @@ fn arm_scan_staging<'mcx>(
                     // dict-group, which the re-prepare above keeps) before
                     // choosing Fold — so the SoA has no fold reader and the
                     // qual-only bitmap arm is safe.
-                    if !try_arm_cb_dictgroup(agg, ss, estate) {
+                    if !try_arm_cb_dictgroup(agg, ss, estate)
+                        && !try_arm_cb_multikey_dict(agg, ss, estate)
+                    {
                         arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
                     }
                 } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
@@ -1361,6 +1364,7 @@ fn decide_agg_lane<'mcx>(
                 // key stages as dict codes, everything else as decoded Datums.
                 probe_arm_fold_prefix(agg, ss, estate)?
                     || try_arm_cb_dictgroup(agg, ss, estate)
+                    || try_arm_cb_multikey_dict(agg, ss, estate)
             }
         }
         _ => false,
@@ -1484,7 +1488,13 @@ fn agg_hash_build_fold_feed<'mcx>(
         .as_ref()
         .map_or(false, |s| ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) == Some(s.key_col));
     let mut dgs = DictGroupScratch::default();
-    trace_feed(if dictgroup {
+    // Packed multi-key admission + compact arm (multikey spike): only for
+    // shapes the single-key K2 machinery does not own.
+    let mk = if k2.is_none() { scan_mk_shape(agg, ss, estate) } else { None };
+    let mut mks = MkScratch::default();
+    trace_feed(if mk.is_some() {
+        "agg-over-seqscan: staged fold feed engaged (multi-key packed)"
+    } else if dictgroup {
         "agg-over-seqscan: staged fold feed engaged (dict-group armed)"
     } else if compact {
         "agg-over-seqscan: staged fold feed engaged (compact table)"
@@ -1588,6 +1598,26 @@ fn agg_hash_build_fold_feed<'mcx>(
             // every group lives in exactly one table (states carried over
             // byte-for-byte; no-op when not armed).
             ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+        }
+        // Packed multi-key batch (multikey spike): only while the compact
+        // table stays armed — after a backstop migration (scan_mk_batch =
+        // false) or a fallback-bearing batch, this and every later batch
+        // route through the per-row arrival probe below (the C table now
+        // holds every group; there is no multi-key staged C probe).
+        if let Some(shape) = &mk {
+            if ::nodeagg::agg_hash_compact_armed(agg) {
+                let all_lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
+                if all_lane {
+                    if scan_mk_batch(
+                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, estate,
+                    )? {
+                        continue;
+                    }
+                } else {
+                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+                }
+            }
         }
         idxs.clear();
         groups.clear();
@@ -2380,6 +2410,362 @@ fn scan_dictgroup_spill<'mcx>(
         ::exectuples::exec_store_virtual_tuple(slot);
     }
     ::nodeagg::agg_hash_spill_staged(agg, estate, slot_id, hash)
+}
+
+// ===========================================================================
+// Packed multi-key GROUP BY (multikey spike 2026-07-14 — the Q17/Q18-class
+// `GROUP BY UserID, SearchPhrase` shapes): a batch pre-pass packs the N
+// fixed-width key components of a staged window into ONE synthetic u64/u128
+// key lane (REUSED per-batch scratch — the spike's 5.5ms-vs-45.5ms verdict),
+// then ALL single-key compact-table machinery runs unchanged through
+// `KeyRepr::Int`/`Int128` + CRC32C. A dict-coded text component is made
+// packable by the per-epoch code → scan-lifetime intern-id resolve
+// (dictgroup's lazy resolve retargeted from pergroup pointers to stable u32
+// ids, spike §2.3); the intern table's reverse map materializes the text at
+// read-back/migrate. NULL components (heap) fold into a null-bitmap byte in
+// the key image (CH `nullable_keys128`); cbstore rides the no-NULLs proof.
+//
+// Fallback discipline: multi-key has NO C staged-probe leg (the tuplehash
+// kernel is Expr) — the compact table is the ONLY packed host. The runtime
+// backstop check runs BEFORE each batch's per-row emit (qual evaluated
+// exactly once per row either way); after a migration the feed falls to the
+// per-row arrival probe for the batch and the rest of the scan, with every
+// group already in the C table (compact_migrate reconstructs component
+// datums and inserts through the unmodified `lookup`, C-exact hashes).
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_MULTIKEY` kill switch (default ON inside the lane).
+fn multikey_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The plan-level half of the multi-key admission (the SoA/compact halves
+/// need the armed batch — `scan_mk_shape`): unguarded, fully lanefold-
+/// admitted, 2..N grouping keys (the single-key kernels own num_cols == 1).
+/// Mirrors `scan_k2_wanted`'s role, including forcing the SoA deform so the
+/// key lanes stage even for count(*)-only fold plans.
+fn scan_mk_plan_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
+    multikey_enabled()
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
+        && !::nodeagg::agg_lanefold_has_resid(agg)
+        && ::nodeagg::agg_hash_staged_probe_col(agg).is_none()
+        && ::nodeagg::agg_hash_key_cols(agg).len() >= 2
+}
+
+/// The multi-key shapes' dict-text component, when the plan has EXACTLY one
+/// raw-bytes text key among Int-class keys: `Some(input colno)`. `None` =
+/// pure-int multi-key (no dict lane needed) or an unpackable component mix
+/// (the compact arm refuses later with the same taxonomy).
+fn scan_mk_dict_att<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<u16> {
+    let mut dict = None;
+    for (att, kind) in ::nodeagg::agg_hash_key_cols(agg) {
+        match kind {
+            ::nodeagg::GroupKeyKind::Int { .. } => {}
+            ::nodeagg::GroupKeyKind::TextRaw => {
+                if dict.is_some() {
+                    return None;
+                }
+                dict = Some(att);
+            }
+            ::nodeagg::GroupKeyKind::Other => return None,
+        }
+    }
+    dict
+}
+
+/// Multi-key dict-component columnar arm, tried when the fixed-width-prefix
+/// arm refused (the text key component sits inside the prefix) — the
+/// multi-key twin of `try_arm_cb_dictgroup`: arm the cbstore SoA staging
+/// with the text component opted into dict lanes; the packing pre-pass
+/// consumes the codes through the per-epoch intern resolve. False =
+/// fail-open (per-row paths, byte-identical).
+fn try_arm_cb_multikey_dict<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if !multikey_enabled()
+        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !scan_mk_plan_wanted(agg)
+    {
+        return false;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        false
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return refused() };
+    if !plan.vguards.is_empty() {
+        return refused();
+    }
+    // Pure-int multi-key shapes need no dict arm (and their prefix refusal
+    // means a different column blocked it — not this arm's business).
+    let Some(key) = scan_mk_dict_att(agg) else { return false };
+    // The fold must not read the dict component's SoA Datum cells: they are
+    // STALE while a dict lane answers (the dictgroup rule, unchanged).
+    if plan.cols.iter().any(|&c| c == key) {
+        return refused();
+    }
+    let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, key) {
+        return refused();
+    }
+    true
+}
+
+/// Multi-key admission inputs for the scan feed, decided once per build
+/// (the compact table is ARMED as a side effect — mirrors the K2 +
+/// compact-arm sequence).
+struct ScanMk {
+    /// The armed packed-key layout (component input colnos + offsets).
+    shape: ::nodeagg::MkShape,
+    /// The dict/intern text component's input colno, when one exists.
+    dict_att: Option<u16>,
+}
+
+/// Reusable per-build scratch for the multi-key batch loop: survivors, the
+/// u128 pack accumulator, the packed key lanes, and the per-epoch
+/// code → intern-id cache (dictgroup's `slots` pattern, retargeted).
+#[derive(Default)]
+struct MkScratch {
+    rows: Vec<u32>,
+    packbuf: Vec<u128>,
+    keys1: Vec<i64>,
+    keys2: Vec<[u64; 2]>,
+    epoch: Option<u64>,
+    code_ids: Vec<Option<u32>>,
+}
+
+/// The scan feed's multi-key admission + compact arm, decided once per
+/// build: plan-level gates (`scan_mk_plan_wanted`), the dict component's
+/// lane registration (when one exists), key lanes staged in the armed SoA,
+/// then the packing admission + table arm in `agg_hash_compact_try_arm_mk`.
+/// `None` = keep the per-row arrival probe (byte-identical), refuse reasons
+/// ticked per taxonomy.
+fn scan_mk_shape<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    if !scan_mk_plan_wanted(agg) {
+        return None;
+    }
+    let refused = |r: RefuseReason| {
+        stats::tick_refused(ShapeClass::AggBuild, r);
+        None
+    };
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+        if !plan.vguards.is_empty() {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    // A text component needs its dict-lane registration (cbstore only) and
+    // must stay out of the fold's lane reads (stale SoA cells).
+    let dict_att = scan_mk_dict_att(agg);
+    let has_text = ::nodeagg::agg_hash_key_cols(agg)
+        .iter()
+        .any(|&(_, k)| k == ::nodeagg::GroupKeyKind::TextRaw);
+    if has_text {
+        let Some(att) = dict_att else { return refused(RefuseReason::MultiKeyShape) };
+        if !is_cb
+            || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) != Some(att)
+            || ::nodeagg::agg_lanefold_plan(agg)
+                .is_some_and(|plan| plan.cols.iter().any(|&c| c == att))
+        {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    // Every key column must be a staged SoA lane the spillless packed feed
+    // can read (colnos_needed always covers grouping columns).
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)?;
+        let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
+        let natts = estate
+            .slot(ss.ss.ss_ScanTupleSlot)
+            .base()
+            .tts_tupleDescriptor
+            .as_ref()?
+            .attrs
+            .len();
+        if colnos_needed.len() != natts || max_colno > soa.ncols() as i32 {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+        for (att, _) in ::nodeagg::agg_hash_key_cols(agg) {
+            if att as usize >= soa.ncols() as usize || !colnos_needed[att as usize] {
+                return refused(RefuseReason::MultiKeyShape);
+            }
+        }
+    }
+    // Packing admission + table arm (nullable = heap; cbstore rides the
+    // no-NULLs per-chunk proof and packs no null byte).
+    match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict_att.filter(|_| is_cb)) {
+        ::nodeagg::CompactArm::Armed => {
+            let shape =
+                ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
+            Some(ScanMk { shape, dict_att: dict_att.filter(|_| is_cb) })
+        }
+        ::nodeagg::CompactArm::KeyKind => refused(RefuseReason::MultiKeyShape),
+        ::nodeagg::CompactArm::SpillRisk => refused(RefuseReason::CompactSpillRisk),
+        ::nodeagg::CompactArm::Off => None,
+    }
+}
+
+/// One page batch through the packed multi-key feed. Sequence per the
+/// section header: (1) backstop check BEFORE any per-row work — a migration
+/// returns `false` and the caller runs the WHOLE batch (emit included)
+/// through the arrival leg, so the qual runs exactly once per row; (2) the
+/// per-row scalar emit collecting survivors (the arrival loop's exact emit
+/// sequence); (3) the pack pre-pass over the survivors' staged component
+/// lanes into the reused packed-key scratch (dict components through the
+/// per-epoch intern resolve); (4) the compact-table batch probe + new-group
+/// seeding; (5) the whole-batch fold.
+#[allow(clippy::too_many_arguments)]
+fn scan_mk_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    mk: &ScanMk,
+    mks: &mut MkScratch,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
+        return Ok(false);
+    }
+    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
+    rows.clear();
+    for i in 0..n {
+        if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
+            rows.push(i);
+        }
+    }
+    // Pack pre-pass, component-major over the survivors (each component
+    // lane streams once), into the REUSED u128 accumulator.
+    packbuf.clear();
+    packbuf.resize(rows.len(), 0u128);
+    let shape = &mk.shape;
+    for (j, comp) in shape.comps.iter().enumerate() {
+        let att = comp.att as usize;
+        let off_bits = comp.off as u32 * 8;
+        match comp.kind {
+            ::nodeagg::MkCompKind::Int { width } => {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("multi-key feed requires the armed SoA");
+                let (values, isnull) = (soa.col_values(att), soa.col_isnull(att));
+                let mask = if width == 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                for (k, &i) in rows.iter().enumerate() {
+                    let i = i as usize;
+                    if shape.nullable && isnull[i] {
+                        // CH nullable_keys128: bit j set, value bits zero —
+                        // NOT-DISTINCT composite NULL semantics hold.
+                        packbuf[k] |= 1u128 << (shape.null_off() as u32 * 8 + j as u32);
+                        continue;
+                    }
+                    debug_assert!(
+                        shape.nullable || !isnull[i],
+                        "cbstore no-NULLs proof violated in a multi-key window"
+                    );
+                    let v = match width {
+                        2 => values[i].as_i16() as i64,
+                        4 => values[i].as_i32() as i64,
+                        _ => values[i].as_i64(),
+                    };
+                    packbuf[k] |= (((v as u64) & mask) as u128) << off_bits;
+                }
+            }
+            ::nodeagg::MkCompKind::Intern => {
+                let mcx = estate.es_query_cxt;
+                let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .and_then(|soa| soa.dict_lane(att));
+                match lane {
+                    Some(lane) => {
+                        // Epoch roll (dictgroup's per-RG cache, retargeted
+                        // to intern ids — scan-stable, so the PACKED key is
+                        // epoch-free).
+                        let ndict = lane.table.ndict as usize;
+                        if *epoch != Some(lane.table.epoch) {
+                            *epoch = Some(lane.table.epoch);
+                            code_ids.clear();
+                            code_ids.resize(ndict, None);
+                        }
+                        debug_assert!(code_ids.len() >= ndict);
+                        for (k, &i) in rows.iter().enumerate() {
+                            let code = lane.code(i as usize) as usize;
+                            debug_assert!(code < ndict, "filler contract: code < ndict");
+                            let id = match code_ids[code] {
+                                Some(id) => id,
+                                None => {
+                                    // First surviving row of (epoch, code):
+                                    // materialize dict[code] once, intern.
+                                    let d = lane.table.datum(code as u32);
+                                    // SAFETY: dict entries are live non-null
+                                    // text varlenas for the staged window
+                                    // (dict lane contract; kernel selection
+                                    // proved the column type).
+                                    let v = unsafe {
+                                        ::types_fmgr::datum_varlena_packed(d, mcx)
+                                    }?;
+                                    let id =
+                                        ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                                    code_ids[code] = Some(id);
+                                    id
+                                }
+                            };
+                            packbuf[k] |= (id as u128) << off_bits;
+                        }
+                    }
+                    None => {
+                        // Raw-answered window (non-dict key chunk): intern
+                        // the staged text datum per row — the dictgroup Raw
+                        // fallback's multi-key analog (correct, colder).
+                        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .expect("multi-key feed requires the armed SoA");
+                        let values = soa.col_values(att);
+                        debug_assert!(
+                            rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
+                            "cbstore no-NULLs proof violated in a multi-key window"
+                        );
+                        for (k, &i) in rows.iter().enumerate() {
+                            let d = values[i as usize];
+                            // SAFETY: staged non-null live text varlena (the
+                            // columnar fill stages decoded Datums; kernel
+                            // selection proved the column type).
+                            let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                            let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                            packbuf[k] |= (id as u128) << off_bits;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Split the accumulator into the packed key lane and probe.
+    if shape.two_words {
+        keys2.clear();
+        keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
+        ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+    } else {
+        keys1.clear();
+        keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
+        ::nodeagg::agg_hash_compact_batch_mk1(agg, keys1, groups)?;
+    }
+    idxs.clear();
+    idxs.extend_from_slice(rows);
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("multi-key feed requires the armed SoA");
+    // SAFETY: as the K2 compact fold — every probed row is non-fallback (the
+    // caller admits only all-lane batches) with valid lane values for every
+    // plan column (a dict component is never in `plan.cols` — admission);
+    // the plan is unguarded; each pergroup was installed by the compact
+    // probe within this batch.
+    unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(true)
 }
 
 /// Shared fold tail for the staged fold feeds (seqscan page batches and the
