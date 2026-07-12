@@ -773,6 +773,7 @@ impl<'mcx> XLogReaderState<'mcx> {
 
         'restart: loop {
             self.nonblocking = nonblocking;
+            self.v.nonblocking = nonblocking;
             self.currRecPtr = rec_ptr;
             let mut assembled = false;
 
@@ -1355,6 +1356,7 @@ impl<'mcx> XLogReaderState<'mcx> {
         debug_assert!(rec_ptr != InvalidXLogRecPtr);
 
         self.nonblocking = false;
+        self.v.nonblocking = false;
 
         let mut tmp_rec_ptr = rec_ptr;
         loop {
