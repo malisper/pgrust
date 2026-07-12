@@ -544,6 +544,17 @@ pub fn seq_scan_batch_soa<'a, 'mcx>(
     (!b.qual_only).then_some(&b.soa)
 }
 
+/// Staged kernel-qual selection bitmap when the SoA deform armed the batch
+/// qual (bits over the current staged batch; forced fallback rows carry a
+/// set bit and must be re-checked per-row — compose with `fallback_words`).
+/// None = no bitmap qual staged; the per-row fetch path owns the qual. A
+/// `Some` covers the scan's WHOLE qual (the kernel is the entire program).
+#[inline]
+pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    b.qual_armed.then_some(&b.sel[..])
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,

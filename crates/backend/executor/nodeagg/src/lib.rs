@@ -1121,13 +1121,14 @@ pub fn exec_init_agg<'mcx>(
         unsafe { q.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
     }
 
-    // Lane-v2 hash-agg breaker fold plan (lanefold crate), classified once at
-    // init — only when the lane can ever engage this node (env-gated; hashed,
-    // single set, no sorted transitions, subplan- and param-free transition
-    // program — the breaker's own admission gate re-checks the rest per call).
+    // Lane-v2 agg-breaker fold plan (lanefold crate), classified once at
+    // init — only when the lane can ever engage this node (env-gated; hashed
+    // or plain, single set, no sorted transitions, subplan- and param-free
+    // transition program — the lane's own admission gate re-checks the rest
+    // per call).
     let lanefold = if lane_v2_enabled()
         && gs.is_none()
-        && node.aggstrategy == AGG_HASHED
+        && (node.aggstrategy == AGG_HASHED || node.aggstrategy == AGG_PLAIN)
         && pertrans_sort.is_empty()
         && evaltrans
             .as_deref()
@@ -1143,12 +1144,23 @@ pub fn exec_init_agg<'mcx>(
                     for &r in plan.resid.iter() {
                         keep[r] = true;
                     }
-                    let base = perhash.as_ref().expect("hashed Agg has perhash").pergroup_cell;
-                    let mut prog = ::executils::with_subplan_compile_env(estate, |env| {
-                        ::execexpr::exec_build_agg_trans_hashed_masked(
-                            mcx, &specs, &keep, base, fm_agg_node, params, env,
-                        )
-                    })?;
+                    let mut prog = if node.aggstrategy == AGG_HASHED {
+                        let base =
+                            perhash.as_ref().expect("hashed Agg has perhash").pergroup_cell;
+                        ::executils::with_subplan_compile_env(estate, |env| {
+                            ::execexpr::exec_build_agg_trans_hashed_masked(
+                                mcx, &specs, &keep, base, fm_agg_node, params, env,
+                            )
+                        })?
+                    } else {
+                        // AGG_PLAIN: fixed pergroup targets (spec.pergroup =
+                        // pergroup_base + transno), same as the full evaltrans.
+                        ::executils::with_subplan_compile_env(estate, |env| {
+                            ::execexpr::exec_build_agg_trans_plain_masked(
+                                mcx, &specs, &keep, fm_agg_node, params, env,
+                            )
+                        })?
+                    };
                     // Same result-mcx discipline as the full evaltrans.
                     // SAFETY: the tmpcontext ExprContext outlives the program.
                     unsafe {
@@ -3041,6 +3053,92 @@ pub fn agg_hash_build_probe_resid<'mcx>(
     }
     estate.reset_expr_context(node.tmpcontext);
     Ok(pg)
+}
+
+// ===========================================================================
+// Lane-v2 plain-agg (AGG_PLAIN, ungrouped) fold-drive delegation seam. The
+// lane's fold drive (execmain/src/lanev2.rs) owns the batched feed; these
+// thin entry points delegate every substantive step to the SAME row-path
+// machinery `exec_agg` / `exec_agg_batched` use — initialize_aggregates, the
+// per-row transition program, and the canonical `plain_finish`
+// finalize/HAVING/project tail (one result row; zero-row input included).
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 plain-agg fold drive: batch-drainable,
+/// AGG_PLAIN, a classified fold plan, and initplan-param-free (the lane
+/// drive, like `exec_agg_batched`, does not hoist pending initplans).
+pub fn agg_plain_fold_admissible(node: &AggStateData<'_>) -> bool {
+    agg_batch_drainable(node)
+        && node.plan.aggstrategy == AGG_PLAIN
+        && node.lanefold.is_some()
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// Feed-phase begin: `exec_agg`'s `initialize_aggregates` (fresh initval
+/// pergroups — a rescan re-enters here with `agg_done` cleared).
+pub fn agg_plain_build_begin(node: &mut AggStateData<'_>) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    initialize_aggregates(node)
+}
+
+/// One outer row through the FULL per-row transition program — `exec_agg`'s
+/// single-group loop body verbatim (no ordered-input collection: the lane
+/// admission requires `pertrans_sort` empty). Demoted/fallback rows and
+/// scalar-qual feeds run here.
+pub fn agg_plain_build_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// One outer row through only the RESIDUAL transitions (the transnos
+/// classify refused); the admitted transitions are folded per batch by the
+/// caller (`lanefold::fold_batch`) over `agg_plain_pergroup_base`. No-op when
+/// the plan admitted every transition.
+pub fn agg_plain_build_accept_resid<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    let Some(resid) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) else {
+        return Ok(());
+    };
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(resid, &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// The single group's once-allocated pergroup array (the fold target).
+pub fn agg_plain_pergroup_base(node: &AggStateData<'_>) -> NonNull<AggPerGroup> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    node.pergroup_base
+}
+
+/// Retrieve: `exec_agg`'s post-drain tail (finalize + HAVING + project, sets
+/// `agg_done`) — the one result row, C's zero-row contract included.
+pub fn agg_plain_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    plain_finish(node, estate)
 }
 
 const MAX_FINAL_ARGS: usize = 8;
