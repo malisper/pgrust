@@ -160,8 +160,14 @@ struct PerTransSortData<'mcx> {
     // and the C sort path finishes the group — C-shaped spill conservatism
     // (charter §4) instead of a bespoke set spill.
     set_kind: Option<distinctset::DistinctKeyKind>,
-    dset: Option<distinctset::DistinctSet>,
+    dset: Option<distinctset::DistinctSet<'mcx>>,
     dset_degraded: bool,
+    // The aggregate's single argument is exactly OUTER column 0 with no
+    // FILTER (recorded at init from the Aggref): the per-row transition
+    // program's whole effect for this entry is "park outer col 0 + flag", so
+    // a lane drive may feed the staged scan key lane directly
+    // (`agg_plain_distinct_insert_batch`) instead of running the program.
+    direct_col0: bool,
     // One sortstate per grouping set (C sortstates[maxsets]); [0] otherwise.
     sortstates: Vec<Option<Tuplesort>>,
     insert_slot: Option<SlotData<'mcx>>,
@@ -346,6 +352,16 @@ fn init_pertrans_sort<'mcx>(
     } else {
         None
     };
+    // Direct staged-key feed shape (`direct_col0` field doc): single input
+    // whose expression is exactly Var(OUTER, attno 1) and no FILTER.
+    let direct_col0 = num_inputs == 1
+        && aggref.aggfilter.is_none()
+        && aggref.args.iter().next().is_some_and(|n| {
+            let tle = n.as_target_entry().expect("Aggref.args cell");
+            tle.expr.as_var().is_some_and(|v| {
+                v.varno == ::execexpr::OUTER_VAR && v.varlevelsup == 0 && v.varattno == 1
+            })
+        });
     Ok((
         PerTransSortData {
             transno,
@@ -372,6 +388,7 @@ fn init_pertrans_sort<'mcx>(
             set_kind,
             dset: None,
             dset_degraded: false,
+            direct_col0,
             sortstates: Vec::new(),
             insert_slot,
             slot1,
@@ -2501,14 +2518,36 @@ pub(crate) fn collect_ordered_input<'mcx>(
 }
 
 /// Memory budget for one exact-distinct set: the same work_mem allowance the
-/// displaced tuplesort would get before spilling. The set has no spill;
-/// crossing the budget degrades the group to that tuplesort
-/// (`degrade_distinct_set`) so total memory behavior stays C-shaped
-/// (charter §4 conservatism). Capped so the text blob's u32 offsets can
-/// never overflow under absurd work_mem settings.
+/// displaced tuplesort would get before spilling. Crossing the budget spills
+/// the set to hash-partitioned tapes (distinctset.rs `SpillState` — v2) or,
+/// below `SPILL_MIN_BUDGET`, degrades the group to that tuplesort
+/// (`degrade_distinct_set` — the v1 path, kept for whatever spill refuses)
+/// so total memory behavior stays work_mem-bounded either way. Capped so the
+/// text blob's u32 offsets can never overflow under absurd work_mem
+/// settings.
 fn distinct_set_budget() -> usize {
     let kb = init_small::globals::work_mem().max(64) as usize;
     (kb * 1024).min(1 << 31)
+}
+
+// Budget crossing (collect-time): first crossing picks the group's overflow
+// path once — the v2 set spill when the budget can absorb the tape write
+// buffers (`SPILL_MIN_BUDGET`), else the v1 degrade-to-tuplesort — and later
+// crossings of a spilled set keep flushing epochs to the tapes.
+#[cold]
+#[inline(never)]
+fn distinct_set_overflow<'mcx>(
+    ps: &mut PerTransSortData<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    budget: usize,
+) -> PgResult<()> {
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    let dset = ps.dset.as_mut().expect("overflow fires on insert");
+    if dset.spilled() || budget >= distinctset::SPILL_MIN_BUDGET {
+        dset.spill_flush(kind, budget, mcx)
+    } else {
+        degrade_distinct_set(ps)
+    }
 }
 
 // The set-mode half of the ordered-trans collect: the parked scratch datum
@@ -2545,8 +2584,9 @@ fn collect_distinct_set<'mcx>(
             dset.insert_bytes(v.data());
         }
     }
-    if dset.mem_bytes() > distinct_set_budget() {
-        degrade_distinct_set(ps)?;
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
     }
     Ok(())
 }
@@ -2605,6 +2645,140 @@ fn degrade_distinct_set(ps: &mut PerTransSortData<'_>) -> PgResult<()> {
     debug_assert!(ps.sortstates[0].is_none());
     ps.sortstates[0] = Some(sort);
     ps.dset_degraded = true;
+    Ok(())
+}
+
+// v2 spilled-set replay (distinctset.rs `SpillState` doc): flush the
+// residual epoch, then load-dedup-replay each hash partition in turn.
+// Partitions are DISJOINT, so replays never repeat a value across
+// partitions; within a partition the set re-dedups whatever the flush
+// epochs wrote twice. A partition whose distinct values alone exceed the
+// budget finishes on a work_mem-bounded datum tuplesort instead: the
+// partial set plus the tape's remaining raw values feed the sort, whose
+// adjacent-dedup drain (the C sort path's own discipline, `equalfn_one`
+// included) replays each distinct value exactly once. Value identity is the
+// v1 argument unchanged: same distinct multiset, different replay order,
+// order-insensitive transfns.
+#[allow(clippy::too_many_arguments)]
+fn replay_spilled_distinct_set<'mcx, F>(
+    dset: &mut distinctset::DistinctSet<'mcx>,
+    ps: &mut PerTransSortData<'mcx>,
+    kind: distinctset::DistinctKeyKind,
+    estate: &mut EStateData<'mcx>,
+    tmp: EcxtId,
+    replay: &mut F,
+) -> PgResult<()>
+where
+    F: FnMut(&mut PerTransSortData<'mcx>, &mut EStateData<'mcx>, NullableDatum) -> PgResult<()>,
+{
+    use distinctset::DistinctKeyKind as K;
+    let budget = distinct_set_budget();
+    let mcx = estate.es_query_cxt;
+    let datum_of = |kind: K, k: i64| match kind {
+        K::Int16 => Datum::from_i16(k as i16),
+        K::Int32 => Datum::from_i32(k as i32),
+        K::Int64 => Datum::from_i64(k),
+        K::Bytes => unreachable!("bytes values replay from images"),
+    };
+    dset.spill_finish_writes(kind, budget, mcx)?;
+    for p in 0..dset.spill_nparts() {
+        if dset.spill_load_partition(kind, p, budget)? {
+            match kind {
+                K::Int16 | K::Int32 | K::Int64 => {
+                    for i in 0..dset.ints().len() {
+                        let d = datum_of(kind, dset.ints()[i]);
+                        replay(ps, estate, NullableDatum { value: d, isnull: false })?;
+                    }
+                }
+                K::Bytes => {
+                    for i in 0..dset.n_bytes() {
+                        let d = dset.bytes_datum(i);
+                        replay(ps, estate, NullableDatum { value: d, isnull: false })?;
+                    }
+                }
+            }
+            continue;
+        }
+        // Oversize partition: bounded finish on the C sort path (the
+        // degrade dump's exact shape, scoped to this partition).
+        let work_mem = init_small::globals::work_mem();
+        let mut sort = Tuplesort::begin_datum(
+            ps.sortdesc.attr(0).atttypid,
+            ps.sort_ops[0],
+            ps.sort_collations[0],
+            ps.sort_nulls_first[0],
+            work_mem,
+            TUPLESORT_NONE,
+        )?;
+        match kind {
+            K::Int16 | K::Int32 | K::Int64 => {
+                for i in 0..dset.ints().len() {
+                    sort.putdatum(datum_of(kind, dset.ints()[i]), false)?;
+                }
+                let mut vals: Vec<i64> = Vec::new();
+                loop {
+                    vals.clear();
+                    if !dset.spill_read_ints(p, &mut vals)? {
+                        break;
+                    }
+                    for &k in &vals {
+                        sort.putdatum(datum_of(kind, k), false)?;
+                    }
+                }
+            }
+            K::Bytes => {
+                for i in 0..dset.n_bytes() {
+                    sort.putdatum(dset.bytes_datum(i), false)?;
+                }
+                // Transient canonical image per record (putdatum copies
+                // by-ref datums into the sort immediately — the degrade
+                // dump relies on the same contract).
+                let mut rec: Vec<u8> = Vec::new();
+                let mut img: Vec<u32> = Vec::new();
+                loop {
+                    if !dset.spill_read_bytes(p, &mut rec)? {
+                        break;
+                    }
+                    let d = distinctset::varlena_image(&rec, &mut img);
+                    sort.putdatum(d, false)?;
+                }
+            }
+        }
+        sort.performsort()?;
+        // Adjacent-dedup drain-replay — the sort path's own discipline
+        // (process_ordered_aggregates_set's single-input arm, sans NULLs:
+        // partition tapes never carry them).
+        let sort_spilled = sort.spilled();
+        let byref_typlen = if sort_spilled { sort.datum_byref_typlen() } else { 0 };
+        let mut old_buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+        let mut old: Option<NullableDatum> = None;
+        while let Some(nd) = sort.getdatum(true)? {
+            debug_assert!(!nd.isnull, "partition tapes carry no NULLs");
+            if let Some(o) = old {
+                let eq = ps.equalfn_one.as_mut().expect("single-col DISTINCT eqfn");
+                let mut fc2 = LocalFcinfo::<2>::fresh(ps.agg_collation);
+                // SAFETY: the per-tuple context outlives the call (resets
+                // recycle the same context object).
+                unsafe { fc2.set_result_mcx(estate.ecxt(tmp).per_tuple_mcx()) };
+                fc2.args[0] = NullableDatum { value: o.value, isnull: false };
+                fc2.args[1] = NullableDatum { value: nd.value, isnull: false };
+                if eq.invoke(&mut fc2)?.as_bool() {
+                    continue;
+                }
+            }
+            replay(ps, estate, nd)?;
+            old = Some(if byref_typlen != 0 {
+                NullableDatum {
+                    value: copy_scratch_datum(&mut old_buf, nd.value, byref_typlen)?,
+                    isnull: false,
+                }
+            } else {
+                nd
+            });
+        }
+        sort.end();
+    }
+    dset.spill_end()?;
     Ok(())
 }
 
@@ -2846,6 +3020,24 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                         pg,
                     )
                 };
+                if dset.spilled() {
+                    // v2 spilled group: per-partition load-dedup-replay
+                    // (oversize partitions finish on a bounded tuplesort).
+                    replay_spilled_distinct_set(
+                        &mut dset,
+                        ps,
+                        kind,
+                        estate,
+                        tmp,
+                        &mut replay,
+                    )?;
+                    if dset.seen_null {
+                        replay(ps, estate, NullableDatum::null())?;
+                    }
+                    dset.clear();
+                    ps.dset = Some(dset);
+                    continue;
+                }
                 match kind {
                     distinctset::DistinctKeyKind::Int16 => {
                         for i in 0..dset.ints().len() {
@@ -3555,6 +3747,90 @@ pub fn agg_plain_build_accept<'mcx>(
         collect_ordered_input(node, estate, 1)?;
     }
     estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// Direct staged-key feed admission (the lane distinct drives' batched arm):
+/// the node's ONE transition is a set-mode exact-DISTINCT over an integer
+/// key whose argument is exactly outer column 0 with no FILTER
+/// (`direct_col0`). For that shape the per-row transition program's entire
+/// effect is "park outer column 0 + flag" and the collect inserts it into
+/// the set — so feeding the staged scan key lane straight into the set
+/// (`agg_plain_distinct_insert_batch`) reproduces the per-row feed
+/// value-for-value (order within the set is replay-invisible; admission).
+/// Text keys stay per-row (no fixed-width staged lane).
+pub fn agg_plain_distinct_direct_shape(node: &AggStateData<'_>) -> bool {
+    node.numtrans == 1 && node.pertrans_sort.len() == 1 && {
+        let ps = &node.pertrans_sort[0];
+        ps.set_active(node.force_distinct_set)
+            && ps.num_inputs == 1
+            && ps.direct_col0
+            && matches!(
+                ps.set_kind,
+                Some(
+                    distinctset::DistinctKeyKind::Int16
+                        | distinctset::DistinctKeyKind::Int32
+                        | distinctset::DistinctKeyKind::Int64
+                )
+            )
+    }
+}
+
+/// One staged batch of the direct-feed drive: `keys` are the batch's
+/// NON-NULL key datums in row order (`saw_null` folds the batch's NULLs —
+/// the set collapses every NULL to one `seen_null` anyway), `hashes`/`ints`
+/// are caller-owned scratch. Equivalent to the per-row program+collect over
+/// the same rows (`agg_plain_distinct_direct_shape` is the caller's
+/// obligation). The budget check runs once per batch, so the set may
+/// overshoot by at most one staged page batch before spilling/degrading.
+/// A group already degraded to its tuplesort keeps feeding it here (values
+/// and NULLs alike are sort inputs whose drain re-dedups — one NULL stands
+/// for the batch's many, which dedup to one either way).
+pub fn agg_plain_distinct_insert_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    keys: &[Datum],
+    saw_null: bool,
+    ints: &mut Vec<i64>,
+    hashes: &mut Vec<u64>,
+) -> PgResult<()> {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    let ps = &mut node.pertrans_sort[0];
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    if ps.dset_degraded {
+        let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
+        for &d in keys {
+            sort.putdatum(d, false)?;
+        }
+        if saw_null {
+            sort.putdatum(Datum::null(), true)?;
+        }
+        return Ok(());
+    }
+    ints.clear();
+    match kind {
+        distinctset::DistinctKeyKind::Int16 => {
+            ints.extend(keys.iter().map(|d| d.as_i16() as i64));
+        }
+        distinctset::DistinctKeyKind::Int32 => {
+            ints.extend(keys.iter().map(|d| d.as_i32() as i64));
+        }
+        distinctset::DistinctKeyKind::Int64 => {
+            ints.extend(keys.iter().map(|d| d.as_i64()));
+        }
+        distinctset::DistinctKeyKind::Bytes => {
+            unreachable!("direct feed admits integer keys only")
+        }
+    }
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    dset.insert_i64_batch(ints, hashes);
+    if saw_null {
+        dset.seen_null = true;
+    }
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
+    }
     Ok(())
 }
 

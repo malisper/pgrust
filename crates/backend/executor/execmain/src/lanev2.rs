@@ -1669,8 +1669,36 @@ fn agg_plain_fold_feed<'mcx>(
 /// transition program (`agg_plain_build_accept`, set collect included);
 /// finish = nothing (the drive runs the delegated `agg_plain_finish` after
 /// the drain, mirroring the fold drive's retrieve step).
+///
+/// `key_direct` (v2, the batched-insert lever): when the node's one
+/// transition is a set-mode integer DISTINCT over exactly outer column 0
+/// (`agg_plain_distinct_direct_shape`) AND the scan armed the direct key
+/// staging (`seq_scan_sortkey_direct` — the sort breaker's own matcher/
+/// staging, shared), `accept_batch` serves each staged row's key straight
+/// off the SoA column and hands the whole batch to one staged set insert
+/// (batched hashing + row-order probes) — no per-row transition program, no
+/// per-row collect scan. Narrow-tuple fallback rows keep the full per-row
+/// path. Value identity: the per-row program's entire effect for the
+/// admitted shape is "park outer col 0 + set-insert", and set insertion
+/// order is replay-invisible (the admission's order-insensitivity grant).
 struct PlainDistinctAggBuildSink<'a, 'mcx> {
     agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    key_direct: bool,
+    keys: Vec<::datum::Datum>,
+    ints: Vec<i64>,
+    hashes: Vec<u64>,
+}
+
+impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
+    fn new(agg: &'a mut ::nodeagg::AggStateData<'mcx>, key_direct: bool) -> Self {
+        PlainDistinctAggBuildSink {
+            agg,
+            key_direct,
+            keys: Vec::new(),
+            ints: Vec::new(),
+            hashes: Vec::new(),
+        }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
@@ -1688,7 +1716,49 @@ impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
     }
 }
 
-impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {}
+impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if !self.key_direct {
+            // Default per-row delegation loop, verbatim.
+            for i in pos..n {
+                if let Some(slot) = emit.emit(i, estate)? {
+                    ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                }
+            }
+            return Ok(());
+        }
+        // Direct staged-key feed (page-level CFI in the staging fetch —
+        // the sort breaker's emit_key cadence).
+        self.keys.clear();
+        let mut saw_null = false;
+        for i in pos..n {
+            match emit.emit_key(i) {
+                Some((d, false)) => self.keys.push(d),
+                Some((_, true)) => saw_null = true,
+                None => {
+                    // Narrow-tuple fallback row: the full per-row path.
+                    if let Some(slot) = emit.emit(i, estate)? {
+                        ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                    }
+                }
+            }
+        }
+        ::nodeagg::agg_plain_distinct_insert_batch(
+            self.agg,
+            estate,
+            &self.keys,
+            saw_null,
+            &mut self.ints,
+            &mut self.hashes,
+        )
+    }
+}
 
 /// Try to let the lane own an AGG_PLAIN exact-DISTINCT `Agg` over a
 /// `SeqScan` (section doc above). `Some(result)` = the lane drove this call;
@@ -1715,14 +1785,24 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     // one call).
     stats::tick_owned(ShapeClass::AggBuild);
     trace_feed("plain-agg distinct-set drive engaged");
-    // Kernel-shaped quals vectorize via the staged selection bitmap; the
-    // set feed itself is per-row (the DISTINCT park is per-row by nature).
-    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
-    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    // v2 batched-insert arm: single integer set-mode DISTINCT over exactly
+    // outer column 0 with the scan's direct key staging (no qual, covered
+    // column — the sort breaker's own matcher). Probed BEFORE the first
+    // produce, exactly as `sort_feed` probes: arming decides staging.
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        // Kernel-shaped quals vectorize via the staged selection bitmap; the
+        // set feed itself is per-row (the DISTINCT park is per-row).
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
     // initialize_aggregates (delegated): fresh initval pergroups + cleared
     // sets; a rescan re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink { agg };
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     // Retrieve (delegated): set replay + finalize + HAVING + project — one
     // row (or none, when the var-free HAVING rejects it), setting agg_done.
@@ -1796,10 +1876,20 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
         unreachable!("matched SeqScan above")
     };
-    arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
-    ::nodeseqscan::seq_scan_stitch_arm(ss);
+    // v2 batched-insert arm (the over-SeqScan drive's twin; the Sort node's
+    // tlist is its child's, so outer column 0 through the skipped Sort IS
+    // scan output column 0 — the same column `seq_scan_sortkey_direct`
+    // proves is one covered scan Var with no qual).
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
     ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink { agg };
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
