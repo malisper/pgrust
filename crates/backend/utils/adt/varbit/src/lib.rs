@@ -372,8 +372,9 @@ pub fn fc_bitfromint8(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> Pg
     Ok(Datum::from_usize(img.leak().as_ptr() as usize))
 }
 
-// varbit.c bit_cmp: byte memcmp then length.
-fn bit_cmp_payload(a: &[u8], b: &[u8]) -> i32 {
+// varbit.c bit_cmp: byte memcmp then length. Pub for btree_gist's
+// leaf-level bit comparisons.
+pub fn bit_cmp_payload(a: &[u8], b: &[u8]) -> i32 {
     let (abits, abytes) = (i32::from_ne_bytes(a[..4].try_into().unwrap()), &a[4..]);
     let (bbits, bbytes) = (i32::from_ne_bytes(b[..4].try_into().unwrap()), &b[4..]);
     let n = abytes.len().min(bbytes.len());
