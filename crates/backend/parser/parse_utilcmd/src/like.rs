@@ -598,13 +598,9 @@ pub fn generateClonedIndexStmt<'mcx>(
     if source_idx.rd_options.is_some() {
         unported("generateClonedIndexStmt: index reloptions (untransformRelOptions)");
     }
-    // Temporal (WITHOUT OVERLAPS) unique/PK indexes are indisexclusion;
-    // plain exclusion constraints stay loud.
+    // Temporal (WITHOUT OVERLAPS) unique/PK indexes are indisexclusion.
     let iswithoutoverlaps =
         (idxrec.indisprimary || idxrec.indisunique) && idxrec.indisexclusion;
-    if idxrec.indisexclusion && !iswithoutoverlaps {
-        unported("generateClonedIndexStmt: exclusion constraints");
-    }
     // C copies per-column opclass options (untransformRelOptions of
     // attoptions); dropping them would silently build a different index.
     if index_has_attoptions(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)? {
@@ -618,15 +614,12 @@ pub fn generateClonedIndexStmt<'mcx>(
         unique: idxrec.indisunique,
         nulls_not_distinct: idxrec.indnullsnotdistinct,
         primary: idxrec.indisprimary,
-        // C also rebuilds excludeOpNames from conexclop here; left NIL so
-        // DefineIndex re-derives the same =/&& operators from the (default,
-        // enforced above) gist opclasses via GetOperatorFromCompareType.
         iswithoutoverlaps,
         transformed: true,
         ..IndexStmt::default()
     };
 
-    if stmt.primary || stmt.unique {
+    if stmt.primary || stmt.unique || idxrec.indisexclusion {
         let constraint_id = pg_depend::get_index_constraint(mcx, source_idx.rd_id)?;
         if constraint_id != InvalidOid {
             stmt.isconstraint = true;
@@ -635,6 +628,29 @@ pub fn generateClonedIndexStmt<'mcx>(
             stmt.deferrable = condeferrable;
             stmt.initdeferred = condeferred;
             constraint_oid = constraint_id;
+
+            // C rebuilds excludeOpNames from conexclop for every
+            // indisexclusion index. DIVERGENCE (kept): WITHOUT OVERLAPS
+            // clones stay NIL — DefineIndex re-derives the same operators
+            // via GetOperatorFromCompareType.
+            if idxrec.indisexclusion && !iswithoutoverlaps {
+                let ops = relcache_build_seams::scan_exclusion_ops::call(
+                    mcx,
+                    indrelid,
+                    source_idx.rd_id,
+                )?;
+                let mut names = NodeList::nil();
+                for &operid in ops.iter() {
+                    let (oprname, oprnamespace) =
+                        syscache_seams::pg_operator_oprnamensp::call(operid)?
+                            .unwrap_or_else(|| {
+                                panic!("cache lookup failed for operator {operid}")
+                            });
+                    let namelist = qualified_name_list(mcx, oprnamespace, &oprname)?;
+                    names.lappend(mcx, Node::mk_list(mcx, namelist)?)?;
+                }
+                stmt.excludeOpNames = names;
+            }
         }
     }
 
