@@ -3125,7 +3125,7 @@ fn scan_mk_dict_att<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<u16> {
     let mut dict = None;
     for (att, kind) in ::nodeagg::agg_hash_key_cols(agg) {
         match kind {
-            ::nodeagg::GroupKeyKind::Int { .. } => {}
+            ::nodeagg::GroupKeyKind::Int { .. } | ::nodeagg::GroupKeyKind::Numeric => {}
             ::nodeagg::GroupKeyKind::TextRaw => {
                 if dict.is_some() {
                     return None;
@@ -3171,9 +3171,12 @@ fn try_arm_cb_multikey_dict<'mcx>(
     let Some(key) = scan_mk_dict_att(agg) else {
         // All-Int keys → plain columnar staging; any Other component means
         // the compact arm will refuse anyway — don't arm for nothing.
-        let all_int = ::nodeagg::agg_hash_key_cols(agg)
-            .iter()
-            .all(|&(_, k)| matches!(k, ::nodeagg::GroupKeyKind::Int { .. }));
+        let all_int = ::nodeagg::agg_hash_key_cols(agg).iter().all(|&(_, k)| {
+            matches!(
+                k,
+                ::nodeagg::GroupKeyKind::Int { .. } | ::nodeagg::GroupKeyKind::Numeric
+            )
+        });
         if !all_int {
             return refused();
         }
@@ -3317,6 +3320,34 @@ fn scan_mk_batch<'mcx>(
     if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
         return Ok(false);
     }
+    // Numeric components: per-VALUE packability over the WHOLE batch BEFORE
+    // the per-row emit — an unpackable value (range / non-minimal display
+    // scale, keypack module doc) migrates to the C table and the caller
+    // routes this batch through the arrival leg, so the qual still runs
+    // exactly once per row. Checking a superset of the survivors is sound
+    // (pack legality is per-value, effect-free).
+    let numeric_packable = {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("multi-key feed requires the armed SoA");
+        mk.shape.comps.iter().all(|comp| {
+            let ::nodeagg::MkCompKind::Numeric { width } = comp.kind else { return true };
+            let att = comp.att as usize;
+            let (values, isnull) = (soa.col_values(att), soa.col_isnull(att));
+            (0..n as usize).all(|i| {
+                if isnull[i] {
+                    // Heap NULLs pack via the null-bitmap byte; a NULL under
+                    // the cbstore no-NULLs proof is a staging surprise —
+                    // demote instead of asserting in release.
+                    return mk.shape.nullable;
+                }
+                ::nodeagg::mk_numeric_datum_bits(values[i], width).is_some()
+            })
+        })
+    };
+    if !numeric_packable {
+        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+        return Ok(false);
+    }
     let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
     rows.clear();
     for i in 0..n {
@@ -3356,6 +3387,21 @@ fn scan_mk_batch<'mcx>(
                         _ => values[i].as_i64(),
                     };
                     packbuf[k] |= (((v as u64) & mask) as u128) << off_bits;
+                }
+            }
+            ::nodeagg::MkCompKind::Numeric { width } => {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("multi-key feed requires the armed SoA");
+                let (values, isnull) = (soa.col_values(att), soa.col_isnull(att));
+                for (k, &i) in rows.iter().enumerate() {
+                    let i = i as usize;
+                    if shape.nullable && isnull[i] {
+                        packbuf[k] |= 1u128 << (shape.null_off() as u32 * 8 + j as u32);
+                        continue;
+                    }
+                    let bits = ::nodeagg::mk_numeric_datum_bits(values[i], width)
+                        .expect("numeric packability proven by the batch pre-check");
+                    packbuf[k] |= (bits as u128) << off_bits;
                 }
             }
             ::nodeagg::MkCompKind::Intern => {

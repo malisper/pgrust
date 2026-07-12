@@ -5,6 +5,7 @@ pub mod aggregates;
 pub mod arith;
 pub mod builtins;
 pub mod io;
+pub mod keypack;
 pub mod math;
 pub mod ops;
 pub mod random;
@@ -30,6 +31,7 @@ pub use arith::{
     select_div_scale, sub_var,
 };
 pub use io::{get_str_from_var, numeric_in, numeric_out_into, numeric_recv, numeric_send};
+pub use keypack::{numeric_key_pack, numeric_key_unpack, NumericKeyForm, NUMERIC_KEY_EXP_MAX};
 pub use math::{
     div_mod_var, exp_var, gcd_var, ln_var, log_var, mod_var, numeric_exp, numeric_exp_into,
     numeric_fac, numeric_gcd_common, numeric_lcm_common, numeric_ln, numeric_ln_into,
