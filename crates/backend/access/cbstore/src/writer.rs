@@ -100,6 +100,15 @@ fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbW
     open_writer_inner(file, xid, frozen_ok, coltypes, fingerprint)
 }
 
+/// TEST SUPPORT (dict-tier round-trip / bench rigs): a writer over an
+/// explicit path + coltypes, bypassing Relation and xact-seam resolution
+/// (xid 1, frozen-ok — the sealed row groups need no visibility seams to
+/// scan). `append_row`/`finish` ride the exact production write path.
+#[doc(hidden)]
+pub fn open_writer_at(path: &str, coltypes: Vec<ColType>) -> PgResult<CbWriter> {
+    open_writer_inner(SegFile::open_rw(path)?, 1, true, coltypes, 0x5aa5)
+}
+
 fn open_writer_inner(
     file: SegFile,
     xid: TransactionId,
@@ -170,7 +179,10 @@ impl CbWriter {
         self.nbuf = 0;
     }
 
-    fn append_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+    /// pub for the test-support writer (`open_writer_at`); production
+    /// callers reach this through multi_insert/tuple_insert.
+    #[doc(hidden)]
+    pub fn append_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
         for c in 0..self.ncols {
             if isnull[c] {
                 return Err(Box::new(
@@ -281,7 +293,9 @@ impl CbWriter {
         Ok(())
     }
 
-    fn finish(&mut self) -> PgResult<()> {
+    /// pub for the test-support writer (`open_writer_at`).
+    #[doc(hidden)]
+    pub fn finish(&mut self) -> PgResult<()> {
         self.seal_rg()?;
         // Footer.
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));

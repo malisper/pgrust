@@ -28,3 +28,6 @@ xact_seams = { path = "../transam/xact_seams" }
 transam_seams = { path = "../transam/transam_seams" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 inval = { path = "../../utils/cache/inval" }
+
+[dev-dependencies]
+laneexec = { path = "../../executor/laneexec" }
