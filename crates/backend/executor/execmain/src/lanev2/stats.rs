@@ -84,9 +84,15 @@ pub(super) enum ShapeClass {
     SubqueryScan = 10,
     Append = 11,
     ProjectSet = 12,
+    /// cbstore-backed SeqScan (the CbstoreSource tranche): counted apart
+    /// from heap seqscans because the admission economics differ (standalone
+    /// cbstore scans ARE lane-owned — the per-row drive lacks the batch
+    /// kernels) and the regress corpus has no cbstore tables (its floor
+    /// seeds from the dedicated cbstore e2e corpus).
+    CbScan = 13,
 }
 
-const N_CLASSES: usize = 13;
+const N_CLASSES: usize = 14;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -103,6 +109,7 @@ impl ShapeClass {
         ShapeClass::SubqueryScan,
         ShapeClass::Append,
         ShapeClass::ProjectSet,
+        ShapeClass::CbScan,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -120,6 +127,7 @@ impl ShapeClass {
             ShapeClass::SubqueryScan => "subqueryscan",
             ShapeClass::Append => "append",
             ShapeClass::ProjectSet => "projectset",
+            ShapeClass::CbScan => "cbscan",
         }
     }
 }

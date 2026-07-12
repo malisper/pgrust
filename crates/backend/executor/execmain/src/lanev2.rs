@@ -177,11 +177,18 @@ enum ScanFeedShape<'a, 'mcx> {
 
 /// Arm the scan staging a lane feed consumes, per feed shape. Idempotent at
 /// every site (re-preparing the same shape is a no-op; the bitmap arm
-/// early-returns once armed). This is the single place the upcoming cbstore
-/// staging variant extends: today every shape stages heap page batches
-/// through `nodeseqscan`'s SoA seam; a cbstore-backed scan will arm its
-/// column-window staging here, behind the same shape parameter, leaving the
-/// feed sites untouched.
+/// early-returns once armed). This is the single seam the cbstore staging
+/// variant (CbstoreSource tranche) plugs into: every arm below stages
+/// through `nodeseqscan`'s SoA seam, whose batch primitives dispatch on the
+/// scan's AM inside `tableam` — heap scans stage page batches
+/// (`heap_getnextpagebatch` + `heap_batch_deform_soa`), cbstore scans stage
+/// column windows (`next_window` + `batch_deform`, <= WINDOW_ROWS <=
+/// SOA_MAX_ROWS, RG/granule/block pruning inside the staging call) — so the
+/// feed sites stay untouched and one arm serves both source kinds. The
+/// cbstore-only differences live below the seam: the fill honors
+/// `lane_fill_wanted`/`dict_want` (dict-lane publication), the store slot is
+/// the scan's virtual slot (`store_slot`, needed columns only), and the
+/// prefix publish is a virtual-slot no-op.
 fn arm_scan_staging<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -335,14 +342,27 @@ pub fn try_own_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
+    // Standalone scan ownership: refused for heap (STANDALONE_SCAN_NO_UPSIDE
+    // — the incumbent row drive carries the identical kernels), but ADMITTED
+    // for cbstore scans: the documented exception (phase4 design §7 /
+    // design-doc §4 "shrinks when standalone scans gain a kernel the row
+    // drive lacks"). The incumbent cbstore per-row drive (`getnextslot`) has
+    // NO SoA staging, NO kernel-qual bitmap and NO dict/PREWHERE tier, so
+    // lane ownership is staged-kernel upside, not adapter overhead.
+    // Bench-gated: the cbstore microbench keeps this admission honest.
     // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
-    if STANDALONE_SCAN_NO_UPSIDE {
+    if STANDALONE_SCAN_NO_UPSIDE && !::nodeseqscan::seq_scan_is_cbstore(ss) {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
         return Ok(None);
     }
     if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
+    }
+    // Kernel-qual selection bitmap over the staged cbstore window (idempotent
+    // re-arm per pull; the heap standalone path never gets here). Stitch stays
+    // off: tier-2 bodies are drain-pipeline-only, and this is a per-pull feed.
+    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false });
     }
     debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
     // Assemble the scan-only push pipeline. Stages are stateless unit structs
@@ -376,13 +396,20 @@ fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    // Engagement class: cbstore scans are counted apart (their admission
+    // economics and corpus differ — see ShapeClass::CbScan).
+    let class = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        ShapeClass::CbScan
+    } else {
+        ShapeClass::SeqScan
+    };
     // Dynamic per-call gates: these may legitimately vary call to call.
     if estate.es_epq_active {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Epq);
+        stats::tick_refused(class, RefuseReason::Epq);
         return Ok(false);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Backward);
+        stats::tick_refused(class, RefuseReason::Backward);
         return Ok(false);
     }
     // Static verdict, memoized on the node at first evaluation: (a) stability
@@ -396,11 +423,11 @@ fn seq_scan_fusible<'mcx>(
     let refuse = seq_scan_refuse_reason(ss, estate)?;
     let v = match refuse {
         None => {
-            stats::tick_owned(ShapeClass::SeqScan);
+            stats::tick_owned(class);
             true
         }
         Some(r) => {
-            stats::tick_refused(ShapeClass::SeqScan, r);
+            stats::tick_refused(class, r);
             false
         }
     };
