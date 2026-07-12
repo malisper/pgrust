@@ -62,6 +62,20 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     pub fn unused(mcx: Mcx<'mcx>) -> SoaDeformPlan<'mcx> {
         SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx), jit: None }
     }
+
+    /// Columnar-AM plan: `ncols` only, NO offset chain — usable exclusively
+    /// with batch fills that ignore tuple offsets (cbstore's `batch_deform`
+    /// stages decoded Datums per column, so varlena columns are stageable
+    /// and the fixed-width-prefix restriction does not apply). The heap
+    /// deform paths must never see this plan (they index `offs`); callers
+    /// install it only on cbstore scan states, whose `TableScanDesc`
+    /// dispatch never reaches the heap deform.
+    pub fn columnar(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
+        if ncols == 0 || ncols > u16::MAX as usize {
+            return None;
+        }
+        Some(SoaDeformPlan { ncols: ncols as u16, end_off: 0, offs: PgVec::new_in(mcx), jit: None })
+    }
 }
 
 /// Identity + content handle of one per-row-group dictionary (cbstore dict
