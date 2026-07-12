@@ -911,3 +911,112 @@ fn jit_deform_matches_aot_and_interpreter() {
     }
     exec_clear_tuple(&mut slot, mcx);
 }
+
+// Dict-lane surface (cbstore dict currency): arm/answer negotiation, the
+// fill gates the AM keys its batch fill on, and window-boundary clearing.
+#[test]
+fn dict_lane_negotiation_round_trip() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let mut soa = SoaBatch::new_in(mcx, 3);
+
+    // Unarmed scan: fail open — every column wants a fill, nothing is dict.
+    for c in 0..3 {
+        assert!(soa.lane_fill_wanted(c), "unarmed fill col {c}");
+        assert!(!soa.dict_want(c), "unarmed dict col {c}");
+        assert!(soa.dict_lane(c).is_none());
+        assert!(soa.col_datum_ready(c));
+    }
+    assert!(!soa.lane_read_armed());
+    assert!(!soa.col_datum_ready(3), "out-of-range col is never ready");
+
+    // Arm: lane program reads col 1 as codes+dict and col 2 as Raw datums.
+    soa.set_dict_want(1);
+    soa.set_lane_read(1);
+    soa.set_lane_read(2);
+    assert!(soa.lane_read_armed());
+    assert!(!soa.lane_fill_wanted(0), "unread col needs no Datum fill");
+    assert!(soa.lane_fill_wanted(1) && soa.lane_fill_wanted(2));
+    assert!(soa.dict_want(1) && !soa.dict_want(0) && !soa.dict_want(2));
+
+    // AM answers col 1 with a dict lane for this window: its Datum cells are
+    // stale by contract, every other column is unaffected.
+    let codes: [u32; 4] = [1, 0, 2, 1];
+    let dict: [Datum; 3] = [Datum::from_i64(10), Datum::from_i64(20), Datum::from_i64(30)];
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 3, epoch: 7, sorted: true };
+    soa.begin(codes.len() as u32);
+    soa.set_dict_lane(1, SoaDictLane { codes: codes.as_ptr(), table });
+    let lane = soa.dict_lane(1).expect("answered");
+    assert_eq!(lane.table.epoch, 7);
+    assert!(lane.table.sorted);
+    for (i, &code) in codes.iter().enumerate() {
+        assert_eq!(lane.code(i), code);
+        assert_eq!(lane.datum(i).as_i64(), dict[code as usize].as_i64());
+    }
+    assert!(!soa.col_datum_ready(1), "dict answer means stale Datum cells");
+    assert!(soa.col_datum_ready(2));
+    assert!(!soa.col_datum_ready(0), "fill-skipped col is not ready");
+
+    // Window boundary (begin) drops the answer: epoch-change invalidation is
+    // structural — a stale codes pointer can never leak into the next window.
+    soa.begin(2);
+    assert!(soa.dict_lane(1).is_none(), "begin clears dict answers");
+    assert!(soa.col_datum_ready(1), "cleared lane re-enables the Raw fill");
+    assert!(soa.dict_want(1), "the arm itself persists across windows");
+}
+
+// dict[codes] gather == full-decode Raw: materializing a dict lane into the
+// Datum cells produces exactly what a Raw fill of the same column would,
+// writes isnull explicitly (NULL-free is a per-chunk proof), and clears the
+// lane so col_datum_ready flips back on.
+#[test]
+fn dict_gather_matches_full_decode_raw() {
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let mut soa = SoaBatch::new_in(mcx, 2);
+    soa.set_dict_want(0);
+
+    let dict: [Datum; 4] = [
+        Datum::from_i64(-1),
+        Datum::from_i64(0),
+        Datum::from_i64(i64::MAX),
+        Datum::from_i64(42),
+    ];
+    let codes: [u32; 6] = [3, 3, 0, 2, 1, 0];
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 4, epoch: 0, sorted: false };
+
+    soa.begin(codes.len() as u32);
+    // Poison the target cells: garbage values, isnull = true. The gather
+    // must overwrite both (it may not assume pre-cleared nulls).
+    soa.col_values_mut(0).fill(Datum::from_i64(-777));
+    soa.col_isnull_mut(0).fill(true);
+    soa.set_dict_lane(0, SoaDictLane { codes: codes.as_ptr(), table });
+
+    soa.gather_dict_lane(0);
+    assert!(soa.dict_lane(0).is_none(), "gather consumes the answer");
+    assert!(soa.col_datum_ready(0));
+    // Full decode reference: dict[codes[i]] per row.
+    for (i, &code) in codes.iter().enumerate() {
+        assert_eq!(soa.col_values(0)[i].as_i64(), dict[code as usize].as_i64(), "row {i}");
+        assert!(!soa.col_isnull(0)[i], "row {i} NULL-free proof");
+    }
+
+    // Gather on a Raw (unanswered) column is a no-op.
+    soa.col_values_mut(1).fill(Datum::from_i64(5));
+    soa.gather_dict_lane(1);
+    assert_eq!(soa.col_values(1)[0].as_i64(), 5);
+}
+
+// Epoch discipline: identity is the epoch (rg index per pinned scan), not
+// the pointer — consumers key memos on it and clear at change.
+#[test]
+fn dict_table_epoch_identity() {
+    let dict: [Datum; 2] = [Datum::from_i64(1), Datum::from_i64(2)];
+    let rg0 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false };
+    let rg0b = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false };
+    let rg1 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 1, sorted: false };
+    assert!(rg0.same_identity(&rg0b));
+    assert!(!rg0.same_identity(&rg1), "same arena address, new row group: memo must clear");
+    assert_eq!(rg1.datum(0).as_i64(), 1);
+    assert_eq!(rg1.datum(1).as_i64(), 2);
+}
