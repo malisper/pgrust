@@ -475,8 +475,41 @@ const REGFILE_BYTES: u32 = (MAX_REGS as u32) * 16;
 const SPILL_MASK: u32 = REGFILE_BYTES;
 const SPILL_BASE: u32 = REGFILE_BYTES + 8;
 const SPILL_BITS: u32 = REGFILE_BYTES + 16;
-const _: () = assert!(REGFILE_BYTES == 256, "prologue sub sp is hardcoded to 288 = 256 + 32 spill");
+const _: () = assert!(REGFILE_BYTES == 256, "frame offsets assume the 256-byte register file");
 const _: () = assert!(MAX_ROWS % 64 == 0);
+
+// ---- SVE2 tier frame extension (survivor-index buffer) --------------------
+//
+// The SVE survivor-extraction path (emit_sve_extract) stores one block's
+// surviving row indices densely: 64 u32 slots plus MAX-VL ST1W overstore
+// slack (the compact'd index vector stores a full vector under an all-true
+// governing predicate; only the CNTP-counted prefix is meaningful). Tier
+// detection refuses VL > SVE_MAX_VL_BYTES so the slack bound holds.
+const SURV_BUF: u32 = REGFILE_BYTES + 32;
+pub(crate) const SVE_MAX_VL_BYTES: usize = 64;
+const SURV_BUF_BYTES: u32 = 64 * 4 + SVE_MAX_VL_BYTES as u32;
+const SURV_CNT: u32 = SURV_BUF + SURV_BUF_BYTES;
+const NEON_FRAME: u32 = REGFILE_BYTES + 32;
+const SVE_FRAME: u32 = (SURV_CNT + 8).div_ceil(16) * 16;
+const _: () = assert!(NEON_FRAME == 288 && SVE_FRAME == 624);
+
+/// Adaptive crossover: the SVE COMPACT survivor-extraction path engages for
+/// a block when the vector pass leaves at least this many survivors of 64.
+/// The spike measured the extraction-only crossover band at ~10-13 of 64
+/// (notes/sve2-spike-2026-07-14.md, K1: NEON pass-word + rbit/clz wins
+/// below ~15% selectivity; SVE COMPACT selectivity-invariant). The
+/// PRODUCTION stencils re-measured on c8gd (sve_ab, fleet job
+/// pgrust-fast-tests-7414f7a5b4-1783871662) put the whole-pipeline
+/// break-even nearer 20% — the per-survivor clause body costs the same on
+/// both arms, diluting the extraction margin — with the dense path -1.4%
+/// at 30%, -7.8% at 50%, -13.8% at 90%. 16/64 (25%) keeps the marginal
+/// band on NEON and takes the wins above it.
+pub(crate) const SVE_SURVIVOR_CROSSOVER: u32 = 16;
+
+/// Per-clause cap on SVE2 MATCH IN-list candidates (8 u16 candidates per
+/// 128-bit MATCH segment; the spike measured 1.8x at k=4 up to 8.8x at
+/// k=64 over the NEON per-candidate CMEQ+ORR stencil).
+pub(crate) const MAX_MATCH_ELEMS: usize = 64;
 
 // Bit i -> byte-lane weight 1<<i, the movemask currency.
 const MOVEMASK_WEIGHTS: u64 = 0x8040_2010_0804_0201;
@@ -500,6 +533,139 @@ const HOIST_PAIRS: [(u32, u32); 2] = [(25, 26), (27, 28)];
 /// scalar row-loop bodies (read per compile — compiles are rare).
 fn simd_enabled() -> bool {
     !matches!(std::env::var("PGRUST_LANESTITCH_SIMD").as_deref(), Ok("0") | Ok("off"))
+}
+
+// ---- SVE2 stencil-tier selection ------------------------------------------
+//
+// Boot-time HWCAP gate (spike §"HWCAP detection"): the SVE2 tier engages
+// only when the kernel reports both SVE (AT_HWCAP) and SVE2 (AT_HWCAP2) —
+// std's runtime detection reads exactly those getauxval bits on
+// linux/aarch64 — and the configured vector length fits the survivor
+// buffer's overstore slack. Apple Silicon and non-SVE Graviton read false
+// and keep the NEON tier untouched. The emitted SVE stencils are
+// VL-agnostic (ptrue-pattern governance, no hardcoded VL strides), so a
+// wider future part only needs the slack bound (SVE_MAX_VL_BYTES) raised.
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+fn sve_vl_bytes() -> usize {
+    // prctl(PR_SVE_GET_VL): low 16 bits = current vector length in bytes.
+    extern "C" {
+        fn prctl(option: i32, ...) -> i32;
+    }
+    const PR_SVE_GET_VL: i32 = 51;
+    let r = unsafe { prctl(PR_SVE_GET_VL) };
+    if r < 0 {
+        0
+    } else {
+        (r as usize) & 0xFFFF
+    }
+}
+
+fn sve2_hw() -> bool {
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        static HW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HW.get_or_init(|| {
+            std::arch::is_aarch64_feature_detected!("sve")
+                && std::arch::is_aarch64_feature_detected!("sve2")
+                && (1..=SVE_MAX_VL_BYTES).contains(&sve_vl_bytes())
+        })
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
+    false
+}
+
+/// The active SIMD stencil tier, read per compile like `simd_enabled`.
+/// PGRUST_LANESTITCH_SVE2=0|off pins NEON on SVE2 hardware (A/B and the
+/// fleet parity matrix); =force drops the adaptive survivor crossover to 0
+/// so every generic-clause block takes the SVE extraction path (parity
+/// soak coverage of the SVE stencils at any selectivity). Both are inert
+/// off-SVE2-hardware — the tier never engages where it cannot execute.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SimdTier {
+    Neon,
+    Sve2 { force: bool },
+}
+
+pub(crate) fn simd_tier() -> SimdTier {
+    if !sve2_hw() {
+        return SimdTier::Neon;
+    }
+    match std::env::var("PGRUST_LANESTITCH_SVE2").as_deref() {
+        Ok("0") | Ok("off") => SimdTier::Neon,
+        Ok("force") => SimdTier::Sve2 { force: true },
+        _ => SimdTier::Sve2 { force: false },
+    }
+}
+
+/// The u16-domain candidate list of a SaopQ clause the SVE2 MATCH stencil
+/// admits, or None (fail closed to the NEON per-candidate stencil).
+/// Admission: an Eq-relation comparator, 1..=MAX_MATCH_ELEMS non-NULL
+/// elements, every element in [0, 0xFFFF] as its canonical 64-bit Datum
+/// image. Exactness without lane-domain metadata: for elem in [0, 0xFFFF],
+/// datum == elem (64-bit canonical compare, any admitted int/oid width)
+/// iff low16(datum) == low16(elem) AND the upper 48 datum bits are zero —
+/// the stencil ANDs the MATCH mask with that in-domain mask, so
+/// out-of-domain lane values (including sign-extended negatives) never
+/// false-match.
+fn saop_match_elems(prog: &Program, op: CmpOp, arr: u16) -> Option<Vec<u16>> {
+    if vcmp(op) != VCmp::Eq {
+        return None;
+    }
+    let elems = saop_vector_elems(prog, arr);
+    if elems.is_empty() || elems.len() > MAX_MATCH_ELEMS {
+        return None;
+    }
+    elems
+        .iter()
+        .map(|d| {
+            let v = d.as_usize() as u64;
+            if v <= 0xFFFF {
+                Some(v as u16)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// z-registers available for block-resident MATCH candidate vectors:
+/// v18-v23 always (untouched by the NEON group stencils), plus whatever
+/// remains of the v24-v28 constant bank after CmpConst/FCmpConst dups.
+/// 8 candidates per register (two packed u64s ZIP1'd into segment 0).
+fn match_free_regs(plan: &Plan) -> Vec<u32> {
+    let nconst = plan
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, ClauseShape::CmpConst { .. } | ClauseShape::FCmpConst { .. }))
+        .count() as u32;
+    (18..24u32).chain(24 + nconst..29).collect()
+}
+
+/// Per-clause MATCH assignment: candidate u16 lists for the SaopQ clauses
+/// the register budget admits, in clause order (greedy; the rest keep the
+/// NEON stencil). Deterministic — emit and telemetry share it.
+fn assign_match_clauses(prog: &Program, plan: &Plan, tier: SimdTier) -> Vec<Option<Vec<u16>>> {
+    let mut out: Vec<Option<Vec<u16>>> = Vec::with_capacity(plan.clauses.len());
+    if !matches!(tier, SimdTier::Sve2 { .. }) {
+        out.resize_with(plan.clauses.len(), || None);
+        return out;
+    }
+    let mut budget = match_free_regs(plan).len();
+    for c in &plan.clauses {
+        let assigned = match *c {
+            ClauseShape::SaopQ { op, arr, .. } => match saop_match_elems(prog, op, arr) {
+                Some(elems) if elems.len().div_ceil(8) <= budget => {
+                    budget -= elems.len().div_ceil(8);
+                    Some(elems)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        out.push(assigned);
+    }
+    out
 }
 
 struct Ctx<'a> {
@@ -561,8 +727,19 @@ fn lane_isnull_reg(e: &mut Emitter, ctx: &Ctx<'_>, col: u16, scratch: u32) -> u3
 pub(crate) fn emit_pipeline(prog: &Program, plan: &Plan, lay: &ParamsLayout) -> Vec<u32> {
     let mut e = Emitter::new();
 
+    let simd = classify_simd(plan);
+    let tier = simd_tier();
+    // The SVE survivor-extraction path exists only when a SIMD body has
+    // non-vector clauses to run per surviving row; only then does the frame
+    // grow the survivor-index buffer.
+    let sve_survivors = simd
+        && matches!(tier, SimdTier::Sve2 { .. })
+        && plan.clauses.iter().any(|c| !vector_pass_clause(c));
+    let frame = if sve_survivors { SVE_FRAME } else { NEON_FRAME };
+
     // Prologue: fp/lr chain kept (unwind guidance), x19-x28 saved, 256-byte
-    // virtual register file + 32 spill bytes below.
+    // virtual register file + 32 spill bytes (+ the SVE survivor buffer)
+    // below.
     e.raw(0xA9BA_7BFD); // stp x29, x30, [sp, #-0x60]!
     e.raw(0x9100_03FD); // mov x29, sp
     e.raw(0xA901_53F3); // stp x19, x20, [sp, #0x10]
@@ -570,7 +747,7 @@ pub(crate) fn emit_pipeline(prog: &Program, plan: &Plan, lay: &ParamsLayout) -> 
     e.raw(0xA903_63F7); // stp x23, x24, [sp, #0x30]
     e.raw(0xA904_6BF9); // stp x25, x26, [sp, #0x40]
     e.raw(0xA905_73FB); // stp x27, x28, [sp, #0x50]
-    e.raw(0xD104_83FF); // sub sp, sp, #288
+    e.sub_sp_imm(frame);
     e.mov_x(PARAMS, 0);
     e.ldr_x(NROWS, PARAMS, lay.nrows);
     e.ldr_x(SEL, PARAMS, lay.sel);
@@ -602,8 +779,8 @@ pub(crate) fn emit_pipeline(prog: &Program, plan: &Plan, lay: &ParamsLayout) -> 
     // SIMD tier: 64-row blocks while a full block remains; leaves ROW at the
     // block-aligned frontier so the scalar row loop finishes the n % 64 tail
     // (and everything, when the shape refuses SIMD).
-    if classify_simd(plan) {
-        emit_simd_blocks(&mut e, &ctx, prog, plan);
+    if simd {
+        emit_simd_blocks(&mut e, &ctx, prog, plan, tier);
     }
 
     e.bind(loop_head);
@@ -636,7 +813,7 @@ pub(crate) fn emit_pipeline(prog: &Program, plan: &Plan, lay: &ParamsLayout) -> 
     e.bind(refuse);
     e.movn_x(0, 0); // RC_REFUSE = -1
     e.bind(epilogue);
-    e.raw(0x9104_83FF); // add sp, sp, #288
+    e.add_sp_imm(frame);
     e.raw(0xA941_53F3); // ldp x19, x20, [sp, #0x10]
     e.raw(0xA942_5BF5); // ldp x21, x22, [sp, #0x20]
     e.raw(0xA943_63F7); // ldp x23, x24, [sp, #0x30]
@@ -1346,7 +1523,8 @@ fn emit_notnull_8b(e: &mut Emitter, ctx: &Ctx<'_>, col: u16, dst: u32) {
 }
 
 /// The 64-row block section. On entry ROW = 0; on exit ROW = nrows & !63.
-fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan) {
+fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan, tier: SimdTier) {
+    let match_of = assign_match_clauses(prog, plan, tier);
     let block_loop = e.new_label();
     let simd_done = e.new_label();
     e.bind(block_loop);
@@ -1378,6 +1556,46 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
     }
     debug_assert!(kreg <= 29);
 
+    // SVE2 MATCH candidate vectors, block-resident like the const bank.
+    // Each register carries 8 u16 candidates in MATCH segment 0 (two packed
+    // u64s ZIP1'd; NEON writes zero the upper z bits, so higher segments —
+    // never governed anyway — hold zeros at any VL). Partial chunks pad by
+    // repeating the first candidate (idempotent under OR-of-equalities).
+    let mut match_regs_of: Vec<Vec<u32>> = Vec::with_capacity(plan.clauses.len());
+    {
+        let mut free = match_free_regs(plan).into_iter();
+        let mut any_match = false;
+        for m in &match_of {
+            let mut regs = Vec::new();
+            if let Some(elems) = m {
+                let pack4 = |c: &[u16], pad: u16| -> u64 {
+                    let mut w = 0u64;
+                    for i in 0..4 {
+                        w |= (*c.get(i).unwrap_or(&pad) as u64) << (16 * i);
+                    }
+                    w
+                };
+                for chunk in elems.chunks(8) {
+                    let reg = free.next().expect("assign_match_clauses bounded the budget");
+                    let lo = pack4(chunk, elems[0]);
+                    let hi = pack4(if chunk.len() > 4 { &chunk[4..] } else { &[] }, elems[0]);
+                    e.ldr_lit(12, lo);
+                    e.dup_2d_x(reg, 12);
+                    e.ldr_lit(12, hi);
+                    e.dup_2d_x(16, 12);
+                    e.zip1_2d(reg, reg, 16);
+                    regs.push(reg);
+                    any_match = true;
+                }
+            }
+            match_regs_of.push(regs);
+        }
+        if any_match {
+            // Governing predicate: exactly the 8-row group at any VL.
+            e.ptrue_h_vl8(1);
+        }
+    }
+
     // Qual vector pass: 8 groups of 8 rows -> 64-bit pass word in x9.
     e.movz_x(9, 0);
     e.mov_x(10, ROW);
@@ -1385,7 +1603,7 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
     let group_loop = e.new_label();
     e.bind(group_loop);
     let mut first = true;
-    for (c, kr) in plan.clauses.iter().zip(&kreg_of) {
+    for (ix, (c, kr)) in plan.clauses.iter().zip(&kreg_of).enumerate() {
         match *c {
             ClauseShape::CmpConst { col, op, .. } => {
                 emit_load_group(e, ctx, col, 0);
@@ -1471,53 +1689,45 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
                 }
             }
             ClauseShape::SaopQ { col, op, arr } => {
-                let elems = saop_vector_elems(prog, arr);
-                emit_load_group(e, ctx, col, 0);
-                let v = vcmp(op);
-                let ne = v == VCmp::Ne;
-                // Accumulators v4-v7. For every relation but Ne the row's
-                // match word is OR over elements of cmp(scalar, elem) —
-                // OR-accumulate from zeros. Ne needs OR of complements,
-                // which is NOT(AND of CMEQ) (De Morgan): AND-accumulate
-                // from ones, complement once in the narrow.
-                for i in 0..4u32 {
-                    if ne {
-                        e.cmeq_2d(4 + i, i, i); // x == x: all-ones
-                    } else {
-                        e.eor_16b(4 + i, 4 + i, 4 + i); // zeros
-                    }
-                }
-                for elem in &elems {
-                    e.ldr_lit(12, elem.as_usize() as u64);
-                    e.dup_2d_x(16, 12);
+                if !match_regs_of[ix].is_empty() {
+                    // SVE2 MATCH stencil (spike K3): 8 u16 candidates per
+                    // MATCH vs the NEON per-candidate CMEQ+ORR below.
+                    // Exactness: elements are in [0, 0xFFFF], so a datum
+                    // equals an element iff its low 16 bits MATCH and its
+                    // upper 48 bits are zero (the in-domain mask) — see
+                    // saop_match_elems.
+                    emit_load_group(e, ctx, col, 0);
+                    // Row low16s, row-ordered, into v16.8h (UZP1 keeps the
+                    // even (low) halves at each width).
+                    e.uzp1_4s(16, 0, 1);
+                    e.uzp1_4s(17, 2, 3);
+                    e.uzp1_8h(16, 16, 17);
+                    // In-domain byte mask: (datum & !0xFFFF) == 0.
+                    e.ldr_lit(12, 0xFFFF);
+                    e.dup_2d_x(17, 12);
                     for i in 0..4u32 {
-                        match v {
-                            VCmp::Eq | VCmp::Ne => e.cmeq_2d(17, i, 16),
-                            VCmp::Gt => e.cmgt_2d(17, i, 16),
-                            VCmp::Ge => e.cmge_2d(17, i, 16),
-                            VCmp::Lt => e.cmgt_2d(17, 16, i),
-                            VCmp::Le => e.cmge_2d(17, 16, i),
-                            VCmp::Hi => e.cmhi_2d(17, i, 16),
-                            VCmp::Hs => e.cmhs_2d(17, i, 16),
-                            VCmp::Lo => e.cmhi_2d(17, 16, i),
-                            VCmp::Ls => e.cmhs_2d(17, 16, i),
-                        }
-                        if ne {
-                            e.and_16b(4 + i, 4 + i, 17);
+                        e.bic_16b(i, i, 17);
+                        e.cmeq0_2d(i, i);
+                    }
+                    emit_narrow_masks_8b(e, false);
+                    // MATCH per candidate register, OR-accumulated in p3.
+                    for (j, &reg) in match_regs_of[ix].iter().enumerate() {
+                        if j == 0 {
+                            e.match_h(3, 1, 16, reg);
                         } else {
-                            e.orr_16b(4 + i, 4 + i, 17);
+                            e.match_h(4, 1, 16, reg);
+                            e.orr_p(3, 1, 3, 4);
                         }
                     }
+                    // Predicate -> byte mask, AND into the clause mask.
+                    e.cpy_z_h_neg1(17, 3);
+                    e.xtn_8b(17, 17);
+                    e.and_8b(0, 0, 17);
+                    emit_notnull_8b(e, ctx, col, 17);
+                    e.and_8b(0, 0, 17);
+                } else {
+                    emit_saop_neon_group(e, ctx, prog, col, op, arr);
                 }
-                // Empty element set falls out naturally: zeros (or
-                // NOT(ones) for Ne) — every row fails, matching the
-                // interpreter's false-or-NULL qual failure.
-                for i in 0..4u32 {
-                    e.orr_16b(i, 4 + i, 4 + i);
-                }
-                emit_narrow_masks_8b(e, ne);
-                emit_notnull_8b(e, ctx, col, 17);
-                e.and_8b(0, 0, 17);
             }
             ClauseShape::Generic { .. } => continue,
         }
@@ -1545,9 +1755,38 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
     // non-erroring (classify_simd refused arith), so the implicit AND
     // commutes — a row failing a pure clause never reaches an erroring
     // clause in either order because no erroring clause exists here at all.
-    for c in &plan.clauses {
-        if !vector_pass_clause(c) {
-            emit_bits_clause(e, ctx, prog, c);
+    let generics: Vec<&ClauseShape> =
+        plan.clauses.iter().filter(|c| !vector_pass_clause(c)).collect();
+    if !generics.is_empty() {
+        if let SimdTier::Sve2 { force } = tier {
+            // Adaptive survivor-emit tier (spike K1): when this block keeps
+            // at least SVE_SURVIVOR_CROSSOVER of its 64 rows, extract the
+            // survivor indices densely via COMPACT/CNTP and iterate the
+            // list; below the crossover the NEON rbit/clz bit-iteration
+            // stays cheaper. `force` drops the threshold to 0 (parity
+            // soak coverage).
+            let lneon = e.new_label();
+            let lmerge = e.new_label();
+            e.fmov_d_x(0, 9);
+            e.cnt_8b(0, 0);
+            e.addv_b_8b(0, 0);
+            e.umov_w_b0(12, 0);
+            e.cmp_w_imm(12, if force { 0 } else { SVE_SURVIVOR_CROSSOVER });
+            e.b_cond(Cond::Lo, lneon);
+            emit_sve_extract(e);
+            for (gi, c) in generics.iter().enumerate() {
+                emit_dense_clause(e, ctx, prog, c, gi > 0);
+            }
+            e.b(lmerge);
+            e.bind(lneon);
+            for c in &generics {
+                emit_bits_clause(e, ctx, prog, c);
+            }
+            e.bind(lmerge);
+        } else {
+            for c in &generics {
+                emit_bits_clause(e, ctx, prog, c);
+            }
         }
     }
     e.ldr_x(ROW, 31, SPILL_BASE);
@@ -1561,6 +1800,158 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
     e.add_x_imm(ROW, ROW, 64);
     e.b(block_loop);
     e.bind(simd_done);
+}
+
+/// The NEON per-candidate SaopQ group arm (every relation; the SVE2 MATCH
+/// stencil above replaces it only for admitted Eq/u16-domain clauses).
+fn emit_saop_neon_group(
+    e: &mut Emitter,
+    ctx: &Ctx<'_>,
+    prog: &Program,
+    col: u16,
+    op: CmpOp,
+    arr: u16,
+) {
+    let elems = saop_vector_elems(prog, arr);
+    emit_load_group(e, ctx, col, 0);
+    let v = vcmp(op);
+    let ne = v == VCmp::Ne;
+    // Accumulators v4-v7. For every relation but Ne the row's
+    // match word is OR over elements of cmp(scalar, elem) —
+    // OR-accumulate from zeros. Ne needs OR of complements,
+    // which is NOT(AND of CMEQ) (De Morgan): AND-accumulate
+    // from ones, complement once in the narrow.
+    for i in 0..4u32 {
+        if ne {
+            e.cmeq_2d(4 + i, i, i); // x == x: all-ones
+        } else {
+            e.eor_16b(4 + i, 4 + i, 4 + i); // zeros
+        }
+    }
+    for elem in &elems {
+        e.ldr_lit(12, elem.as_usize() as u64);
+        e.dup_2d_x(16, 12);
+        for i in 0..4u32 {
+            match v {
+                VCmp::Eq | VCmp::Ne => e.cmeq_2d(17, i, 16),
+                VCmp::Gt => e.cmgt_2d(17, i, 16),
+                VCmp::Ge => e.cmge_2d(17, i, 16),
+                VCmp::Lt => e.cmgt_2d(17, 16, i),
+                VCmp::Le => e.cmge_2d(17, 16, i),
+                VCmp::Hi => e.cmhi_2d(17, i, 16),
+                VCmp::Hs => e.cmhs_2d(17, i, 16),
+                VCmp::Lo => e.cmhi_2d(17, 16, i),
+                VCmp::Ls => e.cmhs_2d(17, 16, i),
+            }
+            if ne {
+                e.and_16b(4 + i, 4 + i, 17);
+            } else {
+                e.orr_16b(4 + i, 4 + i, 17);
+            }
+        }
+    }
+    // Empty element set falls out naturally: zeros (or
+    // NOT(ones) for Ne) — every row fails, matching the
+    // interpreter's false-or-NULL qual failure.
+    for i in 0..4u32 {
+        e.orr_16b(i, 4 + i, 4 + i);
+    }
+    emit_narrow_masks_8b(e, ne);
+    emit_notnull_8b(e, ctx, col, 17);
+    e.and_8b(0, 0, 17);
+}
+
+/// SVE COMPACT survivor extraction (spike K1): densifies the block's pass
+/// word (x9) into block-relative row indices at [sp + SURV_BUF], count at
+/// [sp + SURV_CNT]. Selectivity-invariant; VL-agnostic (ptrue-pattern
+/// governance; ST1W overstores at most one vector of slack — see
+/// SURV_BUF_BYTES). Clobbers z0/z4/z6/z7, p0/p2-p6, x11-x13; reads v30
+/// (the block-invariant movemask weights, whose upper z bits NEON zeroed).
+fn emit_sve_extract(e: &mut Emitter) {
+    e.ptrue_s_all(0);
+    e.ptrue_b_vl8(2);
+    // Block-relative row-id vectors for the two COMPACT halves of a group.
+    e.index_s_imm(6, 0, 1);
+    e.index_s_imm(7, 4, 1);
+    e.add_x_imm(11, 31, SURV_BUF); // cursor
+    for g in 0..8u32 {
+        // Pass-word byte g -> per-row byte mask (bit i of the byte selects
+        // weight lane i) -> .b predicate over the 8 rows.
+        e.ubfx_x_byte(12, 9, 8 * g);
+        e.dup_z_b_w(0, 12);
+        e.and_z(0, 0, 30);
+        e.cmpne_b_imm0(3, 2, 0);
+        // Widen to .s lanes: rows 0..3 in p5, rows 4..7 in p6 (at VL=128;
+        // wider VLs shift rows into p5 and leave p6 empty — both halves
+        // stay exact because the row-id vectors carry absolute positions).
+        e.punpklo(4, 3);
+        e.punpklo(5, 4);
+        e.punpkhi(6, 4);
+        e.compact_s(4, 5, 6);
+        e.st1w_s(4, 0, 11);
+        e.cntp_s(12, 0, 5);
+        e.add_x_lsl2(11, 11, 12);
+        e.compact_s(4, 6, 7);
+        e.st1w_s(4, 0, 11);
+        e.cntp_s(12, 0, 6);
+        e.add_x_lsl2(11, 11, 12);
+        if g < 7 {
+            e.add_z_s_imm(6, 8);
+            e.add_z_s_imm(7, 8);
+        }
+    }
+    e.add_x_imm(12, 31, SURV_BUF);
+    e.sub_x(13, 11, 12);
+    e.lsr_x_imm(13, 13, 2);
+    e.str_x(13, 31, SURV_CNT);
+}
+
+/// One non-vector clause over the extracted survivor list: the dense-index
+/// twin of emit_bits_clause (identical fail path; ascending row order is
+/// COMPACT's — the same order the bit iteration walks). Loop state lives in
+/// the otherwise-unused callee-saved x22 (cursor) / x24 (count) — clause
+/// stencils only clobber x8-x16, so no per-survivor spill traffic. Only
+/// clauses AFTER the first re-check the pass-word bit (a prior dense clause
+/// may have cleared it; the first clause sees the extraction's exact list).
+fn emit_dense_clause(
+    e: &mut Emitter,
+    ctx: &Ctx<'_>,
+    prog: &Program,
+    shape: &ClauseShape,
+    recheck: bool,
+) {
+    e.movz_x(22, 0); // cursor
+    e.ldr_x(24, 31, SURV_CNT);
+    let head = e.new_label();
+    let done = e.new_label();
+    let fail = e.new_label();
+    e.bind(head);
+    e.cmp_x_x(22, 24);
+    e.b_cond(Cond::Ge, done);
+    e.add_x_imm(12, 31, SURV_BUF);
+    e.ldr_w_idx2(13, 12, 22); // block-relative survivor index
+    e.add_x_imm(22, 22, 1);
+    if recheck {
+        e.ldr_x(14, 31, SPILL_MASK);
+        e.lsrv_x(14, 14, 13);
+        e.and_x_1(14, 14);
+        e.cbz_x(14, head); // failed by an earlier dense clause
+    }
+    e.ldr_x(15, 31, SPILL_BASE);
+    e.add_x(ROW, 15, 13);
+    let cctx = ctx.with_row_labels(fail, head);
+    emit_clause(e, &cctx, prog, shape);
+    e.b(head);
+    e.bind(fail);
+    e.ldr_x(13, 31, SPILL_BASE);
+    e.sub_x(12, ROW, 13);
+    e.movz_x(14, 1);
+    e.lslv_x(14, 14, 12);
+    e.ldr_x(15, 31, SPILL_MASK);
+    e.bic_x(15, 15, 14);
+    e.str_x(15, 31, SPILL_MASK);
+    e.b(head);
+    e.bind(done);
 }
 
 /// Bit-iteration prelude: copies the pass word to the cursor slot, then per
@@ -1609,6 +2000,20 @@ fn emit_bits_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, shape: &Clau
 /// the 64-row NEON block tier (the scalar loop still owns the tail).
 pub(crate) fn plan_is_simd(plan: &Plan) -> bool {
     classify_simd(plan)
+}
+
+/// Compile-time introspection for tests/telemetry: (the SVE COMPACT
+/// survivor path was emitted, number of clauses on the SVE2 MATCH stencil).
+/// Both zero on non-SVE2 hardware or with the tier pinned off.
+pub(crate) fn plan_sve2_info(prog: &Program, plan: &Plan) -> (bool, usize) {
+    if !classify_simd(plan) {
+        return (false, 0);
+    }
+    let tier = simd_tier();
+    let survivors = matches!(tier, SimdTier::Sve2 { .. })
+        && plan.clauses.iter().any(|c| !vector_pass_clause(c));
+    let nmatch = assign_match_clauses(prog, plan, tier).iter().flatten().count();
+    (survivors, nmatch)
 }
 
 // ---- Projection tier ------------------------------------------------------
