@@ -26,3 +26,8 @@ varlena = { path = "../../utils/adt/varlena" }
 wchar = { path = "../../../common/wchar" }
 
 memchr = { version = "2", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Census conformance only (tests/translate.rs): the translate whitelist must
+# admit every comparator the central registry censuses.
+lanereg = { path = "../lanereg" }

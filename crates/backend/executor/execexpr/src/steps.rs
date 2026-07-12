@@ -998,8 +998,11 @@ impl CmpOp {
     // AotQualCmp tier entries; here we only decode the registry's neutral
     // `CmpShape` into this crate's `CmpOp` selector. Every width family the
     // registry's in-tree AOT tier carries decodes (the legacy 5 int families
-    // plus the censusgaps int24/int42/oid/float families). The conformance
-    // test in tests.rs pins this to the exact 72-OID golden mapping.
+    // plus the censusgaps int24/int42/oid/float families, plus the
+    // ne-admission census-close date/timestamp/timestamptz aliases — plain
+    // int compares at I4/I8, sentinels included, per date.c/timestamp.c).
+    // The conformance test in tests.rs pins this to the exact 90-OID golden
+    // mapping.
     pub fn for_fn_oid(oid: Oid) -> Option<CmpOp> {
         Some(CmpOp::from_lanereg_shape(::lanereg::aot_qual_cmp(oid)?))
     }

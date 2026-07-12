@@ -22,11 +22,12 @@ fn every_cov_row_is_shape_consistent() {
     }
 }
 
-// The in-tree AOT qual comparator set: exactly the 72 OIDs execexpr's
+// The in-tree AOT qual comparator set: exactly the 90 OIDs execexpr's
 // CmpOp::for_fn_oid admits (the legacy 30 int families + the 42 censusgaps
-// additions: int24/int42/oid/float4/float8/float48/float84), each with the
-// correct (width, pred). This is the golden set the execexpr conformance test
-// binds `for_fn_oid` to.
+// additions: int24/int42/oid/float4/float8/float48/float84 + the 18
+// ne-admission census-close date/timestamp/timestamptz aliases), each with
+// the correct (width, pred). This is the golden set the execexpr conformance
+// test binds `for_fn_oid` to.
 #[test]
 fn aot_qual_cmp_golden_set() {
     let golden: &[(Oid, CmpWidth, CmpPred)] = &[
@@ -42,12 +43,21 @@ fn aot_qual_cmp_golden_set() {
         (293, F8, Eq), (294, F8, Ne), (295, F8, Lt), (296, F8, Le), (297, F8, Gt), (298, F8, Ge),
         (299, F48, Eq), (300, F48, Ne), (301, F48, Lt), (302, F48, Le), (303, F48, Gt), (304, F48, Ge),
         (305, F84, Eq), (306, F84, Ne), (307, F84, Lt), (308, F84, Le), (309, F84, Gt), (310, F84, Ge),
+        // ne-admission census close: date (int32 days), timestamp and
+        // timestamptz (int64 usecs) are plain int compares incl. their
+        // infinity sentinels (date.c / timestamp.c) — the same fact
+        // laneexec's translate whitelist and the cbstore zone-qual
+        // extraction already carried; registered so the central census
+        // matches its consumers.
+        (1086, I4, Eq), (1091, I4, Ne), (1087, I4, Lt), (1088, I4, Le), (1089, I4, Gt), (1090, I4, Ge),
+        (2052, I8, Eq), (2053, I8, Ne), (2054, I8, Lt), (2055, I8, Le), (2057, I8, Gt), (2056, I8, Ge),
+        (1152, I8, Eq), (1153, I8, Ne), (1154, I8, Lt), (1155, I8, Le), (1157, I8, Gt), (1156, I8, Ge),
     ];
     for &(oid, w, p) in golden {
         assert_eq!(aot_qual_cmp(oid), Some(CmpShape { width: w, pred: p }), "oid {oid}");
     }
     let in_tree_aot = ENTRIES.iter().filter(|e| aot_qual_cmp(e.oid).is_some()).count();
-    assert_eq!(in_tree_aot, golden.len(), "AOT in-tree set drifted from the golden 72");
+    assert_eq!(in_tree_aot, golden.len(), "AOT in-tree set drifted from the golden 90");
 }
 
 #[test]

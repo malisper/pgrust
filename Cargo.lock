@@ -7418,6 +7418,7 @@ dependencies = [
  "execexpr",
  "exectuples",
  "fmgr_core",
+ "lanereg",
  "lsyscache",
  "mbutils",
  "mcx",

@@ -78,6 +78,24 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 | 308 | float84le | IN | - | - | - | IN | - |  |
 | 309 | float84gt | IN | - | - | - | IN | - |  |
 | 310 | float84ge | IN | - | - | - | IN | - |  |
+| 1086 | date_eq | IN | - | - | - | IN | - |  |
+| 1091 | date_ne | IN | - | - | - | IN | - |  |
+| 1087 | date_lt | IN | - | - | - | IN | - |  |
+| 1088 | date_le | IN | - | - | - | IN | - |  |
+| 1089 | date_gt | IN | - | - | - | IN | - |  |
+| 1090 | date_ge | IN | - | - | - | IN | - |  |
+| 2052 | timestamp_eq | IN | - | - | - | IN | - |  |
+| 2053 | timestamp_ne | IN | - | - | - | IN | - |  |
+| 2054 | timestamp_lt | IN | - | - | - | IN | - |  |
+| 2055 | timestamp_le | IN | - | - | - | IN | - |  |
+| 2057 | timestamp_gt | IN | - | - | - | IN | - |  |
+| 2056 | timestamp_ge | IN | - | - | - | IN | - |  |
+| 1152 | timestamptz_eq | IN | - | - | - | IN | - |  |
+| 1153 | timestamptz_ne | IN | - | - | - | IN | - |  |
+| 1154 | timestamptz_lt | IN | - | - | - | IN | - |  |
+| 1155 | timestamptz_le | IN | - | - | - | IN | - |  |
+| 1157 | timestamptz_gt | IN | - | - | - | IN | - |  |
+| 1156 | timestamptz_ge | IN | - | - | - | IN | - |  |
 | 177 | int4pl | - | IN | - | IN | - | IN |  |
 | 181 | int4mi | - | IN | - | IN | - | IN |  |
 | 141 | int4mul | - | IN | - | IN | - | IN |  |
@@ -129,7 +147,7 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 
 ## Summary
 
-- registered OIDs: 120
+- registered OIDs: 138
 - stencil-but-no-census: 0 (stitch comparator stencils with no AOT qual census)
 - fold-affine-but-no-jit: 0 (fold affine ops the JIT does not inline)
 - jit-but-no-fold-affine: 0 (JIT-inlined arith unknown to the fold affine admission)
