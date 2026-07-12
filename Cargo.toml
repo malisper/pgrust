@@ -644,6 +644,7 @@ members = [
     "crates/contrib/pg_prewarm",
     "crates/contrib/ltree",
     "crates/contrib/pgcrypto",
+    "crates/contrib/pg_stat_statements",
     "crates/contrib/hstore",
     "crates/contrib/pg_trgm",
     "crates/contrib/btree_gist",

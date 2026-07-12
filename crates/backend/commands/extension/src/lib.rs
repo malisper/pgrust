@@ -16,6 +16,7 @@ use datum::Datum;
 use elog::ereport;
 
 pub mod alter;
+pub mod contents;
 pub mod control;
 pub mod create;
 pub mod funcs;
@@ -23,6 +24,7 @@ pub mod graph;
 pub mod script;
 
 pub use alter::ExecAlterExtensionStmt;
+pub use contents::ExecAlterExtensionContentsStmt;
 pub use control::{extension_file_exists, read_extension_control_file, ExtensionControlFile};
 pub use create::{CreateExtension, InsertExtensionTuple, RemoveExtensionById};
 pub use pg_depend::{creating_extension, CurrentExtensionObject};

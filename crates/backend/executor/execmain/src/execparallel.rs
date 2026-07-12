@@ -318,7 +318,7 @@ pub(crate) fn build_worker_pstmt<'mcx>(
     }
     let pstmt = PlannedStmt {
         commandType: CmdType::CMD_SELECT,
-        queryId: leader.queryId,
+        queryId: ::types_nodes::SyncCell::new(leader.queryId.get()),
         planId: leader.planId,
         hasReturning: false,
         hasModifyingCTE: false,

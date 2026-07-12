@@ -1144,6 +1144,19 @@ unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionStmt<'mcx> {
     const TAG: NodeTag = NodeTag::T_AlterExtensionStmt;
 }
 
+#[derive(Default)]
+pub struct AlterExtensionContentsStmt<'mcx> {
+    pub extname: Option<&'mcx str>,
+    // +1 = add object, -1 = drop object.
+    pub action: i32,
+    pub objtype: crate::parsenodes::ObjectType,
+    pub object: Option<Node<'mcx>>,
+}
+
+unsafe impl<'mcx> NodeVariant<'mcx> for AlterExtensionContentsStmt<'mcx> {
+    const TAG: NodeTag = NodeTag::T_AlterExtensionContentsStmt;
+}
+
 impl<'mcx> Node<'mcx> {
     pub fn mk_raw_stmt(
         mcx: Mcx<'mcx>,

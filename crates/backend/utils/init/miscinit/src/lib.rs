@@ -22,6 +22,7 @@ pub use datadir::{checkDataDir, make_absolute_path, SetDataDir};
 pub use guard::SecContextGuard;
 pub use preload::{
     process_shared_preload_libraries, process_shared_preload_libraries_done,
+    process_shared_preload_libraries_in_progress,
     process_shmem_requests,
 };
 pub use lockfile::{
