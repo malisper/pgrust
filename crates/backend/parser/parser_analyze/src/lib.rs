@@ -31,13 +31,17 @@ use types_nodes::rawnodes::{RawStmt, SelectStmt};
 use types_nodes::{Node, NodeTag};
 use types_portal::QueryEnvHandle;
 
-// post_parse_analyze_hook (hook-surface.md section 2). Empty by default (S1
-// ships no consumer); a future pg_stat_statements installs here to see the
-// JumbleState (clocations) that JumbleQueryDiscard throws away.
+// post_parse_analyze_hook (hook-surface.md section 2). Empty by default;
+// pg_stat_statements installs here to see the JumbleState (clocations) that
+// JumbleQueryDiscard throws away. source_text is C's pstate->p_sourcetext.
+// C divergence: with compute_query_id off C still fires the hook with
+// jstate=NULL; here the tap is skipped — the sole consumer's body is a
+// no-op without a queryId.
 seam_core::tap!(
     pub fn tap_post_parse_analyze<'a, 'mcx>(
         query: &'a mut Query<'mcx>,
         jstate: &'a queryjumble::JumbleState<'mcx>,
+        source_text: &'a str,
     )
 );
 
@@ -73,9 +77,9 @@ pub fn parse_analyze_fixedparams<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if tap_post_parse_analyze::is_installed() {
+    if tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled() {
         let js = queryjumble::JumbleQuery(mcx, &mut query)?;
-        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
     } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
@@ -112,9 +116,9 @@ pub fn parse_analyze_sql_fn<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if tap_post_parse_analyze::is_installed() {
+    if tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled() {
         let js = queryjumble::JumbleQuery(mcx, &mut query)?;
-        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
     } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
@@ -192,9 +196,9 @@ pub fn parse_analyze_varparams<'a, 'mcx>(
     )?;
     let mut query = mem::take(unsafe { &mut *slot });
 
-    if tap_post_parse_analyze::is_installed() {
+    if tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled() {
         let js = queryjumble::JumbleQuery(mcx, &mut query)?;
-        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
     } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
@@ -230,9 +234,9 @@ pub fn parse_analyze_plpgsql<'a, 'mcx>(
 
     let mut query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
-    if tap_post_parse_analyze::is_installed() {
+    if tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled() {
         let js = queryjumble::JumbleQuery(mcx, &mut query)?;
-        tap_post_parse_analyze::call_if(|f| f(&mut query, &js));
+        tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
     } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }

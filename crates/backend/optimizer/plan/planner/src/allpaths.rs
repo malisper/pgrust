@@ -1447,6 +1447,8 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
     let seqscan = crate::pathnode::create_seqscan_path(run, rel, &required_outer, 0)?;
     add_path(run, rel, seqscan);
 
+    create_cbstore_sorted_paths(run, rel, &required_outer)?;
+
     // C: partial paths only when required_outer == NULL.
     if run.root.rel(rel).consider_parallel
         && crate::relnode::relids_is_empty(&required_outer)
@@ -1458,16 +1460,91 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
     Ok(())
 }
 
+// cbstore v5 sorted-column pathkeys (sorted-groupexec inc2): one extra
+// serial seqscan path per useful ordering of the footer-proven sorted
+// columns. Each claimed column is independently non-decreasing over the
+// whole part, so ANY permutation of the claimed columns is a valid
+// lexicographic ordering; candidates lead with each column in turn so a
+// GROUP BY/ORDER BY on any single proven column can match. Exprs come from
+// the rel's reltarget (canonical Vars; an unreferenced column can serve no
+// pathkey), ECs are looked up create_it=false (the index-path discipline),
+// and useless tails are truncated — no useful prefix means no extra path.
+// Partial paths claim nothing (per-worker RG dispatch order is not proven).
+fn create_cbstore_sorted_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rel: RelId,
+    required_outer: &types_pathnodes::Relids<'mcx>,
+) -> PgResult<()> {
+    let nsorted = run.root.rel(rel).cbstore_sorted_attnos.len();
+    if nsorted == 0 {
+        return Ok(());
+    }
+    let relid_index = run.root.rel(rel).relid;
+    let mut vars: Vec<(i16, types_nodes::node_tree::Node<'mcx>)> = Vec::with_capacity(nsorted);
+    for i in 0..nsorted {
+        let attno = run.root.rel(rel).cbstore_sorted_attnos[i];
+        let found = run.root.rel_reltarget(rel).exprs.iter().find_map(|&id| {
+            let n = *run.root.expr_node(id);
+            let v = n.as_var()?;
+            (v.varno == relid_index as i32 && v.varlevelsup == 0 && v.varattno == attno)
+                .then_some(n)
+        });
+        if let Some(n) = found {
+            vars.push((attno, n));
+        }
+    }
+    let mut added: Vec<mcx::PgVec<'mcx, types_pathnodes::PathKey>> = Vec::new();
+    for lead in 0..vars.len() {
+        let relids = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).relids);
+        let mut cand: mcx::PgVec<'mcx, types_pathnodes::PathKey> = mcx::PgVec::new_in(run.mcx);
+        for j in std::iter::once(lead).chain((0..vars.len()).filter(|&j| j != lead)) {
+            let (_, expr) = vars[j];
+            let Some(pk) = crate::pathkeys::make_pathkey_from_sortinfo_existing(
+                run, expr, &relids,
+            )?
+            else {
+                break;
+            };
+            if !crate::pathkeys::pathkey_is_redundant(run, pk, &cand) {
+                cand.push(pk);
+            }
+        }
+        let cand = crate::pathkeys::truncate_useless_pathkeys(run, rel, &cand)?;
+        if cand.is_empty() || added.iter().any(|a| a.as_slice() == cand.as_slice()) {
+            continue;
+        }
+        let id = crate::pathnode::create_seqscan_path(run, rel, required_outer, 0)?;
+        run.root.path_mut(id).base_mut().pathkeys =
+            types_pathnodes::relids::pgvec_clone_shallow(run.mcx, &cand);
+        add_path(run, rel, id);
+        added.push(cand);
+    }
+    Ok(())
+}
+
 // create_plain_partial_paths (allpaths.c).
 fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
     let parallel_workers = {
         let r = run.root.rel(rel);
-        ::allpaths::compute_parallel_worker(
+        let computed = ::allpaths::compute_parallel_worker(
             r,
             r.pages as f64,
             -1.0,
             crate::gucs::max_parallel_workers_per_gather(),
-        )
+        );
+        // Stage-4 pool arming (guc_tables::lane_pool): a cbstore baserel in
+        // an armed session plans exactly the requested DOP (clamped to the
+        // gather GUC; the helper already clamped to available cores) — the
+        // plan's forced-plans posture, no shape rules. Heap rels and
+        // unarmed sessions keep the computed size untouched.
+        if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 {
+            match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
+                dop if dop > 0 => dop.min(crate::gucs::max_parallel_workers_per_gather()),
+                _ => computed,
+            }
+        } else {
+            computed
+        }
     };
     if parallel_workers <= 0 {
         return Ok(());

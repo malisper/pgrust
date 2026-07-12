@@ -84,6 +84,24 @@ impl TupleHashEntryData {
         self.first_tuple = tuple;
     }
 
+    /// Assemble an entry outside the table — the lane compact-table handoff
+    /// export (nodeagg::merge): `tuple` is a handed-buffer image laid out
+    /// exactly like a relocated table entry (`[additionalsize][tuple]`),
+    /// `hash` was computed through the SAME table's
+    /// [`TupleHashTable::hash_slot`] so it merges against classic entries,
+    /// and `key`/`key_isnull` carry the byval kernel's key cache
+    /// (Expr-kernel tables ignore them; by-ref Text caches are excluded by
+    /// the compact admission).
+    #[inline]
+    pub fn from_parts(
+        tuple: NonNull<MinimalTupleData>,
+        hash: u32,
+        key: Datum,
+        key_isnull: bool,
+    ) -> TupleHashEntryData {
+        TupleHashEntryData { first_tuple: tuple, hash, key_isnull, key }
+    }
+
     /// The entry's pergroup prefix (entry_additional's per-entry form).
     #[inline]
     pub fn additional(&self, additionalsize: usize) -> Option<NonNull<u8>> {
@@ -117,6 +135,58 @@ enum ProbeKernel {
     /// stored-tuple store + deform entirely. Nondeterministic or invalid
     /// collations keep the Expr path (bit-identical semantics + C's errors).
     Text { att: u16 },
+}
+
+/// Per-grouping-column classification for the lane's multi-key packed
+/// grouping (multikey spike §2.4): each key column's canonical fixed-width
+/// integer class or raw-bytes text, decided ONCE at build from the (hash fn,
+/// eq fn) oid pair — the same pair-driven taxonomy as [`ProbeKernel::select`],
+/// widened to the byval int-class types whose equality is representation
+/// equality (grouping on them is injective under fixed-width packing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupKeyKind {
+    /// Byval integer-class column, canonical by representation; `width` is
+    /// the canonical payload width in bytes (2/4/8). Covers int2/int4/int8,
+    /// date (i32 days), time/timestamp/timestamptz (i64 micros).
+    Int { width: u8 },
+    /// text/varchar under a raw-bytes DETERMINISTIC collation (byte equality
+    /// == texteq, same gate as [`ProbeKernel::Text`]) — packable only through
+    /// the dict/intern id lane.
+    TextRaw,
+    /// Anything else (float NaN/±0 hazards, numeric scale-equality, abstract
+    /// exprs, non-kernel hash/eq pairs): refuses multi-key packing.
+    Other,
+}
+
+/// One grouping key column's multi-key classification: 0-based attno in the
+/// hashslot/input order + kind.
+#[derive(Clone, Copy, Debug)]
+pub struct GroupKeyCol {
+    pub att: u16,
+    pub kind: GroupKeyKind,
+}
+
+fn group_key_kind(hash: Oid, eq: Oid, collid: Oid) -> GroupKeyKind {
+    match (hash, eq) {
+        // hashint2 / int2eq
+        (449, 63) => GroupKeyKind::Int { width: 2 },
+        // hashint4 / int4eq
+        (450, 65) => GroupKeyKind::Int { width: 4 },
+        // hashint8 / int8eq
+        (949, 467) => GroupKeyKind::Int { width: 8 },
+        // hashdate / date_eq (date is an i32 day count)
+        (6415, 1086) => GroupKeyKind::Int { width: 4 },
+        // time_hash / time_eq (i64 microseconds)
+        (1688, 1145) => GroupKeyKind::Int { width: 8 },
+        // timestamp_hash / timestamp_eq | timestamptz_eq (i64 microseconds;
+        // both families share the representation and the hash proc)
+        (2039, 2052) | (2039, 1152) => GroupKeyKind::Int { width: 8 },
+        // hashtext / texteq under a raw-bytes deterministic collation
+        (400, 67) if ::varlena::text_collation_is_raw_bytes(collid).unwrap_or(false) => {
+            GroupKeyKind::TextRaw
+        }
+        _ => GroupKeyKind::Other,
+    }
 }
 
 impl ProbeKernel {
@@ -388,6 +458,8 @@ pub struct TupleHashTable<'mcx> {
     hashtab: SimpleHashIndex,
     additionalsize: usize,
     kernel: ProbeKernel,
+    /// Per-key-column multi-key classification (build-time, input order).
+    key_cols: Vec<GroupKeyCol>,
     tab_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     tab_eq_func: PgBox<'mcx, ExprState<'mcx>>,
     tableslot: SlotData<'mcx>,
@@ -449,6 +521,14 @@ pub fn build_tuple_hash_table<'mcx>(
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
+        key_cols: key_col_idx
+            .iter()
+            .zip(eqfuncoids.iter().zip(hashfunctions.iter().zip(collations.iter())))
+            .map(|(&col, (&eq, (&hash, &collid)))| GroupKeyCol {
+                att: (col - 1) as u16,
+                kind: group_key_kind(hash, eq, collid),
+            })
+            .collect(),
         tab_hash_expr,
         tab_eq_func,
         tableslot,
@@ -882,6 +962,25 @@ impl<'mcx> TupleHashTable<'mcx> {
     /// their per-row program would win nothing).
     pub fn staged_probe_supported(&self) -> bool {
         !matches!(self.kernel, ProbeKernel::Expr)
+    }
+
+    /// Per-grouping-column multi-key classification, in key (input) order —
+    /// the lane-v2 packed multi-key admission input (multikey spike §2.4).
+    #[inline]
+    pub fn key_cols(&self) -> &[GroupKeyCol] {
+        &self.key_cols
+    }
+
+    /// The single grouping key's integer width in bytes (2/4/8) when this
+    /// table probes through an integer kernel — the lane-v2 compact-table
+    /// (lanetable) admission input. `None` = Text/Expr kernel.
+    pub fn staged_probe_int_width(&self) -> Option<u8> {
+        match self.kernel {
+            ProbeKernel::Int2 { .. } => Some(2),
+            ProbeKernel::Int4 { .. } => Some(4),
+            ProbeKernel::Int8 { .. } => Some(8),
+            ProbeKernel::Text { .. } | ProbeKernel::Expr => None,
+        }
     }
 
     /// K2 batched hashing: `TupleHashTableHash` over a staged key lane in one

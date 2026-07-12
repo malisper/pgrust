@@ -5,6 +5,7 @@
 use core::mem::offset_of;
 
 use types_core::{Cardinality, Cost, Index, Oid, ParseLoc};
+use types_storage::storage::SyncCell;
 
 use crate::bitmapset::Bitmapset;
 use crate::list::{IntList, NodeList, OidList, OptNodeList};
@@ -14,7 +15,10 @@ use crate::tags::NodeTag;
 
 pub struct PlannedStmt<'mcx> {
     pub commandType: CmdType,
-    pub queryId: i64,
+    // repr(transparent) over i64 (layout unchanged): pg_stat_statements'
+    // ProcessUtility hook zeroes it through a shared ref, exactly where C
+    // scribbles pstmt->queryId in place.
+    pub queryId: SyncCell<i64>,
     pub planId: i64,
     pub hasReturning: bool,
     pub hasModifyingCTE: bool,
@@ -48,7 +52,7 @@ impl Default for PlannedStmt<'_> {
     fn default() -> Self {
         PlannedStmt {
             commandType: CmdType::CMD_UNKNOWN,
-            queryId: 0,
+            queryId: SyncCell::new(0),
             planId: 0,
             hasReturning: false,
             hasModifyingCTE: false,

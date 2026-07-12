@@ -126,6 +126,20 @@ pub(super) trait Operator<'mcx> {
     ) -> PgResult<OpStatus> {
         self.consume(node, batch, out, estate)
     }
+    /// Arm the direct sort-key feed on the operator's leaf (the lane mirror
+    /// of `SortFeedSource::key_direct`): probed ONCE by the sort breaker's
+    /// feed driver, BEFORE the first `produce` (arming decides what the
+    /// staging pass stages), and only for datum sorts. True arms
+    /// `BatchEmit::emit_key` — output column 0 served straight from the
+    /// leaf's staged column (value/null identical to `emit` +
+    /// `slot_getsomeattrs(1)`, no qual, same row order). Default: never arms.
+    fn arm_sort_key(
+        &mut self,
+        _node: &mut Self::Node,
+        _estate: &mut EStateData<'mcx>,
+    ) -> bool {
+        false
+    }
 }
 
 /// A pipeline endpoint. For scan-only pipelines this is the `RootAdapter`;
@@ -139,6 +153,17 @@ pub(super) trait Sink<'mcx> {
         tuple: ExecSlotId,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<SinkFeed>;
+    /// Combine-before-finish (the Stage-4 seam, reserved since Phase 2):
+    /// a parallel worker's breaker publishes its partial state for the
+    /// cross-worker combine here — the hash-agg breaker hands its whole
+    /// table to the leader by pointer (nodeagg::merge handoff; the leader
+    /// merges partition-parallel with the ported combinefn machinery) —
+    /// before `finish` flips the breaker to its Source face. Serial
+    /// pipelines and non-partial sinks keep the default no-op; drivers call
+    /// it exactly once, immediately before `finish`.
+    fn combine(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
     /// Upstream exhausted: final flush/cleanup.
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()>;
 }
@@ -157,6 +182,24 @@ pub(super) trait BatchEmit<'mcx> {
         i: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>>;
+    /// Direct sort-key read for staged row `i` (`SortFeedSource::emit_key`'s
+    /// lane mirror): only meaningful after the owning operator's
+    /// `arm_sort_key` returned true for the feed. `None` = staged row not
+    /// covered (narrow-tuple fallback); the caller takes the full `emit`
+    /// path for that row. Default: never serves.
+    fn emit_key(&mut self, _i: u32) -> Option<(::datum::Datum, bool)> {
+        None
+    }
+
+    /// Staged leading-sort-key lane of the current batch for the sort
+    /// breaker's streaming top-k cutoff: `(values, isnull, fallback_words)`
+    /// over the first `n` staged rows, or `None` when no key lane is staged
+    /// (the default — only the seqscan emit face arms one). The sink may
+    /// consult this only when its own top-k pre-filter was armed against the
+    /// SAME node (the arm and the emit face are wired together per feed).
+    fn topk_key_lane(&self, _n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3
@@ -516,6 +559,7 @@ where
     if let OpStatus::Paused = top.source_exhausted(sink, estate)? {
         unreachable!("chain build pipeline paused in flush: breaker sink returned Full")
     }
+    sink.combine(estate)?;
     sink.finish(estate)
 }
 
@@ -562,5 +606,6 @@ where
             OpStatus::Paused => unreachable!("build pipeline paused: breaker sink returned Full"),
         }
     }
+    sink.combine(estate)?;
     sink.finish(estate)
 }

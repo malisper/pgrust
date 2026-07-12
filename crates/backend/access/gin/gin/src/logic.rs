@@ -34,6 +34,7 @@ pub(crate) fn bool_consistent(
         key.queryCategories.as_slice(),
         key.jspOps.as_slice(),
         key.mapItemOperand.as_slice(),
+        key.trgmGraph.as_mut(),
         &mut recheck,
     )?;
     key.recheckCurItem = recheck;
@@ -61,6 +62,7 @@ pub(crate) fn tri_consistent(
         key.queryCategories.as_slice(),
         key.jspOps.as_slice(),
         key.mapItemOperand.as_slice(),
+        key.trgmGraph.as_mut(),
     )?;
     tmp.reset();
     Ok(res)

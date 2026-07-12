@@ -27,6 +27,7 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 execexpr = { path = "../execexpr" }
 execgrouping = { path = "../execgrouping" }
 lanefold = { path = "../lanefold" }
+lanetable = { path = "../lanetable" }
 execscan = { path = "../execscan" }
 exectuples = { path = "../exectuples" }
 executils = { path = "../executils" }
@@ -36,10 +37,12 @@ tuplesort = { path = "../../utils/sort/tuplesort" }
 sort_storage = { path = "../../utils/sort/sort_storage" }
 hyperloglog = { path = "../../lib/hyperloglog" }
 hashfn = { path = "../../../common/hashfn" }
+heaptuple = { path = "../../access/common/heaptuple" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 pqformat = { path = "../../libpq/pqformat" }
+varlena = { path = "../../utils/adt/varlena" }
 
 [dev-dependencies]
 detoast = { path = "../../access/common/detoast" }

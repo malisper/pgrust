@@ -76,6 +76,46 @@ pub fn init_seams() {
             Ok(out)
         },
     );
+    tuplesort_seams::cbstore_ingest_sort::set(|tup_desc, keys, work_mem| {
+        use tuplesort_seams::CbSortKeyKind;
+        assert!(!keys.is_empty());
+        let ssup: Vec<SortSupport> = keys
+            .iter()
+            .map(|&(attno, kind)| SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: attno,
+                comparator: match kind {
+                    CbSortKeyKind::Int16 => SortComparator::Int16,
+                    CbSortKeyKind::Int32 => SortComparator::Int32,
+                    CbSortKeyKind::Int64 => SortComparator::SignedI64,
+                    CbSortKeyKind::TextC => SortComparator::TextC,
+                },
+            })
+            .collect();
+        let ts = Tuplesort::begin_heap_with_keys(tup_desc, &ssup, work_mem, TUPLESORT_NONE);
+        Ok(Box::new(CbIngestSortImpl { ts }))
+    });
+}
+
+// cbstore ingest-sort seam impl: a heap tuplesort driven value-wise.
+struct CbIngestSortImpl {
+    ts: Tuplesort,
+}
+
+impl tuplesort_seams::CbIngestSort for CbIngestSortImpl {
+    fn put_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        self.ts.putvalues(values, isnull)
+    }
+
+    fn sort(&mut self) -> PgResult<()> {
+        self.ts.performsort()
+    }
+
+    fn next_row(&mut self, values: &mut [Datum], isnull: &mut [bool]) -> PgResult<bool> {
+        self.ts.getvalues(true, values, isnull)
+    }
 }
 
 pub const TUPLESORT_NONE: i32 = 0;
@@ -665,6 +705,12 @@ macro_rules! dispatch_cmp {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
+                // Extension gist opclass comparators (btree_gist sorted
+                // builds); indirect call per compare, nothing to fold.
+                SortComparator::GistOpclass(_) => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
                 // Bool keys are cold catalog sorts; not worth a monomorph arm.
                 SortComparator::Bool => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
@@ -1088,6 +1134,30 @@ impl Tuplesort {
         })
     }
 
+    /// Streaming top-k cutoff boundary (lane-v2 sort-feed pre-filter; no C
+    /// counterpart — a pure read of bounded-heap state). While the bounded
+    /// heap is full (`TSS_BOUNDED`, entered at `make_bounded_heap`), the heap
+    /// root `memtuples[0]` is the WORST surviving top-k member under the
+    /// reversed comparator — the current k-th boundary. Returns its leading
+    /// sort-key datum (`datum1`, authentic: `set_bound` disarms abbreviation)
+    /// and null flag; `None` outside `TSS_BOUNDED` (heap not yet full, or not
+    /// a bounded sort).
+    ///
+    /// SOUND FOR BY-VALUE LEADING KEYS ONLY: for by-ref keys `datum1` points
+    /// into the root's stored tuple, which is freed the moment a later put
+    /// evicts it (`puttuple_bounded_replace`). The lane admits only by-value
+    /// kernel families, so the returned Datum is a plain value copy.
+    pub fn topk_boundary(&self) -> Option<(Datum, bool)> {
+        self.0.with(|st| {
+            if st.status != TupSortStatus::Bounded {
+                return None;
+            }
+            debug_assert!(st.bounded && st.have_datum1 && st.abbrev.is_none());
+            let root = st.memtuples.first()?;
+            Some((root.datum1, root.isnull1))
+        })
+    }
+
     /// `tuplesort_reset`: recycle the batch, keep keys + memtuples capacity.
     pub fn reset(&mut self) {
         self.0.with_mut(|st| {
@@ -1148,6 +1218,56 @@ impl Tuplesort {
                 minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
             };
             st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+        })
+    }
+
+    /// Heap-variant put straight from deformed values (the cbstore ingest-sort
+    /// seam; no slot exists on that path).
+    pub fn putvalues(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let SortVariant::Heap { tup_desc } = &st.variant else {
+                panic!("tuplesort_putvalues on a non-heap tuplesort")
+            };
+            let mtup = heaptuple::heap_form_minimal_tuple(
+                st.tuplecontext.mcx(),
+                tup_desc,
+                values,
+                isnull,
+                0,
+            )?;
+            let t_len = mtup.t_len() as usize;
+            let tuple = mtup.as_ptr().cast_mut().cast::<MinimalTupleData>();
+            // Ownership moves to tuplecontext (bulk-freed at end).
+            mem::forget(mtup);
+            let mut isnull1 = false;
+            // SAFETY: fresh live image formed under tup_desc just above.
+            let datum1 = unsafe {
+                minimal_getattr(tuple, st.sort_keys[0].ssup_attno as i32, tup_desc, &mut isnull1)
+            };
+            st.puttuple_common(tuple, datum1, isnull1, maxalign(t_len) as i64)
+        })
+    }
+
+    /// Heap-variant get into deformed-value buffers (len >= the descriptor's
+    /// natts). By-ref datums point into sort-owned memory, live until the
+    /// next call. false = drained.
+    pub fn getvalues(
+        &mut self,
+        forward: bool,
+        values: &mut [Datum],
+        isnull: &mut [bool],
+    ) -> PgResult<bool> {
+        self.0.with_mut(|st| {
+            let Some(stup) = st.gettuple_common(forward)? else {
+                return Ok(false);
+            };
+            let SortVariant::Heap { tup_desc } = &st.variant else {
+                panic!("tuplesort_getvalues on a non-heap tuplesort")
+            };
+            debug_assert!(!stup.tuple.is_null());
+            // SAFETY: live sort-owned minimal-tuple image under tup_desc.
+            unsafe { mgetattr::minimal_deform(stup.tuple, tup_desc, values, isnull) };
+            Ok(true)
         })
     }
 

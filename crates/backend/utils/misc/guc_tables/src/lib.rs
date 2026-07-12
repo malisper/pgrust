@@ -8,6 +8,7 @@
 pub mod backing;
 pub mod consts;
 pub mod hooks;
+pub mod lane_pool;
 pub mod option_sets;
 pub mod session;
 mod slots;

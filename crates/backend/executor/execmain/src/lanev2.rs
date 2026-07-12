@@ -34,8 +34,11 @@
 //! `PGRUST_JIT_DEFORM` switch and is byte-identity-safe (no `pg_settings` /
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
+mod exprkey;
 mod push;
 mod stats;
+
+pub use exprkey::ExprKeyState;
 
 use std::sync::OnceLock;
 
@@ -111,7 +114,19 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
 ) {
     if !::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
         let Some(q) = ss.ss.qual.as_deref() else { return };
-        let Some(c) = q.scan_cmp_const_clauses() else { return };
+        let Some(c) = q.scan_cmp_const_clauses() else {
+            // strsearch contains-LIKE kernel (single `col LIKE '%lit%'`
+            // clause census): varkey-staged text lane + one memmem bitmap
+            // pass per batch; every other admission stays per-row. The
+            // stitch arms below no-op on this shape (nquals = 0, unused
+            // deform plan), so the registration is this one call.
+            if q.scan_contains_clause().is_some()
+                && ::nodeseqscan::seq_scan_batch_soa_prepare_contains(ss, estate)
+            {
+                lane_trace(&format!("seqscan contains qual bitmap armed ({ctx})"));
+            }
+            return;
+        };
         let prefix = c.clauses[..c.n as usize]
             .iter()
             .map(|&(col, _, _)| col as i32 + 1)
@@ -147,6 +162,214 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
     }
 }
 
+/// The feed shapes that arm heap-scan staging (kernel-qual selection bitmap,
+/// SoA prefix deform, stitched tiers, varlane staging) on a SeqScan before a
+/// lane pipeline drives it. `arm_scan_staging` is the ONE seam owning the
+/// arming decision + staging setup across every feed site (agg fold /
+/// per-row build feeds, sort feed, join build and probe feeds), so a second
+/// staging backend (cbstore column windows) plugs in by matching the scan's
+/// source kind inside that helper — not by growing per-site variants.
+enum ScanFeedShape<'a, 'mcx> {
+    /// Row-emit feed with no SoA lane reader above the scan: arm the
+    /// kernel-qual selection bitmap, and on drain pipelines (`stitch`) the
+    /// tier-2 stitched body + projection stitching. `ctx` labels the
+    /// lane-trace line.
+    RowFeed { ctx: &'static str, stitch: bool },
+    /// Hash-agg FOLD drain feed: varlane staging, or the fused full-prefix
+    /// deform (forced when the fold reads lane columns or K2 wants the key;
+    /// the kernel-qual bitmap is detected inside the prefix), falling back
+    /// to the qual-only bitmap when the prefix is unarmable; stitched tiers
+    /// armed (drain pipeline).
+    HashAggFold { agg: &'a ::nodeagg::AggStateData<'mcx> },
+    /// Hash-agg PER-ROW drain feed: unforced fused prefix (bitmap detected
+    /// inside), qual-only bitmap fallback; stitched tiers armed.
+    HashAggPerRow { agg: &'a ::nodeagg::AggStateData<'mcx> },
+    /// Forced fold-prefix deform ONLY (no bitmap fallback, no stitch arm):
+    /// the plain-agg fold feed, and the decide-phase admission probes (via
+    /// `probe_arm_fold_prefix`). Reaches only unprojected scans (the fold
+    /// deciders refuse projected ones before choosing Fold).
+    FoldPrefix { agg: &'a ::nodeagg::AggStateData<'mcx> },
+}
+
+/// Arm the scan staging a lane feed consumes, per feed shape. Idempotent at
+/// every site (re-preparing the same shape is a no-op; the bitmap arm
+/// early-returns once armed). This is the single seam the cbstore staging
+/// variant (CbstoreSource tranche) plugs into: every arm below stages
+/// through `nodeseqscan`'s SoA seam, whose batch primitives dispatch on the
+/// scan's AM inside `tableam` — heap scans stage page batches
+/// (`heap_getnextpagebatch` + `heap_batch_deform_soa`), cbstore scans stage
+/// column windows (`next_window` + `batch_deform`, <= WINDOW_ROWS <=
+/// SOA_MAX_ROWS, RG/granule/block pruning inside the staging call) — so the
+/// feed sites stay untouched and one arm serves both source kinds. The
+/// cbstore-only differences live below the seam: the fill honors
+/// `lane_fill_wanted`/`dict_want` (dict-lane publication), the store slot is
+/// the scan's virtual slot (`store_slot`, needed columns only), and the
+/// prefix publish is a virtual-slot no-op.
+fn arm_scan_staging<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    shape: ScanFeedShape<'_, 'mcx>,
+) -> PgResult<()> {
+    // PREWHERE v1 (cbstore scans with a qual, phase4 design §3): try the
+    // lane-qual arm FIRST — it subsumes the kernel-bitmap arms (staged
+    // clauses cheapest-first with zone folds + per-clause late
+    // materialization, the dict text tier, hybrid requal tails) over the
+    // same forced full-prefix deform, widened to the feed's own SoA ask.
+    // Varlane fold feeds COEXIST (q22coexist): the fold's one varlena column
+    // joins the lane's prefix ask — the cbstore (virtual-)prefix deform
+    // hosts any column type, and the lane's completing deform fills it for
+    // survivor windows, exactly the rows the fold touches (the fold drain
+    // walks the selection bitmap and the guard proof restricts to it).
+    // Refusal falls through to the heap-shaped arms below (the varkey
+    // staging for varlane folds), byte-safely.
+    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        let min_prefix = match &shape {
+            ScanFeedShape::RowFeed { .. } => 0,
+            ScanFeedShape::HashAggFold { agg } | ScanFeedShape::HashAggPerRow { agg } => {
+                if ss.ss.ps_ProjInfo.is_none() {
+                    fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            ScanFeedShape::FoldPrefix { agg } => fused_agg_soa_prefix(agg, ss).unwrap_or(0),
+        };
+        let vcol = match &shape {
+            ScanFeedShape::HashAggFold { agg } => {
+                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
+            }
+            _ => None,
+        };
+        let ask = match vcol {
+            Some(c) => min_prefix.max(c as i32 + 1),
+            None => min_prefix,
+        };
+        if ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)? {
+            if vcol.is_some() {
+                lane_trace("cbstore prewhere+varlane dual arm engaged");
+            }
+            return Ok(());
+        }
+    }
+    match shape {
+        ScanFeedShape::RowFeed { ctx, stitch } => {
+            arm_seq_scan_qual_bitmap(ss, estate, ctx, stitch);
+        }
+        ScanFeedShape::HashAggFold { agg } => {
+            // Arm the SoA page-batch deform + kernel-qual bitmap for the
+            // fused drive when the whole read prefix is knowable
+            // (unprojected scans only: with a projection the agg reads
+            // output columns, which are not commensurable with scan-column
+            // prefixes). ONE deform serves both consumers:
+            // `seq_scan_batch_soa_prepare` detects the kernel qual inside
+            // the prefix and arms the selection bitmap on the same staged
+            // SoA the fold lanes read. When no prefix is knowable
+            // (projected / shape-unknown), fall back to the qual-only bitmap
+            // arm so a kernel-shaped filter still vectorizes (survivors
+            // deform lazily per-row). The fold feed FORCES the deform when
+            // the fold reads lane columns (the <3-column break-even is a
+            // deform+gather artifact; the fold consumes the columns
+            // directly).
+            let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+                fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(vcol) =
+                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
+            {
+                // Varlena lane: re-arm the varkey staging (idempotent; the
+                // decide-phase probe already proved it arms).
+                let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
+                debug_assert!(armed, "varlane re-arm is idempotent");
+            } else if soa_prefix > 0 {
+                // Force the SoA deform when the fold reads lane columns, OR when
+                // the K2 deferred probe could host this shape (the K2 key lane
+                // must be staged even for count(*)-only plans, whose fold reads
+                // nothing — the prefix covers grouping columns, so arming stages
+                // the key). A non-fixed-width prefix still refuses to arm, and
+                // the feed then keeps the arrival probe — byte-safe either way.
+                let force = ::nodeagg::agg_lanefold_plan(agg)
+                    .is_some_and(|plan| !plan.cols.is_empty())
+                    || scan_k2_wanted(agg)
+                    || scan_mk_plan_wanted(agg);
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Full-prefix deform unarmable (non-fixed-width column in
+                    // the prefix) or declined (break-even). Try the cbstore
+                    // dict-group columnar arm (§2.1) first — count(*)-only
+                    // plans reach here without decide's probe-arm (their fold
+                    // reads no lane columns, but K2 wants the key staged).
+                    // Otherwise: a column-reading fold plan cannot get here —
+                    // `decide_agg_lane` probe-armed this prefix (or armed
+                    // dict-group, which the re-prepare above keeps) before
+                    // choosing Fold — so the SoA has no fold reader and the
+                    // qual-only bitmap arm is safe.
+                    if !try_arm_cb_dictgroup(agg, ss, estate)
+                        && !try_arm_cb_multikey_dict(agg, ss, estate)
+                    {
+                        arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
+                    }
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
+                }
+            } else {
+                // Fold with no knowable prefix = a plan reading no lane
+                // columns (count(*)-only); the bitmap is the only SoA user.
+                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed", true);
+            }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed);
+            // idempotent, no-op when the bitmap is not armed.
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
+        }
+        ScanFeedShape::HashAggPerRow { agg } => {
+            // Same prefix bound and fallbacks as the fold arm (comment
+            // there), but the per-row feed reads no SoA columns, so the
+            // deform is never forced.
+            let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+                fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+            } else {
+                0
+            };
+            if soa_prefix > 0 {
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false, true);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Unarmable/declined full prefix; the per-row feed reads
+                    // no SoA columns, so fall back to the qual-only bitmap.
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only", true);
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
+                }
+            } else {
+                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed", true);
+            }
+            // Tier-2 arm for the fused-deform-armed bitmap (drain feed).
+            ::nodeseqscan::seq_scan_stitch_arm(ss);
+        }
+        ScanFeedShape::FoldPrefix { agg } => {
+            let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
+        }
+    }
+    Ok(())
+}
+
+/// Decide-phase admission probe: arm the forced fold prefix NOW so an
+/// unarmable prefix (non-fixed-width column) is known BEFORE committing to
+/// ownership. Returns whether the SoA deform armed. Shared by the hashed and
+/// plain fold deciders; the plain fold feed re-arms the identical shape (a
+/// no-op) through `ScanFeedShape::FoldPrefix`.
+fn probe_arm_fold_prefix<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
+    Ok(::nodeseqscan::seq_scan_batch_soa(ss).is_some())
+}
+
 // ===========================================================================
 // Standalone scan ownership: DELIBERATELY REFUSED (admission economics,
 // design §4; measured on the integration bench 2026-07-11, q9-class).
@@ -169,6 +392,23 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
 // pipelines stay fully exercised via the agg/sort/join breaker feeds.
 const STANDALONE_SCAN_NO_UPSIDE: bool = true;
 
+/// Tiny-input row floor for standalone cbstore scan admission (the
+/// `TinyInputFloor` refuse): relations below this never pay the qual-
+/// translate/arm admission cascade. Default = one cbstore granule (8,192
+/// rows — the store's decode/zone unit; a sub-granule scan is a handful of
+/// staged windows either way, bench 2026-07-12: lane-ON == lane-OFF to noise
+/// at this size, so the cascade is pure tax). `PGRUST_LANE_V2_TINY_FLOOR`
+/// overrides for floor-calibration benches.
+fn cb_tiny_floor() -> u64 {
+    static FLOOR: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_TINY_FLOOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8_192)
+    })
+}
+
 // ===========================================================================
 // SeqScan ownership (Phase 1 first vertical slice, now push-driven). The
 // pipeline is source → filter/project operator → root pull-adapter, over the
@@ -187,13 +427,95 @@ pub fn try_own_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
-    // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
-    if STANDALONE_SCAN_NO_UPSIDE {
+    // Standalone scan ownership: refused for heap (STANDALONE_SCAN_NO_UPSIDE
+    // — the incumbent row drive carries the identical kernels), but ADMITTED
+    // for cbstore scans WITH AN ARMED QUAL KERNEL: the documented exception
+    // (phase4 design §7 / design-doc §4 "shrinks when standalone scans gain
+    // a kernel the row drive lacks"). The incumbent cbstore per-row drive
+    // (`getnextslot`) has NO SoA staging, NO kernel-qual bitmap and NO
+    // dict/PREWHERE tier, so lane ownership of a QUAL'D scan is staged-
+    // kernel upside. A kernel-less cbstore scan (no qual, or an unarmable
+    // one) is the heap case exactly — per-pull capacity-one adapter overhead
+    // with nothing to vectorize — and REFUSES: bench-gated 2026-07-12 on the
+    // 2M-row cbstore microbench, where unconditional admission ran
+    // count-star 1.33x, group-int (sorted-agg pull feed) 1.21x and
+    // merge-join-agg 1.10x lane-ON vs lane-OFF while the qual'd shapes won
+    // 0.45-0.84x; the qual-armed gate keeps the wins and returns the rest
+    // to the per-row drive. Per-PULL tick cadence (once per call).
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    if STANDALONE_SCAN_NO_UPSIDE && !is_cb {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
         return Ok(None);
     }
-    if !seq_scan_fusible(ss, estate)? {
+    if is_cb {
+        // Memoized per node: the arm outcome is static, and a refused scan
+        // must not re-run the fusibility + arm cascade per pulled tuple
+        // (measured +20% on kernel-less count(*) shapes). A refusal is
+        // byte-safe regardless of the dynamic gates, so the memoized-false
+        // path is one branch; the admitted path still re-checks the
+        // dynamic gates inside seq_scan_fusible every call.
+        // Refusal split (refusal-audit rider, 2026-07-14): a QUAL'D scan
+        // that failed to arm any staged kernel is "qual-not-vectorizable"
+        // (the walker/translate residual — the countable survivor of the
+        // dead fixed-width-prefix refusal); a kernel-less NO-QUAL scan is
+        // the plain admission-economics refuse. Stateless per pull off the
+        // memoized verdict.
+        let refused_reason = if ss.ss.qual.is_some() {
+            RefuseReason::QualNotVectorizable
+        } else {
+            RefuseReason::AdmissionEconomicsNoConsumer
+        };
+        match ss.cb_standalone_verdict() {
+            Some(false) => {
+                stats::tick_refused(
+                    ShapeClass::CbScan,
+                    if ss.cb_standalone_tiny() {
+                        RefuseReason::TinyInputFloor
+                    } else {
+                        refused_reason
+                    },
+                );
+                return Ok(None);
+            }
+            Some(true) => {
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+            }
+            None => {
+                // Tiny-input floor (§4 endgame refuse-set, armed with the
+                // noqualfeed tranche): below the floor the whole scan fits a
+                // handful of windows, so lane ownership can never recover
+                // even its own admission cascade (qual walk + translate +
+                // arm). Checked BEFORE the cascade — the refuse costs one
+                // footer metadata read, memoized. Floor = one granule
+                // (8,192 rows, cbstore's zone/decode unit); PGRUST_LANE_V2_
+                // TINY_FLOOR overrides for floor-calibration benches.
+                if let Some(rows) = ::nodeseqscan::seq_scan_cb_total_rows(ss, estate)? {
+                    if rows < cb_tiny_floor() {
+                        ss.set_cb_standalone_tiny();
+                        ss.set_cb_standalone_verdict(false);
+                        stats::tick_refused(ShapeClass::CbScan, RefuseReason::TinyInputFloor);
+                        return Ok(None);
+                    }
+                }
+                // First call: never memoize on a dynamic-gate refusal.
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+                // Arm the qual staging (PREWHERE lane or kernel bitmap).
+                // Stitch stays off: tier-2 bodies are drain-pipeline-only,
+                // and this is a per-pull feed.
+                arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
+                let armed = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ss.set_cb_standalone_verdict(armed);
+                if !armed {
+                    stats::tick_refused(ShapeClass::CbScan, refused_reason);
+                    return Ok(None);
+                }
+            }
+        }
+    } else if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
     debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
@@ -228,13 +550,20 @@ fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    // Engagement class: cbstore scans are counted apart (their admission
+    // economics and corpus differ — see ShapeClass::CbScan).
+    let class = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        ShapeClass::CbScan
+    } else {
+        ShapeClass::SeqScan
+    };
     // Dynamic per-call gates: these may legitimately vary call to call.
     if estate.es_epq_active {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Epq);
+        stats::tick_refused(class, RefuseReason::Epq);
         return Ok(false);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SeqScan, RefuseReason::Backward);
+        stats::tick_refused(class, RefuseReason::Backward);
         return Ok(false);
     }
     // Static verdict, memoized on the node at first evaluation: (a) stability
@@ -248,11 +577,11 @@ fn seq_scan_fusible<'mcx>(
     let refuse = seq_scan_refuse_reason(ss, estate)?;
     let v = match refuse {
         None => {
-            stats::tick_owned(ShapeClass::SeqScan);
+            stats::tick_owned(class);
             true
         }
         Some(r) => {
-            stats::tick_refused(ShapeClass::SeqScan, r);
+            stats::tick_refused(class, r);
             false
         }
     };
@@ -420,6 +749,16 @@ impl<'mcx> Operator<'mcx> for SeqScanFilterProject {
         node.set_lane_cursor(n, n);
         Ok(OpStatus::NeedInput)
     }
+
+    fn arm_sort_key(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> bool {
+        // The incumbent fused sort drive's matcher, shared: no qual, output
+        // column 0 is exactly one scan Var the SoA plan covers.
+        ::nodeseqscan::seq_scan_sortkey_direct(node, estate)
+    }
 }
 
 /// `SeqScanFilterProject`'s per-row body as a `BatchEmit` face: identical
@@ -439,6 +778,20 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     ) -> PgResult<Option<ExecSlotId>> {
         ::postgres_seams::check_for_interrupts::call()?;
         ::nodeseqscan::seq_scan_batch_emit(self.node, estate, i)
+    }
+
+    /// Direct sort-key read (armed by `arm_sort_key`): value/null straight
+    /// from the staged SoA key column — no per-row interrupt seam, exactly
+    /// the incumbent `SeqScanSortSource::emit_key` cadence (page-level CFI
+    /// inside the staging fetch covers the batch).
+    #[inline(always)]
+    fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
+        ::nodeseqscan::seq_scan_batch_key(self.node, i)
+    }
+
+    #[inline]
+    fn topk_key_lane(&self, n: u32) -> Option<(&[::datum::Datum], &[bool], &[u64])> {
+        ::nodeseqscan::seq_scan_topk_key_lane(self.node, n)
     }
 }
 
@@ -1033,6 +1386,13 @@ pub enum AggLaneChoice {
     /// lanefold whole-batch transition kernels (residual transitions
     /// per-row).
     Fold,
+    /// Lane answers the whole AGG_PLAIN node from cbstore part metadata
+    /// (footer row counts + zone maps + footer sums) — zero rows staged, end
+    /// states finalized by the real finalfns (the metaagg arm; phase4 §7
+    /// re-entry, armed 2026-07-14). Structural admission only: the per-call
+    /// runtime gates (MVCC snapshot, AM answerability, guard-interval
+    /// re-proof) fall back to the per-row drive byte-identically.
+    Meta,
 }
 
 ::mcx::forget_safe_nodrop!(AggLaneChoice);
@@ -1047,15 +1407,32 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     choice: &mut Option<AggLaneChoice>,
     stage_slot: &mut Option<ExecSlotId>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // AGG_PLAIN (ungrouped) routes to the fold drive: no breaker needed (a
+    // AGG_PLAIN (ungrouped) routes to the plain drive: no breaker needed (a
     // single group has no per-group read-back — feed + finalize is the whole
     // node inside one call), but the same staged-batch fold applies, with
     // `lanefold::fold_batch` (the ungrouped kernel, CSE included) in place of
-    // the grouped probe+fold.
-    if ::nodeagg::agg_plain_fold_admissible(agg) {
+    // the grouped probe+fold. cbstore scans additionally route WITHOUT a
+    // classified fold plan (lane-v2-noqualfeed): the plain decider can pick
+    // the per-row drain feed there — batch window decode + the full per-row
+    // transition program — because the cbstore incumbent is the per-pull
+    // Volcano drive, not the fused batched arm the heap refusal defends.
+    if ::nodeagg::agg_plain_fold_admissible(agg)
+        || (::nodeagg::agg_plain_perrow_admissible(agg)
+            && ::nodeseqscan::seq_scan_is_cbstore(ss))
+    {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
+    }
+    // AGG_PLAIN exact-DISTINCT (count/sum/avg(DISTINCT x) — nodeagg's
+    // set-mode admission): NOT batch-drainable (pertrans_sort non-empty), so
+    // neither the fold drive above nor the legacy fused arm can host it —
+    // the incumbent is the per-tuple pull with a per-group TUPLESORT. The
+    // set drive replaces that sort with the exact-distinct hash set
+    // (uniqExact analog, cbstore-v2 plan §2.3).
+    if ::nodeagg::agg_plain_distinct_set_admissible(agg) {
+        return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
         return Ok(None);
@@ -1063,7 +1440,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     let c = match *choice {
         Some(c) => c,
         None => {
-            let c = decide_agg_lane(agg, ss, estate)?;
+            let c = decide_agg_lane(agg, ss, xk, estate)?;
             *choice = Some(c);
             c
         }
@@ -1076,7 +1453,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, estate)?;
+    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -1090,8 +1467,18 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
 fn decide_agg_lane<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggLaneChoice> {
+    // Projected scans: the expression-group-key arm (exprkey module) — the
+    // scan computes the (single) grouping key, everything else bare Vars.
+    // Refusal (reason ticked there) keeps the per-row/refuse economics below.
+    if ss.ss.ps_ProjInfo.is_some() && ::nodeagg::agg_lanefold_plan(agg).is_some() {
+        *xk = exprkey::decide_exprkey(agg, ss, estate);
+        if xk.is_some() {
+            return Ok(AggLaneChoice::Fold);
+        }
+    }
     let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
         Some(plan) if ss.ss.ps_ProjInfo.is_none() => {
             if !plan.vguards.is_empty() {
@@ -1111,10 +1498,13 @@ fn decide_agg_lane<'mcx>(
                 true
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
-                // width column) is known BEFORE committing to ownership.
-                let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
-                ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+                // width column) is known BEFORE committing to ownership. A
+                // cbstore scan whose prefix refuses only on varlena columns
+                // gets the dict-group columnar arm (§2.1) — the text grouping
+                // key stages as dict codes, everything else as decoded Datums.
+                probe_arm_fold_prefix(agg, ss, estate)?
+                    || try_arm_cb_dictgroup(agg, ss, estate)
+                    || try_arm_cb_multikey_dict(agg, ss, estate)
             }
         }
         _ => false,
@@ -1212,7 +1602,43 @@ fn agg_hash_build_fold_feed<'mcx>(
     // key, with the key and every spill-replay column staged in the armed
     // SoA lanes. `None` = the per-row arrival probe (byte-identical).
     let k2 = scan_k2_shape(agg, ss, estate);
-    trace_feed(if k2.is_some() {
+    // Stage-2.2 compact-table arming, per build, on top of the K2 shape
+    // (nodeagg::compact module doc: int-width key kernel, AGGSPLIT_SIMPLE,
+    // not spill-eligible by estimate; runtime backstop migrates to the C
+    // table). Non-armed verdicts tick their observability reasons; the
+    // build itself stays lane-owned either way.
+    let compact = k2.is_some()
+        && match ::nodeagg::agg_hash_compact_try_arm(agg) {
+            ::nodeagg::CompactArm::Armed => true,
+            ::nodeagg::CompactArm::KeyKind => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactKeyKind);
+                false
+            }
+            ::nodeagg::CompactArm::SpillRisk => {
+                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactSpillRisk);
+                false
+            }
+            ::nodeagg::CompactArm::Off => false,
+        };
+    // Stage-2.1 dict-group registration (per build): the K2 key column was
+    // opted into dict lanes by `try_arm_cb_dictgroup`. Dict-answered windows
+    // take the per-epoch code-grouping path inside `scan_k2_batch`; Raw
+    // windows keep the Raw keys path — both through the same global table.
+    let dictgroup = k2
+        .as_ref()
+        .map_or(false, |s| ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) == Some(s.key_col));
+    let mut dgs = DictGroupScratch::default();
+    // Packed multi-key admission + compact arm (multikey spike): only for
+    // shapes the single-key K2 machinery does not own.
+    let mk = if k2.is_none() { scan_mk_shape(agg, ss, estate) } else { None };
+    let mut mks = MkScratch::default();
+    trace_feed(if mk.is_some() {
+        "agg-over-seqscan: staged fold feed engaged (multi-key packed)"
+    } else if dictgroup {
+        "agg-over-seqscan: staged fold feed engaged (dict-group armed)"
+    } else if compact {
+        "agg-over-seqscan: staged fold feed engaged (compact table)"
+    } else if k2.is_some() {
         "agg-over-seqscan: staged fold feed engaged (k2 probe)"
     } else {
         "agg-over-seqscan: staged fold feed engaged"
@@ -1227,6 +1653,13 @@ fn agg_hash_build_fold_feed<'mcx>(
         debug_assert!(plan.vguards.is_empty() || lanefold_varlane_col(plan).is_some());
         lanefold_varlane_col(plan)
     };
+    // Dual arm (q22coexist): when the PREWHERE lane owns the staging, the
+    // varlena fold column sits at its NATURAL prefix index (the lane's
+    // completing deform fills it for survivor windows) — no varkey remap.
+    // The lane fills lazily, so the guard proof below must restrict itself
+    // to the selection bitmap (unselected cells may be stale pointers).
+    let lane_owned = ::nodeseqscan::seq_scan_batch_lane_armed(ss);
+    let vremap = if lane_owned { None } else { vcol };
     let mut k2s = ScanK2Scratch::default();
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -1252,27 +1685,55 @@ fn agg_hash_build_fold_feed<'mcx>(
                     .expect("guarded fold plans read lane columns");
                 let nwords = (n as usize).div_ceil(64);
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
-                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
-                    *r = !fb;
+                // Proof domain: every staged non-fallback row — a superset of
+                // the rows the fold will touch, so a Pass is sound and a
+                // Demote at worst conservative. Under the PREWHERE lane the
+                // staged columns fill lazily (survivor windows only), so the
+                // domain must intersect the selection bitmap: unselected
+                // cells may be stale pointers, and the fold touches only
+                // selected rows anyway (requal survivors ⊆ selected bits).
+                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                    Some(sel) if lane_owned => {
+                        for ((r, fb), s) in
+                            rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
+                        {
+                            *r = s & !fb;
+                        }
+                    }
+                    _ => {
+                        for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                            *r = !fb;
+                        }
+                    }
                 }
                 if n % 64 != 0 {
                     rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
-                // SAFETY: selected rows are staged non-fallback rows, whose
-                // lane values are live page datum pointers (varkey staging /
-                // prefix deform contract) — vguard columns readable at their
-                // varlena header byte.
-                demote = unsafe {
-                    match vcol {
-                        Some(c) => ::lanefold::check_guards(
-                            plan,
-                            &VarLaneCols { soa, col: c },
-                            &rows[..nwords],
-                            |_| None,
-                        ),
-                        None => ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None),
-                    }
-                } == ::lanefold::GuardCheck::Demote;
+                // Empty domain: nothing to prove and nothing will fold —
+                // never probe lane cells (a survivor-less lane window ran no
+                // completing deform; every cell is stale).
+                if rows[..nwords].iter().any(|&w| w != 0) {
+                    // SAFETY: proof rows are staged non-fallback rows — under
+                    // a varkey/prefix staging every staged row's lane values
+                    // are live page datum pointers (staging contract); under
+                    // the PREWHERE lane the domain is selected rows of a
+                    // survivor window, whose completing deform filled every
+                    // prefix column with decoded datums — vguard columns
+                    // readable at their varlena header byte either way.
+                    demote = unsafe {
+                        match vremap {
+                            Some(c) => ::lanefold::check_guards(
+                                plan,
+                                &VarLaneCols { soa, col: c },
+                                &rows[..nwords],
+                                |_| None,
+                            ),
+                            None => {
+                                ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                            }
+                        }
+                    } == ::lanefold::GuardCheck::Demote;
+                }
             }
         }
         if demote {
@@ -1294,9 +1755,43 @@ fn agg_hash_build_fold_feed<'mcx>(
                 .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
             if all_lane {
                 scan_k2_batch(
-                    agg, ss, shape, stage_slot, &mut k2s, &mut idxs, &mut groups, n, estate,
+                    agg,
+                    ss,
+                    shape,
+                    stage_slot,
+                    &mut k2s,
+                    dictgroup.then_some(&mut dgs),
+                    &mut idxs,
+                    &mut groups,
+                    n,
+                    estate,
                 )?;
                 continue;
+            }
+            // A fallback-bearing batch routes through the arrival probe (the
+            // C table): the compact table must hand its groups over FIRST so
+            // every group lives in exactly one table (states carried over
+            // byte-for-byte; no-op when not armed).
+            ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+        }
+        // Packed multi-key batch (multikey spike): only while the compact
+        // table stays armed — after a backstop migration (scan_mk_batch =
+        // false) or a fallback-bearing batch, this and every later batch
+        // route through the per-row arrival probe below (the C table now
+        // holds every group; there is no multi-key staged C probe).
+        if let Some(shape) = &mk {
+            if ::nodeagg::agg_hash_compact_armed(agg) {
+                let all_lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
+                if all_lane {
+                    if scan_mk_batch(
+                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, estate,
+                    )? {
+                        continue;
+                    }
+                } else {
+                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+                }
             }
         }
         idxs.clear();
@@ -1321,7 +1816,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         // staging, pinned for the staged batch); guarded plans passed
         // `check_guards` above; the rest is `agg_fold_staged`'s per-feed
         // contract.
-        match (::nodeseqscan::seq_scan_batch_soa(ss), vcol) {
+        match (::nodeseqscan::seq_scan_batch_soa(ss), vremap) {
             (Some(soa), Some(cix)) => unsafe {
                 agg_fold_staged(agg, &VarLaneCols { soa, col: cix }, &idxs, &groups)?
             },
@@ -1334,7 +1829,9 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
         }
     }
-    // Finalize (delegated): spill finish, merge handoff, phase flip.
+    // Combine-before-finish (delegated; the Stage-4 seam): spill finish +
+    // merge handoff, then the phase flip.
+    ::nodeagg::agg_hash_build_combine(agg, estate)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
 }
 
@@ -1398,7 +1895,19 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
             c
         }
     };
-    if c != AggLaneChoice::Fold {
+    // Metadata-answer arm: the whole node from cbstore footers, zero rows
+    // staged. Runtime gates (MVCC snapshot / AM answerability / guard
+    // re-proof) are re-checked per call; a runtime refusal falls back to the
+    // per-row Volcano drive byte-identically (it may raise C's overflow
+    // error at C's row — exactly what the guard re-proof protects).
+    if c == AggLaneChoice::Meta {
+        // exec_agg's top-of-call guard (exec_agg_meta re-checks it too).
+        if ::nodeagg::agg_is_done(agg) {
+            return Ok(Some(None));
+        }
+        return try_meta_agg_answer(agg, ss, estate);
+    }
+    if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
     // exec_agg's top-of-call guard: the one result row is out; a drained agg
@@ -1410,23 +1919,106 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // aggbuild floor counts builds, not calls; a plain node builds once per
     // (re)scan — this drive runs the whole feed inside one call).
     stats::tick_owned(ShapeClass::AggBuild);
-    agg_plain_fold_feed(agg, ss, estate)?;
+    if c == AggLaneChoice::Fold {
+        agg_plain_fold_feed(agg, ss, estate)?;
+    } else {
+        agg_plain_perrow_feed(agg, ss, estate)?;
+    }
     // Retrieve (delegated): finalize + HAVING + project — one row (or none,
     // when the var-free HAVING rejects it), setting `agg_done`.
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
 
+/// Build feed for the plain PER-ROW drive (`AggLaneChoice::PerRow` — cbstore
+/// scans only, lane-v2-noqualfeed): drain the Phase-1 scan pipeline (batch
+/// window decode; the PREWHERE/kernel-bitmap arms engage when the qual has a
+/// kernel shape) into the FULL per-row transition program. This replaces the
+/// per-pull Volcano chain (`exec_agg` → `exec_proc_node` → `getnextslot`)
+/// with one drained loop over staged windows; no fold plan is required, so
+/// arbitrary transition expressions (the Q30-class SUM(x op k) batteries)
+/// are hosted.
+///
+/// Byte-identity: the same rows flow through the same qual (staged bitmap =
+/// the kernel qual's verdict; other quals run scalar per row inside the
+/// emit) and the same per-row transition program (`agg_plain_build_accept` =
+/// `exec_agg`'s single-group loop body) in the same row order — only the
+/// pull chain is elided. The transvalues, and therefore the one finalized
+/// output row, are identical.
+fn agg_plain_perrow_feed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(::nodeseqscan::seq_scan_is_cbstore(ss));
+    // Row-emit staging (drain pipeline): PREWHERE v1 / kernel bitmap when a
+    // qual kernel exists; a no-qual scan stages bare batch-decoded windows.
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "plain agg per-row feed", stitch: true },
+    )?;
+    // initialize_aggregates (delegated): fresh initval pergroups; a rescan
+    // re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainAggBuildSink { agg };
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
+}
+
+/// The plain agg as breaker Sink: accept = the full per-row transition
+/// program (`exec_agg`'s single-group loop body, delegated); finish = no-op
+/// (finalize/HAVING/project is the caller's `agg_plain_finish`, exactly as
+/// the fold drive sequences it). Always `NeedMore` — a breaker consumes its
+/// whole input.
+struct PlainAggBuildSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for PlainAggBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodeagg::agg_plain_build_accept(self.agg, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+/// Batch-granular feed: the default loop, monomorphized (same rows, same
+/// order; the per-row dyn dispatch elided) — mirrors `HashAggBuildSink`.
+impl<'mcx> BatchSink<'mcx> for PlainAggBuildSink<'_, 'mcx> {}
+
 /// The structural lane choice for an AGG_PLAIN Agg over a SeqScan, decided
-/// once at the first call. Fold or Refuse only — the lane never takes plain
-/// shapes per-row: the incumbent legacy fused `exec_agg_batched` drive is
-/// already batched with per-row transitions, so a per-row lane feed has
-/// nothing to win (admission economics, design §4).
+/// once at the first call.
+///
+/// Heap scans: Fold or Refuse only — the lane never takes heap plain shapes
+/// per-row: the incumbent legacy fused `exec_agg_batched` drive is already
+/// batched with per-row transitions, so a per-row lane feed has nothing to
+/// win (admission economics, design §4).
+///
+/// cbstore scans (lane-v2-noqualfeed, phase4 §7 re-entry): the incumbent
+/// fused drive is gated OFF (`table_scan_supports_pagebatch` false — lane-OFF
+/// stays the per-row Volcano oracle), so the heap Refuse arms take the
+/// PER-ROW drain feed instead: batch window decode + the full per-row
+/// transition program beats the per-pull Volcano chain regardless of quals
+/// (the shape the old kernel-armed gate mis-scoped — its 1.21-1.33x evidence
+/// measured the standalone capacity-one RowFeed adapter, not a drained
+/// breaker feed). The one cbstore Refuse left is the count(*)-only census
+/// shape: transitions reading NO input columns decode nothing on the per-row
+/// drive (empty needed set) and are the MetaAggScan footer path's target —
+/// a batch-decoded feed has nothing to win there (distinct reason so the
+/// gate can watch it).
 fn decide_plain_agg_lane<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggLaneChoice> {
-    // Every Refuse below is admission economics (§4): the legacy fused
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    // Heap Refuse = admission economics (§4): the legacy fused
     // `exec_agg_batched` drive (or the per-tuple path) already owns the shape
     // at least as well as a lane feed could. One tick per memoized per-node
     // choice.
@@ -1434,31 +2026,150 @@ fn decide_plain_agg_lane<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
         Ok(AggLaneChoice::Refuse)
     };
-    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+    // Metadata-answer arm first (phase4 §7 re-entry, armed 2026-07-14): a
+    // bare cbstore scan under an all-footer-answerable transition set
+    // answers from part metadata — strictly cheaper than any fold feed, so
+    // it preempts the fold decision below wherever it admits.
+    if meta_agg_admissible(agg, ss, estate)? {
+        return Ok(AggLaneChoice::Meta);
+    }
+    // count(*)-only census shapes (the transition program reads no input
+    // columns): heap's incumbent fused drive advances those per batch with
+    // zero per-row work (the storeless advance / `qualifying_count` bitmap
+    // census); cbstore's per-row drive decodes nothing (empty needed set)
+    // and the footer answer (MetaAggScan) is the real lever — a bare-cbstore
+    // count(*) is answered by the Meta arm above; one reaching here has a
+    // qual/projection/uncovered transition. Deliberate refuse-set entries,
+    // one tick per memoized choice.
+    if ::nodeagg::agg_batch_outer_prefix(agg) == Some(0) {
+        if is_cb {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CountOnlyCensus);
+            return Ok(AggLaneChoice::Refuse);
+        }
         return refuse();
+    }
+    // Fold-readiness: a classified fold plan reading lane columns on an
+    // unprojected scan (projected scans read output columns, which are not
+    // commensurable with scan-column prefixes — the hashed breaker's
+    // scoping, verbatim), with the forced prefix deform probe-armed NOW so
+    // an unarmable prefix (non-fixed-width column) is known BEFORE
+    // committing.
+    let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
+        Some(plan) if ss.ss.ps_ProjInfo.is_none() && !plan.cols.is_empty() => {
+            probe_arm_fold_prefix(agg, ss, estate)?
+        }
+        _ => false,
     };
-    // Projected scans: the agg reads output columns, which are not
-    // commensurable with scan-column prefixes — no SoA lane feed (the hashed
-    // breaker's scoping, verbatim).
-    if ss.ss.ps_ProjInfo.is_some() {
-        return refuse();
+    if fold_ready {
+        return Ok(AggLaneChoice::Fold);
     }
-    // count(*)-only plans read no lane columns: the incumbent fused drive
-    // already advances those per batch with zero per-row work (the storeless
-    // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
-    // Deliberate refuse-set entry.
-    if plan.cols.is_empty() {
-        return refuse();
+    if is_cb {
+        return Ok(AggLaneChoice::PerRow);
     }
-    // Probe-arm the deform now so an unarmable prefix (non-fixed-width
-    // column) is known BEFORE committing: the plain fold reads the SoA lanes
-    // directly, so a disarmed deform keeps the incumbent.
-    let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
-    if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-        return refuse();
+    refuse()
+}
+
+/// Metadata-answer arm kill switch: default ON when the lane is on;
+/// `PGRUST_LANE_V2_METAAGG=0`/`off` disarms (A/B tooling — both sides are
+/// value-identical by exec_agg_meta's end-state contract, so the switch is
+/// byte-identity-safe like `PGRUST_LANE_V2_K2`).
+fn metaagg_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_METAAGG").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Structural admission for the metadata-answer arm, evaluated once per
+/// memoized per-node choice: a BARE cbstore scan (variant Plain — no qual,
+/// no projection — and no zone quals; v1 requires literally no qual) under
+/// an AGG_PLAIN node whose EVERY transition is footer-answerable
+/// (`classify_meta`: count(*)/count(col)/min/max over bare int-family Vars,
+/// sum/avg over affine divk==1 int transforms; FILTER/DISTINCT/ORDER BY and
+/// the float/bool/bitwise/text tiers refuse). Ticks the metaagg class only
+/// for cbstore-backed scans — heap plain aggs are out of the arm's scope
+/// (heap has no part metadata) and fall through silently.
+fn meta_agg_admissible<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return Ok(false);
     }
-    Ok(AggLaneChoice::Fold)
+    if !metaagg_enabled() {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::EnvOff);
+        return Ok(false);
+    }
+    if ::nodeagg::agg_meta_plan(agg).is_none()
+        || !::nodeseqscan::seq_scan_meta_agg_ok(ss, estate)?
+    {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaShape);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Per-call runtime half of the metadata-answer arm. `Ok(Some(_))` = the
+/// node was answered from footers (one finalized row or a drained None);
+/// `Ok(None)` = runtime refusal — the caller falls through to the per-row
+/// Volcano drive byte-identically.
+fn try_meta_agg_answer<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // RG xmin visibility folds against the scan snapshot: MVCC only (the
+    // same gate the fused metacount arm carried on the old branch).
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::NonMvccSnapshot);
+        return Ok(None);
+    }
+    let metas = ::nodeagg::agg_meta_plan(agg).expect("Meta choice requires a meta plan");
+    // Guarded sum cols join the minmax request: the guard re-proof below
+    // needs the visible rows' exact (min, max).
+    let cols: Vec<u16> = metas
+        .iter()
+        .filter(|t| {
+            matches!(t.kind, ::lanefold::MetaKind::Min | ::lanefold::MetaKind::Max)
+                || t.guard.is_some()
+        })
+        .map(|t| t.col)
+        .collect();
+    let mut sum_cols: Vec<u16> =
+        metas.iter().filter(|t| t.kind.needs_sum()).map(|t| t.col).collect();
+    sum_cols.sort_unstable();
+    sum_cols.dedup();
+    let Some(res) = ::nodeseqscan::seq_scan_meta_agg(ss, estate, &cols, &sum_cols)? else {
+        // AM declined: parallel scan desc or an uncovered column type.
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaRuntime);
+        return Ok(None);
+    };
+    // Data-level guard re-proof against the visible rows' footer min/max: a
+    // failed interval falls through to the ordinary drives, whose per-row
+    // program raises C's int4 overflow error at C's row. rows == 0 passes
+    // vacuously (empty minmax stays (MAX, MIN)).
+    let guards_ok = res.rows == 0
+        || metas.iter().all(|t| match t.guard {
+            None => true,
+            Some((lo, hi)) => res
+                .minmax
+                .iter()
+                .find(|e| e.0 == t.col)
+                .is_some_and(|&(_, mn, mx)| lo <= mn && mx <= hi),
+        });
+    if !guards_ok {
+        stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaRuntime);
+        return Ok(None);
+    }
+    // One OWNED tick per metadata-answered execution event.
+    stats::tick_owned(ShapeClass::MetaAgg);
+    lane_trace(&format!("metaagg: footer answer, rows={}", res.rows));
+    Ok(Some(::nodeagg::exec_agg_meta(agg, estate, res.rows, &res.minmax, &res.sums)?))
 }
 
 /// Feed for the plain fold drive: per staged page batch, compose the row
@@ -1494,8 +2205,7 @@ fn agg_plain_fold_feed<'mcx>(
     // Same one-deform staging as the hashed fold feed; the deform is FORCED
     // (count(*)-only plans were refused, so the fold always reads lane
     // columns). Re-preparing with the same shape is a no-op.
-    let soa_prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
-    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, true, true);
+    arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
@@ -1522,20 +2232,42 @@ fn agg_plain_fold_feed<'mcx>(
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                     .expect("plain fold plans read lane columns");
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
-                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
-                    *r = !fb;
+                // Proof domain: under the PREWHERE lane the staged columns
+                // fill lazily (survivor windows only), so intersect the
+                // selection bitmap — the fold touches only selected rows
+                // (requal survivors ⊆ selected bits); unselected cells may be
+                // stale pointers (vguard columns via the virtual prefix).
+                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                    Some(sel) => {
+                        for ((r, fb), s) in
+                            rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
+                        {
+                            *r = s & !fb;
+                        }
+                    }
+                    None => {
+                        for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                            *r = !fb;
+                        }
+                    }
                 }
                 if n % 64 != 0 {
                     rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
-                // SAFETY: selected rows are staged non-fallback rows, whose
-                // lane values are live deformed datums (prefix deform
-                // contract); the plain drive admits no varlena lanes, so no
-                // vguard column is ever probed here.
-                demote = unsafe {
-                    ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
-                        == ::lanefold::GuardCheck::Demote
-                };
+                // Empty domain: nothing will fold — never probe lane cells
+                // (a survivor-less lane window ran no completing deform).
+                if rows[..nwords].iter().any(|&w| w != 0) {
+                    // SAFETY: proof rows are staged non-fallback rows with
+                    // live deformed lane values (prefix deform contract;
+                    // under the PREWHERE lane the domain is selected rows of
+                    // a survivor window, whose completing deform filled every
+                    // prefix column — vguard columns readable at their
+                    // varlena header byte).
+                    demote = unsafe {
+                        ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                            == ::lanefold::GuardCheck::Demote
+                    };
+                }
             }
         }
         if demote {
@@ -1619,6 +2351,254 @@ fn agg_plain_fold_feed<'mcx>(
     Ok(())
 }
 
+// ===========================================================================
+// Plain-agg exact-DISTINCT drive (the uniqExact analog — cbstore-v2 plan
+// §2.3; nodeagg's distinctset module). Hosts AGG_PLAIN nodes whose every
+// DISTINCT aggregate is a set-mode entry (count/sum/avg(DISTINCT x) over
+// int2/4/8 or deterministic-collation text — `distinct_set_kind`'s matrix):
+// the per-row feed runs the SAME evaltrans park + ordered-input collect the
+// per-tuple pull runs (the collect inserts into the per-group set instead of
+// a tuplesort), and the delegated finalize replays each distinct value once
+// through the real transfn.
+//
+// Value identity (order-relaxation charter): the set changes only the
+// transfn REPLAY ORDER over the identical distinct-value multiset, and the
+// admitted transitions are order-insensitive (counting / exact integer /
+// Int128 accumulation), so transvalues — and output bytes — match the C
+// sort-based path on every input. Memory stays C-shaped: past the work_mem
+// budget the group degrades to the very tuplesort it displaced (nodeagg
+// `degrade_distinct_set`), whose own spill machinery then applies.
+// ===========================================================================
+
+/// The plain exact-DISTINCT build sink: accept = the delegated per-row
+/// transition program (`agg_plain_build_accept`, set collect included);
+/// finish = nothing (the drive runs the delegated `agg_plain_finish` after
+/// the drain, mirroring the fold drive's retrieve step).
+///
+/// `key_direct` (v2, the batched-insert lever): when the node's one
+/// transition is a set-mode integer DISTINCT over exactly outer column 0
+/// (`agg_plain_distinct_direct_shape`) AND the scan armed the direct key
+/// staging (`seq_scan_sortkey_direct` — the sort breaker's own matcher/
+/// staging, shared), `accept_batch` serves each staged row's key straight
+/// off the SoA column and hands the whole batch to one staged set insert
+/// (batched hashing + row-order probes) — no per-row transition program, no
+/// per-row collect scan. Narrow-tuple fallback rows keep the full per-row
+/// path. Value identity: the per-row program's entire effect for the
+/// admitted shape is "park outer col 0 + set-insert", and set insertion
+/// order is replay-invisible (the admission's order-insensitivity grant).
+struct PlainDistinctAggBuildSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    key_direct: bool,
+    keys: Vec<::datum::Datum>,
+    ints: Vec<i64>,
+    hashes: Vec<u64>,
+}
+
+impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
+    fn new(agg: &'a mut ::nodeagg::AggStateData<'mcx>, key_direct: bool) -> Self {
+        PlainDistinctAggBuildSink {
+            agg,
+            key_direct,
+            keys: Vec::new(),
+            ints: Vec::new(),
+            hashes: Vec::new(),
+        }
+    }
+}
+
+impl<'mcx> Sink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodeagg::agg_plain_build_accept(self.agg, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if !self.key_direct {
+            // Default per-row delegation loop, verbatim.
+            for i in pos..n {
+                if let Some(slot) = emit.emit(i, estate)? {
+                    ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                }
+            }
+            return Ok(());
+        }
+        // Direct staged-key feed (page-level CFI in the staging fetch —
+        // the sort breaker's emit_key cadence).
+        self.keys.clear();
+        let mut saw_null = false;
+        for i in pos..n {
+            match emit.emit_key(i) {
+                Some((d, false)) => self.keys.push(d),
+                Some((_, true)) => saw_null = true,
+                None => {
+                    // Narrow-tuple fallback row: the full per-row path.
+                    if let Some(slot) = emit.emit(i, estate)? {
+                        ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
+                    }
+                }
+            }
+        }
+        ::nodeagg::agg_plain_distinct_insert_batch(
+            self.agg,
+            estate,
+            &self.keys,
+            saw_null,
+            &mut self.ints,
+            &mut self.hashes,
+        )
+    }
+}
+
+/// Try to let the lane own an AGG_PLAIN exact-DISTINCT `Agg` over a
+/// `SeqScan` (section doc above). `Some(result)` = the lane drove this call;
+/// `None` = refused (the caller falls to the per-tuple pull — whose
+/// collect/replay uses the SAME set state, so a per-call fallback is
+/// value-safe in both directions).
+fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
+    // gates re-checked per call; structural verdict memoized on the node).
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: the one result row is out; a drained agg
+    // stays drained until rescan clears `agg_done`.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // One OWNED tick per lane-owned plain-agg build event (the gate's
+    // aggbuild floor counts builds; this drive runs the whole feed inside
+    // one call).
+    stats::tick_owned(ShapeClass::AggBuild);
+    trace_feed("plain-agg distinct-set drive engaged");
+    // v2 batched-insert arm: single integer set-mode DISTINCT over exactly
+    // outer column 0 with the scan's direct key staging (no qual, covered
+    // column — the sort breaker's own matcher). Probed BEFORE the first
+    // produce, exactly as `sort_feed` probes: arming decides staging.
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        // Kernel-shaped quals vectorize via the staged selection bitmap; the
+        // set feed itself is per-row (the DISTINCT park is per-row).
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
+    // initialize_aggregates (delegated): fresh initval pergroups + cleared
+    // sets; a rescan re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    // Retrieve (delegated): set replay + finalize + HAVING + project — one
+    // row (or none, when the var-free HAVING rejects it), setting agg_done.
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
+}
+
+/// Try to let the lane own `Agg(AGG_PLAIN, all-DISTINCT) → Sort → SeqScan`
+/// by SKIPPING the Sort — the q9/Q14-family plan shape: the planner serves a
+/// single DISTINCT aggregate by sorting the whole input and marking the
+/// aggregate `aggpresorted` (adjacent-dedup). When EVERY transition of the
+/// node is replayed from an exact-DISTINCT set
+/// (`agg_plain_distinct_set_only` — presorted entries get force-armed into
+/// set-mode), the Sort's ONLY observable effect is that dedup, so feeding
+/// the UNSORTED scan into the sets produces identical values with the whole
+/// O(n log n) sort deleted: the order-relaxation charter's headline grant.
+/// `None` = refused; the caller falls to the per-tuple `exec_agg` over
+/// `exec_sort` (which, if the drive armed set-mode on an earlier call,
+/// still computes identical values — the arming doc in nodeagg).
+#[inline]
+pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Refusals here are SILENT: every refused offer falls through to
+    // `try_own_sorted_agg_over_sort`, whose gates tick the identical
+    // accounting for this node (a tick here too would double-count the
+    // (class, reason) cadence the gate files ratchet).
+    if !::nodeagg::agg_plain_distinct_set_only(agg) {
+        return Ok(None);
+    }
+    // Dynamic per-call gates (mirror the sorted-agg-over-sort arm).
+    if estate.es_epq_active || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        return Ok(None);
+    }
+    // Sort-side structural verdict — the sort arms' shared memo (covers
+    // random access + the child scan's own refuse-set, EXPLAIN ANALYZE
+    // included).
+    let fusible = match s.lane_fusible {
+        Some(v) => v,
+        None => {
+            let refuse = sort_refuse_reason(s, estate)?;
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::SortFeed, r);
+            }
+            let v = refuse.is_none();
+            s.lane_fusible = Some(v);
+            v
+        }
+    };
+    if !fusible {
+        return Ok(None);
+    }
+    // v1 scope: SeqScan child only (the q9-class shape; index/bitmap-fed
+    // sorts under an all-DISTINCT plain agg keep the C drive). Silent for
+    // the same fall-through reason as above.
+    if !matches!(&*s.outer, crate::procnode::PlanStateNode::SeqScan(_)) {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // C's CHECK_FOR_INTERRUPTS at the would-be ExecSort feed entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+    stats::tick_owned(ShapeClass::AggBuild);
+    trace_feed("plain-agg distinct-set skip-sort drive engaged");
+    // Arm set-mode for the presorted entries BEFORE any input (sticky;
+    // value-safe on later fallbacks — nodeagg's arming doc).
+    ::nodeagg::agg_force_distinct_set(agg);
+    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
+        unreachable!("matched SeqScan above")
+    };
+    // v2 batched-insert arm (the over-SeqScan drive's twin; the Sort node's
+    // tlist is its child's, so outer column 0 through the skipped Sort IS
+    // scan output column 0 — the same column `seq_scan_sortkey_direct`
+    // proves is one covered scan Var with no qual).
+    let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
+        && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+    if key_direct {
+        trace_feed("distinct-set direct key feed armed");
+    } else {
+        arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
+        ::nodeseqscan::seq_scan_stitch_arm(ss);
+    }
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
+}
+
 /// Build phase of the hash-agg breaker over a SeqScan feed (once, lazily on
 /// the first call), with the choice-dependent feed: drain the scan pipeline
 /// into the breaker sink — the lanefold whole-batch feed for
@@ -1631,88 +2611,31 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     c: AggLaneChoice,
     stage_slot: &mut Option<ExecSlotId>,
+    xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
     if ::nodeagg::agg_hash_table_filled(agg) {
         return Ok(());
     }
-    // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
-    // drive when the whole read prefix is knowable (unprojected scans
-    // only: with a projection the agg reads output columns, which are not
-    // commensurable with scan-column prefixes). ONE deform serves both
-    // consumers: `seq_scan_batch_soa_prepare` detects the kernel qual
-    // inside the prefix and arms the selection bitmap on the same staged
-    // SoA the fold lanes read. When no prefix is knowable (projected /
-    // shape-unknown), fall back to the qual-only bitmap arm so a
-    // kernel-shaped filter still vectorizes (survivors deform lazily
-    // per-row). The fold feed FORCES the deform when the fold reads lane
-    // columns (the <3-column break-even is a deform+gather artifact; the
-    // fold consumes the columns directly).
-    let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
-        fused_agg_soa_prefix(agg, ss).unwrap_or(0)
-    } else {
-        0
-    };
     // One OWNED tick per lane-owned hash-agg build event (the gate's
     // aggbuild floor counts builds, not calls) — fold-fed and per-row
     // feeds alike.
     stats::tick_owned(ShapeClass::AggBuild);
+    // Staging arm per feed shape (see `arm_scan_staging` — the one seam for
+    // deform + bitmap + stitched-tier setup across the feed sites).
     if c == AggLaneChoice::Fold {
-        if let Some(vcol) =
-            ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
-        {
-            // Varlena lane: re-arm the varkey staging (idempotent; the
-            // decide-phase probe already proved it arms).
-            let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
-            debug_assert!(armed, "varlane re-arm is idempotent");
-        } else if soa_prefix > 0 {
-            // Force the SoA deform when the fold reads lane columns, OR when
-            // the K2 deferred probe could host this shape (the K2 key lane
-            // must be staged even for count(*)-only plans, whose fold reads
-            // nothing — the prefix covers grouping columns, so arming stages
-            // the key). A non-fixed-width prefix still refuses to arm, and
-            // the feed then keeps the arrival probe — byte-safe either way.
-            let force = ::nodeagg::agg_lanefold_plan(agg)
-                .is_some_and(|plan| !plan.cols.is_empty())
-                || scan_k2_wanted(agg);
-            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
-            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                // Full-prefix deform unarmable (non-fixed-width column in
-                // the prefix) or declined (break-even). A column-reading
-                // fold plan cannot get here — `decide_agg_lane` probe-armed
-                // this exact prefix before choosing Fold — so the SoA has
-                // no fold reader and the qual-only bitmap arm is safe.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only", true);
-            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
-            }
-        } else {
-            // Fold with no knowable prefix = a plan reading no lane
-            // columns (count(*)-only); the bitmap is the only SoA user.
-            arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed", true);
+        if let Some(xk) = xk.as_deref_mut() {
+            // Expression-group-key feed (projected scans; exprkey module).
+            // A staging rebuild that lost the arm falls back per-row inside
+            // the feed's per-batch route — byte-safe either way.
+            let _ = exprkey::exprkey_rearm(xk, ss, estate);
+            return exprkey::exprkey_build_fold_feed(agg, ss, xk, stage_slot, estate);
         }
-        // Tier-2 arm for the fused-deform-armed bitmap (drain feed);
-        // idempotent, no-op when the bitmap is not armed.
-        ::nodeseqscan::seq_scan_stitch_arm(ss);
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
         agg_hash_build_fold_feed(agg, ss, stage_slot, estate)
     } else {
-        if soa_prefix > 0 {
-            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false, true);
-            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                // Unarmable/declined full prefix; the per-row feed reads
-                // no SoA columns, so fall back to the qual-only bitmap.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only", true);
-            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
-            }
-        } else {
-            arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed", true);
-        }
-        // Tier-2 arm for the fused-deform-armed bitmap (drain feed).
-        ::nodeseqscan::seq_scan_stitch_arm(ss);
+        arm_scan_staging(ss, estate, ScanFeedShape::HashAggPerRow { agg })?;
         let mut sink = HashAggBuildSink { agg };
         drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
     }
@@ -1728,6 +2651,97 @@ fn scan_k2_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
         && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
         && !::nodeagg::agg_lanefold_has_resid(agg)
         && ::nodeagg::agg_hash_staged_probe_col(agg).is_some()
+}
+
+// ===========================================================================
+// Stage-2.1 dict-code grouping (cbstore-v2 plan §2.1 — the LowCardinality /
+// DuckDB dict-grouping analog): when the K2 scan feed's single grouping key
+// is a dict-encoded cbstore column, the feed opts the key into the dict lane
+// (`dict_want`) and groups each dict-answered window ON THE u32 CODES — a
+// per-epoch (row-group) DIRECT-INDEXED array maps code → the group's live
+// pergroup state in the GLOBAL C-ported tuplehash, resolved LAZILY on the
+// first surviving row of each (epoch, code): dict[code] is materialized ONCE
+// per epoch and probed through the same `agg_hash_probe_staged` leg the Raw
+// K2 path uses (same first-arrival insertion order — the resolve happens AT
+// the first row that would have probed — same entry initialization, same
+// spill decisions, same read-back). Per-row work drops from hash+probe to
+// one array index; the k-per-epoch resolves are off the hot path, which is
+// why the GLOBAL table stays the C tuplehash (full semantics/spill/retrieve
+// delegation; the compact table's text-arena hosting is a non-blocking
+// follow-up — its probe-speed edge is amortized away here).
+//
+// Rejected alternative (charter option A): per-epoch PARTIAL states merged
+// at epoch boundaries — needs combine machinery per transtype and breaks
+// first-arrival order; direct global pointers keep the C transition code
+// running exactly once per row into the one true state.
+//
+// NULLs: dict lanes are NULL-free by the cbstore per-chunk proof (the store
+// writes no NULLs today) — asserted per batch, never assumed structurally.
+// Raw windows (non-dict-encoded key chunks) fall back to the Raw K2 keys
+// path within the same build, byte-identically.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_DICTGROUP` kill switch (default ON inside the lane).
+fn dictgroup_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_DICTGROUP").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Dict-group admission + columnar staging arm, tried when the standard
+/// fixed-width-prefix arm refused (a varlena column — typically the text
+/// grouping key itself — sits inside the fold prefix). Admission (§2.1):
+///   * cbstore scan, unprojected (callers gate), lane fold plan classified;
+///   * the K2 deferred probe wants the shape (`scan_k2_wanted`: unguarded,
+///     no residual transitions, single kernel-hostable grouping key);
+///   * no varlena-guard transitions (str MIN/MAX keeps the varkey staging /
+///     per-row paths — mixed vguard+dict shapes are a follow-up);
+///   * the columnar staging arms (`seq_scan_cb_dictgroup_arm`).
+/// True = the SoA staging is armed with the key opted into dict lanes; the
+/// fold feed's dict-group batch path consumes the codes. False = fail-open
+/// (per-row / Raw paths, byte-identical), ticking the observability reason.
+fn try_arm_cb_dictgroup<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if !dictgroup_enabled()
+        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !scan_k2_wanted(agg)
+    {
+        return false;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::DictGroupShape);
+        false
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return refused() };
+    if !plan.vguards.is_empty() {
+        return refused();
+    }
+    let Some(key) = ::nodeagg::agg_hash_staged_probe_col(agg) else { return refused() };
+    // The fold must not read the key column's SoA Datum cells: they are
+    // STALE while a dict lane answers (e.g. `count(url) ... GROUP BY url`
+    // reads url as a transition arg). Refuse — the Raw paths host it.
+    if plan.cols.iter().any(|&c| c == key) {
+        return refused();
+    }
+    let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, key) {
+        return refused();
+    }
+    true
+}
+
+/// Per-build dict-group state: the per-epoch direct-indexed code → global
+/// pergroup map (`slots`, `ndict`-sized, cleared at every epoch roll) plus
+/// the one-element hash scratch for the lazy per-code resolve.
+#[derive(Default)]
+struct DictGroupScratch {
+    epoch: Option<u64>,
+    slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    hash1: Vec<u32>,
 }
 
 /// K2 admission inputs for the scan-fed fold feed. `needed` is the spill
@@ -1810,6 +2824,7 @@ fn scan_k2_batch<'mcx>(
     shape: &ScanK2,
     stage_slot: &mut Option<ExecSlotId>,
     k2s: &mut ScanK2Scratch,
+    dgs: Option<&mut DictGroupScratch>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
@@ -1820,6 +2835,20 @@ fn scan_k2_batch<'mcx>(
     for i in 0..n {
         if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
             rows.push(i);
+        }
+    }
+    // Stage-2.1 dict-group window (registered key + a dict-answered window):
+    // group on the u32 codes through the per-epoch direct-indexed map — no
+    // per-row hashing/probing at all. A Raw-answered window (non-dict key
+    // chunk) falls through to the Raw keys path below; both paths resolve
+    // into the same global table in the same row order.
+    if let Some(dgs) = dgs {
+        let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .and_then(|soa| soa.dict_lane(shape.key_col as usize));
+        if let Some(lane) = lane {
+            return scan_dictgroup_batch(
+                agg, ss, shape, stage_slot, dgs, idxs, groups, rows, lane, estate,
+            );
         }
     }
     keys.clear();
@@ -1833,6 +2862,24 @@ fn scan_k2_batch<'mcx>(
             keys.push(kv[i as usize]);
             knull.push(kn[i as usize]);
         }
+    }
+    // Stage-2.2 compact-table batch (nodeagg::compact): probe + new-group
+    // init inside the compact table — PG hashing bypassed entirely — and the
+    // usual whole-batch fold over the returned pergroups. `false` = the
+    // runtime backstop migrated the table into the C tuplehash BEFORE this
+    // batch; fall through to the staged probe below (same rows, same order,
+    // the migrated groups' states carried over byte-for-byte).
+    if ::nodeagg::agg_hash_compact_armed(agg)
+        && ::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)?
+    {
+        idxs.clear();
+        idxs.extend_from_slice(rows);
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("K2 scan feed requires the armed SoA");
+        // SAFETY: as the staged-probe fold below — every probed row is
+        // non-fallback with valid lane values for every plan column; each
+        // pergroup was installed by the compact probe within this batch.
+        return unsafe { agg_fold_staged(agg, soa, idxs, groups) };
     }
     ::nodeagg::agg_hash_hash_staged(agg, keys, knull, hashes)?;
     idxs.clear();
@@ -1892,6 +2939,512 @@ fn scan_k2_batch<'mcx>(
     // the plan is unguarded (K2 admission); each pergroup was installed by
     // the probe within this batch; the rest is agg_fold_staged's contract.
     unsafe { agg_fold_staged(agg, soa, idxs, groups) }
+}
+
+/// One dict-answered page batch through the dict-group path (§2.1 header
+/// above `dictgroup_enabled`): per surviving row, one direct index into the
+/// per-epoch code→pergroup map; unseen codes resolve lazily — dict[code]
+/// materialized once per epoch and probed through the SAME staged-probe leg
+/// as the Raw K2 path, at exactly the row the Raw path would have probed
+/// (first-arrival insertion order, entry initialization, memory limits and
+/// spill decisions all identical). Spill-mode misses replay off the SoA
+/// lanes with the key materialized from the dictionary (its SoA cells are
+/// stale under a dict lane) and are deliberately NOT cached: every later row
+/// of that code must also spill, exactly as the per-row path would.
+///
+/// NULL discipline: dict codes have no NULL representation and cbstore
+/// stores no NULLs (per-chunk proof, phase4 §8.3) — every dict-window row
+/// probes with `isnull = false`, which is what the Raw fill would have
+/// published (`isnull.fill(false)`).
+#[allow(clippy::too_many_arguments)]
+fn scan_dictgroup_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    shape: &ScanK2,
+    stage_slot: &mut Option<ExecSlotId>,
+    dgs: &mut DictGroupScratch,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    rows: &[u32],
+    lane: ::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Epoch roll (epoch = row-group index, stable per pinned scan): per-RG
+    // dictionaries are dense 0..ndict, so the map is a flat array — k
+    // entries per epoch, cleared once per RG change.
+    let ndict = lane.table.ndict as usize;
+    if dgs.epoch != Some(lane.table.epoch) {
+        dgs.epoch = Some(lane.table.epoch);
+        dgs.slots.clear();
+        dgs.slots.resize(ndict, None);
+        trace_feed(&format!(
+            "dict-group epoch {} (ndict={ndict})",
+            lane.table.epoch
+        ));
+    }
+    debug_assert!(dgs.slots.len() >= ndict, "dict size is fixed per epoch");
+    idxs.clear();
+    groups.clear();
+    for &i in rows {
+        let code = lane.code(i as usize) as usize;
+        debug_assert!(code < ndict, "filler contract: code < ndict");
+        let pg = match dgs.slots[code] {
+            Some(pg) => pg,
+            None => {
+                // First surviving row of (epoch, code): materialize + probe
+                // once. The hash rides the same probe-kernel leg as the Raw
+                // path (bit-identical per the kernel contract).
+                let key = lane.table.datum(code as u32);
+                ::nodeagg::agg_hash_hash_staged(agg, &[key], &[false], &mut dgs.hash1)?;
+                let hash = dgs.hash1[0];
+                match ::nodeagg::agg_hash_probe_staged(agg, estate, key, false, hash)? {
+                    Some(pg) => {
+                        dgs.slots[code] = Some(pg);
+                        pg
+                    }
+                    None => {
+                        scan_dictgroup_spill(agg, ss, shape, stage_slot, i, key, hash, estate)?;
+                        continue;
+                    }
+                }
+            }
+        };
+        idxs.push(i);
+        groups.push(pg);
+    }
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("dict-group feed requires the armed SoA");
+    // SAFETY: as the Raw K2 fold — every probed row is non-fallback (cbstore
+    // stages none) with valid lane values for every plan column (the
+    // columnar fill stages decoded Datums; the key column is NOT in
+    // `plan.cols` — grouping keys are not transition args in this shape, and
+    // vguard plans refuse dict-group); the plan is unguarded (K2 admission);
+    // each pergroup is a live global-table state block (allocation-stable
+    // for the table's lifetime — the per-epoch cache only ever holds
+    // pointers the probe installed).
+    unsafe { agg_fold_staged(agg, soa, idxs, groups) }
+}
+
+/// Dict-group spill-mode miss: the Raw K2 path's replay verbatim, except the
+/// grouping key cell takes the materialized dictionary datum (the key's SoA
+/// cells are stale under a dict lane). `hashagg_spill_tuple` materializes the
+/// slot into the spill tape, so the dict-borrowed datum's scan lifetime is
+/// long enough by construction.
+#[cold]
+#[allow(clippy::too_many_arguments)]
+fn scan_dictgroup_spill<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    shape: &ScanK2,
+    stage_slot: &mut Option<ExecSlotId>,
+    i: u32,
+    key: ::datum::Datum,
+    hash: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let slot_id = match *stage_slot {
+        Some(s) => s,
+        None => {
+            let desc = estate.slot(ss.ss.ss_ScanTupleSlot).base().tts_tupleDescriptor.clone();
+            let s = estate.exec_init_extra_tuple_slot(desc, ::types_slot::TupleSlotKind::Virtual);
+            *stage_slot = Some(s);
+            s
+        }
+    };
+    {
+        let mcx = estate.es_query_cxt;
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("dict-group feed requires the armed SoA");
+        let slot = estate.slot_mut(slot_id);
+        ::exectuples::exec_clear_tuple(slot, mcx);
+        let base = slot.base_mut();
+        for c in 0..shape.natts {
+            base.tts_values[c] = ::datum::Datum::null();
+            base.tts_isnull[c] = true;
+        }
+        for &c in &shape.needed {
+            let c = c as usize;
+            base.tts_values[c] = soa.col_values(c)[i as usize];
+            base.tts_isnull[c] = soa.col_isnull(c)[i as usize];
+        }
+        base.tts_values[shape.key_col as usize] = key;
+        base.tts_isnull[shape.key_col as usize] = false;
+        ::exectuples::exec_store_virtual_tuple(slot);
+    }
+    ::nodeagg::agg_hash_spill_staged(agg, estate, slot_id, hash)
+}
+
+// ===========================================================================
+// Packed multi-key GROUP BY (multikey spike 2026-07-14 — the Q17/Q18-class
+// `GROUP BY UserID, SearchPhrase` shapes): a batch pre-pass packs the N
+// fixed-width key components of a staged window into ONE synthetic u64/u128
+// key lane (REUSED per-batch scratch — the spike's 5.5ms-vs-45.5ms verdict),
+// then ALL single-key compact-table machinery runs unchanged through
+// `KeyRepr::Int`/`Int128` + CRC32C. A dict-coded text component is made
+// packable by the per-epoch code → scan-lifetime intern-id resolve
+// (dictgroup's lazy resolve retargeted from pergroup pointers to stable u32
+// ids, spike §2.3); the intern table's reverse map materializes the text at
+// read-back/migrate. NULL components (heap) fold into a null-bitmap byte in
+// the key image (CH `nullable_keys128`); cbstore rides the no-NULLs proof.
+//
+// Fallback discipline: multi-key has NO C staged-probe leg (the tuplehash
+// kernel is Expr) — the compact table is the ONLY packed host. The runtime
+// backstop check runs BEFORE each batch's per-row emit (qual evaluated
+// exactly once per row either way); after a migration the feed falls to the
+// per-row arrival probe for the batch and the rest of the scan, with every
+// group already in the C table (compact_migrate reconstructs component
+// datums and inserts through the unmodified `lookup`, C-exact hashes).
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_MULTIKEY` kill switch (default ON inside the lane).
+fn multikey_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The plan-level half of the multi-key admission (the SoA/compact halves
+/// need the armed batch — `scan_mk_shape`): unguarded, fully lanefold-
+/// admitted, 2..N grouping keys (the single-key kernels own num_cols == 1).
+/// Mirrors `scan_k2_wanted`'s role, including forcing the SoA deform so the
+/// key lanes stage even for count(*)-only fold plans.
+fn scan_mk_plan_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
+    multikey_enabled()
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
+        && !::nodeagg::agg_lanefold_has_resid(agg)
+        && ::nodeagg::agg_hash_staged_probe_col(agg).is_none()
+        && ::nodeagg::agg_hash_key_cols(agg).len() >= 2
+}
+
+/// The multi-key shapes' dict-text component, when the plan has EXACTLY one
+/// raw-bytes text key among Int-class keys: `Some(input colno)`. `None` =
+/// pure-int multi-key (no dict lane needed) or an unpackable component mix
+/// (the compact arm refuses later with the same taxonomy).
+fn scan_mk_dict_att<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<u16> {
+    let mut dict = None;
+    for (att, kind) in ::nodeagg::agg_hash_key_cols(agg) {
+        match kind {
+            ::nodeagg::GroupKeyKind::Int { .. } => {}
+            ::nodeagg::GroupKeyKind::TextRaw => {
+                if dict.is_some() {
+                    return None;
+                }
+                dict = Some(att);
+            }
+            ::nodeagg::GroupKeyKind::Other => return None,
+        }
+    }
+    dict
+}
+
+/// Multi-key dict-component columnar arm, tried when the fixed-width-prefix
+/// arm refused (the text key component sits inside the prefix) — the
+/// multi-key twin of `try_arm_cb_dictgroup`: arm the cbstore SoA staging
+/// with the text component opted into dict lanes; the packing pre-pass
+/// consumes the codes through the per-epoch intern resolve. False =
+/// fail-open (per-row paths, byte-identical).
+fn try_arm_cb_multikey_dict<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if !multikey_enabled()
+        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !scan_mk_plan_wanted(agg)
+    {
+        return false;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        false
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return refused() };
+    if !plan.vguards.is_empty() {
+        return refused();
+    }
+    // Pure-int multi-key shapes need no dict lane — but a varlena column
+    // INSIDE the fixed-width prefix (the reason the standard arm refused)
+    // still blocks the staging. The offset-free columnar arm hosts those
+    // (Q32-class `GROUP BY WatchID, ClientIP` on cbstore): every staged
+    // column fills as decoded Datums, no dict registration.
+    let Some(key) = scan_mk_dict_att(agg) else {
+        // All-Int keys → plain columnar staging; any Other component means
+        // the compact arm will refuse anyway — don't arm for nothing.
+        let all_int = ::nodeagg::agg_hash_key_cols(agg)
+            .iter()
+            .all(|&(_, k)| matches!(k, ::nodeagg::GroupKeyKind::Int { .. }));
+        if !all_int {
+            return refused();
+        }
+        let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+        if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None) {
+            return refused();
+        }
+        return true;
+    };
+    // The fold must not read the dict component's SoA Datum cells: they are
+    // STALE while a dict lane answers (the dictgroup rule, unchanged).
+    if plan.cols.iter().any(|&c| c == key) {
+        return refused();
+    }
+    let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
+    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, key) {
+        return refused();
+    }
+    true
+}
+
+/// Multi-key admission inputs for the scan feed, decided once per build
+/// (the compact table is ARMED as a side effect — mirrors the K2 +
+/// compact-arm sequence).
+struct ScanMk {
+    /// The armed packed-key layout (component input colnos + offsets).
+    shape: ::nodeagg::MkShape,
+    /// The dict/intern text component's input colno, when one exists.
+    dict_att: Option<u16>,
+}
+
+/// Reusable per-build scratch for the multi-key batch loop: survivors, the
+/// u128 pack accumulator, the packed key lanes, and the per-epoch
+/// code → intern-id cache (dictgroup's `slots` pattern, retargeted).
+#[derive(Default)]
+struct MkScratch {
+    rows: Vec<u32>,
+    packbuf: Vec<u128>,
+    keys1: Vec<i64>,
+    keys2: Vec<[u64; 2]>,
+    epoch: Option<u64>,
+    code_ids: Vec<Option<u32>>,
+}
+
+/// The scan feed's multi-key admission + compact arm, decided once per
+/// build: plan-level gates (`scan_mk_plan_wanted`), the dict component's
+/// lane registration (when one exists), key lanes staged in the armed SoA,
+/// then the packing admission + table arm in `agg_hash_compact_try_arm_mk`.
+/// `None` = keep the per-row arrival probe (byte-identical), refuse reasons
+/// ticked per taxonomy.
+fn scan_mk_shape<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    if !scan_mk_plan_wanted(agg) {
+        return None;
+    }
+    let refused = |r: RefuseReason| {
+        stats::tick_refused(ShapeClass::AggBuild, r);
+        None
+    };
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+        if !plan.vguards.is_empty() {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    // A text component needs its dict-lane registration (cbstore only) and
+    // must stay out of the fold's lane reads (stale SoA cells).
+    let dict_att = scan_mk_dict_att(agg);
+    let has_text = ::nodeagg::agg_hash_key_cols(agg)
+        .iter()
+        .any(|&(_, k)| k == ::nodeagg::GroupKeyKind::TextRaw);
+    if has_text {
+        let Some(att) = dict_att else { return refused(RefuseReason::MultiKeyShape) };
+        if !is_cb
+            || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) != Some(att)
+            || ::nodeagg::agg_lanefold_plan(agg)
+                .is_some_and(|plan| plan.cols.iter().any(|&c| c == att))
+        {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    // Every key column must be a staged SoA lane the spillless packed feed
+    // can read (colnos_needed always covers grouping columns).
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)?;
+        let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
+        let natts = estate
+            .slot(ss.ss.ss_ScanTupleSlot)
+            .base()
+            .tts_tupleDescriptor
+            .as_ref()?
+            .attrs
+            .len();
+        if colnos_needed.len() != natts || max_colno > soa.ncols() as i32 {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+        for (att, _) in ::nodeagg::agg_hash_key_cols(agg) {
+            if att as usize >= soa.ncols() as usize || !colnos_needed[att as usize] {
+                return refused(RefuseReason::MultiKeyShape);
+            }
+        }
+    }
+    // Packing admission + table arm (nullable = heap; cbstore rides the
+    // no-NULLs per-chunk proof and packs no null byte).
+    match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict_att.filter(|_| is_cb)) {
+        ::nodeagg::CompactArm::Armed => {
+            let shape =
+                ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
+            Some(ScanMk { shape, dict_att: dict_att.filter(|_| is_cb) })
+        }
+        ::nodeagg::CompactArm::KeyKind => refused(RefuseReason::MultiKeyShape),
+        ::nodeagg::CompactArm::SpillRisk => refused(RefuseReason::CompactSpillRisk),
+        ::nodeagg::CompactArm::Off => None,
+    }
+}
+
+/// One page batch through the packed multi-key feed. Sequence per the
+/// section header: (1) backstop check BEFORE any per-row work — a migration
+/// returns `false` and the caller runs the WHOLE batch (emit included)
+/// through the arrival leg, so the qual runs exactly once per row; (2) the
+/// per-row scalar emit collecting survivors (the arrival loop's exact emit
+/// sequence); (3) the pack pre-pass over the survivors' staged component
+/// lanes into the reused packed-key scratch (dict components through the
+/// per-epoch intern resolve); (4) the compact-table batch probe + new-group
+/// seeding; (5) the whole-batch fold.
+#[allow(clippy::too_many_arguments)]
+fn scan_mk_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    mk: &ScanMk,
+    mks: &mut MkScratch,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
+        return Ok(false);
+    }
+    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
+    rows.clear();
+    for i in 0..n {
+        if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
+            rows.push(i);
+        }
+    }
+    // Pack pre-pass, component-major over the survivors (each component
+    // lane streams once), into the REUSED u128 accumulator.
+    packbuf.clear();
+    packbuf.resize(rows.len(), 0u128);
+    let shape = &mk.shape;
+    for (j, comp) in shape.comps.iter().enumerate() {
+        let att = comp.att as usize;
+        let off_bits = comp.off as u32 * 8;
+        match comp.kind {
+            ::nodeagg::MkCompKind::Int { width } => {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("multi-key feed requires the armed SoA");
+                let (values, isnull) = (soa.col_values(att), soa.col_isnull(att));
+                let mask = if width == 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                for (k, &i) in rows.iter().enumerate() {
+                    let i = i as usize;
+                    if shape.nullable && isnull[i] {
+                        // CH nullable_keys128: bit j set, value bits zero —
+                        // NOT-DISTINCT composite NULL semantics hold.
+                        packbuf[k] |= 1u128 << (shape.null_off() as u32 * 8 + j as u32);
+                        continue;
+                    }
+                    debug_assert!(
+                        shape.nullable || !isnull[i],
+                        "cbstore no-NULLs proof violated in a multi-key window"
+                    );
+                    let v = match width {
+                        2 => values[i].as_i16() as i64,
+                        4 => values[i].as_i32() as i64,
+                        _ => values[i].as_i64(),
+                    };
+                    packbuf[k] |= (((v as u64) & mask) as u128) << off_bits;
+                }
+            }
+            ::nodeagg::MkCompKind::Intern => {
+                let mcx = estate.es_query_cxt;
+                let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .and_then(|soa| soa.dict_lane(att));
+                match lane {
+                    Some(lane) => {
+                        // Epoch roll (dictgroup's per-RG cache, retargeted
+                        // to intern ids — scan-stable, so the PACKED key is
+                        // epoch-free).
+                        let ndict = lane.table.ndict as usize;
+                        if *epoch != Some(lane.table.epoch) {
+                            *epoch = Some(lane.table.epoch);
+                            code_ids.clear();
+                            code_ids.resize(ndict, None);
+                        }
+                        debug_assert!(code_ids.len() >= ndict);
+                        for (k, &i) in rows.iter().enumerate() {
+                            let code = lane.code(i as usize) as usize;
+                            debug_assert!(code < ndict, "filler contract: code < ndict");
+                            let id = match code_ids[code] {
+                                Some(id) => id,
+                                None => {
+                                    // First surviving row of (epoch, code):
+                                    // materialize dict[code] once, intern.
+                                    let d = lane.table.datum(code as u32);
+                                    // SAFETY: dict entries are live non-null
+                                    // text varlenas for the staged window
+                                    // (dict lane contract; kernel selection
+                                    // proved the column type).
+                                    let v = unsafe {
+                                        ::types_fmgr::datum_varlena_packed(d, mcx)
+                                    }?;
+                                    let id =
+                                        ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                                    code_ids[code] = Some(id);
+                                    id
+                                }
+                            };
+                            packbuf[k] |= (id as u128) << off_bits;
+                        }
+                    }
+                    None => {
+                        // Raw-answered window (non-dict key chunk): intern
+                        // the staged text datum per row — the dictgroup Raw
+                        // fallback's multi-key analog (correct, colder).
+                        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .expect("multi-key feed requires the armed SoA");
+                        let values = soa.col_values(att);
+                        debug_assert!(
+                            rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
+                            "cbstore no-NULLs proof violated in a multi-key window"
+                        );
+                        for (k, &i) in rows.iter().enumerate() {
+                            let d = values[i as usize];
+                            // SAFETY: staged non-null live text varlena (the
+                            // columnar fill stages decoded Datums; kernel
+                            // selection proved the column type).
+                            let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                            let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                            packbuf[k] |= (id as u128) << off_bits;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Split the accumulator into the packed key lane and probe.
+    if shape.two_words {
+        keys2.clear();
+        keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
+        ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+    } else {
+        keys1.clear();
+        keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
+        ::nodeagg::agg_hash_compact_batch_mk1(agg, keys1, groups)?;
+    }
+    idxs.clear();
+    idxs.extend_from_slice(rows);
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("multi-key feed requires the armed SoA");
+    // SAFETY: as the K2 compact fold — every probed row is non-fallback (the
+    // caller admits only all-lane batches) with valid lane values for every
+    // plan column (a dict component is never in `plan.cols` — admission);
+    // the plan is unguarded; each pergroup was installed by the compact
+    // probe within this batch.
+    unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(true)
 }
 
 /// Shared fold tail for the staged fold feeds (seqscan page batches and the
@@ -1985,6 +3538,13 @@ impl<'mcx> Sink<'mcx> for HashAggBuildSink<'_, 'mcx> {
     ) -> PgResult<SinkFeed> {
         ::nodeagg::agg_hash_build_accept(self.agg, estate, tuple)?;
         Ok(SinkFeed::NeedMore)
+    }
+
+    // Stage-4 combine seam: a parallel worker's partial build hands its
+    // whole table to the leader here (merge handoff); idempotent under the
+    // following finish (nodeagg's combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
@@ -2093,7 +3653,11 @@ pub fn try_own_sort<'mcx>(
     ::postgres_seams::check_for_interrupts::call()?;
 
     let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-    sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+    if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
+        // Feed-time refuse (agg-over-join multi-batch spill), before any
+        // sort-side effect: the Volcano fallback resumes byte-identically.
+        return Ok(None);
+    }
     // Emit phase (pipeline N+1): the breaker's Source face streams the
     // tuplesort read-back through the root pull-adapter, one tuple per call.
     let mut root = RootAdapter::new(None);
@@ -2133,14 +3697,72 @@ fn sort_lane_fusible_memo<'mcx>(
 /// is the phase flag; a rescan clears it and re-enters here. Shared by the
 /// bare sort hook, the Limit/Unique-over-sort chains, and the wave-4 chains
 /// over the sort breaker.
+///
+/// `Ok(false)` = feed-time refuse (only the agg-over-hash-join arm's
+/// multi-batch spill, BEFORE the sort was touched or any owned tick fired):
+/// the caller must refuse ownership; no lane tuple has been emitted and the
+/// completed join build is byte-identical to the row path's, so the Volcano
+/// fallback (`exec_sort` over the per-tuple agg over `exec_hash_join`)
+/// resumes exactly.
 fn sort_feed_if_needed<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
     outer: &mut crate::procnode::PlanStateNode<'mcx>,
     outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    narrow: Option<usize>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     if state.sort_done() {
-        return Ok(());
+        return Ok(true);
+    }
+    // Hash-agg breaker child: build the agg FIRST (its own build-event tick
+    // cadence), refusing before any sort-side effect on a multi-batch join
+    // spill; then the agg's emit face feeds the breaker sink one finalized
+    // group row per produce — exactly the row stream `exec_sort`'s feed loop
+    // pulls from `exec_agg`, in C's retrieve order (per-row, matching the
+    // per-tuple pull cadence: no staged batch exists over agg output).
+    //
+    // No top-k pre-filter on this feed: the vectorized boundary kernel runs
+    // over a staged SoA key lane, which only scan feeds stage — agg output
+    // rows are computed one at a time (cardinality = group count, already
+    // post-reduction), so the bounded tuplesort's own compare-and-discard is
+    // the whole cost and a per-row pre-compare would just duplicate it.
+    if let crate::procnode::PlanStateNode::Agg(aps) = outer {
+        let aps = &mut **aps;
+        // exec_agg's top-of-call guard: a drained agg stays drained (its
+        // retrieve below yields EOF immediately — the empty feed C's
+        // `exec_sort` would build from a drained child).
+        if !::nodeagg::agg_is_done(&aps.agg) {
+            let built = match &mut aps.outer {
+                crate::procnode::PlanStateNode::SeqScan(ss) => {
+                    let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                    agg_seq_scan_build_if_needed(
+                        &mut aps.agg,
+                        ss,
+                        c,
+                        &mut aps.lane_stage_slot,
+                        &mut aps.lane_exprkey,
+                        estate,
+                    )?;
+                    true
+                }
+                crate::procnode::PlanStateNode::HashJoin(hj) => {
+                    agg_hash_join_build_if_needed(
+                        &mut aps.agg,
+                        &mut **hj,
+                        &mut aps.lane_stage_slot,
+                        estate,
+                    )?
+                }
+                _ => unreachable!("agg_child_fusible admitted a non-lane agg feed"),
+            };
+            if !built {
+                return Ok(false);
+            }
+        }
+        stats::tick_owned(ShapeClass::SortFeed);
+        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, None, estate, None)?;
+        return Ok(true);
     }
     // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
     // floor counts feeds, not calls).
@@ -2148,11 +3770,16 @@ fn sort_feed_if_needed<'mcx>(
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "sort feed", true);
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
+            arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
+            // Streaming top-k cutoff (bounded sorts over an admitted
+            // qual-less seqscan; None = feed unfiltered, exactly as before).
+            // Composes with the direct-key put: the keep-mask filters first,
+            // then the direct-key arm reads only surviving rows.
+            let topk = topk_cut_arm(state, ss, estate);
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, narrow, estate, topk)?
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, narrow, estate, None)?
         }
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -2160,8 +3787,10 @@ fn sort_feed_if_needed<'mcx>(
             IndexOnlyScanSource,
             IndexOnlyScanEmit,
             outer_desc,
+            narrow,
             estate,
-        ),
+            None,
+        )?,
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             // The bitmap must be built before the heap drive — the same
@@ -2175,11 +3804,14 @@ fn sort_feed_if_needed<'mcx>(
                 BitmapHeapScanSource,
                 BitmapHeapScanEmit,
                 outer_desc,
+                narrow,
                 estate,
-            )
+                None,
+            )?
         }
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
     }
+    Ok(true)
 }
 
 /// Structural refuse-set for the sort breaker. Sort-side: refuse
@@ -2200,6 +3832,22 @@ fn sort_refuse_reason<'mcx>(
 ) -> PgResult<Option<RefuseReason>> {
     if s.state.randomAccess {
         return Ok(Some(RefuseReason::RandomAccess));
+    }
+    // Hash-agg BREAKER child (the final `ORDER BY agg ... LIMIT k` tail over
+    // aggregate output): the agg's Source face (its retrieve/emit) feeds the
+    // sort breaker exactly as a scan source would — breaker-composes-breaker,
+    // the `try_own_agg_over_hash_join` precedent. Admission is the Limit
+    // chain's exact agg-child gate (`agg_child_fusible`: the agg-side breaker
+    // gate × the admitted feed children × the economics memo), so the sort
+    // admits precisely where a Limit-over-agg chain would. All the admitted
+    // checks are init-stable or child-memoized, keeping this verdict
+    // memoizable like the scan arms'.
+    if let crate::procnode::PlanStateNode::Agg(aps) = &mut *s.outer {
+        return Ok(if agg_child_fusible(aps, estate)? {
+            None
+        } else {
+            Some(RefuseReason::ChildNotLaneOwned)
+        });
     }
     scan_child_fusible(&mut s.outer, estate)
 }
@@ -2237,25 +3885,227 @@ fn scan_child_fusible<'mcx>(
 /// construction verbatim), then run pipeline N to exhaustion into the breaker
 /// sink. Mirrors `exec_sort`'s build leg in forcing a forward child read for
 /// the feed's duration (restored on success; an error aborts the query).
+/// `narrow_keys`: `Some(k)` = the grouped exact-DISTINCT order-relaxation
+/// arm — begin the tuplesort with only the first `k` sort keys
+/// (`sort_lane_begin_narrowed`; the caller proved the dropped suffix is
+/// observation-free). `None` = `exec_sort`'s construction verbatim.
 fn sort_feed<'mcx, S, O>(
     sort: &mut ::nodesort::SortState<'mcx>,
     scan: &mut S::Node,
     mut src: S,
     mut op: O,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    narrow_keys: Option<usize>,
     estate: &mut EStateData<'mcx>,
+    topk: Option<TopkCut>,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
     O: Operator<'mcx, Node = S::Node>,
 {
-    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    match narrow_keys {
+        Some(k) => ::nodesort::sort_lane_begin_narrowed(sort, outer_desc, k)?,
+        None => ::nodesort::sort_lane_begin(sort, outer_desc)?,
+    }
+    // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
+    // mirrored): probed once per feed, BEFORE the first `produce` (arming
+    // decides what the staging pass stages), datum sorts only — exactly the
+    // incumbent's probe placement inside its `node.datumSort` arm.
+    let key_direct = ::nodesort::sort_lane_is_datum(sort) && op.arm_sort_key(scan, estate);
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = SortBreakerSink { sort };
+    let mut sink = SortBreakerSink { sort, key_direct, topk: topk.map(TopkCutState::new) };
     drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
     estate.es_direction = dir;
     Ok(())
+}
+
+// ===========================================================================
+// Streaming top-k cutoff on the sort-breaker feed (cbstore-v2 plan §2.8;
+// ClickHouse PartialSortingTransform's threshold filter, our shape). For a
+// bounded (top-N) sort, once the tuplesort's bounded heap is FULL every
+// further put is compare-against-the-k-th-boundary-and-usually-discard. The
+// pre-filter hoists that discard in front of the breaker: each staged batch
+// is compared VECTORIZED (the existing `qual_bitmap_cmp_const` kernel, with
+// the tuplesort's live k-th boundary datum as the "const") against the
+// staged leading-key lane, and rows that cannot make the top k are skipped
+// without an emit or a tuplesort put.
+//
+// CORRECTNESS INVARIANT (the proof the admission rules exist to keep): the
+// pre-filter may skip EXACTLY rows the tuplesort itself would discard with
+// no observable side effect. Piecewise:
+//   * A bounded tuplesort in TSS_BOUNDED discards an incoming tuple iff
+//     full_cmp(tuple, root) >= 0, where `root` (the bounded heap's top under
+//     the reversed comparator) is the current WORST surviving member and
+//     `full_cmp` is the full multi-key comparator (tuplesort.rs
+//     `puttuple_bounded`).
+//   * The pre-filter discards row R iff R's LEADING key is STRICTLY worse
+//     than the boundary's leading key: `keep = R.k1 <op-order> boundary.k1
+//     OR ties` — implemented as the non-strict keep compare (ASC keeps
+//     `k1 <= b`, DESC keeps `k1 >= b`). Strictly-worse on the leading key
+//     forces full_cmp(R, root) > 0 regardless of later keys — the multi-key
+//     comparator is lexicographic — so every skipped row is a row tuplesort
+//     would discard. Leading-key TIES ALWAYS PASS (they can still win on
+//     later keys); equal-or-better rows always pass. Datum-sort ties also
+//     pass and the tuplesort re-judges them — a pure subset, never a
+//     different verdict.
+//   * NULL leading keys are never pre-filtered (the keep mask ORs the
+//     lane's null bits): a NULL's rank depends on NULLS FIRST/LAST, and the
+//     tuplesort's own comparator is the authority. A NULL boundary disables
+//     the batch's pre-filter entirely (nothing compares strictly-worse
+//     against NULL through the kernel; conservative pass-through).
+//   * Deform-fallback rows (no staged lane value) always pass.
+//   * The boundary only TIGHTENS as puts replace the root (the reversed
+//     heap's top is monotonically non-worsening in forward order), so the
+//     once-per-batch boundary snapshot is stale-but-conservative: it only
+//     lets through rows the tuplesort then judges itself.
+//   * Skipping a row skips its emit body, so admission requires the emit to
+//     be observation-free per row: NO scan qual (a qual evaluation C would
+//     have run — including its possible error — must not be elided) and
+//     only pure-Var projections (the single Var-copy kernel or the all-Var
+//     census list — never a computing column). Under that shape a
+//     skipped row's only C-side effects were the tuplesort compare+discard
+//     (and its per-row CHECK_FOR_INTERRUPTS; the filtered path keeps one
+//     CFI per staged batch, the lane's page-level cadence floor).
+//   * By-value leading keys only (the CmpOp kernel families): the boundary
+//     datum read from the heap root must not dangle when a later put in the
+//     same batch evicts the root's tuple.
+// Net: the same rows reach the tuplesort as would have survived its own
+// bounded discards, in the same order, and the sorted output is
+// byte-identical. This is a pure skip optimization with zero refusal
+// surface — non-admission simply feeds the sort unfiltered, exactly as
+// before.
+// ===========================================================================
+
+/// Armed pre-filter spec: the vectorized KEEP comparison (`key <= boundary`
+/// for ASC / `key >= boundary` for DESC, in the leading key's kernel
+/// family). Rows failing it (non-null, staged) are strictly worse than the
+/// k-th boundary on the leading key and are skipped.
+#[derive(Clone, Copy)]
+struct TopkCut {
+    keep: ::execexpr::CmpOp,
+}
+
+/// Map the sort's leading-key ORDER operator (the `<` or `>` operator's
+/// kernel image) to the non-strict KEEP compare of the same family. `None`
+/// refuses: cross-width families never appear as sort operators (both sides
+/// are the key's own type) and everything else is outside the kernel
+/// vocabulary.
+fn topk_keep_op(cmp: ::execexpr::CmpOp) -> Option<::execexpr::CmpOp> {
+    use ::execexpr::CmpOp::*;
+    Some(match cmp {
+        Int2Lt => Int2Le,
+        Int2Gt => Int2Ge,
+        Int4Lt => Int4Le,
+        Int4Gt => Int4Ge,
+        Int8Lt => Int8Le,
+        Int8Gt => Int8Ge,
+        OidLt => OidLe,
+        OidGt => OidGe,
+        Float4Lt => Float4Le,
+        Float4Gt => Float4Ge,
+        Float8Lt => Float8Le,
+        Float8Gt => Float8Ge,
+        _ => return None,
+    })
+}
+
+/// Admission + arming for the top-k cutoff over a seqscan-fed bounded sort.
+/// `None` = not admitted; the feed runs unfiltered (never a lane refusal).
+/// Admits: bounded sort; leading sort key resolvable to a scan column (no
+/// projection, the lone `JustAssignVar` Var-copy, or an all-Var census
+/// projection); NO scan qual (skipped
+/// rows must have no observable per-row evaluation — see the invariant
+/// block); leading-key order operator inside the by-value kernel compare
+/// vocabulary (int2/4/8, oid, float4/8; ASC and DESC, any NULLS placement);
+/// and the key column stageable by the fixed-width SoA prefix deform.
+fn topk_cut_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<TopkCut> {
+    if !state.bounded {
+        return None;
+    }
+    let plan = state.plan;
+    if plan.numCols < 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    // Resolve the sort's leading INPUT column (1-based over the scan's
+    // output) to a scan attnum (0-based).
+    let oc = plan.sortColIdx[0];
+    if oc < 1 {
+        return None;
+    }
+    let attnum = match ss.ss.ps_ProjInfo.as_ref() {
+        None => (oc - 1) as u16,
+        Some(p) => match p.pi_state.kernel() {
+            ::execexpr::Kernel::JustAssignVar {
+                src: ::execexpr::SlotSrc::Scan,
+                attnum,
+                resultnum: 0,
+            } if oc == 1 => attnum,
+            _ => {
+                // Multi-column projections admit only the pure Var-copy list
+                // (the ready-time scan-projection census, subplan/param-free
+                // by construction, with NO arith columns): a skipped row
+                // skips its projection, and only Var passthroughs are
+                // guaranteed observation-free (an elided arith evaluation
+                // could elide C's error). The sort's leading input column
+                // then maps through the census to its scan attnum.
+                let cols = p.pi_state.scan_proj_cols()?;
+                if cols.any_arith() || (oc as usize) > cols.n as usize {
+                    return None;
+                }
+                match cols.cols[(oc - 1) as usize] {
+                    ::execexpr::ScanProjCol::Var { attnum } => attnum,
+                    _ => return None,
+                }
+            }
+        },
+    };
+    // Kernel admission: order operator -> its comparison-function kernel ->
+    // the keep compare. `get_opcode` is one syscache read per feed.
+    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
+    let keep = topk_keep_op(::execexpr::CmpOp::for_fn_oid(opfn)?)?;
+    // Key-lane staging (refuses qual-bearing scans and foreign SoA arming).
+    if !::nodeseqscan::seq_scan_topk_key_arm(ss, estate, attnum) {
+        return None;
+    }
+    stats::tick_owned(ShapeClass::TopkCut);
+    lane_trace("topk cutoff armed (sort feed)");
+    Some(TopkCut { keep })
+}
+
+/// Compute the keep mask for one staged batch, or `None` when the pre-filter
+/// is not engaged for this batch (heap not yet full, NULL boundary, or no
+/// staged key lane). Bits: `keep = (!isnull && key KEEP-cmp boundary) ||
+/// isnull || fallback` over staged rows `0..n`; bits at `n..` are garbage
+/// and never consulted.
+fn topk_keep_mask<'mcx, E: BatchEmit<'mcx>>(
+    cut: TopkCut,
+    sort: &::nodesort::SortState<'mcx>,
+    emit: &E,
+    n: u32,
+) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+    let (boundary, bnull) = ::nodesort::sort_lane_topk_boundary(sort)?;
+    if bnull {
+        return None;
+    }
+    let (values, isnull, fallback) = emit.topk_key_lane(n)?;
+    debug_assert!(values.len() == n as usize && isnull.len() == n as usize);
+    let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+    ::execexpr::qual_bitmap_cmp_const(cut.keep, boundary, values, isnull, &mut sel);
+    // NULL keys and deform-fallback rows always pass through to the
+    // tuplesort's own comparator.
+    for (w, (nch, fb)) in isnull.chunks(64).zip(fallback).enumerate() {
+        let mut nulls = 0u64;
+        for (j, &isn) in nch.iter().enumerate() {
+            nulls |= (isn as u64) << j;
+        }
+        sel[w] |= nulls | fb;
+    }
+    Some(sel)
 }
 
 /// The breaker's `Sink` face (pipeline N endpoint). Holds the sort node by
@@ -2264,6 +4114,36 @@ where
 /// sort node rides in its sink.
 struct SortBreakerSink<'a, 'mcx> {
     sort: &'a mut ::nodesort::SortState<'mcx>,
+    /// Direct sort-key feed armed for this feed (datum sort whose key the
+    /// leaf serves straight from its staged column — `sort_feed`'s probe).
+    key_direct: bool,
+    /// Armed streaming top-k cutoff (see the invariant block above); `None`
+    /// = feed unfiltered.
+    topk: Option<TopkCutState>,
+}
+
+/// Per-feed pre-filter state: the armed spec + the zero-cut back-off. On the
+/// adversarial shape (e.g. descending input under an ASC top-k, where every
+/// row beats the boundary) the filter can never cut anything and its
+/// per-batch mask would be pure overhead; consecutive zero-cut batches back
+/// the filter off exponentially (skip 2, 4, … up to 256 batches between
+/// attempts), and any batch that cuts a row resets it. A skipped batch takes
+/// the exact unfiltered path — correctness is untouched either way (pure
+/// skip optimization), this only bounds the overhead of never-winning feeds.
+struct TopkCutState {
+    cut: TopkCut,
+    /// Batches to feed unfiltered before the next filter attempt.
+    skip: u32,
+    /// Consecutive zero-cut filter attempts (drives the back-off width).
+    fails: u32,
+}
+
+impl TopkCutState {
+    const MAX_BACKOFF_SHIFT: u32 = 8; // cap: retry every 256 batches
+
+    fn new(cut: TopkCut) -> TopkCutState {
+        TopkCutState { cut, skip: 0, fails: 0 }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
@@ -2294,9 +4174,93 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         n: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
-        ::nodesort::sort_lane_put_batch(self.sort, estate, pos, n, &mut |i, estate| {
-            emit.emit(i, estate)
-        })
+        struct Feed<'e, E> {
+            emit: &'e mut E,
+            /// Streaming top-k keep mask (None = unfiltered feed): cut rows
+            /// answer `emit` with None (the qual-filtered path) and `emit_key`
+            /// with None (which routes them through `emit`, filtering them) —
+            /// mask first, then the direct-key put on survivors.
+            sel: Option<&'e [u64; ::exectuples::SOA_BM_WORDS]>,
+        }
+        impl<'e, E> Feed<'e, E> {
+            #[inline(always)]
+            fn cut(&self, i: u32) -> bool {
+                match self.sel {
+                    Some(sel) => sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0,
+                    None => false,
+                }
+            }
+        }
+        impl<'mcx, E: BatchEmit<'mcx>> ::nodesort::SortLaneBatchFeed<'mcx> for Feed<'_, E> {
+            #[inline]
+            fn emit(
+                &mut self,
+                i: u32,
+                estate: &mut EStateData<'mcx>,
+            ) -> PgResult<Option<ExecSlotId>> {
+                if self.cut(i) {
+                    return Ok(None);
+                }
+                self.emit.emit(i, estate)
+            }
+            #[inline(always)]
+            fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
+                if self.cut(i) {
+                    // Cut row: fall back to `emit`, which filters it.
+                    return None;
+                }
+                self.emit.emit_key(i)
+            }
+        }
+        // Streaming top-k cutoff: once the bounded heap is full, discard the
+        // batch's cannot-make-top-k rows (strictly worse than the k-th
+        // boundary on the leading key) before any emit or tuplesort put.
+        // The mask computation completes before the put loop (the lane
+        // borrow ends), and survivors take the EXACT unfiltered put path
+        // (including the direct-key arm when q9triage's probe armed it).
+        if let Some(tk) = self.topk.as_mut() {
+            if tk.skip > 0 {
+                tk.skip -= 1;
+            } else if let Some(sel) = topk_keep_mask(tk.cut, self.sort, &*emit, n) {
+                // The skipped rows' per-row CFIs (emit-side and the
+                // tuplesort discard's) are elided; keep the lane's
+                // page-batch cadence floor of one check per staged batch.
+                ::postgres_seams::check_for_interrupts::call()?;
+                let kept: u32 = (pos..n)
+                    .map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32)
+                    .sum();
+                let cut_rows = n - pos - kept;
+                if cut_rows == 0 {
+                    // Nothing cuttable at the current boundary: back off.
+                    tk.fails = (tk.fails + 1).min(TopkCutState::MAX_BACKOFF_SHIFT);
+                    tk.skip = 1u32 << tk.fails;
+                    // All bits set over pos..n — the put loop below would be
+                    // the unfiltered feed with a dead bit test; fall through
+                    // to the plain path instead.
+                } else {
+                    tk.fails = 0;
+                    if stats::armed() {
+                        stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
+                    }
+                    return ::nodesort::sort_lane_put_batch(
+                        self.sort,
+                        estate,
+                        pos,
+                        n,
+                        self.key_direct,
+                        &mut Feed { emit, sel: Some(&sel) },
+                    );
+                }
+            }
+        }
+        ::nodesort::sort_lane_put_batch(
+            self.sort,
+            estate,
+            pos,
+            n,
+            self.key_direct,
+            &mut Feed { emit, sel: None },
+        )
     }
 }
 
@@ -2537,9 +4501,52 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     }
     // Agg-side admission (static shape; ticked per offered call, the hashed
     // breaker's AggNotDrainable cadence).
-    if !::nodeagg::agg_sorted_lane_admissible(agg) {
-        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
-        return Ok(None);
+    //
+    // Grouped narrow-sort arm (v2, the ClickBench Q9/Q10 shape): an
+    // AGG_SORTED node whose DISTINCT aggregates ride the plan Sort's
+    // distinct-arg SUFFIX keys (aggpresorted adjacent-dedup) fails the plain
+    // admission — but when every internal-sort entry is set-CAPABLE, every
+    // transition is order-insensitive-exact, and the Sort's key prefix is
+    // exactly the grouping columns, the suffix's only observable effect is
+    // intra-group row order, which nothing observes once the drive arms
+    // set-mode. The drive then feeds the sort with the comparator NARROWED
+    // to the group prefix (`sort_lane_begin_narrowed`) and the exact sets
+    // replace the dedup: byte-identical output (same groups, same group
+    // order, same exact values), with the suffix compares and the per-row
+    // dedup calls deleted. Armed only BEFORE the sort is built (arming
+    // decides the feed's construction); the sticky force keeps the plain
+    // admission true on later calls and any per-tuple fallback value-safe.
+    let mut narrow: Option<usize> = None;
+    let plain_admissible = ::nodeagg::agg_sorted_lane_admissible(agg);
+    // Probe the narrow shape when the plain admission failed (the arm's
+    // first engagement) OR when a prior call armed it (a rescan-rebuilt sort
+    // must narrow again — the sticky force makes the plain admission true).
+    if !plain_admissible || ::nodeagg::agg_distinct_set_forced(agg) {
+        let sp = s.state.plan;
+        let k = ::nodeagg::agg_plan_group_cols(agg).len();
+        let ok = ::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+            && !s.state.sort_done()
+            && !s.state.bounded
+            && k >= 1
+            && (sp.numCols as usize) > k
+            && sp.sortColIdx.len() >= k
+            && {
+                // Prefix == group columns as a MULTISET (order within the
+                // prefix is free: grouping adjacency only needs the rows
+                // prefix-sorted, whichever prefix order).
+                let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+                let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            };
+        if !plain_admissible && !ok {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+            return Ok(None);
+        }
+        if ok {
+            narrow = Some(k);
+        }
     }
     // Sort-side structural verdict — the bare-sort arm's memo, shared (the
     // refusal ticks once per node whichever arm probes first).
@@ -2567,43 +4574,22 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
         ::postgres_seams::check_for_interrupts::call()?;
-        // One OWNED tick per lane-owned sort feed event, plus one per
-        // lane-owned sorted-agg stream start (both count feed/build EVENTS,
-        // once per (re)scan).
-        stats::tick_owned(ShapeClass::SortFeed);
-        stats::tick_owned(ShapeClass::AggBuild);
-        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        match &mut **outer {
-            crate::procnode::PlanStateNode::SeqScan(ss) => {
-                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
-            }
-            crate::procnode::PlanStateNode::IndexScan(is) => {
-                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
-            }
-            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
-                state,
-                &mut **ios,
-                IndexOnlyScanSource,
-                IndexOnlyScanEmit,
-                outer_desc,
-                estate,
-            )?,
-            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
-                let b = &mut **b;
-                if !b.scan.initialized {
-                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
-                }
-                sort_feed(
-                    state,
-                    &mut b.scan,
-                    BitmapHeapScanSource,
-                    BitmapHeapScanEmit,
-                    outer_desc,
-                    estate,
-                )?
-            }
-            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+        if narrow.is_some() {
+            // Arm set-mode BEFORE any input (sticky; the arming doc), then
+            // build the narrowed sort below (the shared feed threads the
+            // narrow-key count into `sort_feed`).
+            ::nodeagg::agg_sorted_force_distinct_set(agg);
+            trace_feed("sorted-agg distinct-set narrowed sort feed armed");
         }
+        // The shared feed (a sort under a sorted agg is never bounded — no
+        // LIMIT pushdown crosses the agg — so its seqscan arm's top-k probe
+        // no-ops; false = the agg-child arm's spill refuse, byte-safe).
+        if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
+            return Ok(None);
+        }
+        // One OWNED tick per lane-owned sorted-agg stream start (feed/build
+        // EVENTS, once per (re)scan; the sort feed ticked its own class).
+        stats::tick_owned(ShapeClass::AggBuild);
     }
     // Emit phase (every call): sort read-back → sorted-agg operator → root,
     // one qual-passing group row per PG pull.
@@ -2877,7 +4863,11 @@ fn join_build_dispatch<'mcx>(
     stats::tick_owned(ShapeClass::Join);
     match child {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join build feed", true);
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join build feed", stitch: true },
+            )?;
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -2909,7 +4899,11 @@ fn join_probe_drain_dispatch<'mcx>(
     let mut probe = JoinProbe { hj, hs };
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe drain", true);
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join probe drain", stitch: true },
+            )?;
             drain_pipeline_chain(
                 ss,
                 &mut SeqScanSource,
@@ -2965,10 +4959,16 @@ fn join_probe_pull_dispatch<'mcx>(
     let mut root = RootAdapter::new(None);
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
-            // Per-pull entry: `arm_seq_scan_qual_bitmap` early-returns once
-            // armed (one load+test), and the first pull arms BEFORE any
-            // batch is staged, so a staged batch always matches its bitmap.
-            arm_seq_scan_qual_bitmap(ss, estate, "join probe pull", false);
+            // Per-pull entry: the bitmap arm early-returns once armed (one
+            // load+test), and the first pull arms BEFORE any batch is
+            // staged, so a staged batch always matches its bitmap. No
+            // stitch: pull-one-tuple pipelines keep the AOT bitmap tier
+            // (stitched segments exist only on drain pipelines).
+            arm_scan_staging(
+                ss,
+                estate,
+                ScanFeedShape::RowFeed { ctx: "join probe pull", stitch: false },
+            )?;
             pull_step_chain(
                 ss,
                 &mut SeqScanSource,
@@ -4016,6 +6016,19 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
         Ok(SinkFeed::NeedMore)
     }
 
+    // Stage-4 combine seam (see HashAggBuildSink::combine): flush the staged
+    // tail first so the handed table is complete, then hand off; the
+    // following finish re-flushes nothing (flushes drain their staging) and
+    // skips the install (combined flag).
+    fn combine(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        match self.mode {
+            StagedMode::Guarded => self.flush_guarded(estate)?,
+            StagedMode::K2 { .. } => self.flush_k2(estate)?,
+            StagedMode::Arrival => self.flush_unguarded(estate)?,
+        }
+        ::nodeagg::agg_hash_build_combine(self.agg, estate)
+    }
+
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         match self.mode {
             StagedMode::Guarded => self.flush_guarded(estate)?,
@@ -4324,12 +6337,13 @@ impl<'mcx> TupleOp<'mcx> for UniqueOp<'_, 'mcx> {
     }
 }
 
-/// Admission for a hash-agg breaker child under a lane Limit: the agg-side
-/// breaker gate × the child gates × (for the SeqScan feed) the memoized
-/// `AggLaneChoice` — exactly the bare `agg_arm` hooks' admission
+/// Admission for a hash-agg breaker child under a lane Limit or under the
+/// sort breaker (`sort_refuse_reason`'s Agg arm — the `ORDER BY agg` tail):
+/// the agg-side breaker gate × the child gates × (for the SeqScan feed) the
+/// memoized `AggLaneChoice` — exactly the bare `agg_arm` hooks' admission
 /// (`try_own_agg_over_seq_scan` / `try_own_agg_over_hash_join`), including
-/// the economics `Refuse` arm, so a Limit-owned agg chain admits precisely
-/// where the agg hook would.
+/// the economics `Refuse` arm, so a Limit- or Sort-owned agg chain admits
+/// precisely where the agg hook would.
 fn agg_child_fusible<'mcx>(
     aps: &mut crate::procnode::AggPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -4345,7 +6359,7 @@ fn agg_child_fusible<'mcx>(
             let c = match aps.lane_choice {
                 Some(c) => c,
                 None => {
-                    let c = decide_agg_lane(&aps.agg, ss, estate)?;
+                    let c = decide_agg_lane(&aps.agg, ss, &mut aps.lane_exprkey, estate)?;
                     aps.lane_choice = Some(c);
                     c
                 }
@@ -4417,7 +6431,13 @@ pub fn try_own_limit<'mcx>(
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
             let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-            sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+            if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
+                // Agg-over-join multi-batch spill refuse, before any lane
+                // tuple or sort-side effect: exec_limit over the per-tuple
+                // sort/agg/join resumes byte-identically (the recompute above
+                // ran once, as C's INITIAL arm would have).
+                return Ok(None);
+            }
             let mut op = LimitOp { limit: &mut l.state };
             let mut root = RootAdapter::new(None);
             pull_step_chain(state, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?
@@ -4437,6 +6457,7 @@ pub fn try_own_limit<'mcx>(
                             ss,
                             c,
                             &mut aps.lane_stage_slot,
+                            &mut aps.lane_exprkey,
                             estate,
                         )?;
                         true
@@ -4507,7 +6528,9 @@ pub fn try_own_unique<'mcx>(
     ::nodeunique::lane_unique_cfi()?;
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+        return Ok(None);
+    }
     let mut op = UniqueOp { unique: state };
     let mut root = RootAdapter::new(None);
     let r = pull_step_chain(sstate, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?;
@@ -4636,11 +6659,15 @@ pub fn try_own_group<'mcx>(
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
     // One OWNED tick per lane-owned group drive start (= the underlying sort
-    // feed event; rescan re-feeds and re-ticks, like the sortfeed class).
-    if !sstate.sort_done() {
+    // feed event; rescan re-feeds and re-ticks, like the sortfeed class) —
+    // after the feed, so a feed-time refuse never ticks owned.
+    let feeding = !sstate.sort_done();
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+        return Ok(None);
+    }
+    if feeding {
         stats::tick_owned(ShapeClass::Group);
     }
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
     let mut op = GroupOp { group: &mut g.state };
     let mut root = RootAdapter::new(None);
     let r =
@@ -4775,11 +6802,15 @@ pub fn try_own_result<'mcx>(
             // C's first child pull enters ExecSort: entry CFI, then the feed.
             ::postgres_seams::check_for_interrupts::call()?;
             let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
-            // One OWNED tick per lane-owned Result child-feed event.
-            if !sstate.sort_done() {
+            // One OWNED tick per lane-owned Result child-feed event — after
+            // the feed, so a feed-time refuse never ticks owned.
+            let feeding = !sstate.sort_done();
+            if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+                return Ok(None);
+            }
+            if feeding {
                 stats::tick_owned(ShapeClass::ResultNode);
             }
-            sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
             let mut op = ResultOp { ps };
             let mut root = RootAdapter::new(None);
             Ok(Some(pull_step_chain(
@@ -4879,11 +6910,15 @@ pub fn try_own_subquery_scan<'mcx>(
     // the TupleOp; the subplan pull enters ExecSort — entry CFI here.
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = sort;
-    // One OWNED tick per lane-owned feed event (the child sort feed).
-    if !sstate.sort_done() {
+    // One OWNED tick per lane-owned feed event (the child sort feed) — after
+    // the feed, so a feed-time refuse never ticks owned.
+    let feeding = !sstate.sort_done();
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+        return Ok(None);
+    }
+    if feeding {
         stats::tick_owned(ShapeClass::SubqueryScan);
     }
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
     // End-of-stream mirrors exec_scan_impl's projected-slot clear.
     let clear_on_finish = s.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
     let mut op = SubqueryScanOp { ss: &mut s.ss };

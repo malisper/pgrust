@@ -1,5 +1,4 @@
-// instrument.c; WAL accumulation is loud until xloginsert's pgWalUsage
-// counters exist (the parallel accum path carries WalUsage::default()).
+// instrument.c (the parallel accum path carries WalUsage::default()).
 
 use types_core::instrument::{
     instr_time, BufferUsage, Instrumentation, WalUsage, INSTRUMENT_BUFFERS, INSTRUMENT_TIMER,
@@ -19,18 +18,22 @@ pub fn instr_time_current() -> instr_time {
     instr_time { ticks: anchor.elapsed().as_nanos() as i64 + 1 }
 }
 
-// pgBufferUsage (instrument.c): shared_blks_* tick in bufmgr::counters and
-// temp_blks_* in fd::buffile; local buffers plus the track_io_timing
-// blk_*_time clocks have no ported writers (nor an installed GUC backing),
-// so their running totals are truly zero. WORKER_CONTRIB is
-// InstrAccumParallelQuery's add — the live counters cannot be bumped, so the
-// accumulated worker usage rides as an overlay.
+// pgBufferUsage (instrument.c): shared/local blks tick in bufmgr::counters
+// and temp_blks_* in fd::buffile; the track_io_timing blk_*_time clocks have
+// no ported writers (nor an installed GUC backing), so their running totals
+// are truly zero. WORKER_CONTRIB is InstrAccumParallelQuery's add — the live
+// counters cannot be bumped, so the accumulated worker usage rides as an
+// overlay.
 pub fn pg_buffer_usage() -> BufferUsage {
     let mut u = BufferUsage {
         shared_blks_hit: bufmgr::counters::shared_blks_hit() as i64,
         shared_blks_read: bufmgr::counters::shared_blks_read() as i64,
         shared_blks_dirtied: bufmgr::counters::shared_blks_dirtied() as i64,
         shared_blks_written: bufmgr::counters::shared_blks_written() as i64,
+        local_blks_hit: bufmgr::counters::local_blks_hit() as i64,
+        local_blks_read: bufmgr::counters::local_blks_read() as i64,
+        local_blks_dirtied: bufmgr::counters::local_blks_dirtied() as i64,
+        local_blks_written: bufmgr::counters::local_blks_written() as i64,
         temp_blks_read: fd::buffile::temp_blks_read(),
         temp_blks_written: fd::buffile::temp_blks_written(),
         ..BufferUsage::default()
@@ -85,14 +88,17 @@ pub fn instr_accum_parallel_query(bufusage: &BufferUsage) {
     });
 }
 
+/// `pgWalUsage` read (instrument.h global; owned by xloginsert).
+pub fn pg_wal_usage() -> WalUsage {
+    transam_xlog_seams::wal_usage::call()
+}
+
 /// `InstrInit`.
 pub fn instr_init(instr: &mut Instrumentation, instrument_options: i32) {
-    if instrument_options & INSTRUMENT_WAL != 0 {
-        panic!("InstrInit (instrument.c): INSTRUMENT_WAL needs pgWalUsage counters (xloginsert lane)");
-    }
     *instr = Instrumentation::default();
     instr.need_bufusage = instrument_options & INSTRUMENT_BUFFERS != 0;
     instr.need_timer = instrument_options & INSTRUMENT_TIMER != 0;
+    instr.need_walusage = instrument_options & INSTRUMENT_WAL != 0;
 }
 
 /// `InstrStartNode`.
@@ -106,7 +112,9 @@ pub fn instr_start_node(instr: &mut Instrumentation) {
     if instr.need_bufusage {
         instr.bufusage_start = pg_buffer_usage();
     }
-    debug_assert!(!instr.need_walusage);
+    if instr.need_walusage {
+        instr.walusage_start = transam_xlog_seams::wal_usage::call();
+    }
 }
 
 /// `InstrStopNode`.
@@ -126,6 +134,11 @@ pub fn instr_stop_node(instr: &mut Instrumentation, n_tuples: f64) {
     if instr.need_bufusage {
         let current = pg_buffer_usage();
         buffer_usage_accum_diff(&mut instr.bufusage, &current, &instr.bufusage_start);
+    }
+
+    if instr.need_walusage {
+        let current = transam_xlog_seams::wal_usage::call();
+        wal_usage_accum_diff(&mut instr.walusage, &current, &instr.walusage_start);
     }
 
     if !instr.running {

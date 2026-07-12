@@ -782,6 +782,103 @@ pub fn heap_reloptions<'mcx>(
     }
 }
 
+// Is relam the cbstore table AM? The tableam_vocab registry only fills when
+// a cbstore relation is first built into the relcache, so fall back to the
+// pg_am.amname probe (the same identity rule relcache build uses) — this
+// runs only for non-heap relam values with reloptions present, so the
+// syscache probe is off every hot path.
+pub fn relam_is_cbstore(relam: Oid) -> bool {
+    const HEAP_TABLE_AM_OID: Oid = 2; // pg_am.dat (relcache build carries it too)
+    relam != ::types_core::InvalidOid
+        && relam != HEAP_TABLE_AM_OID
+        && (tableam_vocab::is_cbstore_am_oid(relam)
+            || matches!(
+                syscache_seams::pg_am_amname::call(relam),
+                Ok(Some(ref n)) if n == "cbstore"
+            ))
+}
+
+// cbstore AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// A closed hand-rolled parse table (no C counterpart — cbstore is native):
+// cluster_key='col,...' (sort-on-ingest key), codec=auto|lz4|zstd|plain,
+// zstd_level=1..22, codec_cols='col=codec,...' (per-column overrides).
+// Column-name resolution happens at writer open, not here (parse-time has no
+// tupdesc); unknown/invalid values error under validate, are skipped else.
+pub fn cbstore_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<::types_rel::CbstoreOptions>> {
+    use ::types_rel::{CbstoreCodec, CbstoreOptions};
+    let Some(options) = options else { return Ok(None) };
+    let expanded = expand_short_image(mcx, Some(options))?;
+    let options = match &expanded {
+        Some(v) => &v[..],
+        None => options,
+    };
+    let bad = |msg: String| -> Box<::types_error::PgError> {
+        ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(msg)
+            .into_error()
+            .into()
+    };
+    let mut out = CbstoreOptions::default();
+    for text_str in option_text_strs(mcx, options)?.iter() {
+        let (name, value) = match text_str.find('=') {
+            Some(p) => (&text_str[..p], &text_str[p + 1..]),
+            None => (&text_str[..], ""),
+        };
+        match name {
+            "cluster_key" => {
+                if !out.set_cluster_key(value) && validate {
+                    return Err(bad(format!("value for \"cluster_key\" is too long")));
+                }
+            }
+            "codec_cols" => {
+                if !out.set_codec_cols(value) && validate {
+                    return Err(bad(format!("value for \"codec_cols\" is too long")));
+                }
+            }
+            "codec" => match value {
+                v if v.eq_ignore_ascii_case("auto") => out.codec = CbstoreCodec::Auto,
+                v if v.eq_ignore_ascii_case("lz4") => out.codec = CbstoreCodec::Lz4,
+                v if v.eq_ignore_ascii_case("zstd") => out.codec = CbstoreCodec::Zstd,
+                v if v.eq_ignore_ascii_case("plain") => out.codec = CbstoreCodec::Plain,
+                other => {
+                    if validate {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+                            .errmsg(format!("invalid value for enum option \"codec\": {other}"))
+                            .errdetail(
+                                "Valid values are \"auto\", \"lz4\", \"zstd\", and \"plain\"."
+                                    .to_string(),
+                            )
+                            .into_error()
+                            .into());
+                    }
+                }
+            },
+            "zstd_level" => match guc::units::parse_int(value, 0) {
+                guc::units::ParseNum::Ok(v) if (1..=22).contains(&v) => out.zstd_level = v,
+                _ => {
+                    if validate {
+                        return Err(bad(format!(
+                            "invalid value for integer option \"zstd_level\": {value} (valid: 1..22)"
+                        )));
+                    }
+                }
+            },
+            other => {
+                if validate {
+                    return Err(bad(format!("unrecognized parameter \"{other}\"")));
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 pub fn partitioned_table_reloptions(options: Option<&[u8]>, validate: bool) -> PgResult<()> {
     if validate && options.is_some() {
         return Err(ereport(ERROR)
@@ -1116,6 +1213,9 @@ pub fn extractRelOptions<'mcx>(
     let image = text_array_image(mcx, d)?;
     let options = Some(image.as_slice());
     match relkind {
+        RELKIND_RELATION if relam_is_cbstore(relam) => {
+            Ok(cbstore_reloptions(mcx, options, false)?.map(RdOptions::Cbstore))
+        }
         RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_MATVIEW => {
             Ok(heap_reloptions(mcx, relkind, options, false)?.map(RdOptions::Std))
         }

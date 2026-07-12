@@ -213,6 +213,52 @@ fn bounded_top_n_heapsort_used_and_correct() {
     }
 }
 
+// Lane top-k cutoff boundary accessor: None until the bounded heap fills
+// (TSS_BOUNDED), then always the WORST surviving top-k member (the k-th
+// boundary), monotonically tightening — and every value strictly worse than
+// the boundary on the (only) key is exactly what puttuple_bounded discards.
+#[test]
+fn topk_boundary_tracks_kth_worst_and_tightens() {
+    let mut ts =
+        Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_ALLOWBOUNDED);
+    ts.set_bound(3);
+    assert_eq!(ts.topk_boundary(), None, "no boundary before any put");
+    let mut kept: Vec<i32> = Vec::new();
+    let mut seed = 1234u64;
+    let mut last_boundary: Option<i32> = None;
+    for i in 0..5000 {
+        let v = (lcg(&mut seed) % 100_000) as i32 - 50_000;
+        ts.putdatum(Datum::from_i32(v), false).unwrap();
+        kept.push(v);
+        kept.sort_unstable();
+        kept.truncate(3);
+        match ts.topk_boundary() {
+            None => {
+                // The heap-mode transition happens once memtuples outgrows
+                // 2*bound; before that the boundary is unavailable and the
+                // pre-filter must stay disengaged.
+                assert!(i < 16, "boundary still None after the bounded transition");
+            }
+            Some((d, isnull)) => {
+                assert!(!isnull);
+                let b = d.as_i32();
+                assert_eq!(b, kept[2], "boundary = current 3rd-best (worst survivor)");
+                if let Some(prev) = last_boundary {
+                    assert!(b <= prev, "ASC boundary only tightens");
+                }
+                last_boundary = Some(b);
+            }
+        }
+    }
+    ts.performsort().unwrap();
+    let mut out = Vec::new();
+    while out.len() < 3 {
+        let Some(nd) = ts.getdatum(true).unwrap() else { break };
+        out.push(nd.value.as_i32());
+    }
+    assert_eq!(out, kept);
+}
+
 #[test]
 fn bounded_larger_than_input_falls_back_to_quicksort() {
     let input: Vec<Option<i32>> = vec![Some(3), Some(1), Some(2)];
@@ -1957,6 +2003,158 @@ mod gist_point_zorder {
                 Datum::from_usize(b.as_ptr() as usize),
             );
             assert_eq!(r, expected, "({x1},{y1}) vs ({x2},{y2})");
+        }
+    }
+}
+
+pub(super) mod cbstore_ingest {
+    use super::*;
+    use ::types_tuple::TYPALIGN_INT;
+
+    // int8 + text descriptor (the cbstore ingest shape: by-val ints, inline
+    // 4B-U varlenas).
+    pub(super) fn i64_text_desc(mcx: Mcx<'static>) -> Rc<TupleDescData<'static>> {
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        for (i, (typid, len, byval, align)) in
+            [(20u32, 8i16, true, ::types_tuple::TYPALIGN_DOUBLE), (25, -1, false, TYPALIGN_INT)]
+                .iter()
+                .enumerate()
+        {
+            let att = FormData_pg_attribute {
+                attnum: (i + 1) as i16,
+                atttypid: *typid,
+                attlen: *len,
+                attbyval: *byval,
+                attalign: *align,
+                attstorage: ::types_tuple::TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 2249,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    pub(super) fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // putvalues/getvalues (the cbstore_ingest_sort seam machinery): rows come
+    // back key-sorted (text C-order primary, i64 tiebreak) and deform exactly.
+    #[test]
+    fn putvalues_getvalues_sorts_rows() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [
+            SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 2,
+                comparator: SortComparator::TextC,
+            },
+            SortSupport {
+                ssup_collation: 0,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 1,
+                comparator: SortComparator::SignedI64,
+            },
+        ];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 1024, TUPLESORT_NONE);
+        let mut seed = 42u64;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..2000)
+            .map(|_| {
+                let k = lcg(&mut seed);
+                ((k % 1000) as i64 - 500, format!("k{:03}", k % 250).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (i, t) in rows.iter() {
+            let vals = [Datum::from_i64(*i), text_datum(t, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+        }
+        ts.performsort().unwrap();
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        while ts.getvalues(true, &mut values, &mut isnull).unwrap() {
+            assert!(!isnull[0] && !isnull[1]);
+            let p = values[1].as_usize() as *const u8;
+            // 4B-U inline image copied out before the next call.
+            let len = unsafe { ((p as *const u32).read_unaligned() >> 2) as usize };
+            let bytes = unsafe { std::slice::from_raw_parts(p.add(4), len - 4) }.to_vec();
+            got.push((values[0].as_i64(), bytes));
+        }
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        assert_eq!(got, rows);
+    }
+}
+
+mod cbstore_ingest_large {
+    use super::*;
+    use super::cbstore_ingest::*;
+
+    #[test]
+    fn putvalues_getvalues_sorts_67k_rows() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [
+            SortSupport {
+                ssup_collation: ::types_core::catalog::C_COLLATION_OID,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 2,
+                comparator: SortComparator::TextC,
+            },
+            SortSupport {
+                ssup_collation: 0,
+                ssup_reverse: false,
+                ssup_nulls_first: false,
+                ssup_attno: 1,
+                comparator: SortComparator::SignedI64,
+            },
+        ];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 65536, TUPLESORT_NONE);
+        let mut seed = 7u64;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..66770)
+            .map(|_| {
+                let k = lcg(&mut seed);
+                ((k % 1000) as i64, format!("k{:04}", k % 300).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (i, t) in rows.iter() {
+            let vals = [Datum::from_i64(*i), text_datum(t, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+        }
+        ts.performsort().unwrap();
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        while ts.getvalues(true, &mut values, &mut isnull).unwrap() {
+            let p = values[1].as_usize() as *const u8;
+            let len = unsafe { ((p as *const u32).read_unaligned() >> 2) as usize };
+            let bytes = unsafe { std::slice::from_raw_parts(p.add(4), len - 4) }.to_vec();
+            got.push((values[0].as_i64(), bytes));
+        }
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        assert_eq!(got.len(), rows.len());
+        for (i, (g, r)) in got.iter().zip(rows.iter()).enumerate() {
+            assert_eq!(g, r, "row {i}");
         }
     }
 }

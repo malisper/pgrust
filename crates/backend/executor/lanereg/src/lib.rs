@@ -297,6 +297,19 @@ const COV_AOT_CMP: &[TierCov] = &[
     TierCov::intree(Tier::AotQualCmp, GuardTier::NonErroring, CollGate::NotApplicable),
     TierCov::intree(Tier::StitchCmp, GuardTier::NonErroring, CollGate::NotApplicable),
 ];
+// Non-float comparators additionally back the lanestitch ScalarArrayOp
+// (IN-list) stencil: `scalar <op> ANY(const array)` fused with its qual,
+// non-erroring at every admitted length (lanestitch stitch.rs SaopQ; float
+// element compares refuse — no NaN-exact scalar cond). On SVE2 hardware the
+// Eq members with all elements in the u16 domain additionally take the
+// SVE2 MATCH stencil (lane-v2-sve2tier; same admission row — MATCH is an
+// implementation tier inside StitchSaop with identical semantics, gated by
+// saop_match_elems and parity-proven against the same oracle).
+const COV_AOT_CMP_SAOP: &[TierCov] = &[
+    TierCov::intree(Tier::AotQualCmp, GuardTier::NonErroring, CollGate::NotApplicable),
+    TierCov::intree(Tier::StitchCmp, GuardTier::NonErroring, CollGate::NotApplicable),
+    TierCov::intree(Tier::StitchSaop, GuardTier::NonErroring, CollGate::NotApplicable),
+];
 const COV_ARITH_INT4: &[TierCov] = &[
     TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
     TierCov::intree(Tier::FoldAffine, GuardTier::DataGuard, CollGate::NotApplicable),
@@ -332,8 +345,14 @@ const COV_FOLD_IT: &[TierCov] =
     &[TierCov::intree(Tier::Fold, GuardTier::TypeProof, CollGate::NotApplicable)];
 
 // A comparator the in-tree AOT qual tier admits AND the stitcher will admit.
+// Float rows: no SAOP tier (element compares refuse, fail closed).
 const fn cmp_aot(oid: Oid, name: &'static str, width: CmpWidth, pred: CmpPred) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Cmp(CmpShape { width, pred }), cov: COV_AOT_CMP }
+}
+
+// A non-float comparator: AOT qual + stitch cmp + stitch SAOP (IN-list).
+const fn cmp_aot_saop(oid: Oid, name: &'static str, width: CmpWidth, pred: CmpPred) -> BatchFn {
+    BatchFn { oid, name, shape: Shape::Cmp(CmpShape { width, pred }), cov: COV_AOT_CMP_SAOP }
 }
 
 // (The former `cmp_stitch_only` class — stitch stencil with no AOT census —
@@ -342,61 +361,61 @@ const fn cmp_aot(oid: Oid, name: &'static str, width: CmpWidth, pred: CmpPred) -
 
 pub static ENTRIES: &[BatchFn] = &[
     // === int4 comparators — AOT qual (in-tree) + stitch (pending) ===
-    cmp_aot(65, "int4eq", I4, Eq),
-    cmp_aot(144, "int4ne", I4, Ne),
-    cmp_aot(66, "int4lt", I4, Lt),
-    cmp_aot(149, "int4le", I4, Le),
-    cmp_aot(147, "int4gt", I4, Gt),
-    cmp_aot(150, "int4ge", I4, Ge),
+    cmp_aot_saop(65, "int4eq", I4, Eq),
+    cmp_aot_saop(144, "int4ne", I4, Ne),
+    cmp_aot_saop(66, "int4lt", I4, Lt),
+    cmp_aot_saop(149, "int4le", I4, Le),
+    cmp_aot_saop(147, "int4gt", I4, Gt),
+    cmp_aot_saop(150, "int4ge", I4, Ge),
     // === int8 comparators ===
-    cmp_aot(467, "int8eq", I8, Eq),
-    cmp_aot(468, "int8ne", I8, Ne),
-    cmp_aot(469, "int8lt", I8, Lt),
-    cmp_aot(471, "int8le", I8, Le),
-    cmp_aot(470, "int8gt", I8, Gt),
-    cmp_aot(472, "int8ge", I8, Ge),
+    cmp_aot_saop(467, "int8eq", I8, Eq),
+    cmp_aot_saop(468, "int8ne", I8, Ne),
+    cmp_aot_saop(469, "int8lt", I8, Lt),
+    cmp_aot_saop(471, "int8le", I8, Le),
+    cmp_aot_saop(470, "int8gt", I8, Gt),
+    cmp_aot_saop(472, "int8ge", I8, Ge),
     // === int2 comparators ===
-    cmp_aot(63, "int2eq", I2, Eq),
-    cmp_aot(145, "int2ne", I2, Ne),
-    cmp_aot(64, "int2lt", I2, Lt),
-    cmp_aot(148, "int2le", I2, Le),
-    cmp_aot(146, "int2gt", I2, Gt),
-    cmp_aot(151, "int2ge", I2, Ge),
+    cmp_aot_saop(63, "int2eq", I2, Eq),
+    cmp_aot_saop(145, "int2ne", I2, Ne),
+    cmp_aot_saop(64, "int2lt", I2, Lt),
+    cmp_aot_saop(148, "int2le", I2, Le),
+    cmp_aot_saop(146, "int2gt", I2, Gt),
+    cmp_aot_saop(151, "int2ge", I2, Ge),
     // === int84 (int8,int4) comparators ===
-    cmp_aot(474, "int84eq", I84, Eq),
-    cmp_aot(475, "int84ne", I84, Ne),
-    cmp_aot(476, "int84lt", I84, Lt),
-    cmp_aot(478, "int84le", I84, Le),
-    cmp_aot(477, "int84gt", I84, Gt),
-    cmp_aot(479, "int84ge", I84, Ge),
+    cmp_aot_saop(474, "int84eq", I84, Eq),
+    cmp_aot_saop(475, "int84ne", I84, Ne),
+    cmp_aot_saop(476, "int84lt", I84, Lt),
+    cmp_aot_saop(478, "int84le", I84, Le),
+    cmp_aot_saop(477, "int84gt", I84, Gt),
+    cmp_aot_saop(479, "int84ge", I84, Ge),
     // === int48 (int4,int8) comparators ===
-    cmp_aot(852, "int48eq", I48, Eq),
-    cmp_aot(853, "int48ne", I48, Ne),
-    cmp_aot(854, "int48lt", I48, Lt),
-    cmp_aot(856, "int48le", I48, Le),
-    cmp_aot(855, "int48gt", I48, Gt),
-    cmp_aot(857, "int48ge", I48, Ge),
+    cmp_aot_saop(852, "int48eq", I48, Eq),
+    cmp_aot_saop(853, "int48ne", I48, Ne),
+    cmp_aot_saop(854, "int48lt", I48, Lt),
+    cmp_aot_saop(856, "int48le", I48, Le),
+    cmp_aot_saop(855, "int48gt", I48, Gt),
+    cmp_aot_saop(857, "int48ge", I48, Ge),
     // === int24 (int2,int4) comparators — AOT qual (censusgaps) + stitch (pending) ===
-    cmp_aot(158, "int24eq", I24, Eq),
-    cmp_aot(164, "int24ne", I24, Ne),
-    cmp_aot(160, "int24lt", I24, Lt),
-    cmp_aot(166, "int24le", I24, Le),
-    cmp_aot(162, "int24gt", I24, Gt),
-    cmp_aot(168, "int24ge", I24, Ge),
+    cmp_aot_saop(158, "int24eq", I24, Eq),
+    cmp_aot_saop(164, "int24ne", I24, Ne),
+    cmp_aot_saop(160, "int24lt", I24, Lt),
+    cmp_aot_saop(166, "int24le", I24, Le),
+    cmp_aot_saop(162, "int24gt", I24, Gt),
+    cmp_aot_saop(168, "int24ge", I24, Ge),
     // === int42 (int4,int2) comparators — AOT qual (censusgaps) + stitch (pending) ===
-    cmp_aot(159, "int42eq", I42, Eq),
-    cmp_aot(165, "int42ne", I42, Ne),
-    cmp_aot(161, "int42lt", I42, Lt),
-    cmp_aot(167, "int42le", I42, Le),
-    cmp_aot(163, "int42gt", I42, Gt),
-    cmp_aot(169, "int42ge", I42, Ge),
+    cmp_aot_saop(159, "int42eq", I42, Eq),
+    cmp_aot_saop(165, "int42ne", I42, Ne),
+    cmp_aot_saop(161, "int42lt", I42, Lt),
+    cmp_aot_saop(167, "int42le", I42, Le),
+    cmp_aot_saop(163, "int42gt", I42, Gt),
+    cmp_aot_saop(169, "int42ge", I42, Ge),
     // === oid comparators — AOT qual (censusgaps, unsigned) + stitch (pending) ===
-    cmp_aot(184, "oideq", Oid, Eq),
-    cmp_aot(185, "oidne", Oid, Ne),
-    cmp_aot(716, "oidlt", Oid, Lt),
-    cmp_aot(717, "oidle", Oid, Le),
-    cmp_aot(1638, "oidgt", Oid, Gt),
-    cmp_aot(1639, "oidge", Oid, Ge),
+    cmp_aot_saop(184, "oideq", Oid, Eq),
+    cmp_aot_saop(185, "oidne", Oid, Ne),
+    cmp_aot_saop(716, "oidlt", Oid, Lt),
+    cmp_aot_saop(717, "oidle", Oid, Le),
+    cmp_aot_saop(1638, "oidgt", Oid, Gt),
+    cmp_aot_saop(1639, "oidge", Oid, Ge),
     // === float4 comparators — AOT qual (censusgaps) + stitch (pending) ===
     cmp_aot(287, "float4eq", F4, Eq),
     cmp_aot(288, "float4ne", F4, Ne),
@@ -425,6 +444,33 @@ pub static ENTRIES: &[BatchFn] = &[
     cmp_aot(308, "float84le", F84, Le),
     cmp_aot(309, "float84gt", F84, Gt),
     cmp_aot(310, "float84ge", F84, Ge),
+    // === date comparators — AOT qual (ne-admission census close) ===
+    // date is int32 days; DATE_NOBEGIN/NOEND sentinels are i32::MIN/MAX, so
+    // date.c's comparators are plain int compares (the same fact laneexec's
+    // translate whitelist and the cbstore zone-qual extraction already
+    // carry). Registered here so the central census matches the consumers.
+    cmp_aot_saop(1086, "date_eq", I4, Eq),
+    cmp_aot_saop(1091, "date_ne", I4, Ne),
+    cmp_aot_saop(1087, "date_lt", I4, Lt),
+    cmp_aot_saop(1088, "date_le", I4, Le),
+    cmp_aot_saop(1089, "date_gt", I4, Gt),
+    cmp_aot_saop(1090, "date_ge", I4, Ge),
+    // === timestamp comparators — AOT qual (ne-admission census close) ===
+    // int64 microseconds; TIMESTAMP_NOBEGIN/NOEND are i64::MIN/MAX —
+    // timestamp_cmp_internal is a plain int compare (timestamp.c parity).
+    cmp_aot_saop(2052, "timestamp_eq", I8, Eq),
+    cmp_aot_saop(2053, "timestamp_ne", I8, Ne),
+    cmp_aot_saop(2054, "timestamp_lt", I8, Lt),
+    cmp_aot_saop(2055, "timestamp_le", I8, Le),
+    cmp_aot_saop(2057, "timestamp_gt", I8, Gt),
+    cmp_aot_saop(2056, "timestamp_ge", I8, Ge),
+    // === timestamptz comparators — same int64 bodies (timestamp.c) ===
+    cmp_aot_saop(1152, "timestamptz_eq", I8, Eq),
+    cmp_aot_saop(1153, "timestamptz_ne", I8, Ne),
+    cmp_aot_saop(1154, "timestamptz_lt", I8, Lt),
+    cmp_aot_saop(1155, "timestamptz_le", I8, Le),
+    cmp_aot_saop(1157, "timestamptz_gt", I8, Gt),
+    cmp_aot_saop(1156, "timestamptz_ge", I8, Ge),
     // === arithmetic: int4 add/sub/mul — JIT + fold-affine (in-tree) + stitch ===
     arith(177, "int4pl", ArithWidth::W4, ArithKind::Add, COV_ARITH_INT4),
     arith(181, "int4mi", ArithWidth::W4, ArithKind::Sub, COV_ARITH_INT4),
@@ -634,8 +680,8 @@ pub fn coverage_report() -> String {
     s.push_str("Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).\n");
     s.push_str("`IN` = in-tree, `..` = pending on a side branch, `RF` = documented refusal\n");
     s.push_str("(see the refusals section), `-` = not covered.\n\n");
-    s.push_str("| OID | name | aot-cmp | jit-arith | fold | fold-affine | stitch-cmp | stitch-arith | drift |\n");
-    s.push_str("|----:|------|:-------:|:---------:|:----:|:-----------:|:----------:|:------------:|-------|\n");
+    s.push_str("| OID | name | aot-cmp | jit-arith | fold | fold-affine | stitch-cmp | stitch-arith | stitch-saop | drift |\n");
+    s.push_str("|----:|------|:-------:|:---------:|:----:|:-----------:|:----------:|:------------:|:-----------:|-------|\n");
     for e in ENTRIES {
         let drift = drift_of(e)
             .iter()
@@ -643,7 +689,7 @@ pub fn coverage_report() -> String {
             .collect::<Vec<_>>()
             .join(", ");
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             e.oid,
             e.name,
             cell(e, Tier::AotQualCmp),
@@ -652,6 +698,7 @@ pub fn coverage_report() -> String {
             cell(e, Tier::FoldAffine),
             cell(e, Tier::StitchCmp),
             cell(e, Tier::StitchArith),
+            cell(e, Tier::StitchSaop),
             drift,
         ));
     }

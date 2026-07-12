@@ -523,6 +523,124 @@ pub struct ScanCmpClauses {
     pub n: u8,
 }
 
+/// Contains-class LIKE qual census (the lane-v2 strsearch qual kernel,
+/// `notes/strsearch-parity-2026-07-12.md`): the qual is exactly one
+/// `scan_var LIKE '%literal%'` clause — `textlike` (strict, 2-arg) over one
+/// scan Var and one compile-time non-null Const pattern whose shape is a
+/// leading `%` run + a metachar-free literal (no `%`/`_`/`\` anywhere in the
+/// literal, no `\` anywhere in the pattern) + a trailing `%` run. For that
+/// class, LIKE match == byte-contains of the literal (`MatchText`'s `%`
+/// recursion reduces to substring search; the UTF-8 matcher's char stepping
+/// can't skip a byte-aligned occurrence because a valid-UTF-8 needle's first
+/// byte is never a continuation byte and stored text is validated UTF-8).
+/// Admission also requires the database encoding to be single-byte or UTF-8
+/// (`generic_match_text`'s ported arms — other encodings refuse so the
+/// per-row path keeps its exact error surface).
+///
+/// `needle` points into the pattern Const's varlena payload (compile-owned,
+/// address-stable for the plan's lifetime, like every frame const).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanContainsClause {
+    pub attnum: u16,
+    pub collation: Oid,
+    needle: NonNull<u8>,
+    needle_len: u32,
+}
+
+impl ScanContainsClause {
+    pub(crate) fn new(attnum: u16, collation: Oid, needle: NonNull<u8>, needle_len: u32) -> Self {
+        ScanContainsClause { attnum, collation, needle, needle_len }
+    }
+
+    /// The contains literal. Valid while the owning plan (the pattern
+    /// Const's compile mcx) lives — the same lifetime rail every staged
+    /// clause Datum in [`ScanCmpClauses`] rides.
+    #[inline]
+    pub fn needle(&self) -> &[u8] {
+        // SAFETY: compile-time pointer into the frame const's varlena
+        // payload, address-stable and live for the plan (struct contract).
+        unsafe { core::slice::from_raw_parts(self.needle.as_ptr(), self.needle_len as usize) }
+    }
+}
+
+::mcx::forget_safe_nodrop!(ScanContainsClause);
+
+/// Batched contains-LIKE qual over a staged varlena pointer lane (the varkey
+/// lane: each non-null cell is a live in-page varlena datum pointer). For
+/// every row `i`: selection bit = `!isnull && contains(text, needle)` when
+/// the datum is a plain inline varlena (1B short, not a toast pointer, or 4B
+/// uncompressed); a compressed/external datum is UNDECIDABLE here — its bit
+/// in `undecided` is set instead and the caller must route the row through
+/// the per-row program (which detoasts exactly as C does; the lanefold
+/// vguard discipline, per-row instead of per-batch). Non-erroring by
+/// construction; NULL rows fail the strict clause, matching `exec_qual`.
+///
+/// The needle search is `memchr::memmem` with a per-call prebuilt finder —
+/// the measured-fastest kernel of the strsearch parity matrix (blob-wide
+/// application lands with the cbstore text arena; a pointer lane has no
+/// contiguous blob).
+///
+/// # Safety
+/// Rows with a false isnull bit carry lane values that are live varlena
+/// datum pointers readable through their header (the `soa_stage_varkey`
+/// contract); `sel`/`undecided` hold at least `values.len().div_ceil(64)`
+/// words.
+pub unsafe fn qual_bitmap_contains(
+    needle: &[u8],
+    values: &[Datum],
+    isnull: &[bool],
+    sel: &mut [u64],
+    undecided: &mut [u64],
+) {
+    use ::types_tuple::varatt::{
+        varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b, VARHDRSZ,
+        VARHDRSZ_SHORT,
+    };
+    debug_assert!(values.len() == isnull.len());
+    debug_assert!(sel.len() >= values.len().div_ceil(64));
+    debug_assert!(undecided.len() >= values.len().div_ceil(64));
+    let finder = ::memchr::memmem::Finder::new(needle);
+    let n = values.len();
+    for (w, chunk) in values.chunks(64).enumerate() {
+        let mut bits = 0u64;
+        let mut und = 0u64;
+        for (j, v) in chunk.iter().enumerate() {
+            let i = w * 64 + j;
+            if isnull[i] {
+                continue;
+            }
+            let p = v.as_usize() as *const u8;
+            // SAFETY: non-null staged varkey cell — live varlena pointer
+            // readable through its header byte (fn contract).
+            let text: &[u8] = unsafe {
+                if varatt_is_1b(p) && !varatt_is_1b_e(p) {
+                    core::slice::from_raw_parts(
+                        p.add(VARHDRSZ_SHORT),
+                        varsize_1b(p) - VARHDRSZ_SHORT,
+                    )
+                } else if varatt_is_4b_u(p) {
+                    core::slice::from_raw_parts(p.add(VARHDRSZ), varsize_4b(p) - VARHDRSZ)
+                } else {
+                    und |= 1u64 << j;
+                    continue;
+                }
+            };
+            if finder.find(text).is_some() {
+                bits |= 1u64 << j;
+            }
+        }
+        sel[w] = bits;
+        undecided[w] = und;
+    }
+    let nwords = n.div_ceil(64);
+    for w in sel.iter_mut().skip(nwords) {
+        *w = 0;
+    }
+    for w in undecided.iter_mut().skip(nwords) {
+        *w = 0;
+    }
+}
+
 /// Column cap for [`ScanProjCols`] (the lane-v2 stitched-projection census;
 /// mirrors the lanestitch output-lane cap).
 pub const SCAN_PROJ_MAX_COLS: usize = 8;
@@ -612,6 +730,51 @@ impl ScanProjCols {
             .iter()
             .any(|c| !matches!(c, ScanProjCol::Var { .. }))
     }
+}
+
+/// Call-chain caps for [`ScanProjExprKey`] (the lane-v2 expression-group-key
+/// census; sized for the ClickBench Q29 class — one regexp_replace call with
+/// two const siblings — with slack for a short composition).
+pub const PROJ_KEY_MAX_CALLS: usize = 2;
+pub const PROJ_KEY_MAX_ARGS: usize = 4;
+
+/// One strict fmgr call of an admitted single-Var projection chain
+/// (node-free: the consumer owns catalog authority — volatility, language,
+/// rettype — exactly the `laneexec::DictCallSpec` split).
+#[derive(Clone, Copy, Debug)]
+pub struct ProjKeyCall {
+    pub fn_oid: Oid,
+    /// fcinfo fncollation (collation-sensitive kernels re-evaluate with it).
+    pub collation: Oid,
+    /// Which arg receives the inner value (the scan Var for calls\[0\], the
+    /// previous call's result above); `args[var_argno]` is ignored.
+    pub var_argno: u8,
+    pub nargs: u8,
+    /// Const siblings, prefilled at compile (compile-time non-null gated by
+    /// the walk); slots past `nargs` are unused.
+    pub args: [NullableDatum; PROJ_KEY_MAX_ARGS],
+}
+
+/// Expression-group-key census (lane-v2 expr-key grouping): a projection
+/// whose target list is bare scan Vars plus EXACTLY ONE computed column — a
+/// chain of strict fmgr calls over exactly one scan Var with compile-time
+/// non-null Const siblings. Selected at ready time from the PRISTINE step
+/// program, like [`ScanProjCols`]. Structural only: the fn-oid legality gate
+/// (IMMUTABLE, internal-language, strictness re-check against pg_proc) is the
+/// consumer's (`laneexec::dicteval` — fail-closed there too).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanProjExprKey {
+    /// Per result column: `Some(attnum)` = bare Var passthrough (0-based scan
+    /// attnum); `None` = THE computed column.
+    pub cols: [Option<u16>; SCAN_PROJ_MAX_COLS],
+    pub n: u8,
+    /// resultnum of the computed column.
+    pub key_out: u16,
+    /// The scan Var feeding the chain (0-based attnum) and its vartype.
+    pub input_col: u16,
+    pub input_type: Oid,
+    pub ncalls: u8,
+    pub calls: [ProjKeyCall; PROJ_KEY_MAX_CALLS],
 }
 
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
@@ -738,6 +901,16 @@ impl<'mcx> FuncFrame<'mcx> {
         debug_assert!(argno < self.nargs as usize);
         // SAFETY: argno < nargs, inside the frame's live fcinfo image.
         unsafe { arg_slot_of(self.fcinfo, argno) }
+    }
+
+    /// The call's input collation (fcinfo fncollation), for the lane qual
+    /// walker: collation-sensitive predicates (text eq/LIKE over dict lanes)
+    /// re-evaluate with it.
+    #[inline]
+    pub(crate) fn collation(&self) -> Oid {
+        // SAFETY: the frame's fcinfo image is a live LocalFcinfo header
+        // (written at frame build) followed by the args tail.
+        unsafe { self.fcinfo.cast::<LocalFcinfo<0>>().as_ref() }.fncollation
     }
 }
 
@@ -870,8 +1043,11 @@ impl CmpOp {
     // AotQualCmp tier entries; here we only decode the registry's neutral
     // `CmpShape` into this crate's `CmpOp` selector. Every width family the
     // registry's in-tree AOT tier carries decodes (the legacy 5 int families
-    // plus the censusgaps int24/int42/oid/float families). The conformance
-    // test in tests.rs pins this to the exact 72-OID golden mapping.
+    // plus the censusgaps int24/int42/oid/float families, plus the
+    // ne-admission census-close date/timestamp/timestamptz aliases — plain
+    // int compares at I4/I8, sentinels included, per date.c/timestamp.c).
+    // The conformance test in tests.rs pins this to the exact 90-OID golden
+    // mapping.
     pub fn for_fn_oid(oid: Oid) -> Option<CmpOp> {
         Some(CmpOp::from_lanereg_shape(::lanereg::aot_qual_cmp(oid)?))
     }
@@ -1333,8 +1509,12 @@ pub struct ExprState<'mcx> {
     // Multi-clause scan-Var-cmp-Const census (lane-v2 batched qual tiers);
     // the 1-clause case lives in `kernel` as QualScanVarCmpConst.
     pub(crate) scan_cmp_clauses: Option<ScanCmpClauses>,
+    // Contains-LIKE qual census (lane-v2 strsearch qual kernel).
+    pub(crate) scan_contains_clause: Option<ScanContainsClause>,
     // Scan-projection census (lane-v2 stitched-projection tier).
     pub(crate) scan_proj_cols: Option<ScanProjCols>,
+    // Expression-group-key census (lane-v2 expr-key grouping tier).
+    pub(crate) scan_proj_expr_key: Option<ScanProjExprKey>,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
     // access carries no Rust borrow provenance.
@@ -1386,7 +1566,9 @@ impl<'mcx> ExprState<'mcx> {
                 saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 scan_cmp_clauses: None,
+                scan_contains_clause: None,
                 scan_proj_cols: None,
+                scan_proj_expr_key: None,
                 flags: 0,
                 resnd,
                 innermost_case: None,
@@ -1526,11 +1708,27 @@ impl<'mcx> ExprState<'mcx> {
         self.scan_cmp_clauses
     }
 
+    /// The qual as one contains-class LIKE clause (`scan_var LIKE
+    /// '%literal%'`), or None. Non-erroring, non-volatile, subplan- and
+    /// param-free by construction (strict in-core `textlike` over one scan
+    /// Var and one compile-time non-null Const, admission-gated pattern
+    /// class / encoding). See [`ScanContainsClause`].
+    pub fn scan_contains_clause(&self) -> Option<ScanContainsClause> {
+        self.scan_contains_clause
+    }
+
     /// The projection as `n` scan-Var / int-arith columns in resultnum order
     /// (the ready-time census), or None (shape outside the census
     /// vocabulary). Subplan- and param-free by construction.
     pub fn scan_proj_cols(&self) -> Option<ScanProjCols> {
         self.scan_proj_cols
+    }
+
+    /// The projection as bare scan Vars plus ONE strict-fmgr-chain computed
+    /// column (the ready-time expr-key census), or None (shape outside the
+    /// vocabulary). Subplan- and param-free by construction.
+    pub fn scan_proj_expr_key(&self) -> Option<ScanProjExprKey> {
+        self.scan_proj_expr_key
     }
 
     #[inline]

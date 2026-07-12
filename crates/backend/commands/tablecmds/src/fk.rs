@@ -945,7 +945,9 @@ pub(crate) fn validate_foreign_key_constraint<'mcx>(
         mcx::PgVec::new_in(mcx),
     )?;
     {
-        let tableam::TableScanDesc::Heap(hscan) = &mut scan;
+        let tableam::TableScanDesc::Heap(hscan) = &mut scan else {
+            panic!("FK validation scan on a non-heap AM");
+        };
         while let Some(tup) = heapam::heap_getnext(
             hscan,
             types_scan::ScanDirection::ForwardScanDirection,

@@ -87,6 +87,20 @@ pub fn lowerstr<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     ::oracle_compat::casemap::str_tolower(mcx, s, DEFAULT_COLLATION_OID)
 }
 
+// Repo-vendored tsearch data staged beside the binary by main_main's
+// build.rs (crates/contrib/*/tsearch_data), mirroring the staged extension
+// dir: a per-file check, so files the repo doesn't ship keep resolving from
+// the system share dir.
+fn staged_tsearch_data_dir() -> Option<&'static str> {
+    static DIR: OnceLock<Option<String>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?.join("share/tsearch_data");
+        dir.is_dir().then(|| dir.to_string_lossy().into_owned())
+    })
+    .as_deref()
+}
+
 // DIVERGENCE: PGRUST_PGSHAREDIR env overrides get_share_path(my_exec_path) (tzparser ladder).
 fn tsearch_data_dir() -> &'static str {
     static DIR: OnceLock<String> = OnceLock::new();
@@ -120,7 +134,16 @@ pub fn get_tsearch_config_filename<'mcx>(
         .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
         .into());
     }
-    let dir = tsearch_data_dir();
+    let mut dir = tsearch_data_dir();
+    if let Some(staged) = staged_tsearch_data_dir() {
+        let candidate = format!(
+            "{staged}/{}.{extension}",
+            String::from_utf8_lossy(basename)
+        );
+        if std::path::Path::new(&candidate).is_file() {
+            dir = staged;
+        }
+    }
     let mut out = vec_with_capacity_in(mcx, dir.len() + basename.len() + extension.len() + 2)?;
     out.extend_from_slice(dir.as_bytes());
     out.push(b'/');

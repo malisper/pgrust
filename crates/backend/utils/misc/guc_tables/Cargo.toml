@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 types_error = { path = "../../../../_support/types/types_error" }
 types_guc = { path = "../../../../_support/types/types_guc" }
+guc_seams = { path = "../guc_seams" }

@@ -284,10 +284,14 @@ uuid_ossp = { path = "../../contrib/uuid_ossp" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
 ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
+pg_stat_statements = { path = "../../contrib/pg_stat_statements" }
 pgvector = { path = "../../contrib/pgvector" }
 pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
+btree_gist = { path = "../../contrib/btree_gist" }
+unaccent = { path = "../../contrib/unaccent" }
+pg_walinspect = { path = "../../contrib/pg_walinspect" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

@@ -71,6 +71,10 @@ pub struct QueryDescData {
     pub already_executed: bool,
     // Cached plan backing pstmt when the portal runs one (skeleton-cache key).
     pub cplan: CachedPlanHandle,
+    // C: queryDesc->totaltime — whole-query instrumentation a tap consumer
+    // (pg_stat_statements) arms at ExecutorStart; standard run/finish
+    // accumulate into it exactly like execMain.c.
+    pub totaltime: Option<Box<types_core::instrument::Instrumentation>>,
 }
 
 thread_local! {
@@ -158,7 +162,7 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
 
 // The entry stays in place; nested executor runs (SQL functions) register and
 // free their own boxed entries freely. Re-entry on the SAME handle panics.
-pub(crate) fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
+pub fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
     assert!(!h.is_null(), "execmain: NULL QueryDescHandle dereferenced");
     let (idx, generation) = decode(h);
     let ptr: *mut Entry = ENTRIES.with(|e| {
@@ -245,6 +249,7 @@ pub(crate) fn create_query_desc_seam(
         exec: None,
         already_executed: false,
         cplan,
+        totaltime: None,
     }))
 }
 

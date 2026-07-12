@@ -339,6 +339,14 @@ pub fn cnt_sml(trg1: &[Trgm], trg2: &[Trgm], inexact: bool) -> f32 {
     calc_sml(count, len1, if inexact { count } else { len2 })
 }
 
+// trgm_presence_map: which query trigrams occur in the (sorted) key array.
+pub fn trgm_presence_map(query: &[Trgm], key: &[Trgm]) -> Vec<bool> {
+    query
+        .iter()
+        .map(|q| key.binary_search_by(|k| cmp_trgm(k, q)).is_ok())
+        .collect()
+}
+
 // trgm_contained_by over two sorted arrays.
 pub fn trgm_contained_by(trg1: &[Trgm], trg2: &[Trgm]) -> bool {
     let (mut i, mut j) = (0usize, 0usize);
@@ -440,7 +448,7 @@ fn iterate_word_similarity(
                         lower = tmp_lower;
                         count = tmp_count;
                     }
-                    if check_only && smlr_cur >= threshold as f32 {
+                    if check_only && smlr_cur as f64 >= threshold {
                         break;
                     }
                 }
@@ -456,7 +464,7 @@ fn iterate_word_similarity(
             }
 
             smlr_max = smlr_max.max(smlr_cur);
-            if check_only && smlr_max >= threshold as f32 {
+            if check_only && smlr_max as f64 >= threshold {
                 break;
             }
 
