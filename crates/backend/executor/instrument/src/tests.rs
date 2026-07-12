@@ -16,10 +16,11 @@ fn init_sets_option_flags() {
 }
 
 #[test]
-#[should_panic(expected = "xloginsert lane")]
-fn wal_option_is_loud() {
+fn wal_option_arms_walusage() {
     let mut i = Instrumentation::default();
     instr_init(&mut i, INSTRUMENT_WAL);
+    assert!(i.need_walusage);
+    assert!(!i.need_timer && !i.need_bufusage);
 }
 
 #[test]
