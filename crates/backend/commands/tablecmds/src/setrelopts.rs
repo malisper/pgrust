@@ -102,6 +102,9 @@ fn update_one<'mcx>(
         )?;
     } else {
         match relkind {
+            RELKIND_RELATION if reloptions::relam_is_cbstore(relam) => {
+                reloptions::cbstore_reloptions(mcx, new_options.as_deref(), true)?;
+            }
             RELKIND_RELATION | RELKIND_MATVIEW => {
                 reloptions::heap_reloptions(mcx, relkind, new_options.as_deref(), true)?;
             }
