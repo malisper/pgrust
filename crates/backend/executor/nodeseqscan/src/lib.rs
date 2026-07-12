@@ -133,6 +133,9 @@ struct BatchSoa<'mcx> {
     // kernel, 2+ = the multi-clause census the lane admits).
     quals: [(u16, ::execexpr::CmpOp, ::datum::Datum); ::execexpr::SCAN_CMP_MAX_CLAUSES],
     nquals: u8,
+    // Contains-LIKE kernel qual (the strsearch census) over the varkey-staged
+    // qual column; exclusive with `quals` (nquals stays 0).
+    contains: Option<::execexpr::ScanContainsClause>,
     // Tier-2 stitched-JIT state; armed only by the lane driver on drain
     // pipelines feeding breakers (`seq_scan_stitch_arm`).
     stitch: Option<QualStitch>,
@@ -577,6 +580,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                     |c| c.clauses,
                 ),
                 nquals: qual.map_or(0, |c| c.n),
+                contains: None,
                 stitch: None,
                 proj: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -645,6 +649,7 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
                 ::execexpr::SCAN_CMP_MAX_CLAUSES],
             nquals: 0,
+            contains: None,
             stitch: None,
             proj: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -693,6 +698,68 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
                 ::execexpr::SCAN_CMP_MAX_CLAUSES],
             nquals: 0,
+            contains: None,
+            stitch: None,
+            proj: None,
+            sel: [0; ::exectuples::SOA_BM_WORDS],
+            nwords: 0,
+            cur_word: 0,
+            cur_bits: 0,
+        },
+        mcx,
+    ));
+    true
+}
+
+/// Arm the contains-LIKE kernel qual (the lane-v2 strsearch tier,
+/// `notes/strsearch-parity-2026-07-12.md`): the scan qual is exactly one
+/// `scan_var LIKE '%literal%'` clause (execexpr's `scan_contains_clause`
+/// census). The text column stages per-row varlena pointers via the varkey
+/// pass into SoA column 0; `seq_scan_next_pagebatch` then runs one
+/// `qual_bitmap_contains` pass per staged batch. Rows whose datum is
+/// compressed/external are undecidable in the kernel — they take the
+/// forced-fallback bit and the per-row program (which detoasts exactly as C
+/// does) re-checks them, so semantics stay byte-identical. False = not
+/// armable (no census clause / unstageable column / collation lookup fails —
+/// the per-row path then raises that error itself / another batch feed
+/// already owns the node); the scalar per-row path continues unchanged.
+pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(c) = node.ss.qual.as_deref().and_then(|q| q.scan_contains_clause()) else {
+        return false;
+    };
+    if let Some(b) = &node.batch_soa {
+        // Memo hit on our own arm; any other armed feed wins (fail closed).
+        return b.contains.is_some() && b.varkey.is_some();
+    }
+    // The per-row matcher resolves the collation once per call
+    // (generic_match_text -> pg_newlocale_from_collation); a failing lookup
+    // must surface as ITS error, not a silently-filtering kernel.
+    if ::pg_locale::pg_newlocale_from_collation(c.collation).is_err() {
+        return false;
+    }
+    let mcx = estate.es_query_cxt;
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, c.attnum as usize) else {
+        return false;
+    };
+    node.batch_soa = Some(::mcx::PgBox::new_in(
+        BatchSoa {
+            soa: ::exectuples::SoaBatch::new_in(mcx, 1),
+            plan: ::exectuples::SoaDeformPlan::unused(mcx),
+            qual_armed: true,
+            qual_only: true,
+            key_col: None,
+            varkey: Some(vk),
+            key_read_col: 0,
+            publish: false,
+            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
+                ::execexpr::SCAN_CMP_MAX_CLAUSES],
+            nquals: 0,
+            contains: Some(c),
             stitch: None,
             proj: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -783,6 +850,40 @@ pub fn seq_scan_next_pagebatch<'mcx>(
             let b = &mut **b;
             if let Some(vk) = &b.varkey {
                 ::tableam::table_scan_batch_stage_varkey(scandesc, vk, &mut b.soa);
+                // Contains-LIKE kernel qual (strsearch tier): one bitmap
+                // pass over the staged varlena pointer lane. Undecidable
+                // rows (compressed/external datums) become forced-fallback
+                // bits: they join the selection so `seq_scan_batch_fetch`
+                // re-checks them with the per-row program (which detoasts
+                // exactly as C does) — same rows, same order, same errors.
+                if b.qual_armed {
+                    if let Some(c) = &b.contains {
+                        let nwords = (n as usize).div_ceil(64);
+                        let mut undecided = [0u64; ::exectuples::SOA_BM_WORDS];
+                        // SAFETY: staged varkey lane — every non-null cell
+                        // is a live in-page varlena pointer readable through
+                        // its header (`soa_stage_varkey`'s contract; null
+                        // and narrow rows carry isnull/fallback bits).
+                        unsafe {
+                            ::execexpr::qual_bitmap_contains(
+                                c.needle(),
+                                &b.soa.col_values(0)[..n as usize],
+                                &b.soa.col_isnull(0)[..n as usize],
+                                &mut b.sel,
+                                &mut undecided,
+                            );
+                        }
+                        b.soa.mark_fallback_words(&undecided[..nwords]);
+                        for (w, fb) in
+                            b.sel[..nwords].iter_mut().zip(b.soa.fallback_words())
+                        {
+                            *w |= fb;
+                        }
+                        b.nwords = nwords as u32;
+                        b.cur_word = 0;
+                        b.cur_bits = b.sel[0];
+                    }
+                }
                 return Ok(n);
             }
             // Single-clause qual-only staging deforms just the qual column;
@@ -2064,7 +2165,7 @@ mcx::forget_safe_struct!(
     // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, sel, nwords, cur_word, cur_bits; stitch, proj,
+        nquals, contains, sel, nwords, cur_word, cur_bits; stitch, proj,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

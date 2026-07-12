@@ -523,6 +523,124 @@ pub struct ScanCmpClauses {
     pub n: u8,
 }
 
+/// Contains-class LIKE qual census (the lane-v2 strsearch qual kernel,
+/// `notes/strsearch-parity-2026-07-12.md`): the qual is exactly one
+/// `scan_var LIKE '%literal%'` clause — `textlike` (strict, 2-arg) over one
+/// scan Var and one compile-time non-null Const pattern whose shape is a
+/// leading `%` run + a metachar-free literal (no `%`/`_`/`\` anywhere in the
+/// literal, no `\` anywhere in the pattern) + a trailing `%` run. For that
+/// class, LIKE match == byte-contains of the literal (`MatchText`'s `%`
+/// recursion reduces to substring search; the UTF-8 matcher's char stepping
+/// can't skip a byte-aligned occurrence because a valid-UTF-8 needle's first
+/// byte is never a continuation byte and stored text is validated UTF-8).
+/// Admission also requires the database encoding to be single-byte or UTF-8
+/// (`generic_match_text`'s ported arms — other encodings refuse so the
+/// per-row path keeps its exact error surface).
+///
+/// `needle` points into the pattern Const's varlena payload (compile-owned,
+/// address-stable for the plan's lifetime, like every frame const).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanContainsClause {
+    pub attnum: u16,
+    pub collation: Oid,
+    needle: NonNull<u8>,
+    needle_len: u32,
+}
+
+impl ScanContainsClause {
+    pub(crate) fn new(attnum: u16, collation: Oid, needle: NonNull<u8>, needle_len: u32) -> Self {
+        ScanContainsClause { attnum, collation, needle, needle_len }
+    }
+
+    /// The contains literal. Valid while the owning plan (the pattern
+    /// Const's compile mcx) lives — the same lifetime rail every staged
+    /// clause Datum in [`ScanCmpClauses`] rides.
+    #[inline]
+    pub fn needle(&self) -> &[u8] {
+        // SAFETY: compile-time pointer into the frame const's varlena
+        // payload, address-stable and live for the plan (struct contract).
+        unsafe { core::slice::from_raw_parts(self.needle.as_ptr(), self.needle_len as usize) }
+    }
+}
+
+::mcx::forget_safe_nodrop!(ScanContainsClause);
+
+/// Batched contains-LIKE qual over a staged varlena pointer lane (the varkey
+/// lane: each non-null cell is a live in-page varlena datum pointer). For
+/// every row `i`: selection bit = `!isnull && contains(text, needle)` when
+/// the datum is a plain inline varlena (1B short, not a toast pointer, or 4B
+/// uncompressed); a compressed/external datum is UNDECIDABLE here — its bit
+/// in `undecided` is set instead and the caller must route the row through
+/// the per-row program (which detoasts exactly as C does; the lanefold
+/// vguard discipline, per-row instead of per-batch). Non-erroring by
+/// construction; NULL rows fail the strict clause, matching `exec_qual`.
+///
+/// The needle search is `memchr::memmem` with a per-call prebuilt finder —
+/// the measured-fastest kernel of the strsearch parity matrix (blob-wide
+/// application lands with the cbstore text arena; a pointer lane has no
+/// contiguous blob).
+///
+/// # Safety
+/// Rows with a false isnull bit carry lane values that are live varlena
+/// datum pointers readable through their header (the `soa_stage_varkey`
+/// contract); `sel`/`undecided` hold at least `values.len().div_ceil(64)`
+/// words.
+pub unsafe fn qual_bitmap_contains(
+    needle: &[u8],
+    values: &[Datum],
+    isnull: &[bool],
+    sel: &mut [u64],
+    undecided: &mut [u64],
+) {
+    use ::types_tuple::varatt::{
+        varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b, VARHDRSZ,
+        VARHDRSZ_SHORT,
+    };
+    debug_assert!(values.len() == isnull.len());
+    debug_assert!(sel.len() >= values.len().div_ceil(64));
+    debug_assert!(undecided.len() >= values.len().div_ceil(64));
+    let finder = ::memchr::memmem::Finder::new(needle);
+    let n = values.len();
+    for (w, chunk) in values.chunks(64).enumerate() {
+        let mut bits = 0u64;
+        let mut und = 0u64;
+        for (j, v) in chunk.iter().enumerate() {
+            let i = w * 64 + j;
+            if isnull[i] {
+                continue;
+            }
+            let p = v.as_usize() as *const u8;
+            // SAFETY: non-null staged varkey cell — live varlena pointer
+            // readable through its header byte (fn contract).
+            let text: &[u8] = unsafe {
+                if varatt_is_1b(p) && !varatt_is_1b_e(p) {
+                    core::slice::from_raw_parts(
+                        p.add(VARHDRSZ_SHORT),
+                        varsize_1b(p) - VARHDRSZ_SHORT,
+                    )
+                } else if varatt_is_4b_u(p) {
+                    core::slice::from_raw_parts(p.add(VARHDRSZ), varsize_4b(p) - VARHDRSZ)
+                } else {
+                    und |= 1u64 << j;
+                    continue;
+                }
+            };
+            if finder.find(text).is_some() {
+                bits |= 1u64 << j;
+            }
+        }
+        sel[w] = bits;
+        undecided[w] = und;
+    }
+    let nwords = n.div_ceil(64);
+    for w in sel.iter_mut().skip(nwords) {
+        *w = 0;
+    }
+    for w in undecided.iter_mut().skip(nwords) {
+        *w = 0;
+    }
+}
+
 /// Column cap for [`ScanProjCols`] (the lane-v2 stitched-projection census;
 /// mirrors the lanestitch output-lane cap).
 pub const SCAN_PROJ_MAX_COLS: usize = 8;
@@ -1333,6 +1451,8 @@ pub struct ExprState<'mcx> {
     // Multi-clause scan-Var-cmp-Const census (lane-v2 batched qual tiers);
     // the 1-clause case lives in `kernel` as QualScanVarCmpConst.
     pub(crate) scan_cmp_clauses: Option<ScanCmpClauses>,
+    // Contains-LIKE qual census (lane-v2 strsearch qual kernel).
+    pub(crate) scan_contains_clause: Option<ScanContainsClause>,
     // Scan-projection census (lane-v2 stitched-projection tier).
     pub(crate) scan_proj_cols: Option<ScanProjCols>,
     pub(crate) flags: u8,
@@ -1386,6 +1506,7 @@ impl<'mcx> ExprState<'mcx> {
                 saop_tables: PgVec::new_in(mcx),
                 kernel: Kernel::Program,
                 scan_cmp_clauses: None,
+                scan_contains_clause: None,
                 scan_proj_cols: None,
                 flags: 0,
                 resnd,
@@ -1524,6 +1645,15 @@ impl<'mcx> ExprState<'mcx> {
             return Some(c);
         }
         self.scan_cmp_clauses
+    }
+
+    /// The qual as one contains-class LIKE clause (`scan_var LIKE
+    /// '%literal%'`), or None. Non-erroring, non-volatile, subplan- and
+    /// param-free by construction (strict in-core `textlike` over one scan
+    /// Var and one compile-time non-null Const, admission-gated pattern
+    /// class / encoding). See [`ScanContainsClause`].
+    pub fn scan_contains_clause(&self) -> Option<ScanContainsClause> {
+        self.scan_contains_clause
     }
 
     /// The projection as `n` scan-Var / int-arith columns in resultnum order

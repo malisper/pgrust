@@ -125,6 +125,17 @@ impl<'mcx> SoaBatch<'mcx> {
         &self.fallback
     }
 
+    /// OR extra forced-fallback rows into the batch (a batched qual kernel
+    /// found them undecidable — e.g. compressed/external varlena datums on
+    /// the varkey lane): they take the same per-row re-check path as
+    /// deform-skipped rows.
+    #[inline]
+    pub fn mark_fallback_words(&mut self, words: &[u64]) {
+        for (w, m) in self.fallback.iter_mut().zip(words) {
+            *w |= m;
+        }
+    }
+
     /// Column `c`'s values for the staged batch.
     #[inline]
     pub fn col_values(&self, c: usize) -> &[Datum] {
