@@ -2580,12 +2580,29 @@ fn add_unique_group_var<'mcx>(
     // hash-finalize parallel agg at 100M scale. isdefault is preserved so
     // SELFLAG_USED_DEFAULT consumers still see the truth.
     if isdefault {
-        let ratio = crate::costsize::gucs::cbstore_group_ndistinct_ratio();
-        if ratio > 0.0 {
-            if let Some(rel) = vardata.rel {
-                let r = run.root.rel(rel);
-                if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 && r.tuples > 0.0 {
-                    ndistinct = crate::costsize::clamp_row_est(r.tuples * ratio);
+        if let Some(rel) = vardata.rel {
+            let r = run.root.rel(rel);
+            if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 && r.tuples > 0.0 {
+                // Prefer the footer's ingest-time per-column NDV (whole-stream
+                // HLL — the same count a footer-backed ANALYZE harvests into
+                // stadistinct; plancat stashes it on the rel). Only a plain
+                // Var of this rel maps to a footer column; anything else (or
+                // a footer-less part / unknown column) keeps the flat-ratio
+                // fallback below.
+                let footer_ndv = node.as_var().and_then(|v| {
+                    (v.varno == r.relid as i32 && v.varlevelsup == 0 && v.varattno >= 1)
+                        .then(|| r.cbstore_col_ndv.get(v.varattno as usize - 1))
+                        .flatten()
+                        .copied()
+                        .filter(|&d| d > 0)
+                });
+                if let Some(d) = footer_ndv {
+                    ndistinct = crate::costsize::clamp_row_est((d as f64).min(r.tuples));
+                } else {
+                    let ratio = crate::costsize::gucs::cbstore_group_ndistinct_ratio();
+                    if ratio > 0.0 {
+                        ndistinct = crate::costsize::clamp_row_est(r.tuples * ratio);
+                    }
                 }
             }
         }
