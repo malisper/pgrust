@@ -1522,6 +1522,13 @@ fn decide_agg_lane<'mcx>(
         // One tick per memoized structural choice (the choice is decided once
         // per node and stable thereafter).
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
+        // Trace the structural refuse (Q22 serial-dispatch diagnosis,
+        // 2026-07-14): the memoized Refuse routes the agg into the legacy
+        // FUSED batched drive, which never passes through try_own_seq_scan —
+        // so a refused chain shows ZERO lane markers (not even a PREWHERE
+        // arm) and reads as "non-attempt" in trace capture. This line makes
+        // the attempt+refusal observable.
+        lane_trace("agg-over-scan refused (admission economics: legacy fused drive)");
         return Ok(AggLaneChoice::Refuse);
     }
     Ok(AggLaneChoice::PerRow)
