@@ -38,9 +38,14 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
         set_errno(0);
     }
 
-    // HAVE_FSYNC_WRITETHROUGH platforms only (macOS here).
+    // HAVE_FSYNC_WRITETHROUGH platforms only (macOS here). Before the GUC
+    // machinery installs the slot (early startup, unit tests), behave as the
+    // default: wal_sync_method != fsync_writethrough (C's macOS default is
+    // fsync), i.e. fall through to pg_fsync_no_writethrough.
     #[cfg(target_os = "macos")]
-    if guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH {
+    if guc_tables::vars::wal_sync_method.installed()
+        && guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH
+    {
         return pg_fsync_writethrough(fd);
     }
     #[cfg(not(target_os = "macos"))]
