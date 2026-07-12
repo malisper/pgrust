@@ -26,6 +26,9 @@ mod tags;
 pub use bitmapset::{bitmapword, Bitmapset, BmsComparison, BmsMembership, BITS_PER_BITMAPWORD};
 pub use equal::{equal, equal_opt, NodeEqual};
 pub use jointype::JoinType;
+// pg_stat_statements scribbles PlannedStmt.queryId in place (C parity);
+// re-exported so constructors need no direct types_storage edge.
+pub use types_storage::storage::SyncCell;
 pub use list::{IntList, List, ListFlavor, NodeList, OidList, OptNodeList, XidList};
 pub use node_tree::{BitString, Boolean, Float, Integer, Node, NodeMut, NodeVariant, String};
 pub use nodes_enums::{CmdType, LimitOption, LockClauseStrength, LockWaitPolicy};

@@ -835,8 +835,8 @@ pub fn exec_execute_message<'mcx>(
         let stmts = portal.borrow().stmts;
         if !stmts.is_null() {
             pquery::stmt_list::with(stmts, |stmts| {
-                if let Some(stmt) = stmts.iter().find(|s| s.queryId != 0) {
-                    backend_status_seams::pgstat_report_query_id::call(stmt.queryId, false);
+                if let Some(stmt) = stmts.iter().find(|s| s.queryId.get() != 0) {
+                    backend_status_seams::pgstat_report_query_id::call(stmt.queryId.get(), false);
                 }
                 if let Some(stmt) = stmts.iter().find(|s| s.planId != 0) {
                     backend_status_seams::pgstat_report_plan_id::call(stmt.planId, false);

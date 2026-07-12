@@ -10,3 +10,4 @@ path = "src/lib.rs"
 types_core = { path = "../../../_support/types/types_core" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 fd = { path = "../../storage/file/fd" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }

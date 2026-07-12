@@ -33,23 +33,28 @@ fn string_get(cell: &'static RwLock<Option<String>>) -> Option<String> {
     }
 }
 
-// load_libraries: dfmgr/extension loading is unported; only C's empty-list
-// fast path (SplitDirectoriesString of "" yields NIL) is live.
-fn load_libraries(libraries: Option<&str>, gucname: &str) {
-    let nonempty = libraries.is_some_and(|l| {
-        l.split(',').any(|item| !item.trim().trim_matches('"').is_empty())
-    });
-    if nonempty {
-        panic!(
-            "load_libraries: \"{gucname}\" is set but library loading is unported (dfmgr)"
-        );
+// load_libraries (miscinit.c): names resolve through the dfmgr
+// builtin-library registry (no dlopen); an unknown name errors like C's
+// "could not access file".
+fn load_libraries(libraries: Option<&str>, _gucname: &str) -> PgResult<()> {
+    let Some(list) = libraries else { return Ok(()) };
+    for item in list.split(',') {
+        let name = item.trim().trim_matches('"');
+        if !name.is_empty() {
+            dfmgr::load_file(name)?;
+        }
     }
+    Ok(())
 }
 
 pub fn process_shared_preload_libraries() -> PgResult<()> {
     IN_PROGRESS.set(true);
-    load_libraries(string_get(&SHARED_PRELOAD_LIBRARIES).as_deref(), "shared_preload_libraries");
+    let r = load_libraries(
+        string_get(&SHARED_PRELOAD_LIBRARIES).as_deref(),
+        "shared_preload_libraries",
+    );
     IN_PROGRESS.set(false);
+    r?;
     DONE.set(true);
     Ok(())
 }
@@ -61,28 +66,40 @@ pub fn process_shared_preload_libraries() -> PgResult<()> {
 // (the same window `process_shared_preload_libraries` runs in).
 pub fn process_preload_contrib() -> PgResult<()> {
     let Some(list) = string_get(&PRELOAD_CONTRIB) else { return Ok(()) };
-    for item in list.split(',') {
-        let name = item.trim().trim_matches('"');
-        if !name.is_empty() {
-            dfmgr::load_file(name)?;
+    // Same boot window as shared_preload_libraries: a pg_init loaded here may
+    // install hooks/shmem exactly as if preloaded.
+    IN_PROGRESS.set(true);
+    let r = (|| {
+        for item in list.split(',') {
+            let name = item.trim().trim_matches('"');
+            if !name.is_empty() {
+                dfmgr::load_file(name)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    IN_PROGRESS.set(false);
+    r
 }
 
 pub fn process_shared_preload_libraries_done() -> bool {
     DONE.get()
 }
 
+/// `process_shared_preload_libraries_in_progress` (miscadmin.h).
+pub fn process_shared_preload_libraries_in_progress() -> bool {
+    IN_PROGRESS.get()
+}
+
 pub fn process_session_preload_libraries() -> PgResult<()> {
     load_libraries(
         session_preload_libraries_string_get().as_deref(),
         "session_preload_libraries",
-    );
+    )?;
     load_libraries(
         local_preload_libraries_string_get().as_deref(),
         "local_preload_libraries",
-    );
+    )?;
     Ok(())
 }
 

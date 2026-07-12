@@ -88,10 +88,10 @@ pub fn ExplainPrintPlan<'mcx>(
     ExplainNode(root, None, None, None, es)?;
     ExplainPrintSettings(es)?;
     if es.verbose
-        && pstmt.queryId != 0
+        && pstmt.queryId.get() != 0
         && guc_tables::backing::compute_query_id() != guc_tables::consts::COMPUTE_QUERY_ID_REGRESS
     {
-        ExplainPropertyInteger("Query Identifier", None, pstmt.queryId, es);
+        ExplainPropertyInteger("Query Identifier", None, pstmt.queryId.get(), es);
     }
     Ok(())
 }

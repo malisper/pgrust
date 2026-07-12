@@ -77,7 +77,11 @@ pub fn ExecCreateTableAs<'mcx>(
     let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("CreateTableAsStmt.query is an analyzed Query");
 
-    if queryjumble::IsQueryIdEnabled() {
+    if parser_analyze::tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled()
+    {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, source_text));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
 

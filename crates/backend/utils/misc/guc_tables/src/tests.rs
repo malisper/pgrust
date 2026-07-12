@@ -11,13 +11,15 @@ fn find(name: &str) -> GucSetting {
 fn table_counts_match_compiled_backend_shape() {
     // 41 + 1: regex_engine (re2 product dispatch, hidden).
     // Bool: +1 over the compiled C backend for pgrust.lane_executor
-    // (pgrust-only, the lane-v2 master gate).
-    assert_eq!(ConfigureNamesBool.len(), 116);
-    assert_eq!(ConfigureNamesInt.len(), 147);
+    // (pgrust-only, the lane-v2 master gate), +3 pg_stat_statements.*
+    // (statically defined custom GUCs; no DefineCustomXxxVariable here).
+    // Int/Enum: +1 each for pg_stat_statements.max / .track.
+    assert_eq!(ConfigureNamesBool.len(), 119);
+    assert_eq!(ConfigureNamesInt.len(), 148);
     assert_eq!(ConfigureNamesReal.len(), 26);
     assert_eq!(ConfigureNamesString.len(), 76);
-    assert_eq!(ConfigureNamesEnum.len(), 42);
-    assert_eq!(all_settings().count(), 407);
+    assert_eq!(ConfigureNamesEnum.len(), 43);
+    assert_eq!(all_settings().count(), 412);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
