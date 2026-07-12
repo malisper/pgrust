@@ -233,13 +233,66 @@ impl Emitter {
         self.raw(0x6B00_0000 | (rm << 16) | (rn << 5) | rd);
     }
 
+    // ADDS/SUBS Xd, Xn, Xm (64-bit, set flags — int8 add/sub overflow probe
+    // reads the V flag).
+    pub fn adds_x(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0xAB00_0000 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    pub fn subs_x(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0xEB00_0000 | (rm << 16) | (rn << 5) | rd);
+    }
+
     pub fn smull(&mut self, xd: u32, wn: u32, wm: u32) {
         self.raw(0x9B20_7C00 | (wm << 16) | (wn << 5) | xd);
+    }
+
+    // MUL Wd, Wn, Wm (int2 product; two i16 operands fit i32 exactly).
+    pub fn mul_w(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x1B00_7C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // MUL Xd, Xn, Xm (int8 product low word).
+    pub fn mul_x(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x9B00_7C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // SMULH Xd, Xn, Xm (signed high 64 of the 128-bit product — the int8
+    // multiply overflow probe: overflow iff smulh != (mul >>s 63)).
+    pub fn smulh(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x9B40_7C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // ASR Xd, Xn, #63 (sign-replicate — the int8-mul overflow reference word).
+    pub fn asr_x_63(&mut self, rd: u32, rn: u32) {
+        self.raw(0x937F_FC00 | (rn << 5) | rd);
     }
 
     // SDIV Wd, Wn, Wm
     pub fn sdiv_w(&mut self, rd: u32, rn: u32, rm: u32) {
         self.raw(0x1AC0_0C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // SDIV Xd, Xn, Xm
+    pub fn sdiv_x(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x9AC0_0C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // CMN Xn, #imm12 (ADDS XZR — int8 div probes b == -1 via CMN #1).
+    pub fn cmn_x_imm(&mut self, rn: u32, imm12: u32) {
+        debug_assert!(imm12 <= 4095);
+        self.raw(0xB100_001F | (imm12 << 10) | (rn << 5));
+    }
+
+    // SXTH Wd, Wn (sign-extend low 16 — int2 arithmetic range check).
+    pub fn sxth_w(&mut self, rd: u32, rn: u32) {
+        self.raw(0x1300_3C00 | (rn << 5) | rd);
+    }
+
+    // MOVN Wd, #imm16: wd = !imm16 (materializes i16::MIN as movn #0x7FFF).
+    pub fn movn_w(&mut self, rd: u32, imm16: u32) {
+        debug_assert!(imm16 <= 0xFFFF);
+        self.raw(0x1280_0000 | (imm16 << 5) | rd);
     }
 
     // ADD Xd, Xn, Xm, LSL #3 (Datum lane element address).
@@ -489,6 +542,17 @@ mod tests {
     fn stencil_encodings_match_clang() {
         let cases: &[(fn(&mut Emitter), u32, &str)] = &[
             (|e| e.add_x_lsl3(5, 2, 3), 0x8B030C45, "add x5, x2, x3, lsl #3"),
+            (|e| e.adds_x(2, 3, 4), 0xAB040062, "adds x2, x3, x4"),
+            (|e| e.subs_x(2, 3, 4), 0xEB040062, "subs x2, x3, x4"),
+            (|e| e.mul_w(2, 3, 4), 0x1B047C62, "mul w2, w3, w4"),
+            (|e| e.mul_x(2, 3, 4), 0x9B047C62, "mul x2, x3, x4"),
+            (|e| e.smulh(2, 3, 4), 0x9B447C62, "smulh x2, x3, x4"),
+            (|e| e.asr_x_63(2, 3), 0x937FFC62, "asr x2, x3, #63"),
+            (|e| e.sdiv_x(2, 3, 4), 0x9AC40C62, "sdiv x2, x3, x4"),
+            (|e| e.cmn_x_imm(3, 1), 0xB100047F, "cmn x3, #1"),
+            (|e| e.sxth_w(2, 3), 0x13003C62, "sxth w2, w3"),
+            (|e| e.movn_w(2, 0x1234), 0x12824682, "movn w2, #0x1234"),
+            (|e| e.movn_w(15, 0x7FFF), 0x128FFFEF, "movn w15, #0x7fff (i16::MIN)"),
             (|e| e.sub_x_imm(5, 2, 1), 0xD1000445, "sub x5, x2, #1"),
             (|e| e.sub_x(5, 2, 3), 0xCB030045, "sub x5, x2, x3"),
             (|e| e.and_x(5, 2, 3), 0x8A030045, "and x5, x2, x3"),
