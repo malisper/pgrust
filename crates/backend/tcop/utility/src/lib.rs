@@ -17,7 +17,7 @@ pub use classify::{
     PreventCommandDuringRecovery,
 };
 pub use commandtag::CreateCommandTag;
-pub use dispatch::{standard_ProcessUtility, tap_process_utility, ProcessUtility};
+pub use dispatch::{standard_ProcessUtility, tap_process_utility_enter, tap_process_utility_leave, ProcessUtility};
 pub use loglevel::GetCommandLogLevel;
 pub use returns::{UtilityContainsQuery, UtilityReturnsTuples, UtilityTupleDescriptor};
 pub use xact::{PreventCommandIfParallelMode, PreventCommandIfReadOnly};
