@@ -47,8 +47,14 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+mod compact;
 mod gsets;
 pub mod merge;
+
+pub use compact::{
+    agg_hash_compact_armed, agg_hash_compact_batch, agg_hash_compact_disarm,
+    agg_hash_compact_try_arm, CompactArm,
+};
 
 const ACL_EXECUTE: u64 = 1 << 7;
 const ACLCHECK_OK: i32 = 0;
@@ -86,6 +92,11 @@ pub struct AggStateData<'mcx> {
     lanefold: Option<LaneFold<'mcx>>,
     // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
     pub instr_idx: Option<u32>,
+    // Sink::combine already ran for this build (spills finished, handoff
+    // installed): agg_hash_build_finish must not repeat either (a double
+    // handoff install would double-count the worker's groups). Cleared by
+    // finish for the next build (rescan).
+    hash_build_combined: bool,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -358,6 +369,9 @@ struct PerHashData<'mcx> {
     // C hash_tablecxt: entries + pergroups (transvalues stay in aggcontext).
     table_ctx: MemoryContext,
     spill: HashSpillState<'mcx>,
+    // Lane-v2 compact-row table (Stage 2.2) when armed for this build; the
+    // C tuplehash above stays the fallback + oracle (compact.rs module doc).
+    compact: Option<compact::CompactHash>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1203,6 +1217,7 @@ pub fn exec_init_agg<'mcx>(
         qual,
         lanefold,
         instr_idx: None,
+        hash_build_combined: false,
     })
 }
 
@@ -1558,6 +1573,7 @@ fn init_perhash<'mcx>(
         hash_ngroups_current: 0,
         hash_mem_limit: mem_limit,
         table_filled: false,
+        compact: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -2977,15 +2993,39 @@ pub fn agg_hash_build_accept<'mcx>(
     Ok(())
 }
 
+/// Breaker `Sink::combine` (the Stage-4 seam, reserved since Phase 2 and
+/// landed with the pool): the partial build's cross-worker contribution —
+/// finish initial spills, then hand the whole table to the leader by pointer
+/// (merge handoff) when a finalize registered one. The leader's finalize
+/// combines the handed tables partition-parallel with the ported combinefn
+/// machinery (merge.rs), so this IS the combine half of combine-before-
+/// finish; `finish` then only flips the breaker to its Source face.
+/// Idempotence: guarded by `hash_build_combined` — a double install would
+/// double-count this worker's groups.
+pub fn agg_hash_build_combine<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if node.hash_build_combined {
+        return Ok(());
+    }
+    hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node);
+    node.hash_build_combined = true;
+    Ok(())
+}
+
 /// Breaker `Sink::finish` (= Finalize): `agg_fill_hash_table_batched`'s
-/// post-drain tail — finish initial spills, install the merge handoff if one
-/// arose, flip the phase flag, park the iterator at the table head.
+/// post-drain tail — combine (spill finish + handoff install) unless a
+/// `Sink::combine` call already ran it, flip the phase flag, park the
+/// iterator at the table head. The combined flag resets here so a rescan's
+/// fresh build combines again.
 pub fn agg_hash_build_finish<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    hashagg_finish_initial_spills(node, estate)?;
-    merge::maybe_install_handoff(node);
+    agg_hash_build_combine(node, estate)?;
+    node.hash_build_combined = false;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     ph.table_filled = true;
     ph.hashiter = 0;
@@ -3932,6 +3972,20 @@ fn agg_retrieve_hash_table<'mcx>(
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
 
+        // Lane-v2 compact-table read-back (compact.rs): row order —
+        // order-relaxed vs the C bucket iterate; no spill refill (compact
+        // builds never spill). first_slot gets the reconstructed grouping
+        // key, exactly the copy the C arm below performs from the stored
+        // tuple; the shared finalize/qual/project tail runs unchanged.
+        let pergroup = if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
+            match compact::compact_retrieve_next(node, estate)? {
+                Some(pg) => pg,
+                None => {
+                    node.agg_done = true;
+                    return Ok(None);
+                }
+            }
+        } else {
         let next = {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
             ph.hashtable.iterate(&mut ph.hashiter)
@@ -3943,7 +3997,7 @@ fn agg_retrieve_hash_table<'mcx>(
             }
             continue;
         };
-        let pergroup = {
+        {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
 
             let tup = ph.hashtable.entry_tuple(ix);
@@ -3966,6 +4020,7 @@ fn agg_retrieve_hash_table<'mcx>(
                 }
             }
             ph.hashtable.entry_additional(ix).map_or(NonNull::dangling(), |p| p.cast())
+        }
         };
         // Written by lookup_hash_entry; unread (and dangling) when peragg is
         // empty.
@@ -4073,6 +4128,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
         ph.spill.mode = false;
         ph.hashtable.reset();
         ph.table_ctx.reset();
+        compact::compact_reset(ph);
     }
     if let Some(ps) = node.persort.as_mut() {
         ps.have_pending = false;
@@ -4124,6 +4180,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
         ph.spill.mode = false;
         ph.hashtable.reset();
         ph.table_ctx.reset();
+        compact::compact_reset(ph);
         // SAFETY: sole access path to the node during the reset.
         unsafe { node.agg_node.as_mut() }.reset();
         return;
@@ -4202,11 +4259,11 @@ mcx::forget_safe_struct!(
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
         hash_mem_limit, table_filled, hashiter, spill;
-        hashtable, hashslot, retrieve_slot, first_slot, table_ctx },
+        hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
-        instr_idx;
+        instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
