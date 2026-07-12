@@ -7887,9 +7887,6 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     let Some(order) = hashgroup_order_spec(agg, sp, k) else {
         return Ok(None);
     };
-    // Arm set-mode BEFORE deriving the spec (presorted entries count as
-    // set-mode; sticky, value-safe).
-    ::nodeagg::agg_sorted_force_distinct_set(agg);
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
@@ -7905,6 +7902,10 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     if !spec.vocab.is_empty() && !pardistinct_force() {
         return Ok(None);
     }
+    // Last refusal point passed: arm set-mode (sticky, value-safe; measured
+    // 2026-07-12 — arming BEFORE the vocab refusal cost the refused Q10
+    // shape ~10% in the classic parallel path, so it must come last).
+    ::nodeagg::agg_sorted_force_distinct_set(agg);
     trace_feed("pardistinct grouped leader drive engaged");
     stats::tick_owned(ShapeClass::AggBuild);
     let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
@@ -7935,13 +7936,15 @@ pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     let Some(sp) = pd_leader_gates(&*gm, estate) else {
         return Ok(None);
     };
-    ::nodeagg::agg_force_distinct_set(agg);
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
         return Ok(None);
     };
     debug_assert_eq!(spec.nkeys(), 0);
+    // Last refusal point passed: arm set-mode (the grouped arm's ordering
+    // law — a refusal must leave the classic path untouched).
+    ::nodeagg::agg_force_distinct_set(agg);
     trace_feed("pardistinct plain leader drive engaged");
     stats::tick_owned(ShapeClass::AggBuild);
     let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
