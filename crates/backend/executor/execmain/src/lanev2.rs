@@ -3057,7 +3057,11 @@ pub fn try_own_sort<'mcx>(
     ::postgres_seams::check_for_interrupts::call()?;
 
     let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-    sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+    if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+        // Feed-time refuse (agg-over-join multi-batch spill), before any
+        // sort-side effect: the Volcano fallback resumes byte-identically.
+        return Ok(None);
+    }
     // Emit phase (pipeline N+1): the breaker's Source face streams the
     // tuplesort read-back through the root pull-adapter, one tuple per call.
     let mut root = RootAdapter::new(None);
@@ -3097,14 +3101,70 @@ fn sort_lane_fusible_memo<'mcx>(
 /// is the phase flag; a rescan clears it and re-enters here. Shared by the
 /// bare sort hook, the Limit/Unique-over-sort chains, and the wave-4 chains
 /// over the sort breaker.
+///
+/// `Ok(false)` = feed-time refuse (only the agg-over-hash-join arm's
+/// multi-batch spill, BEFORE the sort was touched or any owned tick fired):
+/// the caller must refuse ownership; no lane tuple has been emitted and the
+/// completed join build is byte-identical to the row path's, so the Volcano
+/// fallback (`exec_sort` over the per-tuple agg over `exec_hash_join`)
+/// resumes exactly.
 fn sort_feed_if_needed<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
     outer: &mut crate::procnode::PlanStateNode<'mcx>,
     outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     if state.sort_done() {
-        return Ok(());
+        return Ok(true);
+    }
+    // Hash-agg breaker child: build the agg FIRST (its own build-event tick
+    // cadence), refusing before any sort-side effect on a multi-batch join
+    // spill; then the agg's emit face feeds the breaker sink one finalized
+    // group row per produce — exactly the row stream `exec_sort`'s feed loop
+    // pulls from `exec_agg`, in C's retrieve order (per-row, matching the
+    // per-tuple pull cadence: no staged batch exists over agg output).
+    //
+    // No top-k pre-filter on this feed: the vectorized boundary kernel runs
+    // over a staged SoA key lane, which only scan feeds stage — agg output
+    // rows are computed one at a time (cardinality = group count, already
+    // post-reduction), so the bounded tuplesort's own compare-and-discard is
+    // the whole cost and a per-row pre-compare would just duplicate it.
+    if let crate::procnode::PlanStateNode::Agg(aps) = outer {
+        let aps = &mut **aps;
+        // exec_agg's top-of-call guard: a drained agg stays drained (its
+        // retrieve below yields EOF immediately — the empty feed C's
+        // `exec_sort` would build from a drained child).
+        if !::nodeagg::agg_is_done(&aps.agg) {
+            let built = match &mut aps.outer {
+                crate::procnode::PlanStateNode::SeqScan(ss) => {
+                    let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                    agg_seq_scan_build_if_needed(
+                        &mut aps.agg,
+                        ss,
+                        c,
+                        &mut aps.lane_stage_slot,
+                        estate,
+                    )?;
+                    true
+                }
+                crate::procnode::PlanStateNode::HashJoin(hj) => {
+                    agg_hash_join_build_if_needed(
+                        &mut aps.agg,
+                        &mut **hj,
+                        &mut aps.lane_stage_slot,
+                        estate,
+                    )?
+                }
+                _ => unreachable!("agg_child_fusible admitted a non-lane agg feed"),
+            };
+            if !built {
+                return Ok(false);
+            }
+        }
+        stats::tick_owned(ShapeClass::SortFeed);
+        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        sort_feed(state, &mut aps.agg, HashAggSource, HashAggEmit, outer_desc, estate, None)?;
+        return Ok(true);
     }
     // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
     // floor counts feeds, not calls).
@@ -3118,10 +3178,10 @@ fn sort_feed_if_needed<'mcx>(
             // Composes with the direct-key put: the keep-mask filters first,
             // then the direct-key arm reads only surviving rows.
             let topk = topk_cut_arm(state, ss, estate);
-            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, topk)
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, topk)?
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
-            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)?
         }
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -3131,7 +3191,7 @@ fn sort_feed_if_needed<'mcx>(
             outer_desc,
             estate,
             None,
-        ),
+        )?,
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
             // The bitmap must be built before the heap drive — the same
@@ -3147,10 +3207,11 @@ fn sort_feed_if_needed<'mcx>(
                 outer_desc,
                 estate,
                 None,
-            )
+            )?
         }
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
     }
+    Ok(true)
 }
 
 /// Structural refuse-set for the sort breaker. Sort-side: refuse
@@ -3171,6 +3232,22 @@ fn sort_refuse_reason<'mcx>(
 ) -> PgResult<Option<RefuseReason>> {
     if s.state.randomAccess {
         return Ok(Some(RefuseReason::RandomAccess));
+    }
+    // Hash-agg BREAKER child (the final `ORDER BY agg ... LIMIT k` tail over
+    // aggregate output): the agg's Source face (its retrieve/emit) feeds the
+    // sort breaker exactly as a scan source would — breaker-composes-breaker,
+    // the `try_own_agg_over_hash_join` precedent. Admission is the Limit
+    // chain's exact agg-child gate (`agg_child_fusible`: the agg-side breaker
+    // gate × the admitted feed children × the economics memo), so the sort
+    // admits precisely where a Limit-over-agg chain would. All the admitted
+    // checks are init-stable or child-memoized, keeping this verdict
+    // memoizable like the scan arms'.
+    if let crate::procnode::PlanStateNode::Agg(aps) = &mut *s.outer {
+        return Ok(if agg_child_fusible(aps, estate)? {
+            None
+        } else {
+            Some(RefuseReason::ChildNotLaneOwned)
+        });
     }
     scan_child_fusible(&mut s.outer, estate)
 }
@@ -3846,47 +3923,15 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
         ::postgres_seams::check_for_interrupts::call()?;
-        // One OWNED tick per lane-owned sort feed event, plus one per
-        // lane-owned sorted-agg stream start (both count feed/build EVENTS,
-        // once per (re)scan).
-        stats::tick_owned(ShapeClass::SortFeed);
-        stats::tick_owned(ShapeClass::AggBuild);
-        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        match &mut **outer {
-            crate::procnode::PlanStateNode::SeqScan(ss) => {
-                // A sort under a sorted agg is never bounded (no LIMIT
-                // pushdown crosses the agg): no top-k cutoff to arm.
-                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate, None)?
-            }
-            crate::procnode::PlanStateNode::IndexScan(is) => {
-                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate, None)?
-            }
-            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
-                state,
-                &mut **ios,
-                IndexOnlyScanSource,
-                IndexOnlyScanEmit,
-                outer_desc,
-                estate,
-                None,
-            )?,
-            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
-                let b = &mut **b;
-                if !b.scan.initialized {
-                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
-                }
-                sort_feed(
-                    state,
-                    &mut b.scan,
-                    BitmapHeapScanSource,
-                    BitmapHeapScanEmit,
-                    outer_desc,
-                    estate,
-                    None,
-                )?
-            }
-            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+        // The shared feed (a sort under a sorted agg is never bounded — no
+        // LIMIT pushdown crosses the agg — so its seqscan arm's top-k probe
+        // no-ops; false = the agg-child arm's spill refuse, byte-safe).
+        if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+            return Ok(None);
         }
+        // One OWNED tick per lane-owned sorted-agg stream start (feed/build
+        // EVENTS, once per (re)scan; the sort feed ticked its own class).
+        stats::tick_owned(ShapeClass::AggBuild);
     }
     // Emit phase (every call): sort read-back → sorted-agg operator → root,
     // one qual-passing group row per PG pull.
@@ -5621,12 +5666,13 @@ impl<'mcx> TupleOp<'mcx> for UniqueOp<'_, 'mcx> {
     }
 }
 
-/// Admission for a hash-agg breaker child under a lane Limit: the agg-side
-/// breaker gate × the child gates × (for the SeqScan feed) the memoized
-/// `AggLaneChoice` — exactly the bare `agg_arm` hooks' admission
+/// Admission for a hash-agg breaker child under a lane Limit or under the
+/// sort breaker (`sort_refuse_reason`'s Agg arm — the `ORDER BY agg` tail):
+/// the agg-side breaker gate × the child gates × (for the SeqScan feed) the
+/// memoized `AggLaneChoice` — exactly the bare `agg_arm` hooks' admission
 /// (`try_own_agg_over_seq_scan` / `try_own_agg_over_hash_join`), including
-/// the economics `Refuse` arm, so a Limit-owned agg chain admits precisely
-/// where the agg hook would.
+/// the economics `Refuse` arm, so a Limit- or Sort-owned agg chain admits
+/// precisely where the agg hook would.
 fn agg_child_fusible<'mcx>(
     aps: &mut crate::procnode::AggPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -5714,7 +5760,13 @@ pub fn try_own_limit<'mcx>(
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
             let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-            sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+            if !sort_feed_if_needed(state, &mut **outer, outer_desc, estate)? {
+                // Agg-over-join multi-batch spill refuse, before any lane
+                // tuple or sort-side effect: exec_limit over the per-tuple
+                // sort/agg/join resumes byte-identically (the recompute above
+                // ran once, as C's INITIAL arm would have).
+                return Ok(None);
+            }
             let mut op = LimitOp { limit: &mut l.state };
             let mut root = RootAdapter::new(None);
             pull_step_chain(state, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?
@@ -5804,7 +5856,9 @@ pub fn try_own_unique<'mcx>(
     ::nodeunique::lane_unique_cfi()?;
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+        return Ok(None);
+    }
     let mut op = UniqueOp { unique: state };
     let mut root = RootAdapter::new(None);
     let r = pull_step_chain(sstate, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?;
@@ -5933,11 +5987,15 @@ pub fn try_own_group<'mcx>(
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
     // One OWNED tick per lane-owned group drive start (= the underlying sort
-    // feed event; rescan re-feeds and re-ticks, like the sortfeed class).
-    if !sstate.sort_done() {
+    // feed event; rescan re-feeds and re-ticks, like the sortfeed class) —
+    // after the feed, so a feed-time refuse never ticks owned.
+    let feeding = !sstate.sort_done();
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+        return Ok(None);
+    }
+    if feeding {
         stats::tick_owned(ShapeClass::Group);
     }
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
     let mut op = GroupOp { group: &mut g.state };
     let mut root = RootAdapter::new(None);
     let r =
@@ -6072,11 +6130,15 @@ pub fn try_own_result<'mcx>(
             // C's first child pull enters ExecSort: entry CFI, then the feed.
             ::postgres_seams::check_for_interrupts::call()?;
             let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
-            // One OWNED tick per lane-owned Result child-feed event.
-            if !sstate.sort_done() {
+            // One OWNED tick per lane-owned Result child-feed event — after
+            // the feed, so a feed-time refuse never ticks owned.
+            let feeding = !sstate.sort_done();
+            if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+                return Ok(None);
+            }
+            if feeding {
                 stats::tick_owned(ShapeClass::ResultNode);
             }
-            sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
             let mut op = ResultOp { ps };
             let mut root = RootAdapter::new(None);
             Ok(Some(pull_step_chain(
@@ -6176,11 +6238,15 @@ pub fn try_own_subquery_scan<'mcx>(
     // the TupleOp; the subplan pull enters ExecSort — entry CFI here.
     ::postgres_seams::check_for_interrupts::call()?;
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = sort;
-    // One OWNED tick per lane-owned feed event (the child sort feed).
-    if !sstate.sort_done() {
+    // One OWNED tick per lane-owned feed event (the child sort feed) — after
+    // the feed, so a feed-time refuse never ticks owned.
+    let feeding = !sstate.sort_done();
+    if !sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)? {
+        return Ok(None);
+    }
+    if feeding {
         stats::tick_owned(ShapeClass::SubqueryScan);
     }
-    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
     // End-of-stream mirrors exec_scan_impl's projected-slot clear.
     let clear_on_finish = s.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
     let mut op = SubqueryScanOp { ss: &mut s.ss };
