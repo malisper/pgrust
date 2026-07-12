@@ -10,6 +10,10 @@
 //   SUM/AVG(int2/int4), MIN/MAX(int2/int4/int8/date/timestamp/timestamptz),
 //   over a bare outer Var or an admitted affine OpExpr
 //   (`(v / divk) * mulk + addend` from int24pl/int42mi/int4mul/int24div/...).
+//   Fold-coverage tier 2 adds MIN/MAX(float4/float8) (float.c larger/smaller
+//   with NaN-greatest, last-tied-wins bit semantics), bool_and/bool_or/every
+//   (booland/boolor_statefunc), and bit_and/bit_or(int2/int4/int8) — all
+//   strict NULL-init transfns, all TYPE-level non-erroring.
 // - The TYPE-level non-erroring proof (`safe_interval`/`type_proof`): an
 //   admitted expression is only folded unchecked when every value of the
 //   Var's type width provably lands inside int4 — otherwise the admission
@@ -69,7 +73,8 @@ use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
 use ::exectuples::SoaBatch;
 use ::mcx::{Mcx, PgVec};
 use ::types_core::catalog::{
-    DATEOID, INT2OID, INT4OID, INT8OID, TIMESTAMPOID, TIMESTAMPTZOID,
+    BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, TIMESTAMPOID,
+    TIMESTAMPTZOID,
 };
 use ::types_core::Oid;
 use ::types_nodes::node_tree::Node;
@@ -97,6 +102,22 @@ const F_TIMESTAMP_SMALLER: Oid = 2035;
 const F_TIMESTAMP_LARGER: Oid = 2036;
 const F_TIMESTAMPTZ_SMALLER: Oid = 1195;
 const F_TIMESTAMPTZ_LARGER: Oid = 1196;
+// Fold-coverage tier 2: float MIN/MAX, bool_and/bool_or, bit_and/bit_or.
+// Every transfn below is strict with a NULL initval in pg_aggregate (same
+// discipline as the int larger/smaller whitelist) and TYPE-level non-erroring
+// (pure comparison / AND / OR — no arithmetic, no guard tier needed).
+const F_FLOAT4LARGER: Oid = 209;
+const F_FLOAT4SMALLER: Oid = 211;
+const F_FLOAT8LARGER: Oid = 223;
+const F_FLOAT8SMALLER: Oid = 224;
+const F_BOOLAND_STATEFUNC: Oid = 2515;
+const F_BOOLOR_STATEFUNC: Oid = 2516;
+const F_INT2AND: Oid = 1892;
+const F_INT2OR: Oid = 1893;
+const F_INT4AND: Oid = 1898;
+const F_INT4OR: Oid = 1899;
+const F_INT8AND: Oid = 1904;
+const F_INT8OR: Oid = 1905;
 
 const F_INT4MUL: Oid = 141;
 const F_INT24MUL: Oid = 170;
@@ -139,6 +160,13 @@ pub enum LaneWidth {
     I16,
     I32,
     I64,
+    // Datum-lane widths (fold-coverage tier 2): floats fold on the raw datum
+    // word (bit-pattern-preserving; float.h comparison semantics), bools on
+    // the canonical bool datum. Never guarded, never affine-transformed —
+    // classify only admits them as bare Vars.
+    F32,
+    F64,
+    Bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +180,24 @@ pub enum LaneKind {
     // strict byval larger/smaller with signed total order.
     Min,
     Max,
+    // float4/float8 larger/smaller (float.c): strict, NULL init, pure
+    // comparison — TYPE-level safe. C's float_gt/float_lt order NaN as
+    // GREATER than everything (NaN ties NaN), and larger/smaller return the
+    // SECOND argument on a tie, so the fold keeps the LAST tied datum's bits
+    // in row order (load-bearing for -0.0 vs 0.0 and NaN payloads).
+    FMin,
+    FMax,
+    // booland/boolor_statefunc (bool.c): strict, NULL init, arg1 && / || arg2
+    // — TYPE-level safe, associative and commutative up to the canonical
+    // bool datum C recomputes each transition.
+    BoolAnd,
+    BoolOr,
+    // int2/int4/int8 and/or (int.c, int8.c): strict, NULL init, bitwise
+    // AND/OR — TYPE-level safe, associative/commutative bit-exact (sign
+    // extension commutes with AND/OR, so the i64 fold truncated to res_width
+    // equals C's native-width op).
+    BitAnd,
+    BitOr,
 }
 
 impl LaneWidth {
@@ -160,6 +206,9 @@ impl LaneWidth {
             LaneWidth::I16 => (i16::MIN as i64, i16::MAX as i64),
             LaneWidth::I32 => (i32::MIN as i64, i32::MAX as i64),
             LaneWidth::I64 => (i64::MIN, i64::MAX),
+            // Datum lanes are never guarded (classify admits them only under
+            // TYPE-level-safe folds over bare Vars).
+            LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
         }
     }
 }
@@ -356,6 +405,9 @@ fn width_of(vartype: Oid) -> Option<LaneWidth> {
         INT2OID => Some(LaneWidth::I16),
         INT4OID | DATEOID => Some(LaneWidth::I32),
         INT8OID | TIMESTAMPOID | TIMESTAMPTZOID => Some(LaneWidth::I64),
+        FLOAT4OID => Some(LaneWidth::F32),
+        FLOAT8OID => Some(LaneWidth::F64),
+        BOOLOID => Some(LaneWidth::Bool),
         _ => None,
     }
 }
@@ -494,6 +546,23 @@ pub fn classify_trans(
         F_TIMESTAMP_SMALLER => mk(LaneKind::Min, arg(TIMESTAMPOID)?),
         F_TIMESTAMPTZ_LARGER => mk(LaneKind::Max, arg(TIMESTAMPTZOID)?),
         F_TIMESTAMPTZ_SMALLER => mk(LaneKind::Min, arg(TIMESTAMPTZOID)?),
+        // Fold-coverage tier 2 (all strict + NULL-init per pg_aggregate, all
+        // TYPE-level safe — no guards). Floats and bools admit only bare Vars
+        // (classify_arg's OpExpr path is int4-only); the int4 bitwise pair
+        // additionally admits the affine OpExpr shapes, whose guard/proof
+        // tiers apply exactly as for SUM/MIN/MAX.
+        F_FLOAT4LARGER => mk(LaneKind::FMax, arg(FLOAT4OID)?),
+        F_FLOAT4SMALLER => mk(LaneKind::FMin, arg(FLOAT4OID)?),
+        F_FLOAT8LARGER => mk(LaneKind::FMax, arg(FLOAT8OID)?),
+        F_FLOAT8SMALLER => mk(LaneKind::FMin, arg(FLOAT8OID)?),
+        F_BOOLAND_STATEFUNC => mk(LaneKind::BoolAnd, arg(BOOLOID)?),
+        F_BOOLOR_STATEFUNC => mk(LaneKind::BoolOr, arg(BOOLOID)?),
+        F_INT2AND => mk(LaneKind::BitAnd, arg(INT2OID)?),
+        F_INT2OR => mk(LaneKind::BitOr, arg(INT2OID)?),
+        F_INT4AND => mk(LaneKind::BitAnd, arg(INT4OID)?),
+        F_INT4OR => mk(LaneKind::BitOr, arg(INT4OID)?),
+        F_INT8AND => mk(LaneKind::BitAnd, arg(INT8OID)?),
+        F_INT8OR => mk(LaneKind::BitOr, arg(INT8OID)?),
         _ => None,
     }
 }
@@ -577,6 +646,12 @@ pub fn build_cse<'mcx>(
                 },
                 ti,
             ),
+            // CountStar/CountAny cluster below; the tier-2 datum-lane kinds
+            // (FMin/FMax/BoolAnd/BoolOr/BitAnd/BitOr) are excluded from CSE:
+            // SumBase's derivation is ring arithmetic (inapplicable), and the
+            // MinMax scan share is conservatively not extended to the
+            // tie-sensitive float rule or the bitwise folds — they keep their
+            // independent per-trans kernels.
             _ => {}
         }
     }
@@ -622,6 +697,9 @@ fn lane_value(values: &[Datum], width: LaneWidth, i: usize) -> i64 {
         LaneWidth::I16 => values[i].as_i16() as i64,
         LaneWidth::I32 => values[i].as_i32() as i64,
         LaneWidth::I64 => values[i].as_i64(),
+        // Datum-lane kinds read the datum word directly, never through the
+        // integer lane read (and are never guarded).
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
     }
 }
 
@@ -878,6 +956,75 @@ pub unsafe fn fold_batch(
                     minmax_advance(t, pg, v, want_max);
                 }
             }
+            // Batch pre-fold in row order, then one advance: legal because
+            // larger/smaller's last-tied-wins rule is associative on bit
+            // patterns (see f_keep).
+            LaneKind::FMin | LaneKind::FMax => {
+                let want_max = t.kind == LaneKind::FMax;
+                let mut m: Option<Datum> = None;
+                for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        let d = values[i];
+                        m = Some(match m {
+                            None => d,
+                            Some(p) => {
+                                if f_keep(t.width, want_max, p, d) {
+                                    p
+                                } else {
+                                    d
+                                }
+                            }
+                        });
+                    }
+                });
+                if let Some(d) = m {
+                    fmm_advance(t, pg, d, want_max);
+                }
+            }
+            LaneKind::BoolAnd | LaneKind::BoolOr => {
+                let want_and = t.kind == LaneKind::BoolAnd;
+                let mut m: Option<bool> = None;
+                for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        let v = values[i].as_bool();
+                        m = Some(match m {
+                            None => v,
+                            Some(p) => {
+                                if want_and {
+                                    p && v
+                                } else {
+                                    p || v
+                                }
+                            }
+                        });
+                    }
+                });
+                if let Some(v) = m {
+                    bool_advance(pg, v, want_and);
+                }
+            }
+            LaneKind::BitAnd | LaneKind::BitOr => {
+                let want_and = t.kind == LaneKind::BitAnd;
+                let mut m: Option<i64> = None;
+                for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        let v = xform(t, lane_value(values, t.width, i));
+                        m = Some(match m {
+                            None => v,
+                            Some(p) => {
+                                if want_and {
+                                    p & v
+                                } else {
+                                    p | v
+                                }
+                            }
+                        });
+                    }
+                });
+                if let Some(v) = m {
+                    bit_advance(t, pg, v, want_and);
+                }
+            }
         }
     }
 }
@@ -934,25 +1081,136 @@ pub fn check_guards(
 // at the lane width truncated in-range int4 results through from_i16).
 #[inline(always)]
 fn minmax_advance(t: &LaneTrans, pg: &mut AggPerGroup, v: i64, want_max: bool) {
-    let store = |v: i64| match t.res_width {
-        LaneWidth::I16 => Datum::from_i16(v as i16),
-        LaneWidth::I32 => Datum::from_i32(v as i32),
-        LaneWidth::I64 => Datum::from_i64(v),
-    };
     if pg.no_trans_value {
-        pg.trans_value = store(v);
+        pg.trans_value = store_res(t, v);
         pg.trans_value_is_null = false;
         pg.no_trans_value = false;
     } else if !pg.trans_value_is_null {
-        let old = match t.res_width {
-            LaneWidth::I16 => pg.trans_value.as_i16() as i64,
-            LaneWidth::I32 => pg.trans_value.as_i32() as i64,
-            LaneWidth::I64 => pg.trans_value.as_i64(),
-        };
+        let old = load_res(t, pg);
         let next = if want_max { old.max(v) } else { old.min(v) };
         if next != old {
-            pg.trans_value = store(next);
+            pg.trans_value = store_res(t, next);
         }
+    }
+}
+
+// Integer transvalue store/load at the transfn's result width (shared by the
+// int Min/Max and BitAnd/BitOr advances).
+#[inline(always)]
+fn store_res(t: &LaneTrans, v: i64) -> Datum {
+    match t.res_width {
+        LaneWidth::I16 => Datum::from_i16(v as i16),
+        LaneWidth::I32 => Datum::from_i32(v as i32),
+        LaneWidth::I64 => Datum::from_i64(v),
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+    }
+}
+
+#[inline(always)]
+fn load_res(t: &LaneTrans, pg: &AggPerGroup) -> i64 {
+    match t.res_width {
+        LaneWidth::I16 => pg.trans_value.as_i16() as i64,
+        LaneWidth::I32 => pg.trans_value.as_i32() as i64,
+        LaneWidth::I64 => pg.trans_value.as_i64(),
+        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool => unreachable!(),
+    }
+}
+
+// float.h float4_gt/float8_gt over datum lanes: gt(a, b) iff b is not NaN and
+// (a is NaN or a > b) — NaN sorts greatest (ties NaN), matching the btree
+// float opclass C's MIN/MAX planagg rewrite relies on.
+#[inline(always)]
+fn f_gt(width: LaneWidth, a: Datum, b: Datum) -> bool {
+    match width {
+        LaneWidth::F32 => {
+            let (x, y) = (a.as_f32(), b.as_f32());
+            !y.is_nan() && (x.is_nan() || x > y)
+        }
+        LaneWidth::F64 => {
+            let (x, y) = (a.as_f64(), b.as_f64());
+            !y.is_nan() && (x.is_nan() || x > y)
+        }
+        _ => unreachable!(),
+    }
+}
+
+// float.h float4_lt/float8_lt: lt(a, b) iff a is not NaN and (b is NaN or
+// a < b).
+#[inline(always)]
+fn f_lt(width: LaneWidth, a: Datum, b: Datum) -> bool {
+    match width {
+        LaneWidth::F32 => {
+            let (x, y) = (a.as_f32(), b.as_f32());
+            !x.is_nan() && (y.is_nan() || x < y)
+        }
+        LaneWidth::F64 => {
+            let (x, y) = (a.as_f64(), b.as_f64());
+            !x.is_nan() && (y.is_nan() || x < y)
+        }
+        _ => unreachable!(),
+    }
+}
+
+// C float4/float8 larger(a, b) = gt(a, b) ? a : b (smaller uses lt): the
+// state survives only a STRICT win, so every tie — equal values, 0.0 vs -0.0,
+// NaN vs NaN (any payloads) — is taken by the SECOND argument. As a fold,
+// "keep cur iff cur strictly beats v, else take v" selects the LAST datum of
+// the winning tie class in row order. That rule is associative on bit
+// patterns (the last tied element wins under any grouping), so the batch
+// pre-fold below combines with the transvalue exactly as C's per-row
+// transition sequence does.
+#[inline(always)]
+fn f_keep(width: LaneWidth, want_max: bool, cur: Datum, v: Datum) -> bool {
+    if want_max {
+        f_gt(width, cur, v)
+    } else {
+        f_lt(width, cur, v)
+    }
+}
+
+// Strict float larger/smaller advance: the stored transvalue is the winning
+// input datum's exact bits (C stores the argument datum, never a recomputed
+// float), replaced on ties per f_keep.
+#[inline(always)]
+fn fmm_advance(t: &LaneTrans, pg: &mut AggPerGroup, d: Datum, want_max: bool) {
+    if pg.no_trans_value {
+        pg.trans_value = d;
+        pg.trans_value_is_null = false;
+        pg.no_trans_value = false;
+    } else if !pg.trans_value_is_null && !f_keep(t.width, want_max, pg.trans_value, d) {
+        pg.trans_value = d;
+    }
+}
+
+// Strict booland/boolor_statefunc advance. C recomputes the canonical bool
+// datum every transition (arg1 && arg2), and the first strict install copies
+// the input's canonical bool datum, so from_bool is byte-identical either
+// way.
+#[inline(always)]
+fn bool_advance(pg: &mut AggPerGroup, v: bool, want_and: bool) {
+    if pg.no_trans_value {
+        pg.trans_value = Datum::from_bool(v);
+        pg.trans_value_is_null = false;
+        pg.no_trans_value = false;
+    } else if !pg.trans_value_is_null {
+        let old = pg.trans_value.as_bool();
+        pg.trans_value = Datum::from_bool(if want_and { old && v } else { old || v });
+    }
+}
+
+// Strict int2/int4/int8 and/or advance at the transfn's result width. The
+// lane read sign-extends to i64 and the store truncates back, which commutes
+// with AND/OR — bit-identical to C's native-width op (and to C's signed
+// *GetDatum sign extension into the datum word).
+#[inline(always)]
+fn bit_advance(t: &LaneTrans, pg: &mut AggPerGroup, v: i64, want_and: bool) {
+    if pg.no_trans_value {
+        pg.trans_value = store_res(t, v);
+        pg.trans_value_is_null = false;
+        pg.no_trans_value = false;
+    } else if !pg.trans_value_is_null {
+        let old = load_res(t, pg);
+        pg.trans_value = store_res(t, if want_and { old & v } else { old | v });
     }
 }
 
@@ -1013,14 +1271,26 @@ pub unsafe fn fold_rows_grouped(
             }
             // SAFETY: caller contract.
             let pg = unsafe { &mut *g.as_ptr().add(transno) };
-            let v = xform(t, lane_value(values, t.width, i));
+            // t.kind is loop-invariant: LLVM unswitches, and the integer lane
+            // read/transform stays out of the datum-lane arms.
             match t.kind {
                 LaneKind::CountStar => unreachable!(),
                 LaneKind::CountAny => count_apply(pg, 1),
-                LaneKind::Sum => sum_apply(pg, v),
-                LaneKind::AvgAccum => avg_apply(pg, 1, v),
+                LaneKind::Sum => sum_apply(pg, xform(t, lane_value(values, t.width, i))),
+                LaneKind::AvgAccum => avg_apply(pg, 1, xform(t, lane_value(values, t.width, i))),
                 LaneKind::Min | LaneKind::Max => {
+                    let v = xform(t, lane_value(values, t.width, i));
                     minmax_advance(t, pg, v, t.kind == LaneKind::Max);
+                }
+                LaneKind::FMin | LaneKind::FMax => {
+                    fmm_advance(t, pg, values[i], t.kind == LaneKind::FMax);
+                }
+                LaneKind::BoolAnd | LaneKind::BoolOr => {
+                    bool_advance(pg, values[i].as_bool(), t.kind == LaneKind::BoolAnd);
+                }
+                LaneKind::BitAnd | LaneKind::BitOr => {
+                    let v = xform(t, lane_value(values, t.width, i));
+                    bit_advance(t, pg, v, t.kind == LaneKind::BitAnd);
                 }
             }
         }
