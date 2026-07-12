@@ -264,6 +264,10 @@ fn for_each_parallel_scan<'mcx>(
                 for_each_parallel_scan(sub, f)?;
             }
         }
+        N::ForeignScan(fs) => assert!(
+            !fs.plan.scan.plan.parallel_aware,
+            "ExecParallel (execParallel.c): parallel-aware ForeignScan unported"
+        ),
         N::SampleScan(_)
         | N::FunctionScan(_)
         | N::ValuesScan(_)

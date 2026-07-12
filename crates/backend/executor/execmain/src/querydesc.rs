@@ -441,6 +441,21 @@ fn query_desc_instr_extra(
     })
 }
 
+pub(crate) fn query_desc_foreign_explain_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+    emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> types_error::PgResult<()>,
+) -> types_error::PgResult<()> {
+    with_qd(h, |qd| {
+        let Some(exec) = qd.exec.as_mut() else { return Ok(()) };
+        exec.with_mut(|d| {
+            let Some(ps) = d.planstate.as_mut() else { return Ok(()) };
+            crate::procnode::planstate_foreign_explain(ps, &mut d.estate, plan_node_id, emit)
+                .unwrap_or(Ok(()))
+        })
+    })
+}
+
 pub(crate) fn query_desc_tuplestore_instrument_seam(
     h: QueryDescHandle,
     plan_node_id: i32,

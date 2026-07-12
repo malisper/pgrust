@@ -188,6 +188,9 @@ fn ExplainPreScanNode<'mcx>(
         NodeTag::T_ValuesScan => {
             rels_used.add_member(mcx, node.as_values_scan().unwrap().scan.scanrelid as i32)?;
         }
+        NodeTag::T_ForeignScan => {
+            rels_used.add_members(mcx, &node.as_foreign_scan().unwrap().fs_base_relids)?;
+        }
         NodeTag::T_FunctionScan => {
             rels_used.add_member(mcx, node.as_function_scan().unwrap().scan.scanrelid as i32)?;
         }
@@ -406,6 +409,11 @@ fn collect_node_subplans<'mcx>(
                     walk_list(&mut out, l);
                 }
             }
+        }
+        NodeTag::T_ForeignScan => {
+            walk_list(&mut out, &plan.targetlist);
+            walk_list(&mut out, &plan.qual);
+            walk_list(&mut out, &node.as_foreign_scan().unwrap().fdw_recheck_quals);
         }
         // C ExecInitValuesScan: projection, qual, then the per-row
         // exprstatelists — SubPlans inside VALUES rows land on the scan's
@@ -673,6 +681,14 @@ pub fn ExplainNode<'mcx>(
         NodeTag::T_FunctionScan => ("Function Scan", "Function Scan"),
         NodeTag::T_TableFuncScan => ("Table Function Scan", "Table Function Scan"),
         NodeTag::T_ValuesScan => ("Values Scan", "Values Scan"),
+        NodeTag::T_ForeignScan => {
+            assert!(
+                node.as_foreign_scan().unwrap().operation
+                    == types_nodes::CmdType::CMD_SELECT,
+                "ExplainNode (explain.c): ForeignScan direct modify unported"
+            );
+            ("Foreign Scan", "Foreign Scan")
+        }
         NodeTag::T_CteScan => ("CTE Scan", "CTE Scan"),
         NodeTag::T_NamedTuplestoreScan => ("Named Tuplestore Scan", "Named Tuplestore Scan"),
         NodeTag::T_WorkTableScan => ("WorkTable Scan", "WorkTable Scan"),
@@ -883,6 +899,11 @@ pub fn ExplainNode<'mcx>(
     if node.node_tag() == NodeTag::T_ValuesScan {
         ExplainScanTarget(node.as_values_scan().unwrap().scan.scanrelid, es)?;
     }
+    if let Some(fscan) = node.as_foreign_scan() {
+        if fscan.scan.scanrelid > 0 {
+            ExplainScanTarget(fscan.scan.scanrelid, es)?;
+        }
+    }
     if let Some(tfs) = node.as_table_func_scan() {
         ExplainTableFuncTarget(tfs, es)?;
     }
@@ -1065,6 +1086,13 @@ pub fn ExplainNode<'mcx>(
             if node.node_tag() == NodeTag::T_CteScan {
                 show_ctescan_info(node, es);
             }
+        }
+        NodeTag::T_ForeignScan => {
+            show_scan_qual(&plan.qual, "Filter", node, ancestors, es)?;
+            if !plan.qual.is_nil() {
+                show_instrumentation_count("Rows Removed by Filter", 1, &instrument, es);
+            }
+            show_foreignscan_info(plan.plan_node_id, es)?;
         }
         NodeTag::T_FunctionScan => {
             if es.verbose {
@@ -2683,6 +2711,23 @@ fn show_windowagg_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {
     if let Some(stats) = tuplestore_stats(node, es) {
         show_storage_info(stats, es);
     }
+}
+
+// show_foreignscan_info (explain.c): ExplainForeignScan runs executor-side.
+fn show_foreignscan_info<'mcx>(plan_node_id: i32, es: &mut ExplainState<'mcx>) -> PgResult<()> {
+    if es.qd.is_null() {
+        return Ok(());
+    }
+    let qd = es.qd;
+    execmain_seams::query_desc_foreign_explain::call(qd, plan_node_id, &mut |label, v| {
+        match v {
+            types_nodes::FdwExplainProp::Text(t) => ExplainPropertyText(label, t, es),
+            types_nodes::FdwExplainProp::Integer { value, unit } => {
+                ExplainPropertyInteger(label, Some(unit), value, es)
+            }
+        }
+        Ok(())
+    })
 }
 
 fn show_ctescan_info<'mcx>(node: Node<'mcx>, es: &mut ExplainState<'mcx>) {

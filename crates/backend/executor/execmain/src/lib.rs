@@ -63,6 +63,7 @@ pub fn init_seams() {
     execmain_seams::query_desc_result_tupdesc::set(querydesc::query_desc_result_tupdesc_seam);
     execmain_seams::query_desc_operation::set(querydesc::query_desc_operation_seam);
     execmain_seams::query_desc_instrument::set(querydesc::query_desc_instrument_seam);
+    execmain_seams::query_desc_foreign_explain::set(querydesc::query_desc_foreign_explain_seam);
     execmain_seams::query_desc_prune_result::set(querydesc::query_desc_prune_result_seam);
     execmain_seams::query_desc_rti_unpruned::set(querydesc::query_desc_rti_unpruned_seam);
     execmain_seams::query_desc_agg_instrument::set(querydesc::query_desc_agg_instrument_seam);

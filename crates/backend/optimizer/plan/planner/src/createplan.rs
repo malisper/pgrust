@@ -7,6 +7,7 @@ use types_nodes::plannodes::{
 use types_nodes::primnodes::{OpExpr, TargetEntry};
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{IndexOptInfo, PathId, PathNode, PtId, RelId, RinfoId};
+use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
 
 use crate::pathnode::is_projection_capable_pathtype;
 use crate::run::PlannerRun;
@@ -58,6 +59,7 @@ fn create_plan_recurse<'mcx>(
         PathNode::TidRangePath(_) => create_scan_plan(run, path_id, flags),
         PathNode::BitmapHeapPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::SubqueryScanPath(_) => create_scan_plan(run, path_id, flags),
+        PathNode::ForeignPath(_) => create_scan_plan(run, path_id, flags),
         PathNode::AppendPath(_) => create_append_plan(run, path_id, flags),
         PathNode::MergeAppendPath(_) => create_merge_append_plan(run, path_id, flags),
         PathNode::SetOpPath(_) => create_setop_plan(run, path_id, flags),
@@ -460,6 +462,9 @@ fn create_scan_plan<'mcx>(
         t if t == crate::pathnode::tag16(NodeTag::T_Result) => {
             create_resultscan_plan(run, best_path, tlist, scan_clauses)?
         }
+        t if t == crate::pathnode::tag16(NodeTag::T_ForeignScan) => {
+            create_foreignscan_plan(run, best_path, tlist, scan_clauses)?
+        }
         other => panic!("create_scan_plan (createplan.c): pathtype {other}; M2 scan lane"),
     };
 
@@ -548,7 +553,7 @@ fn order_qual_clauses<'mcx>(
     out.extend(items.iter().map(|x| x.0));
     Ok(out)
 }
-fn extract_actual_clauses<'mcx>(
+pub fn extract_actual_clauses<'mcx>(
     run: &PlannerRun<'mcx>,
     rinfos: &[RinfoId],
 ) -> NodeList<'mcx> {
@@ -985,6 +990,152 @@ fn create_resultscan_plan<'mcx>(
     plan.resconstantqual =
         if quals.is_nil() { None } else { Some(Node::mk_list(mcx, quals)?) };
     copy_generic_path_info(run, &mut plan.plan, best_path);
+    Ok(plan.seal())
+}
+
+// create_foreignscan_plan (createplan.c): the FDW builds the node (it may
+// move restriction clauses to remote execution); core fills in the rest.
+fn create_foreignscan_plan<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: NodeList<'mcx>,
+    scan_clauses: mcx::PgVec<'mcx, RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let mcx = run.mcx;
+    let rel_id = run.root.path(best_path).base().parent;
+    let scan_relid = run.root.rel(rel_id).relid;
+    let kind = run
+        .root
+        .rel(rel_id)
+        .fdwroutine
+        .expect("create_foreignscan_plan: rel has fdwroutine");
+    let fdw_outerpath = match run.root.path(best_path) {
+        PathNode::ForeignPath(fp) => fp.fdw_outerpath,
+        other => panic!(
+            "create_foreignscan_plan (createplan.c): pathtype {}",
+            other.base().pathtype
+        ),
+    };
+
+    let outer_plan = match fdw_outerpath {
+        Some(p) => Some(create_plan_recurse(run, p, CP_EXACT_TLIST)?),
+        None => None,
+    };
+
+    let rel_oid = if scan_relid > 0 {
+        debug_assert_eq!(run.root.rel(rel_id).rtekind, types_pathnodes::RTE_RELATION);
+        let rte = run.rte(scan_relid as usize);
+        debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_RELATION);
+        rte.relid
+    } else {
+        0
+    };
+
+    let ordered = order_qual_clauses(run, &scan_clauses)?;
+
+    let plan = (crate::fdwplan::fdw_plan_routine(kind).get_foreign_plan)(
+        run, rel_id, rel_oid, best_path, tlist, ordered, outer_plan,
+    )?;
+    debug_assert_eq!(plan.node_tag(), NodeTag::T_ForeignScan);
+
+    if run.root.rel(rel_id).reloptkind == types_pathnodes::RELOPT_UPPER_REL {
+        panic!("create_foreignscan_plan (createplan.c): upper-rel ForeignPath unported");
+    }
+    let mut fs_relids = types_nodes::bitmapset::Bitmapset::empty();
+    for m in types_pathnodes::relids::relids_members(&run.root.rel(rel_id).relids) {
+        fs_relids.add_member(mcx, m)?;
+    }
+    let mut fs_base_relids = fs_relids.clone_in(mcx)?;
+    for m in types_pathnodes::relids::relids_members(&run.root.outer_join_rels) {
+        fs_base_relids.del_member(m);
+    }
+
+    let (check_as_user, fs_server) = {
+        let rel = run.root.rel(rel_id);
+        if rel.useridiscurrent {
+            run.glob.depends_on_role = true;
+        }
+        (run.root.rel(rel_id).userid, run.root.rel(rel_id).serverid)
+    };
+
+    // replace_nestloop_params runs after the FDW callback because parts of
+    // fdw_exprs/fdw_recheck_quals may have come from join clauses.
+    let replaced = if run.root.path(best_path).base().param_info.is_some() {
+        let fs = plan.as_foreign_scan().expect("ForeignScan node");
+        let qual = replace_nestloop_params_list(run, &fs.scan.plan.qual)?;
+        let fdw_exprs = replace_nestloop_params_list(run, &fs.fdw_exprs)?;
+        let fdw_recheck_quals = replace_nestloop_params_list(run, &fs.fdw_recheck_quals)?;
+        Some((qual, fdw_exprs, fdw_recheck_quals))
+    } else {
+        None
+    };
+
+    let mut fs_system_col = false;
+    if scan_relid > 0 {
+        let mut attrs_used = types_nodes::bitmapset::Bitmapset::empty();
+        // rel's targetlist, not attr_needed (unset for inheritance children).
+        let exprs =
+            crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel_reltarget(rel_id).exprs);
+        for &eid in exprs.iter() {
+            vars::pull_varattnos(mcx, *run.root.expr_node(eid), scan_relid as i32, &mut attrs_used)?;
+        }
+        let rids = crate::relnode::pgvec_clone_shallow(mcx, &run.root.rel(rel_id).baserestrictinfo);
+        for &rid in rids.iter() {
+            let clause = *run.root.expr_node(run.root.rinfo(rid).clause);
+            vars::pull_varattnos(mcx, clause, scan_relid as i32, &mut attrs_used)?;
+        }
+        for i in (FirstLowInvalidHeapAttributeNumber + 1)..0 {
+            if attrs_used.is_member(i - FirstLowInvalidHeapAttributeNumber) {
+                fs_system_col = true;
+                break;
+            }
+        }
+    }
+
+    // SAFETY: exclusive plan-tree ownership (just built by the FDW callback).
+    unsafe {
+        plan.with_mut::<types_nodes::plannodes::ForeignScan, _>(|fs| {
+            copy_generic_path_info(run, &mut fs.scan.plan, best_path);
+            fs.checkAsUser = check_as_user;
+            fs.fs_server = fs_server;
+            fs.fs_relids = fs_relids;
+            fs.fs_base_relids = fs_base_relids;
+            if let Some((qual, fdw_exprs, fdw_recheck_quals)) = replaced {
+                fs.scan.plan.qual = qual;
+                fs.fdw_exprs = fdw_exprs;
+                fs.fdw_recheck_quals = fdw_recheck_quals;
+            }
+            fs.fsSystemCol = fs_system_col;
+        })
+    }
+    .expect("ForeignScan node");
+
+    Ok(plan)
+}
+
+// make_foreignscan (createplan.c), the constructor an FDW's GetForeignPlan
+// calls; costs, checkAsUser/fs_server, relid sets fill in afterwards.
+#[allow(clippy::too_many_arguments)]
+pub fn make_foreignscan<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    qptlist: NodeList<'mcx>,
+    qpqual: NodeList<'mcx>,
+    scanrelid: u32,
+    fdw_exprs: NodeList<'mcx>,
+    fdw_private: NodeList<'mcx>,
+    fdw_scan_tlist: NodeList<'mcx>,
+    fdw_recheck_quals: NodeList<'mcx>,
+    outer_plan: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    let mut plan = Node::build::<types_nodes::plannodes::ForeignScan<'mcx>>(mcx)?;
+    plan.scan.plan.targetlist = qptlist;
+    plan.scan.plan.qual = qpqual;
+    plan.scan.plan.lefttree = outer_plan;
+    plan.scan.scanrelid = scanrelid;
+    plan.fdw_exprs = fdw_exprs;
+    plan.fdw_private = fdw_private;
+    plan.fdw_scan_tlist = fdw_scan_tlist;
+    plan.fdw_recheck_quals = fdw_recheck_quals;
     Ok(plan.seal())
 }
 

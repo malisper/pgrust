@@ -20,6 +20,8 @@ pub enum FdwKind {
 
 pub const NUM_FDW_KINDS: usize = 1;
 
+mcx::forget_safe_nodrop!(FdwKind);
+
 impl FdwKind {
     #[inline]
     pub fn index(self) -> usize {
@@ -41,4 +43,14 @@ impl FdwRoutine {
     pub const fn new(kind: FdwKind) -> Self {
         FdwRoutine { tag: NodeTag::T_FdwRoutine, kind }
     }
+}
+
+/// One `ExplainForeignScan` property. Divergence from C: the FDW's explain
+/// callback cannot take an ExplainState (crate cycle), so properties cross
+/// as (label, value) pairs and the explain layer maps them onto
+/// `ExplainPropertyText` / `ExplainPropertyInteger`.
+#[derive(Clone, Copy, Debug)]
+pub enum FdwExplainProp<'a> {
+    Text(&'a str),
+    Integer { value: i64, unit: &'static str },
 }

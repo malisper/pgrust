@@ -352,13 +352,13 @@ fn grouping_planner_tail<'mcx>(
     {
         let (serverid, userid, useridiscurrent, has_fdw) = {
             let cur = run.root.rel(current_rel);
-            (cur.serverid, cur.userid, cur.useridiscurrent, cur.has_fdwroutine)
+            (cur.serverid, cur.userid, cur.useridiscurrent, cur.fdwroutine)
         };
         let f = run.root.rel_mut(final_rel);
         f.serverid = serverid;
         f.userid = userid;
         f.useridiscurrent = useridiscurrent;
-        f.has_fdwroutine = has_fdw;
+        f.fdwroutine = has_fdw;
     }
 
     let paths = crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.rel(current_rel).pathlist);
@@ -1185,7 +1185,7 @@ fn make_grouping_rel<'mcx>(
             input.serverid,
             input.userid,
             input.useridiscurrent,
-            input.has_fdwroutine,
+            input.fdwroutine,
             input.consider_parallel,
         )
     };
@@ -1194,7 +1194,7 @@ fn make_grouping_rel<'mcx>(
     g.serverid = serverid;
     g.userid = userid;
     g.useridiscurrent = useridiscurrent;
-    g.has_fdwroutine = has_fdw;
+    g.fdwroutine = has_fdw;
     g.consider_parallel = in_parallel && target_parallel_safe && having_safe;
     g.pathtarget_id = Some(target);
     Ok(grouped_rel)
@@ -1619,7 +1619,7 @@ fn create_partial_grouping_paths<'mcx>(
                 g.serverid,
                 g.userid,
                 g.useridiscurrent,
-                g.has_fdwroutine,
+                g.fdwroutine,
             )
         };
         let p = run.root.rel_mut(partially_grouped_rel);
@@ -1628,7 +1628,7 @@ fn create_partial_grouping_paths<'mcx>(
         p.serverid = sid;
         p.userid = uid;
         p.useridiscurrent = uidc;
-        p.has_fdwroutine = fdw;
+        p.fdwroutine = fdw;
     }
     let grouping_target =
         run.root.rel(grouped_rel).pathtarget_id.expect("grouped rel has a target");
@@ -2369,7 +2369,7 @@ fn create_distinct_paths<'mcx>(
                 input.serverid,
                 input.userid,
                 input.useridiscurrent,
-                input.has_fdwroutine,
+                input.fdwroutine,
                 input.consider_parallel,
             )
         };
@@ -2377,7 +2377,7 @@ fn create_distinct_paths<'mcx>(
         d.serverid = serverid;
         d.userid = userid;
         d.useridiscurrent = useridiscurrent;
-        d.has_fdwroutine = has_fdw;
+        d.fdwroutine = has_fdw;
         d.consider_parallel = in_parallel;
         d.pathtarget_id = Some(target);
     }
@@ -2422,7 +2422,7 @@ fn create_partial_distinct_paths<'mcx>(
                 input.serverid,
                 input.userid,
                 input.useridiscurrent,
-                input.has_fdwroutine,
+                input.fdwroutine,
                 input.consider_parallel,
             )
         };
@@ -2430,7 +2430,7 @@ fn create_partial_distinct_paths<'mcx>(
         d.serverid = serverid;
         d.userid = userid;
         d.useridiscurrent = useridiscurrent;
-        d.has_fdwroutine = has_fdw;
+        d.fdwroutine = has_fdw;
         d.consider_parallel = in_parallel;
         d.pathtarget_id = Some(target);
     }
@@ -2956,14 +2956,14 @@ fn create_ordered_paths<'mcx>(
     {
         let (serverid, userid, useridiscurrent, has_fdw, in_parallel) = {
             let input = run.root.rel(input_rel);
-            (input.serverid, input.userid, input.useridiscurrent, input.has_fdwroutine,
+            (input.serverid, input.userid, input.useridiscurrent, input.fdwroutine,
              input.consider_parallel)
         };
         let o = run.root.rel_mut(ordered_rel);
         o.serverid = serverid;
         o.userid = userid;
         o.useridiscurrent = useridiscurrent;
-        o.has_fdwroutine = has_fdw;
+        o.fdwroutine = has_fdw;
         o.consider_parallel = in_parallel && target_parallel_safe;
     }
 
