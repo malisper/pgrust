@@ -1842,6 +1842,16 @@ pub fn try_own_hash_join<'mcx>(
             stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
             return Ok(None);
         }
+        // Bloom pushdown reclaim: arm the lane probe's prefilter, only
+        // where the legacy path's own push seats would (SeqScan outer
+        // drives — the fused probe drive and the bare `seq_scan_set_bloom`
+        // seat are both SeqScan-only), so lane-vs-legacy comparisons stay
+        // apples-to-apples. The arm re-applies the row path's exact push
+        // gate (never fill_outer, never dense, hash cover, single batch,
+        // density <= 0.25).
+        if let crate::procnode::PlanStateNode::SeqScan(_) = &**outer {
+            ::nodehashjoin::lane_probe_filter_arm(state, hstate);
+        }
     } else {
         match ::nodehashjoin::lane_join_phase(state, hstate) {
             ::nodehashjoin::LaneJoinPhase::EmptyDone => return Ok(Some(None)),
@@ -1911,6 +1921,14 @@ pub fn try_own_agg_over_hash_join<'mcx>(
                 // HJ_NEED_NEW_OUTER over the identical table.
                 stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
                 return Ok(None);
+            }
+            // Bloom pushdown reclaim (see try_own_hash_join): legacy-seat
+            // parity — SeqScan outer drives only; the arm re-applies the
+            // row path's exact push gate.
+            if !done.empty {
+                if let crate::procnode::PlanStateNode::SeqScan(_) = &**outer {
+                    ::nodehashjoin::lane_probe_filter_arm(state, hstate);
+                }
             }
         }
         match ::nodehashjoin::lane_join_phase(state, hstate) {
