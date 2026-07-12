@@ -736,21 +736,23 @@ fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
         }
         if let Some(body) = &st.body {
             let mut sv = ::lanestitch::SelVec::all(n);
-            let mut lanes = Vec::with_capacity(st.ncols);
-            for c in 0..st.ncols {
-                lanes.push(::lanestitch::Lane {
+            // Stack lane views over the staged SoA (zero allocation on the
+            // per-batch path — doctrine rule 7).
+            let mut lanes =
+                [::lanestitch::Lane { values: &[], isnull: &[] }; ::lanestitch::MAX_COLS];
+            for (c, lane) in lanes[..st.ncols].iter_mut().enumerate() {
+                *lane = ::lanestitch::Lane {
                     values: soa.col_values(c),
                     isnull: soa.col_isnull(c),
-                });
+                };
             }
-            let batch = ::lanestitch::Batch { nrows: n, lanes };
-            // Per-batch signature check + refuse-and-replay live in `run`:
-            // lane drift or an oversize batch interprets this batch
+            // Per-batch signature check + refuse-and-replay live in the
+            // runner: lane drift or an oversize batch interprets this batch
             // (fail-open); an erroring stitched exit replays the batch on
             // the interpreter and refuses the body for good. Our compare
             // programs are non-erroring, so the error arm is unreachable —
             // kept because fail-open must never become wrong-answer.
-            match body.run(&st.prog, &batch, &mut sv)? {
+            match body.run_lanes(&st.prog, n, &lanes[..st.ncols], &mut sv)? {
                 ::lanestitch::RunOutcome::Stitched => st.n_stitched += 1,
                 ::lanestitch::RunOutcome::InterpretedDrift
                 | ::lanestitch::RunOutcome::InterpretedSticky => st.n_interp += 1,
