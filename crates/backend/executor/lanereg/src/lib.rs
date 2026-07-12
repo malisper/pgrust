@@ -106,6 +106,11 @@ pub enum Avail {
     /// Coverage exists on a not-yet-merged branch; `branch` names it so the
     /// migration recipe can find it.
     Pending { branch: &'static str },
+    /// Coverage was evaluated and deliberately REFUSED: the tier cannot
+    /// execute this OID with byte-identical C semantics under its current
+    /// framework. `why` documents the blocking reason so the refusal is a
+    /// recorded decision, not silent drift (censusgaps methodology).
+    Refused { why: &'static str },
 }
 
 /// Error / trap discipline (design §3a contract).
@@ -150,8 +155,19 @@ impl TierCov {
     const fn pending(tier: Tier, branch: &'static str, guard: GuardTier, coll: CollGate) -> TierCov {
         TierCov { tier, avail: Avail::Pending { branch }, guard, coll }
     }
+    const fn refused(tier: Tier, why: &'static str) -> TierCov {
+        TierCov {
+            tier,
+            avail: Avail::Refused { why },
+            guard: GuardTier::NonErroring, // vacuous: a refused tier never runs
+            coll: CollGate::NotApplicable,
+        }
+    }
     pub fn is_intree(&self) -> bool {
         matches!(self.avail, Avail::InTree)
+    }
+    pub fn is_refused(&self) -> bool {
+        matches!(self.avail, Avail::Refused { .. })
     }
 }
 
@@ -276,17 +292,37 @@ const COV_AOT_CMP: &[TierCov] = &[
     TierCov::intree(Tier::AotQualCmp, GuardTier::NonErroring, CollGate::NotApplicable),
     TierCov::pending(Tier::StitchCmp, "lane-v2-stitchwire", GuardTier::NonErroring, CollGate::NotApplicable),
 ];
-const COV_STITCH_CMP: &[TierCov] =
-    &[TierCov::pending(Tier::StitchCmp, "lane-v2-stitchwire", GuardTier::NonErroring, CollGate::NotApplicable)];
 const COV_ARITH_INT4: &[TierCov] = &[
     TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
     TierCov::intree(Tier::FoldAffine, GuardTier::DataGuard, CollGate::NotApplicable),
     TierCov::pending(Tier::StitchArith, "lane-v2-stitchwire", GuardTier::ReplayOnErr, CollGate::NotApplicable),
 ];
-const COV_ARITH_INT8_JIT: &[TierCov] =
-    &[TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable)];
-const COV_FOLD_AFFINE: &[TierCov] =
-    &[TierCov::intree(Tier::FoldAffine, GuardTier::DataGuard, CollGate::NotApplicable)];
+// int8 pl/mi/mul: JIT inlines them (adds/subs/mul+smulh overflow checks with
+// per-call replay), but the fold's affine admission is REFUSED (censusgaps):
+// lanefold's proof machinery is int4-result based — coefficients are i32,
+// `safe_interval` computes `i32::MIN/MAX - addend` exactly in i64, and the
+// guard/zone intervals live in i64. An int8-result affine transform's exact
+// safe interval (`i64::MIN - k`..`i64::MAX - k`) overflows i64 and needs i128
+// interval arithmetic plus i64 coefficients (LaneTrans is size-bounded); no
+// Int128 proof machinery exists in-tree. Without an exact interval the fold
+// cannot promise C's overflow ereport fires at C's row, so int8 affine args
+// stay on the checked per-row program.
+const FOLDAFFINE_INT8_REFUSAL: &str =
+    "int8 affine needs i128 interval proofs (safe_interval/guards are i64, coefficients i32); \
+     without an exact interval the fold cannot reproduce C's int8 overflow ereport";
+const COV_ARITH_INT8_JIT: &[TierCov] = &[
+    TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
+    TierCov::refused(Tier::FoldAffine, FOLDAFFINE_INT8_REFUSAL),
+];
+// int2/int4 mixed arith (int24/int42 pl/mi/mul + int24div): fold-affine
+// admission AND the JIT inline tier (censusgaps closure). The int2 operand is
+// a canonical sign-extended Datum word, so the JIT's 32-bit inline bodies are
+// the exact C promotion semantics; int24div's division-by-zero branch falls
+// into the real per-row call, which raises C's exact ereport.
+const COV_ARITH_MIX24: &[TierCov] = &[
+    TierCov::intree(Tier::JitArith, GuardTier::ReplayOnErr, CollGate::NotApplicable),
+    TierCov::intree(Tier::FoldAffine, GuardTier::DataGuard, CollGate::NotApplicable),
+];
 const COV_FOLD_IT: &[TierCov] =
     &[TierCov::intree(Tier::Fold, GuardTier::TypeProof, CollGate::NotApplicable)];
 
@@ -295,11 +331,9 @@ const fn cmp_aot(oid: Oid, name: &'static str, width: CmpWidth, pred: CmpPred) -
     BatchFn { oid, name, shape: Shape::Cmp(CmpShape { width, pred }), cov: COV_AOT_CMP }
 }
 
-// A comparator only the (pending) stitcher admits — the AOT qual census does
-// NOT cover it: the "stencil-but-no-census" drift class.
-const fn cmp_stitch_only(oid: Oid, name: &'static str, width: CmpWidth, pred: CmpPred) -> BatchFn {
-    BatchFn { oid, name, shape: Shape::Cmp(CmpShape { width, pred }), cov: COV_STITCH_CMP }
-}
+// (The former `cmp_stitch_only` class — stitch stencil with no AOT census —
+// was closed by the censusgaps branch: every stencil-vocabulary comparator now
+// also has the in-tree AOT qual tier, so all comparator rows use `cmp_aot`.)
 
 pub static ENTRIES: &[BatchFn] = &[
     // === int4 comparators — AOT qual (in-tree) + stitch (pending) ===
@@ -337,64 +371,64 @@ pub static ENTRIES: &[BatchFn] = &[
     cmp_aot(856, "int48le", I48, Le),
     cmp_aot(855, "int48gt", I48, Gt),
     cmp_aot(857, "int48ge", I48, Ge),
-    // === int24 (int2,int4) comparators — STITCH ONLY (no AOT census) ===
-    cmp_stitch_only(158, "int24eq", I24, Eq),
-    cmp_stitch_only(164, "int24ne", I24, Ne),
-    cmp_stitch_only(160, "int24lt", I24, Lt),
-    cmp_stitch_only(166, "int24le", I24, Le),
-    cmp_stitch_only(162, "int24gt", I24, Gt),
-    cmp_stitch_only(168, "int24ge", I24, Ge),
-    // === int42 (int4,int2) comparators — STITCH ONLY ===
-    cmp_stitch_only(159, "int42eq", I42, Eq),
-    cmp_stitch_only(165, "int42ne", I42, Ne),
-    cmp_stitch_only(161, "int42lt", I42, Lt),
-    cmp_stitch_only(167, "int42le", I42, Le),
-    cmp_stitch_only(163, "int42gt", I42, Gt),
-    cmp_stitch_only(169, "int42ge", I42, Ge),
-    // === oid comparators — STITCH ONLY (unsigned) ===
-    cmp_stitch_only(184, "oideq", Oid, Eq),
-    cmp_stitch_only(185, "oidne", Oid, Ne),
-    cmp_stitch_only(716, "oidlt", Oid, Lt),
-    cmp_stitch_only(717, "oidle", Oid, Le),
-    cmp_stitch_only(1638, "oidgt", Oid, Gt),
-    cmp_stitch_only(1639, "oidge", Oid, Ge),
-    // === float4 comparators — STITCH ONLY ===
-    cmp_stitch_only(287, "float4eq", F4, Eq),
-    cmp_stitch_only(288, "float4ne", F4, Ne),
-    cmp_stitch_only(289, "float4lt", F4, Lt),
-    cmp_stitch_only(290, "float4le", F4, Le),
-    cmp_stitch_only(291, "float4gt", F4, Gt),
-    cmp_stitch_only(292, "float4ge", F4, Ge),
-    // === float8 comparators — STITCH ONLY ===
-    cmp_stitch_only(293, "float8eq", F8, Eq),
-    cmp_stitch_only(294, "float8ne", F8, Ne),
-    cmp_stitch_only(295, "float8lt", F8, Lt),
-    cmp_stitch_only(296, "float8le", F8, Le),
-    cmp_stitch_only(297, "float8gt", F8, Gt),
-    cmp_stitch_only(298, "float8ge", F8, Ge),
-    // === float48 comparators — STITCH ONLY ===
-    cmp_stitch_only(299, "float48eq", F48, Eq),
-    cmp_stitch_only(300, "float48ne", F48, Ne),
-    cmp_stitch_only(301, "float48lt", F48, Lt),
-    cmp_stitch_only(302, "float48le", F48, Le),
-    cmp_stitch_only(303, "float48gt", F48, Gt),
-    cmp_stitch_only(304, "float48ge", F48, Ge),
-    // === float84 comparators — STITCH ONLY ===
-    cmp_stitch_only(305, "float84eq", F84, Eq),
-    cmp_stitch_only(306, "float84ne", F84, Ne),
-    cmp_stitch_only(307, "float84lt", F84, Lt),
-    cmp_stitch_only(308, "float84le", F84, Le),
-    cmp_stitch_only(309, "float84gt", F84, Gt),
-    cmp_stitch_only(310, "float84ge", F84, Ge),
+    // === int24 (int2,int4) comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(158, "int24eq", I24, Eq),
+    cmp_aot(164, "int24ne", I24, Ne),
+    cmp_aot(160, "int24lt", I24, Lt),
+    cmp_aot(166, "int24le", I24, Le),
+    cmp_aot(162, "int24gt", I24, Gt),
+    cmp_aot(168, "int24ge", I24, Ge),
+    // === int42 (int4,int2) comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(159, "int42eq", I42, Eq),
+    cmp_aot(165, "int42ne", I42, Ne),
+    cmp_aot(161, "int42lt", I42, Lt),
+    cmp_aot(167, "int42le", I42, Le),
+    cmp_aot(163, "int42gt", I42, Gt),
+    cmp_aot(169, "int42ge", I42, Ge),
+    // === oid comparators — AOT qual (censusgaps, unsigned) + stitch (pending) ===
+    cmp_aot(184, "oideq", Oid, Eq),
+    cmp_aot(185, "oidne", Oid, Ne),
+    cmp_aot(716, "oidlt", Oid, Lt),
+    cmp_aot(717, "oidle", Oid, Le),
+    cmp_aot(1638, "oidgt", Oid, Gt),
+    cmp_aot(1639, "oidge", Oid, Ge),
+    // === float4 comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(287, "float4eq", F4, Eq),
+    cmp_aot(288, "float4ne", F4, Ne),
+    cmp_aot(289, "float4lt", F4, Lt),
+    cmp_aot(290, "float4le", F4, Le),
+    cmp_aot(291, "float4gt", F4, Gt),
+    cmp_aot(292, "float4ge", F4, Ge),
+    // === float8 comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(293, "float8eq", F8, Eq),
+    cmp_aot(294, "float8ne", F8, Ne),
+    cmp_aot(295, "float8lt", F8, Lt),
+    cmp_aot(296, "float8le", F8, Le),
+    cmp_aot(297, "float8gt", F8, Gt),
+    cmp_aot(298, "float8ge", F8, Ge),
+    // === float48 comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(299, "float48eq", F48, Eq),
+    cmp_aot(300, "float48ne", F48, Ne),
+    cmp_aot(301, "float48lt", F48, Lt),
+    cmp_aot(302, "float48le", F48, Le),
+    cmp_aot(303, "float48gt", F48, Gt),
+    cmp_aot(304, "float48ge", F48, Ge),
+    // === float84 comparators — AOT qual (censusgaps) + stitch (pending) ===
+    cmp_aot(305, "float84eq", F84, Eq),
+    cmp_aot(306, "float84ne", F84, Ne),
+    cmp_aot(307, "float84lt", F84, Lt),
+    cmp_aot(308, "float84le", F84, Le),
+    cmp_aot(309, "float84gt", F84, Gt),
+    cmp_aot(310, "float84ge", F84, Ge),
     // === arithmetic: int4 add/sub/mul — JIT + fold-affine (in-tree) + stitch ===
     arith(177, "int4pl", ArithWidth::W4, ArithKind::Add, COV_ARITH_INT4),
     arith(181, "int4mi", ArithWidth::W4, ArithKind::Sub, COV_ARITH_INT4),
     arith(141, "int4mul", ArithWidth::W4, ArithKind::Mul, COV_ARITH_INT4),
-    // === arithmetic: int8 add/sub/mul — JIT ONLY (no fold-affine census) ===
+    // === arithmetic: int8 add/sub/mul — JIT in-tree; fold-affine REFUSED ===
     arith(463, "int8pl", ArithWidth::W8, ArithKind::Add, COV_ARITH_INT8_JIT),
     arith(464, "int8mi", ArithWidth::W8, ArithKind::Sub, COV_ARITH_INT8_JIT),
     arith(465, "int8mul", ArithWidth::W8, ArithKind::Mul, COV_ARITH_INT8_JIT),
-    // === arithmetic: int2/int4 mixes + int24div — FOLD-AFFINE ONLY (no JIT) ===
+    // === arithmetic: int2/int4 mixes + int24div — fold-affine + JIT (censusgaps) ===
     fold_affine(178, "int24pl", ArithKind::Add),
     fold_affine(179, "int42pl", ArithKind::Add),
     fold_affine(182, "int24mi", ArithKind::Sub),
@@ -446,7 +480,7 @@ const fn arith(oid: Oid, name: &'static str, width: ArithWidth, op: ArithKind, c
 }
 
 const fn fold_affine(oid: Oid, name: &'static str, op: ArithKind) -> BatchFn {
-    BatchFn { oid, name, shape: Shape::Arith(ArithShape { width: ArithWidth::W24, op }), cov: COV_FOLD_AFFINE }
+    BatchFn { oid, name, shape: Shape::Arith(ArithShape { width: ArithWidth::W24, op }), cov: COV_ARITH_MIX24 }
 }
 
 const fn fold_it(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
@@ -482,9 +516,10 @@ pub fn covers(oid: Oid, tier: Tier) -> bool {
     entry(oid).and_then(|e| e.tier(tier)).is_some_and(|c| c.is_intree())
 }
 
-/// Does any tier (in-tree OR pending) admit `oid`?
+/// Does any tier (in-tree OR pending) admit `oid`? A `Refused` row is a
+/// documented non-admission, not coverage.
 pub fn covers_pending(oid: Oid, tier: Tier) -> bool {
-    entry(oid).and_then(|e| e.tier(tier)).is_some()
+    entry(oid).and_then(|e| e.tier(tier)).is_some_and(|c| !c.is_refused())
 }
 
 /// AOT qual comparator shape for `oid`, if the in-tree AOT tier admits it.
@@ -551,18 +586,21 @@ impl Drift {
     }
 }
 
-/// Compute the drift classes for one entry.
+/// Compute the drift classes for one entry. A `Refused` row is a documented
+/// decision, not drift: it suppresses the cross-tier asymmetry classes (the
+/// report's refusals section carries the reason).
 pub fn drift_of(e: &BatchFn) -> Vec<Drift> {
     let mut out = Vec::new();
-    let has = |t: Tier| e.tier(t).is_some();
+    let has = |t: Tier| e.tier(t).is_some_and(|c| !c.is_refused());
+    let documented = |t: Tier| e.tier(t).is_some_and(|c| c.is_refused());
     let has_it = |t: Tier| e.tier(t).is_some_and(|c| c.is_intree());
     if has(Tier::StitchCmp) && !has_it(Tier::AotQualCmp) {
         out.push(Drift::StencilNoCensus);
     }
-    if has_it(Tier::FoldAffine) && !has_it(Tier::JitArith) {
+    if has_it(Tier::FoldAffine) && !has_it(Tier::JitArith) && !documented(Tier::JitArith) {
         out.push(Drift::FoldAffineNoJit);
     }
-    if has_it(Tier::JitArith) && !has_it(Tier::FoldAffine) {
+    if has_it(Tier::JitArith) && !has_it(Tier::FoldAffine) && !documented(Tier::FoldAffine) {
         out.push(Drift::JitNoFoldAffine);
     }
     if !e.cov.iter().any(|c| c.is_intree()) {
@@ -575,6 +613,7 @@ fn cell(e: &BatchFn, t: Tier) -> &'static str {
     match e.tier(t) {
         None => "-",
         Some(c) if c.is_intree() => "IN",
+        Some(c) if c.is_refused() => "RF",
         Some(_) => "..",
     }
 }
@@ -586,7 +625,8 @@ pub fn coverage_report() -> String {
     let mut s = String::new();
     s.push_str("# Lane batch-function registry — coverage-drift report\n\n");
     s.push_str("Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).\n");
-    s.push_str("`IN` = in-tree, `..` = pending on a side branch, `-` = not covered.\n\n");
+    s.push_str("`IN` = in-tree, `..` = pending on a side branch, `RF` = documented refusal\n");
+    s.push_str("(see the refusals section), `-` = not covered.\n\n");
     s.push_str("| OID | name | aot-cmp | jit-arith | fold | fold-affine | stitch-cmp | stitch-arith | drift |\n");
     s.push_str("|----:|------|:-------:|:---------:|:----:|:-----------:|:----------:|:------------:|-------|\n");
     for e in ENTRIES {
@@ -632,6 +672,25 @@ pub fn coverage_report() -> String {
         Drift::PendingOnly.label(),
         count(Drift::PendingOnly)
     ));
+    let refusals: Vec<(&BatchFn, Tier, &'static str)> = ENTRIES
+        .iter()
+        .flat_map(|e| {
+            e.cov.iter().filter_map(move |c| match c.avail {
+                Avail::Refused { why } => Some((e, c.tier, why)),
+                _ => None,
+            })
+        })
+        .collect();
+    if !refusals.is_empty() {
+        s.push_str("\n## Documented refusals\n\n");
+        s.push_str(
+            "Tier admissions evaluated and deliberately refused — the tier cannot\n\
+             reproduce byte-identical C semantics under its current framework.\n\n",
+        );
+        for (e, t, why) in refusals {
+            s.push_str(&format!("- {} `{}` × {}: {}\n", e.oid, e.name, t.short(), why));
+        }
+    }
     s
 }
 

@@ -1,7 +1,8 @@
 # Lane batch-function registry — coverage-drift report
 
 Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
-`IN` = in-tree, `..` = pending on a side branch, `-` = not covered.
+`IN` = in-tree, `..` = pending on a side branch, `RF` = documented refusal
+(see the refusals section), `-` = not covered.
 
 | OID | name | aot-cmp | jit-arith | fold | fold-affine | stitch-cmp | stitch-arith | drift |
 |----:|------|:-------:|:---------:|:----:|:-----------:|:----------:|:------------:|-------|
@@ -35,61 +36,61 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 | 856 | int48le | IN | - | - | - | .. | - |  |
 | 855 | int48gt | IN | - | - | - | .. | - |  |
 | 857 | int48ge | IN | - | - | - | .. | - |  |
-| 158 | int24eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 164 | int24ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 160 | int24lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 166 | int24le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 162 | int24gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 168 | int24ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 159 | int42eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 165 | int42ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 161 | int42lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 167 | int42le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 163 | int42gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 169 | int42ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 184 | oideq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 185 | oidne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 716 | oidlt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 717 | oidle | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 1638 | oidgt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 1639 | oidge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 287 | float4eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 288 | float4ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 289 | float4lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 290 | float4le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 291 | float4gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 292 | float4ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 293 | float8eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 294 | float8ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 295 | float8lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 296 | float8le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 297 | float8gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 298 | float8ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 299 | float48eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 300 | float48ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 301 | float48lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 302 | float48le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 303 | float48gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 304 | float48ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 305 | float84eq | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 306 | float84ne | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 307 | float84lt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 308 | float84le | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 309 | float84gt | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
-| 310 | float84ge | - | - | - | - | .. | - | stencil-but-no-census, pending-only |
+| 158 | int24eq | IN | - | - | - | .. | - |  |
+| 164 | int24ne | IN | - | - | - | .. | - |  |
+| 160 | int24lt | IN | - | - | - | .. | - |  |
+| 166 | int24le | IN | - | - | - | .. | - |  |
+| 162 | int24gt | IN | - | - | - | .. | - |  |
+| 168 | int24ge | IN | - | - | - | .. | - |  |
+| 159 | int42eq | IN | - | - | - | .. | - |  |
+| 165 | int42ne | IN | - | - | - | .. | - |  |
+| 161 | int42lt | IN | - | - | - | .. | - |  |
+| 167 | int42le | IN | - | - | - | .. | - |  |
+| 163 | int42gt | IN | - | - | - | .. | - |  |
+| 169 | int42ge | IN | - | - | - | .. | - |  |
+| 184 | oideq | IN | - | - | - | .. | - |  |
+| 185 | oidne | IN | - | - | - | .. | - |  |
+| 716 | oidlt | IN | - | - | - | .. | - |  |
+| 717 | oidle | IN | - | - | - | .. | - |  |
+| 1638 | oidgt | IN | - | - | - | .. | - |  |
+| 1639 | oidge | IN | - | - | - | .. | - |  |
+| 287 | float4eq | IN | - | - | - | .. | - |  |
+| 288 | float4ne | IN | - | - | - | .. | - |  |
+| 289 | float4lt | IN | - | - | - | .. | - |  |
+| 290 | float4le | IN | - | - | - | .. | - |  |
+| 291 | float4gt | IN | - | - | - | .. | - |  |
+| 292 | float4ge | IN | - | - | - | .. | - |  |
+| 293 | float8eq | IN | - | - | - | .. | - |  |
+| 294 | float8ne | IN | - | - | - | .. | - |  |
+| 295 | float8lt | IN | - | - | - | .. | - |  |
+| 296 | float8le | IN | - | - | - | .. | - |  |
+| 297 | float8gt | IN | - | - | - | .. | - |  |
+| 298 | float8ge | IN | - | - | - | .. | - |  |
+| 299 | float48eq | IN | - | - | - | .. | - |  |
+| 300 | float48ne | IN | - | - | - | .. | - |  |
+| 301 | float48lt | IN | - | - | - | .. | - |  |
+| 302 | float48le | IN | - | - | - | .. | - |  |
+| 303 | float48gt | IN | - | - | - | .. | - |  |
+| 304 | float48ge | IN | - | - | - | .. | - |  |
+| 305 | float84eq | IN | - | - | - | .. | - |  |
+| 306 | float84ne | IN | - | - | - | .. | - |  |
+| 307 | float84lt | IN | - | - | - | .. | - |  |
+| 308 | float84le | IN | - | - | - | .. | - |  |
+| 309 | float84gt | IN | - | - | - | .. | - |  |
+| 310 | float84ge | IN | - | - | - | .. | - |  |
 | 177 | int4pl | - | IN | - | IN | - | .. |  |
 | 181 | int4mi | - | IN | - | IN | - | .. |  |
 | 141 | int4mul | - | IN | - | IN | - | .. |  |
-| 463 | int8pl | - | IN | - | - | - | - | jit-but-no-fold-affine |
-| 464 | int8mi | - | IN | - | - | - | - | jit-but-no-fold-affine |
-| 465 | int8mul | - | IN | - | - | - | - | jit-but-no-fold-affine |
-| 178 | int24pl | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 179 | int42pl | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 182 | int24mi | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 183 | int42mi | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 170 | int24mul | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 171 | int42mul | - | - | - | IN | - | - | fold-affine-but-no-jit |
-| 172 | int24div | - | - | - | IN | - | - | fold-affine-but-no-jit |
+| 463 | int8pl | - | IN | - | RF | - | - |  |
+| 464 | int8mi | - | IN | - | RF | - | - |  |
+| 465 | int8mul | - | IN | - | RF | - | - |  |
+| 178 | int24pl | - | IN | - | IN | - | - |  |
+| 179 | int42pl | - | IN | - | IN | - | - |  |
+| 182 | int24mi | - | IN | - | IN | - | - |  |
+| 183 | int42mi | - | IN | - | IN | - | - |  |
+| 170 | int24mul | - | IN | - | IN | - | - |  |
+| 171 | int42mul | - | IN | - | IN | - | - |  |
+| 172 | int24div | - | IN | - | IN | - | - |  |
 | 1219 | int8inc | - | - | IN | - | - | - |  |
 | 2804 | int8inc_any | - | - | IN | - | - | - |  |
 | 1840 | int2_sum | - | - | IN | - | - | - |  |
@@ -128,7 +129,16 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 ## Summary
 
 - registered OIDs: 119
-- stencil-but-no-census: 42 (stitch comparator stencils with no AOT qual census)
-- fold-affine-but-no-jit: 7 (fold affine ops the JIT does not inline)
-- jit-but-no-fold-affine: 3 (JIT-inlined arith unknown to the fold affine admission)
-- pending-only: 58 (coverage only on a side branch)
+- stencil-but-no-census: 0 (stitch comparator stencils with no AOT qual census)
+- fold-affine-but-no-jit: 0 (fold affine ops the JIT does not inline)
+- jit-but-no-fold-affine: 0 (JIT-inlined arith unknown to the fold affine admission)
+- pending-only: 16 (coverage only on a side branch)
+
+## Documented refusals
+
+Tier admissions evaluated and deliberately refused — the tier cannot
+reproduce byte-identical C semantics under its current framework.
+
+- 463 `int8pl` × fold-affine: int8 affine needs i128 interval proofs (safe_interval/guards are i64, coefficients i32); without an exact interval the fold cannot reproduce C's int8 overflow ereport
+- 464 `int8mi` × fold-affine: int8 affine needs i128 interval proofs (safe_interval/guards are i64, coefficients i32); without an exact interval the fold cannot reproduce C's int8 overflow ereport
+- 465 `int8mul` × fold-affine: int8 affine needs i128 interval proofs (safe_interval/guards are i64, coefficients i32); without an exact interval the fold cannot reproduce C's int8 overflow ereport

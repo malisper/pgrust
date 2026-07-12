@@ -704,24 +704,71 @@ pub enum CmpOp {
     Int48Le,
     Int48Gt,
     Int48Ge,
+    // censusgaps additions: the stitch-vocabulary comparators the AOT census
+    // was missing. int24/int42 are C's int2-vs-int4 promotion compares (int.c:
+    // the int16 widens to int32, no traps); Oid is the unsigned 32-bit compare
+    // (oid.c); the float bodies are float.h's NaN-aware total order (all NaNs
+    // equal, NaN > every non-NaN, -0 == +0) — Float48/84 promote the float4
+    // side to float8 exactly, per C's `(float8) arg` casts.
+    Int24Eq,
+    Int24Ne,
+    Int24Lt,
+    Int24Le,
+    Int24Gt,
+    Int24Ge,
+    Int42Eq,
+    Int42Ne,
+    Int42Lt,
+    Int42Le,
+    Int42Gt,
+    Int42Ge,
+    OidEq,
+    OidNe,
+    OidLt,
+    OidLe,
+    OidGt,
+    OidGe,
+    Float4Eq,
+    Float4Ne,
+    Float4Lt,
+    Float4Le,
+    Float4Gt,
+    Float4Ge,
+    Float8Eq,
+    Float8Ne,
+    Float8Lt,
+    Float8Le,
+    Float8Gt,
+    Float8Ge,
+    Float48Eq,
+    Float48Ne,
+    Float48Lt,
+    Float48Le,
+    Float48Gt,
+    Float48Ge,
+    Float84Eq,
+    Float84Ne,
+    Float84Lt,
+    Float84Le,
+    Float84Gt,
+    Float84Ge,
 }
 
 impl CmpOp {
     // Admission now consulted from the central batch-function registry
     // (`lanereg`, design §3a): the OID→comparator table lives there as the
     // AotQualCmp tier entries; here we only decode the registry's neutral
-    // `CmpShape` into this crate's `CmpOp` selector. `lanereg::aot_qual_cmp`
-    // returns Some only for the in-tree AOT tier (the 5 int width families), so
-    // every shape it yields decodes; other widths (int24/oid/float — pending
-    // stitch tier) are never returned here. The `for_fn_oid_conformance` test
-    // pins this to the exact legacy 30-OID mapping (zero behavior change).
+    // `CmpShape` into this crate's `CmpOp` selector. Every width family the
+    // registry's in-tree AOT tier carries decodes (the legacy 5 int families
+    // plus the censusgaps int24/int42/oid/float families). The conformance
+    // test in tests.rs pins this to the exact 72-OID golden mapping.
     pub fn for_fn_oid(oid: Oid) -> Option<CmpOp> {
-        CmpOp::from_lanereg_shape(::lanereg::aot_qual_cmp(oid)?)
+        Some(CmpOp::from_lanereg_shape(::lanereg::aot_qual_cmp(oid)?))
     }
 
-    fn from_lanereg_shape(s: ::lanereg::CmpShape) -> Option<CmpOp> {
+    fn from_lanereg_shape(s: ::lanereg::CmpShape) -> CmpOp {
         use ::lanereg::{CmpPred as P, CmpWidth as W};
-        Some(match (s.width, s.pred) {
+        match (s.width, s.pred) {
             (W::I4, P::Eq) => CmpOp::Int4Eq,
             (W::I4, P::Ne) => CmpOp::Int4Ne,
             (W::I4, P::Lt) => CmpOp::Int4Lt,
@@ -752,10 +799,49 @@ impl CmpOp {
             (W::I48, P::Le) => CmpOp::Int48Le,
             (W::I48, P::Gt) => CmpOp::Int48Gt,
             (W::I48, P::Ge) => CmpOp::Int48Ge,
-            // Widths the pending stitch tier adds but the AOT tier never
-            // yields (int24/int42/oid/float): not decodable to this CmpOp.
-            _ => return None,
-        })
+            (W::I24, P::Eq) => CmpOp::Int24Eq,
+            (W::I24, P::Ne) => CmpOp::Int24Ne,
+            (W::I24, P::Lt) => CmpOp::Int24Lt,
+            (W::I24, P::Le) => CmpOp::Int24Le,
+            (W::I24, P::Gt) => CmpOp::Int24Gt,
+            (W::I24, P::Ge) => CmpOp::Int24Ge,
+            (W::I42, P::Eq) => CmpOp::Int42Eq,
+            (W::I42, P::Ne) => CmpOp::Int42Ne,
+            (W::I42, P::Lt) => CmpOp::Int42Lt,
+            (W::I42, P::Le) => CmpOp::Int42Le,
+            (W::I42, P::Gt) => CmpOp::Int42Gt,
+            (W::I42, P::Ge) => CmpOp::Int42Ge,
+            (W::Oid, P::Eq) => CmpOp::OidEq,
+            (W::Oid, P::Ne) => CmpOp::OidNe,
+            (W::Oid, P::Lt) => CmpOp::OidLt,
+            (W::Oid, P::Le) => CmpOp::OidLe,
+            (W::Oid, P::Gt) => CmpOp::OidGt,
+            (W::Oid, P::Ge) => CmpOp::OidGe,
+            (W::F4, P::Eq) => CmpOp::Float4Eq,
+            (W::F4, P::Ne) => CmpOp::Float4Ne,
+            (W::F4, P::Lt) => CmpOp::Float4Lt,
+            (W::F4, P::Le) => CmpOp::Float4Le,
+            (W::F4, P::Gt) => CmpOp::Float4Gt,
+            (W::F4, P::Ge) => CmpOp::Float4Ge,
+            (W::F8, P::Eq) => CmpOp::Float8Eq,
+            (W::F8, P::Ne) => CmpOp::Float8Ne,
+            (W::F8, P::Lt) => CmpOp::Float8Lt,
+            (W::F8, P::Le) => CmpOp::Float8Le,
+            (W::F8, P::Gt) => CmpOp::Float8Gt,
+            (W::F8, P::Ge) => CmpOp::Float8Ge,
+            (W::F48, P::Eq) => CmpOp::Float48Eq,
+            (W::F48, P::Ne) => CmpOp::Float48Ne,
+            (W::F48, P::Lt) => CmpOp::Float48Lt,
+            (W::F48, P::Le) => CmpOp::Float48Le,
+            (W::F48, P::Gt) => CmpOp::Float48Gt,
+            (W::F48, P::Ge) => CmpOp::Float48Ge,
+            (W::F84, P::Eq) => CmpOp::Float84Eq,
+            (W::F84, P::Ne) => CmpOp::Float84Ne,
+            (W::F84, P::Lt) => CmpOp::Float84Lt,
+            (W::F84, P::Le) => CmpOp::Float84Le,
+            (W::F84, P::Gt) => CmpOp::Float84Gt,
+            (W::F84, P::Ge) => CmpOp::Float84Ge,
+        }
     }
 
     // arg-order flip for a fused (const, var) call evaluated as cmp(var, const).
@@ -785,6 +871,44 @@ impl CmpOp {
             CmpOp::Int48Ge => CmpOp::Int84Le,
             CmpOp::Int48Eq => CmpOp::Int84Eq,
             CmpOp::Int48Ne => CmpOp::Int84Ne,
+            CmpOp::Int24Lt => CmpOp::Int42Gt,
+            CmpOp::Int24Le => CmpOp::Int42Ge,
+            CmpOp::Int24Gt => CmpOp::Int42Lt,
+            CmpOp::Int24Ge => CmpOp::Int42Le,
+            CmpOp::Int24Eq => CmpOp::Int42Eq,
+            CmpOp::Int24Ne => CmpOp::Int42Ne,
+            CmpOp::Int42Lt => CmpOp::Int24Gt,
+            CmpOp::Int42Le => CmpOp::Int24Ge,
+            CmpOp::Int42Gt => CmpOp::Int24Lt,
+            CmpOp::Int42Ge => CmpOp::Int24Le,
+            CmpOp::Int42Eq => CmpOp::Int24Eq,
+            CmpOp::Int42Ne => CmpOp::Int24Ne,
+            CmpOp::OidLt => CmpOp::OidGt,
+            CmpOp::OidLe => CmpOp::OidGe,
+            CmpOp::OidGt => CmpOp::OidLt,
+            CmpOp::OidGe => CmpOp::OidLe,
+            // The float order is total (NaN sorts greatest, -0 == +0), so
+            // argument commutation is exactly predicate reflection.
+            CmpOp::Float4Lt => CmpOp::Float4Gt,
+            CmpOp::Float4Le => CmpOp::Float4Ge,
+            CmpOp::Float4Gt => CmpOp::Float4Lt,
+            CmpOp::Float4Ge => CmpOp::Float4Le,
+            CmpOp::Float8Lt => CmpOp::Float8Gt,
+            CmpOp::Float8Le => CmpOp::Float8Ge,
+            CmpOp::Float8Gt => CmpOp::Float8Lt,
+            CmpOp::Float8Ge => CmpOp::Float8Le,
+            CmpOp::Float48Lt => CmpOp::Float84Gt,
+            CmpOp::Float48Le => CmpOp::Float84Ge,
+            CmpOp::Float48Gt => CmpOp::Float84Lt,
+            CmpOp::Float48Ge => CmpOp::Float84Le,
+            CmpOp::Float48Eq => CmpOp::Float84Eq,
+            CmpOp::Float48Ne => CmpOp::Float84Ne,
+            CmpOp::Float84Lt => CmpOp::Float48Gt,
+            CmpOp::Float84Le => CmpOp::Float48Ge,
+            CmpOp::Float84Gt => CmpOp::Float48Lt,
+            CmpOp::Float84Ge => CmpOp::Float48Le,
+            CmpOp::Float84Eq => CmpOp::Float48Eq,
+            CmpOp::Float84Ne => CmpOp::Float48Ne,
             other => other,
         }
     }
@@ -822,8 +946,104 @@ impl CmpOp {
             CmpOp::Int48Le => (a.as_i32() as i64) <= b.as_i64(),
             CmpOp::Int48Gt => (a.as_i32() as i64) > b.as_i64(),
             CmpOp::Int48Ge => (a.as_i32() as i64) >= b.as_i64(),
+            CmpOp::Int24Eq => (a.as_i16() as i32) == b.as_i32(),
+            CmpOp::Int24Ne => (a.as_i16() as i32) != b.as_i32(),
+            CmpOp::Int24Lt => (a.as_i16() as i32) < b.as_i32(),
+            CmpOp::Int24Le => (a.as_i16() as i32) <= b.as_i32(),
+            CmpOp::Int24Gt => (a.as_i16() as i32) > b.as_i32(),
+            CmpOp::Int24Ge => (a.as_i16() as i32) >= b.as_i32(),
+            CmpOp::Int42Eq => a.as_i32() == (b.as_i16() as i32),
+            CmpOp::Int42Ne => a.as_i32() != (b.as_i16() as i32),
+            CmpOp::Int42Lt => a.as_i32() < (b.as_i16() as i32),
+            CmpOp::Int42Le => a.as_i32() <= (b.as_i16() as i32),
+            CmpOp::Int42Gt => a.as_i32() > (b.as_i16() as i32),
+            CmpOp::Int42Ge => a.as_i32() >= (b.as_i16() as i32),
+            CmpOp::OidEq => a.as_u32() == b.as_u32(),
+            CmpOp::OidNe => a.as_u32() != b.as_u32(),
+            CmpOp::OidLt => a.as_u32() < b.as_u32(),
+            CmpOp::OidLe => a.as_u32() <= b.as_u32(),
+            CmpOp::OidGt => a.as_u32() > b.as_u32(),
+            CmpOp::OidGe => a.as_u32() >= b.as_u32(),
+            CmpOp::Float4Eq => f4_eq(a.as_f32(), b.as_f32()),
+            CmpOp::Float4Ne => f4_ne(a.as_f32(), b.as_f32()),
+            CmpOp::Float4Lt => f4_lt(a.as_f32(), b.as_f32()),
+            CmpOp::Float4Le => f4_le(a.as_f32(), b.as_f32()),
+            CmpOp::Float4Gt => f4_gt(a.as_f32(), b.as_f32()),
+            CmpOp::Float4Ge => f4_ge(a.as_f32(), b.as_f32()),
+            CmpOp::Float8Eq => f8_eq(a.as_f64(), b.as_f64()),
+            CmpOp::Float8Ne => f8_ne(a.as_f64(), b.as_f64()),
+            CmpOp::Float8Lt => f8_lt(a.as_f64(), b.as_f64()),
+            CmpOp::Float8Le => f8_le(a.as_f64(), b.as_f64()),
+            CmpOp::Float8Gt => f8_gt(a.as_f64(), b.as_f64()),
+            CmpOp::Float8Ge => f8_ge(a.as_f64(), b.as_f64()),
+            CmpOp::Float48Eq => f8_eq(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float48Ne => f8_ne(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float48Lt => f8_lt(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float48Le => f8_le(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float48Gt => f8_gt(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float48Ge => f8_ge(a.as_f32() as f64, b.as_f64()),
+            CmpOp::Float84Eq => f8_eq(a.as_f64(), b.as_f32() as f64),
+            CmpOp::Float84Ne => f8_ne(a.as_f64(), b.as_f32() as f64),
+            CmpOp::Float84Lt => f8_lt(a.as_f64(), b.as_f32() as f64),
+            CmpOp::Float84Le => f8_le(a.as_f64(), b.as_f32() as f64),
+            CmpOp::Float84Gt => f8_gt(a.as_f64(), b.as_f32() as f64),
+            CmpOp::Float84Ge => f8_ge(a.as_f64(), b.as_f32() as f64),
         }
     }
+}
+
+// float.h's NaN-aware comparison bodies (all NaNs equal, NaN > every non-NaN,
+// -0 == +0), byte-for-byte the ported `adt_float::float{4,8}_{eq,..,ge}`
+// forms (the parity test in tests.rs binds them to the adt_float originals).
+// Duplicated here (12 one-liners) instead of a crate dependency so the qual
+// kernel's hot loop bodies stay local to this crate.
+#[inline(always)]
+fn f4_eq(a: f32, b: f32) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
+}
+#[inline(always)]
+fn f4_ne(a: f32, b: f32) -> bool {
+    if a.is_nan() { !b.is_nan() } else { b.is_nan() || a != b }
+}
+#[inline(always)]
+fn f4_lt(a: f32, b: f32) -> bool {
+    !a.is_nan() && (b.is_nan() || a < b)
+}
+#[inline(always)]
+fn f4_le(a: f32, b: f32) -> bool {
+    b.is_nan() || (!a.is_nan() && a <= b)
+}
+#[inline(always)]
+fn f4_gt(a: f32, b: f32) -> bool {
+    !b.is_nan() && (a.is_nan() || a > b)
+}
+#[inline(always)]
+fn f4_ge(a: f32, b: f32) -> bool {
+    a.is_nan() || (!b.is_nan() && a >= b)
+}
+#[inline(always)]
+fn f8_eq(a: f64, b: f64) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
+}
+#[inline(always)]
+fn f8_ne(a: f64, b: f64) -> bool {
+    if a.is_nan() { !b.is_nan() } else { b.is_nan() || a != b }
+}
+#[inline(always)]
+fn f8_lt(a: f64, b: f64) -> bool {
+    !a.is_nan() && (b.is_nan() || a < b)
+}
+#[inline(always)]
+fn f8_le(a: f64, b: f64) -> bool {
+    b.is_nan() || (!a.is_nan() && a <= b)
+}
+#[inline(always)]
+fn f8_gt(a: f64, b: f64) -> bool {
+    !b.is_nan() && (a.is_nan() || a > b)
+}
+#[inline(always)]
+fn f8_ge(a: f64, b: f64) -> bool {
+    a.is_nan() || (!b.is_nan() && a >= b)
 }
 
 /// `n` int8inc transitions collapsed into one add. false = the caller must
@@ -899,6 +1119,48 @@ pub fn qual_bitmap_cmp_const(
         CmpOp::Int48Le => lanes!(|v: Datum| (v.as_i32() as i64) <= konst.as_i64()),
         CmpOp::Int48Gt => lanes!(|v: Datum| (v.as_i32() as i64) > konst.as_i64()),
         CmpOp::Int48Ge => lanes!(|v: Datum| (v.as_i32() as i64) >= konst.as_i64()),
+        CmpOp::Int24Eq => lanes!(|v: Datum| (v.as_i16() as i32) == konst.as_i32()),
+        CmpOp::Int24Ne => lanes!(|v: Datum| (v.as_i16() as i32) != konst.as_i32()),
+        CmpOp::Int24Lt => lanes!(|v: Datum| (v.as_i16() as i32) < konst.as_i32()),
+        CmpOp::Int24Le => lanes!(|v: Datum| (v.as_i16() as i32) <= konst.as_i32()),
+        CmpOp::Int24Gt => lanes!(|v: Datum| (v.as_i16() as i32) > konst.as_i32()),
+        CmpOp::Int24Ge => lanes!(|v: Datum| (v.as_i16() as i32) >= konst.as_i32()),
+        CmpOp::Int42Eq => lanes!(|v: Datum| v.as_i32() == (konst.as_i16() as i32)),
+        CmpOp::Int42Ne => lanes!(|v: Datum| v.as_i32() != (konst.as_i16() as i32)),
+        CmpOp::Int42Lt => lanes!(|v: Datum| v.as_i32() < (konst.as_i16() as i32)),
+        CmpOp::Int42Le => lanes!(|v: Datum| v.as_i32() <= (konst.as_i16() as i32)),
+        CmpOp::Int42Gt => lanes!(|v: Datum| v.as_i32() > (konst.as_i16() as i32)),
+        CmpOp::Int42Ge => lanes!(|v: Datum| v.as_i32() >= (konst.as_i16() as i32)),
+        CmpOp::OidEq => lanes!(|v: Datum| v.as_u32() == konst.as_u32()),
+        CmpOp::OidNe => lanes!(|v: Datum| v.as_u32() != konst.as_u32()),
+        CmpOp::OidLt => lanes!(|v: Datum| v.as_u32() < konst.as_u32()),
+        CmpOp::OidLe => lanes!(|v: Datum| v.as_u32() <= konst.as_u32()),
+        CmpOp::OidGt => lanes!(|v: Datum| v.as_u32() > konst.as_u32()),
+        CmpOp::OidGe => lanes!(|v: Datum| v.as_u32() >= konst.as_u32()),
+        CmpOp::Float4Eq => lanes!(|v: Datum| f4_eq(v.as_f32(), konst.as_f32())),
+        CmpOp::Float4Ne => lanes!(|v: Datum| f4_ne(v.as_f32(), konst.as_f32())),
+        CmpOp::Float4Lt => lanes!(|v: Datum| f4_lt(v.as_f32(), konst.as_f32())),
+        CmpOp::Float4Le => lanes!(|v: Datum| f4_le(v.as_f32(), konst.as_f32())),
+        CmpOp::Float4Gt => lanes!(|v: Datum| f4_gt(v.as_f32(), konst.as_f32())),
+        CmpOp::Float4Ge => lanes!(|v: Datum| f4_ge(v.as_f32(), konst.as_f32())),
+        CmpOp::Float8Eq => lanes!(|v: Datum| f8_eq(v.as_f64(), konst.as_f64())),
+        CmpOp::Float8Ne => lanes!(|v: Datum| f8_ne(v.as_f64(), konst.as_f64())),
+        CmpOp::Float8Lt => lanes!(|v: Datum| f8_lt(v.as_f64(), konst.as_f64())),
+        CmpOp::Float8Le => lanes!(|v: Datum| f8_le(v.as_f64(), konst.as_f64())),
+        CmpOp::Float8Gt => lanes!(|v: Datum| f8_gt(v.as_f64(), konst.as_f64())),
+        CmpOp::Float8Ge => lanes!(|v: Datum| f8_ge(v.as_f64(), konst.as_f64())),
+        CmpOp::Float48Eq => lanes!(|v: Datum| f8_eq(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float48Ne => lanes!(|v: Datum| f8_ne(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float48Lt => lanes!(|v: Datum| f8_lt(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float48Le => lanes!(|v: Datum| f8_le(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float48Gt => lanes!(|v: Datum| f8_gt(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float48Ge => lanes!(|v: Datum| f8_ge(v.as_f32() as f64, konst.as_f64())),
+        CmpOp::Float84Eq => lanes!(|v: Datum| f8_eq(v.as_f64(), konst.as_f32() as f64)),
+        CmpOp::Float84Ne => lanes!(|v: Datum| f8_ne(v.as_f64(), konst.as_f32() as f64)),
+        CmpOp::Float84Lt => lanes!(|v: Datum| f8_lt(v.as_f64(), konst.as_f32() as f64)),
+        CmpOp::Float84Le => lanes!(|v: Datum| f8_le(v.as_f64(), konst.as_f32() as f64)),
+        CmpOp::Float84Gt => lanes!(|v: Datum| f8_gt(v.as_f64(), konst.as_f32() as f64)),
+        CmpOp::Float84Ge => lanes!(|v: Datum| f8_ge(v.as_f64(), konst.as_f32() as f64)),
     }
 }
 

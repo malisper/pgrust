@@ -57,6 +57,7 @@ pgstat = { path = "../../utils/activity/pgstat" }
 bench-internals = []
 
 [dev-dependencies]
+adt_float = { path = "../../utils/adt/float" }
 adt_jsonpath = { path = "../../utils/adt/jsonpath" }
 mbutils = { path = "../../utils/mb/mbutils" }
 postgres_seams = { path = "../../tcop/postgres_seams" }

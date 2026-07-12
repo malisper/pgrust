@@ -824,3 +824,45 @@ fn fold_oid_set_matches_lanereg_census() {
         ::lanereg::ENTRIES.iter().filter(|e| ::lanereg::fold_desc(e.oid).is_some()).count();
     assert_eq!(census_in_tree, expect.len(), "lanereg in-tree Fold set drifted from classify_trans");
 }
+
+// The affine OpExpr admission set (`classify_arg`'s opfuncid table) is
+// mirrored in the census as the in-tree FoldAffine tier. Bind them both ways
+// so drift cannot re-open: every OID this crate's affine admission recognizes
+// must be in-tree FoldAffine, and the census must carry no in-tree FoldAffine
+// OID this table does not admit. (int42div is absent on both sides: a
+// (const / var) transform is not v-monotone.)
+#[test]
+fn affine_oid_set_matches_lanereg_census() {
+    let admitted: &[::types_core::Oid] = &[
+        F_INT24PL, F_INT42PL, F_INT24MI, F_INT42MI, F_INT24MUL, F_INT42MUL, F_INT24DIV,
+        F_INT4PL, F_INT4MI, F_INT4MUL,
+    ];
+    for &oid in admitted {
+        assert!(
+            ::lanereg::covers(oid, ::lanereg::Tier::FoldAffine),
+            "affine oid {oid} missing from the census FoldAffine tier"
+        );
+    }
+    let census_in_tree = ::lanereg::ENTRIES
+        .iter()
+        .filter(|e| {
+            e.tier(::lanereg::Tier::FoldAffine).is_some_and(|c| c.is_intree())
+        })
+        .count();
+    assert_eq!(
+        census_in_tree,
+        admitted.len(),
+        "lanereg in-tree FoldAffine set drifted from classify_arg"
+    );
+    // int8 pl/mi/mul are documented FoldAffine REFUSALS (no i128 interval
+    // machinery), not admissions — classify_arg must keep refusing them.
+    for &oid in &[463u32, 464, 465] {
+        assert!(!::lanereg::covers(oid, ::lanereg::Tier::FoldAffine), "oid {oid}");
+        assert!(
+            ::lanereg::entry(oid)
+                .and_then(|e| e.tier(::lanereg::Tier::FoldAffine))
+                .is_some_and(|c| c.is_refused()),
+            "oid {oid} must carry a documented FoldAffine refusal"
+        );
+    }
+}
