@@ -9,7 +9,9 @@ name = "lanefold"
 path = "src/lib.rs"
 
 [dependencies]
+adt_numeric = { path = "../../utils/adt/numeric" }
 mcx = { path = "../../../_support/mcx" }
+types_error = { path = "../../../_support/types/types_error" }
 datum = { path = "../../../_support/types/datum" }
 types_core = { path = "../../../_support/types/types_core" }
 types_nodes = { path = "../../../_support/types/nodes" }
