@@ -407,9 +407,15 @@ pub fn fc_pg_last_wal_receive_lsn(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
-    // No walreceiver substrate (scoped non-core): GetWalRcvFlushRecPtr's
-    // flushedUpto is invariantly 0, which C maps to NULL.
-    Ok(fcinfo.return_null())
+    if !walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::is_installed() {
+        return Ok(fcinfo.return_null());
+    }
+    let (recptr, _latest_chunk_start, _tli) =
+        walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call();
+    if recptr == 0 {
+        return Ok(fcinfo.return_null());
+    }
+    Ok(Datum::from_i64(recptr as i64))
 }
 
 pub fn fc_pg_last_wal_replay_lsn(

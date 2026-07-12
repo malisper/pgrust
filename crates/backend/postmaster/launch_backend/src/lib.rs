@@ -99,7 +99,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "wal_receiver",
-        main_fn: Main::Unported("WalReceiverMain (backend-replication-walreceiver)"),
+        main_fn: Main::Ported(walreceiver::WalReceiverMain),
         shmem_attach: true,
     },
     ChildProcessKind {

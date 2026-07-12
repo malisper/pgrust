@@ -625,22 +625,21 @@ pub fn RecoveryRequiresIntParameter(param_name: &str, curr_value: i32, min_value
         .finish(loc("RecoveryRequiresIntParameter"))
 }
 
-fn error_multiple_recovery_targets<T>() -> PgResult<T> {
-    ereport(types_error::ERROR)
-        .errmsg("multiple recovery targets specified")
-        .errdetail(
-            "At most one of \"recovery_target\", \"recovery_target_lsn\", \"recovery_target_name\", \"recovery_target_time\", \"recovery_target_xid\" may be set.",
-        )
-        .finish(loc("error_multiple_recovery_targets"))?;
-    unreachable!()
-}
 
-fn guard_target(kind: RecoveryTargetType) -> PgResult<()> {
+// C guards every assign, but its per-process init makes the empty-value
+// guard unreachable; our per-thread snapshot replay is unordered across
+// variables, so an empty assign skips the guard and unsets only its own kind.
+fn guard_target(kind: RecoveryTargetType) {
     let cur = recovery_target();
     if cur != RecoveryTargetType::Unset && cur != kind {
-        return error_multiple_recovery_targets();
+        panic!("multiple recovery targets specified");
     }
-    Ok(())
+}
+
+fn unset_target(kind: RecoveryTargetType) {
+    if recovery_target() == kind {
+        set_recovery_target(RecoveryTargetType::Unset);
+    }
 }
 
 pub(crate) fn install_guc_hooks() {
@@ -657,13 +656,11 @@ pub(crate) fn install_guc_hooks() {
         Ok(true)
     });
     hooks::assign_recovery_target.install(|newval, _extra| {
-        if guard_target(RecoveryTargetType::Immediate).is_err() {
-            panic!("multiple recovery targets specified");
-        }
         if newval.map_or(false, |v| !v.is_empty()) {
+            guard_target(RecoveryTargetType::Immediate);
             set_recovery_target(RecoveryTargetType::Immediate);
         } else {
-            set_recovery_target(RecoveryTargetType::Unset);
+            unset_target(RecoveryTargetType::Immediate);
         }
     });
 
@@ -679,17 +676,15 @@ pub(crate) fn install_guc_hooks() {
         Ok(true)
     });
     hooks::assign_recovery_target_lsn.install(|newval, extra| {
-        if guard_target(RecoveryTargetType::Lsn).is_err() {
-            panic!("multiple recovery targets specified");
-        }
         if newval.map_or(false, |v| !v.is_empty()) {
+            guard_target(RecoveryTargetType::Lsn);
             set_recovery_target(RecoveryTargetType::Lsn);
             let lsn = *extra
                 .and_then(|e| e.downcast_ref::<XLogRecPtr>())
                 .expect("check hook stored the parsed LSN");
             RECOVERY_TARGET_LSN.with(|c| c.set(lsn));
         } else {
-            set_recovery_target(RecoveryTargetType::Unset);
+            unset_target(RecoveryTargetType::Lsn);
         }
     });
 
@@ -706,15 +701,13 @@ pub(crate) fn install_guc_hooks() {
         Ok(true)
     });
     hooks::assign_recovery_target_name.install(|newval, _extra| {
-        if guard_target(RecoveryTargetType::Name).is_err() {
-            panic!("multiple recovery targets specified");
-        }
         match newval {
             Some(v) if !v.is_empty() => {
+                guard_target(RecoveryTargetType::Name);
                 set_recovery_target(RecoveryTargetType::Name);
                 RECOVERY_TARGET_NAME.with(|c| *c.borrow_mut() = v.to_string());
             }
-            _ => set_recovery_target(RecoveryTargetType::Unset),
+            _ => unset_target(RecoveryTargetType::Name),
         }
     });
 
@@ -732,13 +725,11 @@ pub(crate) fn install_guc_hooks() {
         Ok(true)
     });
     hooks::assign_recovery_target_time.install(|newval, _extra| {
-        if guard_target(RecoveryTargetType::Time).is_err() {
-            panic!("multiple recovery targets specified");
-        }
         if newval.map_or(false, |v| !v.is_empty()) {
+            guard_target(RecoveryTargetType::Time);
             set_recovery_target(RecoveryTargetType::Time);
         } else {
-            set_recovery_target(RecoveryTargetType::Unset);
+            unset_target(RecoveryTargetType::Time);
         }
     });
 
@@ -787,17 +778,15 @@ pub(crate) fn install_guc_hooks() {
         Ok(true)
     });
     hooks::assign_recovery_target_xid.install(|newval, extra| {
-        if guard_target(RecoveryTargetType::Xid).is_err() {
-            panic!("multiple recovery targets specified");
-        }
         if newval.map_or(false, |v| !v.is_empty()) {
+            guard_target(RecoveryTargetType::Xid);
             set_recovery_target(RecoveryTargetType::Xid);
             let xid = *extra
                 .and_then(|e| e.downcast_ref::<u32>())
                 .expect("check hook stored the parsed xid");
             RECOVERY_TARGET_XID_PARSED.with(|c| c.set(xid));
         } else {
-            set_recovery_target(RecoveryTargetType::Unset);
+            unset_target(RecoveryTargetType::Xid);
         }
     });
 

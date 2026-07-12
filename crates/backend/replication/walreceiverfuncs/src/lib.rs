@@ -311,6 +311,47 @@ pub fn GetReplicationTransferLatency() -> i32 {
     adt_timestamp::TimestampDifferenceMilliseconds(send, receipt) as i32
 }
 
+fn wal_rcv_state_string(state: WalRcvState) -> &'static str {
+    match state {
+        WalRcvState::Stopped => "stopped",
+        WalRcvState::Starting => "starting",
+        WalRcvState::Streaming => "streaming",
+        WalRcvState::Waiting => "waiting",
+        WalRcvState::Restarting => "restarting",
+        WalRcvState::Stopping => "stopping",
+    }
+}
+
+fn pg_stat_wal_receiver_snapshot() -> Option<walreceiverfuncs_seams::WalRcvStatSnapshot> {
+    let snap = with_walrcv(|d| {
+        if d.pid == 0 || !d.ready_to_display {
+            return None;
+        }
+        Some(walreceiverfuncs_seams::WalRcvStatSnapshot {
+            pid: d.pid,
+            state: wal_rcv_state_string(d.walRcvState),
+            receive_start_lsn: d.receiveStart,
+            receive_start_tli: d.receiveStartTLI,
+            written_lsn: 0,
+            flushed_lsn: d.flushedUpto,
+            received_tli: d.receivedTLI,
+            last_send_time: d.lastMsgSendTime,
+            last_receipt_time: d.lastMsgReceiptTime,
+            latest_end_lsn: d.latestWalEnd,
+            latest_end_time: d.latestWalEndTime,
+            slotname: d.slotname.clone(),
+            sender_host: d.sender_host.clone(),
+            sender_port: d.sender_port,
+            conninfo: d.conninfo.clone(),
+        })
+    });
+    snap.map(|mut s| {
+        // C reads writtenUpto without the spinlock.
+        s.written_lsn = get_written_upto();
+        s
+    })
+}
+
 pub fn init_seams() {
     walreceiverfuncs_seams::wal_rcv_streaming::set(WalRcvStreaming);
     walreceiverfuncs_seams::wal_rcv_running::set(WalRcvRunning);
@@ -319,4 +360,47 @@ pub fn init_seams() {
     });
     walreceiverfuncs_seams::request_xlog_streaming::set(RequestXLogStreaming);
     walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::set(GetWalRcvFlushRecPtr);
+    walreceiverfuncs_seams::pg_stat_wal_receiver_snapshot::set(pg_stat_wal_receiver_snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_once() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(WalRcvShmemInit);
+    }
+
+    #[test]
+    fn stopped_by_default_and_flush_ptr_tracks() {
+        init_once();
+        assert!(!WalRcvRunning());
+        assert!(!WalRcvStreaming());
+        with_walrcv(|d| {
+            d.flushedUpto = 0x1_0000;
+            d.latestChunkStart = 0x8000;
+            d.receivedTLI = 3;
+        });
+        assert_eq!(GetWalRcvFlushRecPtr(), (0x1_0000, 0x8000, 3));
+        set_written_upto(42);
+        assert_eq!(GetWalRcvWriteRecPtr(), 42);
+        with_walrcv(|d| *d = WalRcvData::new());
+        set_written_upto(0);
+    }
+
+    #[test]
+    fn force_reply_latches() {
+        init_once();
+        assert!(!take_force_reply());
+        set_force_reply();
+        assert!(take_force_reply());
+        assert!(!take_force_reply());
+    }
+
+    #[test]
+    fn stat_snapshot_none_until_ready() {
+        init_once();
+        assert!(pg_stat_wal_receiver_snapshot().is_none());
+    }
 }

@@ -397,18 +397,83 @@ fn xfn_str(buf: &[u8]) -> &str {
 
 const PG_STAT_GET_WAL_RECEIVER_COLS: usize = 16;
 
-// walreceiverfuncs.c:pg_stat_get_wal_receiver — no WalRcv shared state is
-// ported (no walreceiver process exists in this build), so walRcvState is
-// permanently WALRCV_STOPPED and C's early PG_RETURN_NULL() applies; the
-// view (system_views.sql) filters `WHERE s.pid IS NOT NULL`, so an
-// all-null record yields zero rows exactly like the real stopped state.
+// walreceiver.c:pg_stat_get_wal_receiver. C PG_RETURN_NULL()s when no
+// receiver is active; here that is an all-null record — the view filters
+// `WHERE s.pid IS NOT NULL`, so both yield zero rows.
 pub fn fc_pg_stat_get_wal_receiver(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_stat_get_wal_receiver: resolved FmgrInfo required");
-    let values = [Datum::from_usize(0); PG_STAT_GET_WAL_RECEIVER_COLS];
-    let nulls = [true; PG_STAT_GET_WAL_RECEIVER_COLS];
+    let mut values = [Datum::from_usize(0); PG_STAT_GET_WAL_RECEIVER_COLS];
+    let mut nulls = [true; PG_STAT_GET_WAL_RECEIVER_COLS];
+
+    let snap = if walreceiverfuncs_seams::pg_stat_wal_receiver_snapshot::is_installed() {
+        walreceiverfuncs_seams::pg_stat_wal_receiver_snapshot::call()
+    } else {
+        None
+    };
+    let Some(snap) = snap else {
+        return record_datum(flinfo, fcinfo, &values, &nulls);
+    };
+
+    values[0] = Datum::from_i32(snap.pid);
+    nulls[0] = false;
+    let uid = miscinit::GetUserId();
+    if !acl_seams::has_privs_of_role::call(uid, crate::activity::ROLE_PG_READ_ALL_STATS)? {
+        return record_datum(flinfo, fcinfo, &values, &nulls);
+    }
+
+    values[1] = crate::activity::text_datum(fcinfo, snap.state)?;
+    nulls[1] = false;
+    if snap.receive_start_lsn != 0 {
+        values[2] = Datum::from_i64(snap.receive_start_lsn as i64);
+        nulls[2] = false;
+    }
+    values[3] = Datum::from_i32(snap.receive_start_tli as i32);
+    nulls[3] = false;
+    if snap.written_lsn != 0 {
+        values[4] = Datum::from_i64(snap.written_lsn as i64);
+        nulls[4] = false;
+    }
+    if snap.flushed_lsn != 0 {
+        values[5] = Datum::from_i64(snap.flushed_lsn as i64);
+        nulls[5] = false;
+    }
+    values[6] = Datum::from_i32(snap.received_tli as i32);
+    nulls[6] = false;
+    if snap.last_send_time != 0 {
+        values[7] = Datum::from_i64(snap.last_send_time);
+        nulls[7] = false;
+    }
+    if snap.last_receipt_time != 0 {
+        values[8] = Datum::from_i64(snap.last_receipt_time);
+        nulls[8] = false;
+    }
+    if snap.latest_end_lsn != 0 {
+        values[9] = Datum::from_i64(snap.latest_end_lsn as i64);
+        nulls[9] = false;
+    }
+    if snap.latest_end_time != 0 {
+        values[10] = Datum::from_i64(snap.latest_end_time);
+        nulls[10] = false;
+    }
+    if !snap.slotname.is_empty() {
+        values[11] = crate::activity::text_datum(fcinfo, &snap.slotname)?;
+        nulls[11] = false;
+    }
+    if !snap.sender_host.is_empty() {
+        values[12] = crate::activity::text_datum(fcinfo, &snap.sender_host)?;
+        nulls[12] = false;
+    }
+    if snap.sender_port != 0 {
+        values[13] = Datum::from_i32(snap.sender_port);
+        nulls[13] = false;
+    }
+    if !snap.conninfo.is_empty() {
+        values[14] = crate::activity::text_datum(fcinfo, &snap.conninfo)?;
+        nulls[14] = false;
+    }
     record_datum(flinfo, fcinfo, &values, &nulls)
 }
 

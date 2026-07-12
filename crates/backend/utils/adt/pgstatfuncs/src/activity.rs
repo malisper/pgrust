@@ -6,7 +6,7 @@ use ::types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo}
 use backend_status_seams::BackendState;
 
 const PG_STAT_GET_ACTIVITY_COLS: usize = 31;
-const ROLE_PG_READ_ALL_STATS: Oid = 3375;
+pub(crate) const ROLE_PG_READ_ALL_STATS: Oid = 3375;
 
 pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(fcinfo.result_mcx(), s.as_bytes())?))

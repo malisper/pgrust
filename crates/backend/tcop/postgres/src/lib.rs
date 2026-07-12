@@ -210,7 +210,15 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .with_error_location(loc(3316, "ProcessInterrupts"))
                 .into());
         }
-        // C's worker-process arms are unreachable: those mains panic at launch.
+        if miscinit::GetMyBackendType() == types_core::BackendType::WalReceiver {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+                .errmsg("terminating walreceiver process due to administrator command")
+                .into_error()
+                .with_error_location(loc(3339, "ProcessInterrupts"))
+                .into());
+        }
+        // C's other worker-process arms are unreachable: those mains panic at launch.
         return Err(ereport(FATAL)
             .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
             .errmsg("terminating connection due to administrator command")
