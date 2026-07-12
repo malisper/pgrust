@@ -455,6 +455,26 @@ impl Emitter {
         self.raw(0x0E20_9800 | (rn << 5) | rd);
     }
 
+    // CMEQ Vd.2d, Vn.2d, #0 (BoolTest falsy mask: value word == 0).
+    pub fn cmeq0_2d(&mut self, rd: u32, rn: u32) {
+        self.raw(0x4EE0_9800 | (rn << 5) | rd);
+    }
+
+    // AND Vd.16b, Vn.16b, Vm.16b (SAOP Ne accumulates AND-of-eq).
+    pub fn and_16b(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x4E20_1C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // BIC Vd.16b, Vn.16b, Vm.16b (float var-var: nonnan_x & ~nonnan_y).
+    pub fn bic_16b(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x4E60_1C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
+    // EOR Vd.16b, Vn.16b, Vm.16b (self-EOR zeroes a SAOP accumulator).
+    pub fn eor_16b(&mut self, rd: u32, rn: u32, rm: u32) {
+        self.raw(0x6E20_1C00 | (rm << 16) | (rn << 5) | rd);
+    }
+
     pub fn and_8b(&mut self, rd: u32, rn: u32, rm: u32) {
         self.raw(0x0E20_1C00 | (rm << 16) | (rn << 5) | rd);
     }
@@ -499,6 +519,11 @@ impl Emitter {
     pub fn cbz_x(&mut self, rt: u32, l: Label) {
         self.fixups.push((self.code.len(), l));
         self.raw(0xB400_0000 | rt);
+    }
+
+    pub fn cbnz_x(&mut self, rt: u32, l: Label) {
+        self.fixups.push((self.code.len(), l));
+        self.raw(0xB500_0000 | rt);
     }
 
     /// Appends the literal pool, resolves every literal load and label fixup.
@@ -590,6 +615,10 @@ mod tests {
             (|e| e.uzp1_8h(2, 3, 4), 0x4E441862, "uzp1 v2.8h, v3.8h, v4.8h"),
             (|e| e.xtn_8b(2, 3), 0x0E212862, "xtn v2.8b, v3.8h"),
             (|e| e.cmeq0_8b(2, 3), 0x0E209862, "cmeq v2.8b, v3.8b, #0"),
+            (|e| e.cmeq0_2d(2, 3), 0x4EE09862, "cmeq v2.2d, v3.2d, #0"),
+            (|e| e.and_16b(2, 3, 4), 0x4E241C62, "and v2.16b, v3.16b, v4.16b"),
+            (|e| e.bic_16b(2, 3, 4), 0x4E641C62, "bic v2.16b, v3.16b, v4.16b"),
+            (|e| e.eor_16b(2, 3, 4), 0x6E241C62, "eor v2.16b, v3.16b, v4.16b"),
             (|e| e.and_8b(2, 3, 4), 0x0E241C62, "and v2.8b, v3.8b, v4.8b"),
             (|e| e.orr_8b(2, 3, 4), 0x0EA41C62, "orr v2.8b, v3.8b, v4.8b"),
             (|e| e.addv_b_8b(2, 3), 0x0E31B862, "addv b2, v3.8b"),
