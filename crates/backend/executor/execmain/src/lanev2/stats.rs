@@ -214,9 +214,18 @@ pub(super) enum RefuseReason {
     /// standalone ownership) — zero upside today. Re-evaluated when the
     /// design's "SRFs = expanding operator" phase item lands.
     SrfSetExpansion = 24,
+    /// Stage-2.2 compact agg table: the K2-admitted shape's grouping key is
+    /// not an admitted compact key kind (text/expr kernels keep the C-ported
+    /// tuplehash — a mode choice inside a still-lane-owned build, ticked so
+    /// the compact rollout is observable; see nodeagg::compact).
+    CompactKeyKind = 25,
+    /// Stage-2.2 compact agg table: spill-eligible by planner estimate — v1
+    /// REFUSES the compact table (the C table spills; distinct-spill is v2,
+    /// per the plan's 2.2 item). Ticked per build decision.
+    CompactSpillRisk = 26,
 }
 
-const N_REASONS: usize = 25;
+const N_REASONS: usize = 27;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -246,6 +255,8 @@ impl RefuseReason {
             RefuseReason::MultiBatch => "multi-batch",
             RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
             RefuseReason::SrfSetExpansion => "srf-set-expansion",
+            RefuseReason::CompactKeyKind => "compact-key-kind",
+            RefuseReason::CompactSpillRisk => "compact-spill-risk",
         }
     }
 
@@ -277,6 +288,8 @@ impl RefuseReason {
             MultiBatch,
             ChildNotLaneOwned,
             SrfSetExpansion,
+            CompactKeyKind,
+            CompactSpillRisk,
         ][i]
     }
 }
