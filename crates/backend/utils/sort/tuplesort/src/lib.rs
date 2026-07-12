@@ -665,6 +665,12 @@ macro_rules! dispatch_cmp {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
                     $body
                 }
+                // Extension gist opclass comparators (btree_gist sorted
+                // builds); indirect call per compare, nothing to fold.
+                SortComparator::GistOpclass(_) => {
+                    let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
+                    $body
+                }
                 // Bool keys are cold catalog sorts; not worth a monomorph arm.
                 SortComparator::Bool => {
                     let $cmp = |a: &SortTuple, b: &SortTuple| __c.comparetup(a, b);
