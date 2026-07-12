@@ -3095,6 +3095,23 @@ pub fn agg_plain_fold_admissible(node: &AggStateData<'_>) -> bool {
         && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
 }
 
+/// Agg-side admission for the lane-v2 plain-agg PER-ROW drain feed (the
+/// cbstore no-qual-feed tranche): `agg_plain_fold_admissible` minus the
+/// classified-fold-plan requirement — the per-row feed runs the FULL per-row
+/// transition program (`agg_plain_build_accept`) over batch-decoded staged
+/// windows, so arbitrary transition expressions are hosted. Same
+/// batch-drainable + initplan-param-free gates as the fold drive.
+pub fn agg_plain_perrow_admissible(node: &AggStateData<'_>) -> bool {
+    agg_batch_drainable(node)
+        && node.plan.aggstrategy == AGG_PLAIN
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
 /// Feed-phase begin: `exec_agg`'s `initialize_aggregates` (fresh initval
 /// pergroups — a rescan re-enters here with `agg_done` cleared).
 pub fn agg_plain_build_begin(node: &mut AggStateData<'_>) -> PgResult<()> {

@@ -196,8 +196,10 @@ pub(super) enum RefuseReason {
     /// ownership is pure adapter overhead (`STANDALONE_SCAN_NO_UPSIDE`).
     /// Ticked per pull at the standalone `try_own_*` scan hooks.
     AdmissionEconomicsNoConsumer = 19,
-    /// Dynamic tiny-input row-floor (§4 endgame refuse-set).
-    #[allow(dead_code)]
+    /// Dynamic tiny-input row-floor (§4 endgame refuse-set): the relation is
+    /// too small for lane ownership to recover its own admission-probe cost
+    /// (armed 2026-07-12 at the cbstore standalone hook — the memoized tiny
+    /// verdict is taken BEFORE the qual-translate/arm cascade runs).
     TinyInputFloor = 20,
     /// Join-side shape refuse (hash-join breaker and NestLoop TupleOp) —
     /// non-INNER faces (hash join), joinqual/otherqual residuals (hash
@@ -222,9 +224,16 @@ pub(super) enum RefuseReason {
     /// standalone ownership) — zero upside today. Re-evaluated when the
     /// design's "SRFs = expanding operator" phase item lands.
     SrfSetExpansion = 24,
+    /// Plain-agg (ungrouped) plans whose transitions read NO input columns —
+    /// pure count(*)-style census shapes. Deliberately refused by the cbstore
+    /// per-row breaker-feed admission (lane-v2-noqualfeed): the census answer
+    /// needs no data decode at all (heap: the incumbent fused drive's
+    /// storeless advance; cbstore: the MetaAggScan footer path / the empty
+    /// needed-set per-row walk), so a batch-decoded feed has nothing to win.
+    CountOnlyCensus = 25,
 }
 
-const N_REASONS: usize = 25;
+const N_REASONS: usize = 26;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -254,6 +263,7 @@ impl RefuseReason {
             RefuseReason::MultiBatch => "multi-batch",
             RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
             RefuseReason::SrfSetExpansion => "srf-set-expansion",
+            RefuseReason::CountOnlyCensus => "count-only-census",
         }
     }
 
@@ -285,6 +295,7 @@ impl RefuseReason {
             MultiBatch,
             ChildNotLaneOwned,
             SrfSetExpansion,
+            CountOnlyCensus,
         ][i]
     }
 }
