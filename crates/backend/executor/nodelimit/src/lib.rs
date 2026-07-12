@@ -384,6 +384,109 @@ fn compute_tuples_needed(node: &LimitState<'_>) -> i64 {
     node.count.wrapping_add(node.offset)
 }
 
+// ===========================================================================
+// Lane-executor-v2 streaming-limit seam (design §Architecture 1; push-executor
+// study Pattern 2). The lane's LimitOp lives in `execmain/src/lanev2.rs`;
+// these thin entry points keep ALL limit semantics here, operating on the
+// SAME LimitState fields (lstate/position/subSlot) the Volcano `exec_limit`
+// drives — so falling back to `exec_limit` at any call boundary sees exactly
+// C's cross-call state. Forward-only, LIMIT_OPTION_COUNT-only (gated by
+// `lane_limit_admissible`); each function mirrors one arm of `exec_limit`'s
+// forward state machine verbatim.
+// ===========================================================================
+
+/// What the lane streaming-limit operator should do with one child tuple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneLimitFeed {
+    /// Still inside OFFSET: discard. C's LIMIT_RESCAN skip loop pulls and
+    /// discards offset tuples too — same child work, same volatile-function
+    /// invocation counts.
+    Skip,
+    /// In-window tuple: emit downstream.
+    Emit,
+    /// The window's LAST tuple: emit, then stop — the lane operator delivers
+    /// it via `Paused` and reports `Finished` on the next driver round, so
+    /// the source is never pulled past the boundary tuple's batch.
+    EmitBoundary,
+}
+
+/// Limit-side lane admission: plain COUNT only. WITH TIES needs the
+/// boundary-tuple retention + sort-peer equality walk (LIMIT_WINDOWEND_TIES)
+/// — refused, staged later. (PostgreSQL's Limit node has no percent-limit
+/// form, so no gate is needed for one.)
+pub fn lane_limit_admissible(node: &LimitState<'_>) -> bool {
+    node.limitOption == LimitOption::LIMIT_OPTION_COUNT
+}
+
+/// Per-call prologue, mirroring `exec_limit`'s forward entry exactly: C's
+/// ExecLimit CHECK_FOR_INTERRUPTS, then the LIMIT_INITIAL recompute — which
+/// evaluates the OFFSET/LIMIT expressions (raising C's negative-value errors)
+/// and pushes the tuple bound to the child (the Sort's top-N bound; a silent
+/// no-op for Agg — `exec_set_tuple_bound`'s dispatch, unchanged).
+pub fn lane_limit_prologue<'mcx, C: LimitChild<'mcx>>(
+    node: &mut LimitState<'mcx>,
+    child: &mut C,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    cfi()?;
+    if node.lstate == LIMIT_INITIAL {
+        recompute_limits(node, child, estate)?;
+    }
+    Ok(())
+}
+
+/// `exec_limit`'s LIMIT_RESCAN `count <= 0 && !noCount` arm: an empty window
+/// (LIMIT 0) flips to LIMIT_EMPTY and the child is never pulled.
+pub fn lane_limit_empty_window(node: &mut LimitState<'_>) -> bool {
+    debug_assert_eq!(node.lstate, LIMIT_RESCAN);
+    if node.count <= 0 && !node.noCount {
+        node.lstate = LIMIT_EMPTY;
+        return true;
+    }
+    false
+}
+
+/// One child tuple through the window arithmetic — `exec_limit`'s forward
+/// LIMIT_RESCAN skip loop + LIMIT_INWINDOW body verbatim (position/subSlot
+/// bookkeeping and the RESCAN→INWINDOW flip included).
+pub fn lane_limit_feed(node: &mut LimitState<'_>, slot: ExecSlotId) -> LaneLimitFeed {
+    debug_assert!(matches!(node.lstate, LIMIT_RESCAN | LIMIT_INWINDOW));
+    debug_assert_eq!(node.limitOption, LimitOption::LIMIT_OPTION_COUNT);
+    node.subSlot = Some(slot);
+    node.position += 1;
+    if node.position <= node.offset {
+        return LaneLimitFeed::Skip;
+    }
+    node.lstate = LIMIT_INWINDOW;
+    if !node.noCount && node.position - node.offset >= node.count {
+        LaneLimitFeed::EmitBoundary
+    } else {
+        LaneLimitFeed::Emit
+    }
+}
+
+/// True once the window is complete: C's next ExecLimit call would flip to
+/// LIMIT_WINDOWEND and return NULL without pulling the child.
+pub fn lane_limit_window_done(node: &LimitState<'_>) -> bool {
+    node.lstate == LIMIT_INWINDOW
+        && !node.noCount
+        && node.position - node.offset >= node.count
+}
+
+/// The deferred LIMIT_WINDOWEND flip — the `Finished` half of the lane's
+/// Paused-then-Finished protocol (the boundary tuple was already delivered).
+pub fn lane_limit_end_window(node: &mut LimitState<'_>) {
+    debug_assert!(lane_limit_window_done(node));
+    node.lstate = LIMIT_WINDOWEND;
+}
+
+/// Child exhausted before the window filled: `exec_limit`'s subplan-EOF arms
+/// (LIMIT_RESCAN → LIMIT_EMPTY; LIMIT_INWINDOW → LIMIT_SUBPLANEOF).
+pub fn lane_limit_eof(node: &mut LimitState<'_>) {
+    debug_assert!(matches!(node.lstate, LIMIT_RESCAN | LIMIT_INWINDOW));
+    node.lstate = if node.lstate == LIMIT_RESCAN { LIMIT_EMPTY } else { LIMIT_SUBPLANEOF };
+}
+
 /// `ExecReScanLimit` minus the outer rescan (caller rescans the child after,
 /// chgParam being NULL until the Param lanes land).
 pub fn exec_rescan_limit<'mcx, C: LimitChild<'mcx>>(
