@@ -120,6 +120,11 @@ pub fn new_buffer(index: &Relation<'_>, fork_num: ForkNumber) -> PgResult<Buffer
         bufmgr_seams::EB_LOCK_FIRST,
         1,
     )?;
+    eprintln!(
+        "HNSWDBG new_buffer blkno={} extended_by={}",
+        bufmgr::BufferGetBlockNumber(buffer),
+        extended_by
+    );
     debug_assert!(extended_by == 1);
     Ok(buffer)
 }
