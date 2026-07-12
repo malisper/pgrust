@@ -95,6 +95,24 @@ pub fn cbstore_colfrac_cost() -> bool {
     })
 }
 
+/// Footer-NDV group-key estimation on cbstore (pgrust-only): a never-
+/// ANALYZEd cbstore rel estimates group-key ndistinct from the part
+/// footer's ingest-time per-column NDV (the exact numbers a footer-backed
+/// ANALYZE would put in pg_statistic) instead of the flat
+/// DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO guess. The ratio starves nothing
+/// serially, but at high DOP it prices partial aggregation as useless
+/// (per-worker groups ~= 5% of the table) and flips grouped parallel plans
+/// serial. `PGRUST_CBSTORE_FOOTER_NDV_EST=0`/`off` disables for A/B.
+pub fn cbstore_footer_ndv_est() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_FOOTER_NDV_EST").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// Footer sorted-column scan pathkeys (was GUC `cbstore_scan_pathkeys`,
 /// default on). `PGRUST_CBSTORE_SCAN_PATHKEYS=0`/`off` disables for A/B.
 pub fn cbstore_scan_pathkeys() -> bool {
