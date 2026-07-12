@@ -9,7 +9,7 @@ use types_nodes::parsenodes::{DefElem, DefElemAction};
 
 const TEXTOID: Oid = 25;
 
-pub(crate) struct OptionPair<'mcx> {
+pub struct OptionPair<'mcx> {
     pub name: &'mcx str,
     pub value: &'mcx str,
 }
@@ -27,7 +27,7 @@ pub(crate) fn varlena_image<'a>(d: Datum) -> &'a [u8] {
     }
 }
 
-fn text_body(image: &[u8]) -> &[u8] {
+pub(crate) fn text_body(image: &[u8]) -> &[u8] {
     let p = image.as_ptr();
     // SAFETY: image spans the whole varlena (varlena_image contract).
     unsafe {
@@ -40,7 +40,7 @@ fn text_body(image: &[u8]) -> &[u8] {
 }
 
 /// untransformRelOptions (reloptions.c) over a text[] datum.
-pub(crate) fn untransform_options<'mcx>(
+pub fn untransform_options<'mcx>(
     mcx: Mcx<'mcx>,
     options: Option<Datum>,
 ) -> PgResult<PgVec<'mcx, OptionPair<'mcx>>> {
