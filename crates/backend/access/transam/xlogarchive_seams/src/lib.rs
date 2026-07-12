@@ -62,3 +62,8 @@ seam_core::seam!(
         wait_event_info: u32,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    // XLogArchiveIsBusy(xlog) (xlogarchive.c).
+    pub fn xlog_archive_is_busy(xlog: &str) -> bool
+);

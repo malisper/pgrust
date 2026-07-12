@@ -16491,6 +16491,7 @@ dependencies = [
  "origin_seams",
  "pgstat",
  "pgstat_seams",
+ "postgres_seams",
  "predicate_seams",
  "procarray",
  "procarray_seams",
