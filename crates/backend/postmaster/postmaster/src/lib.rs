@@ -680,13 +680,16 @@ pub fn process_pm_child_exit() -> PgResult<()> {
 
         match pmchild_seams::find_postmaster_child_by_pid::call(pid) {
             // C's CleanupBackend also owns autovacuum workers (B_AUTOVAC_WORKER
-            // rides the backend list).
+            // rides the backend list) and walsenders (B_WAL_SENDER — a backend
+            // that switched type at START_REPLICATION; CleanupBackend treats it
+            // exactly like a plain backend).
             Some((child_slot, btype))
                 if matches!(
                     btype,
                     BackendType::Backend
                         | BackendType::DeadEndBackend
                         | BackendType::AutovacWorker
+                        | BackendType::WalSender
                 ) =>
             {
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);
