@@ -61,6 +61,15 @@ fn exprkey_enabled() -> bool {
     })
 }
 
+/// Kill switch for the redundant-key (reduced grouping) tranche —
+/// independent of the single-computed-key arms above.
+fn redkey_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_REDKEY").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 const TEXTOID: ::types_core::Oid = 25;
 const VARCHAROID: ::types_core::Oid = 1043;
 
@@ -111,6 +120,27 @@ pub enum ExprKeyKind {
         input_col: u16,
         prog: Box<::laneexec::DictEvalProg>,
         gather_input: bool,
+    },
+    /// Redundant grouping-key elimination (Q36 class): 2..N int grouping
+    /// keys where every non-representative key is `Var ± Const` over the
+    /// ONE bare-Var key (deterministic — grouping by the representative
+    /// alone is the same partition). The build probes the compact table on
+    /// the representative lane only; the redundant keys are reconstructed
+    /// at group read-back (compact `RedShape`). No per-batch key
+    /// derivation at all — instead a per-batch RANGE GUARD proves every
+    /// selected representative value inside the overflow-free domain of
+    /// every derived expression; a violating batch refuse-and-replays
+    /// per-row STICKY (the C-ported `exec_project` raises C's exact
+    /// overflow error on C's row), exactly the arith-trap discipline.
+    Reduced {
+        /// The armed compact emit spec (key order; cloned to re-arm).
+        shape: ::nodeagg::RedShape,
+        /// Base scan lane of the representative key.
+        rep_att: u16,
+        /// Overflow-free canonical domain of the representative: a batch
+        /// whose selected values leave `[lo, hi]` demotes per-row.
+        lo: i64,
+        hi: i64,
     },
 }
 
@@ -185,7 +215,10 @@ pub(super) fn decide_exprkey<'mcx>(
     // grouping key. Residual transitions are admitted (module doc).
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
     let Some(key_out) = ::nodeagg::agg_hash_staged_probe_col(agg) else {
-        return refused();
+        // 2..N grouping keys: the redundant-key (reduced grouping) tranche
+        // — every non-representative key a Var ± Const function of the one
+        // bare-Var key. Its own refuse accounting ticks inside.
+        return decide_reduced(agg, ss, estate);
     };
     let proj = ss.ss.ps_ProjInfo.as_ref()?;
     let result_slot = proj.pi_result_slot;
@@ -337,6 +370,9 @@ pub(super) fn decide_exprkey<'mcx>(
                 .enumerate()
                 .any(|(c, &need)| need && c != key_out as usize && map[c] == Some(*input_col));
         }
+        ExprKeyKind::Reduced { .. } => {
+            unreachable!("the reduced kind decides in decide_reduced")
+        }
     }
     if let Some(q) = ss.ss.qual.as_deref() {
         // Cover the qual's fetch bound so kernel/PREWHERE arms can host it;
@@ -354,23 +390,11 @@ pub(super) fn decide_exprkey<'mcx>(
     // Staging arm (decide-phase probe, like `probe_arm_fold_prefix`): the
     // PREWHERE lane first on qual'd cbstore scans, then the columnar /
     // fixed-width-prefix deform. A refusing arm fails open to per-row.
-    let armed = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
-        if ss.ss.qual.is_some() {
-            match ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => {}
-            }
-        }
-        let dict_key = match &kind {
-            ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
-            ExprKeyKind::Arith { .. } => None,
-        };
-        ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_key)
-    } else {
-        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
-        ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+    let dict_key = match &kind {
+        ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
+        ExprKeyKind::Arith { .. } | ExprKeyKind::Reduced { .. } => None,
     };
-    if !armed {
+    if !arm_stage(ss, estate, prefix, dict_key) {
         return refused();
     }
     let kind = match kind {
@@ -382,6 +406,9 @@ pub(super) fn decide_exprkey<'mcx>(
     trace_feed(match &kind {
         ExprKeyKind::Arith { .. } => "agg-over-seqscan: expr-key feed armed (arith key)",
         ExprKeyKind::Dict { .. } => "agg-over-seqscan: expr-key feed armed (dict key)",
+        ExprKeyKind::Reduced { .. } => {
+            unreachable!("the reduced kind decides in decide_reduced")
+        }
     });
     Some(Box::new(ExprKeyState {
         natts,
@@ -402,6 +429,232 @@ pub(super) fn decide_exprkey<'mcx>(
     }))
 }
 
+/// The reduced-grouping (redundant-key) admission: `Agg(hashed) → SeqScan`
+/// with 2..N int grouping keys over a projected scan where EXACTLY ONE key
+/// is a bare Var (the representative) and every other key is same-width
+/// `Var ± Const` int arithmetic over that Var — grouping by the reduced set
+/// {representative} produces the identical partition, so the build probes
+/// one int lane and reconstructs the redundant keys once per GROUP at
+/// read-back (the compact table's `RedShape` emit spec) instead of packing
+/// or evaluating them per row. ClickBench Q36 exactly:
+/// `GROUP BY ClientIP, ClientIP-1, ClientIP-2, ClientIP-3`.
+///
+/// The general functional-dependency case (multiple bare-Var keys,
+/// expression-over-expression, mul/div, cross-Var arithmetic) refuses to
+/// the per-row breaker feed, byte-identically. Kill switch:
+/// `PGRUST_LANE_V2_REDKEY=0|off`.
+fn decide_reduced<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<Box<ExprKeyState>> {
+    use ::execexpr::ProjArithOp as E;
+    use ::nodeagg::{RedDerived, RedOp};
+    if !redkey_enabled() {
+        return None;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::RedKeyShape);
+        None
+    };
+    // Fold-admitted plan, no residuals (the compact table is the ONLY host
+    // for the reduced key set — the C table's arrival probe needs all key
+    // columns — and the compact feed has no per-row resid leg).
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    if ::nodeagg::agg_lanefold_has_resid(agg) {
+        return refused();
+    }
+    // 2..N grouping keys, all canonical-int class at ONE width.
+    let key_cols = ::nodeagg::agg_hash_key_cols(agg);
+    if key_cols.len() < 2 {
+        return refused();
+    }
+    let mut width = 0u8;
+    for &(_, kind) in &key_cols {
+        let ::execgrouping::GroupKeyKind::Int { width: w } = kind else {
+            return refused();
+        };
+        if width == 0 {
+            width = w;
+        } else if width != w {
+            return refused();
+        }
+    }
+    let proj = ss.ss.ps_ProjInfo.as_ref()?;
+    let result_slot = proj.pi_result_slot;
+    let natts = estate
+        .slot(result_slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()?
+        .attrs
+        .len();
+    let Some(cols) = proj
+        .pi_state
+        .scan_proj_cols()
+        .filter(|c| c.n as usize == natts && c.any_arith())
+    else {
+        return refused();
+    };
+    // Key-order index of a tlist (agg input) column, when it is a key.
+    let key_ord = |c: u16| key_cols.iter().position(|&(a, _)| a == c);
+    // Pass 1: the representative — EXACTLY ONE key column that is a bare
+    // Var (>1 is the general functional-dependency case: refused).
+    let mut rep: Option<(u16, u16)> = None;
+    for (j, col) in cols.cols[..natts].iter().enumerate() {
+        if key_ord(j as u16).is_some() {
+            if let ::execexpr::ScanProjCol::Var { attnum } = *col {
+                if rep.is_some() {
+                    return refused();
+                }
+                rep = Some((j as u16, attnum));
+            }
+        }
+    }
+    let Some((key_out, rep_att)) = rep else {
+        return refused();
+    };
+    // Pass 2: classify every tlist column — bare Vars map to base lanes;
+    // every OTHER key column must be same-width Add/Sub over the
+    // representative's Var with a non-null Const (census contract); any
+    // other computed column refuses.
+    let mut map: Vec<Option<u16>> = Vec::with_capacity(natts);
+    let mut red_keys: Vec<Option<RedDerived>> = vec![None; key_cols.len()];
+    for (j, col) in cols.cols[..natts].iter().enumerate() {
+        match *col {
+            ::execexpr::ScanProjCol::Var { attnum } => map.push(Some(attnum)),
+            ::execexpr::ScanProjCol::ArithVK { op, attnum, konst, var_is_arg0 } => {
+                let Some(k) = key_ord(j as u16) else {
+                    return refused();
+                };
+                if attnum != rep_att {
+                    return refused();
+                }
+                let (rop, w) = match op {
+                    E::Add2 => (RedOp::Add, 2),
+                    E::Sub2 => (RedOp::Sub, 2),
+                    E::Add4 => (RedOp::Add, 4),
+                    E::Sub4 => (RedOp::Sub, 4),
+                    E::Add8 => (RedOp::Add, 8),
+                    E::Sub8 => (RedOp::Sub, 8),
+                    // Mul/Div: deterministic too, but out of the v1
+                    // boundary (Var ± Const only).
+                    _ => return refused(),
+                };
+                if w != width {
+                    return refused();
+                }
+                let k64 = match width {
+                    2 => proj_arith_konst(op, konst).as_i16() as i64,
+                    4 => proj_arith_konst(op, konst).as_i32() as i64,
+                    _ => proj_arith_konst(op, konst).as_i64(),
+                };
+                red_keys[k] = Some(RedDerived { op: rop, konst: k64, var_is_arg0 });
+                map.push(None);
+            }
+            ::execexpr::ScanProjCol::ArithVV { .. } => return refused(),
+        }
+    }
+    // Exactly the representative's key-order slot stays underived.
+    if red_keys.iter().filter(|d| d.is_none()).count() != 1
+        || key_ord(key_out).is_none_or(|k| red_keys[k].is_some())
+    {
+        return refused();
+    }
+    // Every fold column a mapped bare Var (count(*) plans read none).
+    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+        return refused();
+    }
+    // Needed (spill-replay) columns: mapped bare Vars, or key columns —
+    // the reduced feed never spills (compact-only; the backstop migrates
+    // whole tables and demoted batches replay per-row with the full
+    // projection), so derived key columns need no staged lane.
+    let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
+    if colnos_needed.len() != natts {
+        return refused();
+    }
+    let mut prefix = rep_att as i32 + 1;
+    for (c, &need) in colnos_needed.iter().enumerate() {
+        if !need || key_ord(c as u16).is_some() {
+            continue;
+        }
+        match map[c] {
+            Some(base) => prefix = prefix.max(base as i32 + 1),
+            None => return refused(),
+        }
+    }
+    if let Some(q) = ss.ss.qual.as_deref() {
+        match q.max_fetch(::execexpr::SlotSrc::Scan) {
+            Some(b) => prefix = prefix.max(b),
+            None => return refused(),
+        }
+    }
+    // Overflow-free canonical domain of the representative: intersect each
+    // derived expression's non-erroring input range at the key width (C
+    // int2/4/8 pl/mi semantics — anything outside errors per-row). An empty
+    // domain means EVERY non-null row errors: refuse (per-row raises it).
+    let (tmin, tmax) = match width {
+        2 => (i16::MIN as i128, i16::MAX as i128),
+        4 => (i32::MIN as i128, i32::MAX as i128),
+        _ => (i64::MIN as i128, i64::MAX as i128),
+    };
+    let (mut lo, mut hi) = (tmin, tmax);
+    for d in red_keys.iter().flatten() {
+        let c = d.konst as i128;
+        let (l, h) = match (d.op, d.var_is_arg0) {
+            (RedOp::Add, _) => (tmin - c, tmax - c),
+            (RedOp::Sub, true) => (tmin + c, tmax + c),
+            (RedOp::Sub, false) => (c - tmax, c - tmin),
+        };
+        lo = lo.max(l);
+        hi = hi.min(h);
+    }
+    if lo > hi {
+        return refused();
+    }
+    let (lo, hi) = (lo.max(i64::MIN as i128) as i64, hi.min(i64::MAX as i128) as i64);
+    // Compact-table admissibility (read-only precheck; the feed installs
+    // the real table per build — same gates, same verdict).
+    match ::nodeagg::agg_hash_compact_reduced_admissible(agg) {
+        ::nodeagg::CompactArm::Armed => {}
+        ::nodeagg::CompactArm::KeyKind => {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactKeyKind);
+            return None;
+        }
+        ::nodeagg::CompactArm::SpillRisk => {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactSpillRisk);
+            return None;
+        }
+        ::nodeagg::CompactArm::Off => return None,
+    }
+    if !arm_stage(ss, estate, prefix, None) {
+        return refused();
+    }
+    trace_feed("agg-over-seqscan: expr-key feed armed (reduced key)");
+    Some(Box::new(ExprKeyState {
+        natts,
+        map,
+        key_out,
+        prefix,
+        kind: ExprKeyKind::Reduced {
+            shape: ::nodeagg::RedShape { width, keys: red_keys },
+            rep_att,
+            lo,
+            hi,
+        },
+        refused: false,
+        rows: Vec::new(),
+        keys: Vec::new(),
+        knull: Vec::new(),
+        hashes: Vec::new(),
+        hash1: Vec::new(),
+        key_vals: Vec::new(),
+        key_null: Vec::new(),
+        dg_epoch: None,
+        dg_slots: Vec::new(),
+    }))
+}
+
 /// Re-arm the staging for a build (idempotent — the decide-phase probe armed
 /// the identical shape; rescans re-enter here).
 pub(super) fn exprkey_rearm<'mcx>(
@@ -409,17 +662,29 @@ pub(super) fn exprkey_rearm<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> bool {
+    let dict_key = match &xk.kind {
+        ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
+        ExprKeyKind::Arith { .. } | ExprKeyKind::Reduced { .. } => None,
+    };
+    arm_stage(ss, estate, xk.prefix, dict_key)
+}
+
+/// The shared staging arm (decide-phase probe + per-build re-arm): the
+/// PREWHERE lane first on qual'd cbstore scans, then the columnar /
+/// fixed-width-prefix deform. A refusing arm fails open to per-row.
+fn arm_stage<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+    dict_key: Option<u16>,
+) -> bool {
     if ::nodeseqscan::seq_scan_is_cbstore(ss) {
         if ss.ss.qual.is_some() {
-            let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, xk.prefix);
+            let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix);
         }
-        let dict_key = match &xk.kind {
-            ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
-            ExprKeyKind::Arith { .. } => None,
-        };
-        ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, xk.prefix, dict_key)
+        ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_key)
     } else {
-        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, xk.prefix, false, true, true);
+        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true, true);
         ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
     }
 }
@@ -441,9 +706,11 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     // Stage-2.2 compact table: int-arith keys with fully-admitted
     // transitions (no resid — the compact fold has no per-row leg), same
     // arming gates as the K2 feed (aggsplit, spill estimate, key width).
-    let compact = !has_resid
-        && matches!(xk.kind, ExprKeyKind::Arith { .. })
-        && match ::nodeagg::agg_hash_compact_try_arm(agg) {
+    // The REDUCED kind arms its own compact mode and REQUIRES it (the C
+    // table's arrival probe needs every key column, so there is no staged-
+    // probe fallback): an unarmable table routes the whole build per-row.
+    let tick_arm = |arm: ::nodeagg::CompactArm| -> bool {
+        match arm {
             ::nodeagg::CompactArm::Armed => true,
             ::nodeagg::CompactArm::KeyKind => {
                 stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CompactKeyKind);
@@ -454,8 +721,25 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
                 false
             }
             ::nodeagg::CompactArm::Off => false,
-        };
-    trace_feed(if compact {
+        }
+    };
+    let compact = match &xk.kind {
+        ExprKeyKind::Arith { .. } if !has_resid => {
+            tick_arm(::nodeagg::agg_hash_compact_try_arm(agg))
+        }
+        ExprKeyKind::Reduced { shape, .. } if !has_resid => {
+            let armed =
+                tick_arm(::nodeagg::agg_hash_compact_try_arm_reduced(agg, shape.clone()));
+            if !armed {
+                xk.refused = true;
+            }
+            armed
+        }
+        _ => false,
+    };
+    trace_feed(if compact && matches!(xk.kind, ExprKeyKind::Reduced { .. }) {
+        "agg-over-seqscan: expr-key fold feed engaged (reduced key, compact table)"
+    } else if compact {
         "agg-over-seqscan: expr-key fold feed engaged (compact table)"
     } else {
         "agg-over-seqscan: expr-key fold feed engaged"
@@ -540,6 +824,11 @@ fn exprkey_batch<'mcx>(
             xk.rows.push(i);
         }
     }
+    // Reduced grouping (redundant keys): no key derivation at all — the
+    // representative lane probes the compact table directly.
+    if matches!(xk.kind, ExprKeyKind::Reduced { .. }) {
+        return reduced_batch(agg, ss, xk, &sel, nwords, n, idxs, groups, estate);
+    }
     // Key-lane derivation.
     let mut dict_lane: Option<::exectuples::SoaDictLane> = None;
     match &mut xk.kind {
@@ -614,6 +903,9 @@ fn exprkey_batch<'mcx>(
             if *gather_input {
                 ::nodeseqscan::seq_scan_batch_gather_dict(ss, col);
             }
+        }
+        ExprKeyKind::Reduced { .. } => {
+            unreachable!("reduced batches routed through reduced_batch above")
         }
     }
     // Guarded plans (int2-Var OpExpr admissions): prove the survivors
@@ -751,6 +1043,108 @@ fn exprkey_batch<'mcx>(
     // SAFETY: as the compact arm above — non-fallback staged rows, valid
     // lane values for every mapped plan column, pergroups installed by this
     // batch's probes, guarded plans proven above.
+    unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) }
+}
+
+/// One staged batch of the REDUCED (redundant-key) route: range-guard the
+/// representative lane, prove any plan guards, probe the compact table on
+/// the representative alone, and fold whole-batch. Every demote (range
+/// trap, guard demote, backstop migration) replays the WHOLE batch through
+/// the per-row emit path — the C-ported `exec_project` computes (and, for
+/// out-of-range keys, ERRORS on) every derived key at exactly the per-row
+/// path's row — and the range trap and migration are STICKY (the compact
+/// table is the only reduced host; once it is gone the C table needs all
+/// key columns per arrival).
+#[allow(clippy::too_many_arguments)]
+fn reduced_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    sel: &[u64],
+    nwords: usize,
+    n: u32,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ExprKeyKind::Reduced { ref shape, rep_att, lo, hi } = xk.kind else {
+        unreachable!("reduced_batch requires the Reduced kind")
+    };
+    let width = shape.width;
+    // Survivor-aligned representative keys + the overflow range guard: a
+    // selected value outside [lo, hi] means some derived key errors on this
+    // batch — refuse-and-replay per-row, sticky (arith-trap discipline).
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("reduced batched route requires the armed SoA");
+        let vals = soa.col_values(rep_att as usize);
+        let nulls = soa.col_isnull(rep_att as usize);
+        xk.keys.clear();
+        xk.knull.clear();
+        let (mut mn, mut mx) = (i64::MAX, i64::MIN);
+        for &i in &xk.rows {
+            let isnull = nulls[i as usize];
+            let d = vals[i as usize];
+            if !isnull {
+                let v = match width {
+                    2 => d.as_i16() as i64,
+                    4 => d.as_i32() as i64,
+                    _ => d.as_i64(),
+                };
+                mn = mn.min(v);
+                mx = mx.max(v);
+            }
+            xk.keys.push(d);
+            xk.knull.push(isnull);
+        }
+        if mn <= mx && (mn < lo || mx > hi) {
+            xk.refused = true;
+            trace_feed("reduced-key range trap: replaying batch per-row (sticky)");
+            ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+            return per_row_batch(agg, ss, n, estate);
+        }
+    }
+    // Guarded plans: prove the survivors before any fold (main-feed
+    // discipline over the remapped lanes).
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("reduced feed without a plan");
+        if plan.guarded {
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("reduced batched route requires the armed SoA");
+            // SAFETY: selected rows are staged non-fallback rows with live
+            // lane values for every mapped plan column.
+            let demote = unsafe {
+                ::lanefold::check_guards(
+                    plan,
+                    &MapCols { soa, map: &xk.map },
+                    &sel[..nwords],
+                    |_| None,
+                )
+            } == ::lanefold::GuardCheck::Demote;
+            if demote {
+                ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+                return per_row_batch(agg, ss, n, estate);
+            }
+        }
+    }
+    // Probe the compact table on the representative lane. `false` = the
+    // runtime backstop migrated to the C table BEFORE this batch (or a
+    // prior one did): sticky per-row from here on.
+    {
+        let ExprKeyState { keys, knull, .. } = &mut *xk;
+        if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
+            xk.refused = true;
+            trace_feed("reduced-key backstop migration: per-row from here (sticky)");
+            return per_row_batch(agg, ss, n, estate);
+        }
+    }
+    idxs.clear();
+    idxs.extend_from_slice(&xk.rows);
+    let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+        .expect("reduced batched route requires the armed SoA");
+    // SAFETY: every probed row is non-fallback with valid lane values for
+    // every mapped plan column; each pergroup was installed by the compact
+    // probe within this batch; the rest is agg_fold_staged's contract.
     unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) }
 }
 

@@ -298,9 +298,17 @@ pub(super) enum RefuseReason {
     /// per memoized agg-lane choice; the build stays on the per-row breaker
     /// feed (byte-identical).
     ExprKeyShape = 33,
+    /// Reduced grouping (redundant-key elimination): the offered 2..N-key
+    /// projected shape is outside the Var-±-Const-over-one-bare-Var-key
+    /// vocabulary (multiple bare-Var keys, expression-on-expression,
+    /// mul/div, cross-Var arithmetic, mixed key widths, residual
+    /// transitions, an unmappable needed column, an empty overflow-free
+    /// domain, or an unarmable staging prefix). Ticked once per memoized
+    /// agg-lane choice; the build keeps the per-row feed byte-identically.
+    RedKeyShape = 34,
 }
 
-const N_REASONS: usize = 34;
+const N_REASONS: usize = 35;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -339,6 +347,7 @@ impl RefuseReason {
             RefuseReason::CountOnlyCensus => "count-only-census",
             RefuseReason::MultiKeyShape => "multikey-shape",
             RefuseReason::ExprKeyShape => "exprkey-shape",
+            RefuseReason::RedKeyShape => "redkey-shape",
         }
     }
 
@@ -379,6 +388,7 @@ impl RefuseReason {
             CountOnlyCensus,
             MultiKeyShape,
             ExprKeyShape,
+            RedKeyShape,
         ][i]
     }
 }
