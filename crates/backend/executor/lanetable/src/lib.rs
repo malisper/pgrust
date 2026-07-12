@@ -157,6 +157,26 @@ pub fn hash_int_crc(k: u64) -> u64 {
     hash_int(k)
 }
 
+/// Hardware-CRC32C 128-bit-key hash: the CH `UInt128HashCRC32` idiom —
+/// crc32cx chained over the two words, then the 64-bit spread (salt +
+/// two-level bits). Callers MUST hold [`crc_supported`]; non-aarch64 builds
+/// alias [`hash_i128`].
+#[inline(always)]
+pub fn hash_i128_crc(k: [u64; 2]) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        spread32(crc32cx(crc32cx(u32::MAX, k[0]), k[1]))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    hash_i128(k)
+}
+
+/// fmix64-chain 128-bit-key hash (portable baseline for [`hash_i128_crc`]).
+#[inline(always)]
+pub fn hash_i128(k: [u64; 2]) -> u64 {
+    hash_int(hash_int(k[0]) ^ k[1])
+}
+
 /// Hardware-CRC32C byte-string hash (CH hashes strings CRC-by-8B-words; same
 /// shape). Callers MUST hold [`crc_supported`]; non-aarch64 aliases
 /// [`hash_bytes`].
@@ -263,6 +283,9 @@ pub enum KeyRepr {
     /// One 64-bit integer key word (int2/int4/int8 keys canonicalized to i64
     /// by the caller).
     Int,
+    /// Two 64-bit key words (a packed multi-key composite ≤ 16 B, low word
+    /// first — the CH `keys128` idiom). Salt8 entries only.
+    Int128,
     /// Byte-string keys: 3 key words = [packed8-or-arena-offset, len,
     /// saved 64-bit hash].
     Bytes,
@@ -282,6 +305,7 @@ pub enum EntryLayout {
 }
 
 const INT_KEY_WORDS: usize = 1;
+const INT128_KEY_WORDS: usize = 2;
 const BYTES_KEY_WORDS: usize = 3;
 
 /// Row storage: fixed-stride rows in chunked, allocation-stable u64 arrays
@@ -440,6 +464,7 @@ impl LaneAggTable {
         let state_bytes = (state_bytes + 7) & !7;
         let key_words = match repr {
             KeyRepr::Int => INT_KEY_WORDS,
+            KeyRepr::Int128 => INT128_KEY_WORDS,
             KeyRepr::Bytes => BYTES_KEY_WORDS,
         };
         // Crc falls back where unsupported (single dispatch point: the
@@ -478,6 +503,13 @@ impl LaneAggTable {
     #[inline(always)]
     pub fn hash_key_int(&self, k: u64) -> u64 {
         hash_int_kind(self.hash, k)
+    }
+
+    /// This table's 128-bit-key hash — callers of [`Self::probe_i128`] MUST
+    /// hash through this (kind-consistent with grow/convert re-hashing).
+    #[inline(always)]
+    pub fn hash_key_i128(&self, k: [u64; 2]) -> u64 {
+        hash_i128_kind(self.hash, k)
     }
 
     /// This table's byte-key hash — callers of [`Self::probe_bytes`] MUST
@@ -872,6 +904,248 @@ impl LaneAggTable {
         }
     }
 
+    // -- Int128 keys (packed multi-key composites) ---------------------------
+
+    /// Probe/insert one 2-word packed key with its [`Self::hash_key_i128`]
+    /// hash. Salt8 entries only (Inline16 slots hold one key word); same
+    /// grow-on-emplace shape as [`Self::probe_int`].
+    #[inline]
+    pub fn probe_i128(&mut self, key: [u64; 2], hash: u64) -> Probe {
+        debug_assert_eq!(self.repr, KeyRepr::Int128);
+        debug_assert_eq!(self.slot_words, 1, "Int128 is Salt8-only");
+        let salted = if self.salt_enabled() { salt_of(hash) } else { 0 };
+        let set = self.set_for(hash);
+        let mask = set.mask;
+        let mut pos = (hash as usize) & mask;
+        loop {
+            // SAFETY: pos is masked into the entry array.
+            let e = unsafe { *set.entries.get_unchecked(pos) };
+            if e == 0 {
+                return self.insert_i128(key, hash, pos);
+            }
+            if salted == 0 || (e & !REF_MASK) == salted {
+                let row = ((e & REF_MASK) - 1) as usize;
+                let p = self.rows.row_ptr(row);
+                // SAFETY: live Int128 row; words 0..2 are the key words.
+                if unsafe { *p == key[0] && *p.add(1) == key[1] } {
+                    // SAFETY: states start at key_words within the row.
+                    return Probe {
+                        states: unsafe { p.add(self.key_words).cast() },
+                        is_new: false,
+                    };
+                }
+            }
+            pos = (pos + 1) & mask;
+        }
+    }
+
+    /// Fused probe+fold driver over a packed 2-word key lane — the
+    /// [`Self::probe_fold_int`] hoisted-locals shape for [`KeyRepr::Int128`]
+    /// tables. `fold(states, ordinal, is_new)` runs once per key IN INPUT
+    /// ORDER; new groups' states are zeroed.
+    pub fn probe_fold_i128(&mut self, keys: &[[u64; 2]], mut fold: impl FnMut(*mut u8, u32, bool)) {
+        debug_assert_eq!(self.repr, KeyRepr::Int128);
+        match self.hash {
+            HashKind::Fmix => self.probe_fold_i128_run(keys, hash_i128, &mut fold),
+            HashKind::Crc => self.probe_fold_i128_run(keys, hash_i128_crc, &mut fold),
+        }
+    }
+
+    fn probe_fold_i128_run(
+        &mut self,
+        keys: &[[u64; 2]],
+        hf: impl Fn([u64; 2]) -> u64 + Copy,
+        fold: &mut impl FnMut(*mut u8, u32, bool),
+    ) {
+        let kw = self.key_words;
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            // Hoisted raw parts (re-derived after every insert — see
+            // probe_fold_run's rationale).
+            let bp: *mut EntrySet = match &mut self.buckets {
+                Some(bs) => bs.as_mut_ptr(),
+                None => core::ptr::null_mut(),
+            };
+            let (sp_entries, sp_mask) = {
+                let s = &mut self.single;
+                (s.entries.as_mut_ptr(), s.mask)
+            };
+            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_shift = self.rows.chunk_shift;
+            let rows_cmask = self.rows.chunk_mask;
+            let rows_stride = self.rows.stride_words;
+            let salt_on = self.total_members > SALT_DISABLE_MAX_ENTRIES;
+            while i < keys.len() {
+                // SAFETY: i < keys.len().
+                let key = unsafe { *keys.get_unchecked(i) };
+                let hash = hf(key);
+                let (e_ptr, mask) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                let salted = if salt_on { salt_of(hash) } else { 0 };
+                let mut pos = (hash as usize) & mask;
+                let hit: Option<*mut u64> = loop {
+                    // SAFETY: masked entry index.
+                    let e = unsafe { *e_ptr.add(pos) };
+                    if e == 0 {
+                        break None;
+                    }
+                    if salted == 0 || (e & !REF_MASK) == salted {
+                        let row = ((e & REF_MASK) - 1) as usize;
+                        // SAFETY: live row.
+                        let p = unsafe {
+                            row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                        };
+                        // SAFETY: words 0..2 are the key words.
+                        if unsafe { *p == key[0] && *p.add(1) == key[1] } {
+                            break Some(p);
+                        }
+                    }
+                    pos = (pos + 1) & mask;
+                };
+                match hit {
+                    Some(p) => {
+                        // SAFETY: states follow the key words.
+                        fold(unsafe { p.add(kw).cast() }, i as u32, false);
+                        i += 1;
+                    }
+                    None => {
+                        // Insert leg (cold; may grow/convert/allocate) —
+                        // fold, then re-hoist every raw part.
+                        let pr = self.insert_i128(key, hash, pos);
+                        fold(pr.states, i as u32, true);
+                        i += 1;
+                        continue 'rehoist;
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn insert_i128(&mut self, key: [u64; 2], hash: u64, mut pos: usize) -> Probe {
+        if self.grow_if_needed(hash) {
+            // Layout changed: recompute (key known absent — probe missed).
+            let set = self.set_for(hash);
+            pos = (hash as usize) & set.mask;
+            while unsafe { *set.entries.get_unchecked(pos) } != 0 {
+                pos = (pos + 1) & set.mask;
+            }
+        }
+        let row = self.rows.alloc();
+        let p = self.rows.row_ptr(row);
+        // SAFETY: fresh zeroed row of stride key_words + state words.
+        unsafe {
+            *p = key[0];
+            *p.add(1) = key[1];
+        }
+        // Salt is ALWAYS stored (see insert_int).
+        let set = self.set_for_mut(hash);
+        set.entries[pos] = salt_of(hash) | (row as u64 + 1);
+        set.members += 1;
+        self.total_members += 1;
+        // SAFETY: states follow the key words in the fresh zeroed row.
+        Probe { states: unsafe { p.add(self.key_words).cast() }, is_new: true }
+    }
+
+    /// Batched Int128 probe — [`Self::probe_int_batch`]'s twin over a packed
+    /// 2-word key lane: fused hoisted-locals driver below the prefetch engage
+    /// point, adaptive prefetch above it.
+    pub fn probe_i128_batch(
+        &mut self,
+        keys: &[[u64; 2]],
+        mode: PrefetchMode,
+        hashes: &mut Vec<u64>,
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(self.repr, KeyRepr::Int128);
+        out.reserve(keys.len());
+        let engaged =
+            mode != PrefetchMode::None && self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES;
+        if !engaged {
+            self.probe_fold_i128(keys, |states, i, is_new| {
+                out.push(states);
+                if is_new {
+                    new_out.push(i);
+                }
+            });
+            return;
+        }
+        hashes.clear();
+        hashes.reserve(keys.len());
+        match self.hash {
+            HashKind::Fmix => {
+                for &k in keys {
+                    hashes.push(hash_i128(k));
+                }
+            }
+            HashKind::Crc => {
+                for &k in keys {
+                    hashes.push(hash_i128_crc(k));
+                }
+            }
+        }
+        match mode {
+            PrefetchMode::None => unreachable!("handled by the fused driver"),
+            PrefetchMode::PreTouch => {
+                {
+                    let mut sink = 0u64;
+                    for &h in hashes.iter() {
+                        let set = self.set_for(h);
+                        // SAFETY: masked entry index (Salt8: 1 slot word).
+                        sink ^= unsafe { *set.entries.get_unchecked((h as usize) & set.mask) };
+                    }
+                    std::hint::black_box(sink);
+                }
+                for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
+                    let pr = self.probe_i128(k, h);
+                    out.push(pr.states);
+                    if pr.is_new {
+                        new_out.push(i as u32);
+                    }
+                }
+            }
+            PrefetchMode::Adaptive => {
+                // CH PrefetchingHelper (see probe_int_batch).
+                let sample = keys.len().min(100);
+                let t0 = std::time::Instant::now();
+                for i in 0..sample {
+                    let pr = self.probe_i128(keys[i], hashes[i]);
+                    out.push(pr.states);
+                    if pr.is_new {
+                        new_out.push(i as u32);
+                    }
+                }
+                let lookahead = if sample == 0 {
+                    8
+                } else {
+                    let per_iter_ns = (t0.elapsed().as_nanos() as u64 / sample as u64).max(1);
+                    ((400 / per_iter_ns) as usize).clamp(4, 32)
+                };
+                for i in sample..keys.len() {
+                    let j = i + lookahead;
+                    if j < keys.len() {
+                        let h = hashes[j];
+                        let set = self.set_for(h);
+                        prefetch(unsafe {
+                            set.entries.as_ptr().add((h as usize) & set.mask)
+                        });
+                    }
+                    let pr = self.probe_i128(keys[i], hashes[i]);
+                    out.push(pr.states);
+                    if pr.is_new {
+                        new_out.push(i as u32);
+                    }
+                }
+            }
+        }
+    }
+
     // -- Byte-string keys ---------------------------------------------------
 
     /// Probe/insert one byte-string key with its [`Self::hash_key_bytes`]
@@ -1088,6 +1362,20 @@ impl LaneAggTable {
         Some(unsafe { *self.rows.row_ptr(i) } as i64)
     }
 
+    /// Row `i`'s packed 2-word key: `None` = the NULL group (unused by the
+    /// multi-key hosting, which encodes NULLs in the packed key — kept for
+    /// layout symmetry with [`Self::row_key_int`]).
+    #[inline]
+    pub fn row_key_i128(&self, i: usize) -> Option<[u64; 2]> {
+        debug_assert_eq!(self.repr, KeyRepr::Int128);
+        if self.null_row == Some(i) {
+            return None;
+        }
+        let p = self.rows.row_ptr(i);
+        // SAFETY: i < nrows (caller iterates 0..nrows); words 0..2 are keys.
+        Some(unsafe { [*p, *p.add(1)] })
+    }
+
     /// Row `i`'s byte key: `None` = the NULL group. Short keys are returned
     /// from the caller's scratch buffer (packed-word unpack).
     #[inline]
@@ -1155,6 +1443,15 @@ fn hash_int_kind(hk: HashKind, k: u64) -> u64 {
     }
 }
 
+/// Kind-dispatched 128-bit-key hash ([`hash_int_kind`]'s Int128 twin).
+#[inline(always)]
+fn hash_i128_kind(hk: HashKind, k: [u64; 2]) -> u64 {
+    match hk {
+        HashKind::Fmix => hash_i128(k),
+        HashKind::Crc => hash_i128_crc(k),
+    }
+}
+
 /// Slot re-hash for grow/convert: Inline16 hashes the key straight out of
 /// the entry (never touches rows); Salt8 re-derives from the row (ints
 /// re-hash — cheaper than storing; byte keys read their saved hash word,
@@ -1168,6 +1465,9 @@ fn slot_hash(repr: KeyRepr, hk: HashKind, rows: &RowStore, sw: usize, kw: u64, r
     match repr {
         // SAFETY: live Int row, word 0 = key.
         KeyRepr::Int => hash_int_kind(hk, unsafe { *p }),
+        // SAFETY: live Int128 row, words 0..2 = key (re-hash: cheaper than a
+        // saved-hash word, exactly like the Int arm).
+        KeyRepr::Int128 => hash_i128_kind(hk, unsafe { [*p, *p.add(1)] }),
         // SAFETY: live Bytes row, word 2 = saved hash.
         KeyRepr::Bytes => unsafe { *p.add(2) },
     }

@@ -284,9 +284,15 @@ pub(super) enum RefuseReason {
     /// storeless advance; cbstore: the MetaAggScan footer path / the empty
     /// needed-set per-row walk), so a batch-decoded feed has nothing to win.
     CountOnlyCensus = 31,
+    /// Multi-key packed grouping (multikey spike §2.4): the 2..N-key shape
+    /// is not packable — a non-Int/non-dict-text component, widths past the
+    /// 16-byte image, a missing dict-lane registration for the text
+    /// component, or an unstageable key column. Mode-choice observability
+    /// inside a still-lane-owned build; ticked once per build decision.
+    MultiKeyShape = 32,
 }
 
-const N_REASONS: usize = 32;
+const N_REASONS: usize = 33;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -323,6 +329,7 @@ impl RefuseReason {
             RefuseReason::MetaRuntime => "meta-runtime",
             RefuseReason::QualNotVectorizable => "qual-not-vectorizable",
             RefuseReason::CountOnlyCensus => "count-only-census",
+            RefuseReason::MultiKeyShape => "multikey-shape",
         }
     }
 
@@ -361,6 +368,7 @@ impl RefuseReason {
             MetaRuntime,
             QualNotVectorizable,
             CountOnlyCensus,
+            MultiKeyShape,
         ][i]
     }
 }
