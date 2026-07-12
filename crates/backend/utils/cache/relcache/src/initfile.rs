@@ -501,6 +501,25 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_i32(buf, o.pages_per_range);
             put_bool(buf, o.autosummarize);
         }
+        Some(RdOptions::Cbstore(o)) => {
+            put_u8(buf, 9);
+            put_i32(
+                buf,
+                match o.codec {
+                    ::types_rel::CbstoreCodec::Auto => 0,
+                    ::types_rel::CbstoreCodec::Lz4 => 1,
+                    ::types_rel::CbstoreCodec::Zstd => 2,
+                    ::types_rel::CbstoreCodec::Plain => 3,
+                },
+            );
+            put_i32(buf, o.zstd_level);
+            let ck = o.cluster_key().as_bytes();
+            put_u16(buf, ck.len() as u16);
+            buf.extend_from_slice(ck);
+            let cc = o.codec_cols().as_bytes();
+            put_u16(buf, cc.len() as u16);
+            buf.extend_from_slice(cc);
+        }
     }
 }
 
@@ -575,6 +594,28 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
             pages_per_range: rd.i32()?,
             autosummarize: rd.boolean()?,
         }))),
+        9 => {
+            let mut o = ::types_rel::CbstoreOptions::default();
+            o.codec = match rd.i32()? {
+                0 => ::types_rel::CbstoreCodec::Auto,
+                1 => ::types_rel::CbstoreCodec::Lz4,
+                2 => ::types_rel::CbstoreCodec::Zstd,
+                3 => ::types_rel::CbstoreCodec::Plain,
+                _ => return None,
+            };
+            o.zstd_level = rd.i32()?;
+            let n = rd.u16()? as usize;
+            let ck = core::str::from_utf8(rd.bytes(n)?).ok()?;
+            if !o.set_cluster_key(ck) {
+                return None;
+            }
+            let n = rd.u16()? as usize;
+            let cc = core::str::from_utf8(rd.bytes(n)?).ok()?;
+            if !o.set_codec_cols(cc) {
+                return None;
+            }
+            Some(Some(RdOptions::Cbstore(o)))
+        }
         _ => None,
     }
 }

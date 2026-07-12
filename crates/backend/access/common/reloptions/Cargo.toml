@@ -18,5 +18,6 @@ guc = { path = "../../../utils/misc/guc" }
 define = { path = "../../../commands/define" }
 elog = { path = "../../../utils/error/elog" }
 varlena = { path = "../../../utils/adt/varlena" }
+tableam_vocab = { version = "0.1.0", path = "../../table/tableam_vocab" }
 
 [dev-dependencies]
