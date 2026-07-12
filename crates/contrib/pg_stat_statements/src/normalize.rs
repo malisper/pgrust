@@ -42,10 +42,11 @@ pub(crate) fn generate_normalized_query(
         if l.extern_param && !jstate.has_squashed_lists {
             continue;
         }
-        let off = (l.location - query_loc) as usize;
-        if l.length < 0 {
-            continue; // duplicate location
+        debug_assert!(l.location >= query_loc); // C Assert(loc >= 0)
+        if l.length < 0 || l.location < query_loc {
+            continue; // duplicate or bogus location
         }
+        let off = (l.location - query_loc) as usize;
         let len_to_wrt = off - last_off - last_tok_len;
         norm.push_str(core::str::from_utf8(&qbytes[quer_loc..quer_loc + len_to_wrt]).unwrap());
         norm.push('$');

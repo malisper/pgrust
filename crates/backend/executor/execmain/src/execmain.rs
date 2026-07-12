@@ -378,6 +378,9 @@ pub(crate) fn executor_finish_seam(h: QueryDescHandle) -> PgResult<()> {
     tap_executor_finish::call_if(|f| f(h));
     // The registry borrow must drop before the after-trigger firing loop:
     // RI checks re-enter the executor through SPI (fresh QueryDesc entries).
+    // C divergence: C runs AfterTriggerEndQuery inside the totaltime
+    // Instr window (standard_ExecutorFinish); here it falls outside, so a
+    // consumer's per-statement time/bufusage exclude after-trigger work.
     let r = (|| -> PgResult<()> {
         let fire_triggers = querydesc::with_qd(h, standard_executor_finish)?;
         if fire_triggers {

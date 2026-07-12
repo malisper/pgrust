@@ -125,9 +125,12 @@ fn alter_contents_recurse<'mcx>(
         if object.classId == NAMESPACE_RELATION_ID
             && object.objectId == crate::get_extension_schema(extension.objectId)?
         {
+            let nsp = lsyscache::get_namespace_name(mcx, object.objectId)?
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             return Err(Box::new(
                 PgError::error(format!(
-                    "cannot add schema to extension \"{extname}\" because the schema contains the extension"
+                    "cannot add schema \"{nsp}\" to extension \"{extname}\" because the schema contains the extension"
                 ))
                 .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
             ));

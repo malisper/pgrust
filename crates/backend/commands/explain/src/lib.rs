@@ -80,7 +80,8 @@ pub fn ExplainQuery<'mcx>(
     // SAFETY: fresh copy; this call holds its only live access.
     let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("ExplainQuery: statement is not an analyzed Query");
-    if parser_analyze::tap_post_parse_analyze::is_installed() {
+    if parser_analyze::tap_post_parse_analyze::is_installed() && queryjumble::IsQueryIdEnabled()
+    {
         let js = queryjumble::JumbleQuery(mcx, &mut query)?;
         parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
     } else if queryjumble::IsQueryIdEnabled() {
@@ -273,7 +274,9 @@ fn ExplainOneUtility<'mcx>(
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("CTAS query is not an analyzed Query");
-            if parser_analyze::tap_post_parse_analyze::is_installed() {
+            if parser_analyze::tap_post_parse_analyze::is_installed()
+                && queryjumble::IsQueryIdEnabled()
+            {
                 let js = queryjumble::JumbleQuery(mcx, &mut query)?;
                 parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
             } else if queryjumble::IsQueryIdEnabled() {
@@ -309,7 +312,9 @@ fn ExplainOneUtility<'mcx>(
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("DECLARE CURSOR query is not an analyzed Query");
-            if parser_analyze::tap_post_parse_analyze::is_installed() {
+            if parser_analyze::tap_post_parse_analyze::is_installed()
+                && queryjumble::IsQueryIdEnabled()
+            {
                 let js = queryjumble::JumbleQuery(mcx, &mut query)?;
                 parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
             } else if queryjumble::IsQueryIdEnabled() {
