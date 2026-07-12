@@ -108,6 +108,16 @@ impl ChunkLedger {
     fn take(&self, idx: usize) -> Option<Box<TupleChunk>> {
         self.slots.lock().unwrap_or_else(|e| e.into_inner())[idx].take()
     }
+
+    // Diagnostics (stall self-report): chunks currently in flight.
+    fn in_flight(&self) -> usize {
+        self.slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|s| s.is_some())
+            .count()
+    }
 }
 
 impl Default for ChunkLedger {
@@ -271,6 +281,9 @@ fn flush_chunk(
     let Some(mut chunk) = pending.take() else { return Ok(true) };
     stats.chunks += 1;
 
+    // Stall self-report clock for the ledger-full wait; installing a chunk
+    // is progress (the loop exits). Untouched when a slot is free.
+    let mut stall = shm_mq::stall::StallDetector::new();
     let idx = loop {
         match ledger.try_install(chunk) {
             Ok(idx) => break idx,
@@ -281,9 +294,18 @@ fn flush_chunk(
                 }
                 // All slots in flight: the receiver frees one and sets our
                 // latch (mirrors shm_mq's full-ring sender wait).
-                shm_mq::wait_on_my_latch(
+                shm_mq::stall::wait_on_my_latch_reporting(
                     init_small::globals::MyLatch(),
                     shm_mq::WAIT_EVENT_MQ_SEND,
+                    &mut stall,
+                    &mut |waited_ms| {
+                        shm_mq::stall::report_queue_stall(
+                            queue.queue(),
+                            "send-ledger-full",
+                            ledger.in_flight(),
+                            waited_ms,
+                        )
+                    },
                 )?;
             }
         }
@@ -339,6 +361,11 @@ impl TupleQueueReader {
     /// Batched path (matched to `tqueue_create_DR_batched` on the same queue).
     pub fn new_batched(queue: ShmMqHandle, ledger: Arc<ChunkLedger>) -> Self {
         Self { queue, ledger: Some(ledger), current: None, cursor: 0 }
+    }
+
+    /// Diagnostics (Gather leader stall self-report): this reader's queue.
+    pub fn mq(&self) -> &shm_mq::ShmMq {
+        self.queue.queue()
     }
 
     // TupleQueueReaderNext: the raw MinimalTuple byte image borrowed from the
