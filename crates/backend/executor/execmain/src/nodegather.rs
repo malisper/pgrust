@@ -29,6 +29,11 @@ pub struct GatherState<'mcx> {
     pub nreaders: usize,
     pub nextreader: usize,
     pub reader: Vec<tqueue::TupleQueueReader>,
+    // Read-fairness stride (guc_tables::gather_fair): after `fair_stride`
+    // consecutive tuples from one queue the read cursor rotates. 0 = C's
+    // ratified stick-until-would-block policy (the default).
+    fair_stride: i64,
+    stride_rem: i64,
     // C outerPlan->chgParam: the deferred-rescan set ExecReScanGather leaves
     // for the child; consumed at the leader's next local pull, after
     // ExecParallelReinitialize.
@@ -103,6 +108,8 @@ pub fn exec_init_gather<'mcx>(
         nreaders: 0,
         nextreader: 0,
         reader: Vec::new(),
+        fair_stride: 0,
+        stride_rem: 0,
         outer_chg: Bitmapset::empty(),
     })
 }
@@ -143,6 +150,8 @@ fn gather_startup<'mcx>(
         }
         node.nreaders = node.reader.len();
         node.nextreader = 0;
+        node.fair_stride = guc_tables::gather_fair::gather_fair_stride();
+        node.stride_rem = node.fair_stride;
     }
     node.need_to_scan_locally =
         node.nreaders == 0 || (!gather.single_copy && leader_participation());
@@ -250,6 +259,19 @@ fn gather_readnext(
         }
 
         if tup.is_some() {
+            // Fairness stride (opt-in; see gather_fair): rotate the cursor
+            // after `fair_stride` consecutive tuples so no producer's queue
+            // is drained exclusively. C never rotates on a successful read.
+            if node.fair_stride > 0 && node.nreaders > 1 {
+                node.stride_rem -= 1;
+                if node.stride_rem <= 0 {
+                    node.stride_rem = node.fair_stride;
+                    node.nextreader += 1;
+                    if node.nextreader >= node.nreaders {
+                        node.nextreader = 0;
+                    }
+                }
+            }
             return Ok(tup);
         }
 
@@ -341,5 +363,6 @@ pub(crate) fn apply_pending_outer_chg<'mcx>(
 // ExecShutdownGather and release_owned.
 ::mcx::forget_safe_struct!(
     GatherState<'_> { plan, ps, initialized, need_to_scan_locally, tuples_needed,
-        funnel_slot, nworkers_launched, nreaders, nextreader, outer_chg; pei, reader },
+        funnel_slot, nworkers_launched, nreaders, nextreader, fair_stride,
+        stride_rem, outer_chg; pei, reader },
 );

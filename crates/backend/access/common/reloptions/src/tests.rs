@@ -267,6 +267,43 @@ fn index_am_parses() {
 }
 
 #[test]
+fn cbstore_parallel_workers_reloption() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+
+    // Accepted and parsed (the CREATE/ALTER SET path).
+    let l = NodeList::make1(mcx, def(mcx, None, "parallel_workers", Some("16"))).unwrap();
+    let img = transformRelOptions(mcx, None, &l, None, HEAP_RELOPT_NAMESPACES, true, false)
+        .unwrap()
+        .unwrap();
+    let o = cbstore_reloptions(mcx, Some(&img), true).unwrap().unwrap();
+    assert_eq!(o.parallel_workers, 16);
+
+    // Default is unset (-1), matching StdRdOptions.
+    let l = NodeList::make1(mcx, def(mcx, None, "codec", Some("lz4"))).unwrap();
+    let img = transformRelOptions(mcx, None, &l, None, HEAP_RELOPT_NAMESPACES, true, false)
+        .unwrap()
+        .unwrap();
+    let o = cbstore_reloptions(mcx, Some(&img), true).unwrap().unwrap();
+    assert_eq!(o.parallel_workers, -1);
+
+    // Range-validated like the heap reloption (0..1024).
+    let l = NodeList::make1(mcx, def(mcx, None, "parallel_workers", Some("2000"))).unwrap();
+    let img = transformRelOptions(mcx, None, &l, None, HEAP_RELOPT_NAMESPACES, true, false)
+        .unwrap()
+        .unwrap();
+    let e = cbstore_reloptions(mcx, Some(&img), true).unwrap_err();
+    assert_eq!(
+        e.message(),
+        "invalid value for integer option \"parallel_workers\": 2000 (valid: 0..1024)"
+    );
+
+    // ALTER TABLE SET lock level comes from the shared name table: SUEL.
+    let l = NodeList::make1(mcx, def(mcx, None, "parallel_workers", None)).unwrap();
+    assert_eq!(AlterTableGetRelOptionsLockLevel(&l), ShareUpdateExclusiveLock);
+}
+
+#[test]
 fn lock_levels() {
     let cx = MemoryContext::new("t");
     let mcx = cx.mcx();
