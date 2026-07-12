@@ -780,7 +780,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
 
     /// `NextCopyFromRawFields` + `NextCopyFrom`, text/CSV arms: fill
     /// values/nulls (arrays over all physical attrs). Returns false at EOF.
-    pub(crate) fn next_copy_from(
+    pub fn next_copy_from(
         &mut self,
         row_mcx: Mcx<'mcx>,
         values: &mut [Datum],
@@ -891,6 +891,10 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             let m = attnum as usize - 1;
             if i >= fldct {
                 return Err(missing_data(&self.attname(m)));
+            }
+            if self.convert_select_flags.as_ref().is_some_and(|f| !f[m]) {
+                // Ignore the input field, leaving the column as NULL.
+                continue;
             }
             let mut off = self.raw_fields[i];
             if is_csv {
@@ -1281,6 +1285,7 @@ pub mod bench_internals {
                 force_null: None,
                 force_null_all: false,
                 convert_selectively: false,
+                convert_select: None,
                 on_error: crate::CopyOnErrorChoice::Stop,
                 log_verbosity: crate::CopyLogVerbosityChoice::Default,
                 reject_limit: 0,
@@ -1316,6 +1321,7 @@ pub mod bench_internals {
             attnames: PgVec::new_in(mcx),
             force_notnull_flags: PgVec::new_in(mcx),
             force_null_flags: PgVec::new_in(mcx),
+            convert_select_flags: None,
             defexprs: PgVec::new_in(mcx),
             defmap: PgVec::new_in(mcx),
             where_clause: types_nodes::NodeList::nil(),

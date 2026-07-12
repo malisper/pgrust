@@ -247,8 +247,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
         pg_depend::recordDependencyOn(mcx, &myself, &referenced, DependencyType::Normal)?;
     }
     pg_depend::recordDependencyOnOwner(mcx, FOREIGN_DATA_WRAPPER_RELATION_ID, fdw_id, owner_id)?;
-    // recordDependencyOnCurrentExtension: extension.c unported; C no-ops
-    // outside extension scripts.
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     rel.close(RowExclusiveLock)?;
     Ok(fdw_id)
@@ -1145,6 +1144,8 @@ pub fn init_seams() {
         options::postgresql_fdw_validator(mcx, options, catalog)
     });
     foreigncmds_seams::get_fdw_routine_by_rel_id::set(GetFdwRoutineByRelId);
+    foreigncmds_seams::get_fdw_routine_by_server_id::set(GetFdwRoutineByServerId);
+    foreigncmds_seams::get_foreign_server_id_by_rel_id::set(GetForeignServerIdByRelId);
     foreigncmds_seams::get_foreign_data_wrapper_oid::set(get_foreign_data_wrapper_oid);
     foreigncmds_seams::get_foreign_server_oid::set(get_foreign_server_oid);
     foreigncmds_seams::pg_options_to_table::set(options::pg_options_to_table);

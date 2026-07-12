@@ -222,13 +222,14 @@ fn transient_files_track_and_close() {
     let path = format!("{dir}/t");
     std::fs::write(&path, b"x").unwrap();
 
-    let before = with_fd(|fd| fd.allocated_descs.len());
+    let occupied = || with_fd(|fd| crate::vfd::occupied_descs(fd));
+    let before = occupied();
     let fd1 = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
     assert!(fd1 >= 0);
-    assert_eq!(with_fd(|fd| fd.allocated_descs.len()), before + 1);
+    assert_eq!(occupied(), before + 1);
     assert_eq!(crate::desc::TransientFileRawFd(fd1), Some(fd1));
     assert_eq!(crate::desc::CloseTransientFile(fd1), 0);
-    assert_eq!(with_fd(|fd| fd.allocated_descs.len()), before);
+    assert_eq!(occupied(), before);
 
     let missing = crate::desc::OpenTransientFile(&format!("{dir}/absent"), libc::O_RDONLY).unwrap();
     assert_eq!(missing, -1);
@@ -322,11 +323,11 @@ fn subxact_reassigns_or_frees_descs() {
     std::fs::write(&path, b"x").unwrap();
 
     let td = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
-    let idx = with_fd(|fd| fd.allocated_descs.len() - 1);
-    with_fd(|fd| fd.allocated_descs[idx].create_subid = 7);
+    let idx = with_fd(|fd| fd.allocated_descs.iter().rposition(Option::is_some).unwrap());
+    with_fd(|fd| fd.allocated_descs[idx].as_mut().unwrap().create_subid = 7);
 
     crate::sync::AtEOSubXact_Files(true, 7, 3);
-    assert_eq!(with_fd(|fd| fd.allocated_descs[idx].create_subid), 3);
+    assert_eq!(with_fd(|fd| fd.allocated_descs[idx].as_ref().unwrap().create_subid), 3);
 
     crate::sync::AtEOSubXact_Files(false, 3, 1);
     assert!(crate::desc::TransientFileRawFd(td).is_none());
@@ -610,4 +611,35 @@ fn file_close_is_idempotent_no_freelist_aliasing() {
     assert_ne!(a.0, b.0, "freelist aliased two live files onto one VFD slot");
     crate::io::FileClose(a).unwrap();
     crate::io::FileClose(b).unwrap();
+}
+
+// The motivating stable-slot regression: the old swap_remove registry moved
+// the last desc into the freed slot, so freeing the LOWER of two live
+// AllocateFile indices left the higher handle aliased to the wrong desc.
+#[test]
+fn allocated_desc_indices_stable_across_out_of_order_free() {
+    setup();
+    let dir = scratch_dir("descstable");
+    let pa = format!("{dir}/a");
+    let pb = format!("{dir}/b");
+    std::fs::write(&pa, b"aaa").unwrap();
+    std::fs::write(&pb, b"bbb").unwrap();
+
+    let a = crate::desc::AllocateFile(&pa, "r").unwrap();
+    let b = crate::desc::AllocateFile(&pb, "r").unwrap();
+    assert!(a < b);
+
+    crate::desc::FreeFile(a).unwrap();
+
+    let read = crate::desc::with_allocated_stdio(b, |f| {
+        use std::io::Read;
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        s
+    })
+    .expect("higher handle resolves after freeing the lower");
+    assert_eq!(read, "bbb");
+
+    crate::desc::FreeFile(b).unwrap();
+    with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
 }

@@ -1383,7 +1383,7 @@ pub struct RelOptInfo<'mcx> {
     // estimation on never-ANALYZEd tables; empty for every other relation
     // (and when the part has no committed footer).
     pub cbstore_col_ndv: PgVec<'mcx, u64>,
-    pub has_fdwroutine: bool,
+    pub fdwroutine: Option<types_nodes::FdwKind>,
     pub attr_needed: PgVec<'mcx, Relids<'mcx>>,
     pub notnullattnums: Relids<'mcx>,
     pub indexlist: PgVec<'mcx, &'mcx IndexOptInfo<'mcx>>,
@@ -1457,7 +1457,7 @@ impl<'mcx> RelOptInfo<'mcx> {
             cbstore_sorted_attnos: PgVec::new_in(mcx),
             cbstore_col_bytes: PgVec::new_in(mcx),
             cbstore_col_ndv: PgVec::new_in(mcx),
-            has_fdwroutine: false,
+            fdwroutine: None,
             attr_needed: PgVec::new_in(mcx),
             notnullattnums: None,
             indexlist: PgVec::new_in(mcx),
@@ -2345,7 +2345,7 @@ mcx::forget_safe_struct!(
     OuterJoinClauseInfo<'_> { rinfo, sjinfo },
     PlaceHolderInfo<'_> { phid, ph_var_phexpr, ph_var_phrels, ph_eval_at, ph_lateral, ph_needed, ph_width },
     UniqueRelInfo<'_> { outerrelids, self_join, extra_clauses },
-    RelOptInfo<'_> { reloptkind, relids, rows, consider_startup, consider_param_startup, consider_parallel, pathtarget_id, pathlist, ppilist, partial_pathlist, cheapest_startup_path, cheapest_total_path, cheapest_unique_path, cheapest_parameterized_paths, direct_lateral_relids, lateral_relids, lateral_vars, relid, reltablespace, rtekind, min_attr, max_attr, attr_widths, nulling_relids, lateral_referencers, pages, tuples, allvisfrac, baserestrictinfo, baserestrictcost, baserestrict_min_security, joininfo, has_eclass_joins, consider_partitionwise_join, serverid, userid, useridiscurrent, parent, top_parent, top_parent_relids, rel_parallel_workers, amflags, cbstore_sorted_attnos, cbstore_col_bytes, cbstore_col_ndv, has_fdwroutine, attr_needed, notnullattnums, indexlist, statlist, eclass_indexes, subroot, subroot_idx, subplan_params, fdw_private, unique_for_rels, non_unique_for_rels, part_scheme, nparts, boundinfo, partbounds_merged, partition_qual, part_rels, live_parts, all_partrels, partexprs, nullable_partexprs },
+    RelOptInfo<'_> { reloptkind, relids, rows, consider_startup, consider_param_startup, consider_parallel, pathtarget_id, pathlist, ppilist, partial_pathlist, cheapest_startup_path, cheapest_total_path, cheapest_unique_path, cheapest_parameterized_paths, direct_lateral_relids, lateral_relids, lateral_vars, relid, reltablespace, rtekind, min_attr, max_attr, attr_widths, nulling_relids, lateral_referencers, pages, tuples, allvisfrac, baserestrictinfo, baserestrictcost, baserestrict_min_security, joininfo, has_eclass_joins, consider_partitionwise_join, serverid, userid, useridiscurrent, parent, top_parent, top_parent_relids, rel_parallel_workers, amflags, cbstore_sorted_attnos, cbstore_col_bytes, cbstore_col_ndv, fdwroutine, attr_needed, notnullattnums, indexlist, statlist, eclass_indexes, subroot, subroot_idx, subplan_params, fdw_private, unique_for_rels, non_unique_for_rels, part_scheme, nparts, boundinfo, partbounds_merged, partition_qual, part_rels, live_parts, all_partrels, partexprs, nullable_partexprs },
     PlannerGlobal<'_> { subplans, subpaths, subroots, rewind_plan_ids, finalrtable, all_relids, prunable_relids, finalrteperminfos, finalrowmarks, result_relations, relation_oids, param_exec_types, last_ph_id, last_row_mark_id, last_plan_node_id, transient_plan, depends_on_role, parallel_mode_ok, parallel_mode_needed, max_parallel_hazard },
     WindowClauseNode<'_> { name, partitionClause, orderClause, frameOptions, startOffset, endOffset, startInRangeFunc, endInRangeFunc, inRangeColl, inRangeAsc, inRangeNullsFirst, winref },
     AggInfo<'_> { aggrefs, transno, shareable, finalfn_oid },

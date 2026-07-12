@@ -307,6 +307,65 @@ fn set_plan_refs<'mcx>(run: &mut PlannerRun<'mcx>, plan: Node<'mcx>, rtoffset: i
                 .expect("SeqScan node");
             }
         }
+        NodeTag::T_ForeignScan => {
+            let s = plan.as_foreign_scan().unwrap();
+            if !s.fdw_scan_tlist.is_nil() || s.scan.scanrelid == 0 {
+                panic!(
+                    "set_foreignscan_references (setrefs.c): fdw_scan_tlist / \
+                     scanrelid==0 (foreign join/upper) arm unported"
+                );
+            }
+            debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);
+            let tl = fix_scan_list(run, &s.scan.plan.targetlist, rtoffset, s.scan.plan.plan_rows)?;
+            let qual = fix_scan_list(run, &s.scan.plan.qual, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let fe = fix_scan_list(run, &s.fdw_exprs, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            let frq =
+                fix_scan_list(run, &s.fdw_recheck_quals, rtoffset, 2.0 * s.scan.plan.plan_rows)?;
+            if rtoffset != 0 || tl.is_some() || qual.is_some() || fe.is_some() || frq.is_some() {
+                let (fs_relids, fs_base_relids) = if rtoffset != 0 {
+                    let shift = |old: &types_nodes::bitmapset::Bitmapset<'mcx>| {
+                        let mut shifted = types_nodes::bitmapset::Bitmapset::empty();
+                        let mut m = old.next_member(-1);
+                        while m >= 0 {
+                            shifted.add_member(run.mcx, m + rtoffset)?;
+                            m = old.next_member(m);
+                        }
+                        Ok::<_, types_error::PgError>(shifted)
+                    };
+                    (Some(shift(&s.fs_relids)?), Some(shift(&s.fs_base_relids)?))
+                } else {
+                    (None, None)
+                };
+                // SAFETY: exclusive plan-tree ownership (prologue note).
+                unsafe {
+                    plan.with_mut::<types_nodes::plannodes::ForeignScan, _>(|p| {
+                        if let Some(v) = tl {
+                            p.scan.plan.targetlist = v;
+                        }
+                        if let Some(v) = qual {
+                            p.scan.plan.qual = v;
+                        }
+                        if let Some(v) = fe {
+                            p.fdw_exprs = v;
+                        }
+                        if let Some(v) = frq {
+                            p.fdw_recheck_quals = v;
+                        }
+                        if let Some(v) = fs_relids {
+                            p.fs_relids = v;
+                        }
+                        if let Some(v) = fs_base_relids {
+                            p.fs_base_relids = v;
+                        }
+                        p.scan.scanrelid += rtoffset as u32;
+                        if p.resultRelation > 0 {
+                            p.resultRelation += rtoffset as u32;
+                        }
+                    })
+                }
+                .expect("ForeignScan node");
+            }
+        }
         NodeTag::T_SampleScan => {
             let s = plan.as_sample_scan().unwrap();
             debug_assert!(s.scan.scanrelid as i32 + rtoffset > 0);

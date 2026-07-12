@@ -3340,6 +3340,7 @@ dependencies = [
  "fd",
  "fmgr_core",
  "fmgr_seams",
+ "foreigncmds_seams",
  "freespace_seams",
  "genam",
  "guc",
@@ -4240,6 +4241,7 @@ dependencies = [
  "namespace_seams",
  "nodemodifytable",
  "nodes_core",
+ "numutils",
  "parse_clause",
  "parse_collate",
  "parse_relation",
@@ -5083,6 +5085,7 @@ dependencies = [
  "nodebitmapheapscan",
  "nodebitmapindexscan",
  "nodectescan",
+ "nodeforeignscan",
  "nodefunctionscan",
  "nodegroup",
  "nodehash",
@@ -5581,6 +5584,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "file_fdw"
+version = "0.0.0"
+dependencies = [
+ "acl_seams",
+ "commands_analyze",
+ "commands_define",
+ "copy_cmd",
+ "datum",
+ "dfmgr",
+ "elog",
+ "exectuples",
+ "executils",
+ "foreigncmds",
+ "heaptuple",
+ "mcx",
+ "miscinit",
+ "nodeforeignscan",
+ "pg_prng",
+ "planner",
+ "postgres_seams",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_pathnodes",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+ "varlena",
+ "vars",
+]
+
+[[package]]
 name = "file_seams"
 version = "0.0.0"
 dependencies = [
@@ -5727,6 +5764,7 @@ dependencies = [
  "fmgr_core",
  "foreigncmds_seams",
  "funcapi",
+ "guc_tables",
  "heaptuple",
  "lsyscache",
  "mbutils",
@@ -5758,6 +5796,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_fmgr",
+ "types_nodes",
 ]
 
 [[package]]
@@ -8652,6 +8691,18 @@ dependencies = [
 [[package]]
 name = "nodeforeignscan"
 version = "0.1.0"
+dependencies = [
+ "execexpr",
+ "execscan",
+ "executils",
+ "foreigncmds_seams",
+ "mcx",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_nodes",
+ "types_slot",
+]
 
 [[package]]
 name = "nodefunctionscan"
@@ -14106,6 +14157,7 @@ dependencies = [
  "explain",
  "extension",
  "fd",
+ "file_fdw",
  "fmgr_core",
  "foreigncmds",
  "format_type",

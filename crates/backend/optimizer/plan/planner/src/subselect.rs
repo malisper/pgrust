@@ -2171,6 +2171,13 @@ fn finalize_plan<'mcx>(
             finalize_primnode_list(run, root, &vs.values_lists, &mut paramids)?;
             paramids.add_members(mcx, scan_params)?;
         }
+        // fdw_scan_tlist is assumed to contain no Params.
+        NodeTag::T_ForeignScan => {
+            let fs = plan.as_foreign_scan().unwrap();
+            finalize_primnode_list(run, root, &fs.fdw_exprs, &mut paramids)?;
+            finalize_primnode_list(run, root, &fs.fdw_recheck_quals, &mut paramids)?;
+            paramids.add_members(mcx, scan_params)?;
+        }
         NodeTag::T_SubqueryScan => {
             let ss = plan.as_subquery_scan().unwrap();
             let rel = crate::relnode::find_base_rel(root, ss.scan.scanrelid as i32);

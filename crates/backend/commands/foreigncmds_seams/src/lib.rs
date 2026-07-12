@@ -9,7 +9,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    pub fn get_fdw_routine_by_rel_id(mcx: Mcx<'_>, relid: Oid) -> PgResult<()>
+    // GetFdwRoutineByRelId (foreign.c) — the routine collapses to the provider
+    // id (types_nodes::FdwKind); layer-owned callback tables key off it.
+    pub fn get_fdw_routine_by_rel_id(mcx: Mcx<'_>, relid: Oid) -> PgResult<types_nodes::FdwKind>
+);
+
+seam_core::seam!(
+    // GetFdwRoutineByServerId (foreign.c) — executor path for scanrelid == 0.
+    pub fn get_fdw_routine_by_server_id(
+        mcx: Mcx<'_>,
+        serverid: Oid,
+    ) -> PgResult<types_nodes::FdwKind>
+);
+
+seam_core::seam!(
+    // GetForeignServerIdByRelId (foreign.c) — plancat populates RelOptInfo.serverid.
+    pub fn get_foreign_server_id_by_rel_id(relid: Oid) -> PgResult<Oid>
 );
 
 seam_core::seam!(

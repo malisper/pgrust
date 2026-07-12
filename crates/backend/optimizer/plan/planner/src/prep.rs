@@ -669,7 +669,7 @@ fn collect_jointree_relids<'mcx>(
     Ok(())
 }
 
-// select_rowmark_type (planner.c); the FDW arm is loud.
+// select_rowmark_type (planner.c).
 pub fn select_rowmark_type(
     rte: &RangeTblEntry<'_>,
     strength: types_nodes::LockClauseStrength,
@@ -679,8 +679,10 @@ pub fn select_rowmark_type(
     if rte.rtekind != RTEKind::RTE_RELATION {
         return ROW_MARK_COPY;
     }
+    // C lets the FDW's GetForeignRowMarkType override; no in-tree FDW
+    // installs one, so this is always C's ROW_MARK_COPY default.
     if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        panic!("select_rowmark_type (planner.c): GetForeignRowMarkType; FDW lane");
+        return ROW_MARK_COPY;
     }
     match strength {
         LCS_NONE => ROW_MARK_REFERENCE,
@@ -856,7 +858,15 @@ fn add_row_identity_columns<'mcx>(
     // Non-target auto rowmarks (preprocess_rowmarks) coexist with the row
     // identity; C's add_row_identity_columns has no rowMarks interaction.
     if rel.rd_rel.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-        panic!("add_row_identity_columns (appendinfo.c): FDW row identity; FDW lane");
+        // C's default wholerow arm (no in-tree FDW installs
+        // AddForeignUpdateTargets); execution errors at CheckValidResultRel.
+        let var =
+            Node::mk_var(mcx, result_relation, 0, types_core::catalog::RECORDOID, -1, 0, 0)?;
+        let mut new_tlist = tlist.clone_in(mcx)?;
+        let tle =
+            Node::mk_target_entry(mcx, var, new_tlist.len() as i16 + 1, Some("wholerow"), true)?;
+        new_tlist.lappend(mcx, tle)?;
+        return Ok(new_tlist);
     }
     if rel.rd_rel.relkind != types_rel::RELKIND_RELATION
         && rel.rd_rel.relkind != types_rel::RELKIND_MATVIEW
