@@ -507,7 +507,21 @@ fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
 // provenance), heap plans keep C's parallel_tuple_cost. Same selector as
 // gather_setup_cost.
 fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
-    if cbstore_feeds_plan(run) { gucs::cbstore_parallel_tuple_cost() } else { gucs::parallel_tuple_cost() }
+    if cbstore_feeds_plan(run) {
+        // Armed pool sessions price Gather transfer at the regular rate too:
+        // the measured cbstore chunked-transport rate (0.005/tuple) is cheap
+        // enough that at high forced DOP the planner starts preferring
+        // ship-every-row-to-the-leader plans (HashAggregate ABOVE Gather)
+        // over the partial-agg shape the pool exists for. Heap semantics for
+        // armed cbstore plans; the measured rate stays for unarmed costing.
+        if guc_tables::lane_pool::lane_parallel_pool_armed() {
+            gucs::parallel_tuple_cost()
+        } else {
+            gucs::cbstore_parallel_tuple_cost()
+        }
+    } else {
+        gucs::parallel_tuple_cost()
+    }
 }
 
 pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {
