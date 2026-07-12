@@ -837,10 +837,10 @@ fn XLogWalRcvSendHSFeedback(immed: bool) -> PgResult<()> {
     let mut xmin_epoch = (next_full_xid >> 32) as u32;
     let mut catalog_xmin_epoch = xmin_epoch;
     if next_xid < xmin {
-        xmin_epoch -= 1;
+        xmin_epoch = xmin_epoch.wrapping_sub(1);
     }
     if next_xid < catalog_xmin {
-        catalog_xmin_epoch -= 1;
+        catalog_xmin_epoch = catalog_xmin_epoch.wrapping_sub(1);
     }
 
     let _ = elog(

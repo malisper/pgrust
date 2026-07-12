@@ -23,6 +23,7 @@ libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
 pg_b64 = { path = "../../../common/base64" }
+pg_hmac = { path = "../../../common/hmac" }
 pg_md5 = { path = "../../../common/md5" }
 pgstat = { path = "../../utils/activity/pgstat" }
 postgres_seams = { path = "../../tcop/postgres_seams" }

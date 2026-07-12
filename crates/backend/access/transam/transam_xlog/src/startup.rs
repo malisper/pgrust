@@ -1271,9 +1271,12 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
 
     let mut log_seg_no = XLByteToSeg(redo_rec_ptr, wal_segment_size());
 
-    // C retreats _logSegNo by max(received, replayed); streaming receive is
-    // unported, so GetWalRcvFlushRecPtr's shmem value is provably 0 here.
-    let receive_ptr = InvalidXLogRecPtr;
+    // C retreats _logSegNo by max(received, replayed).
+    let receive_ptr = if walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::is_installed() {
+        walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call().0
+    } else {
+        InvalidXLogRecPtr
+    };
     let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
     let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
     // Same InvalidateObsoleteReplicationSlots gating as CreateCheckPoint:

@@ -40,6 +40,7 @@ checkpointer = { path = "../../../postmaster/checkpointer" }
 slot = { path = "../../../replication/slot" }
 pgarch = { path = "../../../postmaster/pgarch" }
 walsummarizer = { path = "../../../postmaster/walsummarizer" }
+walreceiverfuncs = { path = "../../../replication/walreceiverfuncs" }
 syncscan = { path = "../../../access/common/syncscan" }
 waitevent = { path = "../../../utils/activity/waitevent" }
 procarray = { path = "../procarray" }

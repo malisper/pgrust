@@ -367,6 +367,8 @@ members = [
     "crates/backend/replication/launcher_seams",
     "crates/backend/replication/launcher",
     "crates/backend/replication/walsender_config",
+    "crates/backend/replication/walreceiver",
+    "crates/backend/replication/walreceiverfuncs",
     "crates/backend/replication/walreceiverfuncs_seams",
     "crates/backend/replication/repl_scanner",
     "crates/backend/replication/repl_gram",

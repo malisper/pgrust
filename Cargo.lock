@@ -646,6 +646,7 @@ dependencies = [
  "varlena",
  "varsup",
  "waitevent",
+ "walreceiverfuncs_seams",
  "walsummarizer_seams",
  "xlogbackup",
  "xloginsert_seams",
@@ -7454,6 +7455,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "waitevent",
+ "walreceiverfuncs",
  "walsummarizer",
  "xact_seams",
  "xlogprefetcher",
@@ -7646,6 +7648,7 @@ dependencies = [
  "types_startup",
  "types_storage",
  "waiteventset_seams",
+ "walreceiver",
  "walsummarizer",
  "walwriter",
  "xact_seams",
@@ -11560,6 +11563,7 @@ dependencies = [
  "types_storage",
  "varlena",
  "waitevent",
+ "walreceiverfuncs_seams",
  "xlogprefetcher_seams",
 ]
 
@@ -14459,6 +14463,8 @@ dependencies = [
  "varsup",
  "waitevent",
  "waiteventset",
+ "walreceiver",
+ "walreceiverfuncs",
  "walsender",
  "walsender_config",
  "walsummarizer",
@@ -16518,6 +16524,7 @@ dependencies = [
  "varsup",
  "varsup_seams",
  "waitevent_seams",
+ "walreceiverfuncs_seams",
  "walsender_seams",
  "walsummarizer_seams",
  "xact_seams",
@@ -17968,6 +17975,69 @@ dependencies = [
  "types_error",
  "xlogreader",
  "xlogreader_seams",
+]
+
+[[package]]
+name = "walreceiver"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "auxprocess",
+ "elog",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "mcx",
+ "miscinit",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "pgstat",
+ "postgres_seams",
+ "procarray",
+ "procsignal",
+ "ps_status_seams",
+ "saslprep",
+ "scram_common",
+ "timeline",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "varsup",
+ "waitevent_seams",
+ "walreceiverfuncs",
+ "walreceiverfuncs_seams",
+ "walsender_seams",
+ "xlogarchive",
+ "xlogrecovery_seams",
+]
+
+[[package]]
+name = "walreceiverfuncs"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "condition_variable",
+ "latch",
+ "libc",
+ "pmsignal",
+ "procsignal",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "walreceiverfuncs_seams",
+ "xlogrecovery",
 ]
 
 [[package]]

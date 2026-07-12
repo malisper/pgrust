@@ -5,7 +5,7 @@
 use std::os::fd::{AsRawFd, RawFd};
 
 use elog::ereport;
-use types_core::{pgsocket, TimeLineID, XLogRecPtr};
+use types_core::{pgsocket, TimeLineID, XLogRecPtr, PGINVALID_SOCKET};
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_PROTOCOL_VIOLATION,
     ERRCODE_SYNTAX_ERROR, ERROR,
@@ -276,7 +276,7 @@ impl PgConn {
             let e = std::io::Error::last_os_error();
             match e.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => {
+                Some(libc::EAGAIN) => {
                     if let Err(pe) =
                         wait_socket(self.fd, WL_SOCKET_WRITEABLE, WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE)
                     {
@@ -318,7 +318,7 @@ impl PgConn {
             let e = std::io::Error::last_os_error();
             return match e.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => true,
+                Some(libc::EAGAIN) => true,
                 _ => {
                     self.conn_ok = false;
                     self.err = format!("could not receive data from server: {e}");
@@ -794,14 +794,16 @@ pub fn connect(conninfo: &str, appname: &str) -> PgResult<Result<PgConn, String>
 
 fn b64(data: &[u8]) -> String {
     let mut dst = vec![0u8; pg_b64::pg_b64_enc_len(data.len() as i32) as usize];
-    let n = pg_b64::pg_b64_encode(data, data.len() as i32, &mut dst, dst.len() as i32);
+    let dstlen = dst.len() as i32;
+    let n = pg_b64::pg_b64_encode(data, data.len() as i32, &mut dst, dstlen);
     assert!(n >= 0, "base64 encode failed");
     String::from_utf8_lossy(&dst[..n as usize]).into_owned()
 }
 
 fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
     let mut dst = vec![0u8; pg_b64::pg_b64_dec_len(s.len() as i32) as usize];
-    let n = pg_b64::pg_b64_decode(s.as_bytes(), s.len() as i32, &mut dst, dst.len() as i32);
+    let dstlen = dst.len() as i32;
+    let n = pg_b64::pg_b64_decode(s.as_bytes(), s.len() as i32, &mut dst, dstlen);
     if n < 0 {
         return Err("malformed base64 in SCRAM message".into());
     }
@@ -1039,11 +1041,11 @@ pub fn end_streaming(conn: &mut PgConn) -> PgResult<TimeLineID> {
                     "error reading result of streaming command: {}",
                     pchomp(&conn.error_message())
                 ))
-                .finish(loc("libpqrcv_endstreaming"))
+                .finish(loc("libpqrcv_endstreaming")));
         }
     }
     if conn.get_result()?.is_some() {
-        return ereport(ERROR)
+        return throw(ereport(ERROR)
             .errcode(ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!(
                 "unexpected result after CommandComplete: {}",
@@ -1106,14 +1108,14 @@ pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
         d => d,
     };
     match data {
-        CopyData::Msg(buf) => Ok((buf.len() as i32, buf, 0)),
+        CopyData::Msg(buf) => Ok((buf.len() as i32, buf, PGINVALID_SOCKET)),
         CopyData::End => {
             let res = conn.get_result()?;
             match &res {
                 Some(r) if r.status == ExecStatus::CommandOk => {
                     if conn.get_result()?.is_some() {
                         if conn.connection_bad() {
-                            return Ok((-1, Vec::new(), 0));
+                            return Ok((-1, Vec::new(), PGINVALID_SOCKET));
                         }
                         return throw(ereport(ERROR)
                             .errcode(ERRCODE_PROTOCOL_VIOLATION)
@@ -1123,9 +1125,9 @@ pub fn receive(conn: &mut PgConn) -> PgResult<(i32, Vec<u8>, pgsocket)> {
                             ))
                             .finish(loc("libpqrcv_receive")));
                     }
-                    Ok((-1, Vec::new(), 0))
+                    Ok((-1, Vec::new(), PGINVALID_SOCKET))
                 }
-                Some(r) if r.status == ExecStatus::CopyIn => Ok((-1, Vec::new(), 0)),
+                Some(r) if r.status == ExecStatus::CopyIn => Ok((-1, Vec::new(), PGINVALID_SOCKET)),
                 _ => receive_stream_error(&conn.error_message()),
             }
         }
@@ -1159,4 +1161,67 @@ pub fn send(conn: &mut PgConn, buffer: &[u8]) -> PgResult<()> {
 /// libpqrcv_disconnect.
 pub fn disconnect(mut conn: PgConn) {
     conn.terminate();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conninfo_parse_basic() {
+        let opts = parse_conninfo("host=/tmp/x port=5433 user=al application_name='my app'").unwrap();
+        assert_eq!(opt(&opts, "host"), Some("/tmp/x"));
+        assert_eq!(opt(&opts, "port"), Some("5433"));
+        assert_eq!(opt(&opts, "application_name"), Some("my app"));
+    }
+
+    #[test]
+    fn conninfo_parse_quoting() {
+        let opts = parse_conninfo(r"password='a\'b' dbname = rep").unwrap();
+        assert_eq!(opt(&opts, "password"), Some("a'b"));
+        assert_eq!(opt(&opts, "dbname"), Some("rep"));
+    }
+
+    #[test]
+    fn conninfo_parse_last_dup_wins() {
+        let opts = parse_conninfo("host=a host=b").unwrap();
+        assert_eq!(opt(&opts, "host"), Some("b"));
+    }
+
+    #[test]
+    fn conninfo_parse_errors() {
+        assert!(parse_conninfo("hostonly").unwrap_err().contains("missing \"=\""));
+        assert!(parse_conninfo("host='x").unwrap_err().contains("unterminated"));
+    }
+
+    #[test]
+    fn msg_framing() {
+        let m = msg(b'Q', b"SELECT 1\0");
+        assert_eq!(m[0], b'Q');
+        assert_eq!(be_i32(&m[1..5]) as usize, m.len() - 1);
+    }
+
+    #[test]
+    fn error_fields() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"SFATAL\0");
+        body.extend_from_slice(b"C57P01\0");
+        body.extend_from_slice(b"Mgoodbye\0");
+        body.push(0);
+        assert_eq!(parse_error_fields(&body), "FATAL:  goodbye");
+    }
+
+    #[test]
+    fn b64_roundtrip() {
+        let data = [7u8; 18];
+        assert_eq!(b64_decode(&b64(&data)).unwrap(), data);
+    }
+
+    #[test]
+    fn scram_attr_lookup() {
+        let f: Vec<&str> = "r=abc,s=c2FsdA==,i=4096".split(',').collect();
+        assert_eq!(scram_attr(&f, 'r').unwrap(), "abc");
+        assert_eq!(scram_attr(&f, 'i').unwrap(), "4096");
+        assert!(scram_attr(&f, 'v').is_err());
+    }
 }
