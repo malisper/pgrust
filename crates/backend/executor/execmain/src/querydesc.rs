@@ -71,6 +71,10 @@ pub struct QueryDescData {
     pub already_executed: bool,
     // Cached plan backing pstmt when the portal runs one (skeleton-cache key).
     pub cplan: CachedPlanHandle,
+    // C: queryDesc->totaltime — whole-query instrumentation a tap consumer
+    // (pg_stat_statements) arms at ExecutorStart; standard run/finish
+    // accumulate into it exactly like execMain.c.
+    pub totaltime: Option<Box<types_core::instrument::Instrumentation>>,
 }
 
 thread_local! {
@@ -245,6 +249,7 @@ pub(crate) fn create_query_desc_seam(
         exec: None,
         already_executed: false,
         cplan,
+        totaltime: None,
     }))
 }
 

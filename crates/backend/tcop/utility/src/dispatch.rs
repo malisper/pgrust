@@ -46,9 +46,19 @@ fn collect_gap(what: &str) {
     }
 }
 
-// ProcessUtility_hook (hook-surface.md section 2). Empty by default (S1
-// ships no consumer).
-seam_core::tap!(pub fn tap_process_utility());
+// ProcessUtility_hook (hook-surface.md section 2): enter/leave pair so a
+// consumer (pg_stat_statements) can wrap the call with timing, zero the
+// pstmt queryId, and track nesting. The leave fires on the error path too
+// (C PG_FINALLY parity), and must not touch pstmt (C: the tree may already
+// be freed by a ROLLBACK). Empty by default (S1 ships no consumer).
+seam_core::tap!(pub fn tap_process_utility_enter<'a, 'b>(pstmt: &'a PlannedStmt<'b>));
+seam_core::tap!(
+    pub fn tap_process_utility_leave<'a>(
+        ok: bool,
+        source_text: &'a str,
+        qc: Option<&'a QueryCompletion>,
+    )
+);
 
 // C's hookable entry; no plugin surface exists, so this IS standard_ProcessUtility.
 // Whole utility path is cold: per-statement DDL dispatch, never per-tuple —
@@ -67,12 +77,13 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
     dest: &'d mut DestReceiver<'mcx>,
     qc: Option<&'q mut QueryCompletion>,
 ) -> PgResult<()> {
-    tap_process_utility::call_if(|f| f());
+    tap_process_utility_enter::call_if(|f| f(pstmt));
     debug_assert!(pstmt.commandType == CmdType::CMD_UTILITY);
     debug_assert!(qc
         .as_ref()
         .is_none_or(|qc| qc.commandTag == types_portal::CMDTAG_UNKNOWN));
-    standard_ProcessUtility(
+    let mut qc = qc;
+    let r = standard_ProcessUtility(
         mcx,
         pstmt,
         source_text,
@@ -81,8 +92,10 @@ pub fn ProcessUtility<'p, 'a, 's, 'd, 'q, 'mcx>(
         params,
         query_env,
         dest,
-        qc,
-    )
+        qc.as_deref_mut(),
+    );
+    tap_process_utility_leave::call_if(|f| f(r.is_ok(), source_text, qc.as_deref()));
+    r
 }
 
 #[cold]

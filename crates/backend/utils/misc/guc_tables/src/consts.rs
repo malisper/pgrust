@@ -10,6 +10,10 @@ pub const COMPUTE_QUERY_ID_AUTO: i32 = 2;
 pub const COMPUTE_QUERY_ID_OFF: i32 = 0;
 pub const COMPUTE_QUERY_ID_ON: i32 = 1;
 pub const COMPUTE_QUERY_ID_REGRESS: i32 = 3;
+// pg_stat_statements.c PGSSTrackLevel.
+pub const PGSS_TRACK_NONE: i32 = 0;
+pub const PGSS_TRACK_TOP: i32 = 1;
+pub const PGSS_TRACK_ALL: i32 = 2;
 pub const CONSTRAINT_EXCLUSION_OFF: i32 = 0;
 pub const CONSTRAINT_EXCLUSION_ON: i32 = 1;
 pub const CONSTRAINT_EXCLUSION_PARTITION: i32 = 2;
