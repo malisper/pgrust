@@ -50,9 +50,8 @@ pub(super) struct Batch {
 pub(super) enum SinkFeed {
     /// The sink can take more tuples.
     ///
-    /// Never produced by the capacity-one `RootAdapter`; Phase-2 pipeline
-    /// breakers (hash-agg build, sort feed) accept whole inputs and return it.
-    #[allow(dead_code)]
+    /// Never produced by the capacity-one `RootAdapter`; pipeline breakers
+    /// (hash-agg build, sort feed) accept whole inputs and return it.
     NeedMore,
     /// The sink is full: the pushing operator must save its position and
     /// return `OpStatus::Paused` so the driver hands control back to PG.
@@ -67,6 +66,15 @@ pub(super) enum OpStatus {
     /// The sink went `Full` mid-batch; position saved (see
     /// `Operator::pending`), resumed on a later driver round.
     Paused,
+    /// The operator will never produce again (LIMIT reached, semi/anti
+    /// satisfied, merge side exhausted — Phase-2 breadth operators). Only
+    /// returned when the root buffer is empty: if the last `accept` came back
+    /// `Full`, the operator must return `Paused` first so the boundary tuple
+    /// is delivered, and report `Finished` on the next driver round
+    /// (byte-identity: the source is pulled exactly to the boundary tuple's
+    /// batch and no further — push-executor study, Pattern 2).
+    #[allow(dead_code)] // constructed by Phase-2 breadth operators (LIMIT)
+    Finished,
 }
 
 /// Produces batches — a scan is a source. `Node` is the executor node owning
@@ -150,7 +158,15 @@ impl<'mcx> Sink<'mcx> for RootAdapter {
         tuple: ExecSlotId,
         _estate: &mut EStateData<'mcx>,
     ) -> PgResult<SinkFeed> {
-        debug_assert!(self.buffered.is_none(), "root pull-adapter overfilled");
+        // Overfill = an operator ignored `SinkFeed::Full`; silently replacing
+        // the buffered tuple would be silent row loss, so this is a hard
+        // error in release too, not just a debug assert.
+        if self.buffered.is_some() {
+            return Err(Box::new(::types_error::PgError::error(
+                "lane-v2 root pull-adapter overfilled (operator ignored SinkFeed::Full)"
+                    .to_string(),
+            )));
+        }
         self.buffered = Some(tuple);
         Ok(SinkFeed::Full)
     }
@@ -198,6 +214,53 @@ where
                 return Ok(t);
             }
             OpStatus::NeedInput => {}
+            // Operator-driven early stop: treated exactly like source
+            // exhaustion (the source is never pulled again). Legal only with
+            // an empty root buffer — the Paused-then-Finished rule above.
+            OpStatus::Finished => {
+                debug_assert!(root.buffered.is_none(), "Finished with a buffered tuple");
+                root.finish(estate)?;
+                return Ok(None);
+            }
         }
     }
+}
+
+/// The build-pipeline driver: drain the source through the operator chain
+/// into a pipeline-breaker sink to completion, then `finish()` the sink
+/// (= Finalize; the breaker delegates it to the row-path build — hashagg
+/// spill finish, tuplesort_performsort, …). Breaker sinks accept whole
+/// inputs (`SinkFeed::NeedMore`), so the pipeline never pauses: run in one
+/// call, mirroring C's build-before-first-probe order (nodeAgg's
+/// agg_fill_hash_table, nodeHashjoin's HJ_BUILD_HASHTABLE) for free.
+pub(super) fn drain_pipeline<'mcx, S, O>(
+    node: &mut S::Node,
+    src: &mut S,
+    op: &mut O,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    loop {
+        let batch = match op.pending(node) {
+            Some(b) => b,
+            None => match src.produce(node, estate)? {
+                Some(b) => b,
+                None => break,
+            },
+        };
+        match op.consume(node, batch, sink, estate)? {
+            OpStatus::NeedInput => {}
+            OpStatus::Finished => break,
+            OpStatus::Paused => {
+                // Breaker sinks never return `Full`; a pause here means a
+                // non-breaker sink was wired into a build pipeline.
+                debug_assert!(false, "build pipeline paused: sink returned Full");
+            }
+        }
+    }
+    sink.finish(estate)
 }

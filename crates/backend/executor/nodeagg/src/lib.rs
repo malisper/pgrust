@@ -2849,6 +2849,85 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
     Ok(())
 }
 
+// ===========================================================================
+// Lane-executor-v2 hash-agg breaker delegation seam (design §Architecture 1,
+// §8). The lane's pipeline-breaker node implements push `Sink` + `Source` in
+// `execmain/src/lanev2.rs`; these thin entry points delegate every substantive
+// step to the SAME row-path machinery the fused batched drive uses — the
+// per-row transition path (`lookup_hash_entry` + evaltrans), the hashagg
+// spill, and the canonical `agg_retrieve_hash_table` read-back (same table,
+// same iteration → same output order as C).
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 hash-agg breaker: batch-drainable,
+/// AGG_HASHED, and initplan-param-free (the lane drive, like
+/// `exec_agg_batched`, does not hoist pending initplans).
+pub fn agg_hash_breaker_admissible(node: &AggStateData<'_>) -> bool {
+    agg_batch_drainable(node)
+        && node.plan.aggstrategy == AGG_HASHED
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// `agg_done` read for the lane driver (exec_agg's top-of-call guard).
+pub fn agg_is_done(node: &AggStateData<'_>) -> bool {
+    node.agg_done
+}
+
+/// Build→Probe phase flag for the breaker: the hash table's `table_filled`
+/// IS the phase (exactly C's cross-call state; no new field).
+pub fn agg_hash_table_filled(node: &AggStateData<'_>) -> bool {
+    node.perhash.as_ref().is_some_and(|ph| ph.table_filled)
+}
+
+/// Breaker `Sink::accept`: one outer row through prepare/lookup + the
+/// transition program — `agg_fill_hash_table_batched`'s per-row body verbatim
+/// (spill-mode misses spill the tuple and skip the transition, identically).
+pub fn agg_hash_build_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    if lookup_hash_entry(node, estate, outer_id)? {
+        let outer_slot = estate.slot_mut(outer_id);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// Breaker `Sink::finish` (= Finalize): `agg_fill_hash_table_batched`'s
+/// post-drain tail — finish initial spills, install the merge handoff if one
+/// arose, flip the phase flag, park the iterator at the table head.
+pub fn agg_hash_build_finish<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    hashagg_finish_initial_spills(node, estate)?;
+    merge::maybe_install_handoff(node);
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    ph.table_filled = true;
+    ph.hashiter = 0;
+    Ok(())
+}
+
+/// Breaker `Source::produce`: the canonical read-back —
+/// `agg_retrieve_hash_table` (one qual-passing group per call, C's iteration
+/// order, spill refill included).
+pub fn agg_hash_retrieve<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    agg_retrieve_hash_table(node, estate)
+}
+
 const MAX_FINAL_ARGS: usize = 8;
 
 // finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's

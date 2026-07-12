@@ -42,7 +42,7 @@ use std::sync::OnceLock;
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use push::{pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source};
+use push::{drain_pipeline, pull_step, Batch, OpStatus, Operator, RootAdapter, Sink, SinkFeed, Source};
 
 /// Master switch for lane-v2. Default OFF; `PGRUST_LANE_V2=1` (or `on`) enables
 /// it. Resolved once per process (a boot-time decision, like
@@ -100,12 +100,31 @@ fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
+    // Dynamic per-call gates: these may legitimately vary call to call.
     if estate.es_epq_active
         || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !ss.batch_allowed()
-        || ss.is_parallel()
-        || ss.ss.instr_idx.is_some()
     {
+        return Ok(false);
+    }
+    // Static verdict, memoized on the node at first evaluation: (a) stability
+    // — a mid-scan REFUSE→OWN flip would silently skip the staged remainder
+    // of the current page batch; (b) the fusibility cascade (expr walks + AM
+    // probe) must not run once per pulled tuple on the Volcano hot path.
+    if let Some(v) = ss.lane_verdict() {
+        return Ok(v);
+    }
+    let v = seq_scan_fusible_static(ss, estate)?;
+    ss.set_lane_verdict(v);
+    Ok(v)
+}
+
+/// The call-invariant half of the SeqScan refuse-set: plan shape, init-time
+/// eflags, parallel wiring, instrumentation, and AM page-batch support.
+fn seq_scan_fusible_static<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !ss.batch_allowed() || ss.is_parallel() || ss.ss.instr_idx.is_some() {
         return Ok(false);
     }
     match ss.variant() {
@@ -147,6 +166,13 @@ impl<'mcx> Source<'mcx> for SeqScanSource {
     ) -> PgResult<Option<Batch>> {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(node, estate)?;
         node.set_lane_cursor(0, n);
+        if n == 0 {
+            // End of scan: the per-tuple path's getnextslot clears the scan
+            // slot on exhaustion (dropping its buffer pin); match it so a
+            // lane-owned scan does not hold a pin until rescan/end.
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(node.ss.ss_ScanTupleSlot), mcx);
+        }
         Ok((n > 0).then_some(Batch { n }))
     }
 }
@@ -282,6 +308,12 @@ impl<'mcx> Source<'mcx> for IndexScanSource {
     ) -> PgResult<Option<Batch>> {
         let n = ::nodeindexscan::index_scan_next_tidrun(node, estate)?;
         node.set_lane_cursor(0, n);
+        if n == 0 {
+            // End of scan: C's IndexNext clears the scan slot on exhaustion
+            // (dropping its buffer pin); match it.
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(node.ss.ss_ScanTupleSlot), mcx);
+        }
         Ok((n > 0).then_some(Batch { n }))
     }
 }
@@ -398,6 +430,10 @@ impl<'mcx> Source<'mcx> for IndexOnlyScanSource {
     ) -> PgResult<Option<Batch>> {
         let n = ::nodeindexonlyscan::index_only_scan_batch_next(node, estate)?;
         if n == 0 {
+            // End of scan: C's IndexOnlyNext clears the scan slot on
+            // exhaustion; match it.
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(node.ss.ss_ScanTupleSlot), mcx);
             return Ok(None);
         }
         debug_assert_eq!(n, 1);
@@ -506,6 +542,12 @@ impl<'mcx> Source<'mcx> for BitmapHeapScanSource {
     ) -> PgResult<Option<Batch>> {
         let n = ::nodebitmapheapscan::bitmap_scan_next_pagebatch(node, estate)?;
         node.set_lane_cursor(0, n);
+        if n == 0 {
+            // End of scan: C's BitmapHeapNext returns ExecClearTuple(slot) on
+            // exhaustion (dropping its buffer pin); match it.
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(node.ss.ss_ScanTupleSlot), mcx);
+        }
         Ok((n > 0).then_some(Batch { n }))
     }
 }
@@ -544,5 +586,178 @@ impl<'mcx> Operator<'mcx> for BitmapHeapScanEmit {
                 }
             }
         }
+    }
+}
+
+// ===========================================================================
+// Hash-agg pipeline breaker (Phase-2 vertical slice): the first
+// operator→operator composition. Two chained pipelines on one Agg node:
+//
+//   pipeline N   : SeqScanSource → SeqScanFilterProject → HashAggBuildSink
+//   pipeline N+1 : HashAggSource → HashAggEmit → RootAdapter
+//
+// The breaker node (the Agg) implements Sink for pipeline N (accept = the
+// existing per-row transition path via `agg_hash_build_accept`; always
+// `NeedMore`) and Source for pipeline N+1 (produce = the existing
+// `agg_retrieve_hash_table` read-back — same table, same iteration → same
+// output order as C, spill refill included). Chaining is the per-node
+// Build→Probe phase flag (`table_filled` — C's own cross-call state), driven
+// from the `agg_arm` dispatch hook: the build pipeline drains to completion
+// before the first probe tuple, which is C's exact order for free
+// (push-executor study, Pattern 3). Spill delegates wholesale to the row-path
+// hashagg machinery (§8): `finish()` = spill finish + handoff install; the
+// read-back's refill walks PG's spill partitions in PG's order.
+// ===========================================================================
+
+/// Try to let the lane own an `Agg` over a `SeqScan` child — the fused
+/// scan→filter→hash-agg push pipeline. `Some(result)` = the lane drove this
+/// call; `None` = refused (the caller falls through to the existing fused /
+/// per-tuple agg paths, byte-identically).
+#[inline]
+pub fn try_own_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !agg_over_seq_scan_fusible(agg, ss, estate)? {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained (the hash
+    // iterator is spent; re-iterating would replay groups).
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // Build phase (once, lazily on the first call): drain the scan pipeline
+    // into the breaker sink, then finalize (delegated). `table_filled` is the
+    // phase flag; a rescan rebuild clears it and re-enters here.
+    if !::nodeagg::agg_hash_table_filled(agg) {
+        // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
+        // drive when the whole read prefix is knowable (unprojected scans
+        // only: with a projection the agg reads output columns, which are not
+        // commensurable with scan-column prefixes). Prefix 0 disarms.
+        let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+            fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+        } else {
+            0
+        };
+        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+        let mut sink = HashAggBuildSink { agg: &mut *agg };
+        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    }
+    // Probe phase (every call): the breaker is now the source of pipeline
+    // N+1. One qual-passing group per PG pull, in C's retrieve order.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+/// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
+///   * scan side: the Phase-1 `seq_scan_fusible` gate verbatim (page-batch AM,
+///     uninstrumented, forward, non-parallel, non-EPQ, non-Bloom, subplan- and
+///     param-free qual/projection) — WIDER than the legacy fused arm's
+///     `seq_agg_fusible` (any scalar qual and any admitted projection run
+///     scalar-within-lane, not just kernel quals / outer-read-free tlists);
+///   * agg side: `agg_hash_breaker_admissible` (batch-drainable — no grouping
+///     sets / DISTINCT-or-ordered-input / merge phase / subplan transitions —
+///     AGG_HASHED, initplan-param-free). AGG_PLAIN keeps the existing fused
+///     path (no breaker needed: it has no per-group read-back).
+/// A post-build merge handoff flips `agg_batch_drainable` false, so later
+/// calls refuse here and fall to `exec_agg`'s merged retrieve — exactly the
+/// existing `exec_agg_batched` arm's cross-call behavior.
+fn agg_over_seq_scan_fusible<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        return Ok(false);
+    }
+    seq_scan_fusible(ss, estate)
+}
+
+/// Deform prefix for the SoA page-batch deform under the fused agg drive:
+/// everything the per-row consumers read from the scan slot — the agg's
+/// outer-column bound (transition args + grouping columns; outer slot == scan
+/// slot for unprojected scans) and the scan qual's fetch bound. None = a
+/// consumer's shape is unknown; the SoA deform stays disarmed (per-row lazy
+/// deform, still correct).
+fn fused_agg_soa_prefix<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<i32> {
+    let mut p = ::nodeagg::agg_batch_outer_prefix(agg)?;
+    if let Some(q) = ss.ss.qual.as_deref() {
+        p = p.max(q.max_fetch(::execexpr::SlotSrc::Scan)?);
+    }
+    Some(p)
+}
+
+/// The breaker as Sink of pipeline N: accept = the existing hashagg per-row
+/// build (prepare/lookup + transition program, spill-mode spilling included);
+/// finish = the existing finalize tail (spill finish, handoff install, phase
+/// flip). Always `NeedMore` — a breaker consumes its whole input.
+struct HashAggBuildSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for HashAggBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodeagg::agg_hash_build_accept(self.agg, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_hash_build_finish(self.agg, estate)
+    }
+}
+
+/// The breaker as Source of pipeline N+1: produce = the existing
+/// `agg_retrieve_hash_table` read-back, one final projected group row per
+/// batch (the row lives in the agg's result slot — node-side, per the `Batch`
+/// contract). Delegation preserves C's group output order exactly (§7's
+/// pragmatic rule for this slice: same table, same iteration, same spill
+/// refill → same order, so regress stays byte-comparable without the
+/// annotated comparator).
+struct HashAggSource;
+
+impl<'mcx> Source<'mcx> for HashAggSource {
+    type Node = ::nodeagg::AggStateData<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        Ok(::nodeagg::agg_hash_retrieve(node, estate)?.map(|_| Batch { n: 1 }))
+    }
+}
+
+/// Pass-through operator for the probe pipeline: pushes the produced group
+/// row (already finalized + projected into the result slot) to the root.
+/// One-row batches never outlive the producing driver round → no cursor.
+struct HashAggEmit;
+
+impl<'mcx> Operator<'mcx> for HashAggEmit {
+    type Node = ::nodeagg::AggStateData<'mcx>;
+
+    fn pending(&self, _node: &Self::Node) -> Option<Batch> {
+        None
+    }
+
+    fn consume(
+        &mut self,
+        node: &mut Self::Node,
+        batch: Batch,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert_eq!(batch.n, 1);
+        Ok(match out.accept(node.ps_ResultTupleSlot, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
     }
 }
