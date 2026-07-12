@@ -23,6 +23,7 @@ types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+varlena = { path = "../../utils/adt/varlena" }
 
 [dev-dependencies]
 aclchk_seams = { path = "../../catalog/aclchk_seams" }

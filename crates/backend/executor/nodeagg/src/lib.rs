@@ -3021,6 +3021,20 @@ pub fn agg_aggcontext<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
     unsafe { node.agg_node.as_ref() }.aggcontext()
 }
 
+/// Lane-v2 staged join-feed admission inputs: the outer columns the hashed
+/// build reads per row — C find_cols' `colnos_needed` (grouping + hashed +
+/// unaggregated + aggregated input columns; exactly the spill projection's
+/// column set) — plus the deform bound (`max_colno_needed`). A staged replay
+/// slot carrying exactly these columns (others NULL) is observation-identical
+/// to the original input slot for the whole build: the probe hashes grouping
+/// columns, the transition programs read the aggregated inputs, and a spilled
+/// tuple materializes exactly the needed columns (the spill projection nulls
+/// the unneeded ones anyway — `hashagg_spill_tuple`'s wslot arm).
+pub fn agg_hash_needed_cols<'a>(node: &'a AggStateData<'_>) -> (&'a [bool], i32) {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    (&ph.spill.colnos_needed, ph.spill.max_colno_needed)
+}
+
 /// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
 /// program split — prepare/lookup per row (spill-mode misses spill the tuple
 /// identically), then only the RESIDUAL transitions (the transnos classify
@@ -3352,6 +3366,136 @@ pub fn agg_sorted_emit<'mcx>(
 pub fn agg_sorted_input_done(node: &mut AggStateData<'_>) {
     debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
     node.agg_done = true;
+}
+
+// ===========================================================================
+// Lane-v2 K2 staged group probe (design §3a): the fold feed's batched
+// hash+probe pre-pass. The lane stages the (single) grouping key per batch,
+// hashes the whole lane in one tight kernel loop (`agg_hash_hash_staged`),
+// then probes each row IN ROW ORDER through the same C-ported tuplehash
+// lookup the per-row path uses (`agg_hash_probe_staged`) — same hash values
+// (bit-identical by the kernel contract), same insertion order, same entry
+// initialization, same spill decisions → same table layout, same iteration
+// order, same output bytes. Only the per-row expr-program walk + slot
+// prepare + per-row context churn are replaced.
+// ===========================================================================
+
+/// K2 admission: a single grouping-key column whose tuplehash probe kernel is
+/// batch-hostable (Int4/Int8/Text — `staged_probe_supported`). Returns the
+/// key's 0-based column number in the agg's OUTER (input) tuple. `None` =
+/// keep the per-row arrival probe.
+pub fn agg_hash_staged_probe_col(node: &AggStateData<'_>) -> Option<u16> {
+    let ph = node.perhash.as_ref()?;
+    if ph.num_cols == 1 && ph.hashtable.staged_probe_supported() {
+        Some((ph.hash_grp_col_idx_input[0] - 1) as u16)
+    } else {
+        None
+    }
+}
+
+/// Whether the lanefold plan carries residual (classify-refused) transitions.
+/// The K2 deferred probe hosts only fully-admitted plans: residuals need the
+/// live input row at probe time, which a deferred flush no longer has.
+pub fn agg_lanefold_has_resid(node: &AggStateData<'_>) -> bool {
+    node.lanefold.as_ref().is_some_and(|lf| lf.resid.is_some())
+}
+
+/// K2 batched hashing over the staged key lane — delegates to the tuplehash
+/// probe kernel, bit-identical per element to the per-row `hash_slot`.
+///
+/// Contract (like `hash_staged`): non-null staged datums are live values of
+/// the grouping key's type for the whole call.
+pub fn agg_hash_hash_staged(
+    node: &AggStateData<'_>,
+    keys: &[Datum],
+    isnull: &[bool],
+    out: &mut Vec<u32>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    ph.hashtable.hash_staged(keys, isnull, out)
+}
+
+/// K2 staged probe: `lookup_hash_entry` with the grouping key presented
+/// directly (the caller staged it — self-contained for the batch) and the
+/// hash precomputed by [`agg_hash_hash_staged`]. Same C-ported lookup, same
+/// first-arrival insertion, same `initialize_hash_entry`, same spill-mode
+/// gate as the per-row path. `None` = spill-mode miss: no transition runs
+/// (exactly as per-row) and the caller replays + spills the row via
+/// [`agg_hash_spill_staged`].
+pub fn agg_hash_probe_staged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    key: Datum,
+    isnull: bool,
+    hash: u32,
+) -> PgResult<Option<NonNull<AggPerGroup>>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    let mcx = estate.es_query_cxt;
+    let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
+    let ph = perhash.as_mut().expect("hashed Agg has perhash");
+    debug_assert_eq!(ph.num_cols, 1);
+    // Fast path — the overwhelmingly common found-existing-group case: the
+    // slot-free kernel find (no hashslot presentation, no slot deform).
+    let ix = match ph.hashtable.find_staged(key, isnull, hash)? {
+        Some(ix) => ix,
+        None => {
+            // Miss: present the key in the hashslot (prepare_hash_slot's
+            // tail with the key already in hand) and run the full C-ported
+            // lookup — the insert leg (entry copy + robin-hood placement) or
+            // the spill-mode miss, exactly as the per-row path.
+            exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
+            {
+                let base = ph.hashslot.base_mut();
+                base.tts_values[0] = key;
+                base.tts_isnull[0] = isnull;
+            }
+            exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
+            #[cfg(debug_assertions)]
+            {
+                // The staged hash must equal what the per-row path computes.
+                let h = ph.hashtable.hash_slot(&mut ph.hashslot)?;
+                debug_assert_eq!(h, hash);
+            }
+            let table_mcx = ph.table_ctx.mcx();
+            let use_table = !ph.spill.mode;
+            let (ix, isnew) = ph.hashtable.lookup(
+                &mut ph.hashslot,
+                hash,
+                use_table.then_some(table_mcx),
+                mcx,
+            )?;
+            let Some(ix) = ix else {
+                return Ok(None);
+            };
+            debug_assert!(isnew, "find_staged missed an existing entry");
+            if isnew {
+                initialize_hash_entry(ph, trans_init, trans_typ, *agg_node, ix, mcx)?;
+            }
+            ix
+        }
+    };
+    Ok(Some(
+        ph.hashtable
+            .entry_additional(ix)
+            .expect("fold-fed hashagg carries pergroup space")
+            .cast::<AggPerGroup>(),
+    ))
+}
+
+/// K2 spill leg for a staged spill-mode miss: `hashagg_spill_tuple` over the
+/// caller's replayed row (needed columns populated, unneeded NULL — the spill
+/// projection's own treatment), byte-identical to spilling the original
+/// input row.
+pub fn agg_hash_spill_staged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot: ExecSlotId,
+    hash: u32,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    let s = estate.slot_mut(slot);
+    hashagg_spill_tuple(&mut ph.spill, Some(s), hash, mcx)
 }
 
 const MAX_FINAL_ARGS: usize = 8;
