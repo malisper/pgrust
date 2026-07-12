@@ -56,7 +56,6 @@ pub const RECOVERY_PAUSE_REQUESTED: i32 = 1;
 pub const RECOVERY_PAUSED: i32 = 2;
 
 static RECOVERY_TARGET: AtomicI32 = AtomicI32::new(RecoveryTargetType::Unset as i32);
-static RECOVERY_TARGET_XID: AtomicU32 = AtomicU32::new(0);
 static RECOVERY_TARGET_TIME: AtomicI64 = AtomicI64::new(0);
 static RECOVERY_TARGET_LSN: AtomicU64 = AtomicU64::new(0);
 static RECOVERY_TARGET_NAME: Mutex<String> = Mutex::new(String::new());
