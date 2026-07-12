@@ -351,6 +351,23 @@ fn probe_arm_fold_prefix<'mcx>(
 // pipelines stay fully exercised via the agg/sort/join breaker feeds.
 const STANDALONE_SCAN_NO_UPSIDE: bool = true;
 
+/// Tiny-input row floor for standalone cbstore scan admission (the
+/// `TinyInputFloor` refuse): relations below this never pay the qual-
+/// translate/arm admission cascade. Default = one cbstore granule (8,192
+/// rows — the store's decode/zone unit; a sub-granule scan is a handful of
+/// staged windows either way, bench 2026-07-12: lane-ON == lane-OFF to noise
+/// at this size, so the cascade is pure tax). `PGRUST_LANE_V2_TINY_FLOOR`
+/// overrides for floor-calibration benches.
+fn cb_tiny_floor() -> u64 {
+    static FLOOR: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_TINY_FLOOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8_192)
+    })
+}
+
 // ===========================================================================
 // SeqScan ownership (Phase 1 first vertical slice, now push-driven). The
 // pipeline is source → filter/project operator → root pull-adapter, over the
@@ -398,7 +415,14 @@ pub fn try_own_seq_scan<'mcx>(
         // dynamic gates inside seq_scan_fusible every call.
         match ss.cb_standalone_verdict() {
             Some(false) => {
-                stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                stats::tick_refused(
+                    ShapeClass::CbScan,
+                    if ss.cb_standalone_tiny() {
+                        RefuseReason::TinyInputFloor
+                    } else {
+                        RefuseReason::AdmissionEconomicsNoConsumer
+                    },
+                );
                 return Ok(None);
             }
             Some(true) => {
@@ -407,6 +431,22 @@ pub fn try_own_seq_scan<'mcx>(
                 }
             }
             None => {
+                // Tiny-input floor (§4 endgame refuse-set, armed with the
+                // noqualfeed tranche): below the floor the whole scan fits a
+                // handful of windows, so lane ownership can never recover
+                // even its own admission cascade (qual walk + translate +
+                // arm). Checked BEFORE the cascade — the refuse costs one
+                // footer metadata read, memoized. Floor = one granule
+                // (8,192 rows, cbstore's zone/decode unit); PGRUST_LANE_V2_
+                // TINY_FLOOR overrides for floor-calibration benches.
+                if let Some(rows) = ::nodeseqscan::seq_scan_cb_total_rows(ss, estate)? {
+                    if rows < cb_tiny_floor() {
+                        ss.set_cb_standalone_tiny();
+                        ss.set_cb_standalone_verdict(false);
+                        stats::tick_refused(ShapeClass::CbScan, RefuseReason::TinyInputFloor);
+                        return Ok(None);
+                    }
+                }
                 // First call: never memoize on a dynamic-gate refusal.
                 if !seq_scan_fusible(ss, estate)? {
                     return Ok(None);
@@ -1286,12 +1326,19 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     stage_slot: &mut Option<ExecSlotId>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // AGG_PLAIN (ungrouped) routes to the fold drive: no breaker needed (a
+    // AGG_PLAIN (ungrouped) routes to the plain drive: no breaker needed (a
     // single group has no per-group read-back — feed + finalize is the whole
     // node inside one call), but the same staged-batch fold applies, with
     // `lanefold::fold_batch` (the ungrouped kernel, CSE included) in place of
-    // the grouped probe+fold.
-    if ::nodeagg::agg_plain_fold_admissible(agg) {
+    // the grouped probe+fold. cbstore scans additionally route WITHOUT a
+    // classified fold plan (lane-v2-noqualfeed): the plain decider can pick
+    // the per-row drain feed there — batch window decode + the full per-row
+    // transition program — because the cbstore incumbent is the per-pull
+    // Volcano drive, not the fused batched arm the heap refusal defends.
+    if ::nodeagg::agg_plain_fold_admissible(agg)
+        || (::nodeagg::agg_plain_perrow_admissible(agg)
+            && ::nodeseqscan::seq_scan_is_cbstore(ss))
+    {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
@@ -1633,7 +1680,7 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
             c
         }
     };
-    if c != AggLaneChoice::Fold {
+    if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
     // exec_agg's top-of-call guard: the one result row is out; a drained agg
@@ -1645,23 +1692,106 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // aggbuild floor counts builds, not calls; a plain node builds once per
     // (re)scan — this drive runs the whole feed inside one call).
     stats::tick_owned(ShapeClass::AggBuild);
-    agg_plain_fold_feed(agg, ss, estate)?;
+    if c == AggLaneChoice::Fold {
+        agg_plain_fold_feed(agg, ss, estate)?;
+    } else {
+        agg_plain_perrow_feed(agg, ss, estate)?;
+    }
     // Retrieve (delegated): finalize + HAVING + project — one row (or none,
     // when the var-free HAVING rejects it), setting `agg_done`.
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
 
+/// Build feed for the plain PER-ROW drive (`AggLaneChoice::PerRow` — cbstore
+/// scans only, lane-v2-noqualfeed): drain the Phase-1 scan pipeline (batch
+/// window decode; the PREWHERE/kernel-bitmap arms engage when the qual has a
+/// kernel shape) into the FULL per-row transition program. This replaces the
+/// per-pull Volcano chain (`exec_agg` → `exec_proc_node` → `getnextslot`)
+/// with one drained loop over staged windows; no fold plan is required, so
+/// arbitrary transition expressions (the Q30-class SUM(x op k) batteries)
+/// are hosted.
+///
+/// Byte-identity: the same rows flow through the same qual (staged bitmap =
+/// the kernel qual's verdict; other quals run scalar per row inside the
+/// emit) and the same per-row transition program (`agg_plain_build_accept` =
+/// `exec_agg`'s single-group loop body) in the same row order — only the
+/// pull chain is elided. The transvalues, and therefore the one finalized
+/// output row, are identical.
+fn agg_plain_perrow_feed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(::nodeseqscan::seq_scan_is_cbstore(ss));
+    // Row-emit staging (drain pipeline): PREWHERE v1 / kernel bitmap when a
+    // qual kernel exists; a no-qual scan stages bare batch-decoded windows.
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "plain agg per-row feed", stitch: true },
+    )?;
+    // initialize_aggregates (delegated): fresh initval pergroups; a rescan
+    // re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let mut sink = PlainAggBuildSink { agg };
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
+}
+
+/// The plain agg as breaker Sink: accept = the full per-row transition
+/// program (`exec_agg`'s single-group loop body, delegated); finish = no-op
+/// (finalize/HAVING/project is the caller's `agg_plain_finish`, exactly as
+/// the fold drive sequences it). Always `NeedMore` — a breaker consumes its
+/// whole input.
+struct PlainAggBuildSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+}
+
+impl<'mcx> Sink<'mcx> for PlainAggBuildSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        ::nodeagg::agg_plain_build_accept(self.agg, estate, tuple)?;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+/// Batch-granular feed: the default loop, monomorphized (same rows, same
+/// order; the per-row dyn dispatch elided) — mirrors `HashAggBuildSink`.
+impl<'mcx> BatchSink<'mcx> for PlainAggBuildSink<'_, 'mcx> {}
+
 /// The structural lane choice for an AGG_PLAIN Agg over a SeqScan, decided
-/// once at the first call. Fold or Refuse only — the lane never takes plain
-/// shapes per-row: the incumbent legacy fused `exec_agg_batched` drive is
-/// already batched with per-row transitions, so a per-row lane feed has
-/// nothing to win (admission economics, design §4).
+/// once at the first call.
+///
+/// Heap scans: Fold or Refuse only — the lane never takes heap plain shapes
+/// per-row: the incumbent legacy fused `exec_agg_batched` drive is already
+/// batched with per-row transitions, so a per-row lane feed has nothing to
+/// win (admission economics, design §4).
+///
+/// cbstore scans (lane-v2-noqualfeed, phase4 §7 re-entry): the incumbent
+/// fused drive is gated OFF (`table_scan_supports_pagebatch` false — lane-OFF
+/// stays the per-row Volcano oracle), so the heap Refuse arms take the
+/// PER-ROW drain feed instead: batch window decode + the full per-row
+/// transition program beats the per-pull Volcano chain regardless of quals
+/// (the shape the old kernel-armed gate mis-scoped — its 1.21-1.33x evidence
+/// measured the standalone capacity-one RowFeed adapter, not a drained
+/// breaker feed). The one cbstore Refuse left is the count(*)-only census
+/// shape: transitions reading NO input columns decode nothing on the per-row
+/// drive (empty needed set) and are the MetaAggScan footer path's target —
+/// a batch-decoded feed has nothing to win there (distinct reason so the
+/// gate can watch it).
 fn decide_plain_agg_lane<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggLaneChoice> {
-    // Every Refuse below is admission economics (§4): the legacy fused
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    // Heap Refuse = admission economics (§4): the legacy fused
     // `exec_agg_batched` drive (or the per-tuple path) already owns the shape
     // at least as well as a lane feed could. One tick per memoized per-node
     // choice.
@@ -1669,38 +1799,38 @@ fn decide_plain_agg_lane<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
         Ok(AggLaneChoice::Refuse)
     };
-    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+    // count(*)-only census shapes (the transition program reads no input
+    // columns): heap's incumbent fused drive advances those per batch with
+    // zero per-row work (the storeless advance / `qualifying_count` bitmap
+    // census); cbstore's per-row drive decodes nothing (empty needed set)
+    // and the footer answer (MetaAggScan) is the real lever. Deliberate
+    // refuse-set entries, one tick per memoized choice.
+    if ::nodeagg::agg_batch_outer_prefix(agg) == Some(0) {
+        if is_cb {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::CountOnlyCensus);
+            return Ok(AggLaneChoice::Refuse);
+        }
         return refuse();
+    }
+    // Fold-readiness: a classified fold plan reading lane columns on an
+    // unprojected scan (projected scans read output columns, which are not
+    // commensurable with scan-column prefixes — the hashed breaker's
+    // scoping, verbatim), with the forced prefix deform probe-armed NOW so
+    // an unarmable prefix (non-fixed-width column) is known BEFORE
+    // committing.
+    let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
+        Some(plan) if ss.ss.ps_ProjInfo.is_none() && !plan.cols.is_empty() => {
+            probe_arm_fold_prefix(agg, ss, estate)?
+        }
+        _ => false,
     };
-    // Projected scans: the agg reads output columns, which are not
-    // commensurable with scan-column prefixes — no SoA lane feed (the hashed
-    // breaker's scoping, verbatim).
-    if ss.ss.ps_ProjInfo.is_some() {
-        return refuse();
+    if fold_ready {
+        return Ok(AggLaneChoice::Fold);
     }
-    // count(*)-only plans read no lane columns: the incumbent fused drive
-    // already advances those per batch with zero per-row work (the storeless
-    // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
-    // Deliberate refuse-set entry.
-    //
-    // cbstore note (v1 scope cut, phase4 design §7): for a cbstore scan the
-    // incumbent fused drive is gated OFF (`table_scan_supports_pagebatch` is
-    // false — lane-OFF stays the per-row Volcano oracle), so this refuse
-    // leaves count(*)-only plain aggs on the per-row drive. Hosting them
-    // needs the count-only whole-granule batch shape (n up to GRANULE_ROWS
-    // > SOA_BM_WORDS*64: this feed's bitmap scratch and the fold's armed-SoA
-    // requirement both refuse it) or the deferred MetaAggScan footer answer
-    // — both explicit §7 re-entry points, not v1.
-    if plan.cols.is_empty() {
-        return refuse();
+    if is_cb {
+        return Ok(AggLaneChoice::PerRow);
     }
-    // Probe-arm the deform now so an unarmable prefix (non-fixed-width
-    // column) is known BEFORE committing: the plain fold reads the SoA lanes
-    // directly, so a disarmed deform keeps the incumbent.
-    if !probe_arm_fold_prefix(agg, ss, estate)? {
-        return refuse();
-    }
-    Ok(AggLaneChoice::Fold)
+    refuse()
 }
 
 /// Feed for the plain fold drive: per staged page batch, compose the row
