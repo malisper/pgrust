@@ -82,8 +82,26 @@ pub struct AggStateData<'mcx> {
     gsets: Option<PgBox<'mcx, gsets::GroupingSetsState<'mcx>>>,
     pertrans_sort: PgVec<'mcx, PerTransSortData<'mcx>>,
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
+    // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
+    lanefold: Option<LaneFold<'mcx>>,
     // InstrCountFiltered1 target (HAVING rejections); set by instrument_node.
     pub instr_idx: Option<u32>,
+}
+
+// Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
+// plan classified over this node's transition specs at init, plus the
+// residual per-row transition program (the transitions classify refused,
+// compiled with their ORIGINAL transnos so it runs beside the batched fold).
+struct LaneFold<'mcx> {
+    plan: ::lanefold::LanePlan<'mcx>,
+    resid: Option<PgBox<'mcx, ExprState<'mcx>>>,
+}
+
+// Mirrors execmain `lanev2::enabled()` (the byte-identity-safe env-var gate);
+// duplicated because nodeagg cannot depend on execmain (crate cycle).
+fn lane_v2_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("1") | Ok("on")))
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
@@ -1103,6 +1121,49 @@ pub fn exec_init_agg<'mcx>(
         unsafe { q.arm_result_mcx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx()) };
     }
 
+    // Lane-v2 hash-agg breaker fold plan (lanefold crate), classified once at
+    // init — only when the lane can ever engage this node (env-gated; hashed,
+    // single set, no sorted transitions, subplan- and param-free transition
+    // program — the breaker's own admission gate re-checks the rest per call).
+    let lanefold = if lane_v2_enabled()
+        && gs.is_none()
+        && node.aggstrategy == AGG_HASHED
+        && pertrans_sort.is_empty()
+        && evaltrans
+            .as_deref()
+            .is_some_and(|et| !et.has_subplan() && et.param_exec_deps().is_empty())
+    {
+        match ::lanefold::classify(mcx, &specs) {
+            Some(plan) => {
+                let resid = if plan.resid.is_empty() {
+                    None
+                } else {
+                    let mut keep: PgVec<'mcx, bool> = vec_with_capacity_in(mcx, numtrans)?;
+                    keep.resize(numtrans, false);
+                    for &r in plan.resid.iter() {
+                        keep[r] = true;
+                    }
+                    let base = perhash.as_ref().expect("hashed Agg has perhash").pergroup_cell;
+                    let mut prog = ::executils::with_subplan_compile_env(estate, |env| {
+                        ::execexpr::exec_build_agg_trans_hashed_masked(
+                            mcx, &specs, &keep, base, fm_agg_node, params, env,
+                        )
+                    })?;
+                    // Same result-mcx discipline as the full evaltrans.
+                    // SAFETY: the tmpcontext ExprContext outlives the program.
+                    unsafe {
+                        prog.arm_result_mcx_raw(estate.ecxt(tmpcontext).per_tuple_mcx())
+                    };
+                    Some(prog)
+                };
+                Some(LaneFold { plan, resid })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     Ok(AggStateData {
         plan: node,
         ps_ExprContext,
@@ -1128,6 +1189,7 @@ pub fn exec_init_agg<'mcx>(
         gsets: gs,
         pertrans_sort,
         qual,
+        lanefold,
         instr_idx: None,
     })
 }
@@ -2928,6 +2990,49 @@ pub fn agg_hash_retrieve<'mcx>(
     agg_retrieve_hash_table(node, estate)
 }
 
+/// Lane-v2 fold plan classified at init; None = the lane is off, the shape
+/// can never engage the breaker, or no transition admits (`lanefold::classify`
+/// returned None).
+pub fn agg_lanefold_plan<'a, 'mcx>(
+    node: &'a AggStateData<'mcx>,
+) -> Option<&'a ::lanefold::LanePlan<'mcx>> {
+    node.lanefold.as_ref().map(|lf| &lf.plan)
+}
+
+/// Lane-v2 fold-feed probe: `agg_hash_build_accept` with the transition
+/// program split — prepare/lookup per row (spill-mode misses spill the tuple
+/// identically), then only the RESIDUAL transitions (the transnos classify
+/// refused) run per-row; the admitted transitions are folded per batch by the
+/// caller (`lanefold::fold_rows_grouped`) over the returned pergroup
+/// snapshot. Transition-major reordering across independent pergroup cells is
+/// bit-invisible (the fold kernels are commutative and non-erroring on
+/// admitted/guard-proven data; residual transitions still run in row order).
+/// None = spill-mode miss: no transition runs, exactly as the per-row build.
+pub fn agg_hash_build_probe_resid<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<Option<NonNull<AggPerGroup>>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let mut pg = None;
+    if lookup_hash_entry(node, estate, outer_id)? {
+        let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+        // SAFETY: lookup_hash_entry installed the entry's live pergroup in
+        // the cell (numtrans > 0 whenever a fold plan exists).
+        pg = Some(unsafe { ph.pergroup_cell.as_ptr().read() });
+        if let Some(resid) =
+            node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut())
+        {
+            let outer_slot = estate.slot_mut(outer_id);
+            let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+            exec_eval_expr(resid, &mut slots)?;
+        }
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(pg)
+}
+
 const MAX_FINAL_ARGS: usize = 8;
 
 // finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's
@@ -3463,6 +3568,9 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     if let Some(et) = node.evaltrans.as_mut() {
         et.release_frames();
     }
+    if let Some(r) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) {
+        r.release_frames();
+    }
     node.ps_ResultTupleDesc = None;
 }
 
@@ -3633,5 +3741,8 @@ mcx::forget_safe_struct!(
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
         instr_idx;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual },
+        pertrans_sort, qual, lanefold },
+    // resid released in exec_end_agg (evaltrans discipline); the plan holds
+    // only arena PgVecs.
+    LaneFold<'_> { plan; resid },
 );

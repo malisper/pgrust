@@ -59,6 +59,25 @@ pub fn enabled() -> bool {
 }
 
 // ===========================================================================
+// Standalone scan ownership: DELIBERATELY REFUSED (admission economics,
+// design §4; measured on the integration bench 2026-07-11, q9-class).
+//
+// The `try_own_*` scan entry points are reached only from the per-node
+// dispatch arms — i.e. only when the PARENT is a per-tuple Volcano consumer
+// (lane breakers drive their scan pipelines directly, never through these
+// hooks). A lane-owned scan in that position emits one tuple per pull through
+// the capacity-one adapter with NO batch consumer above and NO scan kernels
+// wired yet — pure adapter overhead (q9: +3–9%), and for kernel-qual'd scans
+// it PREEMPTS the row executor's own fused SoA-bitmap WithQual drive. Until
+// the standalone scan pipeline carries a measured kernel advantage (Phase-3
+// bitmap/dict kernels), refusing is strictly faster and byte-identical.
+//
+// This is a deliberate refuse-set entry, expected to SHRINK when Phase-3 scan
+// kernels land; the scan pipelines stay fully exercised via the agg/sort
+// breaker feeds.
+const STANDALONE_SCAN_NO_UPSIDE: bool = true;
+
+// ===========================================================================
 // SeqScan ownership (Phase 1 first vertical slice, now push-driven). The
 // pipeline is source → filter/project operator → root pull-adapter, over the
 // same `BatchSource`-seam primitives the pull drive used
@@ -76,6 +95,10 @@ pub fn try_own_seq_scan<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
+    if STANDALONE_SCAN_NO_UPSIDE {
+        return Ok(None);
+    }
     if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
@@ -256,6 +279,10 @@ pub fn try_own_index_scan<'mcx>(
     is: &mut ::nodeindexscan::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
+    if STANDALONE_SCAN_NO_UPSIDE {
+        return Ok(None);
+    }
     if !index_scan_fusible(is, estate) {
         return Ok(None);
     }
@@ -384,6 +411,10 @@ pub fn try_own_index_only_scan<'mcx>(
     ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
+    if STANDALONE_SCAN_NO_UPSIDE {
+        return Ok(None);
+    }
     if !index_only_scan_fusible(ios, estate) {
         return Ok(None);
     }
@@ -499,6 +530,10 @@ pub fn try_own_bitmap_heap_scan<'mcx>(
     bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
+    if STANDALONE_SCAN_NO_UPSIDE {
+        return Ok(None);
+    }
     if !bitmap_heap_scan_fusible(bhs, estate) {
         return Ok(None);
     }
@@ -619,6 +654,30 @@ impl<'mcx> Operator<'mcx> for BitmapHeapScanEmit {
 // read-back's refill walks PG's spill partitions in PG's order.
 // ===========================================================================
 
+/// Memoized structural choice for an Agg-over-SeqScan node, decided at the
+/// first call and stable thereafter (a mid-stream flip would desync the
+/// build). Dynamic gates (EPQ, direction, the post-build merge handoff) stay
+/// per-call in `agg_over_seq_scan_fusible`, evaluated BEFORE the memo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AggLaneChoice {
+    /// Admission economics (design §4): no lanefold coverage AND the legacy
+    /// fused `exec_agg_batched` arm would engage — the lane must not preempt
+    /// the measured-faster fused batch drive (q3/q4-class, integration bench
+    /// 2026-07-11). Deliberate refuse-set entry; shrinks as fold coverage
+    /// widens.
+    Refuse,
+    /// Lane owns with the per-row breaker feed: no fold coverage, but no
+    /// fused arm to preempt either (shapes the fused arm refuses — scalar
+    /// quals, admitted projections).
+    PerRow,
+    /// Lane owns with the batched build feed: per-batch group probe + the
+    /// lanefold whole-batch transition kernels (residual transitions
+    /// per-row).
+    Fold,
+}
+
+::mcx::forget_safe_nodrop!(AggLaneChoice);
+
 /// Try to let the lane own an `Agg` over a `SeqScan` child — the fused
 /// scan→filter→hash-agg push pipeline. `Some(result)` = the lane drove this
 /// call; `None` = refused (the caller falls through to the existing fused /
@@ -627,9 +686,21 @@ impl<'mcx> Operator<'mcx> for BitmapHeapScanEmit {
 pub fn try_own_agg_over_seq_scan<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    choice: &mut Option<AggLaneChoice>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
+        return Ok(None);
+    }
+    let c = match *choice {
+        Some(c) => c,
+        None => {
+            let c = decide_agg_lane(agg, ss, estate)?;
+            *choice = Some(c);
+            c
+        }
+    };
+    if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
     // exec_agg's top-of-call guard: a drained agg stays drained (the hash
@@ -644,20 +715,188 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
         // drive when the whole read prefix is knowable (unprojected scans
         // only: with a projection the agg reads output columns, which are not
-        // commensurable with scan-column prefixes). Prefix 0 disarms.
+        // commensurable with scan-column prefixes). Prefix 0 disarms. The
+        // fold feed FORCES the deform when the fold reads lane columns (the
+        // <3-column break-even is a deform+gather artifact; the fold consumes
+        // the columns directly).
         let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
             fused_agg_soa_prefix(agg, ss).unwrap_or(0)
         } else {
             0
         };
-        ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
-        let mut sink = HashAggBuildSink { agg: &mut *agg };
-        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+        if c == AggLaneChoice::Fold {
+            let force = ::nodeagg::agg_lanefold_plan(agg)
+                .is_some_and(|plan| !plan.cols.is_empty());
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+            agg_hash_build_fold_feed(agg, ss, estate)?;
+        } else {
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+            let mut sink = HashAggBuildSink { agg: &mut *agg };
+            drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+        }
     }
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
     Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+/// The structural lane choice (see `AggLaneChoice`), decided once at the
+/// first (pre-build) call. Fold-readiness = a classified lanefold plan on an
+/// unprojected scan, with the SoA deform armed whenever the plan reads lane
+/// columns (a plan of pure `count(*)` transitions reads none).
+fn decide_agg_lane<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggLaneChoice> {
+    let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
+        Some(plan) if ss.ss.ps_ProjInfo.is_none() => {
+            if plan.cols.is_empty() {
+                true
+            } else {
+                // Probe-arm the deform now so an unarmable prefix (non-fixed-
+                // width column) is known BEFORE committing to ownership.
+                let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true);
+                ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
+            }
+        }
+        _ => false,
+    };
+    if fold_ready {
+        return Ok(AggLaneChoice::Fold);
+    }
+    // Admission economics (design §4): without fold coverage the lane's
+    // per-row breaker feed is strictly slower than the legacy fused batched
+    // drive it would preempt (the agg hook runs first) — measured +5%
+    // (q3/q4-class). Never preempt a measured-faster path.
+    if crate::procnode::seq_agg_fusible(agg, ss, estate)
+        && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
+    {
+        return Ok(AggLaneChoice::Refuse);
+    }
+    Ok(AggLaneChoice::PerRow)
+}
+
+/// `LaneCols` for a fold plan that reads no lane columns (pure `count(*)`
+/// transitions): the kernels never call these.
+struct NoCols;
+
+impl ::lanefold::LaneCols for NoCols {
+    fn col_values(&self, _c: usize) -> &[::datum::Datum] {
+        unreachable!("count(*)-only fold plans read no lane columns")
+    }
+
+    fn col_isnull(&self, _c: usize) -> &[bool] {
+        unreachable!("count(*)-only fold plans read no lane columns")
+    }
+}
+
+/// Build feed for the fold-armed breaker (`AggLaneChoice::Fold`): per staged
+/// page batch, run the scan's per-row emit + the per-row group probe (with
+/// the residual transitions inside the probe), snapshotting each row's
+/// pergroup, then fold the admitted transitions whole-batch with
+/// `lanefold::fold_rows_grouped`. One CHECK_FOR_INTERRUPTS per staged batch
+/// (design §9 batch-operator cadence). Guarded plans re-prove every batch;
+/// `Demote` runs the WHOLE batch through the checked per-row program (never
+/// mixing a partial fold with per-row transitions — lanefold contract).
+///
+/// Byte-identity: the same rows flow through the same qual and the same
+/// prepare/lookup/spill per-row machinery in the same order; only the
+/// transition arithmetic is batched, and every fold kernel is commutative and
+/// bit-for-bit equal to C's transition semantics (lanefold's tested
+/// contract), so transvalues — and therefore output bytes — are identical.
+fn agg_hash_build_fold_feed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut idxs: Vec<u32> = Vec::new();
+    let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of scan: drop the scan slot's buffer pin (SeqScanSource
+            // end-of-stream parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        // Guarded plans (int2-Var OpExpr admissions): prove the batch before
+        // any fold. The proof runs over every staged non-fallback row — a
+        // superset of the rows the fold will touch — so a Pass is sound and a
+        // Demote at worst conservative (the checked per-row program is always
+        // correct; it raises C's error at C's row when a selected row really
+        // overflows).
+        let mut demote = false;
+        {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            if plan.guarded {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("guarded fold plans read lane columns");
+                let nwords = (n as usize).div_ceil(64);
+                let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                    *r = !fb;
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+                demote = ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                    == ::lanefold::GuardCheck::Demote;
+            }
+        }
+        if demote {
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
+                }
+            }
+            continue;
+        }
+        idxs.clear();
+        groups.clear();
+        for i in 0..n {
+            let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
+                continue;
+            };
+            // SoA fallback rows carry no lane values: the full per-row
+            // program owns them (the order split across transitions is
+            // bit-invisible — commutative kernels).
+            if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i)) {
+                ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
+            } else if let Some(pg) = ::nodeagg::agg_hash_build_probe_resid(agg, estate, slot)? {
+                idxs.push(i);
+                groups.push(pg);
+            }
+        }
+        if !idxs.is_empty() {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            // SAFETY: `groups[k]` is the live pergroup array the probe just
+            // installed for staged row `idxs[k]` (hash entries and their
+            // additional blocks are allocation-stable for the table's
+            // lifetime; spill mode only redirects NEW groups to the tapes —
+            // spilled rows never reach `groups`); non-fallback rows carry
+            // valid deformed lane values for every plan column (the SoA
+            // prefix covers the evaltrans fetch bound); AvgAccum pergroups
+            // hold the catalog's `{0,0}` int8[2] transarray, datum-copied per
+            // group at entry initialization; guarded plans passed
+            // `check_guards` above.
+            match ::nodeseqscan::seq_scan_batch_soa(ss) {
+                Some(soa) => unsafe {
+                    ::lanefold::fold_rows_grouped(plan, soa, &idxs, &groups)
+                },
+                None => {
+                    debug_assert!(plan.cols.is_empty());
+                    unsafe { ::lanefold::fold_rows_grouped(plan, &NoCols, &idxs, &groups) }
+                }
+            }
+        }
+    }
+    // Finalize (delegated): spill finish, merge handoff, phase flip.
+    ::nodeagg::agg_hash_build_finish(agg, estate)
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:

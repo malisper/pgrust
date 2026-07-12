@@ -172,6 +172,9 @@ pub struct BitmapCombineState<'mcx> {
 pub struct AggPlanState<'mcx> {
     pub agg: ::nodeagg::AggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
+    /// Lane-v2 memoized structural choice for the hash-agg breaker (None =
+    /// undecided); all lane logic lives in `lanev2`.
+    pub lane_choice: Option<crate::lanev2::AggLaneChoice>,
 }
 
 // The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
@@ -835,7 +838,7 @@ pub fn exec_init_node<'mcx>(
             let outer_desc =
                 outer.exec_get_result_type(agg_plan.plan.lefttree.unwrap().as_plan().unwrap())?;
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc, Some(outer_desc))?;
-            PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer })?)
+            PlanStateNode::Agg(::mcx::alloc_in(mcx, AggPlanState { agg, outer, lane_choice: None })?)
         }
         NodeTag::T_WindowAgg => {
             let mcx = estate.es_query_cxt;
@@ -1531,14 +1534,16 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let AggPlanState { agg, outer } = aps;
+    let AggPlanState { agg, outer, lane_choice } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
             // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
             // falls through to the UNCHANGED fused/per-tuple agg paths on
             // refuse. Lane logic + refuse-set live in `lanev2`.
             if crate::lanev2::enabled() {
-                if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(agg, ss, estate)? {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_seq_scan(agg, ss, lane_choice, estate)?
+                {
                     return Ok(r);
                 }
             }
@@ -1644,7 +1649,7 @@ fn agg_fusible_common<'mcx>(
 // same tuples, same transition order; per-tuple node recursion elided.
 // Instrumented children never match the SeqScan arm, so EXPLAIN ANALYZE
 // keeps the per-tuple drive and its filter counters.
-fn seq_agg_fusible<'mcx>(
+pub(crate) fn seq_agg_fusible<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
@@ -3375,7 +3380,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     ModifyTablePlanState<'_> { mt, subplan, epq },
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
-    AggPlanState<'_> { agg, outer },
+    AggPlanState<'_> { agg, outer, lane_choice },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },

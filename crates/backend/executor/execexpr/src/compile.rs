@@ -522,7 +522,33 @@ pub fn exec_build_agg_trans_hashed_subplans<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    build_agg_trans(mcx, specs, PergroupMode::Indirect(base), agg_node, params, sub)
+    build_agg_trans_masked(mcx, specs, None, PergroupMode::Indirect(base), agg_node, params, sub)
+}
+
+/// [`exec_build_agg_trans_hashed_subplans`] over the `keep`-masked subset of
+/// `specs` (`keep` is parallel to `specs`): masked-out transitions get no
+/// steps, kept ones keep their ORIGINAL index as the indirect pergroup
+/// `transno` offset — so the program can run beside a batched fold that
+/// covers the complement (lane-v2 hash-agg breaker residual program).
+pub fn exec_build_agg_trans_hashed_masked<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    keep: &[bool],
+    base: NonNull<NonNull<AggPerGroup>>,
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    debug_assert_eq!(specs.len(), keep.len());
+    build_agg_trans_masked(
+        mcx,
+        specs,
+        Some(keep),
+        PergroupMode::Indirect(base),
+        agg_node,
+        params,
+        sub,
+    )
 }
 
 // The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
@@ -545,9 +571,28 @@ fn build_agg_trans<'mcx>(
     params: ParamBind<'mcx>,
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    build_agg_trans_masked(mcx, specs, None, mode, agg_node, params, sub)
+}
+
+// `keep` = None compiles every spec (all pre-existing callers); Some(mask)
+// compiles only the marked specs, preserving each spec's original index as
+// its transno (indirect pergroup offset).
+fn build_agg_trans_masked<'mcx>(
+    mcx: Mcx<'mcx>,
+    specs: &[AggTransSpec<'_, 'mcx>],
+    keep: Option<&[bool]>,
+    mode: PergroupMode<'_>,
+    agg_node: FmNodePtr,
+    params: ParamBind<'mcx>,
+    sub: Option<SubplanCompileEnv>,
+) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let kept = |transno: usize| keep.is_none_or(|k| k[transno]);
     let mut state = ExprState::new_boxed_in(mcx)?;
     let mut info = SetupInfo::default();
-    for spec in specs {
+    for (transno, spec) in specs.iter().enumerate() {
+        if !kept(transno) {
+            continue;
+        }
         for tle in spec.args.iter() {
             setup_walker(tle, &mut info);
         }
@@ -558,6 +603,9 @@ fn build_agg_trans<'mcx>(
     push_expr_setup_steps(&mut state, mcx, &info, None, params, sub)?;
 
     for (transno, spec) in specs.iter().enumerate() {
+        if !kept(transno) {
+            continue;
+        }
         // C's numTransInputs: resjunk cells (aggpresorted ORDER BY sort
         // columns) are evaluated nowhere and take no transfn arg slot.
         let num_trans_inputs = spec
