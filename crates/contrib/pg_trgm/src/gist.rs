@@ -136,13 +136,6 @@ fn cnt_sml_sign_common(qtrg: &[Trgm], sign: &[u8], siglen: usize) -> i32 {
         .count() as i32
 }
 
-pub fn unported_regexp(fname: &str) -> PgError {
-    PgError::error(format!(
-        "pg_trgm: the regexp index strategy (~ / ~* via {fname}) is not ported — \
-         it needs the trgm_regexp.c NFA engine (createTrgmNFA / trigramsMatchGraph)"
-    ))
-}
-
 #[cold]
 fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized strategy number: {strategy}")))
@@ -201,9 +194,42 @@ pub fn consistent(
             };
             Ok((res, true))
         }
-        REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => Err(unported_regexp("gtrgm_consistent").into()),
+        REGEXP_STRATEGY | REGEXP_ICASE_STRATEGY => {
+            unreachable!("regexp strategies take the consistent_regexp path")
+        }
         other => Err(unrecognized_strategy(other)),
     }
+}
+
+// gtrgm_consistent regexp arms: evaluate the packed graph against the
+// trigrams that can be present under this key. `qtrg` None = regex too
+// complex; everything matches pending recheck. Always inexact.
+pub fn consistent_regexp(
+    is_leaf: bool,
+    key: &TrgmKey,
+    qtrg: Option<&[Trgm]>,
+    graph: &mut gin_vocab::TrgmPackedGraph,
+) -> PgResult<bool> {
+    let Some(qtrg) = qtrg else {
+        return Ok(true);
+    };
+    Ok(match key {
+        TrgmKey::Arr(arr) if is_leaf => {
+            graph.matches(&crate::trgm::trgm_presence_map(qtrg, arr))
+        }
+        TrgmKey::AllTrue => true,
+        TrgmKey::Sign(sign) => {
+            // Signature bits give false positives only; the graph is
+            // monotone, so evaluating over them can't produce a false
+            // negative.
+            let check: Vec<bool> = qtrg
+                .iter()
+                .map(|t| getbit(sign, hashval(trgm2int(t), sign.len())))
+                .collect();
+            graph.matches(&check)
+        }
+        TrgmKey::Arr(arr) => graph.matches(&crate::trgm::trgm_presence_map(qtrg, arr)),
+    })
 }
 
 // gtrgm_distance core: (distance, recheck).

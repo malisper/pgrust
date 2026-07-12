@@ -250,6 +250,88 @@ pub struct JspGinOp {
     pub val: u32,
 }
 
+/// One arc of a packed trigram regex graph (trgm_regexp.c TrgmPackedArc).
+#[derive(Clone, Copy, Debug)]
+pub struct TrgmPackedArc {
+    pub target_state: i32,
+    pub color_trgm: i32,
+}
+
+/// contrib/pg_trgm trgm_regexp.c TrgmPackedGraph: the compact NFA-derived
+/// graph a ~ / ~* scan key evaluates per index entry (C's extra_data[0]).
+/// Built once per scan key by pg_trgm's createTrgmNFA port; state 0 is
+/// initial, state 1 final. Std Vec justified: per-scan-key value crossing
+/// the gin_trgm seam by ownership (C pallocs it in the query context).
+pub struct TrgmPackedGraph {
+    /// Simple-trigram count per color trigram; the check[] array laid out
+    /// group-by-group in color-trigram order.
+    pub color_trigram_groups: Vec<i32>,
+    /// Per-state (offset, count) into `arcs`.
+    pub states: Vec<(u32, u32)>,
+    pub arcs: Vec<TrgmPackedArc>,
+    // trigramsMatchGraph workspace (C preallocates in the graph struct).
+    color_trigrams_active: Vec<bool>,
+    states_active: Vec<bool>,
+    states_queue: Vec<i32>,
+}
+
+impl TrgmPackedGraph {
+    pub fn new(
+        color_trigram_groups: Vec<i32>,
+        states: Vec<(u32, u32)>,
+        arcs: Vec<TrgmPackedArc>,
+    ) -> Self {
+        let ncolors = color_trigram_groups.len();
+        let nstates = states.len();
+        TrgmPackedGraph {
+            color_trigram_groups,
+            states,
+            arcs,
+            color_trigrams_active: vec![false; ncolors],
+            states_active: vec![false; nstates],
+            states_queue: vec![0; nstates],
+        }
+    }
+
+    /// trigramsMatchGraph: `check` is indexed by simple-trigram number in
+    /// the array createTrgmNFA returned.
+    pub fn matches(&mut self, check: &[bool]) -> bool {
+        self.color_trigrams_active.fill(false);
+        self.states_active.fill(false);
+
+        let mut j = 0usize;
+        for (i, &cnt) in self.color_trigram_groups.iter().enumerate() {
+            self.color_trigrams_active[i] = check[j..j + cnt as usize].iter().any(|&c| c);
+            j += cnt as usize;
+        }
+
+        self.states_active[0] = true;
+        self.states_queue[0] = 0;
+        let mut queue_in = 0usize;
+        let mut queue_out = 1usize;
+
+        while queue_in < queue_out {
+            let stateno = self.states_queue[queue_in] as usize;
+            queue_in += 1;
+            let (off, cnt) = self.states[stateno];
+            for arc in &self.arcs[off as usize..(off + cnt) as usize] {
+                if self.color_trigrams_active[arc.color_trgm as usize] {
+                    let next = arc.target_state;
+                    if next == 1 {
+                        return true;
+                    }
+                    if !self.states_active[next as usize] {
+                        self.states_active[next as usize] = true;
+                        self.states_queue[queue_out] = next;
+                        queue_out += 1;
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Per-key-column resolved opclass state (C GinState's per-attnum arrays).
 #[derive(Clone, Copy, Debug)]
 pub struct GinColState {
@@ -295,6 +377,8 @@ pub struct GinScanKeyData {
     pub jspOps: PgVec<'static, JspGinOp>,
     // tsvector_ops extra_data[0]: QueryItem index -> operand (entry) number.
     pub mapItemOperand: PgVec<'static, i32>,
+    // gin_trgm_ops regexp extra_data[0]: the packed trigram graph.
+    pub trgmGraph: Option<TrgmPackedGraph>,
     pub strategy: StrategyNumber,
     pub searchMode: i32,
     pub attnum: OffsetNumber,

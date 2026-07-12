@@ -1,3 +1,5 @@
+-- contrib-ports: prepended CREATE EXTENSION (ln runs each suite in its own DB; upstream relies on the shared contrib_regression DB).
+CREATE EXTENSION pg_trgm;
 CREATE TABLE test_trgm2(t text COLLATE "C");
 
 \copy test_trgm2 from 'data/trgm2.data'

@@ -215,9 +215,13 @@ fn arm_scan_staging<'mcx>(
     // clauses cheapest-first with zone folds + per-clause late
     // materialization, the dict text tier, hybrid requal tails) over the
     // same forced full-prefix deform, widened to the feed's own SoA ask.
-    // Varlane fold shapes keep their dedicated varkey staging (the two
-    // stagings are structurally exclusive). Refusal falls through to the
-    // heap-shaped arms below, byte-safely.
+    // Varlane fold feeds COEXIST (q22coexist): the fold's one varlena column
+    // joins the lane's prefix ask — the cbstore (virtual-)prefix deform
+    // hosts any column type, and the lane's completing deform fills it for
+    // survivor windows, exactly the rows the fold touches (the fold drain
+    // walks the selection bitmap and the guard proof restricts to it).
+    // Refusal falls through to the heap-shaped arms below (the varkey
+    // staging for varlane folds), byte-safely.
     if ::nodeseqscan::seq_scan_is_cbstore(ss) {
         let min_prefix = match &shape {
             ScanFeedShape::RowFeed { .. } => 0,
@@ -230,9 +234,20 @@ fn arm_scan_staging<'mcx>(
             }
             ScanFeedShape::FoldPrefix { agg } => fused_agg_soa_prefix(agg, ss).unwrap_or(0),
         };
-        let varlane = matches!(&shape, ScanFeedShape::HashAggFold { agg }
-            if ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col).is_some());
-        if !varlane && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, min_prefix)? {
+        let vcol = match &shape {
+            ScanFeedShape::HashAggFold { agg } => {
+                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
+            }
+            _ => None,
+        };
+        let ask = match vcol {
+            Some(c) => min_prefix.max(c as i32 + 1),
+            None => min_prefix,
+        };
+        if ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)? {
+            if vcol.is_some() {
+                lane_trace("cbstore prewhere+varlane dual arm engaged");
+            }
             return Ok(());
         }
     }
@@ -1638,6 +1653,13 @@ fn agg_hash_build_fold_feed<'mcx>(
         debug_assert!(plan.vguards.is_empty() || lanefold_varlane_col(plan).is_some());
         lanefold_varlane_col(plan)
     };
+    // Dual arm (q22coexist): when the PREWHERE lane owns the staging, the
+    // varlena fold column sits at its NATURAL prefix index (the lane's
+    // completing deform fills it for survivor windows) — no varkey remap.
+    // The lane fills lazily, so the guard proof below must restrict itself
+    // to the selection bitmap (unselected cells may be stale pointers).
+    let lane_owned = ::nodeseqscan::seq_scan_batch_lane_armed(ss);
+    let vremap = if lane_owned { None } else { vcol };
     let mut k2s = ScanK2Scratch::default();
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -1663,27 +1685,55 @@ fn agg_hash_build_fold_feed<'mcx>(
                     .expect("guarded fold plans read lane columns");
                 let nwords = (n as usize).div_ceil(64);
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
-                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
-                    *r = !fb;
+                // Proof domain: every staged non-fallback row — a superset of
+                // the rows the fold will touch, so a Pass is sound and a
+                // Demote at worst conservative. Under the PREWHERE lane the
+                // staged columns fill lazily (survivor windows only), so the
+                // domain must intersect the selection bitmap: unselected
+                // cells may be stale pointers, and the fold touches only
+                // selected rows anyway (requal survivors ⊆ selected bits).
+                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                    Some(sel) if lane_owned => {
+                        for ((r, fb), s) in
+                            rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
+                        {
+                            *r = s & !fb;
+                        }
+                    }
+                    _ => {
+                        for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                            *r = !fb;
+                        }
+                    }
                 }
                 if n % 64 != 0 {
                     rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
-                // SAFETY: selected rows are staged non-fallback rows, whose
-                // lane values are live page datum pointers (varkey staging /
-                // prefix deform contract) — vguard columns readable at their
-                // varlena header byte.
-                demote = unsafe {
-                    match vcol {
-                        Some(c) => ::lanefold::check_guards(
-                            plan,
-                            &VarLaneCols { soa, col: c },
-                            &rows[..nwords],
-                            |_| None,
-                        ),
-                        None => ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None),
-                    }
-                } == ::lanefold::GuardCheck::Demote;
+                // Empty domain: nothing to prove and nothing will fold —
+                // never probe lane cells (a survivor-less lane window ran no
+                // completing deform; every cell is stale).
+                if rows[..nwords].iter().any(|&w| w != 0) {
+                    // SAFETY: proof rows are staged non-fallback rows — under
+                    // a varkey/prefix staging every staged row's lane values
+                    // are live page datum pointers (staging contract); under
+                    // the PREWHERE lane the domain is selected rows of a
+                    // survivor window, whose completing deform filled every
+                    // prefix column with decoded datums — vguard columns
+                    // readable at their varlena header byte either way.
+                    demote = unsafe {
+                        match vremap {
+                            Some(c) => ::lanefold::check_guards(
+                                plan,
+                                &VarLaneCols { soa, col: c },
+                                &rows[..nwords],
+                                |_| None,
+                            ),
+                            None => {
+                                ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                            }
+                        }
+                    } == ::lanefold::GuardCheck::Demote;
+                }
             }
         }
         if demote {
@@ -1766,7 +1816,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         // staging, pinned for the staged batch); guarded plans passed
         // `check_guards` above; the rest is `agg_fold_staged`'s per-feed
         // contract.
-        match (::nodeseqscan::seq_scan_batch_soa(ss), vcol) {
+        match (::nodeseqscan::seq_scan_batch_soa(ss), vremap) {
             (Some(soa), Some(cix)) => unsafe {
                 agg_fold_staged(agg, &VarLaneCols { soa, col: cix }, &idxs, &groups)?
             },
@@ -2182,20 +2232,42 @@ fn agg_plain_fold_feed<'mcx>(
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                     .expect("plain fold plans read lane columns");
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
-                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
-                    *r = !fb;
+                // Proof domain: under the PREWHERE lane the staged columns
+                // fill lazily (survivor windows only), so intersect the
+                // selection bitmap — the fold touches only selected rows
+                // (requal survivors ⊆ selected bits); unselected cells may be
+                // stale pointers (vguard columns via the virtual prefix).
+                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                    Some(sel) => {
+                        for ((r, fb), s) in
+                            rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
+                        {
+                            *r = s & !fb;
+                        }
+                    }
+                    None => {
+                        for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                            *r = !fb;
+                        }
+                    }
                 }
                 if n % 64 != 0 {
                     rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
-                // SAFETY: selected rows are staged non-fallback rows, whose
-                // lane values are live deformed datums (prefix deform
-                // contract); the plain drive admits no varlena lanes, so no
-                // vguard column is ever probed here.
-                demote = unsafe {
-                    ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
-                        == ::lanefold::GuardCheck::Demote
-                };
+                // Empty domain: nothing will fold — never probe lane cells
+                // (a survivor-less lane window ran no completing deform).
+                if rows[..nwords].iter().any(|&w| w != 0) {
+                    // SAFETY: proof rows are staged non-fallback rows with
+                    // live deformed lane values (prefix deform contract;
+                    // under the PREWHERE lane the domain is selected rows of
+                    // a survivor window, whose completing deform filled every
+                    // prefix column — vguard columns readable at their
+                    // varlena header byte).
+                    demote = unsafe {
+                        ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                            == ::lanefold::GuardCheck::Demote
+                    };
+                }
             }
         }
         if demote {
