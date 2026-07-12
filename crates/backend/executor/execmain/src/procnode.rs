@@ -95,6 +95,11 @@ pub struct AppendNode<'mcx> {
     pub substates: ::mcx::PgVec<'mcx, PlanStateNode<'mcx>>,
     /// Original appendplans index per substate (initial pruning skips some).
     pub subplan_origin: ::mcx::PgVec<'mcx, i32>,
+    /// Lane-executor-v2 append verdict, memoized at first offer (verdict
+    /// stability: a lane-driven child carries a staged-batch cursor across
+    /// the Volcano boundary); the dynamic gates (EPQ, direction, parallel
+    /// mode) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 pub struct MergeAppendNode<'mcx> {
@@ -1039,7 +1044,7 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::Append(::mcx::alloc_in(
                 mcx,
-                AppendNode { state, substates, subplan_origin },
+                AppendNode { state, substates, subplan_origin, lane_fusible: None },
             )?)
         }
         NodeTag::T_MergeAppend => {
@@ -1437,6 +1442,13 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2: ProjectSet is REFUSED wholesale — a documented
+    // refuse-set entry (the SRF multi-call protocol is per-tuple stateful and
+    // has no lane-owned child shape to chain onto; see the ProjectSet section
+    // of `lanev2.rs`). Accounting tick only; always the unchanged body.
+    if crate::lanev2::enabled() {
+        crate::lanev2::refuse_project_set();
+    }
     exec_project_set(ps, estate)
 }
 
@@ -2230,7 +2242,16 @@ fn append_arm<'mcx>(
     a: &mut PgBox<'mcx, AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let AppendNode { state, substates, subplan_origin: _ } = &mut **a;
+    // Lane-executor-v2 dispatch hook (wave 5: the serial Append over
+    // lane-fusible scan children — the node's own exec_append body over lane
+    // child pipelines): falls through to the UNCHANGED exec_append on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_append(a, estate)? {
+            return Ok(r);
+        }
+    }
+    let AppendNode { state, substates, .. } = &mut **a;
     ::nodeappend::exec_append(state, estate, |e, i| exec_proc_node(&mut substates[i], e))
 }
 
@@ -3432,7 +3453,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible; outer_desc },
     IncrementalSortNode<'_> { state, outer },
-    AppendNode<'_> { state, substates, subplan_origin },
+    AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
     SubqueryScanNode<'_> { ss, subplan },
     SetOpNode<'_> { state, outer, inner },
