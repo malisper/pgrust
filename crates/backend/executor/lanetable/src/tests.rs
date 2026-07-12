@@ -6,14 +6,29 @@ fn states_i64(p: *mut u8) -> *mut i64 {
 }
 
 /// Reference-checked int build: fold (sum, count) per key across the salt
-/// enable threshold, growth, and (optionally) two-level conversion.
+/// enable threshold, growth, and (optionally) two-level conversion — over
+/// the full (hash kind × entry layout) config matrix.
 fn int_roundtrip(n: usize, card: u64, expect_two_level: bool) {
-    let mut t = LaneAggTable::new(KeyRepr::Int, 16, 64);
+    for hash in [HashKind::Fmix, HashKind::Crc] {
+        for layout in [EntryLayout::Salt8, EntryLayout::Inline16] {
+            int_roundtrip_cfg(n, card, expect_two_level, hash, layout);
+        }
+    }
+}
+
+fn int_roundtrip_cfg(
+    n: usize,
+    card: u64,
+    expect_two_level: bool,
+    hash: HashKind,
+    layout: EntryLayout,
+) {
+    let mut t = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
     let mut reference: HashMap<i64, (i64, i64)> = HashMap::new();
     for i in 0..n {
         // Multiplicative spread (the bench rig's own domain reduction).
         let k = ((i as u64 % card).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as i64;
-        let pr = t.probe_int(k, hash_int(k as u64));
+        let pr = t.probe_int(k, t.hash_key_int(k as u64));
         // SAFETY: 16 state bytes, zero-initialized at birth.
         unsafe {
             let s = states_i64(pr.states);
@@ -63,7 +78,7 @@ fn int_two_level_conversion() {
 fn int_negative_and_extreme_keys() {
     let mut t = LaneAggTable::new(KeyRepr::Int, 8, 4);
     for k in [i64::MIN, -1, 0, 1, i64::MAX, i64::MIN, 0] {
-        let pr = t.probe_int(k, hash_int(k as u64));
+        let pr = t.probe_int(k, t.hash_key_int(k as u64));
         // SAFETY: 8 zeroed state bytes.
         unsafe { *states_i64(pr.states) += 1 };
     }
@@ -85,7 +100,7 @@ fn null_group_out_of_band() {
     assert!(a.is_new);
     // SAFETY: zeroed states.
     unsafe { *states_i64(a.states) += 7 };
-    let pr = t.probe_int(42, hash_int(42));
+    let pr = t.probe_int(42, t.hash_key_int(42));
     // SAFETY: zeroed states.
     unsafe { *states_i64(pr.states) += 1 };
     let b = t.probe_null();
@@ -145,7 +160,7 @@ fn bytes_short_and_long() {
         .collect();
     let mut reference: HashMap<Vec<u8>, i64> = HashMap::new();
     for k in &corpus {
-        let pr = t.probe_bytes(k, hash_bytes(k));
+        let pr = t.probe_bytes(k, t.hash_key_bytes(k));
         // SAFETY: zeroed 8-byte states.
         unsafe { *states_i64(pr.states) += 1 };
         *reference.entry(k.clone()).or_insert(0) += 1;
@@ -166,7 +181,7 @@ fn bytes_prefix_lengths_distinct() {
     // groups; empty key packs to 0 and is NOT the null group.
     let mut t = LaneAggTable::new(KeyRepr::Bytes, 8, 4);
     for k in ["", "a", "aa", "aaa", "aaaaaaaa", "aaaaaaaaa", ""] {
-        let pr = t.probe_bytes(k.as_bytes(), hash_bytes(k.as_bytes()));
+        let pr = t.probe_bytes(k.as_bytes(), t.hash_key_bytes(k.as_bytes()));
         // SAFETY: zeroed states.
         unsafe { *states_i64(pr.states) += 1 };
     }
@@ -189,7 +204,7 @@ fn bytes_two_level_conversion() {
     let card = 150_000usize;
     for i in 0..(card * 2) {
         let k = format!("k{:07}", i % card);
-        let pr = t.probe_bytes(k.as_bytes(), hash_bytes(k.as_bytes()));
+        let pr = t.probe_bytes(k.as_bytes(), t.hash_key_bytes(k.as_bytes()));
         // SAFETY: zeroed states.
         unsafe { *states_i64(pr.states) += 1 };
     }
@@ -207,13 +222,13 @@ fn bytes_two_level_conversion() {
 fn reset_reuses() {
     let mut t = LaneAggTable::new(KeyRepr::Int, 8, 4);
     for k in 0..10_000i64 {
-        t.probe_int(k, hash_int(k as u64));
+        t.probe_int(k, t.hash_key_int(k as u64));
     }
     t.probe_null();
     t.reset();
     assert_eq!(t.len(), 0);
     assert_eq!(t.nrows(), 0);
-    let pr = t.probe_int(5, hash_int(5));
+    let pr = t.probe_int(5, t.hash_key_int(5));
     assert!(pr.is_new);
     // SAFETY: reset re-zeroes retained chunks.
     assert_eq!(unsafe { *states_i64(pr.states) }, 0);
@@ -233,9 +248,52 @@ fn mem_used_monotone() {
     let mut t = LaneAggTable::new(KeyRepr::Int, 16, 4);
     let m0 = t.mem_used();
     for k in 0..100_000i64 {
-        t.probe_int(k, hash_int(k as u64));
+        t.probe_int(k, t.hash_key_int(k as u64));
     }
     assert!(t.mem_used() > m0);
     // Sanity: accounted memory covers at least entries + rows actually held.
     assert!(t.mem_used() >= t.nrows() * (8 + 16));
+}
+
+#[test]
+fn bytes_crc_hash_roundtrip() {
+    // Same corpus as bytes_short_and_long, explicit Crc hash (falls back to
+    // Fmix off-aarch64 — the test is then a duplicate, still valid).
+    let mut t = LaneAggTable::with_config(KeyRepr::Bytes, 8, 16, HashKind::Crc, EntryLayout::Salt8);
+    let corpus: Vec<Vec<u8>> = (0..3000)
+        .map(|i| {
+            let s = format!("key-{}{}", i % 700, if i % 3 == 0 { "-with-a-long-suffix" } else { "" });
+            s.into_bytes()
+        })
+        .collect();
+    let mut reference: HashMap<Vec<u8>, i64> = HashMap::new();
+    for k in &corpus {
+        let pr = t.probe_bytes(k, t.hash_key_bytes(k));
+        // SAFETY: zeroed 8-byte states.
+        unsafe { *states_i64(pr.states) += 1 };
+        *reference.entry(k.clone()).or_insert(0) += 1;
+    }
+    assert_eq!(t.len(), reference.len());
+    let mut scratch = [0u8; 8];
+    for i in 0..t.nrows() {
+        let k = t.row_key_bytes(i, &mut scratch).unwrap().to_vec();
+        // SAFETY: live row.
+        let c = unsafe { *states_i64(t.row_states(i)) };
+        assert_eq!(reference[&k], c);
+    }
+}
+
+#[test]
+fn inline_layout_reset_reuses() {
+    let mut t =
+        LaneAggTable::with_config(KeyRepr::Int, 8, 4, HashKind::Crc, EntryLayout::Inline16);
+    for k in 0..10_000i64 {
+        t.probe_int(k, t.hash_key_int(k as u64));
+    }
+    assert_eq!(t.len(), 10_000);
+    t.reset();
+    assert_eq!(t.len(), 0);
+    let pr = t.probe_int(5, t.hash_key_int(5));
+    assert!(pr.is_new);
+    assert_eq!(t.len(), 1);
 }

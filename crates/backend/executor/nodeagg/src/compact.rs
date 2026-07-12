@@ -175,7 +175,7 @@ pub fn agg_hash_compact_batch<'mcx>(
                 table.probe_null()
             } else {
                 let k = ckeys[i];
-                table.probe_int(k, ::lanetable::hash_int(k as u64))
+                table.probe_int(k, table.hash_key_int(k as u64))
             };
             states.push(pr.states);
             if pr.is_new {
