@@ -35,6 +35,7 @@ pub enum IndexAmKind {
     Gist,
     Spgist,
     Brin,
+    Hnsw,
     #[cfg(feature = "mock")]
     Mock,
 }
@@ -62,6 +63,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => true,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -75,6 +77,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => true,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -88,6 +91,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -101,6 +105,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -114,6 +119,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -127,6 +133,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => 0,
             IndexAmKind::Spgist => 0,
             IndexAmKind::Brin => 0,
+            IndexAmKind::Hnsw => 0,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -140,6 +147,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => 12,
             IndexAmKind::Spgist => 7,
             IndexAmKind::Brin => 15,
+            IndexAmKind::Hnsw => 3,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 6,
         }
@@ -153,6 +161,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => 10,
             IndexAmKind::Spgist => 7,
             IndexAmKind::Brin => 5,
+            IndexAmKind::Hnsw => 0,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => 5,
         }
@@ -166,6 +175,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => true,
             IndexAmKind::Spgist => true,
             IndexAmKind::Brin => true,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -179,6 +189,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => true,
         }
@@ -192,6 +203,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -205,6 +217,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => true,
             IndexAmKind::Spgist => true,
             IndexAmKind::Brin => false,
+            IndexAmKind::Hnsw => true,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -218,6 +231,7 @@ impl IndexAmKind {
             IndexAmKind::Gist => false,
             IndexAmKind::Spgist => false,
             IndexAmKind::Brin => true,
+            IndexAmKind::Hnsw => false,
             #[cfg(feature = "mock")]
             IndexAmKind::Mock => false,
         }
@@ -312,6 +326,7 @@ pub enum IndexScanOpaque<'mcx> {
     Gist(PgBox<'mcx, GISTScanOpaqueData<'mcx>>),
     Spgist(PgBox<'mcx, ::types_spgist::state::SpGistScanOpaqueData<'mcx>>),
     Brin(PgBox<'mcx, ::types_brin::BrinOpaque<'mcx>>),
+    Hnsw(PgBox<'mcx, ::types_hnsw::HnswScanOpaqueData<'mcx>>),
     #[cfg(feature = "mock")]
     Mock(MockOpaque),
 }
@@ -326,6 +341,7 @@ impl IndexScanOpaque<'_> {
             IndexScanOpaque::Gist(_) => IndexAmKind::Gist,
             IndexScanOpaque::Spgist(_) => IndexAmKind::Spgist,
             IndexScanOpaque::Brin(_) => IndexAmKind::Brin,
+            IndexScanOpaque::Hnsw(_) => IndexAmKind::Hnsw,
             #[cfg(feature = "mock")]
             IndexScanOpaque::Mock(_) => IndexAmKind::Mock,
         }

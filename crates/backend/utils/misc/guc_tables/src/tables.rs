@@ -244,6 +244,12 @@ pub static server_message_level_options: &[config_enum_entry] = &[
     config_enum_entry { name: "panic", val: PANIC, hidden: false },
 ];
 
+pub static hnsw_iterative_scan_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "off", val: 0, hidden: false },
+    config_enum_entry { name: "relaxed_order", val: 1, hidden: false },
+    config_enum_entry { name: "strict_order", val: 2, hidden: false },
+];
+
 pub static intervalstyle_options: &[config_enum_entry] = &[
     config_enum_entry { name: "postgres", val: INTSTYLE_POSTGRES, hidden: false },
     config_enum_entry { name: "postgres_verbose", val: INTSTYLE_POSTGRES_VERBOSE, hidden: false },
@@ -766,6 +772,8 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     GucIntSetting { name: "client_connection_check_interval", context: PGC_USERSET, group: CONN_AUTH_TCP, short_desc: Some("Sets the time interval between checks for disconnection while running queries."), long_desc: Some("0 disables connection checks."), flags: GUC_UNIT_MS, variable: &vars::client_connection_check_interval, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: Some(&hooks::check_client_connection_check_interval), assign_hook: None, show_hook: None },
     GucIntSetting { name: "log_startup_progress_interval", context: PGC_SIGHUP, group: LOGGING_WHEN, short_desc: Some("Time between progress updates for long-running startup operations."), long_desc: Some("0 disables progress updates."), flags: GUC_UNIT_MS, variable: &vars::log_startup_progress_interval, boot_val: GucDefaultValue::Int(10000), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
     GucIntSetting { name: "scram_iterations", context: PGC_USERSET, group: CONN_AUTH_AUTH, short_desc: Some("Sets the iteration count for SCRAM secret generation."), long_desc: None, flags: GUC_REPORT, variable: &vars::scram_sha_256_iterations, boot_val: GucDefaultValue::Int(SCRAM_SHA_256_DEFAULT_ITERATIONS), min: 1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "hnsw.ef_search", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the size of the dynamic candidate list for search"), long_desc: Some("Valid range is 1..1000."), flags: 0, variable: &vars::hnsw_ef_search, boot_val: GucDefaultValue::Int(40), min: 1, max: 1000, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "hnsw.max_scan_tuples", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the max number of tuples to visit for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_max_scan_tuples, boot_val: GucDefaultValue::Int(20000), min: 1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesReal: &[GucRealSetting] = &[
@@ -795,6 +803,7 @@ pub static ConfigureNamesReal: &[GucRealSetting] = &[
     GucRealSetting { name: "log_statement_sample_rate", context: PGC_SUSET, group: LOGGING_WHEN, short_desc: Some("Fraction of statements exceeding \"log_min_duration_sample\" to be logged."), long_desc: Some("Use a value between 0.0 (never log) and 1.0 (always log)."), flags: 0, variable: &vars::log_statement_sample_rate, boot_val: GucDefaultValue::Real(1.0f64), min: 0.0f64, max: 1.0f64, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "log_transaction_sample_rate", context: PGC_SUSET, group: LOGGING_WHEN, short_desc: Some("Sets the fraction of transactions from which to log all statements."), long_desc: Some("Use a value between 0.0 (never log) and 1.0 (log all statements for all transactions)."), flags: 0, variable: &vars::log_xact_sample_rate, boot_val: GucDefaultValue::Real(0.0f64), min: 0.0f64, max: 1.0f64, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "vacuum_max_eager_freeze_failure_rate", context: PGC_USERSET, group: VACUUM_FREEZING, short_desc: Some("Fraction of pages in a relation vacuum can scan and fail to freeze before disabling eager scanning."), long_desc: Some("A value of 0.0 disables eager scanning and a value of 1.0 will eagerly scan up to 100 percent of the all-visible pages in the relation. If vacuum successfully freezes these pages, the cap is lower than 100 percent, because the goal is to amortize page freezing across multiple vacuums."), flags: 0, variable: &vars::vacuum_max_eager_freeze_failure_rate, boot_val: GucDefaultValue::Real(0.03f64), min: 0.0f64, max: 1.0f64, check_hook: None, assign_hook: None, show_hook: None },
+    GucRealSetting { name: "hnsw.scan_mem_multiplier", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the multiple of work_mem to use for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_scan_mem_multiplier, boot_val: GucDefaultValue::Real(1.0f64), min: 1.0f64, max: 1000.0f64, check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesString: &[GucStringSetting] = &[
@@ -923,4 +932,5 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "debug_logical_replication_streaming", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces immediate streaming or serialization of changes in large transactions."), long_desc: Some("On the publisher, it allows streaming or serializing each change in logical decoding. On the subscriber, it allows serialization of all changes to files and notifies the parallel apply workers to read and apply them at the end of the transaction."), flags: GUC_NOT_IN_SAMPLE, variable: &vars::debug_logical_replication_streaming, boot_val: GucDefaultValue::Enum(DEBUG_LOGICAL_REP_STREAMING_BUFFERED), options: GucEnumOptions::Inline(debug_logical_replication_streaming_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "regex_engine", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Selects the regexp engine: auto dispatches compatible patterns to RE2, the rest to Spencer."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::regex_engine, boot_val: GucDefaultValue::Enum(REGEX_ENGINE_AUTO), options: GucEnumOptions::Inline(regex_engine_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "io_method", context: PGC_POSTMASTER, group: RESOURCES_IO, short_desc: Some("Selects the method for executing asynchronous I/O."), long_desc: None, flags: 0, variable: &vars::io_method, boot_val: GucDefaultValue::Enum(IOMETHOD_WORKER), options: GucEnumOptions::External(&option_sets::io_method_options), check_hook: None, assign_hook: Some(&hooks::assign_io_method), show_hook: None },
+    GucEnumSetting { name: "hnsw.iterative_scan", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the mode for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_iterative_scan, boot_val: GucDefaultValue::Enum(0), options: GucEnumOptions::Inline(hnsw_iterative_scan_options), check_hook: None, assign_hook: None, show_hook: None },
 ];

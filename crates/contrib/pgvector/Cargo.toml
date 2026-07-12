@@ -1,0 +1,28 @@
+[package]
+name = "pgvector"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgvector"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+elog = { path = "../../backend/utils/error/elog" }
+guc = { path = "../../backend/utils/misc/guc" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+adt_float = { path = "../../backend/utils/adt/float" }
+ryu = { path = "../../common/ryu" }
+pqformat = { path = "../../backend/libpq/pqformat" }
+adt_numeric = { path = "../../backend/utils/adt/numeric" }
+detoast = { path = "../../backend/access/common/detoast" }
+stringinfo = { path = "../../_support/types/stringinfo" }

@@ -1091,6 +1091,10 @@ pub fn index_build<'mcx>(
             let r = ginbuild::ginbuild(mcx, heapRelation, indexRelation, indexInfo)?;
             (r.heap_tuples, r.index_tuples)
         }
+        types_relscan::IndexAmKind::Hnsw => {
+            let r = pgvector_hnsw_build::hnswbuild(mcx, heapRelation, indexRelation, indexInfo)?;
+            (r.heap_tuples, r.index_tuples)
+        }
         _ => {
             let r = gistbuild::gistbuild(mcx, heapRelation, indexRelation, indexInfo)?;
             (r.heap_tuples, r.index_tuples)
@@ -1113,6 +1117,7 @@ pub fn index_build<'mcx>(
                 types_relscan::IndexAmKind::Gist => gistbuild::gistbuildempty(indexRelation)?,
                 types_relscan::IndexAmKind::Spgist => spgist_build::spgbuildempty(indexRelation)?,
                 types_relscan::IndexAmKind::Brin => brin_build::brinbuildempty(indexRelation)?,
+                types_relscan::IndexAmKind::Hnsw => pgvector_hnsw_build::hnswbuildempty(indexRelation)?,
                 #[allow(unreachable_patterns)]
                 other => unported(&format!("index_build: ambuildempty for AM {other:?}")),
             }

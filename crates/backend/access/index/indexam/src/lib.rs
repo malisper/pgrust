@@ -195,6 +195,7 @@ pub fn index_bulk_delete<'mcx>(
         IndexAmKind::Gin => gin::ginbulkdelete(mcx, info, istat, dead_items),
         IndexAmKind::Gist => gist::gistbulkdelete(info, istat, dead_items),
         IndexAmKind::Spgist => spgist::spgbulkdelete(info, istat, dead_items),
+        IndexAmKind::Hnsw => pgvector_hnsw::hnswbulkdelete(info, istat, dead_items),
         // brinbulkdelete: BRIN has no per-heap-tuple entries; stats
         // allocation is the whole body.
         IndexAmKind::Brin => Ok(istat.unwrap_or_default()),
@@ -218,6 +219,7 @@ pub fn index_bulk_delete_collect<'mcx>(
         IndexAmKind::Gin => gin::ginbulkdelete_collect(mcx, info, callback),
         IndexAmKind::Gist => gist::gistbulkdelete_collect(info, callback),
         IndexAmKind::Spgist => spgist::spgbulkdelete_collect(info, callback),
+        IndexAmKind::Hnsw => pgvector_hnsw::hnswbulkdelete_collect(info, callback),
         // brinbulkdelete never invokes the callback: BRIN has no
         // per-heap-tuple entries to report.
         IndexAmKind::Brin => Ok(IndexBulkDeleteResult::default()),
@@ -247,6 +249,7 @@ pub fn index_vacuum_cleanup<'mcx>(
         IndexAmKind::Gin => gin::ginvacuumcleanup(mcx, info, istat),
         IndexAmKind::Gist => gist::gistvacuumcleanup(info, istat),
         IndexAmKind::Spgist => spgist::spgvacuumcleanup(info, istat),
+        IndexAmKind::Hnsw => pgvector_hnsw::hnswvacuumcleanup(info, istat),
         IndexAmKind::Brin => {
             if info.analyze_only {
                 Ok(istat)
@@ -405,6 +408,7 @@ fn am_getbitmap(
         IndexScanOpaque::Gist(_) => gist::gistgetbitmap(scan, bitmap),
         IndexScanOpaque::Spgist(_) => spgist::spggetbitmap(scan, bitmap),
         IndexScanOpaque::Brin(_) => brin::bringetbitmap(scan, bitmap),
+        IndexScanOpaque::Hnsw(_) => Err(missing_procedure("amgetbitmap", scan.index_rel())),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amgetbitmap"),
         #[allow(unreachable_patterns)]
@@ -807,6 +811,7 @@ fn am_beginscan<'mcx>(
         IndexAmKind::Gin => gin::ginbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Gist => gist::gistbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Spgist => spgist::spgbeginscan(mcx, indexRelation, nkeys, norderbys),
+        IndexAmKind::Hnsw => pgvector_hnsw::hnswbeginscan(mcx, indexRelation, nkeys, norderbys),
         IndexAmKind::Brin => brin::brinbeginscan(mcx, indexRelation, nkeys, norderbys),
         #[cfg(test)]
         IndexAmKind::Mock => Ok(mock::beginscan(mcx, indexRelation, nkeys, norderbys)),
@@ -827,6 +832,7 @@ fn am_rescan(
         IndexScanOpaque::Gin(_) => gin::ginrescan(scan, keys),
         IndexScanOpaque::Gist(_) => gist::gistrescan(scan, keys, orderbys),
         IndexScanOpaque::Spgist(_) => spgist::spgrescan(scan, keys, orderbys),
+        IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswrescan(scan, keys, orderbys),
         IndexScanOpaque::Brin(_) => brin::brinrescan(scan, keys),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::rescan(scan)),
@@ -842,6 +848,7 @@ fn am_endscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gin(_) => gin::ginendscan(scan),
         IndexScanOpaque::Gist(_) => gist::gistendscan(scan),
         IndexScanOpaque::Spgist(_) => spgist::spgendscan(scan),
+        IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswendscan(scan),
         IndexScanOpaque::Brin(_) => brin::brinendscan(scan),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(()),
@@ -857,6 +864,7 @@ fn am_markpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks ammarkpos (guarded by has_ammarkpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("ammarkpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_ammarkpos gate"),
+        IndexScanOpaque::Hnsw(_) => unreachable!("has_ammarkpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_ammarkpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => Ok(mock::markpos(scan)),
@@ -872,6 +880,7 @@ fn am_restrpos(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         IndexScanOpaque::Gin(_) => unreachable!("gin lacks amrestrpos (guarded by has_amrestrpos)"),
         IndexScanOpaque::Gist(_) => Err(missing_procedure("amrestrpos", scan.index_rel())),
         IndexScanOpaque::Spgist(_) => unreachable!("has_amrestrpos gate"),
+        IndexScanOpaque::Hnsw(_) => unreachable!("has_amrestrpos gate"),
         IndexScanOpaque::Brin(_) => unreachable!("has_amrestrpos gate"),
         #[cfg(test)]
         IndexScanOpaque::Mock(_) => unreachable!("Mock lacks amrestrpos"),
@@ -892,6 +901,7 @@ fn am_gettuple(scan: &mut IndexScanDescData<'_>, direction: ScanDirection) -> Pg
         ),
         IndexScanOpaque::Gist(_) => gist::gistgettuple(scan, direction),
         IndexScanOpaque::Spgist(_) => spgist::spggettuple(scan, direction),
+        IndexScanOpaque::Hnsw(_) => pgvector_hnsw::hnswgettuple(scan, direction),
         // CHECK_SCAN_PROCEDURE(amgettuple): BRIN is bitmap-only.
         IndexScanOpaque::Brin(_) => Err(missing_procedure("amgettuple", scan.index_rel())),
         #[cfg(test)]
@@ -997,6 +1007,10 @@ fn am_insert<'mcx>(
                 unsafe { core::mem::transmute(slot) };
             brin::brininsert(mcx, indexRelation, values, isnull, heap_t_ctid, slot)
         }
+        IndexAmKind::Hnsw => {
+            debug_assert!(checkUnique == IndexUniqueCheck::UNIQUE_CHECK_NO);
+            pgvector_hnsw::hnswinsert(mcx, indexRelation, values, isnull, heap_t_ctid, heapRelation)
+        }
         #[cfg(test)]
         IndexAmKind::Mock => Ok(true),
         #[allow(unreachable_patterns)]
@@ -1016,6 +1030,7 @@ fn am_insert_cleanup(
         IndexAmKind::Gin => unreachable!("gin lacks aminsertcleanup (guarded)"),
         IndexAmKind::Gist => Ok(()),
         IndexAmKind::Spgist => unreachable!("spgist lacks aminsertcleanup (guarded)"),
+        IndexAmKind::Hnsw => unreachable!("hnsw lacks aminsertcleanup (guarded)"),
         IndexAmKind::Brin => {
             let Some(boxed) = am_cache else { return Ok(()) };
             let slot = boxed
