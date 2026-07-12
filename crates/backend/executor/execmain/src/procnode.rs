@@ -1724,6 +1724,20 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::Gather(g) => {
+            // Lane-executor-v2 dispatch hook (agg-over-gather: the leader-
+            // side hash-agg breaker fed by the gather machinery as a source;
+            // the workers stay row-path). Falls through to the UNCHANGED
+            // per-tuple agg over exec_gather on refuse. Lane logic +
+            // refuse-set in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_gather(agg, g, lane_stage_slot, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
         PlanStateNode::SubqueryScan(sqs) => {
             // Lane-executor-v2 dispatch hook (wave-4 glue: hash-agg breaker
             // over a SubqueryScan over lane scans — pipelines chaining
