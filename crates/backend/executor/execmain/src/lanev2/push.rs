@@ -255,15 +255,18 @@ pub(super) trait TupleOp<'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus>;
     /// The upstream source is exhausted — the `Finished`-vs-more-phases
-    /// seam. An op with a post-exhaustion phase (the right-fill hash join's
-    /// unmatched-BUILD fill scan, HJ_FILL_INNER_TUPLES) flips into
-    /// source-of-fill-rows mode here and pushes into the SAME sink:
-    /// `Paused` = downstream full mid-fill (position node-resident;
-    /// `pending()` must report true so the driver `resume`s the fill on the
-    /// next round), anything else = nothing further will ever be produced
-    /// (the driver then finishes the sink). Called (possibly repeatedly —
-    /// implementations must be idempotent once drained) whenever the source
-    /// reports exhaustion. Default: no post-exhaustion phase.
+    /// seam. An op with a post-exhaustion phase flips into source mode here
+    /// and pushes into the SAME sink: the right-fill hash join's
+    /// unmatched-BUILD fill scan (HJ_FILL_INNER_TUPLES), or the sorted-agg
+    /// operator's final open-group flush. `Paused` = downstream full
+    /// (position node-resident; a multi-row phase must report `pending()`
+    /// true so the driver `resume`s it on the next round — a single-tuple
+    /// tail may instead rely on the driver re-calling this method), anything
+    /// else = nothing further will ever be produced (the driver then
+    /// finishes the sink). Called possibly repeatedly — implementations must
+    /// be idempotent once drained (the sorted-agg op's `agg_done` is; a
+    /// drained fill scan reports `Finished`). Default: no post-exhaustion
+    /// phase.
     fn source_exhausted(
         &mut self,
         _out: &mut dyn Sink<'mcx>,
@@ -427,6 +430,13 @@ where
                 unreachable!("chain build pipeline paused: breaker sink returned Full")
             }
         }
+    }
+    // Upstream exhausted (second, idempotent seam call for ops whose
+    // post-exhaustion phase ran inside the loop): flush the TupleOp's tail
+    // into the breaker sink (breaker sinks never fill, so a flush cannot
+    // pause) before finishing.
+    if let OpStatus::Paused = top.source_exhausted(sink, estate)? {
+        unreachable!("chain build pipeline paused in flush: breaker sink returned Full")
     }
     sink.finish(estate)
 }

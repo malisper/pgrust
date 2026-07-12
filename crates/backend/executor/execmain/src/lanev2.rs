@@ -912,6 +912,14 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     choice: &mut Option<AggLaneChoice>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // AGG_PLAIN (ungrouped) routes to the fold drive: no breaker needed (a
+    // single group has no per-group read-back — feed + finalize is the whole
+    // node inside one call), but the same staged-batch fold applies, with
+    // `lanefold::fold_batch` (the ungrouped kernel, CSE included) in place of
+    // the grouped probe+fold.
+    if ::nodeagg::agg_plain_fold_admissible(agg) {
+        return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
+    }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
         return Ok(None);
     }
@@ -1130,6 +1138,255 @@ fn agg_fold_feed_row<'mcx>(
     Ok(())
 }
 
+// ===========================================================================
+// Plain-agg (AGG_PLAIN, ungrouped) fold drive — the q2-class
+// `SELECT sum(a), avg(b), count(*) FROM t [WHERE ...]` shapes. SIMPLER than
+// the hashed breaker: one group, no probe — each staged batch folds straight
+// into the single pergroup array via `lanefold::fold_batch` (the ungrouped
+// kernel, CSE schedule included), and the retrieve side is the delegated
+// `plain_finish` (finalize + HAVING + project, one row, zero-row contract
+// included). The whole node runs inside one `exec_proc_node` call, exactly
+// like `exec_agg`'s single-group arm.
+// ===========================================================================
+
+/// Try to let the lane own an AGG_PLAIN `Agg` over a `SeqScan` child with the
+/// batched fold. `Some(result)` = the lane drove this call; `None` = refused
+/// (the caller falls through to the fused `exec_agg_batched` / per-tuple
+/// paths, byte-identically).
+fn try_own_plain_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    choice: &mut Option<AggLaneChoice>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
+    // gates re-checked per call; structural verdict memoized on the node).
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    let c = match *choice {
+        Some(c) => c,
+        None => {
+            let c = decide_plain_agg_lane(agg, ss, estate)?;
+            *choice = Some(c);
+            c
+        }
+    };
+    if c != AggLaneChoice::Fold {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: the one result row is out; a drained agg
+    // stays drained until rescan clears `agg_done`.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // One OWNED tick per lane-owned plain-agg build event (the gate's
+    // aggbuild floor counts builds, not calls; a plain node builds once per
+    // (re)scan — this drive runs the whole feed inside one call).
+    stats::tick_owned(ShapeClass::AggBuild);
+    agg_plain_fold_feed(agg, ss, estate)?;
+    // Retrieve (delegated): finalize + HAVING + project — one row (or none,
+    // when the var-free HAVING rejects it), setting `agg_done`.
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
+}
+
+/// The structural lane choice for an AGG_PLAIN Agg over a SeqScan, decided
+/// once at the first call. Fold or Refuse only — the lane never takes plain
+/// shapes per-row: the incumbent legacy fused `exec_agg_batched` drive is
+/// already batched with per-row transitions, so a per-row lane feed has
+/// nothing to win (admission economics, design §4).
+fn decide_plain_agg_lane<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggLaneChoice> {
+    // Every Refuse below is admission economics (§4): the legacy fused
+    // `exec_agg_batched` drive (or the per-tuple path) already owns the shape
+    // at least as well as a lane feed could. One tick per memoized per-node
+    // choice.
+    let refuse = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
+        Ok(AggLaneChoice::Refuse)
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+        return refuse();
+    };
+    // Projected scans: the agg reads output columns, which are not
+    // commensurable with scan-column prefixes — no SoA lane feed (the hashed
+    // breaker's scoping, verbatim).
+    if ss.ss.ps_ProjInfo.is_some() {
+        return refuse();
+    }
+    // count(*)-only plans read no lane columns: the incumbent fused drive
+    // already advances those per batch with zero per-row work (the storeless
+    // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
+    // Deliberate refuse-set entry.
+    if plan.cols.is_empty() {
+        return refuse();
+    }
+    // Probe-arm the deform now so an unarmable prefix (non-fixed-width
+    // column) is known BEFORE committing: the plain fold reads the SoA lanes
+    // directly, so a disarmed deform keeps the incumbent.
+    let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true);
+    if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+        return refuse();
+    }
+    Ok(AggLaneChoice::Fold)
+}
+
+/// Feed for the plain fold drive: per staged page batch, compose the row
+/// selection and fold the admitted transitions whole-batch with
+/// `lanefold::fold_batch` into the single pergroup array. One
+/// CHECK_FOR_INTERRUPTS per staged batch (design §9 batch-operator cadence).
+/// Guarded plans re-prove every batch; `Demote` runs the WHOLE batch through
+/// the checked per-row program (lanefold contract).
+///
+/// Two per-batch modes:
+///   * bitmap: no residual transitions and the qual is absent or staged as
+///     the kernel-qual bitmap — the selection is `sel & !fallback` (or
+///     `!fallback` with no qual) with NO per-row work for deformed rows (the
+///     fold reads the SoA lanes; a per-row emit would only store a slot
+///     nothing reads). Forced fallback rows re-check the qual per-row and run
+///     the full per-row program off the stored tuple.
+///   * per-row emit: a scalar qual and/or residual transitions — the scan's
+///     per-row emit applies the qual; surviving deformed rows join the fold
+///     selection (+ the residual program per row), fallback rows run the
+///     full per-row program.
+///
+/// Byte-identity: the same rows pass the same qual (the staged bitmap IS the
+/// kernel qual's verdict; fallback rows re-run the per-row check), and every
+/// fold kernel is commutative and bit-for-bit equal to C's transition
+/// semantics on admitted/guard-proven data (lanefold's tested contract), so
+/// the single group's transvalues — and the finalized output row — are
+/// identical.
+fn agg_plain_fold_feed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Same one-deform staging as the hashed fold feed; the deform is FORCED
+    // (count(*)-only plans were refused, so the fold always reads lane
+    // columns). Re-preparing with the same shape is a no-op.
+    let soa_prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, true);
+    // initialize_aggregates (delegated): fresh initval pergroups; a rescan
+    // re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let has_resid =
+        ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of scan: drop the scan slot's buffer pin (SeqScanSource
+            // end-of-stream parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let nwords = (n as usize).div_ceil(64);
+        // Guarded plans: prove the batch over every staged non-fallback row —
+        // a superset of the rows the fold will touch — before any fold (same
+        // soundness argument as the hashed fold feed).
+        let mut demote = false;
+        {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            if plan.guarded {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("plain fold plans read lane columns");
+                let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                    *r = !fb;
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+                demote = ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                    == ::lanefold::GuardCheck::Demote;
+            }
+        }
+        if demote {
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                }
+            }
+            continue;
+        }
+        let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+        let bitmap_qual = ::nodeseqscan::seq_scan_batch_qual_sel(ss).is_some();
+        if !has_resid && (bitmap_qual || ss.ss.qual.is_none()) {
+            let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
+            {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("plain fold plans read lane columns");
+                let fb = soa.fallback_words();
+                let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+                for w in 0..nwords {
+                    rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
+                    fallback[w] = fb[w];
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                    fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+            }
+            for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
+                while bits != 0 {
+                    let i = (w as u32) * 64 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                    }
+                }
+            }
+        } else {
+            for i in 0..n {
+                let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
+                    continue;
+                };
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i))
+                {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                } else {
+                    rows[(i / 64) as usize] |= 1u64 << (i % 64);
+                    if has_resid {
+                        ::nodeagg::agg_plain_build_accept_resid(agg, estate, slot)?;
+                    }
+                }
+            }
+        }
+        if rows[..nwords].iter().any(|w| *w != 0) {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            let aggcx = ::nodeagg::agg_aggcontext(agg);
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("plain fold plans read lane columns");
+            // SAFETY: pergroup_base is the node's once-allocated single-group
+            // pergroup array covering every transno (initialize_aggregates
+            // just wrote it); selected rows are non-fallback, carrying valid
+            // deformed lane values for every plan column (the SoA prefix
+            // covers the evaltrans fetch bound); AvgAccum pergroups hold the
+            // catalog's {0,0} int8[2] transarray, datum-copied at
+            // initialize_aggregates; Int128AvgAccum pergroups are NULL or
+            // hold the aggcontext state the fold/transfn chain installed, and
+            // `aggcx` is that same aggcontext; guarded plans passed
+            // `check_guards` above.
+            unsafe {
+                ::lanefold::fold_batch(
+                    plan,
+                    soa,
+                    &rows[..nwords],
+                    n as usize,
+                    ::nodeagg::agg_plain_pergroup_base(agg),
+                    aggcx,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build phase of the hash-agg breaker over a SeqScan feed (once, lazily on
 /// the first call), with the choice-dependent feed: drain the scan pipeline
 /// into the breaker sink — the lanefold whole-batch feed for
@@ -1218,8 +1475,8 @@ fn agg_seq_scan_build_if_needed<'mcx>(
 ///     scalar-within-lane, not just kernel quals / outer-read-free tlists);
 ///   * agg side: `agg_hash_breaker_admissible` (batch-drainable — no grouping
 ///     sets / DISTINCT-or-ordered-input / merge phase / subplan transitions —
-///     AGG_HASHED, initplan-param-free). AGG_PLAIN keeps the existing fused
-///     path (no breaker needed: it has no per-group read-back).
+///     AGG_HASHED, initplan-param-free). AGG_PLAIN routes to the fold drive
+///     above (`try_own_plain_agg_over_seq_scan`) before this gate runs.
 /// A post-build merge handoff flips `agg_batch_drainable` false, so later
 /// calls refuse here and fall to `exec_agg`'s merged retrieve — exactly the
 /// existing `exec_agg_batched` arm's cross-call behavior.
@@ -1606,6 +1863,335 @@ impl<'mcx> Operator<'mcx> for SortEmit {
             SinkFeed::NeedMore => OpStatus::NeedInput,
         })
     }
+}
+
+// ===========================================================================
+// Sorted-agg (AGG_SORTED) streaming operator (Phase-2 breadth). NOT a
+// breaker: input arrives sorted on the grouping keys, so the node emits a
+// finalized group at each key boundary and never needs the whole input — it
+// sits as a mid-pipeline `TupleOp` between a lane-owned ordered feed and the
+// root pull-adapter:
+//
+//   Agg over Sort (two chained pipelines on the sort breaker):
+//     pipeline N   : scan source → filter/project → SortBreakerSink
+//     pipeline N+1 : SortEmitSourceCfi → SortEmit → SortedAggOp → RootAdapter
+//   Agg over IndexScan / IndexOnlyScan (order from the index, one pipeline):
+//     IndexScanSource → IndexScanEmit → SortedAggOp → RootAdapter
+//
+// The lane owns ONLY control flow; ALL semantics delegate to the row-path
+// nodeagg seam (`agg_sorted_*`): the group-boundary comparison is the ported
+// grouping-equality ExprState (NULL keys group together through it), the
+// per-row transition program, and the finalize/HAVING/project tail are
+// `agg_retrieve_sorted`'s own pieces over the node's own persort state
+// (first/pending slots + `have_pending`). Because the seam maintains exactly
+// the pull loop's node state — every call boundary has the current group
+// closed and at most a pending boundary tuple saved — a per-call fallback to
+// `exec_agg` (dynamic gates) is byte-safe in both directions.
+//
+// Per-tuple laziness holds: the capacity-one root buffers the boundary
+// group's row, pausing the pipeline (the child feed advances only to the
+// boundary tuple, which is saved in the pending slot before the pause).
+// End-of-stream uses the driver's `TupleOp::source_exhausted` hook (the
+// Finished-vs-more-phases seam) to finalize the last
+// open group; `agg_done` (set exactly where the pull loop sets it) makes the
+// drained node stay drained.
+//
+// v1 is deliberately per-row (correctness first): the ordered feeds emit
+// one-row batches (sort read-back) or short TID runs, so there is no clean
+// whole-batch group-run fold seam here yet; the lanefold `fold_rows_grouped`
+// batching over contiguous group runs is a later, measured step.
+// ===========================================================================
+
+/// The sorted-agg streaming operator. `group_open` is call-local by
+/// construction: the only pauses are group-row emissions (capacity-one root),
+/// after which the group is already closed — so at every PG call boundary the
+/// open-group flag is false and the cross-call resume state is entirely the
+/// node's own `have_pending`/`agg_done`.
+struct SortedAggOp<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    group_open: bool,
+}
+
+impl<'mcx> SortedAggOp<'_, 'mcx> {
+    /// Start the next group from the saved pending boundary tuple.
+    fn begin_from_pending(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        ::nodeagg::agg_sorted_group_begin(self.agg, estate, None)?;
+        self.group_open = true;
+        Ok(())
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for SortedAggOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        // A saved boundary tuple whose group has not started: the resume
+        // after the pause that delivered the previous group's row.
+        !self.group_open && ::nodeagg::agg_sorted_have_pending(self.agg)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        if !self.group_open {
+            // First row of the stream (or after a HAVING-rejected tail): the
+            // group prologue — copy, initialize, first transition.
+            debug_assert!(!::nodeagg::agg_sorted_have_pending(self.agg));
+            ::nodeagg::agg_sorted_group_begin(self.agg, estate, Some(tuple))?;
+            self.group_open = true;
+            return Ok(OpStatus::NeedInput);
+        }
+        if ::nodeagg::agg_sorted_same_group(self.agg, estate, tuple)? {
+            ::nodeagg::agg_sorted_accept(self.agg, estate, tuple)?;
+            return Ok(OpStatus::NeedInput);
+        }
+        // Group boundary: save the boundary row first (the pull loop's
+        // order), then finalize + HAVING + project the completed group.
+        ::nodeagg::agg_sorted_save_pending(self.agg, estate, tuple)?;
+        self.group_open = false;
+        match ::nodeagg::agg_sorted_emit(self.agg, estate)? {
+            Some(row) => match out.accept(row, estate)? {
+                SinkFeed::Full => Ok(OpStatus::Paused),
+                // Non-root sinks (none wired today): start the next group
+                // immediately, as the pull loop's next iteration would.
+                SinkFeed::NeedMore => {
+                    self.begin_from_pending(estate)?;
+                    Ok(OpStatus::NeedInput)
+                }
+            },
+            // HAVING rejected the group: no output row; start the next group
+            // from the pending boundary tuple (the pull loop's `continue`).
+            None => {
+                self.begin_from_pending(estate)?;
+                Ok(OpStatus::NeedInput)
+            }
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // The paused emit already delivered its row; resuming means starting
+        // the next group from the saved boundary tuple, then asking for more
+        // input.
+        debug_assert!(self.pending());
+        self.begin_from_pending(estate)?;
+        Ok(OpStatus::NeedInput)
+    }
+
+    fn source_exhausted(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // Input exhausted: agg_done first (the pull loop's fetch-None arms),
+        // then finalize the last open group, if any. Zero input rows emit
+        // nothing (C's sorted-agg contract — unlike AGG_PLAIN).
+        ::nodeagg::agg_sorted_input_done(self.agg);
+        if !self.group_open {
+            return Ok(OpStatus::Finished);
+        }
+        self.group_open = false;
+        match ::nodeagg::agg_sorted_emit(self.agg, estate)? {
+            Some(row) => match out.accept(row, estate)? {
+                SinkFeed::Full => Ok(OpStatus::Paused),
+                SinkFeed::NeedMore => Ok(OpStatus::Finished),
+            },
+            None => Ok(OpStatus::Finished),
+        }
+    }
+}
+
+/// Sort read-back source for the sorted-agg emit chain: `SortEmitSource`
+/// plus C's per-fetch CHECK_FOR_INTERRUPTS — each row the agg pulls from the
+/// sort is one `ExecSort` call in the per-tuple path, which checks at entry
+/// (the bare-sort pipeline's equivalent check lives at `try_own_sort`'s
+/// entry, once per pull).
+struct SortEmitSourceCfi;
+
+impl<'mcx> Source<'mcx> for SortEmitSourceCfi {
+    type Node = ::nodesort::SortState<'mcx>;
+
+    fn produce(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<Batch>> {
+        ::postgres_seams::check_for_interrupts::call()?;
+        Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
+    }
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → Sort → scan`: the sort breaker
+/// feeds once (pipeline N), then the sorted-agg operator streams the
+/// read-back into one group row per PG pull. `None` = refused (caller falls
+/// to the per-tuple `exec_agg` over `exec_sort`, byte-safely — see the
+/// section doc on call-boundary state compatibility).
+#[inline]
+pub fn try_own_sorted_agg_over_sort<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (mirror the bare-sort breaker).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
+        return Ok(None);
+    }
+    // Agg-side admission (static shape; ticked per offered call, the hashed
+    // breaker's AggNotDrainable cadence).
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    // Sort-side structural verdict — the bare-sort arm's memo, shared (the
+    // refusal ticks once per node whichever arm probes first).
+    let fusible = match s.lane_fusible {
+        Some(v) => v,
+        None => {
+            let refuse = sort_refuse_reason(s, estate)?;
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::SortFeed, r);
+            }
+            let v = refuse.is_none();
+            s.lane_fusible = Some(v);
+            v
+        }
+    };
+    if !fusible {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    if !state.sort_done() {
+        // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
+        // emit chain's source checks per subsequent fetch).
+        ::postgres_seams::check_for_interrupts::call()?;
+        // One OWNED tick per lane-owned sort feed event, plus one per
+        // lane-owned sorted-agg stream start (both count feed/build EVENTS,
+        // once per (re)scan).
+        stats::tick_owned(ShapeClass::SortFeed);
+        stats::tick_owned(ShapeClass::AggBuild);
+        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        match &mut **outer {
+            crate::procnode::PlanStateNode::SeqScan(ss) => {
+                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexScan(is) => {
+                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
+            }
+            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
+                state,
+                &mut **ios,
+                IndexOnlyScanSource,
+                IndexOnlyScanEmit,
+                outer_desc,
+                estate,
+            )?,
+            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+                let b = &mut **b;
+                if !b.scan.initialized {
+                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
+                }
+                sort_feed(
+                    state,
+                    &mut b.scan,
+                    BitmapHeapScanSource,
+                    BitmapHeapScanEmit,
+                    outer_desc,
+                    estate,
+                )?
+            }
+            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+        }
+    }
+    // Emit phase (every call): sort read-back → sorted-agg operator → root,
+    // one qual-passing group row per PG pull.
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        state,
+        &mut SortEmitSourceCfi,
+        &mut SortEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → IndexScan` (index order feeds
+/// the grouping directly — no Sort node). Engagement accounting: the
+/// per-pull indexscan class ticks (owned per admitted feed decision, the
+/// class's documented cadence); agg-side refusals tick AggNotDrainable per
+/// offered call.
+#[inline]
+pub fn try_own_sorted_agg_over_index_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    // Child refuse-set verbatim (dynamic EPQ/direction gates included; ticks
+    // under the indexscan class, per call).
+    if !index_scan_fusible(is, estate) {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        is,
+        &mut IndexScanSource,
+        &mut IndexScanEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → IndexOnlyScan`. Accounting as
+/// the IndexScan arm (per-pull indexonlyscan class).
+#[inline]
+pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !::nodeagg::agg_sorted_lane_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
+        return Ok(None);
+    }
+    if !index_only_scan_fusible(ios, estate) {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step_chain(
+        ios,
+        &mut IndexOnlyScanSource,
+        &mut IndexOnlyScanEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )?))
 }
 
 // ===========================================================================
