@@ -477,6 +477,118 @@ pub fn fc_pg_stat_get_wal_receiver(
     record_datum(flinfo, fcinfo, &values, &nulls)
 }
 
+const PG_STAT_GET_WAL_SENDERS_COLS: usize = 12;
+
+// offset_to_interval (walsender.c:3898): TimeOffset µs → Interval datum
+// (byref, layout time i64 + day i32 + month i32, typlen 16 typalign d).
+fn offset_to_interval(fcinfo: &Fcinfo, diff: i64) -> PgResult<Datum> {
+    let mut image = [0u8; 16];
+    image[..8].copy_from_slice(&diff.to_ne_bytes());
+    byref_result(fcinfo.result_mcx(), &image)
+}
+
+// walsender.c:pg_stat_get_wal_senders — one row per live WalSnd slot.
+pub fn fc_pg_stat_get_wal_senders(
+    flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    let flinfo = flinfo.expect("pg_stat_get_wal_senders: resolved FmgrInfo required");
+    // SAFETY: executor arms es_query_cxt pre-call; it outlives this frame.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    debug_assert_eq!(srf.tupdesc.natts as usize, PG_STAT_GET_WAL_SENDERS_COLS);
+
+    let rows = if walsender_seams::pg_stat_wal_senders_snapshot::is_installed() {
+        walsender_seams::pg_stat_wal_senders_snapshot::call()
+    } else {
+        Vec::new()
+    };
+
+    let uid = miscinit::GetUserId();
+    let can_see_details =
+        acl_seams::has_privs_of_role::call(uid, crate::activity::ROLE_PG_READ_ALL_STATS)?;
+
+    for row in rows {
+        let mut values = [Datum::from_usize(0); PG_STAT_GET_WAL_SENDERS_COLS];
+        let mut nulls = [false; PG_STAT_GET_WAL_SENDERS_COLS];
+
+        values[0] = Datum::from_i32(row.pid);
+
+        if !can_see_details {
+            // Only superusers and roles with privileges of pg_read_all_stats
+            // can see details; others only get the pid.
+            for n in nulls.iter_mut().skip(1) {
+                *n = true;
+            }
+        } else {
+            values[1] = text_datum(fcinfo, row.state)?;
+
+            if row.sent_ptr == 0 {
+                nulls[2] = true;
+            }
+            values[2] = Datum::from_u64(row.sent_ptr);
+
+            if row.write == 0 {
+                nulls[3] = true;
+            }
+            values[3] = Datum::from_u64(row.write);
+
+            if row.flush == 0 {
+                nulls[4] = true;
+            }
+            values[4] = Datum::from_u64(row.flush);
+
+            if row.apply == 0 {
+                nulls[5] = true;
+            }
+            values[5] = Datum::from_u64(row.apply);
+
+            // A standby that never reports a flush location (e.g. a
+            // pg_basebackup background process) counts as asynchronous.
+            let priority = if row.flush == 0 { 0 } else { row.sync_priority };
+
+            if row.write_lag < 0 {
+                nulls[6] = true;
+            } else {
+                values[6] = offset_to_interval(fcinfo, row.write_lag)?;
+            }
+            if row.flush_lag < 0 {
+                nulls[7] = true;
+            } else {
+                values[7] = offset_to_interval(fcinfo, row.flush_lag)?;
+            }
+            if row.apply_lag < 0 {
+                nulls[8] = true;
+            } else {
+                values[8] = offset_to_interval(fcinfo, row.apply_lag)?;
+            }
+
+            values[9] = Datum::from_i32(priority);
+
+            values[10] = text_datum(
+                fcinfo,
+                if priority == 0 {
+                    "async"
+                } else if row.is_sync_standby {
+                    if row.syncrep_method_is_priority { "sync" } else { "quorum" }
+                } else {
+                    "potential"
+                },
+            )?;
+
+            if row.reply_time == 0 {
+                nulls[11] = true;
+            } else {
+                values[11] = Datum::from_i64(row.reply_time);
+            }
+        }
+
+        srf.putvalues(&values, &nulls)?;
+    }
+
+    Ok(srf.finish(fcinfo))
+}
+
 pub fn fc_pg_stat_get_archiver(
     flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,

@@ -208,6 +208,55 @@ fn WalSndKill(_code: i32, _arg: usize) {
     WalSndCtl().walsnds[i as usize].lock().expect("walsnd mutex").pid = 0;
 }
 
+// WalSndGetStateString (walsender.c:3888).
+pub fn WalSndGetStateString(state: WalSndState) -> &'static str {
+    match state {
+        WalSndState::Startup => "startup",
+        WalSndState::Backup => "backup",
+        WalSndState::Catchup => "catchup",
+        WalSndState::Streaming => "streaming",
+        WalSndState::Stopping => "stopping",
+    }
+}
+
+// pg_stat_get_wal_senders' shared-memory scan half (walsender.c:3914); the SQL
+// function body lives in pgstatfuncs. SyncRep note: SyncRepInitConfig is
+// unported, so no walsender ever carries sync_standby_priority > 0 and
+// SyncRepGetCandidateStandbys would return an empty set — is_sync_standby is
+// false and the method default (priority) holds. Stay loud if a nonzero
+// priority ever appears before the syncrep port lands.
+fn pg_stat_wal_senders_snapshot() -> Vec<walsender_seams::WalSndStatRow> {
+    let ctl = WalSndCtl();
+    let mut rows = Vec::new();
+    for slot in ctl.walsnds.iter() {
+        let w = slot.lock().expect("walsnd mutex");
+        if w.pid == 0 {
+            continue;
+        }
+        assert_eq!(
+            w.sync_standby_priority, 0,
+            "pg_stat_get_wal_senders: sync_standby_priority set but \
+             SyncRepGetCandidateStandbys unported (syncrep.c)"
+        );
+        rows.push(walsender_seams::WalSndStatRow {
+            pid: w.pid,
+            state: WalSndGetStateString(w.state),
+            sent_ptr: w.sentPtr,
+            write: w.write,
+            flush: w.flush,
+            apply: w.apply,
+            write_lag: w.writeLag,
+            flush_lag: w.flushLag,
+            apply_lag: w.applyLag,
+            sync_priority: w.sync_standby_priority,
+            is_sync_standby: false,
+            syncrep_method_is_priority: true,
+            reply_time: w.replyTime,
+        });
+    }
+    rows
+}
+
 // WalSndSetState (walsender.c:3858).
 pub fn WalSndSetState(state: WalSndState) {
     debug_assert!(am_walsender());
@@ -863,4 +912,5 @@ pub fn init_seams() {
     walsender_seams::init_wal_sender::set(InitWalSender);
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);
+    walsender_seams::pg_stat_wal_senders_snapshot::set(pg_stat_wal_senders_snapshot);
 }

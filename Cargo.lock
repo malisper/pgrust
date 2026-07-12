@@ -11564,6 +11564,7 @@ dependencies = [
  "varlena",
  "waitevent",
  "walreceiverfuncs_seams",
+ "walsender_seams",
  "xlogprefetcher_seams",
 ]
 
