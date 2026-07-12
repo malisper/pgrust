@@ -826,6 +826,14 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     choice: &mut Option<AggLaneChoice>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // AGG_PLAIN (ungrouped) routes to the fold drive: no breaker needed (a
+    // single group has no per-group read-back — feed + finalize is the whole
+    // node inside one call), but the same staged-batch fold applies, with
+    // `lanefold::fold_batch` (the ungrouped kernel, CSE included) in place of
+    // the grouped probe+fold.
+    if ::nodeagg::agg_plain_fold_admissible(agg) {
+        return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
+    }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
         return Ok(None);
     }
@@ -1048,6 +1056,255 @@ fn agg_hash_build_fold_feed<'mcx>(
     ::nodeagg::agg_hash_build_finish(agg, estate)
 }
 
+// ===========================================================================
+// Plain-agg (AGG_PLAIN, ungrouped) fold drive — the q2-class
+// `SELECT sum(a), avg(b), count(*) FROM t [WHERE ...]` shapes. SIMPLER than
+// the hashed breaker: one group, no probe — each staged batch folds straight
+// into the single pergroup array via `lanefold::fold_batch` (the ungrouped
+// kernel, CSE schedule included), and the retrieve side is the delegated
+// `plain_finish` (finalize + HAVING + project, one row, zero-row contract
+// included). The whole node runs inside one `exec_proc_node` call, exactly
+// like `exec_agg`'s single-group arm.
+// ===========================================================================
+
+/// Try to let the lane own an AGG_PLAIN `Agg` over a `SeqScan` child with the
+/// batched fold. `Some(result)` = the lane drove this call; `None` = refused
+/// (the caller falls through to the fused `exec_agg_batched` / per-tuple
+/// paths, byte-identically).
+fn try_own_plain_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    choice: &mut Option<AggLaneChoice>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
+    // gates re-checked per call; structural verdict memoized on the node).
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    let c = match *choice {
+        Some(c) => c,
+        None => {
+            let c = decide_plain_agg_lane(agg, ss, estate)?;
+            *choice = Some(c);
+            c
+        }
+    };
+    if c != AggLaneChoice::Fold {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: the one result row is out; a drained agg
+    // stays drained until rescan clears `agg_done`.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // One OWNED tick per lane-owned plain-agg build event (the gate's
+    // aggbuild floor counts builds, not calls; a plain node builds once per
+    // (re)scan — this drive runs the whole feed inside one call).
+    stats::tick_owned(ShapeClass::AggBuild);
+    agg_plain_fold_feed(agg, ss, estate)?;
+    // Retrieve (delegated): finalize + HAVING + project — one row (or none,
+    // when the var-free HAVING rejects it), setting `agg_done`.
+    Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
+}
+
+/// The structural lane choice for an AGG_PLAIN Agg over a SeqScan, decided
+/// once at the first call. Fold or Refuse only — the lane never takes plain
+/// shapes per-row: the incumbent legacy fused `exec_agg_batched` drive is
+/// already batched with per-row transitions, so a per-row lane feed has
+/// nothing to win (admission economics, design §4).
+fn decide_plain_agg_lane<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggLaneChoice> {
+    // Every Refuse below is admission economics (§4): the legacy fused
+    // `exec_agg_batched` drive (or the per-tuple path) already owns the shape
+    // at least as well as a lane feed could. One tick per memoized per-node
+    // choice.
+    let refuse = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
+        Ok(AggLaneChoice::Refuse)
+    };
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+        return refuse();
+    };
+    // Projected scans: the agg reads output columns, which are not
+    // commensurable with scan-column prefixes — no SoA lane feed (the hashed
+    // breaker's scoping, verbatim).
+    if ss.ss.ps_ProjInfo.is_some() {
+        return refuse();
+    }
+    // count(*)-only plans read no lane columns: the incumbent fused drive
+    // already advances those per batch with zero per-row work (the storeless
+    // advance / `qualifying_count` bitmap census), so a fold cannot beat it.
+    // Deliberate refuse-set entry.
+    if plan.cols.is_empty() {
+        return refuse();
+    }
+    // Probe-arm the deform now so an unarmable prefix (non-fixed-width
+    // column) is known BEFORE committing: the plain fold reads the SoA lanes
+    // directly, so a disarmed deform keeps the incumbent.
+    let prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, prefix, false, true);
+    if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+        return refuse();
+    }
+    Ok(AggLaneChoice::Fold)
+}
+
+/// Feed for the plain fold drive: per staged page batch, compose the row
+/// selection and fold the admitted transitions whole-batch with
+/// `lanefold::fold_batch` into the single pergroup array. One
+/// CHECK_FOR_INTERRUPTS per staged batch (design §9 batch-operator cadence).
+/// Guarded plans re-prove every batch; `Demote` runs the WHOLE batch through
+/// the checked per-row program (lanefold contract).
+///
+/// Two per-batch modes:
+///   * bitmap: no residual transitions and the qual is absent or staged as
+///     the kernel-qual bitmap — the selection is `sel & !fallback` (or
+///     `!fallback` with no qual) with NO per-row work for deformed rows (the
+///     fold reads the SoA lanes; a per-row emit would only store a slot
+///     nothing reads). Forced fallback rows re-check the qual per-row and run
+///     the full per-row program off the stored tuple.
+///   * per-row emit: a scalar qual and/or residual transitions — the scan's
+///     per-row emit applies the qual; surviving deformed rows join the fold
+///     selection (+ the residual program per row), fallback rows run the
+///     full per-row program.
+///
+/// Byte-identity: the same rows pass the same qual (the staged bitmap IS the
+/// kernel qual's verdict; fallback rows re-run the per-row check), and every
+/// fold kernel is commutative and bit-for-bit equal to C's transition
+/// semantics on admitted/guard-proven data (lanefold's tested contract), so
+/// the single group's transvalues — and the finalized output row — are
+/// identical.
+fn agg_plain_fold_feed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // Same one-deform staging as the hashed fold feed; the deform is FORCED
+    // (count(*)-only plans were refused, so the fold always reads lane
+    // columns). Re-preparing with the same shape is a no-op.
+    let soa_prefix = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, true);
+    // initialize_aggregates (delegated): fresh initval pergroups; a rescan
+    // re-enters here with agg_done cleared.
+    ::nodeagg::agg_plain_build_begin(agg)?;
+    let has_resid =
+        ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of scan: drop the scan slot's buffer pin (SeqScanSource
+            // end-of-stream parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let nwords = (n as usize).div_ceil(64);
+        // Guarded plans: prove the batch over every staged non-fallback row —
+        // a superset of the rows the fold will touch — before any fold (same
+        // soundness argument as the hashed fold feed).
+        let mut demote = false;
+        {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            if plan.guarded {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("plain fold plans read lane columns");
+                let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+                for (r, fb) in rows[..nwords].iter_mut().zip(soa.fallback_words()) {
+                    *r = !fb;
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+                demote = ::lanefold::check_guards(plan, soa, &rows[..nwords], |_| None)
+                    == ::lanefold::GuardCheck::Demote;
+            }
+        }
+        if demote {
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                }
+            }
+            continue;
+        }
+        let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+        let bitmap_qual = ::nodeseqscan::seq_scan_batch_qual_sel(ss).is_some();
+        if !has_resid && (bitmap_qual || ss.ss.qual.is_none()) {
+            let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
+            {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("plain fold plans read lane columns");
+                let fb = soa.fallback_words();
+                let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+                for w in 0..nwords {
+                    rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
+                    fallback[w] = fb[w];
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                    fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+            }
+            for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
+                while bits != 0 {
+                    let i = (w as u32) * 64 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                    }
+                }
+            }
+        } else {
+            for i in 0..n {
+                let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
+                    continue;
+                };
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i))
+                {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                } else {
+                    rows[(i / 64) as usize] |= 1u64 << (i % 64);
+                    if has_resid {
+                        ::nodeagg::agg_plain_build_accept_resid(agg, estate, slot)?;
+                    }
+                }
+            }
+        }
+        if rows[..nwords].iter().any(|w| *w != 0) {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+            let aggcx = ::nodeagg::agg_aggcontext(agg);
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("plain fold plans read lane columns");
+            // SAFETY: pergroup_base is the node's once-allocated single-group
+            // pergroup array covering every transno (initialize_aggregates
+            // just wrote it); selected rows are non-fallback, carrying valid
+            // deformed lane values for every plan column (the SoA prefix
+            // covers the evaltrans fetch bound); AvgAccum pergroups hold the
+            // catalog's {0,0} int8[2] transarray, datum-copied at
+            // initialize_aggregates; Int128AvgAccum pergroups are NULL or
+            // hold the aggcontext state the fold/transfn chain installed, and
+            // `aggcx` is that same aggcontext; guarded plans passed
+            // `check_guards` above.
+            unsafe {
+                ::lanefold::fold_batch(
+                    plan,
+                    soa,
+                    &rows[..nwords],
+                    n as usize,
+                    ::nodeagg::agg_plain_pergroup_base(agg),
+                    aggcx,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
 ///   * scan side: the Phase-1 `seq_scan_fusible` gate verbatim (page-batch AM,
 ///     uninstrumented, forward, non-parallel, non-EPQ, non-Bloom, subplan- and
@@ -1056,8 +1313,8 @@ fn agg_hash_build_fold_feed<'mcx>(
 ///     scalar-within-lane, not just kernel quals / outer-read-free tlists);
 ///   * agg side: `agg_hash_breaker_admissible` (batch-drainable — no grouping
 ///     sets / DISTINCT-or-ordered-input / merge phase / subplan transitions —
-///     AGG_HASHED, initplan-param-free). AGG_PLAIN keeps the existing fused
-///     path (no breaker needed: it has no per-group read-back).
+///     AGG_HASHED, initplan-param-free). AGG_PLAIN routes to the fold drive
+///     above (`try_own_plain_agg_over_seq_scan`) before this gate runs.
 /// A post-build merge handoff flips `agg_batch_drainable` false, so later
 /// calls refuse here and fall to `exec_agg`'s merged retrieve — exactly the
 /// existing `exec_agg_batched` arm's cross-call behavior.
