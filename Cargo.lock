@@ -2857,6 +2857,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cbstore"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "init_small",
+ "inval",
+ "libc",
+ "lz4_flex",
+ "mcx",
+ "relpath",
+ "snapmgr",
+ "tableam_vocab",
+ "transam_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7874,6 +7900,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "main_main"
 version = "0.0.0"
 dependencies = [
@@ -11466,6 +11501,7 @@ dependencies = [
  "syscache_seams",
  "table",
  "tableam",
+ "tableam_vocab",
  "tablesample",
  "tidbitmap",
  "typcache",
@@ -15559,6 +15595,8 @@ version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
  "catalog_storage",
+ "cbstore",
+ "datum",
  "elog_seams",
  "exectuples",
  "format_type",
@@ -15639,6 +15677,7 @@ dependencies = [
  "catalog_namespace",
  "catalog_storage",
  "catalog_toasting",
+ "cbstore",
  "clauses",
  "coerce",
  "commands_amcmds",
@@ -16577,6 +16616,12 @@ dependencies = [
  "types_core",
  "types_error",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typcache"

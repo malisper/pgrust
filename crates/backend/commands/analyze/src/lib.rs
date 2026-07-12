@@ -473,6 +473,15 @@ fn do_analyze_rel<'mcx>(
         // freed wholesale at the per-column reset (C pfrees per call).
         let mut col_cx = anl.new_child_bump("Analyze Column");
         let src = FetchSource::Heap { tupdesc, rows: &rows[..numrows as usize] };
+        // Ingest-time footer NDV (whole-stream HLL): sampled Duj1 underestimates
+        // heavy-tailed text NDV 100-1500x, so a present footer count wins.
+        let footer_ndv = if !inh
+            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore)
+        {
+            tableam::cbstore_footer_ndv(onerel)?
+        } else {
+            None
+        };
         for s in vacattrstats.iter_mut() {
             match s.compute {
                 ComputeStats::Scalar => {
@@ -497,6 +506,20 @@ fn do_analyze_rel<'mcx>(
                 }
                 ComputeStats::TsVector => {
                     ts_typanalyze::compute_tsvector_stats(anl_mcx, col_cx.mcx(), s, &src, numrows)?
+                }
+            }
+            if let Some(ndv) = &footer_ndv {
+                if s.stats_valid && s.tupattnum >= 1 {
+                    let d = ndv.get(s.tupattnum as usize - 1).copied().unwrap_or(0);
+                    if d > 0 {
+                        let d = (d as f64).min(totalrows.max(1.0));
+                        // Same negative-fraction convention as compute_scalar_stats.
+                        s.stadistinct = if d > 0.1 * totalrows {
+                            -(d / totalrows) as f32
+                        } else {
+                            d as f32
+                        };
+                    }
                 }
             }
             // n_distinct / n_distinct_inherited attoptions override
@@ -1171,6 +1194,9 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore) {
+        return cbstore_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    }
     let base = rows.len();
     let mut numrows: i32 = 0;
     let mut samplerows = 0.0f64;
@@ -1257,6 +1283,110 @@ fn acquire_sample_rows<'mcx>(
         *totaldeadrows = 0.0;
     }
 
+    Ok(numrows)
+}
+
+// cbstore's acquirefunc (C table_relation_analyze lets the AM supply it):
+// uniform Vitter reservoir over the visible row stream; skipped spans are
+// never decoded (gather_row decodes granules on demand). totalrows is exact
+// from the part footer; cbstore parts carry no dead rows.
+fn cbstore_acquire_sample_rows<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+    rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
+    targrows: i32,
+    totalrows: &mut f64,
+    totaldeadrows: &mut f64,
+) -> PgResult<i32> {
+    let tupdesc = onerel.descr();
+    let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
+    let mut slot = tableam::table_slot_create(mcx, onerel)?;
+    let rgs = tableam::cbstore_analyze_visible_rgs(&scan)?;
+    let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
+    *totalrows = total as f64;
+    *totaldeadrows = 0.0;
+
+    pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL, rgs.len() as i64);
+
+    let mut fetch = |scan: &mut tableam::TableScanDesc<'mcx>,
+                     slot: &mut SlotData<'mcx>,
+                     rg: u32,
+                     row: u32|
+     -> PgResult<HeapTupleData<'mcx>> {
+        if !tableam::cbstore_analyze_fetch_row(scan, rg, row, slot) {
+            panic!("cbstore analyze: sampled row ref out of range");
+        }
+        let b = slot.base();
+        let owned = heaptuple::heap_form_tuple(mcx, tupdesc, &b.tts_values, &b.tts_isnull)?;
+        let (ptr, len, tid, oid) = (
+            owned.image().as_ptr(),
+            owned.as_tuple().t_len,
+            owned.as_tuple().t_self,
+            owned.as_tuple().t_tableOid,
+        );
+        core::mem::forget(owned);
+        // SAFETY: the image was just formed in `mcx` and, forgotten, lives
+        // until that context's teardown; nothing else writes it.
+        Ok(unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, oid) })
+    };
+
+    let mut rstate = sampling::reservoir_init_selection_state(
+        pg_prng::global_prng(|p| p.next_u64()),
+        targrows as u32,
+    );
+    // (ordinal, tuple): replacements land at random slots; physical order is
+    // restored by the final sort (the correlation stat reads rows order).
+    let mut sample: Vec<(u64, HeapTupleData<'mcx>)> = Vec::new();
+    let mut samplerows = 0.0f64;
+    let mut rowstoskip = -1.0f64;
+    let mut ord: u64 = 0;
+    let mut rgs_done: i64 = 0;
+    for &(rg, nrows) in &rgs {
+        let mut row: u32 = 0;
+        while row < nrows {
+            if (sample.len() as i32) < targrows {
+                let t = fetch(&mut scan, &mut slot, rg, row)?;
+                sample.push((ord, t));
+            } else {
+                if rowstoskip < 0.0 {
+                    rowstoskip =
+                        sampling::reservoir_get_next_s(&mut rstate, samplerows, targrows as u32);
+                }
+                // Skip rowstoskip rows (integer count), then take the next;
+                // spans crossing row groups keep the residual skip.
+                let skip = rowstoskip.ceil();
+                let span = (nrows - row) as f64;
+                if skip >= span {
+                    rowstoskip -= span;
+                    samplerows += span;
+                    ord += (nrows - row) as u64;
+                    break;
+                }
+                row += skip as u32;
+                ord += skip as u64;
+                samplerows += skip;
+                rowstoskip = -1.0;
+                let k = (targrows as f64 * sampling::sampler_random_fract(&mut rstate.randstate))
+                    as usize;
+                debug_assert!(k < targrows as usize);
+                let t = fetch(&mut scan, &mut slot, rg, row)?;
+                sample[k] = (ord, t);
+            }
+            row += 1;
+            ord += 1;
+            samplerows += 1.0;
+        }
+        rgs_done += 1;
+        pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE, rgs_done);
+    }
+    drop(slot);
+    tableam::table_endscan(scan)?;
+
+    sample.sort_unstable_by_key(|&(o, _)| o);
+    let numrows = sample.len() as i32;
+    for (_, t) in sample {
+        rows.push(t);
+    }
     Ok(numrows)
 }
 

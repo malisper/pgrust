@@ -479,6 +479,33 @@ pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
     clamp_row_est(rows * get_parallel_divisor(parallel_workers))
 }
 
+
+// Gather setup price: cbstore-fed parallel plans pay the measured
+// thread-native startup (consts::DEFAULT_CBSTORE_PARALLEL_SETUP_COST
+// provenance), heap plans keep C's parallel_setup_cost. The Gather may sit
+// on an upper rel (grouped rel over a partial agg), whose amflags are
+// empty — scan the simple-rel array instead: any cbstore baserel in the
+// (sub)query prices the whole plan's Gathers.
+fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
+    if cbstore_feeds_plan(run) { gucs::cbstore_parallel_setup_cost() } else { gucs::parallel_setup_cost() }
+}
+
+// Per-tuple Gather transfer price: cbstore-fed plans pay the measured P0b
+// chunked-transport rate (consts::DEFAULT_CBSTORE_PARALLEL_TUPLE_COST
+// provenance), heap plans keep C's parallel_tuple_cost. Same selector as
+// gather_setup_cost.
+fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
+    if cbstore_feeds_plan(run) { gucs::cbstore_parallel_tuple_cost() } else { gucs::parallel_tuple_cost() }
+}
+
+pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {
+    run.root.simple_rel_array.iter().any(|slot| {
+        slot.is_some_and(|rid| {
+            run.root.rel(rid).amflags & types_pathnodes::AMFLAG_CBSTORE != 0
+        })
+    })
+}
+
 // cost_gather (costsize.c); no parameterized Gather paths exist (required
 // outer is empty at every ported call site).
 pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId, rows: Option<f64>) {
@@ -490,13 +517,15 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
         let sub = run.root.path(g.subpath.expect("Gather subpath")).base();
         (sub.startup_cost, sub.total_cost, sub.disabled_nodes)
     };
+    let setup_cost = gather_setup_cost(run);
+    let tuple_cost = gather_tuple_cost(run);
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
     let mut startup_cost = sub_startup;
     let mut run_cost = sub_total - sub_startup;
-    startup_cost += gucs::parallel_setup_cost();
-    run_cost += gucs::parallel_tuple_cost() * p.rows;
+    startup_cost += setup_cost;
+    run_cost += tuple_cost * p.rows;
     p.disabled_nodes = sub_disabled;
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
@@ -520,6 +549,8 @@ pub fn cost_gather_merge(
         g.num_workers
     };
     debug_assert!(num_workers > 0);
+    let setup_cost = gather_setup_cost(run);
+    let tuple_cost = gather_tuple_cost(run);
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
@@ -533,8 +564,8 @@ pub fn cost_gather_merge(
     startup_cost += comparison_cost * n * log_n;
     run_cost += p.rows * comparison_cost * log_n;
     run_cost += gucs::cpu_operator_cost() * p.rows;
-    startup_cost += gucs::parallel_setup_cost();
-    run_cost += gucs::parallel_tuple_cost() * p.rows * 1.05;
+    startup_cost += setup_cost;
+    run_cost += tuple_cost * p.rows * 1.05;
 
     p.disabled_nodes = input_disabled_nodes + if gucs::enable_gathermerge() { 0 } else { 1 };
     p.startup_cost = startup_cost + input_startup_cost;
