@@ -1390,6 +1390,45 @@ pub fn seq_scan_batch_lane_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u6
     (b.lane.is_some() && b.nwords > 0).then(|| &b.sel[..b.nwords as usize])
 }
 
+/// Slot-free batch filter classification (colagg): how a staged batch's
+/// survivor set can be decided WITHOUT the per-row `seq_scan_batch_emit`
+/// sequence, for consumers that never read the scan slot (the fold feed's
+/// deferred-probe arms read keys and transition inputs from the staged SoA
+/// lanes; the emit's slot store is pure discard there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotFreeFilter {
+    /// No qual at all: every staged row survives.
+    All,
+    /// The armed selection bitmap IS the whole qual's verdict for every
+    /// non-fallback row (kernel/stitched/PREWHERE-owned bitmap, no hybrid
+    /// requal tail). Forced-fallback rows carry a SET bit that demands the
+    /// per-row re-check — callers must exclude fallback-bearing batches
+    /// (the deferred-probe arms already admit all-lane batches only).
+    Bitmap,
+}
+
+/// Classify the CURRENT staged batch for slot-free survivor collection.
+/// `Some(kind)` = calling `seq_scan_batch_emit` on every staged row would
+/// return `Some(slot)` exactly for the rows `kind` selects, with no
+/// consumer-visible effect beyond the (discarded) slot store and the
+/// per-tuple context reset: no projection, no hosted (subplan/param) qual,
+/// no hybrid requal, no stale-bit hazard. `None` = the per-row emit owns the
+/// batch (byte-identical fallback).
+#[inline]
+pub fn seq_scan_batch_slotfree_filter(node: &SeqScanState<'_>) -> Option<SlotFreeFilter> {
+    if node.ss.ps_ProjInfo.is_some() {
+        return None;
+    }
+    if node.ss.qual.is_none() {
+        return Some(SlotFreeFilter::All);
+    }
+    let b = node.batch_soa.as_deref()?;
+    // `qual_armed` bitmaps cover the scan's WHOLE qual (all-or-nothing
+    // census / lane translation); `lane_requal` bits are a pre-filter only.
+    // A hosted qual (subplan/param deps) never arms the bitmap.
+    (b.qual_armed && !b.lane_requal && b.nwords > 0).then_some(SlotFreeFilter::Bitmap)
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
