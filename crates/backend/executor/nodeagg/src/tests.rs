@@ -2355,6 +2355,151 @@ mod hashspill {
         assert_eq!(temp_files(&dir), 0, "end must drop the tape files");
         init_small::globals::set_work_mem(saved_work_mem);
     }
+
+    // ------------------------------------------------------------------
+    // v2 exact-DISTINCT set spill (distinctset.rs SpillState): direct API
+    // tests over the temp-file machinery the module already stands up.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn distinct_set_spill_partitions_dedup_exactly() {
+        use crate::distinctset::{DistinctKeyKind, DistinctSet};
+        setup();
+        let (_cwd, dir) = enter_datadir("dsetspill-ints");
+        let mcx = leaked_mcx();
+        let budget = 256 * 1024;
+        let mut s: DistinctSet<'_> = DistinctSet::new();
+        let mut expect: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        // 60k distinct over 180k inserts; the wrap re-inserts earlier values
+        // in later flush epochs (cross-epoch duplicates on the tapes).
+        for r in 0..180_000i64 {
+            let k = (r * 37) % 60_000 - 7;
+            s.insert_i64(k);
+            expect.insert(k);
+            if s.over_budget(budget) {
+                s.spill_flush(DistinctKeyKind::Int64, budget, mcx).unwrap();
+            }
+        }
+        assert!(s.spilled(), "60k i64 keys must cross a 256KB budget");
+        s.spill_finish_writes(DistinctKeyKind::Int64, budget, mcx).unwrap();
+        let mut got: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for p in 0..s.spill_nparts() {
+            assert!(
+                s.spill_load_partition(DistinctKeyKind::Int64, p, budget).unwrap(),
+                "partition {p} fits the budget"
+            );
+            assert!(s.mem_bytes() <= budget, "load stayed within budget");
+            for &k in s.ints() {
+                assert!(got.insert(k), "value {k} appeared in two partitions");
+            }
+        }
+        assert_eq!(got, expect);
+        s.spill_end().unwrap();
+        s.clear();
+        assert_eq!(temp_files(&dir), 0, "spill_end must drop the temp file");
+    }
+
+    #[test]
+    fn distinct_set_spill_oversize_partition_streams_rest() {
+        use crate::distinctset::{DistinctKeyKind, DistinctSet};
+        setup();
+        let (_cwd, dir) = enter_datadir("dsetspill-oversize");
+        let mcx = leaked_mcx();
+        // Small budget + big NDV: every partition's distinct load alone
+        // exceeds the budget, exercising the partial-load + raw-stream leg.
+        let budget = 130 * 1024;
+        let mut s: DistinctSet<'_> = DistinctSet::new();
+        let mut expect: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for r in 0..200_000i64 {
+            let k = r.wrapping_mul(0x9e37_79b9) ^ (r >> 3);
+            s.insert_i64(k);
+            expect.insert(k);
+            if s.over_budget(budget) {
+                s.spill_flush(DistinctKeyKind::Int64, budget, mcx).unwrap();
+            }
+        }
+        assert!(s.spilled());
+        s.spill_finish_writes(DistinctKeyKind::Int64, budget, mcx).unwrap();
+        let mut got: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut saw_partial = false;
+        for p in 0..s.spill_nparts() {
+            let complete = s.spill_load_partition(DistinctKeyKind::Int64, p, budget).unwrap();
+            let mut part: std::collections::HashSet<i64> = s.ints().iter().copied().collect();
+            if !complete {
+                saw_partial = true;
+                let mut vals: Vec<i64> = Vec::new();
+                loop {
+                    vals.clear();
+                    if !s.spill_read_ints(p, &mut vals).unwrap() {
+                        break;
+                    }
+                    part.extend(vals.iter().copied());
+                }
+            }
+            for &k in &part {
+                assert!(got.insert(k), "value {k} appeared in two partitions");
+            }
+        }
+        assert!(saw_partial, "the shape must exercise the oversize-partition leg");
+        assert_eq!(got, expect);
+        s.spill_end().unwrap();
+        assert_eq!(temp_files(&dir), 0, "spill_end must drop the temp file");
+    }
+
+    #[test]
+    fn distinct_set_spill_bytes_roundtrip() {
+        use crate::distinctset::{DistinctKeyKind, DistinctSet};
+        setup();
+        let (_cwd, dir) = enter_datadir("dsetspill-bytes");
+        let mcx = leaked_mcx();
+        let budget = 256 * 1024;
+        let mut s: DistinctSet<'_> = DistinctSet::new();
+        let mut expect: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in 0..40_000u32 {
+            let v = format!("value-{}", (r * 17) % 15_000);
+            s.insert_bytes(v.as_bytes());
+            expect.insert(v);
+            if s.over_budget(budget) {
+                s.spill_flush(DistinctKeyKind::Bytes, budget, mcx).unwrap();
+            }
+        }
+        assert!(s.spilled(), "15k strings must cross a 256KB budget");
+        s.spill_finish_writes(DistinctKeyKind::Bytes, budget, mcx).unwrap();
+        let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in 0..s.spill_nparts() {
+            assert!(
+                s.spill_load_partition(DistinctKeyKind::Bytes, p, budget).unwrap(),
+                "partition {p} fits the budget"
+            );
+            for i in 0..s.n_bytes() {
+                let v = text_any_str(s.bytes_datum(i));
+                assert!(got.insert(v), "a value appeared in two partitions");
+            }
+        }
+        assert_eq!(got, expect);
+        s.spill_end().unwrap();
+        assert_eq!(temp_files(&dir), 0, "spill_end must drop the temp file");
+    }
+
+    #[test]
+    fn distinct_set_batch_insert_matches_per_row() {
+        use crate::distinctset::DistinctSet;
+        let keys: Vec<i64> = (0..10_000i64).map(|r| (r * 13) % 3_000).collect();
+        let mut a: DistinctSet<'_> = DistinctSet::new();
+        for &k in &keys {
+            a.insert_i64(k);
+        }
+        let mut b: DistinctSet<'_> = DistinctSet::new();
+        let mut hashes = Vec::new();
+        for chunk in keys.chunks(257) {
+            b.insert_i64_batch(chunk, &mut hashes);
+        }
+        let (mut av, mut bv) = (a.ints().to_vec(), b.ints().to_vec());
+        av.sort_unstable();
+        bv.sort_unstable();
+        assert_eq!(av, bv);
+        assert_eq!(a.ints(), b.ints(), "same input order ⇒ same insertion order");
+    }
 }
 
 // AGG_SORTED with a compressed text group key: the boundary eq (texteq)
