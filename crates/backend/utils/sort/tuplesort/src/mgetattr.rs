@@ -86,3 +86,48 @@ pub(crate) unsafe fn minimal_getattr(
     // SAFETY: off is the target attribute's computed in-image offset.
     unsafe { fetchatt(target, tp.add(off)) }
 }
+
+/// Linear all-attribute deform of a MinimalTuple body (the cbstore ingest-sort
+/// drain; per-attribute `minimal_getattr` would be quadratic on wide rows).
+///
+/// # Safety
+/// As [`minimal_getattr`]; `values`/`isnull` are at least `desc.natts` long.
+pub(crate) unsafe fn minimal_deform(
+    mt: *const MinimalTupleData,
+    desc: &TupleDescData<'_>,
+    values: &mut [Datum],
+    isnull: &mut [bool],
+) {
+    let mtref = unsafe { &*mt };
+    let base = mt.cast::<u8>();
+    let bp = unsafe { base.add(SizeofMinimalTupleHeader) };
+    let hasnulls = (mtref.t_infomask & HEAP_HASNULL) != 0;
+    let tup_natts = (mtref.natts() as usize).min(desc.natts as usize);
+    let tp = unsafe { base.add(mtref.t_hoff as usize - MINIMAL_TUPLE_OFFSET) };
+    let atts = &desc.compact_attrs[..desc.natts as usize];
+    let mut off = 0usize;
+    for i in 0..tup_natts {
+        let att = &atts[i];
+        if hasnulls && unsafe { att_isnull(i, bp) } {
+            values[i] = Datum::null();
+            isnull[i] = true;
+            continue;
+        }
+        isnull[i] = false;
+        let attlen = att.attlen as i32;
+        // SAFETY: offsets walk attributes present in the tuple (fn contract).
+        unsafe {
+            off = if attlen == -1 {
+                att_pointer_alignby(off, att.attalignby, -1, tp.add(off))
+            } else {
+                att_nominal_alignby(off, att.attalignby)
+            };
+            values[i] = fetchatt(att, tp.add(off));
+            off = att_addlength_pointer(off, attlen, tp.add(off));
+        }
+    }
+    // Missing-attr tail (added columns since the tuple was formed).
+    for i in tup_natts..desc.natts as usize {
+        values[i] = getmissingattr(desc, i as i32 + 1, &mut isnull[i]);
+    }
+}

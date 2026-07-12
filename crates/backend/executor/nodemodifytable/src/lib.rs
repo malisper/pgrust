@@ -1548,6 +1548,20 @@ pub fn exec_modify_table<'mcx>(
     }
 
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
+    // cbstore statement-end flush: single-tuple inserts buffer in the AM's
+    // per-statement ingest writer (cbstore::tuple_insert; RG-sized seals
+    // instead of one row group per row), published here — before AS triggers
+    // so statement triggers observe the rows.
+    for r in mt.rels.iter() {
+        if r.relkind != RELKIND_RELATION {
+            continue;
+        }
+        if let Some(rel) = estate.es_relations[(r.rti - 1) as usize].as_ref() {
+            if tableam_vocab::is_cbstore_am_oid(rel.rd_rel.relam) {
+                tableam::table_finish_bulk_insert(rel, 0)?;
+            }
+        }
+    }
     fire_as_triggers(mt, estate)?;
     mt.mt_done = true;
     Ok(None)

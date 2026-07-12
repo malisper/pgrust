@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use ::datum::Datum;
 use ::types_core::primitive::{Oid, TransactionId};
 use ::types_error::{PgError, PgResult};
+use ::tuplesort_seams::{CbIngestSort, CbSortKeyKind};
 
 use crate::format::*;
 use crate::hll::Hll;
@@ -13,6 +14,185 @@ use crate::reader::read_header;
 use crate::segfile::SegFile;
 use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use crate::varlena_bytes;
+
+// ---- per-table writer options (CREATE TABLE ... USING cbstore WITH (...)) --
+
+/// Table-level codec policy (the v6 per-column codec menu, plan §3.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodecChoice {
+    /// Sample-based per-chunk pick (day-0 evidence, ch-microbench note §1):
+    /// LZ4 unless ZSTD's sampled ratio gain clears the class threshold.
+    Auto,
+    Lz4,
+    Zstd,
+    /// No compressed frames (v5 behavior for int/text raw lanes).
+    Plain,
+}
+
+pub const ZSTD_LEVEL_DEFAULT: i32 = 3;
+
+/// Options resolved against the relation's columns at writer open.
+#[derive(Clone, Debug)]
+pub struct CbWriterOpts {
+    // (column index, sort-key kind) in declared cluster-key order.
+    pub cluster_key: Vec<(u16, CbSortKeyKind)>,
+    // Per-column codec choice (explicit override or the table default).
+    pub codec: Vec<CodecChoice>,
+    pub zstd_level: i32,
+}
+
+impl CbWriterOpts {
+    pub fn plain(ncols: usize) -> CbWriterOpts {
+        CbWriterOpts {
+            cluster_key: Vec::new(),
+            codec: vec![CodecChoice::Auto; ncols],
+            zstd_level: ZSTD_LEVEL_DEFAULT,
+        }
+    }
+}
+
+fn sort_kind_of(t: ColType) -> CbSortKeyKind {
+    match t {
+        ColType::I16 => CbSortKeyKind::Int16,
+        ColType::I32 | ColType::Date => CbSortKeyKind::Int32,
+        ColType::I64 | ColType::Timestamp => CbSortKeyKind::Int64,
+        ColType::Text => CbSortKeyKind::TextC,
+    }
+}
+
+fn col_index_of(rel: &::types_rel::Relation<'_>, name: &str) -> PgResult<u16> {
+    for (i, a) in rel.rd_att.attrs.iter().enumerate() {
+        if !a.attisdropped && a.attname.name_str() == name.as_bytes() {
+            return Ok(i as u16);
+        }
+    }
+    Err(Box::new(
+        PgError::error(format!(
+            "cbstore: cluster/codec option references unknown column \"{name}\""
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
+}
+
+/// Resolve the relation's cbstore reloptions into writer terms.
+pub fn writer_opts_of(
+    rel: &::types_rel::Relation<'_>,
+    coltypes: &[ColType],
+) -> PgResult<CbWriterOpts> {
+    let mut out = CbWriterOpts::plain(coltypes.len());
+    let Some(o) = rel.rd_options.as_ref().and_then(|o| o.cbstore()) else {
+        return Ok(out);
+    };
+    out.zstd_level = o.zstd_level;
+    let table_choice = match o.codec {
+        ::types_rel::CbstoreCodec::Auto => CodecChoice::Auto,
+        ::types_rel::CbstoreCodec::Lz4 => CodecChoice::Lz4,
+        ::types_rel::CbstoreCodec::Zstd => CodecChoice::Zstd,
+        ::types_rel::CbstoreCodec::Plain => CodecChoice::Plain,
+    };
+    out.codec = vec![table_choice; coltypes.len()];
+    for part in o.cluster_key().split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let idx = col_index_of(rel, part)?;
+        out.cluster_key.push((idx, sort_kind_of(coltypes[idx as usize])));
+    }
+    if out.cluster_key.len() > CB_CLUSTER_KEY_MAX_COLS {
+        return Err(Box::new(PgError::error(format!(
+            "cbstore: cluster_key supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
+        ))));
+    }
+    for pair in o.codec_cols().split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (name, codec) = pair.split_once('=').ok_or_else(|| {
+            Box::new(PgError::error(format!("cbstore: bad codec_cols entry \"{pair}\"")))
+        })?;
+        let idx = col_index_of(rel, name.trim())? as usize;
+        out.codec[idx] = match codec.trim() {
+            "auto" => CodecChoice::Auto,
+            "lz4" => CodecChoice::Lz4,
+            "zstd" => CodecChoice::Zstd,
+            "plain" => CodecChoice::Plain,
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "cbstore: unknown codec \"{other}\" in codec_cols"
+                ))))
+            }
+        };
+    }
+    Ok(out)
+}
+
+// ---- codec engine ----------------------------------------------------------
+
+/// Per-chunk compression driver: sample-pick between LZ4/ZSTD, then frame.
+pub(crate) struct CodecCtx {
+    pub choice: CodecChoice,
+    pub zstd_level: i32,
+}
+
+impl CodecCtx {
+    pub(crate) fn compress(&self, codec: Codec, data: &[u8]) -> Vec<u8> {
+        match codec {
+            Codec::Lz4 => lz4_flex::compress(data),
+            Codec::Zstd => zstd::bulk::compress(data, self.zstd_level)
+                .expect("cbstore: zstd compress failed"),
+            Codec::None => unreachable!("cbstore: compress with Codec::None"),
+        }
+    }
+
+    /// Pick a codec from one sampled frame. `narrow_hot` marks 1-2B int lanes
+    /// (decode-hot; day-0 §1: keep LZ4 unless ZSTD's win is outsized).
+    /// Returns None when no codec clears the >=10% win-vs-raw gate.
+    pub(crate) fn pick(&self, sample: &[u8], narrow_hot: bool) -> Option<Codec> {
+        if sample.is_empty() {
+            return None;
+        }
+        let wins = |comp: usize| comp * 10 <= sample.len() * 9;
+        match self.choice {
+            CodecChoice::Plain => None,
+            CodecChoice::Lz4 => {
+                wins(lz4_flex::compress(sample).len()).then_some(Codec::Lz4)
+            }
+            CodecChoice::Zstd => {
+                wins(self.compress(Codec::Zstd, sample).len()).then_some(Codec::Zstd)
+            }
+            CodecChoice::Auto => {
+                let lz4 = lz4_flex::compress(sample).len();
+                let zst = self.compress(Codec::Zstd, sample).len();
+                if !wins(lz4) && !wins(zst) {
+                    return None;
+                }
+                // ZSTD must beat LZ4 by >=20% (day-0: its ratio edge is
+                // 1.2-20x where it matters), >=30% on decode-hot narrow ints.
+                let num = if narrow_hot { 7 } else { 8 };
+                if zst * 10 <= lz4 * num {
+                    Some(Codec::Zstd)
+                } else if wins(lz4) {
+                    Some(Codec::Lz4)
+                } else {
+                    Some(Codec::Zstd)
+                }
+            }
+        }
+    }
+}
+
+// Compressed-frame image: u32 raw_len | u32 comp_len | bytes, align4-padded.
+pub(crate) fn push_frame(body: &mut Vec<u8>, raw_len: usize, comp: &[u8]) {
+    put_u32(body, raw_len as u32);
+    put_u32(body, comp.len() as u32);
+    body.extend_from_slice(comp);
+    while body.len() % 4 != 0 {
+        body.push(0);
+    }
+}
+
+pub(crate) fn frame_len(comp_len: usize) -> usize {
+    align4(8 + comp_len)
+}
+
+#[cfg(test)]
+pub(crate) fn test_codec_ctx() -> CodecCtx {
+    CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT }
+}
 
 struct IntBuilder {
     vals: Vec<i64>,
@@ -32,6 +212,10 @@ enum ColBuilder {
 pub struct CbWriter {
     file: SegFile,
     xid: TransactionId,
+    // Command that opened this writer: buffered ingest is per-statement
+    // (tuple_insert buffers until the statement-end flush), so a writer left
+    // behind by an errored statement must not leak rows into the next one.
+    cid: ::types_core::CommandId,
     frozen: bool,
     ncols: usize,
     coltypes: Vec<ColType>,
@@ -51,6 +235,13 @@ pub struct CbWriter {
     prev_int: Vec<i64>,
     prev_text: Vec<Vec<u8>>,
     has_prev: bool,
+    // v6 writer options (cluster key + codec menu).
+    opts: CbWriterOpts,
+    // Sort-on-ingest (plan §3.1): with a declared cluster key, rows buffer
+    // into a spill-capable tuplesort and only reach append_row on the sorted
+    // drain at finish(); RGs sealed from the drain carry RG_FLAG_CLUSTERED.
+    sorter: Option<Box<dyn CbIngestSort>>,
+    draining_clustered: bool,
 }
 
 pub struct FooterRg {
@@ -91,13 +282,31 @@ pub fn coltypes_of(rel: &::types_rel::Relation<'_>) -> PgResult<Vec<ColType>> {
 
 fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbWriter> {
     let coltypes = coltypes_of(rel)?;
+    let opts = writer_opts_of(rel, &coltypes)?;
     let path = crate::rel_main_path(rel);
     let file = SegFile::open_rw(&path)?;
     let xid = xact_seams::get_current_transaction_id::call()?;
     let fingerprint = schema_fingerprint(
         &rel.rd_att.attrs.iter().map(|a| (a.atttypid, a.attlen)).collect::<Vec<_>>(),
     );
-    open_writer_inner(file, xid, frozen_ok, coltypes, fingerprint)
+    let cid = xact_seams::get_current_command_id::call(false)?;
+    let mut w = open_writer_inner(file, xid, cid, frozen_ok, coltypes, fingerprint, opts)?;
+    if !w.opts.cluster_key.is_empty() {
+        let keys: Vec<(i16, CbSortKeyKind)> =
+            w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
+        // SAFETY: lifetime erasure on the relcache tupdesc; the COPY/INSERT
+        // statement keeps the relation open for the writer's lifetime (the
+        // begin_index_btree contract), and the stale-xid check in
+        // multi_insert drops writers abandoned by error unwinds.
+        let tup_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>> =
+            unsafe { std::mem::transmute(rel.rd_att.clone()) };
+        w.sorter = Some(::tuplesort_seams::cbstore_ingest_sort::call(
+            tup_desc,
+            &keys,
+            init_small::globals::maintenance_work_mem(),
+        )?);
+    }
+    Ok(w)
 }
 
 /// TEST SUPPORT (dict-tier round-trip / bench rigs): a writer over an
@@ -106,21 +315,25 @@ fn open_writer(rel: &::types_rel::Relation<'_>, frozen_ok: bool) -> PgResult<CbW
 /// scan). `append_row`/`finish` ride the exact production write path.
 #[doc(hidden)]
 pub fn open_writer_at(path: &str, coltypes: Vec<ColType>) -> PgResult<CbWriter> {
-    open_writer_inner(SegFile::open_rw(path)?, 1, true, coltypes, 0x5aa5)
+    let opts = CbWriterOpts::plain(coltypes.len());
+    open_writer_inner(SegFile::open_rw(path)?, 1, 0, true, coltypes, 0x5aa5, opts)
 }
 
 fn open_writer_inner(
     file: SegFile,
     xid: TransactionId,
+    cid: ::types_core::CommandId,
     frozen_ok: bool,
     coltypes: Vec<ColType>,
     fingerprint: u64,
+    opts: CbWriterOpts,
 ) -> PgResult<CbWriter> {
     let len = file.total_len();
     let ncols = coltypes.len();
     let mut w = CbWriter {
         file,
         xid,
+        cid,
         // Freeze-on-load: first write into a file created by our own
         // transaction (empty part) makes RGs all-visible-on-commit.
         frozen: false,
@@ -136,6 +349,9 @@ fn open_writer_inner(
         prev_int: vec![0; ncols],
         prev_text: vec![Vec::new(); ncols],
         has_prev: false,
+        opts,
+        sorter: None,
+        draining_clustered: false,
     };
     w.reset_builders();
     if len >= CB_HEADER_LEN {
@@ -148,7 +364,7 @@ fn open_writer_inner(
             )));
         }
         if footer_off != 0 {
-            let (rgs, footer_end, _ndv, _sorted) =
+            let (rgs, footer_end, _ndv, _sorted, _ckey) =
                 crate::reader::read_footer_rgs(&mut w.file, footer_off, w.ncols, version, true)?;
             if !rgs.is_empty() {
                 w.ndv = None;
@@ -179,8 +395,24 @@ impl CbWriter {
         self.nbuf = 0;
     }
 
+    // COPY/INSERT entry: rows detour through the cluster-key sorter when one
+    // is declared, reaching append_row only on the sorted drain in finish().
+    fn ingest_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        if let Some(s) = &mut self.sorter {
+            if let Some(c) = isnull[..self.ncols].iter().position(|&n| n) {
+                let _ = c;
+                return Err(Box::new(
+                    PgError::error("cbstore does not support NULL values".to_string())
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+            return s.put_row(&values[..self.ncols], &isnull[..self.ncols]);
+        }
+        self.append_row(values, isnull)
+    }
+
     /// pub for the test-support writer (`open_writer_at`); production
-    /// callers reach this through multi_insert/tuple_insert.
+    /// callers reach this through multi_insert/tuple_insert (via ingest_row).
     #[doc(hidden)]
     pub fn append_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
         for c in 0..self.ncols {
@@ -244,7 +476,9 @@ impl CbWriter {
         }
         let nrows = self.nbuf;
         let ngranules = nrows.div_ceil(GRANULE_ROWS) as u32;
-        let flags = (if self.frozen { RG_FLAG_FROZEN } else { 0 }) | RG_FLAG_SUMS;
+        let flags = (if self.frozen { RG_FLAG_FROZEN } else { 0 })
+            | RG_FLAG_SUMS
+            | (if self.draining_clustered { RG_FLAG_CLUSTERED } else { 0 });
         let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
         // rg_header placeholder; length patched at the end.
         put_u32(&mut body, CB_RG_MAGIC);
@@ -262,9 +496,10 @@ impl CbWriter {
                 body.push(0);
             }
             let chunk_off = body.len() as u64;
+            let cc = CodecCtx { choice: self.opts.codec[c], zstd_level: self.opts.zstd_level };
             let (min, max) = match b {
-                ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules),
-                ColBuilder::Text(tb) => encode_text_chunk(&mut body, tb, ngranules),
+                ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
+                ColBuilder::Text(tb) => encode_text_chunk(&mut body, tb, ngranules, &cc),
             };
             chunk_meta.push((chunk_off, min, max));
             sums.push(match b {
@@ -296,6 +531,18 @@ impl CbWriter {
     /// pub for the test-support writer (`open_writer_at`).
     #[doc(hidden)]
     pub fn finish(&mut self) -> PgResult<()> {
+        // Cluster-key drain: sort the buffered ingest and feed it through the
+        // ordinary append path (NDV/sorted trackers and RG seals see rows in
+        // final order, so their metadata is exact for the sorted part).
+        if let Some(mut sorter) = self.sorter.take() {
+            sorter.sort()?;
+            self.draining_clustered = true;
+            let mut values = vec![Datum::null(); self.ncols];
+            let mut isnull = vec![false; self.ncols];
+            while sorter.next_row(&mut values, &mut isnull)? {
+                self.append_row(&values, &isnull)?;
+            }
+        }
         self.seal_rg()?;
         // Footer.
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));
@@ -335,6 +582,15 @@ impl CbWriter {
         // v5 sorted section; 0 = unknown (append-invalidated tracker).
         for c in 0..self.ncols {
             f.push(self.sorted.as_ref().is_some_and(|s| s[c]) as u8);
+        }
+        // v6 cluster-key section (fixed width): the declared key this writer
+        // sorted under (0 keys = none); adaptive traversal gates per RG on
+        // RG_FLAG_CLUSTERED.
+        debug_assert!(self.opts.cluster_key.len() <= CB_CLUSTER_KEY_MAX_COLS);
+        f.extend_from_slice(&(self.opts.cluster_key.len() as u16).to_le_bytes());
+        for slot in 0..CB_CLUSTER_KEY_MAX_COLS {
+            let c = self.opts.cluster_key.get(slot).map(|&(c, _)| c).unwrap_or(0);
+            f.extend_from_slice(&c.to_le_bytes());
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -399,7 +655,40 @@ fn bloom_armed(vals: &[i64], min: i64, max: i64, gmm: &[(i64, i64)]) -> bool {
     false
 }
 
-pub(crate) fn encode_int_chunk(body: &mut Vec<u8>, vals: &[i64], ngranules: u32) -> (i64, i64) {
+// Serialize granule g's plain FOR/Raw payload image into `out`.
+fn enc_int_granule(out: &mut Vec<u8>, vals: &[i64], g: usize, encoding: Encoding, width: u8, base: i64) {
+    let lo = g * GRANULE_ROWS;
+    let hi = (lo + GRANULE_ROWS).min(vals.len());
+    match encoding {
+        Encoding::For => match width {
+            1 => out.extend(vals[lo..hi].iter().map(|&v| (v - base) as u8)),
+            2 => {
+                for &v in &vals[lo..hi] {
+                    out.extend_from_slice(&(((v - base) as u16).to_le_bytes()));
+                }
+            }
+            4 => {
+                for &v in &vals[lo..hi] {
+                    out.extend_from_slice(&(((v - base) as u32).to_le_bytes()));
+                }
+            }
+            _ => unreachable!(),
+        },
+        Encoding::Raw => {
+            for &v in &vals[lo..hi] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn encode_int_chunk(
+    body: &mut Vec<u8>,
+    vals: &[i64],
+    ngranules: u32,
+    cc: &CodecCtx,
+) -> (i64, i64) {
     let n = vals.len();
     let min = vals.iter().copied().min().unwrap();
     let max = vals.iter().copied().max().unwrap();
@@ -430,8 +719,41 @@ pub(crate) fn encode_int_chunk(body: &mut Vec<u8>, vals: &[i64], ngranules: u32)
             flags |= CHUNK_FLAG_BLOOM;
         }
     }
+    // v6 codec menu: sample granule 0 to pick a codec, then frame every
+    // granule; keep the plain zero-decode lane unless the full chunk clears
+    // the >=10% win gate too. Narrow FOR lanes (1-2B) are the decode-hot
+    // class — pick() holds them to a stricter ZSTD threshold.
+    let mut frames: Vec<(Vec<u8>, u32)> = Vec::new();
+    let mut codec = Codec::None;
+    if encoding != Encoding::Const {
+        let mut plain = Vec::with_capacity(GRANULE_ROWS * width as usize);
+        enc_int_granule(&mut plain, vals, 0, encoding, width, min);
+        if let Some(c) = cc.pick(&plain, encoding == Encoding::For && width <= 2) {
+            let mut frames_len = 0usize;
+            let mut raw_len = 0usize;
+            frames.reserve(ng);
+            for g in 0..ng {
+                if g > 0 {
+                    plain.clear();
+                    enc_int_granule(&mut plain, vals, g, encoding, width, min);
+                }
+                let comp = cc.compress(c, &plain);
+                frames_len += frame_len(comp.len());
+                raw_len += plain.len();
+                frames.push((comp, plain.len() as u32));
+            }
+            if frames_len * 10 <= raw_len * 9 {
+                codec = c;
+            } else {
+                frames.clear();
+            }
+        }
+    }
     let payload_len = match encoding {
         Encoding::Const => 0u64,
+        _ if codec != Codec::None => {
+            frames.iter().map(|(f, _)| frame_len(f.len()) as u64).sum()
+        }
         _ => (n * width as usize) as u64,
     };
     ChunkHeader {
@@ -441,10 +763,19 @@ pub(crate) fn encode_int_chunk(body: &mut Vec<u8>, vals: &[i64], ngranules: u32)
         ngranules,
         aux: min,
         payload_len,
+        codec,
     }
     .encode(body);
+    let mut frame_off = 0u64;
     for (g, &(gmin, gmax)) in gmm.iter().enumerate() {
-        put_u64(body, ((g * GRANULE_ROWS) * width as usize) as u64);
+        let off = if codec != Codec::None {
+            let o = frame_off;
+            frame_off += frame_len(frames[g].0.len()) as u64;
+            o
+        } else {
+            ((g * GRANULE_ROWS) * width as usize) as u64
+        };
+        put_u64(body, off);
         put_i64(body, gmin);
         put_i64(body, gmax);
     }
@@ -485,26 +816,15 @@ pub(crate) fn encode_int_chunk(body: &mut Vec<u8>, vals: &[i64], ngranules: u32)
     }
     match encoding {
         Encoding::Const => {}
-        Encoding::For => {
-            let base = min;
-            match width {
-                1 => body.extend(vals.iter().map(|&v| (v - base) as u8)),
-                2 => {
-                    for &v in vals {
-                        body.extend_from_slice(&(((v - base) as u16).to_le_bytes()));
-                    }
+        Encoding::For | Encoding::Raw => {
+            if codec != Codec::None {
+                for (comp, raw_len) in &frames {
+                    push_frame(body, *raw_len as usize, comp);
                 }
-                4 => {
-                    for &v in vals {
-                        body.extend_from_slice(&(((v - base) as u32).to_le_bytes()));
-                    }
+            } else {
+                for g in 0..ng {
+                    enc_int_granule(body, vals, g, encoding, width, min);
                 }
-                _ => unreachable!(),
-            }
-        }
-        Encoding::Raw => {
-            for &v in vals {
-                body.extend_from_slice(&v.to_le_bytes());
             }
         }
         _ => unreachable!(),
@@ -516,7 +836,12 @@ pub(crate) fn encode_int_chunk(body: &mut Vec<u8>, vals: &[i64], ngranules: u32)
 // images, 4-byte aligned, so decode publishes pointers with no copies.
 //   Dict:    codes[n] (1/2/4 B) | dict_off[ndv] u32 | blob
 //   RawText: off[n] u32 | blob
-fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i64, i64) {
+fn encode_text_chunk(
+    body: &mut Vec<u8>,
+    tb: &TextBuilder,
+    ngranules: u32,
+    cc: &CodecCtx,
+) -> (i64, i64) {
     let n = tb.offs.len();
 
     // Dictionary pass over the row set.
@@ -573,21 +898,24 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
         for c in codes.iter_mut() {
             *c = remap[*c as usize];
         }
-        // Lz4Dict candidate: one LZ4 frame over the varlena-image dict blob,
-        // taken on a >=10% payload win; codes + dict_off stay plain.
+        // Compressed-dict candidate: one frame over the varlena-image dict
+        // blob (codec from the v6 menu, sampled on the blob itself), taken on
+        // a >=10% payload win; codes + dict_off stay plain.
         let mut dict_blob: Vec<u8> = Vec::with_capacity(dict_blob_len);
         for &(off, len) in &order {
             push_varlena_image(&mut dict_blob, &tb.blob[off as usize..(off + len) as usize]);
         }
         debug_assert_eq!(dict_blob.len(), dict_blob_len);
-        let comp = lz4_flex::compress(&dict_blob);
         let head_len = align4(n * code_w) + ndv * 4;
-        let lz4_blob_len = align4(8 + comp.len());
-        let use_lz4 = (head_len + lz4_blob_len) * 10 <= (head_len + dict_blob_len) * 9;
-        let (encoding, stored_blob_len) = if use_lz4 {
-            (Encoding::Lz4Dict, lz4_blob_len)
+        let picked = cc.pick(&dict_blob, false);
+        let comp = picked.map(|c| cc.compress(c, &dict_blob)).unwrap_or_default();
+        let comp_blob_len = frame_len(comp.len());
+        let use_comp = picked.is_some()
+            && (head_len + comp_blob_len) * 10 <= (head_len + dict_blob_len) * 9;
+        let (encoding, codec, stored_blob_len) = if use_comp {
+            (Encoding::Lz4Dict, picked.unwrap(), comp_blob_len)
         } else {
-            (Encoding::Dict, dict_blob_len)
+            (Encoding::Dict, Codec::None, dict_blob_len)
         };
         let payload_len = (head_len + stored_blob_len) as u64;
         ChunkHeader {
@@ -597,6 +925,7 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
             ngranules,
             aux: ndv as i64,
             payload_len,
+            codec,
         }
         .encode(body);
         for (g, &(gmin, gmax)) in gmm.iter().enumerate() {
@@ -629,27 +958,29 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
             put_u32(body, blob_off);
             blob_off += align4(VARLENA_IMG_HDR + len as usize) as u32;
         }
-        if use_lz4 {
+        if use_comp {
             let start = body.len();
             put_u32(body, dict_blob_len as u32);
             put_u32(body, comp.len() as u32);
             body.extend_from_slice(&comp);
-            while body.len() - start != lz4_blob_len {
+            while body.len() - start != comp_blob_len {
                 body.push(0);
             }
         } else {
             body.extend_from_slice(&dict_blob);
         }
     } else {
-        // Lz4Text candidate (S3 footprint step): per-granule LZ4 frames over
-        // the varlena-image blob, granule-relative offsets; decode is
+        // Compressed-text candidate (S3 footprint step): per-granule frames
+        // (codec from the v6 menu, sampled on granule 0's blob) over the
+        // varlena-image blob, granule-relative offsets; decode is
         // decompress-then-pointer-gather. Taken only on a >=10% payload win
         // so incompressible chunks keep the zero-decode RAWTEXT lane.
         let mut frames: Vec<(Vec<u8>, u32)> = Vec::with_capacity(ngranules as usize);
         let mut offs_rel: Vec<u32> = Vec::with_capacity(n);
         let mut max_raw = 0usize;
-        let mut lz4_frames_len = 0usize;
+        let mut comp_frames_len = 0usize;
         let mut gblob: Vec<u8> = Vec::new();
+        let mut picked: Option<Codec> = None;
         for g in 0..ngranules as usize {
             let lo = g * GRANULE_ROWS;
             let hi = (lo + GRANULE_ROWS).min(n);
@@ -659,13 +990,17 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
                 push_varlena_image(&mut gblob, &tb.blob[off as usize..(off + len) as usize]);
             }
             max_raw = max_raw.max(gblob.len());
-            let comp = lz4_flex::compress(&gblob);
-            lz4_frames_len += align4(8 + comp.len());
+            if g == 0 {
+                picked = cc.pick(&gblob, false);
+            }
+            let Some(c) = picked else { break };
+            let comp = cc.compress(c, &gblob);
+            comp_frames_len += frame_len(comp.len());
             frames.push((comp, gblob.len() as u32));
         }
-        let lz4_size = n * 4 + lz4_frames_len;
-        if lz4_size * 10 <= (n * 4 + raw_blob_len) * 9 {
-            let payload_len = (n * 4) as u64 + lz4_frames_len as u64;
+        let comp_size = n * 4 + comp_frames_len;
+        if picked.is_some() && comp_size * 10 <= (n * 4 + raw_blob_len) * 9 {
+            let payload_len = (n * 4) as u64 + comp_frames_len as u64;
             ChunkHeader {
                 encoding: Encoding::Lz4Text,
                 width: 4,
@@ -673,6 +1008,7 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
                 ngranules,
                 aux: max_raw as i64,
                 payload_len,
+                codec: picked.unwrap(),
             }
             .encode(body);
             let mut frame_off = (n * 4) as u64;
@@ -706,6 +1042,7 @@ fn encode_text_chunk(body: &mut Vec<u8>, tb: &TextBuilder, ngranules: u32) -> (i
                 ngranules,
                 aux: 0,
                 payload_len,
+                codec: Codec::None,
             }
             .encode(body);
             for (g, &(gmin, gmax)) in gmm.iter().enumerate() {
@@ -747,9 +1084,14 @@ pub fn multi_insert<'mcx>(
 ) -> PgResult<()> {
     let oid = rel.rd_id;
     let xid = xact_seams::get_current_transaction_id::call()?;
+    let cid = xact_seams::get_current_command_id::call(false)?;
     WRITERS.with(|w| {
         let mut map = w.borrow_mut();
-        let stale = map.get(&oid).is_some_and(|cw| cw.xid != xid);
+        // Evict writers from another transaction OR another command: buffered
+        // ingest is per-statement (the statement-end flush publishes it), so
+        // a writer abandoned by an errored statement must not leak its rows
+        // into a later statement of the same transaction.
+        let stale = map.get(&oid).is_some_and(|cw| cw.xid != xid || cw.cid != cid);
         if stale {
             map.remove(&oid);
         }
@@ -757,10 +1099,16 @@ pub fn multi_insert<'mcx>(
             map.insert(oid, open_writer(rel, true)?);
         }
         let cw = map.get_mut(&oid).unwrap();
-        for slot in slots.iter() {
+        for slot in slots.iter_mut() {
+            // Deform before reading: buffer/heap-backed slots (CTAS from a
+            // heap table feeds the scan slot straight in) arrive with
+            // tts_nvalid == 0, and reading tts_values/tts_isnull raw off
+            // them fabricated NULLs on NULL-free data. No-op on the
+            // already-deformed COPY/INSERT..SELECT virtual slots.
+            exectuples::slot_getallattrs(slot);
             let base = slot.base();
             debug_assert!(base.tts_nvalid as usize >= cw.ncols);
-            cw.append_row(&base.tts_values, &base.tts_isnull)?;
+            cw.ingest_row(&base.tts_values, &base.tts_isnull)?;
         }
         Ok(())
     })
@@ -770,10 +1118,13 @@ pub fn tuple_insert<'mcx>(
     rel: &::types_rel::Relation<'mcx>,
     slot: &mut ::types_slot::SlotData<'mcx>,
 ) -> PgResult<()> {
-    // Correctness-only single-row path: one RG per statement-less insert.
+    // Single-row inserts buffer like COPY: the row joins the per-(xid, cid)
+    // ingest writer and the statement-end flush (ExecModifyTable's cbstore
+    // finish, or COPY's finish_bulk_insert) publishes RG-sized seals. The
+    // old finish-per-row form sealed ONE ROW GROUP PER ROW on INSERT..SELECT
+    // (24 GB for 2M rows), each with a full footer rewrite.
     let mut slots = [slot];
-    multi_insert(rel, &mut slots)?;
-    finish_bulk_insert(rel)
+    multi_insert(rel, &mut slots)
 }
 
 pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
@@ -799,7 +1150,8 @@ mod sorted_flag_tests {
     }
 
     fn writer_at(path: &str, coltypes: Vec<ColType>) -> CbWriter {
-        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, true, coltypes, 0x5aa5).unwrap()
+        let opts = CbWriterOpts::plain(coltypes.len());
+        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts).unwrap()
     }
 
     // 4B-U inline varlena image; returns the backing buffer + datum.
@@ -932,7 +1284,7 @@ mod dict_sort_tests {
             b"\xff", b"ab", b"abz", b"", b"apple", b"a", b"ab\xff\xff",
         ];
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&rows), 1);
+        encode_text_chunk(&mut body, &tb_of(&rows), 1, &test_codec_ctx());
         let (hdr, codes, entries) = parse_dict_chunk(&body, rows.len());
         assert!(matches!(hdr.encoding, Encoding::Dict | Encoding::Lz4Dict));
         assert_ne!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
@@ -955,10 +1307,322 @@ mod dict_sort_tests {
             .collect();
         let refs: Vec<&[u8]> = rows.iter().map(|v| &v[..]).collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&refs), 1);
+        encode_text_chunk(&mut body, &tb_of(&refs), 1, &test_codec_ctx());
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert!(matches!(hdr.encoding, Encoding::RawText | Encoding::Lz4Text));
         assert_eq!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use crate::reader::ChunkView;
+
+    fn decode_ints(body: &[u8], nrows: usize) -> Vec<i64> {
+        let cv = ChunkView::at(body, 0, nrows as u32);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut got = Vec::new();
+        for g in 0..cv.hdr.ngranules as usize {
+            cv.decode_granule(g, &mut out, &mut dict, &mut arena);
+            got.extend(out.iter().map(|d| d.as_i64()));
+        }
+        got
+    }
+
+    // Repetitive (compressible) i64s across 2.5 granules; force each codec
+    // and prove framed round-trips + the codec tag.
+    #[test]
+    fn int_frames_roundtrip_lz4_and_zstd() {
+        let n = GRANULE_ROWS * 2 + GRANULE_ROWS / 2;
+        let vals: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + (i % 97) * 3).collect();
+        for choice in [CodecChoice::Lz4, CodecChoice::Zstd] {
+            let cc = CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT };
+            let mut body = Vec::new();
+            let (min, max) =
+                encode_int_chunk(&mut body, &vals, n.div_ceil(GRANULE_ROWS) as u32, &cc);
+            assert_eq!((min, max), (1_000_000, 1_000_000 + 96 * 3));
+            let cv = ChunkView::at(&body, 0, n as u32);
+            let want = if choice == CodecChoice::Lz4 { Codec::Lz4 } else { Codec::Zstd };
+            assert_eq!(cv.hdr.codec, want, "{choice:?}");
+            assert_eq!(decode_ints(&body, n), vals, "{choice:?}");
+        }
+    }
+
+    // Auto keeps the plain zero-decode lane on incompressible data.
+    #[test]
+    fn auto_keeps_plain_on_incompressible_ints() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as u64).map(|i| crate::hll::mix64(i) as i64).collect();
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 1, &test_codec_ctx());
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(cv.hdr.payload_len, (n * cv.hdr.width as usize) as u64);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Auto picks a codec on compressible data and the >=10%-win gate holds.
+    #[test]
+    fn auto_compresses_compressible_ints() {
+        let n = GRANULE_ROWS * 2;
+        let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 2, &test_codec_ctx());
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_ne!(cv.hdr.codec, Codec::None);
+        assert!(cv.hdr.payload_len as usize * 10 <= n * cv.hdr.width as usize * 9);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Plain choice = the v5 byte behavior (no frames anywhere).
+    #[test]
+    fn plain_choice_writes_v5_shape() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
+        let cc = CodecCtx { choice: CodecChoice::Plain, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let mut body = Vec::new();
+        encode_int_chunk(&mut body, &vals, 1, &cc);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // ZSTD text frames: low-NDV rows force the dict lane; the compressed
+    // dict blob round-trips under the zstd tag.
+    #[test]
+    fn zstd_dict_text_roundtrip() {
+        let rows: Vec<Vec<u8>> = (0..4096)
+            .map(|i| format!("value-{:02}-{}", i % 7, "x".repeat(2000)).into_bytes())
+            .collect();
+        let refs: Vec<&[u8]> = rows.iter().map(|v| &v[..]).collect();
+        let mut tb = TextBuilder { offs: Vec::new(), blob: Vec::new() };
+        for r in &refs {
+            tb.offs.push((tb.blob.len() as u32, r.len() as u32));
+            tb.blob.extend_from_slice(r);
+        }
+        let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let mut body = Vec::new();
+        encode_text_chunk(&mut body, &tb, 1, &cc);
+        let cv = ChunkView::at(&body, 0, rows.len() as u32);
+        assert_eq!(cv.hdr.encoding, Encoding::Lz4Dict);
+        assert_eq!(cv.hdr.codec, Codec::Zstd);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        cv.decode_granule(0, &mut out, &mut dict, &mut arena);
+        for (i, d) in out.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(*d).unwrap(), &refs[i][..], "row {i}");
+        }
+    }
+
+    // Old-bank read-compat at the chunk level: a legacy Lz4Text image with
+    // codec byte 0 (the v<=5 writer's layout) must decode as LZ4.
+    #[test]
+    fn legacy_lz4text_codec0_decodes() {
+        let n = 512usize;
+        let rows: Vec<Vec<u8>> =
+            (0..n).map(|i| format!("legacy-{}-{}", i % 5, "pad".repeat(16)).into_bytes()).collect();
+        // Old-writer layout: header (codec byte 0) | granule dir | offsets |
+        // one LZ4 frame per granule.
+        let mut gblob = Vec::new();
+        let mut offs = Vec::with_capacity(n);
+        for r in &rows {
+            offs.push(gblob.len() as u32);
+            push_varlena_image(&mut gblob, r);
+        }
+        let comp = lz4_flex::compress(&gblob);
+        let mut body = Vec::new();
+        ChunkHeader {
+            encoding: Encoding::Lz4Text,
+            width: 4,
+            flags: 0,
+            ngranules: 1,
+            aux: gblob.len() as i64,
+            payload_len: (n * 4 + frame_len(comp.len())) as u64,
+            codec: Codec::None, // legacy tag byte
+        }
+        .encode(&mut body);
+        put_u64(&mut body, (n * 4) as u64);
+        put_i64(&mut body, 0);
+        put_i64(&mut body, 0);
+        while body.len() % 64 != 0 {
+            body.push(0);
+        }
+        for &o in &offs {
+            put_u32(&mut body, o);
+        }
+        push_frame(&mut body, gblob.len(), &comp);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(cv.hdr.frame_codec(), Codec::Lz4);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        cv.decode_granule(0, &mut out, &mut dict, &mut arena);
+        for (i, d) in out.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(*d).unwrap(), &rows[i][..], "row {i}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cluster_key_tests {
+    use super::*;
+
+    fn seams_once() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(::tuplesort::init_seams);
+    }
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-ckey-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    // int8 + text tupdesc matching ColType::[I64, Text].
+    fn tup_desc() -> std::rc::Rc<::types_tuple::TupleDescData<'static>> {
+        use ::types_tuple::*;
+        let m: &'static ::mcx::MemoryContext =
+            Box::leak(Box::new(::mcx::MemoryContext::new("cbstore-ckey-test")));
+        let mcx = m.mcx();
+        let mut attrs = ::mcx::PgVec::new_in(mcx);
+        let mut compact = ::mcx::PgVec::new_in(mcx);
+        for (i, (typid, len, byval, align)) in
+            [(20u32, 8i16, true, TYPALIGN_DOUBLE), (25, -1, false, TYPALIGN_INT)]
+                .iter()
+                .enumerate()
+        {
+            let att = FormData_pg_attribute {
+                attnum: (i + 1) as i16,
+                atttypid: *typid,
+                attlen: *len,
+                attbyval: *byval,
+                attalign: *align,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            compact.push(CompactAttribute::populate_from(&att));
+            attrs.push(att);
+        }
+        std::rc::Rc::new(TupleDescData {
+            natts: 2,
+            tdtypeid: 2249,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        })
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // The 3.1 ordering property: rows ingested in adversarial order come out
+    // key-sorted (text C-order, then i64), RGs carry RG_FLAG_CLUSTERED, the
+    // footer records the declared key, and the v5 sorted flags read exact.
+    #[test]
+    fn cluster_key_sorts_ingest_and_stamps_metadata() {
+        seams_once();
+        let path = tmp("sort");
+        let coltypes = vec![ColType::I64, ColType::Text];
+        let mut opts = CbWriterOpts::plain(2);
+        // Key: (text col 1, int col 0) — cross-column and cross-class.
+        opts.cluster_key = vec![(1, CbSortKeyKind::TextC), (0, CbSortKeyKind::Int64)];
+        let mut w = open_writer_inner(
+            SegFile::open_rw(&path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts,
+        )
+        .unwrap();
+        let keys: Vec<(i16, CbSortKeyKind)> =
+            w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
+        w.sorter =
+            Some(::tuplesort_seams::cbstore_ingest_sort::call(tup_desc(), &keys, 65536).unwrap());
+
+        // > 1 RG of rows, adversarial order (descending + interleaved).
+        let n = RG_ROWS + 1234;
+        let mut rows: Vec<(i64, Vec<u8>)> = (0..n)
+            .map(|i| {
+                let r = crate::hll::mix64(i as u64);
+                ((r % 1000) as i64, format!("k{:04}", r % 300).into_bytes())
+            })
+            .collect();
+        let mut keep = Vec::new();
+        for (v, t) in &rows {
+            let vals = [Datum::from_i64(*v), text_datum(t, &mut keep)];
+            w.ingest_row(&vals, &[false, false]).unwrap();
+        }
+        // Nothing sealed before the drain: rows live in the sorter.
+        assert_eq!(w.rgs.len(), 0);
+        assert_eq!(w.nbuf, 0);
+        w.finish().unwrap();
+
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.cluster_key, vec![1, 0]);
+        assert_eq!(part.total_rows(), n as u64);
+        assert!(part.rgs.len() >= 2);
+        for rg in &part.rgs {
+            assert_ne!(rg.flags & RG_FLAG_CLUSTERED, 0);
+        }
+        // Text key column is whole-part sorted; int is not (tiebreak only).
+        assert_eq!(part.sorted, vec![0, 1]);
+
+        // Read every row back and compare against the host-sorted oracle.
+        rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let (mut out_i, mut out_t) = (Vec::new(), Vec::new());
+        let (mut dict, mut arena) = (Vec::new(), Vec::new());
+        let (mut dict2, mut arena2) = (Vec::new(), Vec::new());
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        for rg in 0..part.rgs.len() {
+            let ints = part.chunk(rg, 0);
+            let texts = part.chunk(rg, 1);
+            // Dict tables are per-RG (build_dict contract: caller clears at
+            // RG boundaries).
+            dict.clear();
+            dict2.clear();
+            for g in 0..ints.hdr.ngranules as usize {
+                ints.decode_granule(g, &mut out_i, &mut dict, &mut arena);
+                texts.decode_granule(g, &mut out_t, &mut dict2, &mut arena2);
+                assert_eq!(out_i.len(), out_t.len());
+                for (i, t) in out_i.iter().zip(out_t.iter()) {
+                    got.push((i.as_i64(), crate::varlena_bytes(*t).unwrap().to_vec()));
+                }
+            }
+        }
+        assert_eq!(got.len(), rows.len());
+        // Multiset equality by full row; order equality by the key columns
+        // (equal-key rows may permute in payload—here the whole row IS the
+        // key, so exact equality holds).
+        for (i, (g, r)) in got.iter().zip(rows.iter()).enumerate() {
+            assert_eq!(g, r, "row {i} of {}", rows.len());
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // No cluster key: ingest_row appends directly (no sorter detour).
+    #[test]
+    fn no_cluster_key_appends_directly() {
+        seams_once();
+        let path = tmp("nokey");
+        let mut w = open_writer_inner(
+            SegFile::open_rw(&path).unwrap(), 1, 0, true,
+            vec![ColType::I64, ColType::Text], 0x5aa5, CbWriterOpts::plain(2),
+        )
+        .unwrap();
+        assert!(w.sorter.is_none());
+        let mut keep = Vec::new();
+        let vals = [Datum::from_i64(7), text_datum(b"x", &mut keep)];
+        w.ingest_row(&vals, &[false, false]).unwrap();
+        assert_eq!(w.nbuf, 1);
+        w.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.cluster_key, Vec::<u16>::new());
+        assert_eq!(part.rgs[0].flags & RG_FLAG_CLUSTERED, 0);
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -1003,7 +1667,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -1018,7 +1682,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
         assert_eq!(decode_all(&body, n), rows);
