@@ -105,13 +105,16 @@ pub(crate) fn relation_init_index_access_info(
 
     // amroutine->amsupport per handler; from_relam covers non-builtin AMs
     // over builtin handlers.
-    let amsupport = match types_relscan::IndexAmKind::from_relam(form.relam) {
+    let am_kind = types_relscan::IndexAmKind::from_relam(form.relam);
+    let amsupport = match am_kind {
         types_relscan::IndexAmKind::Btree => BTNProcs,
         types_relscan::IndexAmKind::Hash => HASHNProcs,
         types_relscan::IndexAmKind::Gin => GINNProcs,
         types_relscan::IndexAmKind::Gist => GISTNProcs,
         types_relscan::IndexAmKind::Spgist => SPGISTNProcs,
         types_relscan::IndexAmKind::Brin => BRINNProcs,
+        // pgvector hnsw: distance, norm, type-info.
+        types_relscan::IndexAmKind::Hnsw => 3,
         #[allow(unreachable_patterns)]
         other => panic!("relcache_build: index AM kind {other:?} for index {relid} unported"),
     };
@@ -135,6 +138,7 @@ pub(crate) fn relation_init_index_access_info(
             || form.relam == GIST_AM_OID
             || form.relam == SPGIST_AM_OID
             || form.relam == BRIN_AM_OID
+            || am_kind == types_relscan::IndexAmKind::Hnsw
         {
             0
         } else {

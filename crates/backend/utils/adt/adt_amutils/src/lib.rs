@@ -184,6 +184,21 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         has_amproperty: false,
         has_ambuildphasename: false,
     };
+    const HNSW: AmFlags = AmFlags {
+        amcanorder: false,
+        amcanorderbyop: true,
+        amcanbackward: false,
+        amcanunique: false,
+        amcanmulticol: false,
+        amsearcharray: false,
+        amsearchnulls: false,
+        amclusterable: false,
+        amcaninclude: false,
+        has_amgettuple: true,
+        has_amcanreturn: false,
+        has_amproperty: false,
+        has_ambuildphasename: true,
+    };
     match canonical_index_am(amoid) {
         BTREE_AM_OID => Some(&BT),
         HASH_AM_OID => Some(&HASH),
@@ -191,8 +206,24 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         GIN_AM_OID => Some(&GIN),
         SPGIST_AM_OID => Some(&SPGIST),
         BRIN_AM_OID => Some(&BRIN),
-        _ => None,
+        other => {
+            if extension_am_is_hnsw(other) {
+                Some(&HNSW)
+            } else {
+                None
+            }
+        }
     }
+}
+
+fn extension_am_is_hnsw(amoid: Oid) -> bool {
+    let Ok(Some(handler)) = syscache_seams::pg_am_amhandler::call(amoid) else {
+        return false;
+    };
+    matches!(
+        syscache_seams::pg_proc_proname::call(handler),
+        Ok(Some(name)) if name.name_str() == b"hnswhandler"
+    )
 }
 
 // pg_am.amhandler -> the handler's builtin AM (C reads the IndexAmRoutine, so

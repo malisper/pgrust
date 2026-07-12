@@ -26,6 +26,7 @@ tableam = { path = "../../table/tableam" }
 indexam_seams = { path = "../indexam_seams" }
 types_relscan = { path = "../relscan" }
 spgist = { path = "../../spgist/spgist" }
+pgvector_hnsw = { path = "../../../../contrib/pgvector_hnsw" }
 gist = { path = "../../gist/gist" }
 nbtree = { path = "../../nbtree/nbtree" }
 hash = { path = "../../hash/hash" }

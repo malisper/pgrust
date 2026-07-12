@@ -28,7 +28,8 @@ use ::types_nodes::parsenodes::DefElem;
 use ::types_nodes::NodeList;
 use ::types_rel::{
     AutoVacOpts, BTOptions, BrinOptions, GinOptions, GistOptBufferingMode, GistOptions,
-    HashOptions, RdOptions, SpGistOptions, StdRdOptIndexCleanup, StdRdOptions, ViewOptCheckOption,
+    HashOptions, HnswOptions, RdOptions, SpGistOptions, StdRdOptIndexCleanup, StdRdOptions,
+    ViewOptCheckOption,
     ViewOptions, LOCKMODE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
@@ -48,6 +49,8 @@ pub const RELOPT_KIND_SPGIST: relopt_kind = 1 << 8;
 pub const RELOPT_KIND_VIEW: relopt_kind = 1 << 9;
 pub const RELOPT_KIND_BRIN: relopt_kind = 1 << 10;
 pub const RELOPT_KIND_PARTITIONED: relopt_kind = 1 << 11;
+// pgvector hnsw: C add_reloption_kind() at module load; static here.
+pub const RELOPT_KIND_HNSW: relopt_kind = 1 << 12;
 
 pub const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 
@@ -167,6 +170,8 @@ static RELOPTS: &[OptDef] = &[
         SPGIST_MIN_FILLFACTOR,
         100,
     ),
+    i("m", RELOPT_KIND_HNSW, AEL, 16, 2, 100),
+    i("ef_construction", RELOPT_KIND_HNSW, AEL, 64, 4, 1000),
     i("autovacuum_vacuum_threshold", HT, SUEL, -1, 0, i32::MAX),
     i("autovacuum_vacuum_max_threshold", HT, SUEL, -2, -1, i32::MAX),
     i("autovacuum_vacuum_insert_threshold", HT, SUEL, -2, -1, i32::MAX),
@@ -994,8 +999,18 @@ pub fn index_reloptions<'mcx>(
         GIST_AM_OID => gistoptions(mcx, options, validate),
         SPGIST_AM_OID => spgoptions(mcx, options, validate),
         BRIN_AM_OID => brinoptions(mcx, options, validate),
-        other => panic!("index_reloptions: no amoptions for access method {other}"),
+        other => match extension_am_handler_symbol(other).as_deref() {
+            Some("hnswhandler") => hnswoptions(mcx, options, validate),
+            _ => panic!("index_reloptions: no amoptions for access method {other}"),
+        },
     }
+}
+
+// Extension AM (dynamic pg_am row): identify by the handler proc's C symbol.
+fn extension_am_handler_symbol(amoid: Oid) -> Option<String> {
+    let handler = syscache_seams::pg_am_amhandler::call(amoid).ok()??;
+    let name = syscache_seams::pg_proc_proname::call(handler).ok()??;
+    Some(String::from_utf8_lossy(name.name_str()).into_owned())
 }
 
 // pg_am.amhandler -> the handler's builtin AM (amapi.c GetIndexAmRoutine).
@@ -1174,6 +1189,31 @@ fn brinoptions<'mcx>(
         }
     }
     Ok(Some(RdOptions::Brin(out)))
+}
+
+// hnswoptions (pgvector hnsw.c).
+fn hnswoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<RdOptions>> {
+    let values = parseRelOptions(mcx, options, validate, RELOPT_KIND_HNSW)?;
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut out = HnswOptions { m: 16, ef_construction: 64 };
+    for v in values.iter() {
+        match v.def.name {
+            "m" => out.m = v.int_val(),
+            "ef_construction" => out.ef_construction = v.int_val(),
+            other => {
+                if validate {
+                    panic!("reloption \"{other}\" not found in parse table");
+                }
+            }
+        }
+    }
+    Ok(Some(RdOptions::Hnsw(out)))
 }
 
 // extractRelOptions over the already-fetched reloptions datum; the caller

@@ -31,6 +31,7 @@ miscinit = { path = "../../utils/init/miscinit" }
 mcx = { path = "../../../_support/mcx" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 spgist_build = { path = "../../access/spgist/spgist_build" }
+pgvector_hnsw_build = { path = "../../../contrib/pgvector_hnsw_build" }
 brin_build = { path = "../../access/brin/brin_build" }
 gistbuild = { path = "../../access/gist/gistbuild" }
 nbtsort = { path = "../../access/nbtree/nbtsort" }
