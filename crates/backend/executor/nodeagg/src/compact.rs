@@ -284,11 +284,12 @@ pub fn agg_hash_compact_try_arm_mk(
         let kind = match kc.kind {
             ::execgrouping::GroupKeyKind::Int { width } => MkCompKind::Int { width },
             // Raw-bytes text packs ONLY through the dict/intern lane the
-            // feed armed for exactly this column; NULL text cannot be
-            // interned, so intern components require the no-NULLs proof.
-            ::execgrouping::GroupKeyKind::TextRaw
-                if dict_att == Some(input_att) && !nullable =>
-            {
+            // feed armed for exactly this column. NULL text is never
+            // interned: non-nullable shapes carry the feed's no-NULLs proof
+            // (cbstore) or its runtime NULL-demote pre-check (slot streams);
+            // nullable shapes route NULL through the null-bitmap byte (bit
+            // set, value bits zero) without touching the intern table.
+            ::execgrouping::GroupKeyKind::TextRaw if dict_att == Some(input_att) => {
                 has_intern = true;
                 MkCompKind::Intern
             }

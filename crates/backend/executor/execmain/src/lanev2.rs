@@ -5613,6 +5613,18 @@ enum StagedMode {
         /// The grouping key's 0-based colno in the join output.
         key_col: u16,
     },
+    /// Packed multi-key deferred batched probe (the scan multikey feed's
+    /// slot-stream analog): full needed-column staging; per batch — pack the
+    /// staged grouping-key lanes into the armed compact table's ≤16-byte key
+    /// image (Int shift/mask, numeric keypack, raw-bytes text through the
+    /// build-lifetime intern table), one batched compact-table probe, then
+    /// the whole-batch fold. Admitted for unguarded plans with NO residual
+    /// transitions over 2..N packable keys (`staged_mk_admit` — the compact
+    /// table is ARMED as a side effect). Inadmissible values demote at
+    /// runtime (NULL keys on a non-nullable image, unpackable numerics,
+    /// backstop migration): the compact groups migrate into the C tuplehash
+    /// and the batch (and every later one) replays per-row — byte-safe.
+    Mk,
 }
 
 /// The composition breaker's fold-armed `Sink` face (three modes, see
@@ -5646,6 +5658,20 @@ struct StagedFoldAggSink<'a, 'mcx> {
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     /// K2 scratch: the batch's grouping-key hashes (batched hash pre-pass).
     hashes: Vec<u32>,
+    /// Mk mode's armed shape + scratch (`None` in every other mode).
+    mk: Option<StagedMk>,
+}
+
+/// Mk-mode state: the armed packed-key layout plus the reused packing
+/// scratch, and the one-way demote flag (after a runtime demote the compact
+/// table has migrated into the C tuplehash — every later batch replays
+/// per-row through the arrival probe, byte-identically).
+struct StagedMk {
+    shape: ::nodeagg::MkShape,
+    demoted: bool,
+    packbuf: Vec<u128>,
+    keys1: Vec<i64>,
+    keys2: Vec<[u64; 2]>,
 }
 
 /// Staged-feed admission inputs for the composition. `None` = the composition
@@ -5656,11 +5682,13 @@ struct StagedFeedShape {
     mode: StagedMode,
     fold_cols: Vec<u16>,
     fold_bound: i32,
-    /// Guarded/K2 modes only (empty in arrival mode): each needed column's
-    /// 0-based attno, attlen, attbyval.
+    /// Guarded/K2/Mk modes only (empty in arrival mode): each needed
+    /// column's 0-based attno, attlen, attbyval.
     needed: Vec<(u16, i16, bool)>,
     max_colno: i32,
     natts: usize,
+    /// Mk mode's armed packed-key layout (`None` in every other mode).
+    mk: Option<::nodeagg::MkShape>,
 }
 
 /// K2 deferred-probe kill-switch: on by default under the lane;
@@ -5673,52 +5701,165 @@ fn k2_enabled() -> bool {
     })
 }
 
+/// Slot-stream multi-key kill switch: on by default under the lane;
+/// `PGRUST_LANE_V2_MKSTREAM=0`/`off` forces the arrival probe for the staged
+/// join/gather feeds' multi-key shapes (A/B tooling — byte-identical up to
+/// the group-order relaxation). The scan-feed switch
+/// (`PGRUST_LANE_V2_MULTIKEY`) gates this arm too (shared machinery).
+fn mkstream_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_MKSTREAM").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The slot-stream multi-key admission (`scan_mk_shape`'s analog for the
+/// staged join/gather feeds), decided once per build — the compact table is
+/// ARMED as a side effect. Caller checked: unguarded plan, no residual
+/// transitions, no single-key kernel probe. This adds:
+///   * 2..N grouping keys, every one a staged needed column;
+///   * packable kinds — Int class / numeric (keypack canonical form, gated
+///     per value at flush) / at most ONE raw-bytes text component, hosted
+///     through the compact table's build-lifetime intern table (slot streams
+///     carry raw varlenas — no dict codes — so the feed interns per row; ids
+///     are stable for the whole stream and bounded by the backstop's memory
+///     check, which counts the intern arena);
+///   * the packing admission + table arm (`agg_hash_compact_try_arm_mk`) —
+///     first WITH the null-bitmap byte (slot streams carry no no-NULLs
+///     proof), and when that busts the 16-byte image budget (Q19's
+///     int8+numeric4+intern4 = 16), WITHOUT it plus `flush_mk`'s runtime
+///     NULL-demote pre-check (a NULL grouping key migrates to the C table —
+///     byte-safe, never packed wrong).
+/// `None` = keep the arrival probe (byte-identical); refuse reasons ticked
+/// per the scan feed's taxonomy.
+fn staged_mk_admit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    natts: usize,
+    needed: &[(u16, i16, bool)],
+) -> Option<::nodeagg::MkShape> {
+    if !multikey_enabled() || !mkstream_enabled() {
+        return None;
+    }
+    let key_cols = ::nodeagg::agg_hash_key_cols(agg);
+    if key_cols.len() < 2 {
+        return None;
+    }
+    let refused = |r: RefuseReason| {
+        stats::tick_refused(ShapeClass::AggBuild, r);
+        None
+    };
+    // Mirror `scan_mk_shape`'s vguard belt (the staged feeds admit no
+    // varlena fold lanes, so vguards should be empty on unguarded plans).
+    if ::nodeagg::agg_lanefold_plan(agg).is_none_or(|plan| !plan.vguards.is_empty()) {
+        return refused(RefuseReason::MultiKeyShape);
+    }
+    // Every key must be a staged needed column (it always is — the spill
+    // projection keeps grouping columns); structural gate.
+    for &(att, _) in &key_cols {
+        if att as usize >= natts || !needed.iter().any(|&(c, _, _)| c == att) {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    // Kind census: at most one raw-bytes text component (one intern table).
+    let mut dict_att = None;
+    for &(att, kind) in &key_cols {
+        match kind {
+            ::nodeagg::GroupKeyKind::Int { .. } | ::nodeagg::GroupKeyKind::Numeric => {}
+            ::nodeagg::GroupKeyKind::TextRaw => {
+                if dict_att.is_some() {
+                    return refused(RefuseReason::MultiKeyShape);
+                }
+                dict_att = Some(att);
+            }
+            ::nodeagg::GroupKeyKind::Other => return refused(RefuseReason::MultiKeyShape),
+        }
+    }
+    // Arm: nullable first (NULL keys ride the bitmap — no demote); a budget
+    // refusal retries without the null byte, taking the runtime NULL-demote
+    // pre-check instead.
+    for nullable in [true, false] {
+        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, nullable, dict_att) {
+            ::nodeagg::CompactArm::Armed => {
+                return Some(
+                    ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table"),
+                );
+            }
+            ::nodeagg::CompactArm::KeyKind => continue,
+            ::nodeagg::CompactArm::SpillRisk => {
+                return refused(RefuseReason::CompactSpillRisk)
+            }
+            ::nodeagg::CompactArm::Off => return None,
+        }
+    }
+    refused(RefuseReason::MultiKeyShape)
+}
+
 fn staged_feed_shape<'mcx>(
-    agg: &::nodeagg::AggStateData<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
     join_result_slot: ExecSlotId,
     estate: &EStateData<'mcx>,
 ) -> Option<StagedFeedShape> {
-    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
-    let desc = estate.slot(join_result_slot).base().tts_tupleDescriptor.as_ref()?;
-    let natts = desc.attrs.len();
-    let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
-    if colnos_needed.len() != natts {
-        return None;
-    }
-    debug_assert!(plan.cols.iter().all(|&c| colnos_needed[c as usize]));
-    let fold_cols: Vec<u16> = plan.cols.iter().copied().collect();
-    let fold_bound = fold_cols.iter().map(|&c| c as i32 + 1).max().unwrap_or(0);
-    // Mode choice: guarded plans keep the proof/Demote staging; unguarded
-    // plans take the K2 deferred batched probe when the plan is fully
-    // admitted (no residual transitions — they need the live row at probe
-    // time) and the grouping key is a single kernel-hostable column;
-    // otherwise the arrival probe. `PGRUST_LANE_V2_K2=0` forces arrival mode
-    // (A/B kill-switch; byte-identical either way).
-    let mode = if plan.guarded {
-        StagedMode::Guarded
-    } else if k2_enabled() && !::nodeagg::agg_lanefold_has_resid(agg) {
-        match ::nodeagg::agg_hash_staged_probe_col(agg) {
-            // The key must be in the staged needed set (it always is — the
-            // spill projection keeps grouping columns); structural gate.
-            Some(key_col) if (key_col as usize) < natts && colnos_needed[key_col as usize] => {
-                StagedMode::K2 { key_col }
-            }
-            _ => StagedMode::Arrival,
-        }
-    } else {
-        StagedMode::Arrival
+    let (guarded, fold_cols): (bool, Vec<u16>) = {
+        let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+        (plan.guarded, plan.cols.iter().copied().collect())
     };
-    let needed: Vec<(u16, i16, bool)> = if mode == StagedMode::Arrival {
-        Vec::new()
-    } else {
-        colnos_needed
+    let has_resid = ::nodeagg::agg_lanefold_has_resid(agg);
+    // Full needed-column census up front (the borrow of `agg` must end
+    // before the multi-key arm takes `&mut agg` to arm the compact table).
+    let (natts, max_colno, needed_all): (usize, i32, Vec<(u16, i16, bool)>) = {
+        let desc = estate.slot(join_result_slot).base().tts_tupleDescriptor.as_ref()?;
+        let natts = desc.attrs.len();
+        let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
+        if colnos_needed.len() != natts {
+            return None;
+        }
+        debug_assert!(fold_cols.iter().all(|&c| colnos_needed[c as usize]));
+        let needed_all = colnos_needed
             .iter()
             .enumerate()
             .filter(|&(_, &n)| n)
             .map(|(c, _)| (c as u16, desc.attrs[c].attlen, desc.attrs[c].attbyval))
-            .collect()
+            .collect();
+        (natts, max_colno, needed_all)
     };
-    Some(StagedFeedShape { mode, fold_cols, fold_bound, needed, max_colno, natts })
+    let fold_bound = fold_cols.iter().map(|&c| c as i32 + 1).max().unwrap_or(0);
+    // Mode choice: guarded plans keep the proof/Demote staging; unguarded
+    // plans with fully-admitted transitions (no residuals — they need the
+    // live row at probe time) take the K2 deferred batched probe when the
+    // grouping key is a single kernel-hostable column, the packed multi-key
+    // deferred probe when 2..N keys pack into the compact table
+    // (`staged_mk_admit` — armed as a side effect); otherwise the arrival
+    // probe. `PGRUST_LANE_V2_K2=0` / `PGRUST_LANE_V2_MKSTREAM=0` force
+    // arrival mode per arm (A/B kill-switches; byte-identical either way up
+    // to the compact table's group-order relaxation).
+    let mut mk = None;
+    let mode = if guarded {
+        StagedMode::Guarded
+    } else if has_resid {
+        StagedMode::Arrival
+    } else {
+        match ::nodeagg::agg_hash_staged_probe_col(agg).filter(|_| k2_enabled()) {
+            // The key must be in the staged needed set (it always is — the
+            // spill projection keeps grouping columns); structural gate.
+            Some(key_col)
+                if (key_col as usize) < natts
+                    && needed_all.iter().any(|&(c, _, _)| c == key_col) =>
+            {
+                StagedMode::K2 { key_col }
+            }
+            Some(_) => StagedMode::Arrival,
+            None => match staged_mk_admit(agg, natts, &needed_all) {
+                Some(shape) => {
+                    mk = Some(shape);
+                    StagedMode::Mk
+                }
+                None => StagedMode::Arrival,
+            },
+        }
+    };
+    let needed: Vec<(u16, i16, bool)> =
+        if mode == StagedMode::Arrival { Vec::new() } else { needed_all };
+    Some(StagedFeedShape { mode, fold_cols, fold_bound, needed, max_colno, natts, mk })
 }
 
 impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
@@ -5732,11 +5873,12 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
         shape: StagedFeedShape,
         estate: &mut EStateData<'mcx>,
     ) -> Self {
-        let StagedFeedShape { mode, fold_cols, fold_bound, needed, max_colno, natts } = shape;
-        // Guarded and K2 modes stage every needed column (guarded for the
-        // Demote replay, K2 for the deferred probe + spill replay) and need
-        // the replay slot + by-ref arena; arrival mode stages only the
-        // (byval) fold lanes.
+        let StagedFeedShape { mode, fold_cols, fold_bound, needed, max_colno, natts, mk } =
+            shape;
+        // Guarded, K2 and Mk modes stage every needed column (guarded for
+        // the Demote replay, K2/Mk for the deferred probe + spill/demote
+        // replay) and need the replay slot + by-ref arena; arrival mode
+        // stages only the (byval) fold lanes.
         let (stage_slot, stage_cxt) = if mode == StagedMode::Arrival {
             (None, None)
         } else {
@@ -5785,6 +5927,13 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
             idxs: Vec::new(),
             groups: Vec::new(),
             hashes: Vec::new(),
+            mk: mk.map(|shape| StagedMk {
+                shape,
+                demoted: false,
+                packbuf: Vec::new(),
+                keys1: Vec::new(),
+                keys2: Vec::new(),
+            }),
         }
     }
 
@@ -5989,6 +6138,203 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
         Ok(())
     }
 
+    /// Mk accept: stage every needed column; the packed multi-key probe is
+    /// deferred to the batched flush.
+    fn accept_mk(&mut self, tuple: ExecSlotId, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        self.stage_needed_row(tuple, estate)?;
+        if self.nstaged == STAGE_ROWS {
+            self.flush_mk(estate)?;
+        }
+        Ok(())
+    }
+
+    /// Clear the staged window (all needed lanes + the by-ref arena) after a
+    /// staging-mode flush.
+    fn clear_staged_window(&mut self) {
+        for &(c, _, _) in &self.needed {
+            let c = c as usize;
+            self.lanes.values[c].clear();
+            self.lanes.isnull[c].clear();
+        }
+        self.nstaged = 0;
+        self.stage_cxt.as_mut().expect("staging mode has a stage cxt").reset();
+    }
+
+    /// Mk flush — the packed multi-key deferred probe (`scan_mk_batch`'s
+    /// slot-stream analog): (1) one CFI per batch (design §9 cadence);
+    /// (2) demote decision BEFORE any packing — the runtime backstop
+    /// (memory migration), then per-value packability over the staged key
+    /// lanes (NULL keys on a non-nullable image; unpackable numerics —
+    /// range / non-minimal display scale). A demote migrates the compact
+    /// groups into the C tuplehash ONCE; this batch and every later one
+    /// replay per-row through the arrival probe (byte-identical, spill
+    /// machinery intact). (3) the component-major pack of the staged key
+    /// lanes into the reused u128 accumulator — Int shift/mask, numeric
+    /// keypack, raw-bytes text through the build-lifetime intern table
+    /// (slot streams carry raw varlenas, no dict codes: intern per row;
+    /// NULLs on nullable images set the bitmap bit, value bits zero);
+    /// (4) the compact-table batched probe + new-group seeding; (5) the
+    /// whole-batch fold. Every staged row is a survivor (the feed stages
+    /// only emitted rows), so the fold covers `0..n`.
+    fn flush_mk(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let n = self.nstaged;
+        if n == 0 {
+            return Ok(());
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        debug_assert!(self.mode == StagedMode::Mk, "flush_mk outside Mk mode");
+        let live = !self.mk.as_ref().expect("Mk mode carries its state").demoted
+            && ::nodeagg::agg_hash_compact_backstop(self.agg, estate)?;
+        let packable = live && {
+            let StagedFoldAggSink { lanes, mk, .. } = &*self;
+            let shape = &mk.as_ref().expect("Mk mode carries its state").shape;
+            shape.comps.iter().all(|comp| {
+                let att = comp.att as usize;
+                let (values, isnull) = (&lanes.values[att], &lanes.isnull[att]);
+                match comp.kind {
+                    ::nodeagg::MkCompKind::Numeric { width } => (0..n).all(|k| {
+                        if isnull[k] {
+                            shape.nullable
+                        } else {
+                            ::nodeagg::mk_numeric_datum_bits(values[k], width).is_some()
+                        }
+                    }),
+                    // Int/Intern values always pack; a NULL key needs the
+                    // bitmap byte — without it, demote.
+                    ::nodeagg::MkCompKind::Int { .. } | ::nodeagg::MkCompKind::Intern => {
+                        shape.nullable || (0..n).all(|k| !isnull[k])
+                    }
+                }
+            })
+        };
+        if live && !packable {
+            ::nodeagg::agg_hash_compact_disarm(self.agg, estate)?;
+        }
+        if !live || !packable {
+            self.mk.as_mut().expect("Mk mode carries its state").demoted = true;
+            return self.flush_mk_demoted(estate);
+        }
+        {
+            let StagedFoldAggSink { agg, lanes, mk, stage_cxt, idxs, groups, .. } = &mut *self;
+            let StagedMk { shape, packbuf, keys1, keys2, .. } =
+                mk.as_mut().expect("Mk mode carries its state");
+            packbuf.clear();
+            packbuf.resize(n, 0u128);
+            for (j, comp) in shape.comps.iter().enumerate() {
+                let att = comp.att as usize;
+                let off_bits = comp.off as u32 * 8;
+                let (values, isnull) = (&lanes.values[att], &lanes.isnull[att]);
+                // Only read when `shape.nullable` (guarded per row below).
+                let null_bit = if shape.nullable {
+                    1u128 << (shape.null_off() as u32 * 8 + j as u32)
+                } else {
+                    0
+                };
+                match comp.kind {
+                    ::nodeagg::MkCompKind::Int { width } => {
+                        let mask =
+                            if width == 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                        for (k, pb) in packbuf.iter_mut().enumerate() {
+                            if shape.nullable && isnull[k] {
+                                // CH nullable_keys128: bit j set, value bits
+                                // zero — NOT-DISTINCT composite NULLs hold.
+                                *pb |= null_bit;
+                                continue;
+                            }
+                            debug_assert!(!isnull[k], "NULL keys demote before packing");
+                            let v = match width {
+                                2 => values[k].as_i16() as i64,
+                                4 => values[k].as_i32() as i64,
+                                _ => values[k].as_i64(),
+                            };
+                            *pb |= (((v as u64) & mask) as u128) << off_bits;
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Numeric { width } => {
+                        for (k, pb) in packbuf.iter_mut().enumerate() {
+                            if shape.nullable && isnull[k] {
+                                *pb |= null_bit;
+                                continue;
+                            }
+                            let bits = ::nodeagg::mk_numeric_datum_bits(values[k], width)
+                                .expect("numeric packability proven by the batch pre-check");
+                            *pb |= (bits as u128) << off_bits;
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Intern => {
+                        let cxt = stage_cxt.as_ref().expect("staging mode has a stage cxt");
+                        for (k, pb) in packbuf.iter_mut().enumerate() {
+                            if shape.nullable && isnull[k] {
+                                *pb |= null_bit;
+                                continue;
+                            }
+                            debug_assert!(!isnull[k], "NULL keys demote before packing");
+                            // SAFETY: staged non-null live text varlena,
+                            // datum-copied into the batch arena at accept
+                            // (kernel selection proved the column type). A
+                            // detoast copy lands in the batch arena too —
+                            // reset after this flush; the intern table owns
+                            // its own copy of the bytes.
+                            let v = unsafe {
+                                ::types_fmgr::datum_varlena_packed(values[k], cxt.mcx())
+                            }?;
+                            let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                            *pb |= (id as u128) << off_bits;
+                        }
+                    }
+                }
+            }
+            // Split the accumulator into the packed key lane and probe.
+            if shape.two_words {
+                keys2.clear();
+                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
+                ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+            } else {
+                keys1.clear();
+                keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
+                ::nodeagg::agg_hash_compact_batch_mk1(agg, keys1, groups)?;
+            }
+            idxs.clear();
+            idxs.extend(0..n as u32);
+            // SAFETY: staged lanes cover every plan column for all staged
+            // rows (plan.cols ⊆ colnos_needed); the plan is unguarded (Mk
+            // admission); each pergroup was installed by the compact probe
+            // within this batch; the rest is agg_fold_staged's contract.
+            unsafe { agg_fold_staged(agg, &*lanes, idxs, groups)? }
+        }
+        self.clear_staged_window();
+        Ok(())
+    }
+
+    /// Mk demote leg: the staged window replays per-row through the arrival
+    /// probe against the C tuplehash (the compact groups migrated at the
+    /// demote) — `flush_guarded`'s replay loop without the guard proof (the
+    /// plan is unguarded by Mk admission) — then the whole-batch fold.
+    /// Spill-mode misses return no pergroup and run no transition, exactly
+    /// the per-row build's treatment.
+    fn flush_mk_demoted(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        let n = self.nstaged;
+        let stage_slot = self.stage_slot.expect("staging mode has a replay slot");
+        self.idxs.clear();
+        self.groups.clear();
+        for k in 0..n {
+            self.replay_row(k, estate);
+            if let Some(pg) =
+                ::nodeagg::agg_hash_build_probe_resid(self.agg, estate, stage_slot)?
+            {
+                self.idxs.push(k as u32);
+                self.groups.push(pg);
+            }
+        }
+        // SAFETY: staged lanes cover every plan column for all staged rows
+        // (plan.cols ⊆ colnos_needed); the plan is unguarded (Mk admission);
+        // each pergroup was installed by the probe within this batch; the
+        // rest is agg_fold_staged's contract.
+        unsafe { agg_fold_staged(self.agg, &self.lanes, &self.idxs, &self.groups)? }
+        self.clear_staged_window();
+        Ok(())
+    }
+
     /// Guarded flush: one CHECK_FOR_INTERRUPTS per batch (design §9
     /// batch-operator cadence), the guard proof re-run per batch, then the
     /// replayed probe/residual + fold — or the whole batch through the
@@ -6066,6 +6412,7 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
         match self.mode {
             StagedMode::Guarded => self.accept_guarded(tuple, estate)?,
             StagedMode::K2 { .. } => self.accept_k2(tuple, estate)?,
+            StagedMode::Mk => self.accept_mk(tuple, estate)?,
             StagedMode::Arrival => self.accept_unguarded(tuple, estate)?,
         }
         Ok(SinkFeed::NeedMore)
@@ -6079,6 +6426,7 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
         match self.mode {
             StagedMode::Guarded => self.flush_guarded(estate)?,
             StagedMode::K2 { .. } => self.flush_k2(estate)?,
+            StagedMode::Mk => self.flush_mk(estate)?,
             StagedMode::Arrival => self.flush_unguarded(estate)?,
         }
         ::nodeagg::agg_hash_build_combine(self.agg, estate)
@@ -6088,6 +6436,7 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
         match self.mode {
             StagedMode::Guarded => self.flush_guarded(estate)?,
             StagedMode::K2 { .. } => self.flush_k2(estate)?,
+            StagedMode::Mk => self.flush_mk(estate)?,
             StagedMode::Arrival => self.flush_unguarded(estate)?,
         }
         ::nodeagg::agg_hash_build_finish(self.agg, estate)
@@ -6229,6 +6578,9 @@ fn agg_hash_join_build_if_needed<'mcx>(
                         }
                         StagedMode::K2 { .. } => {
                             "agg-over-join: staged fold feed engaged (k2 probe)"
+                        }
+                        StagedMode::Mk => {
+                            "agg-over-join: staged fold feed engaged (mk probe)"
                         }
                         StagedMode::Arrival => "agg-over-join: staged fold feed engaged",
                     });
@@ -7229,6 +7581,7 @@ fn agg_gather_build_if_needed<'mcx>(
             trace_feed(match shape.mode {
                 StagedMode::Guarded => "agg-over-gather: staged fold feed engaged (guarded)",
                 StagedMode::K2 { .. } => "agg-over-gather: staged fold feed engaged (k2 probe)",
+                StagedMode::Mk => "agg-over-gather: staged fold feed engaged (mk probe)",
                 StagedMode::Arrival => "agg-over-gather: staged fold feed engaged",
             });
             let mut sink = StagedFoldAggSink::new(agg, out_slot, stage_slot, shape, estate);
