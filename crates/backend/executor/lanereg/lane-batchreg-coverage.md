@@ -6,81 +6,81 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 
 | OID | name | aot-cmp | jit-arith | fold | fold-affine | stitch-cmp | stitch-arith | drift |
 |----:|------|:-------:|:---------:|:----:|:-----------:|:----------:|:------------:|-------|
-| 65 | int4eq | IN | - | - | - | .. | - |  |
-| 144 | int4ne | IN | - | - | - | .. | - |  |
-| 66 | int4lt | IN | - | - | - | .. | - |  |
-| 149 | int4le | IN | - | - | - | .. | - |  |
-| 147 | int4gt | IN | - | - | - | .. | - |  |
-| 150 | int4ge | IN | - | - | - | .. | - |  |
-| 467 | int8eq | IN | - | - | - | .. | - |  |
-| 468 | int8ne | IN | - | - | - | .. | - |  |
-| 469 | int8lt | IN | - | - | - | .. | - |  |
-| 471 | int8le | IN | - | - | - | .. | - |  |
-| 470 | int8gt | IN | - | - | - | .. | - |  |
-| 472 | int8ge | IN | - | - | - | .. | - |  |
-| 63 | int2eq | IN | - | - | - | .. | - |  |
-| 145 | int2ne | IN | - | - | - | .. | - |  |
-| 64 | int2lt | IN | - | - | - | .. | - |  |
-| 148 | int2le | IN | - | - | - | .. | - |  |
-| 146 | int2gt | IN | - | - | - | .. | - |  |
-| 151 | int2ge | IN | - | - | - | .. | - |  |
-| 474 | int84eq | IN | - | - | - | .. | - |  |
-| 475 | int84ne | IN | - | - | - | .. | - |  |
-| 476 | int84lt | IN | - | - | - | .. | - |  |
-| 478 | int84le | IN | - | - | - | .. | - |  |
-| 477 | int84gt | IN | - | - | - | .. | - |  |
-| 479 | int84ge | IN | - | - | - | .. | - |  |
-| 852 | int48eq | IN | - | - | - | .. | - |  |
-| 853 | int48ne | IN | - | - | - | .. | - |  |
-| 854 | int48lt | IN | - | - | - | .. | - |  |
-| 856 | int48le | IN | - | - | - | .. | - |  |
-| 855 | int48gt | IN | - | - | - | .. | - |  |
-| 857 | int48ge | IN | - | - | - | .. | - |  |
-| 158 | int24eq | IN | - | - | - | .. | - |  |
-| 164 | int24ne | IN | - | - | - | .. | - |  |
-| 160 | int24lt | IN | - | - | - | .. | - |  |
-| 166 | int24le | IN | - | - | - | .. | - |  |
-| 162 | int24gt | IN | - | - | - | .. | - |  |
-| 168 | int24ge | IN | - | - | - | .. | - |  |
-| 159 | int42eq | IN | - | - | - | .. | - |  |
-| 165 | int42ne | IN | - | - | - | .. | - |  |
-| 161 | int42lt | IN | - | - | - | .. | - |  |
-| 167 | int42le | IN | - | - | - | .. | - |  |
-| 163 | int42gt | IN | - | - | - | .. | - |  |
-| 169 | int42ge | IN | - | - | - | .. | - |  |
-| 184 | oideq | IN | - | - | - | .. | - |  |
-| 185 | oidne | IN | - | - | - | .. | - |  |
-| 716 | oidlt | IN | - | - | - | .. | - |  |
-| 717 | oidle | IN | - | - | - | .. | - |  |
-| 1638 | oidgt | IN | - | - | - | .. | - |  |
-| 1639 | oidge | IN | - | - | - | .. | - |  |
-| 287 | float4eq | IN | - | - | - | .. | - |  |
-| 288 | float4ne | IN | - | - | - | .. | - |  |
-| 289 | float4lt | IN | - | - | - | .. | - |  |
-| 290 | float4le | IN | - | - | - | .. | - |  |
-| 291 | float4gt | IN | - | - | - | .. | - |  |
-| 292 | float4ge | IN | - | - | - | .. | - |  |
-| 293 | float8eq | IN | - | - | - | .. | - |  |
-| 294 | float8ne | IN | - | - | - | .. | - |  |
-| 295 | float8lt | IN | - | - | - | .. | - |  |
-| 296 | float8le | IN | - | - | - | .. | - |  |
-| 297 | float8gt | IN | - | - | - | .. | - |  |
-| 298 | float8ge | IN | - | - | - | .. | - |  |
-| 299 | float48eq | IN | - | - | - | .. | - |  |
-| 300 | float48ne | IN | - | - | - | .. | - |  |
-| 301 | float48lt | IN | - | - | - | .. | - |  |
-| 302 | float48le | IN | - | - | - | .. | - |  |
-| 303 | float48gt | IN | - | - | - | .. | - |  |
-| 304 | float48ge | IN | - | - | - | .. | - |  |
-| 305 | float84eq | IN | - | - | - | .. | - |  |
-| 306 | float84ne | IN | - | - | - | .. | - |  |
-| 307 | float84lt | IN | - | - | - | .. | - |  |
-| 308 | float84le | IN | - | - | - | .. | - |  |
-| 309 | float84gt | IN | - | - | - | .. | - |  |
-| 310 | float84ge | IN | - | - | - | .. | - |  |
-| 177 | int4pl | - | IN | - | IN | - | .. |  |
-| 181 | int4mi | - | IN | - | IN | - | .. |  |
-| 141 | int4mul | - | IN | - | IN | - | .. |  |
+| 65 | int4eq | IN | - | - | - | IN | - |  |
+| 144 | int4ne | IN | - | - | - | IN | - |  |
+| 66 | int4lt | IN | - | - | - | IN | - |  |
+| 149 | int4le | IN | - | - | - | IN | - |  |
+| 147 | int4gt | IN | - | - | - | IN | - |  |
+| 150 | int4ge | IN | - | - | - | IN | - |  |
+| 467 | int8eq | IN | - | - | - | IN | - |  |
+| 468 | int8ne | IN | - | - | - | IN | - |  |
+| 469 | int8lt | IN | - | - | - | IN | - |  |
+| 471 | int8le | IN | - | - | - | IN | - |  |
+| 470 | int8gt | IN | - | - | - | IN | - |  |
+| 472 | int8ge | IN | - | - | - | IN | - |  |
+| 63 | int2eq | IN | - | - | - | IN | - |  |
+| 145 | int2ne | IN | - | - | - | IN | - |  |
+| 64 | int2lt | IN | - | - | - | IN | - |  |
+| 148 | int2le | IN | - | - | - | IN | - |  |
+| 146 | int2gt | IN | - | - | - | IN | - |  |
+| 151 | int2ge | IN | - | - | - | IN | - |  |
+| 474 | int84eq | IN | - | - | - | IN | - |  |
+| 475 | int84ne | IN | - | - | - | IN | - |  |
+| 476 | int84lt | IN | - | - | - | IN | - |  |
+| 478 | int84le | IN | - | - | - | IN | - |  |
+| 477 | int84gt | IN | - | - | - | IN | - |  |
+| 479 | int84ge | IN | - | - | - | IN | - |  |
+| 852 | int48eq | IN | - | - | - | IN | - |  |
+| 853 | int48ne | IN | - | - | - | IN | - |  |
+| 854 | int48lt | IN | - | - | - | IN | - |  |
+| 856 | int48le | IN | - | - | - | IN | - |  |
+| 855 | int48gt | IN | - | - | - | IN | - |  |
+| 857 | int48ge | IN | - | - | - | IN | - |  |
+| 158 | int24eq | IN | - | - | - | IN | - |  |
+| 164 | int24ne | IN | - | - | - | IN | - |  |
+| 160 | int24lt | IN | - | - | - | IN | - |  |
+| 166 | int24le | IN | - | - | - | IN | - |  |
+| 162 | int24gt | IN | - | - | - | IN | - |  |
+| 168 | int24ge | IN | - | - | - | IN | - |  |
+| 159 | int42eq | IN | - | - | - | IN | - |  |
+| 165 | int42ne | IN | - | - | - | IN | - |  |
+| 161 | int42lt | IN | - | - | - | IN | - |  |
+| 167 | int42le | IN | - | - | - | IN | - |  |
+| 163 | int42gt | IN | - | - | - | IN | - |  |
+| 169 | int42ge | IN | - | - | - | IN | - |  |
+| 184 | oideq | IN | - | - | - | IN | - |  |
+| 185 | oidne | IN | - | - | - | IN | - |  |
+| 716 | oidlt | IN | - | - | - | IN | - |  |
+| 717 | oidle | IN | - | - | - | IN | - |  |
+| 1638 | oidgt | IN | - | - | - | IN | - |  |
+| 1639 | oidge | IN | - | - | - | IN | - |  |
+| 287 | float4eq | IN | - | - | - | IN | - |  |
+| 288 | float4ne | IN | - | - | - | IN | - |  |
+| 289 | float4lt | IN | - | - | - | IN | - |  |
+| 290 | float4le | IN | - | - | - | IN | - |  |
+| 291 | float4gt | IN | - | - | - | IN | - |  |
+| 292 | float4ge | IN | - | - | - | IN | - |  |
+| 293 | float8eq | IN | - | - | - | IN | - |  |
+| 294 | float8ne | IN | - | - | - | IN | - |  |
+| 295 | float8lt | IN | - | - | - | IN | - |  |
+| 296 | float8le | IN | - | - | - | IN | - |  |
+| 297 | float8gt | IN | - | - | - | IN | - |  |
+| 298 | float8ge | IN | - | - | - | IN | - |  |
+| 299 | float48eq | IN | - | - | - | IN | - |  |
+| 300 | float48ne | IN | - | - | - | IN | - |  |
+| 301 | float48lt | IN | - | - | - | IN | - |  |
+| 302 | float48le | IN | - | - | - | IN | - |  |
+| 303 | float48gt | IN | - | - | - | IN | - |  |
+| 304 | float48ge | IN | - | - | - | IN | - |  |
+| 305 | float84eq | IN | - | - | - | IN | - |  |
+| 306 | float84ne | IN | - | - | - | IN | - |  |
+| 307 | float84lt | IN | - | - | - | IN | - |  |
+| 308 | float84le | IN | - | - | - | IN | - |  |
+| 309 | float84gt | IN | - | - | - | IN | - |  |
+| 310 | float84ge | IN | - | - | - | IN | - |  |
+| 177 | int4pl | - | IN | - | IN | - | IN |  |
+| 181 | int4mi | - | IN | - | IN | - | IN |  |
+| 141 | int4mul | - | IN | - | IN | - | IN |  |
 | 463 | int8pl | - | IN | - | RF | - | - |  |
 | 464 | int8mi | - | IN | - | RF | - | - |  |
 | 465 | int8mul | - | IN | - | RF | - | - |  |
@@ -97,6 +97,7 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 | 1841 | int4_sum | - | - | IN | - | - | - |  |
 | 1962 | int2_avg_accum | - | - | IN | - | - | - |  |
 | 1963 | int4_avg_accum | - | - | IN | - | - | - |  |
+| 2746 | int8_avg_accum | - | - | IN | - | - | - |  |
 | 768 | int4larger | - | - | IN | - | - | - |  |
 | 769 | int4smaller | - | - | IN | - | - | - |  |
 | 770 | int2larger | - | - | IN | - | - | - |  |
@@ -109,30 +110,30 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 | 2035 | timestamp_smaller | - | - | IN | - | - | - |  |
 | 1196 | timestamptz_larger | - | - | IN | - | - | - |  |
 | 1195 | timestamptz_smaller | - | - | IN | - | - | - |  |
-| 209 | float4larger | - | - | .. | - | - | - | pending-only |
-| 211 | float4smaller | - | - | .. | - | - | - | pending-only |
-| 223 | float8larger | - | - | .. | - | - | - | pending-only |
-| 224 | float8smaller | - | - | .. | - | - | - | pending-only |
-| 2515 | booland_statefunc | - | - | .. | - | - | - | pending-only |
-| 2516 | boolor_statefunc | - | - | .. | - | - | - | pending-only |
-| 1892 | int2and | - | - | .. | - | - | - | pending-only |
-| 1893 | int2or | - | - | .. | - | - | - | pending-only |
-| 1898 | int4and | - | - | .. | - | - | - | pending-only |
-| 1899 | int4or | - | - | .. | - | - | - | pending-only |
-| 1904 | int8and | - | - | .. | - | - | - | pending-only |
-| 1905 | int8or | - | - | .. | - | - | - | pending-only |
-| 458 | text_larger | - | - | .. | - | - | - | pending-only |
-| 459 | text_smaller | - | - | .. | - | - | - | pending-only |
-| 1063 | bpchar_larger | - | - | .. | - | - | - | pending-only |
-| 1064 | bpchar_smaller | - | - | .. | - | - | - | pending-only |
+| 209 | float4larger | - | - | IN | - | - | - |  |
+| 211 | float4smaller | - | - | IN | - | - | - |  |
+| 223 | float8larger | - | - | IN | - | - | - |  |
+| 224 | float8smaller | - | - | IN | - | - | - |  |
+| 2515 | booland_statefunc | - | - | IN | - | - | - |  |
+| 2516 | boolor_statefunc | - | - | IN | - | - | - |  |
+| 1892 | int2and | - | - | IN | - | - | - |  |
+| 1893 | int2or | - | - | IN | - | - | - |  |
+| 1898 | int4and | - | - | IN | - | - | - |  |
+| 1899 | int4or | - | - | IN | - | - | - |  |
+| 1904 | int8and | - | - | IN | - | - | - |  |
+| 1905 | int8or | - | - | IN | - | - | - |  |
+| 458 | text_larger | - | - | IN | - | - | - |  |
+| 459 | text_smaller | - | - | IN | - | - | - |  |
+| 1063 | bpchar_larger | - | - | IN | - | - | - |  |
+| 1064 | bpchar_smaller | - | - | IN | - | - | - |  |
 
 ## Summary
 
-- registered OIDs: 119
+- registered OIDs: 120
 - stencil-but-no-census: 0 (stitch comparator stencils with no AOT qual census)
 - fold-affine-but-no-jit: 0 (fold affine ops the JIT does not inline)
 - jit-but-no-fold-affine: 0 (JIT-inlined arith unknown to the fold affine admission)
-- pending-only: 16 (coverage only on a side branch)
+- pending-only: 0 (coverage only on a side branch)
 
 ## Documented refusals
 

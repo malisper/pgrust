@@ -77,9 +77,13 @@ fn jit_arith_golden_set() {
 
 #[test]
 fn fold_in_tree_golden_set() {
+    // Base set + int8_avg_accum (lane-v2-int8fold) + tier 2 (lane-v2-foldcov)
+    // + text/bpchar MIN/MAX (lane-v2-textfold) — the third-train landings
+    // flipped the pending rows to in-tree (migration recipe step 1).
     let golden: &[Oid] = &[
-        1219, 2804, 1840, 1841, 1962, 1963, 768, 769, 770, 771, 1236, 1237, 1138, 1139, 2036,
-        2035, 1196, 1195,
+        1219, 2804, 1840, 1841, 1962, 1963, 2746, 768, 769, 770, 771, 1236, 1237, 1138, 1139,
+        2036, 2035, 1196, 1195, 209, 211, 223, 224, 2515, 2516, 1892, 1893, 1898, 1899, 1904,
+        1905, 458, 459, 1063, 1064,
     ];
     for &oid in golden {
         assert!(fold_desc(oid).is_some(), "fold oid {oid} missing in-tree");
