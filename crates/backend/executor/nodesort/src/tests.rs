@@ -351,3 +351,75 @@ fn bound_pushdown_uses_bounded_sort() {
     }
     assert_eq!(out, vec![0, 1, 2]);
 }
+
+/// Lane batch feed with a direct-key face: every third row falls back to the
+/// full emit path, mirroring `KeyFeed`'s coverage pattern.
+struct LaneKeyFeed {
+    slot: ExecSlotId,
+    rows: Vec<Option<i32>>,
+}
+
+impl SortLaneBatchFeed<'static> for LaneKeyFeed {
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'static>,
+    ) -> ::types_error::PgResult<Option<ExecSlotId>> {
+        let v = self.rows[i as usize];
+        let mcx = estate.es_query_cxt;
+        let slot = estate.slot_mut(self.slot);
+        exectuples::exec_clear_tuple(slot, mcx);
+        let base = slot.base_mut();
+        base.tts_values[0] = v.map_or(Datum::null(), Datum::from_i32);
+        base.tts_isnull[0] = v.is_none();
+        exectuples::exec_store_virtual_tuple(slot);
+        Ok(Some(self.slot))
+    }
+
+    fn emit_key(&mut self, i: u32) -> Option<(Datum, bool)> {
+        let idx = i as usize;
+        if idx % 3 == 2 {
+            return None;
+        }
+        let v = self.rows[idx];
+        Some((v.map_or(Datum::null(), Datum::from_i32), v.is_none()))
+    }
+}
+
+/// A/B the lane sort feed's direct-key arm against its full emit path (the
+/// lane mirror of `datum_sort_direct_key_matches_emit_path`): same rows, same
+/// order, direct off vs on — identical sorted output.
+#[test]
+fn lane_datum_sort_direct_key_matches_emit_path() {
+    let rows: Vec<Option<i32>> = (0..1000)
+        .map(|i| if i % 7 == 0 { None } else { Some((i * 48271) % 997) })
+        .collect();
+    let mut outs = Vec::new();
+    for direct in [false, true] {
+        install_seams();
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut estate = EStateData::new_in(mcx);
+        let in_slot =
+            estate.exec_init_extra_tuple_slot(Some(desc.clone()), TupleSlotKind::Virtual);
+        let plan = mk_sort_plan(mcx, 1);
+        let mut node = exec_init_sort(plan, &mut estate, 0, &desc, desc.clone()).unwrap();
+        assert!(sort_lane_is_datum(&node));
+        sort_lane_begin(&mut node, desc.clone()).unwrap();
+        let mut feed = LaneKeyFeed { slot: in_slot, rows: rows.clone() };
+        // Two batches, split mid-stream, exercising pos..n ranges.
+        let n = rows.len() as u32;
+        sort_lane_put_batch(&mut node, &mut estate, 0, n / 2, direct, &mut feed).unwrap();
+        sort_lane_put_batch(&mut node, &mut estate, n / 2, n, direct, &mut feed).unwrap();
+        sort_lane_finish(&mut node, &mut estate).unwrap();
+        let mut out = Vec::new();
+        while let Some(id) = sort_lane_next(&mut node, &mut estate).unwrap() {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(estate.slot_mut(id), 1, &mut isnull);
+            out.push(if isnull { None } else { Some(v.as_i32()) });
+        }
+        assert_eq!(out.len(), rows.len());
+        outs.push(out);
+    }
+    assert_eq!(outs[0], outs[1]);
+}
