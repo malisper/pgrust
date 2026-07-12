@@ -104,9 +104,15 @@ pub(super) enum ShapeClass {
     /// just feeds the sort unfiltered). Row-level effect is reported by the
     /// `counter` dump lines (`topkcut-rows-seen` / `topkcut-rows-cut`).
     TopkCut = 15,
+    /// Agg-over-Gather composition (the leader-side hash-agg breaker fed by
+    /// the gather machinery as a source): OWNED ticks once per lane-owned
+    /// build feed (alongside the aggbuild tick, the join/subquery cadence);
+    /// refusals tick the dynamic per-call gates (EPQ/backward) here and the
+    /// agg-side shape refusal under aggbuild.
+    Gather = 16,
 }
 
-const N_CLASSES: usize = 16;
+const N_CLASSES: usize = 17;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -126,6 +132,7 @@ impl ShapeClass {
         ShapeClass::CbScan,
         ShapeClass::MetaAgg,
         ShapeClass::TopkCut,
+        ShapeClass::Gather,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -146,6 +153,7 @@ impl ShapeClass {
             ShapeClass::CbScan => "cbscan",
             ShapeClass::MetaAgg => "metaagg",
             ShapeClass::TopkCut => "topkcut",
+            ShapeClass::Gather => "gather",
         }
     }
 }
