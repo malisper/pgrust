@@ -7353,11 +7353,13 @@ version = "0.1.0"
 name = "lanefold"
 version = "0.0.0"
 dependencies = [
+ "adt_numeric",
  "datum",
  "execexpr",
  "exectuples",
  "mcx",
  "types_core",
+ "types_error",
  "types_nodes",
  "types_tuple",
 ]
