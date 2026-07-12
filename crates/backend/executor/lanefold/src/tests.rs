@@ -8,6 +8,7 @@
 
 use core::ptr::NonNull;
 
+use ::adt_numeric::aggregates::Int128AggState;
 use ::datum::Datum;
 use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
 use ::mcx::{Mcx, MemoryContext};
@@ -150,6 +151,14 @@ fn init_pergroup(mcx: Mcx<'_>, kind: LaneKind) -> AggPerGroup {
             trans_value_is_null: false,
             no_trans_value: false,
         },
+        // int8_avg_accum: INTERNAL transtype, NULL catalog initval, transfn
+        // not strict (C initialize_aggregate sets both flags from
+        // initValueIsNull; noTransValue is never consulted for non-strict).
+        LaneKind::Int128AvgAccum => AggPerGroup {
+            trans_value: Datum::null(),
+            trans_value_is_null: true,
+            no_trans_value: true,
+        },
         LaneKind::Min | LaneKind::Max => AggPerGroup {
             trans_value: Datum::null(),
             trans_value_is_null: true,
@@ -170,6 +179,15 @@ fn pergroups_for(mcx: Mcx<'_>, plan: &LanePlan<'_>, ntrans: usize) -> Vec<AggPer
         pgs[t.transno as usize] = init_pergroup(mcx, t.kind);
     }
     pgs
+}
+
+fn read_int128_state(pg: &AggPerGroup) -> (i64, i128) {
+    assert!(!pg.trans_value_is_null);
+    // SAFETY: state installed by the fold's int128_state or the reference's
+    // leaked Box, live for the test.
+    let st = unsafe { &*(pg.trans_value.as_usize() as *const Int128AggState) };
+    assert!(!st.calc_sum_x2, "int8_avg_accum state carries no sumX2");
+    (st.n, st.sum_x)
 }
 
 fn read_transarray(pg: &AggPerGroup) -> (i64, i64) {
@@ -202,12 +220,31 @@ fn reference_fold(
                 pg.trans_value = Datum::from_i64(pg.trans_value.as_i64().wrapping_add(1));
                 continue;
             }
+            if t.kind == LaneKind::Int128AvgAccum {
+                // C int8_avg_accum, per selected row: NOT strict, so the
+                // state allocates on the group's first call even for a NULL
+                // input; only non-null inputs accumulate (do_int128_accum).
+                let st: &mut Int128AggState = if pg.trans_value_is_null {
+                    let st = Box::leak(Box::new(Int128AggState::new(false)));
+                    pg.trans_value = Datum::from_usize(st as *mut Int128AggState as usize);
+                    pg.trans_value_is_null = false;
+                    st
+                } else {
+                    // SAFETY: the leaked state installed above.
+                    unsafe { &mut *(pg.trans_value.as_usize() as *mut Int128AggState) }
+                };
+                if let Some(v) = row[t.col as usize] {
+                    st.sum_x += v as i128;
+                    st.n += 1;
+                }
+                continue;
+            }
             let Some(v) = row[t.col as usize] else { continue };
             // The admitted transform, checked per row exactly as C evaluates
             // the OpExpr (trunc division, int4-fitting result by admission).
             let v = (v / t.divk as i64) * t.mulk as i64 + t.addend as i64;
             match t.kind {
-                LaneKind::CountStar => unreachable!(),
+                LaneKind::CountStar | LaneKind::Int128AvgAccum => unreachable!(),
                 LaneKind::CountAny => {
                     pg.trans_value = Datum::from_i64(pg.trans_value.as_i64().wrapping_add(1));
                 }
@@ -271,6 +308,18 @@ fn assert_parity(plan: &LanePlan<'_>, got: &[AggPerGroup], want: &[AggPerGroup])
                 "transarray for transno {}",
                 t.transno
             );
+        } else if t.kind == LaneKind::Int128AvgAccum {
+            // State pointers differ by construction; the payload (and the
+            // allocated-vs-NULL distinction, asserted via the flags above)
+            // is the parity surface.
+            if !g.trans_value_is_null {
+                assert_eq!(
+                    read_int128_state(g),
+                    read_int128_state(w),
+                    "int128 state for transno {}",
+                    t.transno
+                );
+            }
         } else if !g.trans_value_is_null {
             assert_eq!(
                 g.trans_value.as_i64(),
@@ -301,8 +350,10 @@ fn run_fold(
             &rows,
             data.len(),
             NonNull::new(pgs.as_mut_ptr()).unwrap(),
-        );
+            mcx,
+        )
     }
+    .expect("fold_batch");
     let want = reference_fold(mcx, &plan, data, sel, specs.len());
     assert_parity(&plan, &pgs, &want);
     (plan, pgs)
@@ -380,6 +431,7 @@ fn classify_admission_matrix() {
         (1840, true, &a2, LaneKind::Sum, LaneWidth::I16),                     // sum(int2)
         (1963, false, &a1, LaneKind::AvgAccum, LaneWidth::I32),               // avg(int4)
         (1962, false, &a2, LaneKind::AvgAccum, LaneWidth::I16),               // avg(int2)
+        (2746, true, &a3, LaneKind::Int128AvgAccum, LaneWidth::I64),          // sum/avg(int8)
         (768, false, &a1, LaneKind::Max, LaneWidth::I32),
         (769, false, &a1, LaneKind::Min, LaneWidth::I32),
         (770, false, &a2, LaneKind::Max, LaneWidth::I16),
@@ -452,6 +504,15 @@ fn classify_refusals() {
     // Initval polarity is part of the whitelist contract.
     assert!(classify_trans(&mk_spec(1841, false, &a1), 0).is_none(), "sum non-null init");
     assert!(classify_trans(&mk_spec(1963, true, &a1), 0).is_none(), "avg null init");
+    // int8_avg_accum: INTERNAL transtype means a NULL catalog initval; a
+    // non-null initval is not the whitelisted shape.
+    let a8 = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    assert!(classify_trans(&mk_spec(2746, false, &a8), 0).is_none(), "int8 sum non-null init");
+    // ... and only a bare int8 Var admits: wrong Var type / any OpExpr
+    // (int8pl has no affine admission) stay on the per-row program.
+    assert!(classify_trans(&mk_spec(2746, true, &a1), 0).is_none(), "int4 var for 2746");
+    let a8op = arg_list(mcx, mk_int_op(mcx, 1, INT8OID, 5, 463, true)); // v + 5 (int8pl)
+    assert!(classify_trans(&mk_spec(2746, true, &a8op), 0).is_none(), "int8 OpExpr refused");
     assert!(classify_trans(&mk_spec(1219, true, &NodeList::nil()), 0).is_none());
     // Unknown transfn.
     assert!(classify_trans(&mk_spec(9999, true, &a1), 0).is_none());
@@ -738,7 +799,8 @@ fn guard_zone_data_and_demote() {
     );
     let mut pgs = pergroups_for(mcx, &plan, 1);
     // SAFETY: pgs covers transno 0; lanes cover the one row.
-    unsafe { fold_batch(&plan, &cols, &rows1, 1, NonNull::new(pgs.as_mut_ptr()).unwrap()) };
+    unsafe { fold_batch(&plan, &cols, &rows1, 1, NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx) }
+        .expect("fold_batch");
     assert_eq!(pgs[0].trans_value.as_i64(), 21474 * 100_000);
 }
 
@@ -778,7 +840,7 @@ fn fold_rows_grouped_parity() {
         .collect();
     // SAFETY: each group's pergroup array covers every transno; lanes cover
     // every row; arrays are not moved while the pointers live.
-    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups) };
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx) }.expect("grouped fold");
     // Per-group reference over the group's own row subset.
     for g in 0..ngroups {
         let gdata: Vec<Vec<Option<i64>>> =
@@ -786,4 +848,119 @@ fn fold_rows_grouped_parity() {
         let want = reference_fold(mcx, &plan, &gdata, |_| true, specs.len());
         assert_parity(&plan, &group_pgs[g], &want);
     }
+}
+
+// ---- Phase-3: sum/avg(int8) — the Int128AggState fold ----
+
+// Ungrouped parity for the int8_avg_accum fold: sum(int8) + avg(int8) over
+// one column (shared transfn 2746, independent per-trans kernels — no CSE)
+// plus count(col), with NULLs, negative extremes and repeated i64::MIN/MAX
+// terms whose running sum leaves the i64 range (the i128 carrier is exact
+// where an i64 fold would wrap).
+#[test]
+fn fold_int8_sum_avg_parity() {
+    let mcx = leaked_mcx();
+    let a_sum = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let a_avg = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let a_cnt = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let specs = [
+        mk_spec(2746, true, &a_sum),  // sum(int8)
+        mk_spec(2746, true, &a_avg),  // avg(int8) — same transfn
+        mk_spec(2804, false, &a_cnt), // count(v)
+    ];
+    let n = 200usize;
+    let val = |i: usize| -> Option<i64> {
+        match i % 8 {
+            0 => None,
+            1 | 3 => Some(i64::MAX),
+            2 => Some(i64::MIN),
+            4 => Some(-1),
+            _ => Some((i as i64 - 100) * 1_000_000_007),
+        }
+    };
+    let data: Vec<Vec<Option<i64>>> = (0..n).map(|i| vec![val(i)]).collect();
+    let (plan, pgs) = run_fold(mcx, &specs, &[8], &data, |i| i % 3 != 1);
+    assert_eq!(plan.cse.len(), 0, "Int128AvgAccum joins no SumBase cluster");
+    let vals = || (0..n).filter(|&i| i % 3 != 1).filter_map(val);
+    let want_n = vals().count() as i64;
+    let want_s: i128 = vals().map(|v| v as i128).sum();
+    assert!(want_s > i64::MAX as i128, "test data must overflow an i64 sum");
+    assert_eq!(read_int128_state(&pgs[0]), (want_n, want_s));
+    assert_eq!(read_int128_state(&pgs[1]), (want_n, want_s));
+    assert_eq!(pgs[2].trans_value.as_i64(), want_n);
+}
+
+// C parity for the lazy INTERNAL state: every selected row calls the
+// non-strict transfn, so an all-NULL batch still ALLOCATES the state (n = 0
+// — observable through int8_avg_serialize under a partial-agg finalize),
+// while a batch selecting nothing must leave the pergroup NULL (the transfn
+// never ran).
+#[test]
+fn fold_int8_allnull_allocates_state() {
+    let mcx = leaked_mcx();
+    let args = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let specs = [mk_spec(2746, true, &args)];
+    let data: Vec<Vec<Option<i64>>> = (0..8).map(|_| vec![None]).collect();
+    let (_, pgs) = run_fold(mcx, &specs, &[8], &data, |_| true);
+    assert!(!pgs[0].trans_value_is_null, "all-NULL input still allocates the state");
+    assert_eq!(read_int128_state(&pgs[0]), (0, 0));
+    assert!(pgs[0].no_trans_value, "the non-strict byval step never clears noTransValue");
+    // Nothing selected: the transfn never runs, the state stays NULL.
+    let (_, pgs) = run_fold(mcx, &specs, &[8], &data, |_| false);
+    assert!(pgs[0].trans_value_is_null);
+}
+
+// Grouped int8 fold parity across TWO batches: per-row routing, an all-NULL
+// group still gets its state allocated, extremes stay exact in i128, and the
+// second batch accumulates into the SAME aggcontext state the first
+// installed (the pointer datum survives across batches, exactly as the
+// per-row transfn chain's does).
+#[test]
+fn fold_rows_grouped_int8_parity() {
+    let mcx = leaked_mcx();
+    let a_sum = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let a_avg = arg_list(mcx, mk_var(mcx, 1, INT8OID));
+    let specs = [mk_spec(2746, true, &a_sum), mk_spec(2746, true, &a_avg)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let n = 120usize;
+    let ngroups = 4usize;
+    // Group 3 (i % 4 == 3) is all-NULL in both batches (120 % 4 == 0 keeps
+    // batch-2 routing aligned).
+    let val = |i: usize| -> Option<i64> {
+        if i % 4 == 3 || i % 5 == 0 {
+            None
+        } else if i % 7 == 1 {
+            Some(i64::MAX)
+        } else if i % 7 == 2 {
+            Some(i64::MIN)
+        } else {
+            Some((i as i64 - 60) * 999_999_937)
+        }
+    };
+    let data: Vec<Vec<Option<i64>>> = (0..n).map(|i| vec![val(i)]).collect();
+    let data2: Vec<Vec<Option<i64>>> = (0..n).map(|i| vec![val(n + i)]).collect();
+    let cols = TestCols::new(&[8], &data);
+    let cols2 = TestCols::new(&[8], &data2);
+    let mut group_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    let idxs: Vec<u32> = (0..n as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(group_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: each group's pergroup array covers every transno; lanes cover
+    // every row; arrays are not moved while the pointers live.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx) }.expect("batch 1");
+    unsafe { fold_rows_grouped(&plan, &cols2, &idxs, &groups, mcx) }.expect("batch 2");
+    for g in 0..ngroups {
+        let gdata: Vec<Vec<Option<i64>>> = (0..n)
+            .filter(|i| i % ngroups == g)
+            .map(|i| data[i].clone())
+            .chain((0..n).filter(|i| i % ngroups == g).map(|i| data2[i].clone()))
+            .collect();
+        let want = reference_fold(mcx, &plan, &gdata, |_| true, specs.len());
+        assert_parity(&plan, &group_pgs[g], &want);
+    }
+    // The all-NULL group's transfn ran per row: allocated state, n = 0.
+    assert_eq!(read_int128_state(&group_pgs[3][0]), (0, 0));
+    assert_eq!(read_int128_state(&group_pgs[3][1]), (0, 0));
 }
