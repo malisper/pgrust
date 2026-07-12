@@ -1781,6 +1781,16 @@ fn slow_switch<'mcx>(
             extension::ExecAlterExtensionStmt(mcx, stmt)?;
             Ok(None)
         }
+        T_AlterExtensionContentsStmt => {
+            // Retention contract as unify_stmt_lifetime.
+            let stmt_node = unsafe { core::mem::transmute::<Node<'_>, Node<'mcx>>(parsetree) };
+            let stmt = stmt_node
+                .as_variant::<types_nodes::rawnodes::AlterExtensionContentsStmt>()
+                .expect("AlterExtensionContentsStmt");
+            collect_gap("ALTER EXTENSION ... ADD/DROP");
+            extension::ExecAlterExtensionContentsStmt(mcx, stmt)?;
+            Ok(None)
+        }
 
         T_AlterFunctionStmt => {
             // Retention contract as unify_stmt_lifetime.
