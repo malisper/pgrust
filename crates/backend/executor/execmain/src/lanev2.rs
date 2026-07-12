@@ -60,6 +60,58 @@ pub fn enabled() -> bool {
     })
 }
 
+/// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`
+/// logs lane engagement events to stderr. Resolved once per process.
+fn lane_trace(event: &str) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    }) {
+        eprintln!("[lane-v2] {event}");
+    }
+}
+
+// ===========================================================================
+// Phase-3 qual kernel: the vectorized selection-bitmap qual for lane-owned
+// filtered scans. This restores the fast path the NON-lane `WithQual` drive
+// already has (`scan_batch_probe` → `exec_seq_scan_batch`): a kernel-shaped
+// `col CMP const` qual (`Kernel::QualScanVarCmpConst`) is evaluated over the
+// whole staged page batch by `qual_bitmap_cmp_const` (execexpr/steps.rs —
+// chunked so LLVM can vectorize the compare) into a selection bitmap, and the
+// lane's filter/project segment iterates ONLY the survivors instead of
+// running `exec_qual` scalar per staged row. All of the staging + bitmap +
+// forced-fallback-bit machinery is the EXISTING `BatchSoa` flow in
+// `nodeseqscan` (`seq_scan_batch_soa_prepare` / `seq_scan_next_pagebatch` /
+// `seq_scan_batch_fetch`); the lane only arms it and consumes the bitmap.
+// ===========================================================================
+
+/// Arm the SoA deform + selection-bitmap qual for a lane-owned filtered
+/// SeqScan pipeline. Admission is exactly `scan_batch_probe`'s: the qual must
+/// be kernel-shaped (`QualScanVarCmpConst` — non-erroring, non-volatile by
+/// construction, which is why only kernel shapes are admitted), and
+/// `seq_scan_batch_soa_prepare` internally refuses a non-fixed-width column
+/// prefix (the scalar per-row path then continues unchanged). `qual_only`:
+/// the deform stages the qual column only; surviving rows deform lazily
+/// per-row — identical to the non-lane `exec_seq_scan_batch` drive. No-op
+/// (memo hit) when already armed, so per-pull callers pay one load+test.
+fn arm_seq_scan_qual_bitmap<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ctx: &str,
+) {
+    if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+        return;
+    }
+    let Some(q) = ss.ss.qual.as_deref() else { return };
+    let ::execexpr::Kernel::QualScanVarCmpConst { attnum, .. } = q.kernel() else {
+        return;
+    };
+    ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, attnum as i32 + 1, true, false);
+    if ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+        lane_trace(&format!("seqscan qual bitmap armed ({ctx})"));
+    }
+}
+
 // ===========================================================================
 // Standalone scan ownership: DELIBERATELY REFUSED (admission economics,
 // design §4; measured on the integration bench 2026-07-11, q9-class).
@@ -70,13 +122,16 @@ pub fn enabled() -> bool {
 // hooks). A lane-owned scan in that position emits one tuple per pull through
 // the capacity-one adapter with NO batch consumer above and NO scan kernels
 // wired yet — pure adapter overhead (q9: +3–9%), and for kernel-qual'd scans
-// it PREEMPTS the row executor's own fused SoA-bitmap WithQual drive. Until
-// the standalone scan pipeline carries a measured kernel advantage (Phase-3
-// bitmap/dict kernels), refusing is strictly faster and byte-identical.
+// it PREEMPTS the row executor's own fused SoA-bitmap WithQual drive.
 //
-// This is a deliberate refuse-set entry, expected to SHRINK when Phase-3 scan
-// kernels land; the scan pipelines stay fully exercised via the agg/sort
-// breaker feeds.
+// Revisited with the Phase-3 qual kernel (2026-07-11): lane-owned filtered
+// scans now carry the same selection bitmap, but for a STANDALONE scan the
+// incumbent per-node drive is `exec_seq_scan_batch` — the identical bitmap
+// over the identical staging, with NO pull-adapter round trip per surviving
+// row on top. The lane can therefore only match-or-lose here (the q9-class
+// adapter overhead stands), so the refuse stays. It shrinks when standalone
+// scans gain a kernel the row drive lacks (dict/PREWHERE-class); the scan
+// pipelines stay fully exercised via the agg/sort/join breaker feeds.
 const STANDALONE_SCAN_NO_UPSIDE: bool = true;
 
 // ===========================================================================
@@ -231,15 +286,19 @@ impl<'mcx> Source<'mcx> for SeqScanSource {
     }
 }
 
-/// Push operator: the scan's scalar filter→project segment. Consumes the
-/// staged batch row-by-row via `seq_scan_batch_emit` — `ExecScanExtended`'s
-/// body over a staged batch row (reset per-tuple context, store + apply the
-/// scan qual scalar-per-row via `execexpr`, project) — pushing each surviving
-/// output slot into the sink. Filter and projection stay fused within this
-/// one segment operator per the operator-model decision (design §1): the push
-/// conversion inverts driver control, never the fused per-row segment. Same
-/// tuples, same order, same qual/proj/NULL semantics as `exec_seq_scan` →
-/// BYTE-IDENTICAL.
+/// Push operator: the scan's filter→project segment. Consumes the staged
+/// batch via `seq_scan_batch_emit` — `ExecScanExtended`'s body over a staged
+/// batch row (reset per-tuple context, store + apply the scan qual via
+/// `execexpr`, project) — pushing each surviving output slot into the sink.
+/// Kernel-shaped quals (`QualScanVarCmpConst`, armed by
+/// `arm_seq_scan_qual_bitmap` or the agg's fused full-prefix deform) run
+/// vectorized: the staging computed a whole-batch selection bitmap
+/// (`qual_bitmap_cmp_const`), and this operator walks only the survivors;
+/// all other quals run scalar per-row. Filter and projection stay fused
+/// within this one segment operator per the operator-model decision (design
+/// §1): the push conversion inverts driver control, never the fused per-row
+/// segment. Same tuples, same order, same qual/proj/NULL semantics as
+/// `exec_seq_scan` → BYTE-IDENTICAL.
 ///
 /// The consume position over the staged page batch lives on the node
 /// (`SeqScanState::lane_cursor`), so a `Paused` pipeline survives the Volcano
@@ -261,6 +320,35 @@ impl<'mcx> Operator<'mcx> for SeqScanFilterProject {
         out: &mut dyn Sink<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<OpStatus> {
+        // Phase-3 qual kernel: when the kernel-shaped qual bitmap is staged
+        // for this batch (`seq_scan_next_pagebatch` ran `qual_bitmap_cmp_const`
+        // over the SoA qual column at staging), iterate ONLY the selection
+        // survivors — bitmap hits plus forced fallback bits, which
+        // `seq_scan_batch_fetch` re-checks per-row inside the emit — instead
+        // of running the scalar qual on every staged row. Survivors come out
+        // in ascending row order: same rows, same order, same per-row
+        // emit/projection semantics as the scalar walk → byte-identical (the
+        // kernel is non-erroring/non-volatile by admission, so skipped rows
+        // have no observable evaluation). The bitmap cursor is node-resident,
+        // so a `Paused` pipeline resumes exactly; `lane_cursor` is kept in
+        // step for `pending`. Interrupt cadence: one check per survivor and
+        // at least one per staged page (no coarser than the page-level check
+        // in `heap_fetch_next_buffer` the incumbent batch drive relies on).
+        if ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(node) {
+            loop {
+                ::postgres_seams::check_for_interrupts::call()?;
+                let Some(i) = ::nodeseqscan::seq_scan_batch_next_selected(node) else {
+                    node.set_lane_cursor(batch.n, batch.n);
+                    return Ok(OpStatus::NeedInput);
+                };
+                node.set_lane_cursor(i + 1, batch.n);
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(node, estate, i)? {
+                    if let SinkFeed::Full = out.accept(slot, estate)? {
+                        return Ok(OpStatus::Paused);
+                    }
+                }
+            }
+        }
         loop {
             let (pos, n) = node.lane_cursor();
             debug_assert_eq!(n, batch.n);
@@ -794,8 +882,12 @@ pub enum AggLaneChoice {
     /// Admission economics (design §4): no lanefold coverage AND the legacy
     /// fused `exec_agg_batched` arm would engage — the lane must not preempt
     /// the measured-faster fused batch drive (q3/q4-class, integration bench
-    /// 2026-07-11). Deliberate refuse-set entry; shrinks as fold coverage
-    /// widens.
+    /// 2026-07-11). Re-measured with the Phase-3 qual bitmap (2026-07-12):
+    /// the lane's per-row breaker feed is STILL slower than the fused arm at
+    /// q4's 50% selectivity (+2.5%; only ~-5% at 10% selectivity) — the
+    /// dominant cost is the per-row `agg_hash_build_accept` vs the fused
+    /// arm's batched drive, which carries the same bitmap. Deliberate
+    /// refuse-set entry; shrinks as fold coverage widens.
     Refuse,
     /// Lane owns with the per-row breaker feed: no fold coverage, but no
     /// fused arm to preempt either (shapes the fused arm refuses — scalar
@@ -846,10 +938,15 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
         // drive when the whole read prefix is knowable (unprojected scans
         // only: with a projection the agg reads output columns, which are not
-        // commensurable with scan-column prefixes). Prefix 0 disarms. The
-        // fold feed FORCES the deform when the fold reads lane columns (the
-        // <3-column break-even is a deform+gather artifact; the fold consumes
-        // the columns directly).
+        // commensurable with scan-column prefixes). ONE deform serves both
+        // consumers: `seq_scan_batch_soa_prepare` detects the kernel qual
+        // inside the prefix and arms the selection bitmap on the same staged
+        // SoA the fold lanes read. When no prefix is knowable (projected /
+        // shape-unknown), fall back to the qual-only bitmap arm so a
+        // kernel-shaped filter still vectorizes (survivors deform lazily
+        // per-row). The fold feed FORCES the deform when the fold reads lane
+        // columns (the <3-column break-even is a deform+gather artifact; the
+        // fold consumes the columns directly).
         let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
             fused_agg_soa_prefix(agg, ss).unwrap_or(0)
         } else {
@@ -860,12 +957,41 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         // feeds alike.
         stats::tick_owned(ShapeClass::AggBuild);
         if c == AggLaneChoice::Fold {
-            let force = ::nodeagg::agg_lanefold_plan(agg)
-                .is_some_and(|plan| !plan.cols.is_empty());
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+            if soa_prefix > 0 {
+                let force = ::nodeagg::agg_lanefold_plan(agg)
+                    .is_some_and(|plan| !plan.cols.is_empty());
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Full-prefix deform unarmable (non-fixed-width column in
+                    // the prefix) or declined (break-even). A column-reading
+                    // fold plan cannot get here — `decide_agg_lane` probe-armed
+                    // this exact prefix before choosing Fold — so the SoA has
+                    // no fold reader and the qual-only bitmap arm is safe.
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only");
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
+                }
+            } else {
+                // Fold with no knowable prefix = a plan reading no lane
+                // columns (count(*)-only); the bitmap is the only SoA user.
+                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed");
+            }
             agg_hash_build_fold_feed(agg, ss, estate)?;
         } else {
-            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+            if soa_prefix > 0 {
+                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                    // Unarmable/declined full prefix; the per-row feed reads
+                    // no SoA columns, so fall back to the qual-only bitmap.
+                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only");
+                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                    lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
+                }
+            } else {
+                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed");
+            }
             let mut sink = HashAggBuildSink { agg: &mut *agg };
             drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
         }
@@ -996,18 +1122,18 @@ fn agg_hash_build_fold_feed<'mcx>(
         }
         idxs.clear();
         groups.clear();
-        for i in 0..n {
-            let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
-                continue;
-            };
-            // SoA fallback rows carry no lane values: the full per-row
-            // program owns them (the order split across transitions is
-            // bit-invisible — commutative kernels).
-            if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i)) {
-                ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
-            } else if let Some(pg) = ::nodeagg::agg_hash_build_probe_resid(agg, estate, slot)? {
-                idxs.push(i);
-                groups.push(pg);
+        // Phase-3 qual kernel: with the selection bitmap staged for this
+        // batch, walk ONLY the survivors (bitmap hits + forced fallback bits,
+        // re-checked per-row inside the emit) — same rows, same ascending
+        // order as the full walk, whose emit would have bit-tested each row
+        // anyway. Non-kernel quals keep the full per-row walk.
+        if ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss) {
+            while let Some(i) = ::nodeseqscan::seq_scan_batch_next_selected(ss) {
+                agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
+            }
+        } else {
+            for i in 0..n {
+                agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
             }
         }
         if !idxs.is_empty() {
@@ -1040,6 +1166,32 @@ fn agg_hash_build_fold_feed<'mcx>(
     }
     // Finalize (delegated): spill finish, merge handoff, phase flip.
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// One staged row of the fold build feed: the per-row emit (per-tuple ctx
+/// reset, store, qual), then route — SoA fallback rows to the full per-row
+/// transition program (they carry no lane values; the order split across
+/// transitions is bit-invisible — commutative kernels), everything else
+/// through the group probe with its pergroup snapshotted for the whole-batch
+/// fold.
+fn agg_fold_feed_row<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    i: u32,
+) -> PgResult<()> {
+    let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
+        return Ok(());
+    };
+    if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i)) {
+        ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
+    } else if let Some(pg) = ::nodeagg::agg_hash_build_probe_resid(agg, estate, slot)? {
+        idxs.push(i);
+        groups.push(pg);
+    }
+    Ok(())
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
@@ -1234,6 +1386,7 @@ pub fn try_own_sort<'mcx>(
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
         match &mut **outer {
             crate::procnode::PlanStateNode::SeqScan(ss) => {
+                arm_seq_scan_qual_bitmap(ss, estate, "sort feed");
                 sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
             }
             crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -1565,6 +1718,7 @@ fn join_build_dispatch<'mcx>(
     stats::tick_owned(ShapeClass::Join);
     match child {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
+            arm_seq_scan_qual_bitmap(ss, estate, "join build feed");
             join_build_feed(hj, hs, ss, SeqScanSource, SeqScanFilterProject, estate)
         }
         crate::procnode::PlanStateNode::IndexScan(is) => {
@@ -1595,14 +1749,17 @@ fn join_probe_drain_dispatch<'mcx>(
 ) -> PgResult<()> {
     let mut probe = JoinProbe { hj, hs };
     match outer {
-        crate::procnode::PlanStateNode::SeqScan(ss) => drain_pipeline_chain(
-            ss,
-            &mut SeqScanSource,
-            &mut SeqScanFilterProject,
-            &mut probe,
-            sink,
-            estate,
-        ),
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            arm_seq_scan_qual_bitmap(ss, estate, "join probe drain");
+            drain_pipeline_chain(
+                ss,
+                &mut SeqScanSource,
+                &mut SeqScanFilterProject,
+                &mut probe,
+                sink,
+                estate,
+            )
+        }
         crate::procnode::PlanStateNode::IndexScan(is) => drain_pipeline_chain(
             is,
             &mut IndexScanSource,
@@ -1648,14 +1805,20 @@ fn join_probe_pull_dispatch<'mcx>(
     let mut probe = JoinProbe { hj, hs };
     let mut root = RootAdapter::new(None);
     match outer {
-        crate::procnode::PlanStateNode::SeqScan(ss) => pull_step_chain(
-            ss,
-            &mut SeqScanSource,
-            &mut SeqScanFilterProject,
-            &mut probe,
-            &mut root,
-            estate,
-        ),
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            // Per-pull entry: `arm_seq_scan_qual_bitmap` early-returns once
+            // armed (one load+test), and the first pull arms BEFORE any
+            // batch is staged, so a staged batch always matches its bitmap.
+            arm_seq_scan_qual_bitmap(ss, estate, "join probe pull");
+            pull_step_chain(
+                ss,
+                &mut SeqScanSource,
+                &mut SeqScanFilterProject,
+                &mut probe,
+                &mut root,
+                estate,
+            )
+        }
         crate::procnode::PlanStateNode::IndexScan(is) => pull_step_chain(
             is,
             &mut IndexScanSource,
