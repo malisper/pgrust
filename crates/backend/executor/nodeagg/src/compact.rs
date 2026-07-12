@@ -184,12 +184,14 @@ pub fn agg_hash_compact_batch<'mcx>(
             }
         }
     } else {
-        // Default prefetch idiom pending the pod A/B verdict (bench lanes
-        // agg_lt_*_pf*): DuckDB pre-touch — no timing calls, no lookahead
-        // tuning, measured within noise of adaptive at DRAM-bound sizes.
+        // Prefetch idiom: CH-style ADAPTIVE, per the pod A/B verdict
+        // (2026-07-14, ch-bench-pod, 8.4M-row staged hits keys): at u64
+        // card 1e6/1e8 adaptive beat DuckDB pre-touch by 6–10% (191/170 vs
+        // 204/189 Mns/pass) and no-prefetch by 17–24%; below the L2 gate all
+        // three are equal by construction (both idioms disable there).
         table.probe_int_batch(
             ckeys,
-            ::lanetable::PrefetchMode::PreTouch,
+            ::lanetable::PrefetchMode::Adaptive,
             hashes,
             states,
             new_rows,
