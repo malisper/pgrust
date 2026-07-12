@@ -442,6 +442,32 @@ pub fn sort_lane_put<'mcx>(
     }
 }
 
+/// True when this sort's outer shape sorts bare datums (single-column
+/// outer). Callers use it to gate the direct-key feed probe — the arming
+/// mirror of `exec_sort_batched`, which probes `key_direct` only inside its
+/// `node.datumSort` arm.
+#[inline(always)]
+pub fn sort_lane_is_datum(node: &SortState<'_>) -> bool {
+    node.datumSort
+}
+
+/// Per-row feed face for `sort_lane_put_batch` — the batch-positioned
+/// analogue of `SortFeedSource`'s `emit`/`emit_key` pair (one face so both
+/// legs share the caller's emit state).
+pub trait SortLaneBatchFeed<'mcx> {
+    /// Produce staged row `i`'s output slot; `None` = qual-filtered.
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>>;
+    /// Direct sort-key read for staged row `i` (only consulted when the
+    /// caller armed `direct`); `None` = fallback, take the `emit` path.
+    fn emit_key(&mut self, _i: u32) -> Option<(Datum, bool)> {
+        None
+    }
+}
+
 /// Batch-granular feed leg (breaker `BatchSink::accept_batch`): put every
 /// row `emit` yields for staged positions `pos..n`. Row-for-row this is
 /// `sort_lane_put` over the same emit stream in the same order — the
@@ -454,22 +480,36 @@ pub fn sort_lane_put<'mcx>(
 ///     through it, so the sort state and output are unchanged);
 ///   * by-ref datum sorts keep `putdatum` (its datumCopy arm — the batch
 ///     putter parks raw slot pointers the next emit would recycle).
-pub fn sort_lane_put_batch<'mcx, E>(
+///
+/// Direct key feed (`exec_sort_batched`'s `key_direct`/`emit_key` arms,
+/// verbatim): when `direct` is armed (datum sort, key served straight from
+/// the leaf's staged column — value/null identical to `emit` +
+/// `slot_getsomeattrs(1)`, no qual, same row order), rows `emit_key` covers
+/// put straight from the staged column; `None` rows (narrow-tuple fallback)
+/// take the existing full emit path in order.
+pub fn sort_lane_put_batch<'mcx, F>(
     node: &mut SortState<'mcx>,
     estate: &mut EStateData<'mcx>,
     pos: u32,
     n: u32,
-    emit: &mut E,
+    direct: bool,
+    feed: &mut F,
 ) -> PgResult<()>
 where
-    E: FnMut(u32, &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    F: SortLaneBatchFeed<'mcx>,
 {
     let mcx = estate.es_query_cxt;
     let ts = node.tuplesortstate.as_mut().expect("sort_lane_put_batch before sort_lane_begin");
     if node.datumSort {
         if ts.datum_sort_is_byref() {
             for i in pos..n {
-                let Some(id) = emit(i, estate)? else { continue };
+                if direct {
+                    if let Some((val, isnull)) = feed.emit_key(i) {
+                        ts.putdatum(val, isnull)?;
+                        continue;
+                    }
+                }
+                let Some(id) = feed.emit(i, estate)? else { continue };
                 let slot = estate.slot_mut(id);
                 exectuples::slot_getsomeattrs(slot, 1);
                 let base = slot.base();
@@ -478,7 +518,13 @@ where
         } else {
             ts.putdatum_batch(|p| {
                 for i in pos..n {
-                    let Some(id) = emit(i, estate)? else { continue };
+                    if direct {
+                        if let Some((val, isnull)) = feed.emit_key(i) {
+                            p.put(val, isnull)?;
+                            continue;
+                        }
+                    }
+                    let Some(id) = feed.emit(i, estate)? else { continue };
                     let slot = estate.slot_mut(id);
                     exectuples::slot_getsomeattrs(slot, 1);
                     let base = slot.base();
@@ -489,7 +535,7 @@ where
         }
     } else {
         for i in pos..n {
-            let Some(id) = emit(i, estate)? else { continue };
+            let Some(id) = feed.emit(i, estate)? else { continue };
             ts.puttupleslot(estate.slot_mut(id), mcx)?;
         }
     }
