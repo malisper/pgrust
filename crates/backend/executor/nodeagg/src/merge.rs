@@ -99,24 +99,70 @@ pub struct HandedAggTable {
 // installer never touches the payload again.
 unsafe impl Send for HandedAggTable {}
 
+// Raw (columnar) handed table — the Stage-4 §4.4 exchange's wire format for
+// single-int-key compact shapes. Rows are radix-partitioned AT INSTALL by the
+// C kernel hash's top-8 bits (the SAME bucket function `partition_entries`
+// uses on classic entries, so mixed classic/raw sources stay bucket-
+// consistent): bucket b's keys/state-blocks are the contiguous runs
+// starts[b]..starts[b+1] — the merge streams them sequentially instead of
+// pointer-chasing minimal-tuple images (the tuple-format exchange measured
+// ~200ns/entry on the merge, DRAM-bound; this format is the Stage-0.4
+// prototype's flat-merge shape).
+pub struct HandedRawTable {
+    // 257 bucket offsets over keys/states (non-NULL rows only).
+    starts: Vec<u32>,
+    // Canonical sign-extended i64 keys (the compact table's own repr).
+    keys: Vec<i64>,
+    // One `additionalsize`-byte pergroup block per key, 16-aligned stride.
+    states: Vec<u128>,
+    stride16: usize,
+    // Relocated internal (PolyInt128) states the copied pergroups point into.
+    _extra: Vec<u128>,
+    // The out-of-band NULL group's pergroup block (compact null_row).
+    null_states: Option<Vec<u128>>,
+}
+
+// SAFETY: self-contained buffers; install/take hand ownership through the
+// handoff Mutex and the installer never touches the payload again.
+unsafe impl Send for HandedRawTable {}
+
+#[derive(Default)]
+struct HandoffSlots {
+    classic: Vec<HandedAggTable>,
+    raw: Vec<HandedRawTable>,
+}
+
 pub struct AggTableHandoff {
-    slots: Mutex<Vec<HandedAggTable>>,
+    slots: Mutex<HandoffSlots>,
     // Leader-decided per-transno state plan; the worker install relocates
     // internal states by it. Immutable after construction.
     kinds: Vec<CombineKind>,
+    // Stage-4 §4.4 radix exchange: Some(cap) = the leader admitted the
+    // high-NDV exchange for this shape (bucket-parallel merge qualified on a
+    // single fixed int grouping key + pool armed + plan NDV over the floor),
+    // and workers bound their compact partial tables at `cap` entries,
+    // installing raw radix-partitioned flushes mid-fill. None = classic
+    // one-table-per-worker handoff. Immutable after construction (workers
+    // read it through the registry).
+    exchange_cap: Option<u32>,
 }
 
 impl AggTableHandoff {
-    fn new(kinds: Vec<CombineKind>) -> AggTableHandoff {
-        AggTableHandoff { slots: Mutex::new(Vec::new()), kinds }
+    fn new(kinds: Vec<CombineKind>, exchange_cap: Option<u32>) -> AggTableHandoff {
+        AggTableHandoff { slots: Mutex::new(HandoffSlots::default()), kinds, exchange_cap }
     }
 
     fn install(&self, t: HandedAggTable) {
-        self.slots.lock().unwrap_or_else(|e| e.into_inner()).push(t);
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).classic.push(t);
     }
 
-    fn take_all(&self) -> Vec<HandedAggTable> {
-        core::mem::take(&mut *self.slots.lock().unwrap_or_else(|e| e.into_inner()))
+    fn install_raw(&self, t: HandedRawTable) {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).raw.push(t);
+    }
+
+    fn take_all(&self) -> (Vec<HandedAggTable>, Vec<HandedRawTable>) {
+        let mut s = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        (core::mem::take(&mut s.classic), core::mem::take(&mut s.raw))
     }
 }
 
@@ -301,6 +347,16 @@ struct MergeRun {
     // Bucket-parallel results (increment 2): all 256 buckets merged up front
     // by the claimer pool; retrieval drains them in bucket order.
     pre: Option<Vec<Vec<TupleHashEntryData>>>,
+    // Stage-4 §4.4 raw exchange: the handed raw tables (buffer owners) and
+    // the flat per-bucket merge output; retrieval drains buckets in order,
+    // rows in insertion order, synthesizing key datums directly (no minimal
+    // tuples). `raw_pre` present ⇒ `pre` absent and retrieval takes the raw
+    // leg; the classic fields still cover mixed classic sources (merged
+    // INTO raw_pre at consume).
+    raw_tables: Vec<HandedRawTable>,
+    raw_pre: Option<Vec<::lanetable::LaneAggTable>>,
+    // The single grouping key's attlen for datum synthesis (raw leg only).
+    raw_key_len: i16,
 }
 
 // PGRUST_AGG_MERGE_NO_PARALLEL triage kill-switch: forces the increment-1
@@ -608,7 +664,27 @@ pub(crate) fn init_finalize_merge<'mcx>(
     let key_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(hash_desc));
 
-    let handoff = Arc::new(AggTableHandoff::new(kinds.clone()));
+    // Stage-4 §4.4 exchange admission (leader-decided, workers read it off
+    // the handoff): requires the bucket-parallel merge (a serial leader-side
+    // merge over cap-flushed O(N) entries would be a regression), the RAW
+    // wire shape — exactly one fixed-width int grouping key of a compact-
+    // hostable width, so worker flushes stream canonical i64 keys + state
+    // blocks and the merge is flat (the tuple-format exchange measured
+    // ~200ns/entry, DRAM-bound pointer chasing) — and the NDV floor over the
+    // finalize's plan-time group estimate (footer-HLL-honest on never-
+    // ANALYZEd cbstore since the cbparallelstats lane). Low-NDV shapes keep
+    // classic behavior byte-for-byte (their tables never reach the cap even
+    // when admitted, but the floor keeps the planner and executor aligned).
+    let raw_shape = par.as_ref().is_some_and(|spec| {
+        spec.atts.len() == 1
+            && !spec.atts[0].memcmp_payload
+            && matches!(spec.atts[0].attlen, 2 | 4 | 8)
+    });
+    let exchange_cap = (raw_shape
+        && !parallel_merge_disabled()
+        && ::guc_tables::lane_pool::agg_exchange_admits(node.numGroups as f64))
+    .then(|| ::guc_tables::lane_pool::agg_exchange_cap() as u32);
+    let handoff = Arc::new(AggTableHandoff::new(kinds.clone(), exchange_cap));
     let registry_key = partial as *const Agg<'_> as usize;
     registry_insert(registry_key, &handoff);
     Ok(Some(FinalizeMerge {
@@ -738,9 +814,24 @@ pub(crate) fn maybe_install_handoff<'mcx>(
             return Ok(());
         }
         if ph.compact.is_some() {
+            // Exchange-mode builds hand their remainder in the raw wire
+            // format (matching their mid-fill flushes); everything else
+            // keeps the tuple export.
+            if matches!(ph.exchange, ExchangeState::On { .. }) {
+                return install_raw_handoff(node, estate, &handoff, id, false).map(|_| ());
+            }
             return install_compact_handoff(node, estate, &handoff, id);
         }
     }
+    install_classic_handoff(node, &handoff, id)
+}
+
+// The classic C-table install body (fill-completion handoff).
+fn install_classic_handoff<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    handoff: &Arc<AggTableHandoff>,
+    id: i32,
+) -> PgResult<()> {
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let kinds = &handoff.kinds;
     let additionalsize = ph.hashtable.additionalsize();
@@ -938,6 +1029,270 @@ fn install_compact_handoff<'mcx>(
     Ok(())
 }
 
+// The raw (columnar) install — the exchange's wire format, both for the
+// mid-fill flushes (`rearm=true`: the emptied table is re-armed and the
+// build continues) and the fill-completion remainder (`rearm=false`: the
+// table is consumed, exactly like the tuple exports). Per row: canonical
+// i64 key + the C kernel hash (bucket routing, consistent with classic
+// entries), the pergroup block copied verbatim, internal (PolyInt128)
+// states relocated behind it. No minimal tuples anywhere — reconstruction
+// was the tuple exchange's measured wall. Returns the handed byte count
+// (the exchange budget).
+fn install_raw_handoff<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    _estate: &mut EStateData<'mcx>,
+    handoff: &Arc<AggTableHandoff>,
+    id: i32,
+    rearm: bool,
+) -> PgResult<usize> {
+    let kinds = &handoff.kinds;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    debug_assert!(!ph.spill.mode, "raw installs never run in spill mode");
+    let additionalsize = ph.hashtable.additionalsize();
+    let stride16 = additionalsize.div_ceil(16);
+    let mut ch = ph.compact.take().expect("raw install requires an armed table");
+    let width = match &ch.key {
+        crate::compact::CompactKeySpec::Single { width } => *width,
+        crate::compact::CompactKeySpec::Multi(_) => {
+            unreachable!("raw exchange admission requires a single-int-key shape")
+        }
+    };
+    let n = ch.table.nrows();
+    // Pass 1: keys, kernel hashes (the classic entries' bucket function —
+    // hash_staged == hash_slot, the staged-probe equivalence), per-bucket
+    // counts, and the internal-state arena size.
+    let mut keys: Vec<i64> = Vec::with_capacity(n);
+    let mut key_datums: Vec<Datum> = Vec::with_capacity(n);
+    let mut isnull: Vec<bool> = Vec::with_capacity(n);
+    let mut extra_bytes = 0usize;
+    for row in 0..n {
+        match ch.table.row_key_int(row) {
+            Some(k) => {
+                keys.push(k);
+                key_datums.push(match width {
+                    2 => Datum::from_i16(k as i16),
+                    4 => Datum::from_i32(k as i32),
+                    _ => Datum::from_i64(k),
+                });
+                isnull.push(false);
+            }
+            None => {
+                keys.push(0);
+                key_datums.push(Datum::null());
+                isnull.push(true);
+            }
+        }
+        // SAFETY: the row's state block holds kinds.len() live pergroups
+        // (compact build contract; numtrans matches the engagement proof).
+        extra_bytes +=
+            unsafe { states_extra_bytes(ch.table.row_states(row).cast_const().cast(), kinds) };
+    }
+    let mut hashes: Vec<u32> = Vec::new();
+    ph.hashtable.hash_staged(&key_datums, &isnull, &mut hashes)?;
+    drop(key_datums);
+    let mut counts = [0u32; 256];
+    for i in 0..n {
+        if !isnull[i] {
+            counts[(hashes[i] >> 24) as usize] += 1;
+        }
+    }
+    let mut starts: Vec<u32> = Vec::with_capacity(257);
+    let mut acc = 0u32;
+    starts.push(0);
+    for c in counts {
+        acc += c;
+        starts.push(acc);
+    }
+    let nonnull = acc as usize;
+    let mut cursor: Vec<u32> = starts[..256].to_vec();
+    let mut out_keys: Vec<i64> = vec![0; nonnull];
+    let mut states: Vec<u128> = vec![0; nonnull * stride16];
+    let mut extra: Vec<u128> = vec![0; extra_bytes.div_ceil(16)];
+    let extra_base = extra.as_mut_ptr().cast::<u8>();
+    let mut extra_off = 0usize;
+    let mut null_states: Option<Vec<u128>> = None;
+    for row in 0..n {
+        // SAFETY: dst blocks were sized in pass 1 (stride16 per row, extra
+        // arena by states_extra_bytes); source blocks are live compact rows;
+        // relocate_states_into repoints the COPIED pergroups only.
+        unsafe {
+            let dst: *mut u8 = if isnull[row] {
+                let block = null_states.get_or_insert_with(|| vec![0u128; stride16]);
+                block.as_mut_ptr().cast()
+            } else {
+                let b = (hashes[row] >> 24) as usize;
+                let slot = cursor[b] as usize;
+                cursor[b] += 1;
+                out_keys[slot] = keys[row];
+                states.as_mut_ptr().add(slot * stride16).cast()
+            };
+            core::ptr::copy_nonoverlapping(ch.table.row_states(row), dst, additionalsize);
+            extra_off = relocate_states_into(dst, kinds, extra_base, extra_off);
+        }
+    }
+    debug_assert_eq!(extra_off, extra_bytes);
+    let bytes = nonnull * (8 + stride16 * 16) + extra_bytes;
+    if merge_stats_enabled() {
+        eprintln!(
+            "AGG_MERGE_STATS install: node={id} entries={n} bytes={bytes} pre-partitioned=true src=raw flush={rearm}",
+        );
+    }
+    handoff.install_raw(HandedRawTable {
+        starts,
+        keys: out_keys,
+        states,
+        stride16,
+        _extra: extra,
+        null_states,
+    });
+    if rearm {
+        // Mid-fill flush: re-arm the SAME table emptied (reset keeps
+        // repr/hash/layout/state width; the intern table — mk-only — cannot
+        // occur here). The aggcontext keeps the original internal states
+        // (no-drop arena); the exchange budget bounds that growth.
+        ch.table.reset();
+        ph.compact = Some(ch);
+    }
+    Ok(bytes)
+}
+
+// --- Stage-4 §4.4 radix exchange: worker-side bounded partial tables ---
+//
+// The worker-side half of the exchange (the leader half is the existing
+// bucket-claim parallel merge, unchanged): when the leader admitted the
+// exchange on the handoff, the partial build bounds its table at `cap`
+// entries and, on reaching the bound, installs the table radix-partitioned
+// (the classic/compact install bodies verbatim, `flush=true`) and continues
+// into the emptied table. Group ownership at the final aggregation is then
+// disjoint per bucket claimer, per-worker builds stay cache-resident instead
+// of DRAM-random-probing G-sized tables, and the merge's per-bucket probe
+// tables are G/256-sized — the Leis'14 radix-partitioned-output shape the
+// Stage-0.4 prototype demanded for the O(T·G) merge wall.
+
+// Worker-side exchange runtime, hosted in PerHashData. Resolution is lazy
+// (first probe of the build): ExecInitAgg of the participating leader's
+// partial node runs before init_finalize_merge registers the handoff.
+pub(crate) enum ExchangeState {
+    Unresolved,
+    Off,
+    On {
+        handoff: Arc<AggTableHandoff>,
+        cap: u32,
+        // Handed-buffer bytes this build has installed: the exchange's
+        // work_mem discipline (the flushes outlive the table, so the bounded
+        // table alone is not the build's footprint). Over the hash_mem limit
+        // the exchange turns Off and the classic growth/spill/refusal
+        // machinery takes over untouched.
+        installed_bytes: usize,
+    },
+}
+
+#[cold]
+#[inline(never)]
+fn exchange_resolve(node: &mut AggStateData<'_>) {
+    let state = 'r: {
+        if node.plan.aggsplit != AGGSPLIT_INITIAL_SERIAL
+            || node.plan.aggstrategy != AGG_HASHED
+        {
+            break 'r ExchangeState::Off;
+        }
+        let Some(handoff) = registry_get(node.plan as *const Agg<'_> as usize) else {
+            break 'r ExchangeState::Off;
+        };
+        match handoff.exchange_cap {
+            Some(cap) => ExchangeState::On { handoff, cap, installed_bytes: 0 },
+            None => ExchangeState::Off,
+        }
+    };
+    node.perhash.as_mut().expect("hashed Agg has perhash").exchange = state;
+}
+
+/// The exchange bound for this build (compact-arm sizing hook): a bounded
+/// table cannot become spill-eligible, so the arm gates/sizes by the cap
+/// instead of the full plan-time group estimate.
+pub(crate) fn exchange_cap_for_build(node: &mut AggStateData<'_>) -> Option<u32> {
+    if matches!(
+        node.perhash.as_ref().expect("hashed Agg has perhash").exchange,
+        ExchangeState::Unresolved
+    ) {
+        exchange_resolve(node);
+    }
+    match node.perhash.as_ref().expect("hashed Agg has perhash").exchange {
+        ExchangeState::On { cap, .. } => Some(cap),
+        _ => None,
+    }
+}
+
+/// The exchange's bound check — called BEFORE the row/batch probes
+/// (`lookup_hash_entry` top; compact backstop), so no caller-held group
+/// pointer is ever invalidated by a flush.
+#[inline]
+pub(crate) fn exchange_maybe_flush<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    match &ph.exchange {
+        ExchangeState::Off => Ok(()),
+        ExchangeState::Unresolved => {
+            // First probe of the build: the table is empty — resolve only.
+            exchange_resolve(node);
+            Ok(())
+        }
+        ExchangeState::On { cap, .. } => {
+            // Raw flushes stream off the compact table only; a build whose
+            // compact arm refused (or migrated away) keeps the classic
+            // one-install path — the merge handles mixed sources.
+            let over = ph
+                .compact
+                .as_ref()
+                .is_some_and(|ch| ch.table.len() >= *cap as usize);
+            if !over {
+                return Ok(());
+            }
+            exchange_flush(node, estate)
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn exchange_flush<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    // A spilled build stops exchanging: its remaining groups follow the
+    // classic spill/emission path (and the fill-end install refuses).
+    // Already-installed flushes stay correct — each flush removed those
+    // groups' states from the table, so tape/table/handed contributions are
+    // disjoint deltas the finalize's combines add up. (Under the cap the
+    // table itself never trips the limits; this arms only when the
+    // aggcontext's transvalue growth does.)
+    if ph.spill.mode || ph.spill.ever_spilled {
+        node.perhash.as_mut().unwrap().exchange = ExchangeState::Off;
+        return Ok(());
+    }
+    let ExchangeState::On { handoff, .. } = &ph.exchange else {
+        unreachable!("exchange_flush under ExchangeState::On")
+    };
+    let handoff = Arc::clone(handoff);
+    let hash_mem_limit = ph.hash_mem_limit;
+    let id = node.plan.plan.plan_node_id;
+    let bytes = install_raw_handoff(node, estate, &handoff, id, true)?;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    if let ExchangeState::On { installed_bytes, .. } = &mut ph.exchange {
+        *installed_bytes += bytes;
+        // Budget discipline: handed buffers are this build's real footprint.
+        // Over the limit, stop exchanging — the table then grows classically
+        // and the existing spill machinery owns the memory bound.
+        if *installed_bytes > hash_mem_limit {
+            ph.exchange = ExchangeState::Off;
+        }
+    }
+    Ok(())
+}
+
 // Leader-side consumption at the finalize's fill boundary (before
 // hashagg_finish_initial_spills): a never-spilled finalize takes the tables
 // into a bucket-merge run; a spilled one replays their entries through the
@@ -947,22 +1302,25 @@ pub(crate) fn consume_handoff<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let Some(m) = node.merge.as_ref() else { return Ok(()) };
-    let tables = m.handoff.take_all();
-    if tables.is_empty() {
+    let (tables, raw_tables) = m.handoff.take_all();
+    if tables.is_empty() && raw_tables.is_empty() {
         return Ok(());
     }
     let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
     if merge_stats_enabled() {
         eprintln!(
-            "AGG_MERGE_STATS consume: tables={} entries={} row_groups={} mode={}",
+            "AGG_MERGE_STATS consume: tables={} entries={} raw_tables={} raw_entries={} row_groups={} mode={}",
             tables.len(),
             tables.iter().map(|t| t.entries.len()).sum::<usize>(),
+            raw_tables.len(),
+            raw_tables.iter().map(|t| t.keys.len()).sum::<usize>(),
             ph.hashtable.entries().len(),
             if ph.spill.ever_spilled { "replay" } else { "bucket-merge" },
         );
     }
     if ph.spill.ever_spilled {
-        return replay_handed_rows(node, estate, tables);
+        replay_handed_rows(node, estate, tables)?;
+        return replay_raw_rows(node, estate, raw_tables);
     }
     let t0 = merge_stats_enabled().then(std::time::Instant::now);
     let additionalsize = ph.hashtable.additionalsize();
@@ -977,6 +1335,45 @@ pub(crate) fn consume_handoff<'mcx>(
             Some(p) => p,
             None => partition_entries(&t.entries),
         });
+    }
+    if !raw_tables.is_empty() {
+        // Raw exchange consume: flat bucket-claim merge over the raw runs +
+        // any classic sources (the leader's own row-built table; fallback
+        // workers). Raw installs exist only under the exchange admission,
+        // which required the parallel-qualified spec.
+        let spec = m.par.as_ref().expect("raw handoff implies a parallel-qualified merge");
+        let raw_key_len = spec.atts[0].attlen;
+        let null_hash = {
+            let mut v: Vec<u32> = Vec::new();
+            ph.hashtable.hash_staged(&[Datum::null()], &[true], &mut v)?;
+            v[0]
+        };
+        let raw_pre = parallel_merge_raw(
+            spec,
+            ph.hashtable.entries(),
+            &tables,
+            &raw_tables,
+            &parts,
+            additionalsize,
+            null_hash,
+        )?;
+        if let Some(t0) = t0 {
+            eprintln!("AGG_MERGE_STATS merge-wall-us={} mode=raw", t0.elapsed().as_micros());
+        }
+        node.merge.as_mut().unwrap().run = Some(MergeRun {
+            tables,
+            parts,
+            additionalsize,
+            bucket: 0,
+            out: Vec::new(),
+            out_pos: 0,
+            probe: Vec::new(),
+            pre: None,
+            raw_tables,
+            raw_pre: Some(raw_pre),
+            raw_key_len,
+        });
+        return Ok(());
     }
     let pre = match &m.par {
         Some(spec) if !parallel_merge_disabled() => {
@@ -1002,6 +1399,9 @@ pub(crate) fn consume_handoff<'mcx>(
         out_pos: 0,
         probe: Vec::new(),
         pre,
+        raw_tables: Vec::new(),
+        raw_pre: None,
+        raw_key_len: 0,
     });
     Ok(())
 }
@@ -1082,6 +1482,123 @@ fn replay_handed_rows<'mcx>(
     result
 }
 
+// The single raw grouping key's datum, from its canonical i64 (the compact
+// table's sign-extended storage; compact_key_datum's exact construction).
+#[inline]
+fn raw_key_datum(attlen: i16, k: i64) -> Datum {
+    match attlen {
+        2 => Datum::from_i16(k as i16),
+        4 => Datum::from_i32(k as i32),
+        _ => Datum::from_i64(k),
+    }
+}
+
+// A classic entry's key datum canonicalized to the raw i64 (the exact
+// widths compact canonicalizes — both sides sign-extend identically).
+#[inline]
+fn raw_canon_key(attlen: i16, d: Datum) -> i64 {
+    match attlen {
+        2 => d.as_i16() as i64,
+        4 => d.as_i32() as i64,
+        _ => d.as_i64(),
+    }
+}
+
+// `replay_handed_rows` for raw handed tables: each raw group re-enters as a
+// synthesized partial-output row through the classic fill body.
+fn replay_raw_rows<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tables: Vec<HandedRawTable>,
+) -> PgResult<()> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let mcx = estate.es_query_cxt;
+    let mut m = node.merge.take().expect("replay under an engaged merge");
+    let key_len =
+        m.par.as_ref().expect("raw handoff implies a parallel-qualified merge").atts[0].attlen;
+    let key_attno = node
+        .perhash
+        .as_ref()
+        .expect("hashed Agg has perhash")
+        .hash_grp_col_idx_input[0];
+    let mut result = Ok(());
+    let mut state_vals: Vec<NullableDatum> = vec![NullableDatum::null(); m.state_cols.len()];
+    'outer: for t in &tables {
+        let n = t.keys.len();
+        // Rows 0..n, then the out-of-band NULL block (index n).
+        for i in 0..=n {
+            let (key_datum, key_isnull, pg): (Datum, bool, NonNull<AggPerGroup>) = if i < n {
+                let pg = if t.stride16 == 0 {
+                    NonNull::dangling()
+                } else {
+                    // SAFETY: states holds n stride16-blocks (install layout).
+                    unsafe {
+                        NonNull::new_unchecked(
+                            t.states.as_ptr().add(i * t.stride16).cast_mut().cast(),
+                        )
+                    }
+                };
+                (raw_key_datum(key_len, t.keys[i]), false, pg)
+            } else {
+                let Some(block) = &t.null_states else { continue };
+                let pg = if t.stride16 == 0 {
+                    NonNull::dangling()
+                } else {
+                    // SAFETY: the NULL block holds one stride16-block.
+                    unsafe { NonNull::new_unchecked(block.as_ptr().cast_mut().cast()) }
+                };
+                (Datum::null(), true, pg)
+            };
+            // SAFETY: raw blocks hold kinds.len() pergroups whose internal
+            // states were relocated into the table's arena at install.
+            if let Err(err) = unsafe {
+                synth_state_vals_pg(
+                    &m.kinds,
+                    pg,
+                    estate.ecxt(node.tmpcontext).per_tuple_mcx(),
+                    &mut state_vals,
+                )
+            } {
+                result = Err(err);
+                break 'outer;
+            }
+            {
+                let replay = estate.slot_mut(m.replay_slot);
+                exectuples::exec_store_all_null_tuple(replay, mcx);
+                let dst = replay.base_mut();
+                dst.tts_values[(key_attno - 1) as usize] = key_datum;
+                dst.tts_isnull[(key_attno - 1) as usize] = key_isnull;
+                for (&attno, v) in m.state_cols.iter().zip(&state_vals) {
+                    dst.tts_values[(attno - 1) as usize] = v.value;
+                    dst.tts_isnull[(attno - 1) as usize] = v.isnull;
+                }
+            }
+            estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(m.replay_slot);
+            match lookup_hash_entry(node, estate, m.replay_slot) {
+                Ok(true) => {
+                    let replay = estate.slot_mut(m.replay_slot);
+                    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(replay) };
+                    if let Err(e) = exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)
+                    {
+                        result = Err(e);
+                        break 'outer;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    result = Err(e);
+                    break 'outer;
+                }
+            }
+            estate.reset_expr_context(node.tmpcontext);
+        }
+    }
+    node.merge = Some(m);
+    result
+}
+
 // One replayed entry's state-column datums: byval transvalues pass through;
 // internal states serialize with the same plain functions the worker's
 // serialfn wraps, so the synthesized row is byte-identical to a sent one.
@@ -1096,7 +1613,21 @@ fn synth_state_vals(
         out.fill(NullableDatum::null());
         return Ok(());
     };
-    let pg = add.cast::<AggPerGroup>();
+    // SAFETY: additionalsize holds kinds.len() pergroups (fn contract below).
+    unsafe { synth_state_vals_pg(kinds, add.cast::<AggPerGroup>(), per_tuple, out) }
+}
+
+// `synth_state_vals` over a bare pergroup block (the raw exchange's replay).
+//
+// # Safety
+// `pg` points at `kinds.len()` live pergroups whose non-null internal
+// transvalues are live relocated states.
+unsafe fn synth_state_vals_pg(
+    kinds: &[CombineKind],
+    pg: NonNull<AggPerGroup>,
+    per_tuple: Mcx<'_>,
+    out: &mut [NullableDatum],
+) -> PgResult<()> {
     for (transno, k) in kinds.iter().enumerate() {
         // SAFETY: additionalsize holds kinds.len() pergroups; non-null
         // internal transvalues are live relocated states in the handed
@@ -1140,6 +1671,14 @@ pub(crate) fn agg_retrieve_merged<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    if node
+        .merge
+        .as_ref()
+        .and_then(|m| m.run.as_ref())
+        .is_some_and(|r| r.raw_pre.is_some())
+    {
+        return agg_retrieve_merged_raw(node, estate);
+    }
     let mcx = estate.es_query_cxt;
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
@@ -1174,6 +1713,78 @@ pub(crate) fn agg_retrieve_merged<'mcx>(
             }
             entry.additional(additionalsize).map_or(NonNull::dangling(), |p| p.cast())
         };
+        finalize_aggregates(node, estate, pergroup)?;
+
+        {
+            let AggStateData { perhash, qual, .. } = node;
+            let ph = perhash.as_mut().unwrap();
+            let mut slots =
+                EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+            if !::execexpr::exec_qual(qual.as_deref_mut(), &mut slots)? {
+                continue;
+            }
+        }
+        let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+        let ph = node.perhash.as_mut().unwrap();
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ph.first_slot) };
+        ::execexpr::exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+        return Ok(Some(node.ps_ResultTupleSlot));
+    }
+}
+
+// The raw exchange's retrieve: buckets 0..255 in order, rows in insertion
+// order, key datums synthesized straight from the flat merge tables (no
+// minimal tuples — the tuple store/deform pair was a measured wall at 10M
+// groups). Same finalize/qual/project tail as the classic merged retrieve.
+fn agg_retrieve_merged_raw<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mcx = estate.es_query_cxt;
+    loop {
+        estate.reset_expr_context(node.ps_ExprContext);
+
+        let (key, states, key_len) = {
+            let run = node
+                .merge
+                .as_mut()
+                .and_then(|m| m.run.as_mut())
+                .expect("merged retrieve under a built run");
+            let buckets = run.raw_pre.as_ref().expect("raw retrieve under a raw run");
+            let next = loop {
+                if run.bucket >= 256 {
+                    break None;
+                }
+                let t = &buckets[run.bucket];
+                if run.out_pos >= t.nrows() {
+                    run.bucket += 1;
+                    run.out_pos = 0;
+                    continue;
+                }
+                let row = run.out_pos;
+                run.out_pos += 1;
+                break Some((t.row_key_int(row), t.row_states(row)));
+            };
+            let Some((key, states)) = next else {
+                node.agg_done = true;
+                return Ok(None);
+            };
+            (key, states, run.raw_key_len)
+        };
+        // SAFETY: merge-table rows are live for the run; the state block is
+        // the kinds.len()-pergroup array the finalize reads.
+        let pergroup: NonNull<AggPerGroup> =
+            unsafe { NonNull::new_unchecked(states.cast()) };
+        {
+            let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+            exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
+            if let Some(k) = key {
+                let v = (ph.hash_grp_col_idx_input[0] - 1) as usize;
+                let dst = ph.first_slot.base_mut();
+                dst.tts_values[v] = raw_key_datum(key_len, k);
+                dst.tts_isnull[v] = false;
+            }
+        }
         finalize_aggregates(node, estate, pergroup)?;
 
         {
@@ -1664,7 +2275,14 @@ fn parallel_merge(
         }
     }
 
-    let nthreads = tables.len();
+    // Claimer pool size: one per handed table (the launched worker count on
+    // the classic engaged path) plus the leader. Exchange flushes install
+    // MANY small tables per worker, so an armed pool clamps to its DOP —
+    // spawning a thread per flush would oversubscribe the node.
+    let nthreads = match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
+        dop if dop > 0 => tables.len().min(dop as usize),
+        _ => tables.len(),
+    };
     let claimers = nthreads + 1;
     let ctx = ParCtx {
         spec,
@@ -1718,6 +2336,222 @@ fn parallel_merge(
         );
     }
     Ok(Some(pre))
+}
+
+// --- Raw exchange merge (Stage-4 §4.4) ---
+//
+// The flat bucket-claim merge over raw handed runs + classic sources: per
+// bucket, one claimer streams the raw (key, state-block) runs sequentially
+// into a LaneAggTable keyed by the canonical i64 (classic entries deform
+// their single key and canonicalize the same way), insert-or-combine with
+// the thread-native ParCombine set. This is the Stage-0.4 prototype's merge
+// shape — no tuple deform, no per-entry pointer chase.
+
+struct RawParCtx<'a> {
+    combines: &'a [ParCombine],
+    key_att: KeyAtt,
+    additionalsize: usize,
+    null_bucket: usize,
+    leader: &'a [TupleHashEntryData],
+    tables: &'a [HandedAggTable],
+    raw: &'a [HandedRawTable],
+    parts: &'a [Partition],
+    next: AtomicUsize,
+    barrier: Barrier,
+    // 256 bucket outputs; slot b is written only by the claimer that took b.
+    out: Vec<UnsafeCell<::lanetable::LaneAggTable>>,
+}
+
+// SAFETY: same argument as ParCtx — shared read-only sources; the only
+// mutation is each claimer's exclusive out[b] slot plus state payloads that
+// partition by bucket (an entry's bucket is a pure function of its kernel
+// hash on both classic and raw sides).
+unsafe impl Sync for RawParCtx<'_> {}
+
+// Insert-or-combine one source state block into the bucket table.
+#[inline]
+fn raw_absorb(
+    ctx: &RawParCtx<'_>,
+    pr: ::lanetable::Probe,
+    src: Option<NonNull<u8>>,
+) -> PgResult<()> {
+    let Some(src) = src else { return Ok(()) };
+    if pr.is_new {
+        // SAFETY: the row's state block holds additionalsize bytes (table
+        // config); src is a live pergroup block of the same layout. Adopted
+        // internal-state pointers stay live for the run (handed buffers /
+        // leader arenas) and each source block feeds exactly once.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), pr.states, ctx.additionalsize);
+        }
+        return Ok(());
+    }
+    for (transno, c) in ctx.combines.iter().enumerate() {
+        // SAFETY: both blocks hold numtrans pergroups; dst is uniquely
+        // reachable through this claimer's bucket.
+        unsafe {
+            combine_one_par(
+                c,
+                &mut *pr.states.cast::<AggPerGroup>().add(transno),
+                &*src.as_ptr().cast::<AggPerGroup>().add(transno),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_bucket_raw(ctx: &RawParCtx<'_>, b: usize) -> PgResult<::lanetable::LaneAggTable> {
+    let mut total = 0usize;
+    for p in ctx.parts {
+        total += (p.starts[b + 1] - p.starts[b]) as usize;
+    }
+    for rt in ctx.raw {
+        total += (rt.starts[b + 1] - rt.starts[b]) as usize;
+    }
+    let mut t = ::lanetable::LaneAggTable::new(
+        ::lanetable::KeyRepr::Int,
+        ctx.additionalsize,
+        total.max(4),
+    );
+    let mut values = [Datum::null(); 1];
+    let mut nulls = [false; 1];
+    // Classic sources first (leader = source 0), in install order — the
+    // source-major first-seen policy of the tuple merge.
+    for (src, part) in ctx.parts.iter().enumerate() {
+        let lo = part.starts[b] as usize;
+        let hi = part.starts[b + 1] as usize;
+        for &eix in &part.idx[lo..hi] {
+            let e = if src == 0 {
+                ctx.leader[eix as usize]
+            } else {
+                ctx.tables[src - 1].entries[eix as usize]
+            };
+            // SAFETY: live entry images under the single-key KeyAtt plan
+            // (the raw admission proved the key shape).
+            unsafe { deform_key_prefix(e.tuple(), core::slice::from_ref(&ctx.key_att), &mut values, &mut nulls) };
+            let pr = if nulls[0] {
+                t.probe_null()
+            } else {
+                let k = raw_canon_key(ctx.key_att.attlen, values[0]);
+                t.probe_int(k, t.hash_key_int(k as u64))
+            };
+            raw_absorb(ctx, pr, e.additional(ctx.additionalsize))?;
+        }
+    }
+    for rt in ctx.raw {
+        let lo = rt.starts[b] as usize;
+        let hi = rt.starts[b + 1] as usize;
+        for i in lo..hi {
+            let k = rt.keys[i];
+            let pr = t.probe_int(k, t.hash_key_int(k as u64));
+            // SAFETY: states holds one stride16 block per key (install
+            // layout, alive for the run).
+            let src = unsafe {
+                NonNull::new_unchecked(rt.states.as_ptr().add(i * rt.stride16).cast_mut().cast::<u8>())
+            };
+            raw_absorb(ctx, pr, (ctx.additionalsize > 0).then_some(src))?;
+        }
+        if b == ctx.null_bucket {
+            if let Some(block) = &rt.null_states {
+                let pr = t.probe_null();
+                // SAFETY: the NULL block holds one stride16 block.
+                let src = unsafe {
+                    NonNull::new_unchecked(block.as_ptr().cast_mut().cast::<u8>())
+                };
+                raw_absorb(ctx, pr, (ctx.additionalsize > 0).then_some(src))?;
+            }
+        }
+    }
+    Ok(t)
+}
+
+fn raw_claim_loop(ctx: &RawParCtx<'_>) -> PgResult<usize> {
+    ctx.barrier.wait();
+    let mut merged = 0usize;
+    loop {
+        let b = ctx.next.fetch_add(1, Ordering::Relaxed);
+        if b >= 256 {
+            return Ok(merged);
+        }
+        let t = merge_bucket_raw(ctx, b)?;
+        if t.nrows() > 0 {
+            merged += 1;
+        }
+        // SAFETY: bucket b was claimed exclusively via the counter.
+        unsafe { *ctx.out[b].get() = t };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parallel_merge_raw(
+    spec: &ParSpec,
+    leader: &[TupleHashEntryData],
+    tables: &[HandedAggTable],
+    raw: &[HandedRawTable],
+    parts: &[Partition],
+    additionalsize: usize,
+    null_hash: u32,
+) -> PgResult<Vec<::lanetable::LaneAggTable>> {
+    debug_assert_eq!(spec.atts.len(), 1);
+    // Claimer pool sizing: the armed DOP + the leader (raw tables are many
+    // small flushes, not one per worker).
+    let dop = ::guc_tables::lane_pool::lane_parallel_pool_dop().max(0) as usize;
+    let nthreads = raw.len().saturating_add(tables.len()).min(dop.max(1));
+    let ctx = RawParCtx {
+        combines: &spec.combines,
+        key_att: spec.atts[0],
+        additionalsize,
+        null_bucket: (null_hash >> 24) as usize,
+        leader,
+        tables,
+        raw,
+        parts,
+        next: AtomicUsize::new(0),
+        barrier: Barrier::new(nthreads + 1),
+        out: (0..256)
+            .map(|_| {
+                UnsafeCell::new(::lanetable::LaneAggTable::new(
+                    ::lanetable::KeyRepr::Int,
+                    additionalsize,
+                    4,
+                ))
+            })
+            .collect(),
+    };
+    let mut claims: Vec<usize> = Vec::with_capacity(nthreads + 1);
+    let mut first_err: Option<Box<PgError>> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..nthreads)
+            .map(|_| scope.spawn(|| raw_claim_loop(&ctx)))
+            .collect();
+        let leader_res = raw_claim_loop(&ctx);
+        for res in core::iter::once(leader_res)
+            .chain(handles.into_iter().map(|h| h.join().expect("raw merge claimer panicked")))
+        {
+            match res {
+                Ok(n) => claims.push(n),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+    });
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    let pre: Vec<::lanetable::LaneAggTable> =
+        ctx.out.into_iter().map(UnsafeCell::into_inner).collect();
+    if merge_stats_enabled() {
+        eprintln!(
+            "AGG_MERGE_STATS parallel: mode=raw claimers={} claims={:?} groups={}",
+            nthreads + 1,
+            claims,
+            pre.iter().map(::lanetable::LaneAggTable::nrows).sum::<usize>(),
+        );
+    }
+    Ok(pre)
 }
 
 // Rescan: merged results reference handed buffers mutated in place by the
