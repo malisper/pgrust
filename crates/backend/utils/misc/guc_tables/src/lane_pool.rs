@@ -87,3 +87,65 @@ pub fn lane_parallel_pool_dop() -> i32 {
 pub fn lane_parallel_pool_armed() -> bool {
     lane_parallel_pool_dop() > 0
 }
+
+// ---------------------------------------------------------------------------
+// Stage-4 §4.4 radix exchange for HIGH-cardinality parallel aggregation.
+//
+// The engaged pool's thread-local partial tables duplicate groups across
+// workers at high NDV (per-worker distinct ≈ G, merge input O(T·G) — the
+// Stage-0.4 prototype's merge wall), so 16T barely beats serial on
+// groupby_high. The exchange bounds each worker's partial table at
+// `exchange_cap` entries and, on reaching the cap, installs the table into
+// the finalize's handoff radix-partitioned (top-8 hash bits) and resets it:
+// the leader's existing 256-bucket atomic bucket-claim merge then gives every
+// bucket to exactly ONE claimer — group ownership is disjoint at the final
+// aggregation, per-bucket probe tables are G/256-sized (cache-resident), and
+// per-worker builds stay L2-resident instead of DRAM-random-probing 75 MB
+// tables. Admission is NDV-driven (plan-time `numGroups`, footer-HLL-honest
+// since the cbparallelstats lane): low/mid-NDV builds never reach the cap and
+// keep the independent-partials path byte-for-byte.
+// ---------------------------------------------------------------------------
+
+/// Exchange kill switch: `PGRUST_AGG_EXCHANGE=0` forces the unbounded
+/// thread-local-table behavior on otherwise admitted shapes.
+pub fn agg_exchange_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_AGG_EXCHANGE").map_or(true, |v| v != "0"))
+}
+
+/// Per-worker partial-table entry bound in exchange mode
+/// (`PGRUST_AGG_EXCHANGE_CAP` override). Default 65536: table + entry images
+/// stay L2-scale, while a cap-sized flush amortizes the install relocation.
+pub fn agg_exchange_cap() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_AGG_EXCHANGE_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1024)
+            .unwrap_or(1 << 16)
+    })
+}
+
+/// NDV admission floor (`PGRUST_AGG_EXCHANGE_MIN_GROUPS` override): the
+/// exchange engages only when the plan-estimated group count says cross-
+/// worker duplication would dominate (default 8× the cap). Below it the
+/// independent-partials path wins (groupby_low/mid) and stays untouched.
+pub fn agg_exchange_min_groups() -> f64 {
+    static N: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_AGG_EXCHANGE_MIN_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|&n| n >= 1.0)
+            .unwrap_or((8 * (1 << 16)) as f64)
+    })
+}
+
+/// The full exchange admission over a plan-time group estimate: pool armed,
+/// exchange not killed, NDV at/above the floor. Shared verbatim by the
+/// planner discounts (costsize) and the executor engagement (nodeagg::merge)
+/// so the two never disagree on a shape.
+pub fn agg_exchange_admits(num_groups: f64) -> bool {
+    agg_exchange_enabled() && num_groups >= agg_exchange_min_groups() && lane_parallel_pool_armed()
+}

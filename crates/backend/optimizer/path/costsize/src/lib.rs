@@ -536,15 +536,28 @@ pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {
 // outer is empty at every ported call site).
 pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, rel: RelId, rows: Option<f64>) {
     let rel_rows = run.root.rel(rel).rows;
-    let (sub_startup, sub_total, sub_disabled) = {
+    let (sub_startup, sub_total, sub_disabled, sub_id) = {
         let PathNode::GatherPath(g) = run.root.path(path_id) else {
             panic!("cost_gather: not a GatherPath")
         };
-        let sub = run.root.path(g.subpath.expect("Gather subpath")).base();
-        (sub.startup_cost, sub.total_cost, sub.disabled_nodes)
+        let sub_id = g.subpath.expect("Gather subpath");
+        let sub = run.root.path(sub_id).base();
+        (sub.startup_cost, sub.total_cost, sub.disabled_nodes, sub_id)
     };
     let setup_cost = gather_setup_cost(run);
-    let tuple_cost = gather_tuple_cost(run);
+    // Stage-4 §4.4 exchange transfer pricing: an admitted partial hashed Agg
+    // under this Gather hands its tables to the finalize by pointer (the
+    // radix-partitioned handoff), never through tuple-queue serialization —
+    // price its "transfer" at the measured cbstore chunked-transport rate
+    // (the install relocation memcpy class) instead of parallel_tuple_cost.
+    // Ship-all-raw-rows Gathers (subpath ≠ partial Agg) keep the armed
+    // pool's heap-rate pricing, so the degenerate leader-hash plan cannot
+    // win on a free transfer.
+    let tuple_cost = if lane_exchange_partial_agg(run, sub_id) {
+        gucs::cbstore_parallel_tuple_cost()
+    } else {
+        gather_tuple_cost(run)
+    };
     let p = run.root.path_mut(path_id).base_mut();
     debug_assert!(p.param_info.is_none());
     p.rows = rows.unwrap_or(rel_rows);
@@ -1865,6 +1878,136 @@ pub fn cost_agg_shape(
     }
 
     Ok((output_tuples, disabled_nodes, startup_cost, total_cost))
+}
+
+// ---------------------------------------------------------------------------
+// Stage-4 §4.4 radix exchange — honest recosting of the engaged parallel-agg
+// shape (create_agg_path rider; cost_gather carries the transfer half).
+//
+// With honest footer-NDV stats a high-cardinality GROUP BY prices partial
+// aggregation as a poor reducer and the planner drops the parallel shape
+// entirely (poolscale groupby_high: T-invariant serial ~4s). Under the
+// exchange that pricing is wrong on three counts: (a) partial tables are
+// bounded at the exchange cap, so the partial agg's disk-spill surcharge
+// never materializes; (b) partial output crosses to the finalize by pointer
+// handoff, not tuple-queue serialization; (c) the finalize's per-input work
+// runs on the bucket-claim claimer pool (DOP+1 threads), not serially.
+// The adjustments below apply ONLY when the executor's own admission
+// (guc_tables::lane_pool::agg_exchange_admits over the same plan-time group
+// estimate) says the exchange will engage — armed pool + NDV floor —
+// and the plan is cbstore-fed; everything else keeps C costing untouched.
+// ---------------------------------------------------------------------------
+
+// The AGG_HASHED disk-spill surcharge exactly as cost_agg_shape adds it
+// (keep in lockstep with its spill block; not refactored into a shared
+// helper so the C-parity mul_add chains there stay byte-identical).
+// Returns (startup_add, total_add).
+fn hashed_agg_spill_surcharge(
+    run: &PlannerRun<'_>,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_groups: f64,
+    input_tuples: f64,
+    input_width: i32,
+) -> (f64, f64) {
+    let hashentrysize = ::nodeagg::hash_agg_entry_size(
+        run.root.aggtransinfos.len(),
+        input_width.max(0) as usize,
+        aggcosts.transitionSpace as usize,
+    );
+    let (mem_limit, ngroups_limit, num_partitions) =
+        ::nodeagg::hash_agg_set_limits(hashentrysize, num_groups, 0);
+    let nbatches = ((num_groups * hashentrysize) / mem_limit as f64)
+        .max(num_groups / ngroups_limit as f64)
+        .ceil()
+        .max(1.0);
+    let num_partitions = (num_partitions.max(2)) as f64;
+    let depth = (nbatches.ln() / num_partitions.ln()).ceil();
+    let pages = relation_byte_size(input_tuples, input_width) / BLCKSZ as f64;
+    let pages_written = pages * depth * 2.0;
+    let pages_read = pages_written;
+    let spill_cost = depth * input_tuples * 2.0 * gucs::cpu_tuple_cost();
+    (
+        pages_written * gucs::random_page_cost() + spill_cost,
+        pages_written * gucs::random_page_cost() + pages_read * gucs::seq_page_cost() + spill_cost,
+    )
+}
+
+// One ProjectionPath peel: grouping paths occasionally interpose a
+// projection between the Gather and the partial Agg.
+fn peel_projection(run: &PlannerRun<'_>, id: types_pathnodes::PathId) -> types_pathnodes::PathId {
+    match run.root.path(id) {
+        PathNode::ProjectionPath(p) => p.subpath.unwrap_or(id),
+        _ => id,
+    }
+}
+
+/// The exchange-eligible PARTIAL half: a parallel hashed
+/// AGGSPLIT_INITIAL_SERIAL AggPath whose group estimate clears the
+/// admission floor. Shared by cost_gather (transfer pricing) and the
+/// finalize-side shape check.
+pub fn lane_exchange_partial_agg(run: &PlannerRun<'_>, subpath_id: types_pathnodes::PathId) -> bool {
+    if !cbstore_feeds_plan(run) {
+        return false;
+    }
+    match run.root.path(peel_projection(run, subpath_id)) {
+        PathNode::AggPath(a) => {
+            a.aggstrategy == types_pathnodes::AGG_HASHED
+                && a.aggsplit == types_pathnodes::AGGSPLIT_INITIAL_SERIAL
+                && guc_tables::lane_pool::agg_exchange_admits(a.numGroups)
+        }
+        _ => false,
+    }
+}
+
+/// create_agg_path's exchange rider: adjust the just-written costs of an
+/// admitted shape. No-op (bit-exact untouched costs) everywhere else.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_agg_lane_exchange_adjust(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    aggstrategy: u32,
+    aggsplit: u32,
+    subpath_id: types_pathnodes::PathId,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_groups: f64,
+    input_tuples: f64,
+    input_width: i32,
+    input_total_cost: f64,
+) {
+    if aggstrategy != types_pathnodes::AGG_HASHED
+        || !guc_tables::lane_pool::agg_exchange_admits(num_groups)
+        || !cbstore_feeds_plan(run)
+    {
+        return;
+    }
+    let is_partial = aggsplit == types_pathnodes::AGGSPLIT_INITIAL_SERIAL
+        && run.root.path(path_id).base().parallel_workers > 0;
+    let is_final = aggsplit == types_pathnodes::AGGSPLIT_FINAL_DESERIAL
+        && match run.root.path(subpath_id) {
+            PathNode::GatherPath(g) => g
+                .subpath
+                .is_some_and(|s| lane_exchange_partial_agg(run, s)),
+            _ => false,
+        };
+    if !is_partial && !is_final {
+        return;
+    }
+    // (a) Neither side spills: the partial table is cap-bounded and the
+    // finalize merges handed tables bucket-by-bucket in place.
+    let (s_add, t_add) =
+        hashed_agg_spill_surcharge(run, aggcosts, num_groups, input_tuples, input_width);
+    let p = run.root.path_mut(path_id).base_mut();
+    p.startup_cost = (p.startup_cost - s_add).max(input_total_cost);
+    p.total_cost = (p.total_cost - t_add).max(p.startup_cost);
+    if is_final {
+        // (c) The finalize's build-above-input work (combines + hashing over
+        // the handed entries) runs on the claimer pool; the group emit tail
+        // (total − startup) stays serial behind the RootAdapter.
+        let claimers = (guc_tables::lane_pool::lane_parallel_pool_dop().max(1) + 1) as f64;
+        let emit = p.total_cost - p.startup_cost;
+        p.startup_cost = input_total_cost + (p.startup_cost - input_total_cost) / claimers;
+        p.total_cost = p.startup_cost + emit;
+    }
 }
 
 /// cost_group (costsize.c); caller ensures the input is sorted.
