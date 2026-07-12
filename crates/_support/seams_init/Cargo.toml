@@ -288,6 +288,8 @@ pg_stat_statements = { path = "../../contrib/pg_stat_statements" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
+unaccent = { path = "../../contrib/unaccent" }
+pg_walinspect = { path = "../../contrib/pg_walinspect" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
