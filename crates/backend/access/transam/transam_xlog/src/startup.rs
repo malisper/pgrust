@@ -301,27 +301,22 @@ pub fn StartupXLOG() -> PgResult<()> {
 
             standby_seams::init_recovery_transaction_environment::call()?;
 
-            let oldest_active_xid = if was_shutdown {
-                // The prescan seam cannot return the prepared-xact xids list;
-                // it and StandbyRecoverPreparedTransactions are provably
-                // no-ops only while pg_twophase is empty.
-                if !dir_is_empty("pg_twophase") {
-                    panic!(
-                        "hot-standby init with prepared transactions not ported \
-                         (PrescanPreparedTransactions xids list / \
-                         StandbyRecoverPreparedTransactions)"
-                    );
-                }
-                if twophase_seams::prescan_prepared_transactions::is_installed() {
-                    twophase_seams::prescan_prepared_transactions::call()?
+            // C: oldestActiveXID = PrescanPreparedTransactions(&xids, &nxids)
+            // when starting from a shutdown checkpoint.
+            let (oldest_active_xid, prepared_xids) = if was_shutdown {
+                if twophase_seams::prescan_prepared_transactions_xids::is_installed() {
+                    twophase_seams::prescan_prepared_transactions_xids::call()?
                 } else {
-                    types_core::FullTransactionId {
-                        value: procarray::TransamVariables().nextXid.load(Relaxed),
-                    }
-                    .xid()
+                    (
+                        types_core::FullTransactionId {
+                            value: procarray::TransamVariables().nextXid.load(Relaxed),
+                        }
+                        .xid(),
+                        Vec::new(),
+                    )
                 }
             } else {
-                check_point.oldestActiveXid
+                (check_point.oldestActiveXid, Vec::new())
             };
             debug_assert!(oldest_active_xid != types_core::InvalidTransactionId);
 
@@ -335,7 +330,12 @@ pub fn StartupXLOG() -> PgResult<()> {
             subtrans_seams::startup_subtrans::call(oldest_active_xid)?;
 
             if was_shutdown {
-                // Empty fake running-xacts record: no prepared xacts (guarded above).
+                // C: fake running-xacts record for a shut-down server — only
+                // prepared transactions still alive; update pg_subtrans for
+                // them first (StandbyRecoverPreparedTransactions).
+                if twophase_seams::standby_recover_prepared_transactions::is_installed() {
+                    twophase_seams::standby_recover_prepared_transactions::call()?;
+                }
                 let cx = mcx::MemoryContext::new("StartupXLOG/running-xacts");
                 let mut latest_completed_xid = check_point.nextXid.xid();
                 loop {
@@ -345,14 +345,14 @@ pub fn StartupXLOG() -> PgResult<()> {
                     }
                 }
                 let running = types_storage::storage::RunningTransactionsData {
-                    xcnt: 0,
+                    xcnt: prepared_xids.len() as i32,
                     subxcnt: 0,
                     subxid_status: types_storage::storage::SUBXIDS_IN_SUBTRANS,
                     nextXid: check_point.nextXid.xid(),
                     oldestRunningXid: oldest_active_xid,
                     oldestDatabaseRunningXid: types_core::InvalidTransactionId,
                     latestCompletedXid: latest_completed_xid,
-                    xids: mcx::PgVec::new_in(cx.mcx()),
+                    xids: mcx::slice_in(cx.mcx(), &prepared_xids)?,
                 };
                 procarray_seams::proc_array_apply_recovery_info::call(&running)?;
             }

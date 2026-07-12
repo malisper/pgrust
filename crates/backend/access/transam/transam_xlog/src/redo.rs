@@ -85,8 +85,44 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 ));
             }
 
+            // C xlog.c:8352: a shutdown checkpoint means nothing was running
+            // on the primary. Fake up an empty running-xacts record (only
+            // prepared transactions alive) and apply it now, plus recover
+            // standby state for prepared transactions.
             if xlogutils::standby_state() >= xlogutils::STANDBY_INITIALIZED {
-                panic!("hot-standby shutdown-checkpoint replay not ported");
+                let (oldest_active_xid, xids) =
+                    if twophase_seams::prescan_prepared_transactions_xids::is_installed() {
+                        twophase_seams::prescan_prepared_transactions_xids::call()?
+                    } else {
+                        // No twophase linked: no prepared xacts can exist.
+                        (check_point.nextXid.xid(), Vec::new())
+                    };
+                if twophase_seams::standby_recover_prepared_transactions::is_installed() {
+                    twophase_seams::standby_recover_prepared_transactions::call()?;
+                }
+
+                // TransactionIdRetreat(latestCompletedXid).
+                let mut latest_completed_xid = check_point.nextXid.xid();
+                loop {
+                    latest_completed_xid = latest_completed_xid.wrapping_sub(1);
+                    if latest_completed_xid >= types_core::FirstNormalTransactionId {
+                        break;
+                    }
+                }
+
+                let cx = mcx::MemoryContext::new("xlog_redo/running-xacts");
+                let xid_vec = mcx::slice_in(cx.mcx(), &xids)?;
+                let running = types_storage::storage::RunningTransactionsData {
+                    xcnt: xids.len() as i32,
+                    subxcnt: 0,
+                    subxid_status: types_storage::storage::SUBXIDS_IN_SUBTRANS,
+                    nextXid: check_point.nextXid.xid(),
+                    oldestRunningXid: oldest_active_xid,
+                    oldestDatabaseRunningXid: types_core::InvalidTransactionId,
+                    latestCompletedXid: latest_completed_xid,
+                    xids: xid_vec,
+                };
+                procarray_seams::proc_array_apply_recovery_info::call(&running)?;
             }
 
             control_file_update(|cf| cf.checkPointCopy.nextXid = check_point.nextXid);

@@ -228,8 +228,19 @@ pub fn restoreTwoPhaseData() -> PgResult<()> {
 /// `PrescanPreparedTransactions(NULL, NULL)`: the oldest valid prepared XID
 /// (or nextXid when none).
 pub fn PrescanPreparedTransactions() -> PgResult<TransactionId> {
+    Ok(prescan_prepared_transactions_impl()?.0)
+}
+
+/// `PrescanPreparedTransactions(&xids, &nxids)`: also collects the valid
+/// prepared-xact XIDs for the hot-standby fake running-xacts snapshot.
+pub fn PrescanPreparedTransactionsXids() -> PgResult<(TransactionId, Vec<TransactionId>)> {
+    prescan_prepared_transactions_impl()
+}
+
+fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<TransactionId>)> {
     let orig_next = orig_next_xid();
     let mut result = orig_next;
+    let mut xids: Vec<TransactionId> = Vec::new();
 
     let st = TwoPhaseState();
     lock_twophase_state(LW_EXCLUSIVE);
@@ -249,8 +260,11 @@ pub fn PrescanPreparedTransactions() -> PgResult<TransactionId> {
                 false,
                 true,
             )?;
-            if buf.is_some() && TransactionIdPrecedes(xid, result) {
-                result = xid;
+            if buf.is_some() {
+                if TransactionIdPrecedes(xid, result) {
+                    result = xid;
+                }
+                xids.push(xid);
             }
             i += 1;
         }
@@ -258,7 +272,7 @@ pub fn PrescanPreparedTransactions() -> PgResult<TransactionId> {
     })();
     unlock_twophase_state();
     inner?;
-    Ok(result)
+    Ok((result, xids))
 }
 
 /// `StandbyRecoverPreparedTransactions`: pg_subtrans setup during hot standby.
