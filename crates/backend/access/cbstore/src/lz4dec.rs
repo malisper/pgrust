@@ -264,78 +264,50 @@ unsafe fn wide_copy(mut src: *const u8, mut dst: *mut u8, len: usize) {
 unsafe fn copy_match(out: *mut u8, op: usize, offset: usize, len: usize) {
     let dst0 = out.add(op);
     let src0 = out.add(op - offset);
-    if offset >= 16 {
-        // Non-overlapping at 16 B granularity: 32 B per iteration as two
-        // sequential 16 B copies (the second may re-read bytes the first
-        // just wrote — correct match bytes — so offset >= 16 suffices).
-        // Stores end < dst0 + len + 32 <= raw_len + OUT_PAD.
-        let mut src = src0;
-        let mut dst = dst0;
-        let end = dst0.add(len);
-        loop {
-            core::ptr::copy_nonoverlapping(src, dst, 16);
-            core::ptr::copy_nonoverlapping(src.add(16), dst.add(16), 16);
-            src = src.add(32);
-            dst = dst.add(32);
-            if dst >= end {
-                return;
-            }
-        }
+    if offset == 1 {
+        // RLE byte run (the dominant shape on constant int stretches).
+        core::ptr::write_bytes(dst0, *src0, len);
+        return;
     }
-    match offset {
-        1 => {
-            // RLE byte run (the dominant shape on constant int stretches).
-            core::ptr::write_bytes(dst0, *src0, len);
+    // Unified overlap-tolerant copy. Explicit [u8; 16] read_unaligned /
+    // write_unaligned pairs (NOT copy_nonoverlapping of a pattern array —
+    // the compiler scalarizes that into per-byte strb stores, measured 3.4x
+    // slower on CounterID-class RLE runs) so each 16 B moves as one
+    // q-register load + store, and overlapping load/store is well-defined.
+    //
+    // Phase 1 (offset < 16): distance-doubling. Each 16 B store commits
+    // `dist` bytes; the load window at `dst - dist` never precedes the
+    // pattern window at `op - offset`, and its committed prefix (the next
+    // store's first `dist * 2` bytes) reads only bytes already correct.
+    // Phase 2 (dist >= 16): 32 B per iteration as two ordered 16 B moves;
+    // the second load's window ends at `dst + 32 - dist <= dst + 16`, i.e.
+    // entirely within bytes the first move just committed.
+    //
+    // Bounds: phase-1 stores end < dst0 + len + 16, phase-2 stores end
+    // <= dst0 + ceil(len/32)*32 <= dst0 + len + 31 — both inside OUT_PAD
+    // (caller guarantees op + len <= raw_len).
+    let mut dist = offset;
+    let mut dst = dst0;
+    let end = dst0.add(len);
+    while dist < 16 {
+        let chunk = core::ptr::read_unaligned(dst.sub(dist) as *const [u8; 16]);
+        core::ptr::write_unaligned(dst as *mut [u8; 16], chunk);
+        dst = dst.add(dist);
+        if dst >= end {
+            return;
         }
-        2 | 4 | 8 => {
-            // Power-of-two period p dividing 16: stage one 16 B pattern and
-            // stamp it 32 B per iteration; every stride lands phase-aligned
-            // (16 % p == 0). The hot case for sorted/delta int columns
-            // (u16/u32/u64 runs). Stores end < len + 32 past dst0: in-pad.
-            let mut pat = [0u8; 16];
-            for (i, b) in pat.iter_mut().enumerate() {
-                *b = *src0.add(i % offset);
-            }
-            let mut dst = dst0;
-            let end = dst0.add(len);
-            loop {
-                core::ptr::copy_nonoverlapping(pat.as_ptr(), dst, 16);
-                core::ptr::copy_nonoverlapping(pat.as_ptr(), dst.add(16), 16);
-                dst = dst.add(32);
-                if dst >= end {
-                    return;
-                }
-            }
-        }
-        _ => {
-            // Overlapping copy, period 3/5/6/7/9..15: distance-doubling.
-            // Invariant at each load: the first `dist` bytes of the 16 B
-            // window at `dst - dist` are correct output (bytes past that are
-            // garbage but land at >= dst + dist, which the NEXT store's
-            // committed prefix overwrites before anything reads them).
-            // Loads use read_unaligned into a stack temp, so overlapping
-            // load/store pairs are well-defined.
-            // Each 16 B store commits `min(dist, 16)` bytes; the doubling
-            // keeps every committed load inside the correct region (window
-            // start `dst - dist` never precedes the pattern window at
-            // `op - offset`), and once dist >= 16 windows are fully behind
-            // the cursor.
-            let mut dist = offset;
-            let mut dst = dst0;
-            let end = dst0.add(len);
-            loop {
-                let chunk = core::ptr::read_unaligned(dst.sub(dist) as *const [u8; 16]);
-                core::ptr::write_unaligned(dst as *mut [u8; 16], chunk);
-                if dist < 16 {
-                    dst = dst.add(dist);
-                    dist *= 2;
-                } else {
-                    dst = dst.add(16);
-                }
-                if dst >= end {
-                    return;
-                }
-            }
+        dist *= 2;
+    }
+    let mut src = dst.sub(dist);
+    loop {
+        let a = core::ptr::read_unaligned(src as *const [u8; 16]);
+        core::ptr::write_unaligned(dst as *mut [u8; 16], a);
+        let b = core::ptr::read_unaligned(src.add(16) as *const [u8; 16]);
+        core::ptr::write_unaligned(dst.add(16) as *mut [u8; 16], b);
+        src = src.add(32);
+        dst = dst.add(32);
+        if dst >= end {
+            return;
         }
     }
 }
