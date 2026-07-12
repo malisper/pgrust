@@ -64,6 +64,85 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 }
 
+/// Identity + content handle of one per-row-group dictionary (cbstore dict
+/// encoding): decoded text Datums, code = index. The pointer is the storage
+/// adapter's and stays valid while the window is staged (until the next
+/// batch fill / endscan) — the same lifetime contract as the text Datums the
+/// adapter publishes into slots.
+///
+/// EPOCH DISCIPLINE (phase4 design §2/§8.1): `epoch` is the row-group index
+/// within the scan. A scan pins its `Rc<Part>` for its whole lifetime, so the
+/// rg-index is unique and rescan-stable per scan — a part-cache refresh can
+/// never swap dictionary content under a live scan (a reopen is a new scan,
+/// hence a new pin and a fresh epoch space). Consumers key per-code memos on
+/// `epoch` and clear them whenever it changes; they never compare pointers.
+///
+/// BREAKER SURVIVAL (design addendum): this handle is deliberately a small
+/// Copy value separate from the per-window codes so a later materialization
+/// path (join build narrowing payloads to codes, DuckDB-style) can store one
+/// `SoaDictTable` per staged run and re-emit dict lanes on probe. Validation
+/// is `same_identity` (epoch match); nothing here prevents carrying it —
+/// implementing that plumbing is explicitly out of scope for now.
+///
+/// CONTRACT: dict-coded columns are NULL-free today (cbstore stores no
+/// NULLs). That is a per-chunk proof the filler asserts by writing
+/// `isnull = false` on gather — NOT a type invariant of this struct; the
+/// per-lane isnull currency stays so a NULL-capable cbstore v2 only changes
+/// the fillers (phase4 design §8.3).
+#[derive(Clone, Copy)]
+pub struct SoaDictTable {
+    pub dict: *const Datum,
+    pub ndict: u32,
+    pub epoch: u64,
+    /// Dict entries are byte-sorted (codes are rank order) — gates dict
+    /// range predicates. False keeps the per-entry memo path.
+    pub sorted: bool,
+}
+
+impl SoaDictTable {
+    /// Memo/carry validation: same dictionary content. Epoch alone decides
+    /// (rg-index per pinned scan — see the struct doc); pointer equality is
+    /// deliberately not consulted (an arena could reuse an address).
+    #[inline]
+    pub fn same_identity(&self, other: &SoaDictTable) -> bool {
+        self.epoch == other.epoch
+    }
+
+    /// Decode one code. Bounds are the filler's contract (`code < ndict`).
+    #[inline]
+    pub fn datum(&self, code: u32) -> Datum {
+        debug_assert!(code < self.ndict);
+        // SAFETY: filler contract — `dict` spans `ndict` Datums and outlives
+        // the staged window; `code` is in range for every staged row.
+        unsafe { *self.dict.add(code as usize) }
+    }
+}
+
+/// Dict-coded lane view of one staged column: u32 codes (one per staged row)
+/// into a per-row-group dictionary. Published by a columnar AM's batch fill
+/// when the consumer opted in (`set_dict_want`); the column's values/isnull
+/// cells are NOT filled while a dict lane answer is up (`col_datum_ready`).
+#[derive(Clone, Copy)]
+pub struct SoaDictLane {
+    pub codes: *const u32,
+    pub table: SoaDictTable,
+}
+
+impl SoaDictLane {
+    /// Row `i`'s code. Valid for `i < nrows` of the staged window.
+    #[inline]
+    pub fn code(&self, i: usize) -> u32 {
+        // SAFETY: filler contract — `codes` spans the staged window's rows.
+        unsafe { *self.codes.add(i) }
+    }
+
+    /// Row `i`'s decoded Datum (`dict[codes[i]]` gather).
+    #[inline]
+    pub fn datum(&self, i: usize) -> Datum {
+        self.table.datum(self.code(i))
+    }
+}
+
 pub struct SoaBatch<'mcx> {
     ncols: u16,
     nrows: u32,
@@ -77,6 +156,23 @@ pub struct SoaBatch<'mcx> {
     kinds: PgVec<'mcx, u8>,
     // OR of all staged kinds: 0 = every row is kind 0 (dense lane).
     kinds_or: u8,
+    // Representation-tag columns (dict lanes): `dict_want` is set once at
+    // lane arm for columns the lane program reads as codes+dict; the AM's
+    // batch fill answers per window with `dict_lanes` (and skips the Datum
+    // fill for answered columns — their values/isnull cells stay stale and
+    // only the dict-lane reader consumes them). Heap deform never sets
+    // these: on heap batches every column stays Raw and the kinds/jit paths
+    // are untouched (a dict lane can only be published by a columnar fill,
+    // which bypasses soa_classify_row/soa_deform_columns entirely).
+    dict_want: PgVec<'mcx, bool>,
+    dict_lanes: PgVec<'mcx, Option<SoaDictLane>>,
+    dict_any: bool,
+    // Lane-read mask (columnar lane-armed scans): when armed, only masked
+    // columns need their Datum cells filled by the batch fill — every other
+    // consumer on those scans reads the slot the AM's store_slot populates.
+    // Unarmed = fill all needed columns exactly as before (fail open).
+    lane_read: PgVec<'mcx, bool>,
+    lane_read_any: bool,
 }
 
 impl<'mcx> SoaBatch<'mcx> {
@@ -93,6 +189,11 @@ impl<'mcx> SoaBatch<'mcx> {
             tps: ::mcx::vec_from_elem_in(mcx, core::ptr::null(), SOA_MAX_ROWS),
             kinds: ::mcx::vec_from_elem_in(mcx, 0u8, SOA_MAX_ROWS),
             kinds_or: 0,
+            dict_want: ::mcx::vec_from_elem_in(mcx, false, ncols as usize),
+            dict_lanes: ::mcx::vec_from_elem_in(mcx, None, ncols as usize),
+            dict_any: false,
+            lane_read: ::mcx::vec_from_elem_in(mcx, false, ncols as usize),
+            lane_read_any: false,
         }
     }
 
@@ -102,6 +203,86 @@ impl<'mcx> SoaBatch<'mcx> {
         self.nrows = nrows;
         self.fallback = [0; SOA_BM_WORDS];
         self.kinds_or = 0;
+        // Window boundary: dict lane answers are per-window; stale codes
+        // pointers (and possibly a stale epoch) must never survive into the
+        // next fill — the AM re-answers (or the fill goes Raw) every window.
+        if self.dict_any {
+            self.dict_lanes.fill(None);
+        }
+    }
+
+    /// Lane arm (once, at scan/program build): the consumer reads column `c`
+    /// as codes+dict when the staged window is dict-coded. The AM may still
+    /// answer Raw per window (non-dict-encoded chunk) — consumers must take
+    /// `dict_lane(c) == None` as "this window is Raw", never as an error.
+    pub fn set_dict_want(&mut self, c: u16) {
+        self.dict_want[c as usize] = true;
+        self.dict_any = true;
+    }
+
+    #[inline]
+    pub fn dict_want(&self, c: usize) -> bool {
+        self.dict_any && self.dict_want[c]
+    }
+
+    /// AM-side per-window answer; implies the column's values/isnull cells
+    /// were NOT filled for this window. Only columns that opted in may be
+    /// answered — a filler must gather `dict[code]` to Raw for everyone else.
+    #[inline]
+    pub fn set_dict_lane(&mut self, c: usize, lane: SoaDictLane) {
+        debug_assert!(self.dict_want[c]);
+        self.dict_lanes[c] = Some(lane);
+    }
+
+    #[inline]
+    pub fn dict_lane(&self, c: usize) -> Option<SoaDictLane> {
+        if !self.dict_any {
+            return None;
+        }
+        self.dict_lanes[c]
+    }
+
+    /// Escape hatch: materialize column `c`'s dict lane into its values/
+    /// isnull cells (the one-instruction `dict[code]` gather) and clear the
+    /// lane, flipping `col_datum_ready` back on. Byte-identical to the
+    /// filler's own full-decode Raw fill by the dict contract (code =
+    /// dictionary index of the decoded Datum). isnull is written explicitly:
+    /// NULL-free is this window's proof, not a structural assumption.
+    pub fn gather_dict_lane(&mut self, c: usize) {
+        let Some(lane) = self.dict_lane(c) else { return };
+        let n = self.nrows as usize;
+        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        let isnull = &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        isnull.fill(false);
+        for (i, v) in values.iter_mut().enumerate() {
+            *v = lane.datum(i);
+        }
+        self.dict_lanes[c] = None;
+    }
+
+    /// Lane arm: column `c` is read by the lane program from the SoA batch.
+    pub fn set_lane_read(&mut self, c: u16) {
+        self.lane_read[c as usize] = true;
+        self.lane_read_any = true;
+    }
+
+    /// AM-side fill gate: false = no SoA consumer reads this column's Datum
+    /// cells on this scan (the fill may leave them stale).
+    #[inline]
+    pub fn lane_fill_wanted(&self, c: usize) -> bool {
+        !self.lane_read_any || self.lane_read[c]
+    }
+
+    #[inline]
+    pub fn lane_read_armed(&self) -> bool {
+        self.lane_read_any
+    }
+
+    /// Column `c`'s values/isnull cells are valid for this window's
+    /// non-fallback rows (no dict-lane answer, fill not skipped).
+    #[inline]
+    pub fn col_datum_ready(&self, c: usize) -> bool {
+        c < self.ncols as usize && self.dict_lane(c).is_none() && self.lane_fill_wanted(c)
     }
 
     #[inline]
@@ -136,7 +317,8 @@ impl<'mcx> SoaBatch<'mcx> {
         &self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
     }
 
-    // Columnar-AM staging (cbstore): the AM writes decoded vectors directly.
+    // Columnar-AM staging (cbstore): the AM writes decoded vectors directly
+    // (subject to `lane_fill_wanted`; dict-answered columns skip the fill).
     #[inline]
     pub fn col_values_mut(&mut self, c: usize) -> &mut [Datum] {
         &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
@@ -455,9 +637,11 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
 }
 
 mcx::forget_safe_nodrop!(SoaVarKeyPlan);
+mcx::forget_safe_nodrop!(SoaDictTable);
+mcx::forget_safe_nodrop!(SoaDictLane);
 
 // jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs; jit },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any },
 );
