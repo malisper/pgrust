@@ -172,6 +172,16 @@ struct QualStitch {
 /// sized scans never pay a stitch.
 const STITCH_ROW_FLOOR: u64 = 2048;
 
+/// Tier-2 fusion floor (admission economics, design §4 — never preempt a
+/// measured-faster path): the stitched body engages only when it FUSES
+/// something the AOT tier runs as separate passes, i.e. >= 2 clauses. A
+/// single-clause body re-runs exactly the AOT kernel's one pass plus the
+/// per-batch call/params overhead — measured 2026-07-12 (10M-row filtered
+/// drain shapes, warm best-of-6 interleaved): 1-clause agg feeds 0.998x
+/// (parity), 1-clause sort feed 1.04x (loss); 3-clause shapes 0.97-0.98x
+/// (fusion win). Ratchet DOWN only with a measurement.
+const STITCH_MIN_CLAUSES: u8 = 2;
+
 /// Engagement trace (verification aid, no perf path): mirrors lanev2's
 /// `PGRUST_LANE_V2_TRACE` switch so one env var traces the whole lane.
 fn lane_trace(event: &str) {
@@ -735,7 +745,6 @@ fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
             }
         }
         if let Some(body) = &st.body {
-            let mut sv = ::lanestitch::SelVec::all(n);
             // Stack lane views over the staged SoA (zero allocation on the
             // per-batch path — doctrine rule 7).
             let mut lanes =
@@ -746,19 +755,24 @@ fn stitch_qual_bitmap(b: &mut BatchSoa<'_>, n: u32) -> PgResult<bool> {
                     isnull: soa.col_isnull(c),
                 };
             }
+            // The body writes the pipeline's own selection words (all-ones
+            // over n on entry, tail clear; only failures store).
+            let nwords = (n as usize).div_ceil(64);
+            sel[..nwords].fill(!0u64);
+            if n % 64 != 0 {
+                sel[nwords - 1] = (1u64 << (n % 64)) - 1;
+            }
             // Per-batch signature check + refuse-and-replay live in the
             // runner: lane drift or an oversize batch interprets this batch
             // (fail-open); an erroring stitched exit replays the batch on
             // the interpreter and refuses the body for good. Our compare
             // programs are non-erroring, so the error arm is unreachable —
             // kept because fail-open must never become wrong-answer.
-            match body.run_lanes(&st.prog, n, &lanes[..st.ncols], &mut sv)? {
+            match body.run_into(&st.prog, n, &lanes[..st.ncols], &mut sel[..nwords])? {
                 ::lanestitch::RunOutcome::Stitched => st.n_stitched += 1,
                 ::lanestitch::RunOutcome::InterpretedDrift
                 | ::lanestitch::RunOutcome::InterpretedSticky => st.n_interp += 1,
             }
-            let nwords = (n as usize).div_ceil(64);
-            sel[..nwords].copy_from_slice(&sv.words[..nwords]);
             ran = true;
         }
     }
@@ -836,7 +850,11 @@ fn stitch_cmp(
 /// the clause list into the stitch program.
 pub fn seq_scan_stitch_arm(node: &mut SeqScanState<'_>) {
     let Some(b) = node.batch_soa.as_deref_mut() else { return };
-    if !b.qual_armed || b.stitch.is_some() || !::lanestitch::available() {
+    if !b.qual_armed
+        || b.nquals < STITCH_MIN_CLAUSES
+        || b.stitch.is_some()
+        || !::lanestitch::available()
+    {
         return;
     }
     let mut prog = ::lanestitch::Program::new();

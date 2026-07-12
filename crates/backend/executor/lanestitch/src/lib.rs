@@ -207,22 +207,49 @@ impl StitchedProgram {
         sel: &mut SelVec,
     ) -> PgResult<RunOutcome> {
         debug_assert_eq!(sel.nrows, nrows);
-        debug_assert!(sel.is_all(), "run requires an all-ones sel (only failures store)");
-        let interp_batch = || Batch { nrows, lanes: lane_views.to_vec() };
+        let nwords = (nrows as usize).div_ceil(64);
+        self.run_into(prog, nrows, lane_views, &mut sel.words[..nwords])
+    }
+
+    /// [`run_lanes`](Self::run_lanes) writing directly into the caller's
+    /// selection words (the pipeline's own bitmap — no `SelVec` staging or
+    /// copy-out on the per-batch path). `sel_words` must span exactly
+    /// `ceil(nrows/64)` words and be all-ones over `nrows` on entry (tail
+    /// bits of the last word clear; only failures store) — both the body
+    /// and the interpreter tiers touch no word beyond that span (the scalar
+    /// loop and the 64-row SIMD block pass index words by row/64 only).
+    pub fn run_into(
+        &self,
+        prog: &Program,
+        nrows: u32,
+        lane_views: &[Lane<'_>],
+        sel_words: &mut [u64],
+    ) -> PgResult<RunOutcome> {
+        let nwords = (nrows as usize).div_ceil(64);
+        debug_assert_eq!(sel_words.len(), nwords);
+        // Interpreter tiers (cold: sticky refuse / per-batch drift /
+        // refuse-and-replay): materialize the Batch + SelVec currency.
+        let interp_into = |sel_words: &mut [u64]| -> PgResult<()> {
+            let batch = Batch { nrows, lanes: lane_views.to_vec() };
+            let mut sv = SelVec::all(nrows);
+            interp::eval_qual(prog, &batch, &mut sv)?;
+            sel_words.copy_from_slice(&sv.words[..nwords]);
+            Ok(())
+        };
         if self.refused.get() {
-            interp::eval_qual(prog, &interp_batch(), sel)?;
+            interp_into(sel_words)?;
             return Ok(RunOutcome::InterpretedSticky);
         }
         // Per-batch fail-open: drifted staging interprets this batch.
         if nrows as usize > MAX_ROWS || lane_views.len() < self.ncols {
-            interp::eval_qual(prog, &interp_batch(), sel)?;
+            interp_into(sel_words)?;
             return Ok(RunOutcome::InterpretedDrift);
         }
         let n = nrows as usize;
         for &col in &self.used_cols {
             let lane = &lane_views[col as usize];
             if lane.values.len() < n || lane.isnull.len() < n {
-                interp::eval_qual(prog, &interp_batch(), sel)?;
+                interp_into(sel_words)?;
                 return Ok(RunOutcome::InterpretedDrift);
             }
         }
@@ -235,10 +262,13 @@ impl StitchedProgram {
             lanes[col as usize] =
                 LaneParam { p0: lane.values.as_ptr().cast(), isnull: lane.isnull.as_ptr().cast() };
         }
-        let mut params = JitParams { lanes, sel: sel.words.as_mut_ptr(), nrows: nrows as u64 };
+        let mut params =
+            JitParams { lanes, sel: sel_words.as_mut_ptr(), nrows: nrows as u64 };
         // SAFETY: body compiled for ncols-lane batches; every used lane
-        // pointer covers nrows rows (checked above); sel covers MAX_ROWS
-        // bits >= nrows; the body only reads lanes and clears sel bits.
+        // pointer covers nrows rows (checked above); sel spans
+        // ceil(nrows/64) words and the body indexes sel words by row/64
+        // with row < nrows only; the body only reads lanes and clears sel
+        // bits.
         let rc = unsafe { (self.entry)(&mut params) };
         if rc == stitch::RC_OK {
             return Ok(RunOutcome::Stitched);
@@ -251,8 +281,7 @@ impl StitchedProgram {
         // interpreter raises C's exact error on C's row. Sticky: this
         // program's data errors; stop stitching it.
         self.refused.set(true);
-        *sel = SelVec::all(nrows);
-        interp::eval_qual(prog, &interp_batch(), sel)?;
+        interp_into(sel_words)?;
         // Defensive completeness: if the replay did NOT error (can only
         // happen if a trap condition raced with... nothing — lanes are
         // immutable for the call; kept because fail-open must never turn
