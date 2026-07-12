@@ -717,7 +717,11 @@ fn XLogWalRcvFlush(dying: bool, tli: TimeLineID) -> PgResult<()> {
         });
 
         xlogrecovery_seams::wakeup_recovery::call();
-        if walsender_seams::wal_snd_wakeup::is_installed() {
+        // AllowCascadeReplication().
+        if guc_tables::vars::EnableHotStandby.read()
+            && guc_tables::vars::max_wal_senders.read() > 0
+            && walsender_seams::wal_snd_wakeup::is_installed()
+        {
             walsender_seams::wal_snd_wakeup::call(true, false);
         }
 
