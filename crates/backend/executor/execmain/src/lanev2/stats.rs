@@ -22,6 +22,10 @@
 //!   * `Join` — one OWNED tick per lane-owned join build event; structural
 //!     refusals once per memoized verdict; dynamic EPQ/backward,
 //!     fused-probe-drive economics, and multi-batch spill refusals per call.
+//!   * `NestLoop` — one OWNED tick per accepted outer row (the unit the lane
+//!     owns: bind params → rescan the inner → drain the expansion);
+//!     structural refusals once per memoized verdict; dynamic EPQ/backward
+//!     per call.
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but
@@ -55,9 +59,10 @@ pub(super) enum ShapeClass {
     AggBuild = 4,
     SortFeed = 5,
     Join = 6,
+    NestLoop = 7,
 }
 
-const N_CLASSES: usize = 7;
+const N_CLASSES: usize = 8;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -68,6 +73,7 @@ impl ShapeClass {
         ShapeClass::AggBuild,
         ShapeClass::SortFeed,
         ShapeClass::Join,
+        ShapeClass::NestLoop,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -79,6 +85,7 @@ impl ShapeClass {
             ShapeClass::AggBuild => "aggbuild",
             ShapeClass::SortFeed => "sortfeed",
             ShapeClass::Join => "join",
+            ShapeClass::NestLoop => "nestloop",
         }
     }
 }
@@ -146,9 +153,11 @@ pub(super) enum RefuseReason {
     /// Dynamic tiny-input row-floor (§4 endgame refuse-set).
     #[allow(dead_code)]
     TinyInputFloor = 20,
-    /// Hash-join breaker: join-side shape refuse — non-INNER faces,
-    /// joinqual/otherqual residuals, instrumented, subplan/param-bearing join
-    /// exprs, or a node the row path already drove (whole-life ownership).
+    /// Join-side shape refuse (hash-join breaker and NestLoop TupleOp) —
+    /// non-INNER faces (hash join), joinqual/otherqual residuals (hash
+    /// join), instrumented, subplan/param-bearing join exprs / quals /
+    /// projection, or a node the row path already drove (whole-life
+    /// ownership).
     JoinShape = 21,
     /// Hash-join breaker: the completed build's final nbatch > 1 (spill);
     /// the probe is refused before any lane tuple is emitted.
