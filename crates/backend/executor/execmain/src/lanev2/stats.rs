@@ -237,9 +237,17 @@ pub(super) enum RefuseReason {
     /// consumer conflict. Mode-choice observability inside a still-lane-owned
     /// build (like the compact rows); ticked once per build decision.
     DictGroupShape = 27,
+    /// Expression-group-key feed (expr-key tranche): the offered projected
+    /// hash-agg-over-scan shape cannot host a computed grouping key — census
+    /// outside the vocabulary (multi-key / multiple computed columns /
+    /// non-admitted fns), an unmappable transition/needed column, a
+    /// non-hostable probe kernel, or an unarmable staging prefix. Ticked once
+    /// per memoized agg-lane choice; the build stays on the per-row breaker
+    /// feed (byte-identical).
+    ExprKeyShape = 28,
 }
 
-const N_REASONS: usize = 28;
+const N_REASONS: usize = 29;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -272,6 +280,7 @@ impl RefuseReason {
             RefuseReason::CompactKeyKind => "compact-key-kind",
             RefuseReason::CompactSpillRisk => "compact-spill-risk",
             RefuseReason::DictGroupShape => "dictgroup-shape",
+            RefuseReason::ExprKeyShape => "exprkey-shape",
         }
     }
 
@@ -306,6 +315,7 @@ impl RefuseReason {
             CompactKeyKind,
             CompactSpillRisk,
             DictGroupShape,
+            ExprKeyShape,
         ][i]
     }
 }

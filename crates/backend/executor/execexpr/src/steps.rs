@@ -614,6 +614,51 @@ impl ScanProjCols {
     }
 }
 
+/// Call-chain caps for [`ScanProjExprKey`] (the lane-v2 expression-group-key
+/// census; sized for the ClickBench Q29 class — one regexp_replace call with
+/// two const siblings — with slack for a short composition).
+pub const PROJ_KEY_MAX_CALLS: usize = 2;
+pub const PROJ_KEY_MAX_ARGS: usize = 4;
+
+/// One strict fmgr call of an admitted single-Var projection chain
+/// (node-free: the consumer owns catalog authority — volatility, language,
+/// rettype — exactly the `laneexec::DictCallSpec` split).
+#[derive(Clone, Copy, Debug)]
+pub struct ProjKeyCall {
+    pub fn_oid: Oid,
+    /// fcinfo fncollation (collation-sensitive kernels re-evaluate with it).
+    pub collation: Oid,
+    /// Which arg receives the inner value (the scan Var for calls\[0\], the
+    /// previous call's result above); `args[var_argno]` is ignored.
+    pub var_argno: u8,
+    pub nargs: u8,
+    /// Const siblings, prefilled at compile (compile-time non-null gated by
+    /// the walk); slots past `nargs` are unused.
+    pub args: [NullableDatum; PROJ_KEY_MAX_ARGS],
+}
+
+/// Expression-group-key census (lane-v2 expr-key grouping): a projection
+/// whose target list is bare scan Vars plus EXACTLY ONE computed column — a
+/// chain of strict fmgr calls over exactly one scan Var with compile-time
+/// non-null Const siblings. Selected at ready time from the PRISTINE step
+/// program, like [`ScanProjCols`]. Structural only: the fn-oid legality gate
+/// (IMMUTABLE, internal-language, strictness re-check against pg_proc) is the
+/// consumer's (`laneexec::dicteval` — fail-closed there too).
+#[derive(Clone, Copy, Debug)]
+pub struct ScanProjExprKey {
+    /// Per result column: `Some(attnum)` = bare Var passthrough (0-based scan
+    /// attnum); `None` = THE computed column.
+    pub cols: [Option<u16>; SCAN_PROJ_MAX_COLS],
+    pub n: u8,
+    /// resultnum of the computed column.
+    pub key_out: u16,
+    /// The scan Var feeding the chain (0-based attnum) and its vartype.
+    pub input_col: u16,
+    pub input_type: Oid,
+    pub ncalls: u8,
+    pub calls: [ProjKeyCall; PROJ_KEY_MAX_CALLS],
+}
+
 const _: () = assert!(core::mem::size_of::<Step>() <= 64);
 
 // C ExprEvalStep.d.func minus the FmgrInfo pointer: fn_addr/fcinfo are the
@@ -1345,6 +1390,8 @@ pub struct ExprState<'mcx> {
     pub(crate) scan_cmp_clauses: Option<ScanCmpClauses>,
     // Scan-projection census (lane-v2 stitched-projection tier).
     pub(crate) scan_proj_cols: Option<ScanProjCols>,
+    // Expression-group-key census (lane-v2 expr-key grouping tier).
+    pub(crate) scan_proj_expr_key: Option<ScanProjExprKey>,
     pub(crate) flags: u8,
     // C ExprState.resvalue/resnull: mcx-allocated result cell — OutRef raw
     // access carries no Rust borrow provenance.
@@ -1397,6 +1444,7 @@ impl<'mcx> ExprState<'mcx> {
                 kernel: Kernel::Program,
                 scan_cmp_clauses: None,
                 scan_proj_cols: None,
+                scan_proj_expr_key: None,
                 flags: 0,
                 resnd,
                 innermost_case: None,
@@ -1541,6 +1589,13 @@ impl<'mcx> ExprState<'mcx> {
     /// vocabulary). Subplan- and param-free by construction.
     pub fn scan_proj_cols(&self) -> Option<ScanProjCols> {
         self.scan_proj_cols
+    }
+
+    /// The projection as bare scan Vars plus ONE strict-fmgr-chain computed
+    /// column (the ready-time expr-key census), or None (shape outside the
+    /// vocabulary). Subplan- and param-free by construction.
+    pub fn scan_proj_expr_key(&self) -> Option<ScanProjExprKey> {
+        self.scan_proj_expr_key
     }
 
     #[inline]

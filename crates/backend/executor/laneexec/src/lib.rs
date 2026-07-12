@@ -35,6 +35,14 @@ pub use dicteval::{
 pub fn inline_const_ok(d: datum::Datum) -> bool {
     dict::inline_varlena_payload(d).is_some()
 }
+
+/// Catalog result type for a walker-built `DictCallSpec.rettype` (dicteval
+/// re-checks it against pg_proc, so supplying the catalog value keeps one
+/// authority). None = unresolvable (seam missing / not in pg_proc) — the
+/// caller refuses, exactly as dicteval's own compile would.
+pub fn func_catalog_rettype(fn_oid: types_core::Oid) -> Option<types_core::Oid> {
+    syscache_seams::lookup_pg_proc_shape::call(fn_oid).ok().flatten().map(|s| s.prorettype)
+}
 pub use dict::{collation_usable, inline_varlena_payload, non_inline_lane_datum};
 pub use textlen::{
     lane_text_payload, lane_textlen_eval, lane_textlen_mode, TEXTLEN_CHAR, TEXTLEN_OCTET,
