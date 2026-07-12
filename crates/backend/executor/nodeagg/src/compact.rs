@@ -56,6 +56,15 @@ pub enum MkCompKind {
     /// Scan-lifetime intern id (u32) for a dict-coded / raw-bytes text
     /// component — resolved through [`agg_hash_compact_intern`].
     Intern,
+    /// numeric in the canonical (mantissa, exp10) key form
+    /// (`adt_numeric::keypack` — the Q19 numeric key kind): low `width - 1`
+    /// bytes = sign-extended mantissa, top byte = exp10 as i8 with -128
+    /// reserved for specials (mantissa 1 = NaN, 2 = +Inf, 3 = -Inf).
+    /// `width` is 4 or 8; values outside the width's mantissa range, or
+    /// displaying at a non-minimal scale, are UNPACKABLE — the feed demotes
+    /// (migrates) instead of packing lossily, so read-back stays
+    /// byte-identical.
+    Numeric { width: u8 },
 }
 
 /// One packed multi-key component: 0-based input attno + byte offset into
@@ -73,6 +82,7 @@ impl MkComp {
         match self.kind {
             MkCompKind::Int { width } => width,
             MkCompKind::Intern => 4,
+            MkCompKind::Numeric { width } => width,
         }
     }
 }
@@ -271,9 +281,13 @@ pub fn agg_hash_compact_try_arm_mk(
     if key_cols.len() < 2 {
         return CompactArm::KeyKind;
     }
-    let mut comps: Vec<MkComp> = Vec::with_capacity(key_cols.len());
-    let mut off = 0usize;
+    // Component kinds first; offsets are laid out per numeric width below
+    // (numeric components try the roomy 8-byte encoding, shrinking to 4
+    // bytes when the image would exceed 16 — the Q19 shape's budget:
+    // int8 + numeric4 + intern4 = 16).
+    let mut kinds: Vec<(u16, MkCompKind)> = Vec::with_capacity(key_cols.len());
     let mut has_intern = false;
+    let mut has_numeric = false;
     for (j, kc) in key_cols.iter().enumerate() {
         // MkComp.att is the 0-based INPUT column (the feed reads SoA lanes
         // by input colno); kc.att is the hashslot position, unused here.
@@ -289,13 +303,34 @@ pub fn agg_hash_compact_try_arm_mk(
                 has_intern = true;
                 MkCompKind::Intern
             }
+            // The canonical-form numeric key kind (keypack module doc);
+            // per-value packability is the feed's runtime gate.
+            ::execgrouping::GroupKeyKind::Numeric => {
+                has_numeric = true;
+                MkCompKind::Numeric { width: 8 }
+            }
             _ => return CompactArm::KeyKind,
         };
-        let comp = MkComp { att: input_att, off: off as u8, kind };
-        off += comp.width() as usize;
-        comps.push(comp);
+        kinds.push((input_att, kind));
     }
-    let packed_bytes = off + nullable as usize;
+    let layout = |kinds: &[(u16, MkCompKind)], numeric_width: u8| {
+        let mut comps: Vec<MkComp> = Vec::with_capacity(kinds.len());
+        let mut off = 0usize;
+        for &(att, kind) in kinds {
+            let kind = match kind {
+                MkCompKind::Numeric { .. } => MkCompKind::Numeric { width: numeric_width },
+                k => k,
+            };
+            let comp = MkComp { att, off: off as u8, kind };
+            off += comp.width() as usize;
+            comps.push(comp);
+        }
+        (comps, off + nullable as usize)
+    };
+    let (mut comps, mut packed_bytes) = layout(&kinds, 8);
+    if packed_bytes > 16 && has_numeric {
+        (comps, packed_bytes) = layout(&kinds, 4);
+    }
     if packed_bytes > 16 || (nullable && comps.len() > 8) {
         return CompactArm::KeyKind;
     }
@@ -645,6 +680,139 @@ fn mk_intern_datum(ch: &CompactHash, id: u32, mcx: ::mcx::Mcx<'_>) -> PgResult<D
     Ok(d)
 }
 
+// -- Numeric key components (the Q19 numeric key kind) -----------------------
+//
+// Bit codec for [`MkCompKind::Numeric`]: low `width - 1` bytes carry the
+// canonical mantissa (sign-extended two's complement), the top byte carries
+// exp10 as i8 with -128 reserved for specials (mantissa 1 = NaN, 2 = +Inf,
+// 3 = -Inf; `numeric_eq` treats NaN = NaN, so one NaN key is correct).
+// Injective over `numeric_eq` classes by the keypack canonical-form
+// contract; per-VALUE packability (range, minimal display scale) is gated
+// at pack time — unpackable values make the feed migrate to the C table,
+// never pack lossily.
+
+/// Largest admissible |mantissa| for a `width`-byte numeric component.
+#[inline]
+pub fn mk_numeric_mant_abs_max(width: u8) -> u64 {
+    debug_assert!(width == 4 || width == 8);
+    (1u64 << ((width as u32 - 1) * 8 - 1)) - 1
+}
+
+/// Encode a canonical key form into component bits.
+#[inline]
+pub fn mk_numeric_key_bits(key: ::adt_numeric::NumericKeyForm, width: u8) -> u64 {
+    use ::adt_numeric::NumericKeyForm as K;
+    let shift = (width as u32 - 1) * 8;
+    let mant_mask = (1u64 << shift) - 1;
+    match key {
+        K::Finite { mantissa, exp10 } => {
+            debug_assert!(mantissa.unsigned_abs() <= mk_numeric_mant_abs_max(width));
+            debug_assert!((-127..=127).contains(&exp10));
+            ((mantissa as u64) & mant_mask) | (((exp10 as i8 as u8) as u64) << shift)
+        }
+        K::NaN => (0x80u64 << shift) | 1,
+        K::PInf => (0x80u64 << shift) | 2,
+        K::NInf => (0x80u64 << shift) | 3,
+    }
+}
+
+/// Decode component bits back to the canonical key form.
+#[inline]
+fn mk_numeric_key_decode(bits: u64, width: u8) -> ::adt_numeric::NumericKeyForm {
+    use ::adt_numeric::NumericKeyForm as K;
+    let shift = (width as u32 - 1) * 8;
+    let e = ((bits >> shift) as u8) as i8;
+    let mant_bits = bits & ((1u64 << shift) - 1);
+    if e == i8::MIN {
+        return match mant_bits {
+            1 => K::NaN,
+            2 => K::PInf,
+            _ => K::NInf,
+        };
+    }
+    // Sign-extend the mantissa from its `shift`-bit field.
+    let m = ((mant_bits << (64 - shift)) as i64) >> (64 - shift);
+    K::Finite { mantissa: m, exp10: e as i32 }
+}
+
+/// Pack a live numeric varlena datum into its `width`-byte component bits.
+/// `None` = unpackable — non-inline image, out-of-range value, or a
+/// non-minimal display scale (keypack module doc) — the caller DEMOTES
+/// (migrates to the C table); packing lossily would break read-back
+/// byte-identity.
+pub fn mk_numeric_datum_bits(d: Datum, width: u8) -> Option<u64> {
+    let mut buf = [0u16; 64];
+    let key = mk_numeric_datum_key(d, width, &mut buf)?;
+    Some(mk_numeric_key_bits(key, width))
+}
+
+fn mk_numeric_datum_key(
+    d: Datum,
+    width: u8,
+    buf: &mut [u16; 64],
+) -> Option<::adt_numeric::NumericKeyForm> {
+    let p = d.as_usize() as *const u8;
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: live numeric varlena datum (kernel selection proved the
+    // column type; NULLs are handled by the caller's isnull lane).
+    let b0 = unsafe { *p };
+    let (src, must_copy): (&[u8], bool) = if b0 & 0x01 == 0x01 {
+        if b0 == 0x01 {
+            // External toast pointer: unpackable here (staged lanes carry
+            // inline datums; belt for exotic sources).
+            return None;
+        }
+        let total = ((b0 >> 1) & 0x7F) as usize;
+        if total < 3 {
+            return None;
+        }
+        // SAFETY: 1B-header varlena of `total` bytes including the header.
+        (unsafe { core::slice::from_raw_parts(p.add(1), total - 1) }, true)
+    } else {
+        if b0 & 0x03 != 0 {
+            // Compressed inline: unpackable (never staged today; belt).
+            return None;
+        }
+        // SAFETY: live 4B-header varlena.
+        let data = unsafe { ::datum::VarlenaRef::from_ptr(p) }.data();
+        (data, false)
+    };
+    if src.len() < 2 {
+        return None;
+    }
+    let payload: &[u8] = if must_copy || src.as_ptr() as usize % 2 != 0 {
+        // Realign into the stack scratch: `Num::digits` requires 2-byte
+        // alignment and short-header payloads are misaligned by
+        // construction. Anything larger than the scratch has ndigits far
+        // beyond the packable range — unpackable either way.
+        if src.len() > 128 {
+            return None;
+        }
+        // SAFETY: buf is 128 bytes, 2-aligned; src.len() <= 128.
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), src.len())
+        };
+        dst.copy_from_slice(src);
+        dst
+    } else {
+        src
+    };
+    ::adt_numeric::numeric_key_pack(
+        ::adt_numeric::Num::from_payload(payload),
+        mk_numeric_mant_abs_max(width),
+    )
+}
+
+/// Materialize a numeric component's datum from its packed bits (read-back /
+/// migrate leg) — byte-identical to the packed first-arrival datum by the
+/// keypack canonicality gates.
+fn mk_numeric_datum(bits: u64, width: u8, mcx: ::mcx::Mcx<'_>) -> PgResult<Datum> {
+    let img = ::adt_numeric::numeric_key_unpack(mk_numeric_key_decode(bits, width))?;
+    ::types_fmgr::byref_result(mcx, img.as_bytes())
+}
+
 /// Reconstruct row `row`'s component datums (key order) into `out` — the
 /// read-back/migrate leg of the packed multi-key design (spike §2.1a):
 /// shift/mask + sign-extend per Int component, intern-arena materialization
@@ -681,6 +849,7 @@ fn compact_key_datums_mk(
                 }
             }
             MkCompKind::Intern => mk_intern_datum(ch, bits as u32, mcx)?,
+            MkCompKind::Numeric { width } => mk_numeric_datum(bits, width, mcx)?,
         };
         out.push((d, false));
     }
@@ -807,6 +976,78 @@ fn compact_migrate<'mcx>(
     // subsequent inserts — exactly the safety property v1 promises).
     crate::hash_agg_check_limits(ph, aggctx, mcx)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod numeric_key_tests {
+    use super::*;
+
+    fn image(s: &str) -> ::adt_numeric::NumericImage {
+        ::adt_numeric::numeric_in(s, -1, None).expect("parse").expect("non-soft parse")
+    }
+
+    fn datum_of(bytes: &[u8]) -> Datum {
+        Datum::from_usize(bytes.as_ptr() as usize)
+    }
+
+    #[test]
+    fn datum_bits_roundtrip_byte_identical() {
+        let owner = ::mcx::MemoryContext::new_bump("numeric-key-test");
+        let mcx = owner.mcx();
+        for w in [4u8, 8] {
+            for s in ["0", "1", "-1", "59", "1.5", "-0.07", "8388607", "-8388607", "NaN",
+                      "Infinity", "-Infinity"] {
+                let img = image(s);
+                let bits = mk_numeric_datum_bits(datum_of(img.as_bytes()), w)
+                    .unwrap_or_else(|| panic!("{s} must pack at width {w}"));
+                let d = mk_numeric_datum(bits, w, mcx).expect("read-back");
+                // SAFETY: byref_result produced a live 4B-header varlena.
+                let back = unsafe { ::datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+                assert_eq!(back.as_bytes(), img.as_bytes(), "{s} at width {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn width4_range_gate_is_exact() {
+        let img_in = image("8388607");
+        assert!(mk_numeric_datum_bits(datum_of(img_in.as_bytes()), 4).is_some());
+        let img_out = image("8388608");
+        assert_eq!(mk_numeric_datum_bits(datum_of(img_out.as_bytes()), 4), None);
+        assert!(mk_numeric_datum_bits(datum_of(img_out.as_bytes()), 8).is_some());
+    }
+
+    #[test]
+    fn non_minimal_display_scale_refuses() {
+        for s in ["1.0", "1.50", "0.00"] {
+            let img = image(s);
+            assert_eq!(mk_numeric_datum_bits(datum_of(img.as_bytes()), 8), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn short_header_datums_realign_and_pack() {
+        // 1B-short varlena image of the same payload: the pack path must
+        // copy it into the aligned scratch (heap tuple-packed numerics).
+        let img = image("59");
+        let payload = &img.as_bytes()[4..];
+        let mut short = Vec::with_capacity(payload.len() + 1);
+        short.push((((payload.len() + 1) as u8) << 1) | 1);
+        short.extend_from_slice(payload);
+        let a = mk_numeric_datum_bits(datum_of(&short), 4).expect("short image packs");
+        let b = mk_numeric_datum_bits(datum_of(img.as_bytes()), 4).expect("long image packs");
+        assert_eq!(a, b, "short and long images of one value pack identically");
+    }
+
+    #[test]
+    fn distinct_values_pack_distinct_bits() {
+        let mut seen = std::collections::HashSet::new();
+        for s in ["0", "1", "-1", "10", "0.1", "59", "NaN", "Infinity", "-Infinity"] {
+            let img = image(s);
+            let bits = mk_numeric_datum_bits(datum_of(img.as_bytes()), 4).unwrap();
+            assert!(seen.insert(bits), "distinct bits for {s}");
+        }
+    }
 }
 
 /// Read-back: the next compact group as (populated `first_slot`, pergroup).
