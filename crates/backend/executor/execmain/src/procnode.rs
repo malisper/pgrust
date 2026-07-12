@@ -2114,6 +2114,14 @@ fn unique_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let u = &mut **u;
+    // Lane-executor-v2 dispatch hook (Phase-2 streaming unique over the sort
+    // breaker): falls through to the UNCHANGED exec_unique on refuse. Lane
+    // logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_unique(u, estate)? {
+            return Ok(r);
+        }
+    }
     let outer = &mut u.outer;
     ::nodeunique::exec_unique(&mut u.state, estate, |e| exec_proc_node(outer, e))
 }
@@ -2130,6 +2138,14 @@ fn group_arm<'mcx>(
 
 #[inline(never)]
 fn limit_arm<'mcx>(l: &mut LimitNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (Phase-2 streaming limit over lane-owned
+    // chains): falls through to the UNCHANGED exec_limit on refuse. Lane
+    // logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_limit(l, estate)? {
+            return Ok(r);
+        }
+    }
     let LimitNode { state, outer } = l;
     ::nodelimit::exec_limit(state, &mut **outer, estate)
 }

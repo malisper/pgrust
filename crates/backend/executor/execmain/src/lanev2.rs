@@ -931,71 +931,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    // Build phase (once, lazily on the first call): drain the scan pipeline
-    // into the breaker sink, then finalize (delegated). `table_filled` is the
-    // phase flag; a rescan rebuild clears it and re-enters here.
-    if !::nodeagg::agg_hash_table_filled(agg) {
-        // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
-        // drive when the whole read prefix is knowable (unprojected scans
-        // only: with a projection the agg reads output columns, which are not
-        // commensurable with scan-column prefixes). ONE deform serves both
-        // consumers: `seq_scan_batch_soa_prepare` detects the kernel qual
-        // inside the prefix and arms the selection bitmap on the same staged
-        // SoA the fold lanes read. When no prefix is knowable (projected /
-        // shape-unknown), fall back to the qual-only bitmap arm so a
-        // kernel-shaped filter still vectorizes (survivors deform lazily
-        // per-row). The fold feed FORCES the deform when the fold reads lane
-        // columns (the <3-column break-even is a deform+gather artifact; the
-        // fold consumes the columns directly).
-        let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
-            fused_agg_soa_prefix(agg, ss).unwrap_or(0)
-        } else {
-            0
-        };
-        // One OWNED tick per lane-owned hash-agg build event (the gate's
-        // aggbuild floor counts builds, not calls) — fold-fed and per-row
-        // feeds alike.
-        stats::tick_owned(ShapeClass::AggBuild);
-        if c == AggLaneChoice::Fold {
-            if soa_prefix > 0 {
-                let force = ::nodeagg::agg_lanefold_plan(agg)
-                    .is_some_and(|plan| !plan.cols.is_empty());
-                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
-                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                    // Full-prefix deform unarmable (non-fixed-width column in
-                    // the prefix) or declined (break-even). A column-reading
-                    // fold plan cannot get here — `decide_agg_lane` probe-armed
-                    // this exact prefix before choosing Fold — so the SoA has
-                    // no fold reader and the qual-only bitmap arm is safe.
-                    arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only");
-                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                    lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
-                }
-            } else {
-                // Fold with no knowable prefix = a plan reading no lane
-                // columns (count(*)-only); the bitmap is the only SoA user.
-                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed");
-            }
-            agg_hash_build_fold_feed(agg, ss, estate)?;
-        } else {
-            if soa_prefix > 0 {
-                let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
-                ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
-                if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
-                    // Unarmable/declined full prefix; the per-row feed reads
-                    // no SoA columns, so fall back to the qual-only bitmap.
-                    arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only");
-                } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
-                    lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
-                }
-            } else {
-                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed");
-            }
-            let mut sink = HashAggBuildSink { agg: &mut *agg };
-            drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
-        }
-    }
+    agg_seq_scan_build_if_needed(agg, ss, c, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -1194,6 +1130,85 @@ fn agg_fold_feed_row<'mcx>(
     Ok(())
 }
 
+/// Build phase of the hash-agg breaker over a SeqScan feed (once, lazily on
+/// the first call), with the choice-dependent feed: drain the scan pipeline
+/// into the breaker sink — the lanefold whole-batch feed for
+/// `AggLaneChoice::Fold`, the per-row breaker feed otherwise — then finalize
+/// (delegated). `table_filled` is the phase flag; a rescan rebuild clears it
+/// and re-enters here. Shared by the bare agg hook above and the
+/// Limit-over-agg chain (`try_own_limit`), so both drive the identical build.
+fn agg_seq_scan_build_if_needed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    c: AggLaneChoice,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert_ne!(c, AggLaneChoice::Refuse);
+    if ::nodeagg::agg_hash_table_filled(agg) {
+        return Ok(());
+    }
+    // Arm the SoA page-batch deform + kernel-qual bitmap for the fused
+    // drive when the whole read prefix is knowable (unprojected scans
+    // only: with a projection the agg reads output columns, which are not
+    // commensurable with scan-column prefixes). ONE deform serves both
+    // consumers: `seq_scan_batch_soa_prepare` detects the kernel qual
+    // inside the prefix and arms the selection bitmap on the same staged
+    // SoA the fold lanes read. When no prefix is knowable (projected /
+    // shape-unknown), fall back to the qual-only bitmap arm so a
+    // kernel-shaped filter still vectorizes (survivors deform lazily
+    // per-row). The fold feed FORCES the deform when the fold reads lane
+    // columns (the <3-column break-even is a deform+gather artifact; the
+    // fold consumes the columns directly).
+    let soa_prefix = if ss.ss.ps_ProjInfo.is_none() {
+        fused_agg_soa_prefix(agg, ss).unwrap_or(0)
+    } else {
+        0
+    };
+    // One OWNED tick per lane-owned hash-agg build event (the gate's
+    // aggbuild floor counts builds, not calls) — fold-fed and per-row
+    // feeds alike.
+    stats::tick_owned(ShapeClass::AggBuild);
+    if c == AggLaneChoice::Fold {
+        if soa_prefix > 0 {
+            let force = ::nodeagg::agg_lanefold_plan(agg)
+                .is_some_and(|plan| !plan.cols.is_empty());
+            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force);
+            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                // Full-prefix deform unarmable (non-fixed-width column in
+                // the prefix) or declined (break-even). A column-reading
+                // fold plan cannot get here — `decide_agg_lane` probe-armed
+                // this exact prefix before choosing Fold — so the SoA has
+                // no fold reader and the qual-only bitmap arm is safe.
+                arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed, qual-only");
+            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                lane_trace("seqscan qual bitmap armed (agg fold fused deform)");
+            }
+        } else {
+            // Fold with no knowable prefix = a plan reading no lane
+            // columns (count(*)-only); the bitmap is the only SoA user.
+            arm_seq_scan_qual_bitmap(ss, estate, "agg fold feed");
+        }
+        agg_hash_build_fold_feed(agg, ss, estate)
+    } else {
+        if soa_prefix > 0 {
+            let was = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+            ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, false);
+            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                // Unarmable/declined full prefix; the per-row feed reads
+                // no SoA columns, so fall back to the qual-only bitmap.
+                arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed, qual-only");
+            } else if !was && ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss) {
+                lane_trace("seqscan qual bitmap armed (agg per-row fused deform)");
+            }
+        } else {
+            arm_seq_scan_qual_bitmap(ss, estate, "agg per-row feed");
+        }
+        let mut sink = HashAggBuildSink { agg };
+        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
+    }
+}
+
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
 ///   * scan side: the Phase-1 `seq_scan_fusible` gate verbatim (page-batch AM,
 ///     uninstrumented, forward, non-parallel, non-EPQ, non-Bloom; subplan- and
@@ -1351,11 +1366,31 @@ pub fn try_own_sort<'mcx>(
         stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
         return Ok(None);
     }
-    // Structural verdict, memoized at first call: the fusibility cascade must
-    // not run once per pulled tuple, and a mid-stream verdict flip would
-    // desync the staged-batch cursors.
-    let fusible = match s.lane_fusible {
-        Some(v) => v,
+    if !sort_lane_fusible_memo(s, estate)? {
+        return Ok(None);
+    }
+    // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
+    ::postgres_seams::check_for_interrupts::call()?;
+
+    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+    // Emit phase (pipeline N+1): the breaker's Source face streams the
+    // tuplesort read-back through the root pull-adapter, one tuple per call.
+    let mut root = RootAdapter::new(None);
+    Ok(Some(pull_step(state, &mut SortEmitSource, &mut SortEmit, &mut root, estate)?))
+}
+
+/// Structural sort-breaker verdict, memoized at first call: the fusibility
+/// cascade must not run once per pulled tuple, and a mid-stream verdict flip
+/// would desync the staged-batch cursors. Shared by the bare sort hook and
+/// the Limit/Unique-over-sort chains (which admit exactly the sort shapes the
+/// breaker admits).
+fn sort_lane_fusible_memo<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    match s.lane_fusible {
+        Some(v) => Ok(v),
         None => {
             // Refusal accounting ticks exactly here — once per memoized
             // structural verdict (a child-scan refusal's specific reason is
@@ -1366,63 +1401,63 @@ pub fn try_own_sort<'mcx>(
             }
             let v = refuse.is_none();
             s.lane_fusible = Some(v);
-            v
+            Ok(v)
         }
-    };
-    if !fusible {
-        return Ok(None);
     }
-    // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
-    ::postgres_seams::check_for_interrupts::call()?;
+}
 
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-    if !state.sort_done() {
-        // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
-        // floor counts feeds, not calls).
-        stats::tick_owned(ShapeClass::SortFeed);
-        // Feed phase (pipeline N): drive the scan pipeline to exhaustion into
-        // the breaker sink, then finalize (performsort) — all inside this one
-        // call, exactly like `exec_sort`'s build leg.
-        let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        match &mut **outer {
-            crate::procnode::PlanStateNode::SeqScan(ss) => {
-                arm_seq_scan_qual_bitmap(ss, estate, "sort feed");
-                sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)?
+/// Feed phase of the sort breaker (pipeline N), once, lazily: drive the scan
+/// pipeline to exhaustion into the breaker sink, then finalize (performsort)
+/// — all inside one call, exactly like `exec_sort`'s build leg. `sort_Done`
+/// is the phase flag; a rescan clears it and re-enters here. Shared by the
+/// bare sort hook and the Limit/Unique-over-sort chains.
+fn sort_feed_if_needed<'mcx>(
+    state: &mut ::nodesort::SortState<'mcx>,
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if state.sort_done() {
+        return Ok(());
+    }
+    // One OWNED tick per lane-owned sort feed event (the gate's sortfeed
+    // floor counts feeds, not calls).
+    stats::tick_owned(ShapeClass::SortFeed);
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    match outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            arm_seq_scan_qual_bitmap(ss, estate, "sort feed");
+            sort_feed(state, ss, SeqScanSource, SeqScanFilterProject, outer_desc, estate)
+        }
+        crate::procnode::PlanStateNode::IndexScan(is) => {
+            sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)
+        }
+        crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
+            state,
+            &mut **ios,
+            IndexOnlyScanSource,
+            IndexOnlyScanEmit,
+            outer_desc,
+            estate,
+        ),
+        crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
+            let b = &mut **b;
+            // The bitmap must be built before the heap drive — the same
+            // setup the bitmap arm runs before offering the scan.
+            if !b.scan.initialized {
+                crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
             }
-            crate::procnode::PlanStateNode::IndexScan(is) => {
-                sort_feed(state, is, IndexScanSource, IndexScanEmit, outer_desc, estate)?
-            }
-            crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
+            sort_feed(
                 state,
-                &mut **ios,
-                IndexOnlyScanSource,
-                IndexOnlyScanEmit,
+                &mut b.scan,
+                BitmapHeapScanSource,
+                BitmapHeapScanEmit,
                 outer_desc,
                 estate,
-            )?,
-            crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
-                let b = &mut **b;
-                // The bitmap must be built before the heap drive — the same
-                // setup the bitmap arm runs before offering the scan.
-                if !b.scan.initialized {
-                    crate::procnode::bitmap_table_scan_setup_dispatch(b, estate)?;
-                }
-                sort_feed(
-                    state,
-                    &mut b.scan,
-                    BitmapHeapScanSource,
-                    BitmapHeapScanEmit,
-                    outer_desc,
-                    estate,
-                )?
-            }
-            _ => unreachable!("memoized sort verdict admitted a non-scan child"),
+            )
         }
+        _ => unreachable!("memoized sort verdict admitted a non-scan child"),
     }
-    // Emit phase (pipeline N+1): the breaker's Source face streams the
-    // tuplesort read-back through the root pull-adapter, one tuple per call.
-    let mut root = RootAdapter::new(None);
-    Ok(Some(pull_step(state, &mut SortEmitSource, &mut SortEmit, &mut root, estate)?))
 }
 
 /// Structural refuse-set for the sort breaker. Sort-side: refuse
@@ -1539,6 +1574,11 @@ impl<'mcx> Source<'mcx> for SortEmitSource {
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<Batch>> {
+        // C's per-ExecSort-call CHECK_FOR_INTERRUPTS: when a chained consumer
+        // (Unique dedup, Limit's offset skip) drains several sorted tuples in
+        // one PG pull, C would enter ExecSort once per tuple — keep that
+        // cadence here rather than once per pull (§9).
+        ::postgres_seams::check_for_interrupts::call()?;
         Ok(::nodesort::sort_lane_next(node, estate)?.map(|_| Batch { n: 1 }))
     }
 }
@@ -2382,52 +2422,393 @@ pub fn try_own_agg_over_hash_join<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    if !::nodeagg::agg_hash_table_filled(agg) {
-        let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
-        let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
-        // Join build phase (once, lazily; a rescan that rebuilt the inner
-        // side re-enters here via the node's own HJ_BUILD_HASHTABLE).
-        if ::nodehashjoin::lane_join_phase(state, hstate)
-            == ::nodehashjoin::LaneJoinPhase::Build
-        {
-            let done = join_build_dispatch(state, hstate, child, estate)?;
-            if !done.empty && done.nbatch > 1 {
-                // Spill refuse before any lane tuple is emitted; the
-                // fallback per-tuple agg over exec_hash_join resumes from
-                // HJ_NEED_NEW_OUTER over the identical table.
-                stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
-                return Ok(None);
-            }
-        }
-        match ::nodehashjoin::lane_join_phase(state, hstate) {
-            ::nodehashjoin::LaneJoinPhase::EmptyDone => {
-                // A non-fill-outer join (INNER/SEMI/RIGHT/RIGHT_SEMI/
-                // RIGHT_ANTI) over an empty build: emits nothing — an empty
-                // build has no unmatched inner tuples to fill either — and
-                // the outer child is never pulled (C's early return;
-                // LEFT/FULL/ANTI never take this phase — their empty build
-                // proceeds to the probe and null-fills). The agg finalizes
-                // over an empty input.
-                stats::tick_owned(ShapeClass::AggBuild);
-                let mut sink = HashAggBuildSink { agg: &mut *agg };
-                sink.finish(estate)?;
-            }
-            ::nodehashjoin::LaneJoinPhase::Probe => {
-                if hstate.table.as_ref().expect("probe phase has a table").nbatch > 1 {
-                    stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
-                    return Ok(None);
-                }
-                // One OWNED tick per lane-owned agg build event (here the
-                // build is fed by the join probe drain).
-                stats::tick_owned(ShapeClass::AggBuild);
-                let mut sink = HashAggBuildSink { agg: &mut *agg };
-                join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
-            }
-            ::nodehashjoin::LaneJoinPhase::Build => unreachable!("build ran above"),
-        }
+    if !agg_hash_join_build_if_needed(agg, hj, estate)? {
+        return Ok(None);
     }
     // Agg emit phase (every call): one qual-passing group per PG pull, in
     // C's retrieve order.
     let mut root = RootAdapter::new(None);
     Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+/// Build phases of the agg-over-join composition (join build, then the probe
+/// drain into the agg breaker sink), once, lazily. `Ok(false)` = multi-batch
+/// spill refuse — the caller must refuse ownership; no lane tuple has been
+/// emitted, so the fallback per-tuple agg over `exec_hash_join` resumes from
+/// HJ_NEED_NEW_OUTER over the identical table. Shared by the bare
+/// composition hook above and the Limit-over-agg chain (`try_own_limit`).
+fn agg_hash_join_build_if_needed<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if ::nodeagg::agg_hash_table_filled(agg) {
+        return Ok(true);
+    }
+    let crate::procnode::HashJoinNode { state, outer, hash, .. } = hj;
+    let crate::procnode::HashSubNode { state: hstate, child } = &mut **hash;
+    // Join build phase (once, lazily; a rescan that rebuilt the inner
+    // side re-enters here via the node's own HJ_BUILD_HASHTABLE).
+    if ::nodehashjoin::lane_join_phase(state, hstate)
+        == ::nodehashjoin::LaneJoinPhase::Build
+    {
+        let done = join_build_dispatch(state, hstate, child, estate)?;
+        if !done.empty && done.nbatch > 1 {
+            // Spill refuse before any lane tuple is emitted; the
+            // fallback per-tuple agg over exec_hash_join resumes from
+            // HJ_NEED_NEW_OUTER over the identical table.
+            stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
+            return Ok(false);
+        }
+    }
+    match ::nodehashjoin::lane_join_phase(state, hstate) {
+        ::nodehashjoin::LaneJoinPhase::EmptyDone => {
+            // A non-fill-outer join (INNER/SEMI/RIGHT/RIGHT_SEMI/
+            // RIGHT_ANTI) over an empty build: emits nothing — an empty
+            // build has no unmatched inner tuples to fill either — and
+            // the outer child is never pulled (C's early return;
+            // LEFT/FULL/ANTI never take this phase — their empty build
+            // proceeds to the probe and null-fills). The agg finalizes
+            // over an empty input.
+            stats::tick_owned(ShapeClass::AggBuild);
+            let mut sink = HashAggBuildSink { agg };
+            sink.finish(estate)?;
+        }
+        ::nodehashjoin::LaneJoinPhase::Probe => {
+            if hstate.table.as_ref().expect("probe phase has a table").nbatch > 1 {
+                stats::tick_refused(ShapeClass::Join, RefuseReason::MultiBatch);
+                return Ok(false);
+            }
+            // One OWNED tick per lane-owned agg build event (here the
+            // build is fed by the join probe drain).
+            stats::tick_owned(ShapeClass::AggBuild);
+            let mut sink = HashAggBuildSink { agg };
+            join_probe_drain_dispatch(state, hstate, outer, &mut sink, estate)?;
+        }
+        ::nodehashjoin::LaneJoinPhase::Build => unreachable!("build ran above"),
+    }
+    Ok(true)
+}
+
+// ===========================================================================
+// Streaming Limit + Unique (Phase-2 breadth): mid-pipeline `TupleOp`s at the
+// TOP of an already-lane-owned chain, engaged ONLY where the lane owns the
+// child pipeline (admission economics, design §4): a Volcano Limit/Unique is
+// already cheap per-tuple and PG's pull already stops a lane pipeline lazily,
+// so ownership here buys chain continuity (no per-tuple root adapter between
+// the breaker emit and the limit/dedup — and future within-pipeline fusion),
+// never a new layer over a refused child.
+//
+//   Limit  (Pattern 2, DuckDB streaming limit): counts in the node's own
+//          LimitState (lstate/position — C's cross-call state, so a Volcano
+//          fallback at any call boundary is byte-safe), delivers the boundary
+//          tuple via `Paused`, reports `Finished` on the next driver round —
+//          the source is never pulled past the boundary tuple's batch, and
+//          quals/projections are never evaluated past the limit (C's LIMIT
+//          stops calling its child). OFFSET tuples are pulled + discarded,
+//          exactly as C's LIMIT_RESCAN skip loop pulls them.
+//   Unique (over the sort breaker): adjacent-dedup streaming op — one sorted
+//          tuple in, 0..1 group heads out, via `nodeunique::lane_unique_feed`
+//          (the SAME grouping-equality program + prev-slot copy exec_unique
+//          runs — reused, not reimplemented).
+//
+// Row-identity note (LIMIT without ORDER BY): C returns whichever rows its
+// plan yields first. The lane's owned pipelines emit C's rows in C's order BY
+// CONSTRUCTION — scan pipelines walk the same pages/TID runs in the same
+// order, and breaker read-backs delegate to the same tuplesort / hash-table
+// retrieves — so the lane's first k tuples are C's first k tuples,
+// byte-identically (verified by the full regress off/on comparison).
+//
+// Refused shapes (each byte-safe on the Volcano fallback):
+//   * LIMIT ... WITH TIES — needs boundary-tuple retention + the sort-peer
+//     equality walk (LIMIT_WINDOWEND_TIES); staged later. (PG's Limit node
+//     has no percent-limit form — nothing to gate.)
+//   * Limit/Unique over a BARE scan — the scan hooks themselves refuse
+//     standalone ownership (per-tuple emission through the pull adapter with
+//     no batch consumer above = pure adapter overhead); a Volcano
+//     Limit/Unique over the refused scan IS C's shape, so taking ownership
+//     adds a layer with no consumer benefit.
+//   * Limit over a bare HashJoin — needs a two-TupleOp chain driver
+//     (JoinProbe → LimitOp); staged with the next chain generalization.
+//   * Backward/scrollable cursors — a scrollable/backward cursor forces
+//     randomAccess on the Sort child (refused by `sort_fusible`), Limit
+//     never sees EXEC_FLAG_MARK (init assert), Unique never sees
+//     BACKWARD/MARK (init assert); the dynamic direction gate refuses any
+//     non-forward pull.
+//   * Hashed DISTINCT is NOT here: the planner emits Agg (AGG_HASHED, zero
+//     aggregates), which the hash-agg breaker already admits
+//     (`agg_hash_breaker_admissible` — evaltrans is an empty transition
+//     program, subplan- and param-free trivially).
+// ===========================================================================
+
+/// The Limit node as a mid-pipeline streaming operator. All window
+/// arithmetic delegates to `nodelimit`'s lane seam, which mirrors
+/// `exec_limit`'s forward COUNT arms verbatim over the same node state.
+struct LimitOp<'a, 'mcx> {
+    limit: &'a mut ::nodelimit::LimitState<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for LimitOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        // Window complete (the boundary tuple was already delivered via
+        // `Paused`): the next driver round must resume() → `Finished`
+        // BEFORE the source is pulled again — the Paused-then-Finished rule.
+        ::nodelimit::lane_limit_window_done(self.limit)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        match ::nodelimit::lane_limit_feed(self.limit, tuple) {
+            ::nodelimit::LaneLimitFeed::Skip => Ok(OpStatus::NeedInput),
+            ::nodelimit::LaneLimitFeed::Emit => Ok(match out.accept(tuple, estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            }),
+            ::nodelimit::LaneLimitFeed::EmitBoundary => {
+                // Paused-then-Finished (`OpStatus::Finished` contract):
+                // deliver the boundary tuple now; pending()/resume() report
+                // Finished on the next driver round. The downstream sink is
+                // always the capacity-one root here (LimitOp tops the chain),
+                // so accept necessarily returns Full.
+                let fed = out.accept(tuple, estate)?;
+                debug_assert_eq!(fed, SinkFeed::Full, "limit chain must end at the root adapter");
+                let _ = fed;
+                Ok(OpStatus::Paused)
+            }
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // Only reachable via pending() = window done: flip to LIMIT_WINDOWEND
+        // (what C's next ExecLimit call would do) and end the stream.
+        ::nodelimit::lane_limit_end_window(self.limit);
+        Ok(OpStatus::Finished)
+    }
+}
+
+/// The Unique node as a mid-pipeline streaming operator: never pends (no
+/// intra-tuple expansion) and never finishes early.
+struct UniqueOp<'a, 'mcx> {
+    unique: &'a mut ::nodeunique::UniqueState<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for UniqueOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        match ::nodeunique::lane_unique_feed(self.unique, estate, tuple)? {
+            None => Ok(OpStatus::NeedInput),
+            Some(result) => Ok(match out.accept(result, estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            }),
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        unreachable!("UniqueOp never pends")
+    }
+}
+
+/// Admission for a hash-agg breaker child under a lane Limit: the agg-side
+/// breaker gate × the child gates × (for the SeqScan feed) the memoized
+/// `AggLaneChoice` — exactly the bare `agg_arm` hooks' admission
+/// (`try_own_agg_over_seq_scan` / `try_own_agg_over_hash_join`), including
+/// the economics `Refuse` arm, so a Limit-owned agg chain admits precisely
+/// where the agg hook would.
+fn agg_child_fusible<'mcx>(
+    aps: &mut crate::procnode::AggPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeagg::agg_hash_breaker_admissible(&aps.agg) {
+        return Ok(false);
+    }
+    match &mut aps.outer {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            if !seq_scan_fusible(ss, estate)? {
+                return Ok(false);
+            }
+            let c = match aps.lane_choice {
+                Some(c) => c,
+                None => {
+                    let c = decide_agg_lane(&aps.agg, ss, estate)?;
+                    aps.lane_choice = Some(c);
+                    c
+                }
+            };
+            Ok(c != AggLaneChoice::Refuse)
+        }
+        crate::procnode::PlanStateNode::HashJoin(hj) => hash_join_lane_fusible(hj, estate),
+        _ => Ok(false),
+    }
+}
+
+/// Try to let the lane own a `Limit` over a lane-owned chain — the streaming
+/// limit (see the section header above for the protocol, the row-identity
+/// argument, and the documented refusals). Admitted children: the sort
+/// breaker, and the hash-agg breaker over its admitted feeds (SeqScan, or
+/// the hash-join composition). `None` = refused; falling to `exec_limit` is
+/// byte-safe at any boundary because the lane drives the SAME LimitState
+/// machine C does (including after the prologue below ran — C's own INITIAL
+/// arm would have run the same recompute once).
+#[inline]
+pub fn try_own_limit<'mcx>(
+    l: &mut crate::procnode::LimitNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    use ::nodelimit::LimitStateCond::*;
+    // Dynamic per-call gates + the limit-side shape gate (COUNT only; the
+    // option is init-stable so this refuse is stable too).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !::nodelimit::lane_limit_admissible(&l.state)
+    {
+        return Ok(None);
+    }
+    // Child admission BEFORE any state effect (a refuse must leave the node
+    // untouched). Child verdicts are memoized on the child nodes.
+    let child_ok = match &mut *l.outer {
+        crate::procnode::PlanStateNode::Sort(s) => sort_lane_fusible_memo(s, estate)?,
+        crate::procnode::PlanStateNode::Agg(aps) => agg_child_fusible(&mut **aps, estate)?,
+        _ => false,
+    };
+    if !child_ok {
+        return Ok(None);
+    }
+    // C's exec_limit entry: CFI, then the LIMIT_INITIAL recompute (evaluates
+    // OFFSET/LIMIT — same negative-value errors — and pushes the tuple bound
+    // to the child: the Sort's top-N bound; a no-op for Agg).
+    ::nodelimit::lane_limit_prologue(&mut l.state, &mut *l.outer, estate)?;
+    match l.state.lstate {
+        // Terminal forward states: nothing more to return (C's arms).
+        LIMIT_EMPTY | LIMIT_WINDOWEND | LIMIT_SUBPLANEOF => return Ok(Some(None)),
+        LIMIT_RESCAN => {
+            // LIMIT 0: the window is empty and the child is NEVER pulled
+            // (C's `count <= 0 && !noCount` arm) — no feed, no build.
+            if ::nodelimit::lane_limit_empty_window(&mut l.state) {
+                return Ok(Some(None));
+            }
+        }
+        LIMIT_INWINDOW => {}
+        LIMIT_INITIAL => unreachable!("prologue recomputed"),
+        // Backward-only states — unreachable under the forward gate + the
+        // non-scrollable admitted children; refuse defensively.
+        LIMIT_WINDOWEND_TIES | LIMIT_WINDOWSTART => return Ok(None),
+    }
+    // Run the owned chain: child pipeline → LimitOp → root adapter.
+    let r = match &mut *l.outer {
+        crate::procnode::PlanStateNode::Sort(s) => {
+            // C's first child pull enters ExecSort: entry CFI, then the feed
+            // (the tuplesort bound set by the prologue makes it top-N,
+            // exactly as C's bounded sort under Limit).
+            ::postgres_seams::check_for_interrupts::call()?;
+            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            sort_feed_if_needed(state, &mut **outer, outer_desc, estate)?;
+            let mut op = LimitOp { limit: &mut l.state };
+            let mut root = RootAdapter::new(None);
+            pull_step_chain(state, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?
+        }
+        crate::procnode::PlanStateNode::Agg(aps) => {
+            let aps = &mut **aps;
+            // exec_agg's top-of-call guard: a drained agg stays drained (the
+            // hash iterator is spent) — treat as source EOF.
+            if ::nodeagg::agg_is_done(&aps.agg) {
+                None
+            } else {
+                let built = match &mut aps.outer {
+                    crate::procnode::PlanStateNode::SeqScan(ss) => {
+                        let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                        agg_seq_scan_build_if_needed(&mut aps.agg, ss, c, estate)?;
+                        true
+                    }
+                    crate::procnode::PlanStateNode::HashJoin(hj) => {
+                        agg_hash_join_build_if_needed(&mut aps.agg, &mut **hj, estate)?
+                    }
+                    _ => unreachable!("agg_child_fusible admitted a non-lane agg feed"),
+                };
+                if !built {
+                    // Join multi-batch spill refuse, before any lane tuple:
+                    // exec_limit over the per-tuple agg/join resumes
+                    // byte-identically (the recompute above ran once, as C's
+                    // INITIAL arm would have).
+                    return Ok(None);
+                }
+                let mut op = LimitOp { limit: &mut l.state };
+                let mut root = RootAdapter::new(None);
+                pull_step_chain(
+                    &mut aps.agg,
+                    &mut HashAggSource,
+                    &mut HashAggEmit,
+                    &mut op,
+                    &mut root,
+                    estate,
+                )?
+            }
+        }
+        _ => unreachable!("admitted a non-lane limit child"),
+    };
+    if r.is_none() && matches!(l.state.lstate, LIMIT_RESCAN | LIMIT_INWINDOW) {
+        // Source exhausted before the window filled — C's subplan-EOF arms.
+        ::nodelimit::lane_limit_eof(&mut l.state);
+    }
+    Ok(Some(r))
+}
+
+/// Try to let the lane own a `Unique` over the sort breaker — streaming
+/// adjacent-dedup on the sorted emit (see the section header for economics +
+/// refusals; hashed DISTINCT plans an Agg and is owned by the agg breaker).
+/// `None` = refused; `exec_unique` drives the same UniqueState byte-safely.
+#[inline]
+pub fn try_own_unique<'mcx>(
+    u: &mut crate::procnode::UniqueNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Dynamic per-call gates (Unique init asserts !BACKWARD && !MARK, so a
+    // non-forward pull should be impossible — gate anyway, like the sort).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    let crate::procnode::UniqueNode { state, outer } = u;
+    let crate::procnode::PlanStateNode::Sort(s) = outer else {
+        return Ok(None);
+    };
+    if !sort_lane_fusible_memo(s, estate)? {
+        return Ok(None);
+    }
+    // C's ExecUnique entry interrupt check (conditional, exactly the
+    // Volcano entry's), then the first child pull's ExecSort entry CFI.
+    ::nodeunique::lane_unique_cfi()?;
+    ::postgres_seams::check_for_interrupts::call()?;
+    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+    sort_feed_if_needed(sstate, &mut **souter, outer_desc, estate)?;
+    let mut op = UniqueOp { unique: state };
+    let mut root = RootAdapter::new(None);
+    let r = pull_step_chain(sstate, &mut SortEmitSource, &mut SortEmit, &mut op, &mut root, estate)?;
+    if r.is_none() {
+        // exec_unique's end-of-stream arm: drop the retained previous tuple
+        // and clear both slots.
+        ::nodeunique::lane_unique_eof(state, estate);
+    }
+    Ok(Some(r))
 }

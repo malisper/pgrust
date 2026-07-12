@@ -73,7 +73,6 @@ pub(super) enum OpStatus {
     /// is delivered, and report `Finished` on the next driver round
     /// (byte-identity: the source is pulled exactly to the boundary tuple's
     /// batch and no further — push-executor study, Pattern 2).
-    #[allow(dead_code)] // constructed by Phase-2 breadth operators (LIMIT)
     Finished,
 }
 
@@ -295,7 +294,11 @@ impl<'mcx> Sink<'mcx> for TupleOpSink<'_, '_, 'mcx> {
             OpStatus::NeedInput => SinkFeed::NeedMore,
             OpStatus::Paused => SinkFeed::Full,
             OpStatus::Finished => {
-                unreachable!("mid-chain TupleOp finished early (no early-stop ops exist yet)")
+                // Early-stop TupleOps (LimitOp) obey the Paused-then-Finished
+                // rule: accept() delivers the boundary tuple via `Paused` and
+                // only resume() — called by the driver directly, never
+                // through this splice — reports `Finished`.
+                unreachable!("mid-chain TupleOp returned Finished from accept")
             }
         })
     }
