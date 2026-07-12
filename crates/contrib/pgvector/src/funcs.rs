@@ -181,7 +181,12 @@ pub fn fc_array_to_vector(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgR
     }
 
     let elemtype: Oid = arrayfuncs::arr_elemtype(arr);
-    let (elems, _nulls) = arrayfuncs::deconstruct_array_builtin(mcx, arr, elemtype, true)?;
+    // numeric is not in builtin_meta: varlena, int-aligned.
+    let (elems, _nulls) = if elemtype == NUMERICOID {
+        arrayfuncs::deconstruct_array(mcx, arr, -1, false, b'i', true)?
+    } else {
+        arrayfuncs::deconstruct_array_builtin(mcx, arr, elemtype, true)?
+    };
     let n = elems.len();
     check_dim(n)?;
     check_expected_dim(typmod, n)?;

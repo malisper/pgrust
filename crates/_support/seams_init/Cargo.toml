@@ -285,6 +285,7 @@ pg_prewarm = { path = "../../contrib/pg_prewarm" }
 ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 pgvector = { path = "../../contrib/pgvector" }
+pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
