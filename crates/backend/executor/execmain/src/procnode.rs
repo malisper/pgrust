@@ -183,6 +183,9 @@ pub struct AggPlanState<'mcx> {
     /// Lane-v2 staged join-feed replay slot, memoized across rescan rebuilds
     /// (a fresh extra slot per rebuild would grow es_tupleTable per rescan).
     pub lane_stage_slot: Option<::executils::ExecSlotId>,
+    /// Lane-v2 expression-group-key state (projected-scan builds), memoized
+    /// with the choice; all logic lives in `lanev2::exprkey`.
+    pub lane_exprkey: Option<Box<crate::lanev2::ExprKeyState>>,
 }
 
 // The WindowAgg node's outer child lives here (nodesort/nodeagg precedent).
@@ -859,7 +862,7 @@ pub fn exec_init_node<'mcx>(
             let agg = ::nodeagg::exec_init_agg(agg_plan, estate, eflags, desc, Some(outer_desc))?;
             PlanStateNode::Agg(::mcx::alloc_in(
                 mcx,
-                AggPlanState { agg, outer, lane_choice: None, lane_stage_slot: None },
+                AggPlanState { agg, outer, lane_choice: None, lane_stage_slot: None, lane_exprkey: None },
             )?)
         }
         NodeTag::T_WindowAgg => {
@@ -1572,7 +1575,7 @@ fn agg_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let aps = &mut **aps;
-    let AggPlanState { agg, outer, lane_choice, lane_stage_slot } = aps;
+    let AggPlanState { agg, outer, lane_choice, lane_stage_slot, lane_exprkey } = aps;
     match outer {
         PlanStateNode::SeqScan(ss) => {
             // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
@@ -1585,6 +1588,7 @@ fn agg_arm<'mcx>(
                         ss,
                         lane_choice,
                         lane_stage_slot,
+                        lane_exprkey,
                         estate,
                     )?
                 {
@@ -2828,13 +2832,15 @@ fn release_owned(node: &mut PlanStateNode<'_>) {
             gm.state.tuple_buffers_release();
         }
         PlanStateNode::HashJoin(hj) => hj.probe_batch.filter = None,
+        // Exempt lane_exprkey: heap-owned census/scratch (+ the dicteval
+        // memo arena) released here; the arena reset must not forget it.
+        PlanStateNode::Agg(a) => a.lane_exprkey = None,
         PlanStateNode::LockRows(_)
         | PlanStateNode::Append(_)
         | PlanStateNode::MergeAppend(_)
         | PlanStateNode::SetOp(_)
         | PlanStateNode::RecursiveUnion(_)
         | PlanStateNode::IncrementalSort(_)
-        | PlanStateNode::Agg(_)
         | PlanStateNode::BitmapIndexScan(_)
         | PlanStateNode::BitmapAnd(_)
         | PlanStateNode::BitmapOr(_)
@@ -3542,7 +3548,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     ModifyTablePlanState<'_> { mt, subplan, epq },
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
-    AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot },
+    AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot; lane_exprkey },
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },

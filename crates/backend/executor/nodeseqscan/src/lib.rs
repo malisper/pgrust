@@ -874,94 +874,40 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
     }
 }
 
-/// Dict-GROUP columnar arm (cbstore-v2 plan Stage 2.1 — dict-code
-/// execution): arm the SoA staging for a lane agg feed whose (single)
-/// grouping key is column `key` of a cbstore scan, with `dict_want` set on
-/// the key so the AM's batch fill answers dict-encoded windows as
-/// codes+dict (zero decode) for the feed's per-epoch code grouping. The
-/// plan is the OFFSET-FREE columnar plan (`SoaDeformPlan::columnar`) —
-/// cbstore's `batch_deform` stages decoded Datums per column and never
-/// reads tuple offsets, so varlena columns (the text grouping key) are
-/// stageable where the heap fixed-width-prefix plan refuses.
-/// Windows whose key chunk is NOT dict-encoded fill Raw (real Datums in the
-/// key lane) — the consumer takes `dict_lane(key) == None` as "this window
-/// is Raw", per the `set_dict_want` contract.
-///
-/// Idempotent: a matching armed batch is kept (PREWHERE may have installed
-/// its lane qual on it in between — the dict-group registration survives,
-/// and the post-qual gather-to-Raw skips the registered column). Refuses —
-/// fail-open to the per-row paths — when another staging consumer owns the
-/// batch (sort key feed / varkey staging).
-/// Plain COLUMNAR staging arm for a cbstore scan (the multi-key packed
-/// feed's pure-int shapes): the dict-group arm's offset-free columnar plan
-/// WITHOUT a dict-lane registration — every staged column fills as decoded
-/// Datums, so varlena columns inside the prefix (which the heap fixed-width
-/// plan refuses) stage fine. Same idempotence/conflict rules as the
-/// dict-group arm; fail-open to the per-row paths.
-pub fn seq_scan_cb_columnar_arm<'mcx>(
-    node: &mut SeqScanState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    prefix: i32,
-) -> bool {
-    if node.cb_scan.is_none() || prefix <= 0 {
-        return false;
-    }
-    if let Some(b) = node.batch_soa.as_deref_mut() {
-        // An existing staging that covers the ask serves it (PREWHERE lane,
-        // dict-group co-arm, or an earlier columnar arm).
-        if b.plan.ncols() as i32 >= prefix && b.key_col.is_none() && b.varkey.is_none() {
-            return true;
-        }
-        if b.key_col.is_some() || b.varkey.is_some() {
-            return false;
-        }
-    }
-    let mcx = estate.es_query_cxt;
-    let Some(plan) = ::exectuples::SoaDeformPlan::columnar(mcx, prefix as usize) else {
-        return false;
-    };
-    let soa = ::exectuples::SoaBatch::new_in(mcx, plan.ncols());
-    node.batch_soa = Some(::mcx::PgBox::new_in(
-        BatchSoa {
-            soa,
-            plan,
-            qual_armed: false,
-            qual_only: false,
-            key_col: None,
-            varkey: None,
-            key_read_col: 0,
-            publish: false,
-            quals: [(0, ::execexpr::CmpOp::Int4Eq, ::datum::Datum::null());
-                ::execexpr::SCAN_CMP_MAX_CLAUSES],
-            nquals: 0,
-            stitch: None,
-            proj: None,
-            lane: None,
-            lane_requal: false,
-            dict_group: None,
-            contains: None,
-            sel: [0; ::exectuples::SOA_BM_WORDS],
-            nwords: 0,
-            cur_word: 0,
-            cur_bits: 0,
-        },
-        mcx,
-    ));
-    lane_trace("cbstore columnar staging armed");
-    true
-}
-
 pub fn seq_scan_cb_dictgroup_arm<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     prefix: i32,
     key: u16,
 ) -> bool {
-    if node.cb_scan.is_none() || prefix <= 0 || (key as i32) >= prefix {
+    seq_scan_cb_columnar_arm(node, estate, prefix, Some(key))
+}
+
+/// The dict-group columnar arm generalized over the dict registration
+/// (expr-key grouping tranche): `dict_key = None` arms the same offset-free
+/// columnar staging with NO column opted into dict lanes — every window
+/// fills decoded Datums (the expr-key ARITH class over cbstore, whose
+/// grouping-key inputs may sit past varlena columns the heap fixed-width
+/// prefix plan refuses). `Some(key)` is `seq_scan_cb_dictgroup_arm` exactly.
+pub fn seq_scan_cb_columnar_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    prefix: i32,
+    dict_key: Option<u16>,
+) -> bool {
+    if node.cb_scan.is_none() || prefix <= 0 {
         return false;
     }
+    if let Some(key) = dict_key {
+        if (key as i32) >= prefix {
+            return false;
+        }
+    }
     if let Some(b) = node.batch_soa.as_deref_mut() {
-        if b.dict_group == Some(key) && b.plan.ncols() as i32 >= prefix {
+        // Idempotent: a matching armed batch is kept (a dict-free ask is
+        // served by ANY covering staging — the dict registration, if one
+        // exists, belongs to a co-resident consumer).
+        if b.plan.ncols() as i32 >= prefix && b.dict_group == dict_key {
             return true;
         }
         if b.key_col.is_some() || b.varkey.is_some() {
@@ -972,8 +918,10 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
         // fill answers the key as codes+dict from the next window on; the
         // gather-to-Raw skip keeps the codes up past the qual).
         if b.lane.is_some() && b.plan.ncols() as i32 >= prefix {
-            b.soa.set_dict_want(key);
-            b.dict_group = Some(key);
+            if let Some(key) = dict_key {
+                b.soa.set_dict_want(key);
+                b.dict_group = Some(key);
+            }
             return true;
         }
     }
@@ -982,7 +930,9 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
         return false;
     };
     let mut soa = ::exectuples::SoaBatch::new_in(mcx, plan.ncols());
-    soa.set_dict_want(key);
+    if let Some(key) = dict_key {
+        soa.set_dict_want(key);
+    }
     node.batch_soa = Some(::mcx::PgBox::new_in(
         BatchSoa {
             soa,
@@ -1001,7 +951,7 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
-            dict_group: Some(key),
+            dict_group: dict_key,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1009,8 +959,24 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
         },
         mcx,
     ));
-    lane_trace("cbstore dict-group staging armed");
+    lane_trace(if dict_key.is_some() {
+        "cbstore dict-group staging armed"
+    } else {
+        "cbstore columnar staging armed"
+    });
     true
+}
+
+/// Materialize a dict-answered column's lane into its Raw Datum cells for the
+/// CURRENT staged batch (`SoaBatch::gather_dict_lane` — byte-identical to the
+/// filler's own Raw fill), clearing the lane. The expr-key feed calls this
+/// AFTER its per-code key derivation so fold/resid consumers can read the
+/// same column's decoded values. No-op when the window answered Raw.
+#[inline]
+pub fn seq_scan_batch_gather_dict(node: &mut SeqScanState<'_>, c: usize) {
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.soa.gather_dict_lane(c);
+    }
 }
 
 /// The registered dict-group consumer column, when the dict-group arm (or a

@@ -290,9 +290,17 @@ pub(super) enum RefuseReason {
     /// component, or an unstageable key column. Mode-choice observability
     /// inside a still-lane-owned build; ticked once per build decision.
     MultiKeyShape = 32,
+    /// Expression-group-key feed (expr-key tranche): the offered projected
+    /// hash-agg-over-scan shape cannot host a computed grouping key — census
+    /// outside the vocabulary (multi-key / multiple computed columns /
+    /// non-admitted fns), an unmappable transition/needed column, a
+    /// non-hostable probe kernel, or an unarmable staging prefix. Ticked once
+    /// per memoized agg-lane choice; the build stays on the per-row breaker
+    /// feed (byte-identical).
+    ExprKeyShape = 33,
 }
 
-const N_REASONS: usize = 33;
+const N_REASONS: usize = 34;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -330,6 +338,7 @@ impl RefuseReason {
             RefuseReason::QualNotVectorizable => "qual-not-vectorizable",
             RefuseReason::CountOnlyCensus => "count-only-census",
             RefuseReason::MultiKeyShape => "multikey-shape",
+            RefuseReason::ExprKeyShape => "exprkey-shape",
         }
     }
 
@@ -369,6 +378,7 @@ impl RefuseReason {
             QualNotVectorizable,
             CountOnlyCensus,
             MultiKeyShape,
+            ExprKeyShape,
         ][i]
     }
 }

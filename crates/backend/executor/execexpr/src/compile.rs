@@ -4537,6 +4537,9 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     // the walk bails on the first non-matching step.
     if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL == 0 {
         state.scan_proj_cols = select_scan_proj_cols(state);
+        // Expr-key census (lane-v2 expression group keys): same PRISTINE-
+        // program requirement; bails on the first non-matching step.
+        state.scan_proj_expr_key = select_scan_proj_expr_key(state);
     }
     // Kernelized programs never run their steps: skipping the peephole keeps
     // compile-per-query lanes (point/select1) free of the pass cost.
@@ -5342,6 +5345,146 @@ fn select_scan_proj_cols(state: &ExprState<'_>) -> Option<crate::steps::ScanProj
         out.n += 1;
     }
     (out.n >= 1).then_some(out)
+}
+
+/// Expression-group-key census (lane-v2 expr-key grouping): the projection
+/// program as a FETCHSOME(scan) prefix followed by per-column units in
+/// resultnum order — `AssignScanVar` (Var passthrough) for every column but
+/// EXACTLY ONE, which is a chain of strict fmgr calls over one scan Var
+/// (`ScanVar` -> FUNCEXPR_STRICT* -> `AssignTmp`), each call's other args
+/// compile-time non-null Consts. Fail-closed like the censuses above; runs
+/// on the PRISTINE program. Structural only — the consumer re-gates every
+/// fn oid against pg_proc (IMMUTABLE / internal-language / strict).
+fn select_scan_proj_expr_key(state: &ExprState<'_>) -> Option<crate::steps::ScanProjExprKey> {
+    use crate::steps::{
+        ProjKeyCall, ScanProjExprKey, PROJ_KEY_MAX_ARGS, PROJ_KEY_MAX_CALLS, SCAN_PROJ_MAX_COLS,
+    };
+    let steps = state.steps.as_slice();
+    let done = steps.len().checked_sub(1)?;
+    if !matches!(steps[done], Step::DoneReturn | Step::DoneNoReturn) {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < done {
+        let Some(src) = fetch_src(&steps[i]) else { break };
+        if src != SlotSrc::Scan {
+            return None;
+        }
+        i += 1;
+    }
+    let empty_call = ProjKeyCall {
+        fn_oid: 0,
+        collation: 0,
+        var_argno: 0,
+        nargs: 0,
+        args: [::datum::NullableDatum::null(); PROJ_KEY_MAX_ARGS],
+    };
+    let mut out = ScanProjExprKey {
+        cols: [None; SCAN_PROJ_MAX_COLS],
+        n: 0,
+        key_out: 0,
+        input_col: 0,
+        input_type: 0,
+        ncalls: 0,
+        calls: [empty_call; PROJ_KEY_MAX_CALLS],
+    };
+    let mut have_key = false;
+    while i < done {
+        if out.n as usize == SCAN_PROJ_MAX_COLS {
+            return None;
+        }
+        let idx = out.n as u16;
+        match &steps[i] {
+            Step::AssignScanVar { attnum, resultnum } if *resultnum == idx => {
+                out.cols[out.n as usize] = Some(*attnum);
+                i += 1;
+            }
+            Step::ScanVar { attnum, vartype, out: vout } if !have_key => {
+                out.input_col = *attnum;
+                out.input_type = *vartype;
+                out.key_out = idx;
+                let mut prev_out = *vout;
+                let mut ncalls = 0usize;
+                loop {
+                    match steps.get(i + 1 + ncalls).filter(|_| i + 1 + ncalls < done) {
+                        Some(
+                            Step::FuncExprStrict1 { call, out: fout }
+                            | Step::FuncExprStrict2 { call, out: fout }
+                            | Step::FuncExprStrict { call, out: fout },
+                        ) => {
+                            if ncalls == PROJ_KEY_MAX_CALLS {
+                                return None;
+                            }
+                            let frame = &state.frames[call.frame as usize];
+                            let nargs = frame.nargs as usize;
+                            if nargs == 0 || nargs > PROJ_KEY_MAX_ARGS {
+                                return None;
+                            }
+                            // Which arg does the inner value feed?
+                            let mut var_argno = None;
+                            for a in 0..nargs {
+                                if prev_out.0 == frame.arg_slot(a) {
+                                    var_argno = Some(a);
+                                    break;
+                                }
+                            }
+                            let Some(va) = var_argno else { return None };
+                            // Every sibling must be a compile-time non-null
+                            // Const, prefilled in its arg slot.
+                            let mut args = [::datum::NullableDatum::null(); PROJ_KEY_MAX_ARGS];
+                            for a in 0..nargs {
+                                if a == va {
+                                    continue;
+                                }
+                                if frame.const_args & (1 << a) == 0
+                                    || frame.const_null_args & (1 << a) != 0
+                                {
+                                    return None;
+                                }
+                                // SAFETY: const arg slot was written at
+                                // compile and never re-targeted.
+                                args[a] = unsafe { frame.arg_slot(a).read() };
+                            }
+                            // SAFETY: frame-owned mcx-boxed FmgrInfo,
+                            // read-only here.
+                            let fn_oid = unsafe { frame.flinfo.as_ref() }.fn_oid;
+                            out.calls[ncalls] = ProjKeyCall {
+                                fn_oid,
+                                collation: frame.collation(),
+                                var_argno: va as u8,
+                                nargs: nargs as u8,
+                                args,
+                            };
+                            prev_out = *fout;
+                            ncalls += 1;
+                        }
+                        // Varlena-typed tlist expressions assign via
+                        // ASSIGN_TMP_MAKE_RO (C ExecBuildProjectionInfo's
+                        // typlen == -1 arm); MakeReadOnly is identity on the
+                        // flat varlena results the admitted internal-builtin
+                        // chains produce (fmgr results, never expanded).
+                        Some(
+                            Step::AssignTmp { resultnum }
+                            | Step::AssignTmpMakeRo { resultnum },
+                        ) if ncalls > 0 => {
+                            if *resultnum != idx || !state.is_result(prev_out) {
+                                return None;
+                            }
+                            out.ncalls = ncalls as u8;
+                            have_key = true;
+                            i += 1 + ncalls + 1;
+                            break;
+                        }
+                        _ => return None,
+                    }
+                }
+                out.cols[out.n as usize] = None;
+            }
+            _ => return None,
+        }
+        out.n += 1;
+    }
+    have_key.then_some(out)
 }
 
 // ===========================================================================
