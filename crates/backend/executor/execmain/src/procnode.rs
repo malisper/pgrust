@@ -1473,6 +1473,13 @@ fn index_scan_arm<'mcx>(
     is: &mut ::nodeindexscan::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: on refuse this falls through to the
+    // UNCHANGED per-tuple path. All lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_index_scan(is, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeindexscan::exec_index_scan(is, estate)
 }
 
@@ -1497,6 +1504,13 @@ fn index_only_scan_arm<'mcx>(
     ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: falls through to the UNCHANGED per-tuple
+    // path on refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_index_only_scan(ios, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeindexonlyscan::exec_index_only_scan(ios, estate)
 }
 
@@ -2073,6 +2087,14 @@ fn bitmap_heap_scan_arm<'mcx>(
     let b = &mut **b;
     if !b.scan.initialized {
         bitmap_table_scan_setup_dispatch(b, estate)?;
+    }
+    // Lane-executor-v2 dispatch hook: the bitmap is now built, so the lane may
+    // own the heap-scan drive. Falls through to the UNCHANGED per-tuple path on
+    // refuse. Lane logic + refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_bitmap_heap_scan(&mut b.scan, estate)? {
+            return Ok(r);
+        }
     }
     ::nodebitmapheapscan::exec_bitmap_heap_scan(&mut b.scan, estate)
 }

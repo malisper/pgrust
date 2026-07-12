@@ -149,3 +149,252 @@ fn drive_seq_scan<'mcx>(
         }
     }
 }
+
+// ===========================================================================
+// IndexScan ownership (Phase 1 breadth). Mirrors the SeqScan lane above,
+// driving the SAME batch primitives the fused-agg path uses
+// (`index_scan_next_tidrun` / `index_scan_batch_fetch`). The admitted shape is
+// deliberately narrow — no qual, no projection, no runtime keys, forward btree
+// — so the node's output is exactly the stored scan tuple: `exec_index_scan`
+// over that shape is `exec_scan_extended::<false,false>` (reset ctx, fetch,
+// return the scan slot). Same visible tuples, same index order → BYTE-IDENTICAL.
+// ===========================================================================
+
+/// Try to let the lane own an `IndexScan`. `Some` = lane drove this call;
+/// `None` = refused (caller runs the unchanged `exec_index_scan`).
+#[inline]
+pub fn try_own_index_scan<'mcx>(
+    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !index_scan_fusible(is, estate) {
+        return Ok(None);
+    }
+    Ok(Some(drive_index_scan(is, estate)?))
+}
+
+/// Refuse-set for the lane-v2 IndexScan driver. Admits only the shape the
+/// fused-agg index arm admits (no qual / no projection / no runtime keys /
+/// forward index order / btree AM / MVCC), plus the lane-specific disarms:
+/// EPQ, a non-forward call, a scrollable/backward or mergejoin-mark cursor
+/// (`!batch_allowed` — mark/restore + backward desync the tidrun cursor),
+/// parallel, EXPLAIN ANALYZE (instrumented), and any amcanorderbyop reorder
+/// (`iss_OrderBy`) which the tidrun path does not reorder.
+fn index_scan_fusible<'mcx>(
+    is: &::nodeindexscan::IndexScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !is.batch_allowed()
+        || is.iss_ParallelAware
+        || is.ss.instr_idx.is_some()
+    {
+        return false;
+    }
+    // Same-block tidrun batching is only sound under an MVCC snapshot (matches
+    // the fused-agg gate; non-MVCC keeps the per-tuple path).
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        return false;
+    }
+    is.ss.qual.is_none()
+        && is.ss.ps_ProjInfo.is_none()
+        && is.iss_Runtime.is_none()
+        && is.iss_OrderBy.is_none()
+        && ::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir)
+        && is
+            .iss_RelationDesc
+            .as_ref()
+            .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+}
+
+/// The lane's IndexScan drive. Stages a same-block TID run
+/// (`index_scan_next_tidrun`) and replays it one visible tuple per call
+/// (`index_scan_batch_fetch`, sequential: entry `i>0` advances the AM cursor,
+/// so the run is consumed 0,1,2,… without gaps). No qual/projection → the
+/// emitted slot is the stored scan tuple. The run cursor lives on the node
+/// (`IndexScanState::lane_cursor`) to survive the Volcano call boundary.
+fn drive_index_scan<'mcx>(
+    is: &mut ::nodeindexscan::IndexScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    let scan_id = is.ss.ss_ScanTupleSlot;
+    loop {
+        let (mut pos, mut n) = is.lane_cursor();
+        if pos >= n {
+            // `index_scan_next_tidrun` runs `check_for_interrupts` per run,
+            // matching the fused-agg drive this reuses.
+            n = ::nodeindexscan::index_scan_next_tidrun(is, estate)?;
+            pos = 0;
+            is.set_lane_cursor(pos, n);
+            if n == 0 {
+                return Ok(None);
+            }
+        }
+        let i = pos;
+        is.set_lane_cursor(pos + 1, n);
+        if ::nodeindexscan::index_scan_batch_fetch(is, estate, i)? {
+            return Ok(Some(scan_id));
+        }
+    }
+}
+
+// ===========================================================================
+// IndexOnlyScan ownership. `index_only_scan_batch_next` advances to the next
+// VISIBLE index tuple (VM probe / heap fallback / predicate lock — C's
+// IndexOnlyNext order) and returns 0 or 1; `index_only_scan_batch_store`
+// stages `xs_itup` into the scan slot. One tuple per call, so the drive is
+// stateless across the Volcano boundary (no cursor). Narrow shape (no qual /
+// no projection / no runtime keys / forward btree) → the output is the stored
+// scan tuple, identical to `exec_index_only_scan`.
+// ===========================================================================
+
+/// Try to let the lane own an `IndexOnlyScan`.
+#[inline]
+pub fn try_own_index_only_scan<'mcx>(
+    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !index_only_scan_fusible(ios, estate) {
+        return Ok(None);
+    }
+    Ok(Some(drive_index_only_scan(ios, estate)?))
+}
+
+/// Refuse-set for the lane-v2 IndexOnlyScan driver (mirrors the fused-agg IOS
+/// arm + the lane disarms). `!batch_allowed` refuses a scrollable/backward or
+/// mergejoin-mark cursor; `ioss_OrderByKeys` non-empty refuses amcanorderbyop
+/// (distance-ordered) scans.
+fn index_only_scan_fusible<'mcx>(
+    ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !ios.batch_allowed()
+        || ios.ioss_ParallelAware
+        || ios.ss.instr_idx.is_some()
+    {
+        return false;
+    }
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        return false;
+    }
+    ios.ss.qual.is_none()
+        && ios.ss.ps_ProjInfo.is_none()
+        && ios.ioss_Runtime.is_none()
+        && ios.ioss_OrderByKeys.is_empty()
+        && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
+        && ios
+            .ioss_RelationDesc
+            .as_ref()
+            .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
+}
+
+/// The lane's IndexOnlyScan drive: one visible index tuple per call.
+fn drive_index_only_scan<'mcx>(
+    ios: &mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    // `index_only_scan_batch_next` runs `check_for_interrupts` per tuple.
+    let n = ::nodeindexonlyscan::index_only_scan_batch_next(ios, estate)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    debug_assert_eq!(n, 1);
+    ::nodeindexonlyscan::index_only_scan_batch_store(ios, estate)?;
+    Ok(Some(ios.ss.ss_ScanTupleSlot))
+}
+
+// ===========================================================================
+// BitmapHeapScan ownership. The bitmap must be built before the drive — the
+// dispatch hook keeps the arm's existing `bitmap_table_scan_setup_dispatch`
+// call, then offers the (already-initialized) scan to the lane. The drive
+// mirrors the SeqScan lane over the page-batch primitives
+// (`bitmap_scan_next_pagebatch` / `bitmap_scan_batch_fetch`, random-access by
+// `i`); `bitmap_scan_batch_fetch` applies the page recheck (`bitmapqualorig`)
+// internally on lossy/recheck pages, exactly as `BitmapHeapNext` does. Narrow
+// shape (no scan qual / no projection) → the output is the stored scan tuple.
+// ===========================================================================
+
+/// Try to let the lane own a `BitmapHeapScan`. The caller must have already
+/// run the bitmap setup (the arm does, unconditionally, before this).
+#[inline]
+pub fn try_own_bitmap_heap_scan<'mcx>(
+    bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !bitmap_heap_scan_fusible(bhs, estate) {
+        return Ok(None);
+    }
+    Ok(Some(drive_bitmap_heap_scan(bhs, estate)?))
+}
+
+/// Refuse-set for the lane-v2 BitmapHeapScan driver (mirrors the fused-agg
+/// bitmap arm: no scan qual / no projection). Disarms EPQ, non-forward,
+/// parallel (aware or a worker attached to shared state), and EXPLAIN ANALYZE.
+/// Also refuses when the page recheck qual (`bitmapqualorig`) carries a subplan
+/// or exec-param — the recheck runs a plain `exec_qual` that evaluates neither.
+/// Bitmap scans are never scrollable/mark cursors (planner-guaranteed; a SCROLL
+/// cursor gets a Material parent), so no eflags gate is needed. Bitmap init
+/// asserts an MVCC snapshot, so that is implicit.
+fn bitmap_heap_scan_fusible<'mcx>(
+    bhs: &::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> bool {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || bhs.parallel_aware
+        || bhs.pstate.is_some()
+        || bhs.ss.instr_idx.is_some()
+    {
+        return false;
+    }
+    if bhs
+        .bitmapqualorig
+        .as_deref()
+        .is_some_and(|q| q.has_subplan() || !q.param_exec_deps().is_empty())
+    {
+        return false;
+    }
+    bhs.ss.qual.is_none() && bhs.ss.ps_ProjInfo.is_none()
+}
+
+/// The lane's BitmapHeapScan drive. Stages the next page's tuples
+/// (`bitmap_scan_next_pagebatch`) and emits each surviving row
+/// (`bitmap_scan_batch_fetch`, which applies the page recheck on lossy pages).
+/// The page-batch cursor lives on the node (`BitmapHeapScanState::lane_cursor`).
+fn drive_bitmap_heap_scan<'mcx>(
+    bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+    let scan_id = bhs.ss.ss_ScanTupleSlot;
+    loop {
+        let (mut pos, mut n) = bhs.lane_cursor();
+        if pos >= n {
+            // `bitmap_scan_next_pagebatch` runs `check_for_interrupts` per page.
+            n = ::nodebitmapheapscan::bitmap_scan_next_pagebatch(bhs, estate)?;
+            pos = 0;
+            bhs.set_lane_cursor(pos, n);
+            if n == 0 {
+                return Ok(None);
+            }
+        }
+        let i = pos;
+        bhs.set_lane_cursor(pos + 1, n);
+        if ::nodebitmapheapscan::bitmap_scan_batch_fetch(bhs, estate, i)? {
+            return Ok(Some(scan_id));
+        }
+    }
+}

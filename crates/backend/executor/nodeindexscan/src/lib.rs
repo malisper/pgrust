@@ -34,6 +34,7 @@ use ::types_scan::scankey::{
     SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
+use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 
 pub fn init_seams() {}
 
@@ -94,6 +95,16 @@ pub struct IndexScanState<'mcx> {
     // Plan's indexid, kept for skeleton re-open (iss_RelationDesc is closed
     // while parked).
     pub iss_IndexOid: ::types_core::Oid,
+    // Lane-executor-v2 (`execmain::lanev2`): forward, non-mark eflags at init.
+    // False for a scrollable/backward or mergejoin-mark cursor — the lane's
+    // sequential tidrun drive can't survive backward fetch or mark/restore, so
+    // it refuses these. Default false (refuse); set by `exec_init_index_scan`.
+    batch_allowed: bool,
+    // Lane-executor-v2 tidrun cursor `(pos, n)` over the currently-staged
+    // same-block TID run; stored across the Volcano per-call boundary. The
+    // drive lives in the `lanev2` module. Reset on rescan/park.
+    lane_pos: u32,
+    lane_n: u32,
 }
 
 /// `cmp_orderbyvals` (nodeIndexscan.c): raw ssup comparator, NULLS LAST only
@@ -199,6 +210,26 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
 }
 
 impl<'mcx> IndexScanState<'mcx> {
+    /// Lane-executor-v2: forward, non-mark eflags at init (false for a
+    /// scrollable/backward or mergejoin-mark cursor).
+    #[inline]
+    pub fn batch_allowed(&self) -> bool {
+        self.batch_allowed
+    }
+
+    /// Lane-executor-v2 tidrun cursor `(pos, n)`; the drive lives in `lanev2`,
+    /// this only stores its position across the Volcano per-call boundary.
+    #[inline]
+    pub fn lane_cursor(&self) -> (u32, u32) {
+        (self.lane_pos, self.lane_n)
+    }
+
+    #[inline]
+    pub fn set_lane_cursor(&mut self, pos: u32, n: u32) {
+        self.lane_pos = pos;
+        self.lane_n = n;
+    }
+
     #[inline(never)]
     fn open_scandesc(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         let mcx = estate.es_query_cxt;
@@ -485,13 +516,18 @@ pub fn exec_init_index_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &IndexScan<'mcx>,
     estate: &mut EStateData<'mcx>,
-    _eflags: i32,
+    eflags: i32,
 ) -> PgResult<IndexScanState<'mcx>> {
     let rel = estate
         .exec_get_range_table_relation(node.scan.scanrelid, false)?
         .alias();
     let index_rel = indexam::index_open(mcx, node.indexid, index_lockmode(estate, node.scan.scanrelid))?;
-    exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)
+    let mut state = exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)?;
+    // Lane-executor-v2: the batched tidrun drive is forward-only and can't
+    // survive mark/restore, so forbid it for a scrollable/backward or
+    // mergejoin-mark cursor. Byte-identity-safe (the lane just refuses).
+    state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
+    Ok(state)
 }
 
 // C opens scan indexes with the RTE's rellockmode unconditionally
@@ -580,6 +616,11 @@ pub fn exec_init_index_scan_rel<'mcx>(
         iss_OrderDir: order_dir(node.indexorderdir),
         iss_PlanNodeId: node.scan.plan.plan_node_id,
         iss_ParallelAware: node.scan.plan.parallel_aware,
+        // Default refuse; `exec_init_index_scan` sets it from eflags. Direct
+        // `_rel` callers (tests) keep the lane disarmed.
+        batch_allowed: false,
+        lane_pos: 0,
+        lane_n: 0,
     })
 }
 
@@ -951,6 +992,9 @@ pub fn skeleton_park(node: &mut IndexScanState<'_>) -> PgResult<()> {
         index_close(index_rel, NoLock)?;
     }
     node.ss.ss_currentRelation = None;
+    // Lane-executor-v2: drop any staged tidrun position across the park.
+    node.lane_pos = 0;
+    node.lane_n = 0;
     if let Some(rt) = node.iss_Runtime.as_deref_mut() {
         rt.ready = false;
     }
@@ -991,6 +1035,9 @@ pub fn exec_rescan_index_scan<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // Lane-executor-v2: the staged tidrun is stale after rescan.
+    node.lane_pos = 0;
+    node.lane_n = 0;
     if let Some(rt) = node.iss_Runtime.as_deref_mut() {
         estate.reset_expr_context(rt.ecxt);
         let (scan_keys, orderby_keys) = (
@@ -1206,7 +1253,8 @@ pub fn exec_index_scan_initialize_worker<'mcx>(
 // is no-drop, const-proven below.
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
-    IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware, iss_IndexOid;
+    IndexScanState<'_> { ss, iss_PlanNodeId, iss_ParallelAware, iss_IndexOid,
+        batch_allowed, lane_pos, lane_n;
         indexqualorig, iss_ScanDesc, iss_RelationDesc, iss_ScanKeys, iss_Runtime,
         iss_OrderBy, iss_OrderDir },
 );
