@@ -1238,7 +1238,9 @@ fn fc_gbt_numeric_penalty(f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let ok = var::key_readable(org);
     let uk = var::key_readable(&uni);
 
-    let num = |v: &[u8]| nm::Num::from_payload(&v[VARHDRSZ..]);
+    fn num(v: &[u8]) -> adt_numeric::Num<'_> {
+        adt_numeric::Num::from_payload(&v[VARHDRSZ..])
+    }
     let us = nm::numeric_sub_common(num(uk.upper), num(uk.lower))?;
     let os = nm::numeric_sub_common(num(ok.upper), num(ok.lower))?;
     let ds = nm::numeric_sub_common(us.num(), os.num())?;
