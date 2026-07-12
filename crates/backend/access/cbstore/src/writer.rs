@@ -961,3 +961,66 @@ mod dict_sort_tests {
         assert_eq!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
     }
 }
+
+#[cfg(test)]
+mod lz4_decode_seat_tests {
+    // Differential coverage of the lz4dec decoder IN ITS REAL SEAT: chunks
+    // that the writer admits to Lz4Text / Lz4Dict, decoded back through
+    // ChunkView::decode_granule (reader.rs), values compared byte-for-byte.
+    use super::*;
+    use crate::reader::ChunkView;
+
+    fn tb_of_owned(rows: &[Vec<u8>]) -> TextBuilder {
+        let mut tb = TextBuilder { offs: Vec::new(), blob: Vec::new() };
+        for r in rows {
+            tb.offs.push((tb.blob.len() as u32, r.len() as u32));
+            tb.blob.extend_from_slice(r);
+        }
+        tb
+    }
+
+    fn decode_all(body: &[u8], n: usize) -> Vec<Vec<u8>> {
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        let cv = ChunkView::at(body, 0, n as u32);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut got = Vec::with_capacity(n);
+        for g in 0..hdr.ngranules as usize {
+            cv.decode_granule(g, &mut out, &mut dict, &mut arena);
+            for d in &out {
+                got.push(crate::varlena_bytes(*d).unwrap().to_vec());
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn lz4text_granule_decode_roundtrip() {
+        // All-distinct compressible rows across a partial final granule:
+        // dict loses (ndv == n), LZ4 wins >= 10% -> Lz4Text, whose granule
+        // frames decode through lz4dec.
+        let n = GRANULE_ROWS + 37;
+        let rows: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
+            .collect();
+        let mut body = Vec::new();
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32);
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
+        assert_eq!(decode_all(&body, n), rows);
+    }
+
+    #[test]
+    fn lz4dict_granule_decode_roundtrip() {
+        // Repeated compressible entries: dict wins, dict blob compresses
+        // >= 10% -> Lz4Dict; build_dict decompresses the blob through lz4dec.
+        let n = GRANULE_ROWS + 11;
+        let rows: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
+            .collect();
+        let mut body = Vec::new();
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32);
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
+        assert_eq!(decode_all(&body, n), rows);
+    }
+}
