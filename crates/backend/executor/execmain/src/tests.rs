@@ -32,6 +32,9 @@ fn install_seams() {
         crate::init_seams();
         xact::init_seams();
         backend_status_seams::pgstat_report_query_id::set(|_, _| {});
+        // Lane-v2 is on by default (2026-07-14); its per-batch CFI goes
+        // through this seam, so the fake-heap end-to-end tests need it.
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
         syscache_seams::lookup_pg_type_shape::set(|typid| {
             Ok(match typid {
                 INT4OID => Some(PgTypeShape {

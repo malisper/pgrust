@@ -101,7 +101,9 @@ struct LaneFold<'mcx> {
 // duplicated because nodeagg cannot depend on execmain (crate cycle).
 fn lane_v2_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("1") | Ok("on")))
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2").as_deref(), Ok("0") | Ok("off"))
+    })
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
