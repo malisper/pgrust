@@ -18,6 +18,7 @@ types_nodes = { path = "../../../_support/types/nodes" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 varlena = { path = "../../utils/adt/varlena" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
+mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
 lanereg = { path = "../lanereg" }

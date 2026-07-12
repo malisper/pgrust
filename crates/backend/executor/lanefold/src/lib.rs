@@ -17,7 +17,12 @@
 //   strict NULL-init transfns, all TYPE-level non-erroring. Tier 3 adds
 //   MIN/MAX(text/varchar/bpchar) under the memcmp collation tier (C/POSIX
 //   only) with a per-batch inline-varlena proof (vguards) and C's exact
-//   datumCopy-into-aggcontext transvalue discipline.
+//   datumCopy-into-aggcontext transvalue discipline. The strlenfold tier
+//   (lane-v2-strlenfold, CB Q28) adds the int4 SUM/AVG/MIN/MAX/bit kinds
+//   over `length(text Var)` / `octet_length(text Var)` — Var-pointer-backed
+//   integer lane widths (VarLenBytes/VarLenChars) whose kernels read the
+//   char/byte count straight off the inline payload (uguard-proven exact
+//   for UTF-8), never materializing per-row result datums.
 // - The TYPE-level non-erroring proof (`safe_interval`/`type_proof`): an
 //   admitted expression is only folded unchecked when every value of the
 //   Var's type width provably lands inside int4 — otherwise the admission
@@ -144,6 +149,21 @@ const F_TEXT_SMALLER: Oid = 459;
 const F_BPCHAR_LARGER: Oid = 1063;
 const F_BPCHAR_SMALLER: Oid = 1064;
 
+// String-length fold inputs (lane-v2-strlenfold): the textlen pg_proc family
+// (varlena.c textlen — length/char_length over text, plus the varchar
+// aliases the parser resolves through the binary-coercion relabel) and
+// textoctetlen (octet_length). An int-family transition over
+// `length(text Var)` admits with a Var-pointer-backed integer lane width:
+// the lane holds the varlena datum pointers (str-tier staging, vguarded) and
+// the kernels read each selected row's CHARACTER length straight off the
+// inline payload — no fmgr call, no per-row result datum. bpcharlen (1372)
+// has bcTruelen trailing-blank semantics and stays refused.
+const F_TEXTLEN: [Oid; 4] = [1257, 1317, 1369, 1381];
+const F_TEXTOCTETLEN: Oid = 1374;
+// pg_wchar.h pg_enc: PG_UTF8 = 6 (the only multibyte server encoding the
+// char-count kernel admits — see classify_len_arg).
+const PG_UTF8: i32 = 6;
+
 const F_INT4MUL: Oid = 141;
 const F_INT24MUL: Oid = 170;
 const F_INT42MUL: Oid = 171;
@@ -197,6 +217,20 @@ pub enum LaneWidth {
     // never affine-transformed; every Var-width lane instead carries a vguard
     // (inline-form batch proof) — see LanePlan::vguards.
     Var,
+    // String-length lanes (lane-v2-strlenfold): the lane value is a varlena
+    // datum pointer (vguarded like Var), but the kernels READ it as an
+    // integer — the admitted `length(v)`/`octet_length(v)` result.
+    // VarLenBytes = payload byte count (octet_length under any server
+    // encoding; textlen under a 1-byte-max encoding, text_length's
+    // max_length==1 arm). VarLenChars = UTF-8 character count, computed as
+    // bytes minus continuation bytes; exact-parity with C textlen's pg_mblen
+    // walk is guaranteed by the per-batch uguard proof (valid UTF-8, no
+    // embedded NUL) — see LanePlan::uguards/check_guards. Both are
+    // TYPE-level non-erroring on guard-passed batches (result in
+    // [0, 2^30) ⊂ int4) and admit only as the bare textlen-family FuncExpr
+    // (no affine composition).
+    VarLenBytes,
+    VarLenChars,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -261,6 +295,11 @@ impl LaneWidth {
             LaneWidth::I16 => (i16::MIN as i64, i16::MAX as i64),
             LaneWidth::I32 => (i32::MIN as i64, i32::MAX as i64),
             LaneWidth::I64 => (i64::MIN, i64::MAX),
+            // Length lanes: a varlena payload is < 2^30 bytes (1GB toast
+            // limit), and the char count never exceeds the byte count. Only
+            // reachable through type_proof if a transform admission is ever
+            // extended over length args; today's bare admission never guards.
+            LaneWidth::VarLenBytes | LaneWidth::VarLenChars => (0, (1 << 30) - 1),
             // Datum lanes are never guarded (classify admits them only under
             // TYPE-level-safe folds over bare Vars); Var lanes carry vguards
             // instead of integer intervals.
@@ -377,6 +416,13 @@ pub struct LanePlan<'mcx> {
     // uncompressed) or the whole batch demotes to the checked per-row
     // program (which detoasts compressed/external datums exactly as C does).
     pub vguards: PgVec<'mcx, u16>,
+    // UTF-8 countability proof columns (VarLenChars lanes), deduped, always a
+    // subset of vguards: every selected non-null payload must be valid UTF-8
+    // with no embedded NUL or the whole batch demotes — the predicate under
+    // which the fold's continuation-byte count is bit-equal to C textlen's
+    // pg_mblen walk (stored text is verified server encoding, so a demote
+    // here is corrupt-data territory, never a perf path).
+    pub uguards: PgVec<'mcx, u16>,
     pub cols: PgVec<'mcx, u16>,
     // Transnos classify refused: the caller keeps its checked per-row
     // transition program for these.
@@ -529,12 +575,60 @@ fn str_collation_safe(collid: Oid) -> bool {
             .is_ok_and(|l| l.collate_is_c && l.deterministic)
 }
 
+// textlen-family FuncExpr over a text lane Var (or the varchar
+// binary-coercion relabel): `length(v)`/`char_length(v)` (textlen) and
+// `octet_length(v)` (textoctetlen), int4-result, strict (result NULL-ness ==
+// the Var's NULL-ness), TYPE-level non-erroring on a guard-passed batch. The
+// lane width picks the read kernel by server encoding, resolved ONCE at
+// classify (the database encoding is fixed for the backend's lifetime):
+// octet_length and 1-byte-max-encoding textlen read the payload byte count
+// (text_length's max_length==1 arm — no walk, no NUL stop, cannot error);
+// UTF-8 textlen reads bytes − continuation bytes under the per-batch uguard
+// proof. Every other multibyte encoding refuses (their pg_mblen walks have
+// no vectorizable count), as does a missing encoding seam (test harnesses
+// must install one to admit char-length).
+fn classify_len_arg(expr: Node<'_>) -> Option<(u16, LaneWidth)> {
+    let f = expr.as_func_expr()?;
+    if f.funcretset || f.args.len() != 1 {
+        return None;
+    }
+    let octet = f.funcid == F_TEXTOCTETLEN;
+    if !octet && !F_TEXTLEN.contains(&f.funcid) {
+        return None;
+    }
+    let (col, _) = classify_str_var(f.args.iter().next()?, TEXTOID)?;
+    let width = if octet {
+        LaneWidth::VarLenBytes
+    } else {
+        if !::mbutils_seams::pg_database_encoding_max_length::is_installed()
+            || !::mbutils_seams::get_database_encoding::is_installed()
+        {
+            return None;
+        }
+        if ::mbutils_seams::pg_database_encoding_max_length::call() == 1 {
+            LaneWidth::VarLenBytes
+        } else if ::mbutils_seams::get_database_encoding::call() == PG_UTF8 {
+            LaneWidth::VarLenChars
+        } else {
+            return None;
+        }
+    };
+    Some((col, width))
+}
+
 fn classify_arg(expr: Node<'_>, expected: Oid) -> Option<LaneArg> {
     if let Some((col, width)) = classify_var(expr, expected) {
         return Some(LaneArg { col, width, addend: 0, mulk: 1, divk: 1, guard: None });
     }
     if expected != INT4OID {
         return None;
+    }
+    // Bare textlen-family admission (no affine composition, no integer
+    // guard — the result interval [0, 2^30) is inside int4 by type; the
+    // data-level obligation is the vguard/uguard pair attached per column
+    // in classify()).
+    if let Some((col, width)) = classify_len_arg(expr) {
+        return Some(LaneArg { col, width, addend: 0, mulk: 1, divk: 1, guard: None });
     }
     let op = expr.as_op_expr()?;
     if op.opretset || op.args.len() != 2 {
@@ -780,14 +874,19 @@ pub fn classify_meta<'mcx>(
         // bitwise and/or (not derivable from min/max/sum), and the varlena
         // str tier (text zone entries carry byte lengths).
         let affine = t.divk == 1;
-        let int_minmax = matches!(t.width, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64);
+        // The length widths (VarLenBytes/VarLenChars) are NOT
+        // footer-answerable: their lane value is computed off the varlena
+        // payload, and the part footer carries no length sums (text zone
+        // entries carry byte-length bounds only) — every meta arm below is
+        // integer-lane-only.
+        let int_width = matches!(t.width, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64);
         let kind = match t.kind {
             LaneKind::CountStar | LaneKind::CountAny => MetaKind::Count,
-            LaneKind::Min if plain && int_minmax => MetaKind::Min,
-            LaneKind::Max if plain && int_minmax => MetaKind::Max,
-            LaneKind::Sum if affine => MetaKind::Sum,
-            LaneKind::AvgAccum if affine => MetaKind::AvgAccum,
-            LaneKind::Int128AvgAccum if plain => MetaKind::Sum128,
+            LaneKind::Min if plain && int_width => MetaKind::Min,
+            LaneKind::Max if plain && int_width => MetaKind::Max,
+            LaneKind::Sum if affine && int_width => MetaKind::Sum,
+            LaneKind::AvgAccum if affine && int_width => MetaKind::AvgAccum,
+            LaneKind::Int128AvgAccum if plain && int_width => MetaKind::Sum128,
             _ => return None,
         };
         out.push(MetaTrans {
@@ -837,16 +936,34 @@ pub fn classify<'mcx>(
         }
     }
     // Varlena lanes carry the per-batch inline-form proof obligation (one
-    // entry per distinct str column).
+    // entry per distinct str/length column); VarLenChars lanes additionally
+    // carry the UTF-8 countability obligation.
     let mut vguards: PgVec<'mcx, u16> = PgVec::new_in(mcx);
+    let mut uguards: PgVec<'mcx, u16> = PgVec::new_in(mcx);
     for t in trans.iter() {
-        if t.width == LaneWidth::Var && !vguards.contains(&t.col) {
+        if matches!(t.width, LaneWidth::Var | LaneWidth::VarLenBytes | LaneWidth::VarLenChars)
+            && !vguards.contains(&t.col)
+        {
             vguards.push(t.col);
+        }
+        if t.width == LaneWidth::VarLenChars && !uguards.contains(&t.col) {
+            uguards.push(t.col);
         }
     }
     let (cse, cse_members, cse_skip) = build_cse(mcx, &trans);
     let guarded = !guards.is_empty() || !vguards.is_empty();
-    Some(LanePlan { trans, cse, cse_members, cse_skip, guards, vguards, cols, resid, guarded })
+    Some(LanePlan {
+        trans,
+        cse,
+        cse_members,
+        cse_skip,
+        guards,
+        vguards,
+        uguards,
+        cols,
+        resid,
+        guarded,
+    })
 }
 
 /// CSE schedule over classified transitions. SumBase: Sum/AvgAccum cluster by
@@ -864,12 +981,23 @@ pub fn build_cse<'mcx>(
 ) -> (PgVec<'mcx, CseGroup>, PgVec<'mcx, u16>, PgVec<'mcx, bool>) {
     #[derive(PartialEq)]
     enum Key {
-        Sum { col: u16, divk: i32 },
+        // width is part of Sum/MinMax structural identity: one text column
+        // can host lanes of different reads (VarLenChars for length() vs
+        // VarLenBytes for octet_length()) — same col, different values.
+        Sum { col: u16, width: LaneWidth, divk: i32 },
         Count { col: u16 },
         // res_width is part of MinMax structural identity: a bare int2 Var
         // and an int2+0 OpExpr share coefficients but store transvalues at
         // different widths.
-        MinMax { max: bool, col: u16, res_width: LaneWidth, addend: i32, mulk: i32, divk: i32 },
+        MinMax {
+            max: bool,
+            col: u16,
+            width: LaneWidth,
+            res_width: LaneWidth,
+            addend: i32,
+            mulk: i32,
+            divk: i32,
+        },
     }
     let mut clusters: Vec<(Key, Vec<u16>)> = Vec::new();
     let mut join = |key: Key, ti: u16| match clusters.iter_mut().find(|(k, _)| *k == key) {
@@ -879,11 +1007,14 @@ pub fn build_cse<'mcx>(
     for (ti, t) in trans.iter().enumerate() {
         let ti = ti as u16;
         match t.kind {
-            LaneKind::Sum | LaneKind::AvgAccum => join(Key::Sum { col: t.col, divk: t.divk }, ti),
+            LaneKind::Sum | LaneKind::AvgAccum => {
+                join(Key::Sum { col: t.col, width: t.width, divk: t.divk }, ti)
+            }
             LaneKind::Min | LaneKind::Max => join(
                 Key::MinMax {
                     max: t.kind == LaneKind::Max,
                     col: t.col,
+                    width: t.width,
                     res_width: t.res_width,
                     addend: t.addend,
                     mulk: t.mulk,
@@ -936,12 +1067,31 @@ pub fn build_cse<'mcx>(
     (groups, members, skip)
 }
 
+// chars = bytes − UTF-8 continuation bytes. On a uguard-passed payload
+// (valid UTF-8, no embedded NUL) this equals C textlen's
+// pg_mbstrlen_with_len walk exactly: every lead byte's claimed length is the
+// sequence's true length, the walk never NUL-stops early, and the final
+// character never overruns the slice. The byte test is branch-free and
+// LLVM auto-vectorizes the count.
+#[inline(always)]
+fn utf8_char_count(s: &[u8]) -> i64 {
+    let cont = s.iter().filter(|&&b| (b & 0xC0) == 0x80).count();
+    (s.len() - cont) as i64
+}
+
+// Only called from the unsafe fold/guard entry points: for the length
+// widths, the caller contract (vguard-passed batch) makes the selected
+// non-null lane values live inline varlena pointers.
 #[inline(always)]
 fn lane_value(values: &[Datum], width: LaneWidth, i: usize) -> i64 {
     match width {
         LaneWidth::I16 => values[i].as_i16() as i64,
         LaneWidth::I32 => values[i].as_i32() as i64,
         LaneWidth::I64 => values[i].as_i64(),
+        // SAFETY: vguard-passed inline varlena (see fn comment); uguard
+        // makes the UTF-8 count exact (see utf8_char_count).
+        LaneWidth::VarLenBytes => unsafe { str_payload(values[i]).len() as i64 },
+        LaneWidth::VarLenChars => utf8_char_count(unsafe { str_payload(values[i]) }),
         // Datum-lane kinds read the datum word directly, never through the
         // integer lane read (and are never integer-guarded).
         LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
@@ -1455,6 +1605,28 @@ pub unsafe fn check_guards(
         }
         data = true;
     }
+    // UTF-8 countability proof (VarLenChars lanes): valid UTF-8, no embedded
+    // NUL — under it the fold's continuation-byte count is bit-equal to C
+    // textlen's pg_mblen walk (no early NUL stop, no trailing-char overrun
+    // error, every lead byte's claimed length true). Runs strictly AFTER the
+    // vguard loop above: uguard columns are always vguard columns, so a
+    // non-inline datum has already demoted before str_payload runs here.
+    for &c in plan.uguards.iter() {
+        let values = cols.col_values(c as usize);
+        let isnull = cols.col_isnull(c as usize);
+        let mut ok = true;
+        for_each_row(rows, |i| {
+            if !isnull[i] {
+                // SAFETY: vguard-passed inline varlena (loop above).
+                let s = unsafe { str_payload(values[i]) };
+                ok &= core::str::from_utf8(s).is_ok() && !s.contains(&0);
+            }
+        });
+        if !ok {
+            return GuardCheck::Demote;
+        }
+        data = true;
+    }
     GuardCheck::Pass { zone, data }
 }
 
@@ -1484,7 +1656,14 @@ fn store_res(t: &LaneTrans, v: i64) -> Datum {
         LaneWidth::I16 => Datum::from_i16(v as i16),
         LaneWidth::I32 => Datum::from_i32(v as i32),
         LaneWidth::I64 => Datum::from_i64(v),
-        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
+        // res_width is always an integer width (the transfn's result type;
+        // length-lane transitions store at I32).
+        LaneWidth::F32
+        | LaneWidth::F64
+        | LaneWidth::Bool
+        | LaneWidth::Var
+        | LaneWidth::VarLenBytes
+        | LaneWidth::VarLenChars => unreachable!(),
     }
 }
 
@@ -1494,7 +1673,12 @@ fn load_res(t: &LaneTrans, pg: &AggPerGroup) -> i64 {
         LaneWidth::I16 => pg.trans_value.as_i16() as i64,
         LaneWidth::I32 => pg.trans_value.as_i32() as i64,
         LaneWidth::I64 => pg.trans_value.as_i64(),
-        LaneWidth::F32 | LaneWidth::F64 | LaneWidth::Bool | LaneWidth::Var => unreachable!(),
+        LaneWidth::F32
+        | LaneWidth::F64
+        | LaneWidth::Bool
+        | LaneWidth::Var
+        | LaneWidth::VarLenBytes
+        | LaneWidth::VarLenChars => unreachable!(),
     }
 }
 
@@ -1681,7 +1865,7 @@ unsafe fn str_advance(
 ::mcx::forget_safe_nodrop!(LaneTrans, CseGroup, GuardEntry);
 // SAFETY census: every field is an arena PgVec of no-drop elements (or bool).
 ::mcx::forget_safe_struct!(
-    LanePlan<'_> { trans, cse, cse_members, cse_skip, guards, vguards, cols, resid, guarded },
+    LanePlan<'_> { trans, cse, cse_members, cse_skip, guards, vguards, uguards, cols, resid, guarded },
 );
 
 #[inline(always)]

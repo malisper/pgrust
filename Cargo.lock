@@ -7481,6 +7481,7 @@ dependencies = [
  "execexpr",
  "exectuples",
  "lanereg",
+ "mbutils_seams",
  "mcx",
  "pg_locale",
  "types_core",
