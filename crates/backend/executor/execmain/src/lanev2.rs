@@ -8078,3 +8078,472 @@ pub fn try_own_append<'mcx>(
 pub fn refuse_project_set() {
     stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::SrfSetExpansion);
 }
+
+// ===========================================================================
+// Lane-v2 parallel exact-DISTINCT partials (lane-v2-pardistinct;
+// nodeagg/src/pardistinct.rs holds the builder/wire/merge machinery and the
+// module-level byte-identity argument). The planner cannot emit a Partial
+// Agg for a DISTINCT aggregate (hasNonPartialAggs), so the parallel plan is
+// always `Agg ← GatherMerge ← Sort ← ParallelSeqScan`. The LEADER arm below
+// owns the Agg node: it registers a build recipe keyed by the Sort plan
+// node's address (the merge.rs handoff-registry pattern), launches the
+// workers, builds its own partial over the local fragment (leader
+// participation on the shared claim), folds any stray queue rows
+// (degraded/refused workers emit ordinary sorted rows), merges the handed
+// tables (partition-parallel where everything fits in memory), and emits
+// through the serial arms' unchanged finalize tails. The WORKER arm hooks
+// the Sort fragment: a registry hit replaces the sort with the partial
+// build; refusal or budget-crossing keeps/resumes the classic sort feed.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_PARDISTINCT` kill switch (default ON inside the lane).
+fn pardistinct_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_PARDISTINCT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// `PGRUST_LANE_V2_PARDISTINCT_FORCE=1`: skip the planner-estimate
+/// economics (e2e harness lever; the runtime freeze/evict still bounds
+/// memory).
+fn pardistinct_force() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_PARDISTINCT_FORCE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// The worker-side build sink: rows feed the partial table; crossing the
+/// worker budget freezes + installs the table and degrades the REMAINDER to
+/// the plan's real Sort (classic sorted-row emission — pre-freeze rows ride
+/// the frozen table, post-freeze rows ride the queue; disjoint, exact).
+struct PdWorkerSink<'a, 'mcx> {
+    builder: Option<::nodeagg::PdBuilder<'mcx>>,
+    handoff: &'a std::sync::Arc<::nodeagg::PdHandoff>,
+    sort: &'a mut ::nodesort::SortState<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    tmp: ::executils::EcxtId,
+    /// Reset per row only when a bytes set detoasts into per-tuple memory.
+    reset_tmp: bool,
+    degraded: bool,
+}
+
+impl<'mcx> Sink<'mcx> for PdWorkerSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        if self.degraded {
+            ::nodesort::sort_lane_put(self.sort, estate, tuple)?;
+            return Ok(SinkFeed::NeedMore);
+        }
+        let crossed = {
+            let b = self.builder.as_mut().expect("undegraded sink holds the builder");
+            b.accept(estate, tuple, self.tmp)? == ::nodeagg::PdFeed::Crossed
+        };
+        if self.reset_tmp {
+            estate.reset_expr_context(self.tmp);
+        }
+        if crossed {
+            self.degrade_impl()?;
+        }
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.degraded {
+            ::nodesort::sort_lane_finish(self.sort, estate)
+        } else {
+            // Whole share absorbed: install the frozen table; the fragment
+            // emits nothing.
+            let t = self.builder.take().expect("undegraded sink holds the builder").freeze()?;
+            self.handoff.install(t);
+            Ok(())
+        }
+    }
+}
+
+impl<'mcx> BatchSink<'mcx> for PdWorkerSink<'_, 'mcx> {}
+
+impl PdWorkerSink<'_, '_> {
+    #[cold]
+    #[inline(never)]
+    fn degrade_impl(&mut self) -> PgResult<()> {
+        trace_feed("pardistinct worker partial frozen; degrading remainder to classic sort");
+        let t = self.builder.take().expect("crossing fires on the live builder").freeze()?;
+        self.handoff.install(t);
+        ::nodesort::sort_lane_begin(self.sort, self.outer_desc.clone())?;
+        self.degraded = true;
+        Ok(())
+    }
+}
+
+/// Worker-fragment hook (procnode `sort_arm`, BEFORE the bare-sort
+/// breaker): a parallel worker whose fragment top is a leader-registered
+/// Sort builds the parallel-DISTINCT partial instead of sorting.
+/// `Ok(Some(None))` = table handed off, fragment emits nothing;
+/// `Ok(None)` = not engaged (or degraded — the classic sort emit resumes
+/// over the fed tuplesort).
+#[inline]
+pub fn try_pardistinct_worker_sort<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    match s.pd_state {
+        Some(true) => return Ok(Some(None)),
+        Some(false) => return Ok(None),
+        None => {}
+    }
+    // Cheap static rejects before any registry probe.
+    if !pardistinct_enabled()
+        || !::parallel::IsParallelWorker()
+        || !::nodeagg::pd_registry_nonempty()
+    {
+        return Ok(None);
+    }
+    let key = s.state.plan as *const ::types_nodes::plannodes::Sort<'_> as usize;
+    let Some(handoff) = ::nodeagg::pd_registry_get(key) else {
+        s.pd_state = Some(false);
+        return Ok(None);
+    };
+    if handoff.is_spent() {
+        // A rescan relaunch against the original registry snapshot: the
+        // fresh leader drive folds our classic sorted rows instead.
+        s.pd_state = Some(false);
+        return Ok(None);
+    }
+    // Dynamic / structural guards; refusal emits classic sorted rows, which
+    // the leader folds — always sound.
+    if estate.es_epq_active
+        || estate.es_instrument != 0
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || s.state.sort_done()
+        || s.state.bounded
+    {
+        s.pd_state = Some(false);
+        return Ok(None);
+    }
+    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
+        s.pd_state = Some(false);
+        return Ok(None);
+    };
+    let spec = handoff.spec.clone();
+    if spec.max_att > outer_desc.as_ref().map_or(0, |d| d.natts) {
+        s.pd_state = Some(false);
+        return Ok(None);
+    }
+    trace_feed("pardistinct worker partial build engaged");
+    stats::tick_owned(ShapeClass::AggBuild);
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "pardistinct worker feed", stitch: true },
+    )?;
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    let tmp = estate.exec_assign_expr_context();
+    let reset_tmp = spec.any_bytes_set();
+    let budget = spec.worker_budget;
+    let mut sink = PdWorkerSink {
+        builder: Some(::nodeagg::PdBuilder::new(spec, budget, None)),
+        handoff: &handoff,
+        sort: state,
+        outer_desc,
+        tmp,
+        reset_tmp,
+        degraded: false,
+    };
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+    let degraded = sink.degraded;
+    estate.es_direction = dir;
+    fed?;
+    if degraded {
+        // The classic sort emit takes over (sort_done after finish).
+        s.pd_state = Some(false);
+        return Ok(None);
+    }
+    s.pd_state = Some(true);
+    Ok(Some(None))
+}
+
+/// Shared leader drive: launch workers, build the leader's own partial over
+/// the local fragment, fold stray queue rows, take the handed tables, and
+/// merge. Returns the merged result. The caller has registered `handoff`
+/// (keyed by the fragment Sort's plan address) and must deregister after.
+fn pd_leader_drive<'mcx>(
+    gm: &mut crate::procnode::GatherMergeNode<'mcx>,
+    handoff: &std::sync::Arc<::nodeagg::PdHandoff>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<::nodeagg::PdMerged<'mcx>> {
+    let spec = handoff.spec.clone();
+    // 1. Launch the workers FIRST (they adopt the registry snapshot at
+    //    launch), then take over leader participation ourselves.
+    crate::nodegathermerge::gather_merge_ensure_launched(&mut gm.state, &mut gm.outer, estate)?;
+    gm.state.need_to_scan_locally = false;
+    // 2. Leader partial over the local fragment (one more builder on the
+    //    shared claim). mcx-backed: crossing evicts sets to spill tapes.
+    let tmp = estate.exec_assign_expr_context();
+    let reset_tmp = spec.any_bytes_set();
+    let budget = spec.worker_budget;
+    let mut builder =
+        ::nodeagg::PdBuilder::new(spec.clone(), budget, Some(estate.es_query_cxt));
+    {
+        let crate::procnode::PlanStateNode::Sort(s) = &mut *gm.outer else {
+            unreachable!("admission proved the fragment shape")
+        };
+        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
+            unreachable!("admission proved the fragment shape")
+        };
+        arm_scan_staging(
+            ss,
+            estate,
+            ScanFeedShape::RowFeed { ctx: "pardistinct leader feed", stitch: true },
+        )?;
+        struct PdLeaderSink<'a, 'mcx> {
+            builder: &'a mut ::nodeagg::PdBuilder<'mcx>,
+            tmp: ::executils::EcxtId,
+            reset_tmp: bool,
+        }
+        impl<'mcx> Sink<'mcx> for PdLeaderSink<'_, 'mcx> {
+            fn accept(
+                &mut self,
+                tuple: ExecSlotId,
+                estate: &mut EStateData<'mcx>,
+            ) -> PgResult<SinkFeed> {
+                // Leader builders never cross (mcx-backed eviction).
+                let _ = self.builder.accept(estate, tuple, self.tmp)?;
+                if self.reset_tmp {
+                    estate.reset_expr_context(self.tmp);
+                }
+                Ok(SinkFeed::NeedMore)
+            }
+            fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+                Ok(())
+            }
+        }
+        impl<'mcx> BatchSink<'mcx> for PdLeaderSink<'_, 'mcx> {}
+        let mut sink = PdLeaderSink { builder: &mut builder, tmp, reset_tmp };
+        let dir = estate.es_direction;
+        estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+        let fed =
+            drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+        estate.es_direction = dir;
+        fed?;
+    }
+    // 3. Drain the queues to EOF; stray rows (degraded/refused workers)
+    //    fold into the leader builder — order-insensitive, exact.
+    loop {
+        ::postgres_seams::check_for_interrupts::call()?;
+        let Some(slot) =
+            crate::nodegathermerge::exec_gather_merge(&mut gm.state, &mut gm.outer, estate)?
+        else {
+            break;
+        };
+        let _ = builder.accept(estate, slot, tmp)?;
+        if reset_tmp {
+            estate.reset_expr_context(tmp);
+        }
+    }
+    // 4. Merge. Fast path: every table in memory and the working set fits
+    //    the budget — partition-parallel claim merge on scoped threads.
+    //    Slow path: serial fold into the (spill-capable) leader builder.
+    let tables = handoff.take_all();
+    let handed_bytes: usize = tables.iter().map(|t| t.mem_bytes()).sum();
+    let nthreads = ((gm.state.nworkers_launched.max(0) as usize) + 1).clamp(1, 16);
+    let plain = spec.nkeys() == 0;
+    if !builder.ever_spilled
+        && nthreads > 1
+        && !tables.is_empty()
+        && handed_bytes + builder.mem_bytes() <= budget.saturating_mul(2)
+    {
+        trace_feed("pardistinct parallel partition merge engaged");
+        let mut all = tables;
+        all.push(builder.freeze()?);
+        let all: Vec<_> = all.into_iter().filter(|t| t.ngroups > 0).collect();
+        if plain {
+            Ok(::nodeagg::pd_parallel_merge_plain(&spec, all, nthreads))
+        } else {
+            Ok(::nodeagg::pd_parallel_merge_grouped(&spec, all, nthreads).into_lt())
+        }
+    } else {
+        trace_feed("pardistinct serial merge (spill-capable) engaged");
+        for t in &tables {
+            builder.merge_handed(t)?;
+        }
+        Ok(builder.into_merged())
+    }
+}
+
+/// Shared static admission for both leader arms: fragment shape (GatherMerge
+/// passthrough → un-built unbounded Sort → SeqScan), parallel mode, and the
+/// per-call dynamic gates. Returns the fragment Sort's plan (the registry
+/// key + order-spec source).
+fn pd_leader_gates<'mcx>(
+    gm: &crate::procnode::GatherMergeNode<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<&'mcx ::types_nodes::plannodes::Sort<'mcx>> {
+    if !pardistinct_enabled() {
+        return None;
+    }
+    if estate.es_epq_active
+        || estate.es_instrument != 0
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !estate.es_use_parallel_mode
+    {
+        return None;
+    }
+    if gm.state.initialized || gm.state.plan.num_workers <= 0 {
+        return None;
+    }
+    // First execution only: a rescan (pei already built) has deferred-rescan
+    // and registry-snapshot state this drive does not manage — the classic
+    // path (plus spent-handoff worker refusal) owns rescans wholesale.
+    if gm.state.pei.is_some() {
+        return None;
+    }
+    // Passthrough GatherMerge only (no projection: worker rows and the
+    // fragment share the outer descriptor the spec's attnos index).
+    if gm.state.ps.ps_ProjInfo.is_some() {
+        return None;
+    }
+    let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else {
+        return None;
+    };
+    if s.state.sort_done() || s.state.bounded || s.outer_desc.is_none() {
+        return None;
+    }
+    let crate::procnode::PlanStateNode::SeqScan(_) = &*s.outer else {
+        return None;
+    };
+    Some(s.state.plan)
+}
+
+/// Leader arm, grouped shape: `Agg(AGG_SORTED) ← GatherMerge ← Sort ←
+/// ParallelSeqScan` with exact-DISTINCT aggregates (ClickBench Q9/Q10).
+/// `None` = refused (the unchanged per-tuple agg over exec_gather_merge
+/// runs, byte-safely).
+#[inline]
+pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    gm: &mut crate::procnode::GatherMergeNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Mid-emit resume — BEFORE the dynamic gates (the hashgrouped arm's
+    // discipline: the fragment was consumed; nothing may re-pull it).
+    if ::nodeagg::agg_hashgroup_emitting(agg) {
+        return Ok(Some(hashgroup_emit(agg, estate)?));
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let Some(sp) = pd_leader_gates(&*gm, estate) else {
+        return Ok(None);
+    };
+    // Narrow-shape admission (the serial arm's multiset-prefix law) +
+    // hashgroup admission (integer keys, integer set kinds) + economics.
+    let k = ::nodeagg::agg_plan_group_cols(agg).len();
+    if k == 0
+        || !::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+        || (sp.numCols as usize) <= k
+        || sp.sortColIdx.len() < k
+    {
+        return Ok(None);
+    }
+    {
+        let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+        let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+        a.sort_unstable();
+        b.sort_unstable();
+        if a != b {
+            return Ok(None);
+        }
+    }
+    if !::nodeagg::agg_hashgroup_admissible(agg)
+        || !::nodeagg::agg_hashgroup_economical(agg, pardistinct_force())
+    {
+        return Ok(None);
+    }
+    let Some(order) = hashgroup_order_spec(agg, sp, k) else {
+        return Ok(None);
+    };
+    let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
+    let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+        return Ok(None);
+    };
+    // v1 economics: engage the grouped arm only when the DISTINCT sets are
+    // the WHOLE transition load (empty vocabulary — the Q9 shape). Measured
+    // 2026-07-12 (10m bank, DOP 6): Q9 1.675 -> 0.894s, but the Q10 shape
+    // (sum/count/avg companions) REGRESSED 2.14 -> 2.31s — the per-row
+    // vocabulary accept underprices the fused classic drives. The batched
+    // vocabulary accept is the named follow-up; until then companion-agg
+    // shapes keep the classic parallel plan (FORCE overrides for the e2e).
+    if !spec.vocab.is_empty() && !pardistinct_force() {
+        return Ok(None);
+    }
+    // Last refusal point passed: arm set-mode (sticky, value-safe; measured
+    // 2026-07-12 — arming BEFORE the vocab refusal cost the refused Q10
+    // shape ~10% in the classic parallel path, so it must come last).
+    ::nodeagg::agg_sorted_force_distinct_set(agg);
+    trace_feed("pardistinct grouped leader drive engaged");
+    stats::tick_owned(ShapeClass::AggBuild);
+    let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
+    let handoff = std::sync::Arc::new(::nodeagg::PdHandoff::new(spec.clone()));
+    ::nodeagg::pd_registry_insert(key, &handoff);
+    let drive = pd_leader_drive(gm, &handoff, estate);
+    ::nodeagg::pd_registry_remove(key);
+    let merged = drive?;
+    ::nodeagg::agg_hashgroup_adopt_merged(agg, estate, merged, &spec.vocab, order)?;
+    Ok(Some(hashgroup_emit(agg, estate)?))
+}
+
+/// Leader arm, plain shape: `Agg(AGG_PLAIN) ← GatherMerge ← Sort ←
+/// ParallelSeqScan` where EVERY transition replays from an exact-DISTINCT
+/// set (ClickBench Q5/Q6). `None` = refused.
+#[inline]
+pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    gm: &mut crate::procnode::GatherMergeNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    if !::nodeagg::agg_plain_distinct_set_only(agg) {
+        return Ok(None);
+    }
+    let Some(sp) = pd_leader_gates(&*gm, estate) else {
+        return Ok(None);
+    };
+    let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
+    let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+        return Ok(None);
+    };
+    debug_assert_eq!(spec.nkeys(), 0);
+    // Last refusal point passed: arm set-mode (the grouped arm's ordering
+    // law — a refusal must leave the classic path untouched).
+    ::nodeagg::agg_force_distinct_set(agg);
+    trace_feed("pardistinct plain leader drive engaged");
+    stats::tick_owned(ShapeClass::AggBuild);
+    let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
+    let handoff = std::sync::Arc::new(::nodeagg::PdHandoff::new(spec.clone()));
+    ::nodeagg::pd_registry_insert(key, &handoff);
+    let drive = pd_leader_drive(gm, &handoff, estate);
+    ::nodeagg::pd_registry_remove(key);
+    let merged = drive?;
+    if merged.ngroups == 0 {
+        // Zero input rows anywhere: the plain finalize's empty-input
+        // contract (count = 0, sum NULL) falls out of the untouched init
+        // states + empty sets.
+        return Ok(Some(::nodeagg::agg_plain_adopt_empty(agg, estate)?));
+    }
+    Ok(Some(::nodeagg::agg_plain_adopt_merged(agg, estate, merged)?))
+}

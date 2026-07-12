@@ -347,9 +347,12 @@ pub fn agg_hashgroup_begin<'mcx>(
     }));
     // The build starts with NO group loaded; the node's own pergroup array
     // is the swap scratch. Clear leftover pertrans set state (a rescan can
-    // leave a cut-short group's set behind).
+    // leave the last emitted group's set behind) — and DROP the slot:
+    // `switch_to` owns the invariant that no set is loaded between groups
+    // (its debug_assert fired on rescan re-engagement when this left a
+    // cleared-but-Some slot; release builds silently overwrote it).
     for ps in node.pertrans_sort.iter_mut() {
-        if let Some(d) = ps.dset.as_mut() {
+        if let Some(mut d) = ps.dset.take() {
             d.clear();
         }
         debug_assert!(!ps.dset_degraded);
@@ -696,8 +699,22 @@ pub fn agg_hashgroup_finish_build<'mcx>(
     let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
     let mcx = hg.mcx;
     exectuples::exec_clear_tuple(&mut hg.rep_slot, mcx);
+    let order = order_groups(&hg.keys, &hg.keynulls, &hg.order_spec, hg.nkeys, n);
+    hg.phase = HgPhase::Emit { order, pos: 0 };
+    Ok(())
+}
+
+/// Order group indices by the plan Sort's prefix (total, C-identical order —
+/// module doc). Shared by the build finish and the parallel-partials merged
+/// adoption.
+fn order_groups(
+    keys: &[i64],
+    keynulls: &[u32],
+    spec: &[HashGroupOrderKey],
+    nkeys: usize,
+    n: usize,
+) -> Vec<u32> {
     let mut order: Vec<u32> = (0..n as u32).collect();
-    let (keys, keynulls, spec, nkeys) = (&hg.keys, &hg.keynulls, &hg.order_spec, hg.nkeys);
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
         for k in spec.iter() {
@@ -737,8 +754,7 @@ pub fn agg_hashgroup_finish_build<'mcx>(
         debug_assert_eq!(a, b, "distinct groups compare equal on the full prefix");
         core::cmp::Ordering::Equal
     });
-    hg.phase = HgPhase::Emit { order, pos: 0 };
-    Ok(())
+    order
 }
 
 /// Emit the next group in prefix order through the UNCHANGED sorted-agg
@@ -840,6 +856,219 @@ pub fn agg_hashgroup_set_residual(node: &mut AggStateData<'_>) {
     debug_assert!(matches!(hg.phase, HgPhase::Building));
     debug_assert_eq!(hg.rep_cursor, hg.ngroups(), "every representative rides the sort");
     hg.phase = HgPhase::Residual;
+}
+
+/// Lane-v2 pardistinct (pardistinct.rs): adopt a MERGED parallel-partial
+/// result straight into this arm's Emit phase — the unchanged
+/// finalize/HAVING/project tail then emits the merged groups in the plan
+/// Sort's prefix order, replaying the merged exact-DISTINCT sets through
+/// the real transfns exactly as the serial build would.
+///
+/// Group representatives are SYNTHESIZED: key columns from the merged key
+/// words, every other column NULL. Sound for the same reason the serial
+/// arm's first-row representative is: the only columns an Agg output can
+/// reference are grouping columns (rebuilt byte-exactly — representational
+/// equality) and aggregates.
+///
+/// Vocab states materialize as the REAL trans states the C build would
+/// have left: count/sum → int8 datums; avg(int2/4) → an Int8TransTypeData
+/// int8[2] array {count, sum} allocated in aggcontext.
+pub fn agg_hashgroup_adopt_merged<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    merged: crate::pardistinct::PdMerged<'mcx>,
+    vocab: &[crate::pardistinct::PdVocab],
+    order_spec: Vec<HashGroupOrderKey>,
+) -> PgResult<()> {
+    use crate::pardistinct::PdVocabKind;
+    const INT2OID: ::types_core::Oid = 21;
+    const INT4OID: ::types_core::Oid = 23;
+    const INT8OID: ::types_core::Oid = 20;
+    debug_assert!(node.hashgroup.is_none());
+    debug_assert!(node.force_distinct_set);
+    let mcx = estate.es_query_cxt;
+    let ps = node.persort.as_ref().expect("sorted Agg has persort");
+    let desc = ps
+        .first_slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .expect("persort slots carry the outer desc")
+        .clone();
+    let mut key_atts = Vec::with_capacity(node.plan.grpColIdx.len());
+    let mut key_kinds = Vec::with_capacity(node.plan.grpColIdx.len());
+    let mut max_att = 0i32;
+    for &col in node.plan.grpColIdx {
+        key_atts.push((col - 1) as u16);
+        max_att = max_att.max(col as i32);
+        key_kinds.push(match desc.attr((col - 1) as usize).atttypid {
+            INT2OID => HgKeyKind::Int16,
+            INT4OID => HgKeyKind::Int32,
+            _ => HgKeyKind::Int64,
+        });
+    }
+    let nkeys = key_atts.len();
+    let numtrans = node.numtrans;
+    let nsort = node.pertrans_sort.len();
+    let n = merged.ngroups;
+    debug_assert_eq!(merged.dsets.len(), n * nsort);
+    let nvocab = vocab.len();
+    // Synthesized representatives: a scratch virtual slot per the sort-dump
+    // discipline (lib.rs collect degrade), copied minimal per group.
+    let mut reps: Vec<Option<MinimalTuple<'mcx>>> = Vec::with_capacity(n);
+    {
+        let mut scratch =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        let natts = desc.natts as usize;
+        for g in 0..n {
+            exectuples::exec_clear_tuple(&mut scratch, mcx);
+            {
+                let base = scratch.base_mut();
+                for i in 0..natts {
+                    base.tts_isnull[i] = true;
+                    base.tts_values[i] = ::datum::Datum::null();
+                }
+                for (i, (&att, &kind)) in key_atts.iter().zip(key_kinds.iter()).enumerate() {
+                    if merged.keynulls[g] & (1 << i) != 0 {
+                        continue;
+                    }
+                    let w = merged.keys[g * nkeys + i];
+                    base.tts_isnull[att as usize] = false;
+                    base.tts_values[att as usize] = match kind {
+                        HgKeyKind::Int16 => ::datum::Datum::from_i16(w as i16),
+                        HgKeyKind::Int32 => ::datum::Datum::from_i32(w as i32),
+                        HgKeyKind::Int64 => ::datum::Datum::from_i64(w),
+                    };
+                }
+            }
+            exectuples::exec_store_virtual_tuple(&mut scratch);
+            reps.push(Some(exectuples::exec_copy_slot_minimal_tuple(&mut scratch, mcx, mcx, 0)?));
+        }
+    }
+    // Per-group trans states: init values, then the vocab overrides.
+    let mut pergroup: Vec<AggPerGroup> = Vec::with_capacity(n * numtrans);
+    for g in 0..n {
+        for (transno, init) in node.trans_init.iter().enumerate() {
+            let typ = node.trans_typ[transno];
+            let value = if !init.isnull && !typ.byval {
+                // SAFETY: node-lifetime initval datum; agg_node live, no &mut.
+                unsafe {
+                    ::execexpr::agg_datum_copy(
+                        node.agg_node.as_ref().aggcontext(),
+                        init.value,
+                        typ.len,
+                    )?
+                }
+            } else {
+                init.value
+            };
+            pergroup.push(AggPerGroup {
+                trans_value: value,
+                trans_value_is_null: init.isnull,
+                no_trans_value: init.isnull,
+            });
+        }
+        for (vi, v) in vocab.iter().enumerate() {
+            let acc = merged.states[g * 2 * nvocab + 2 * vi];
+            let cnt = merged.states[g * 2 * nvocab + 2 * vi + 1];
+            let pg = &mut pergroup[g * numtrans + v.transno as usize];
+            match v.kind {
+                PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => {
+                    pg.trans_value = ::datum::Datum::from_i64(acc);
+                    pg.trans_value_is_null = false;
+                    pg.no_trans_value = false;
+                }
+                PdVocabKind::SumInt { .. } => {
+                    // int2/4_sum: NULL iff no non-null input ever arrived.
+                    if cnt > 0 {
+                        pg.trans_value = ::datum::Datum::from_i64(acc);
+                        pg.trans_value_is_null = false;
+                        pg.no_trans_value = false;
+                    }
+                }
+                PdVocabKind::AvgInt { .. } => {
+                    // Int8TransTypeData {count, sum} — a 1-D no-nulls int8[2]
+                    // array image, copied into aggcontext.
+                    let mut img = [0u8; 40];
+                    img[0..4].copy_from_slice(
+                        &::types_tuple::varatt::set_varsize_4b_word(40).to_ne_bytes(),
+                    );
+                    img[4..8].copy_from_slice(&1i32.to_ne_bytes()); // ndim
+                    img[8..12].copy_from_slice(&0i32.to_ne_bytes()); // dataoffset
+                    img[12..16].copy_from_slice(&INT8OID.to_ne_bytes()); // elemtype
+                    img[16..20].copy_from_slice(&2i32.to_ne_bytes()); // dims[0]
+                    img[20..24].copy_from_slice(&1i32.to_ne_bytes()); // lbound[0]
+                    img[24..32].copy_from_slice(&cnt.to_ne_bytes());
+                    img[32..40].copy_from_slice(&acc.to_ne_bytes());
+                    let typ = node.trans_typ[v.transno as usize];
+                    // SAFETY: `img` is a live, well-formed varlena image for
+                    // the copy's duration; agg_node live, no &mut.
+                    let copied = unsafe {
+                        ::execexpr::agg_datum_copy(
+                            node.agg_node.as_ref().aggcontext(),
+                            ::datum::Datum::from_usize(img.as_ptr() as usize),
+                            typ.len,
+                        )?
+                    };
+                    pg.trans_value = copied;
+                    pg.trans_value_is_null = false;
+                    pg.no_trans_value = false;
+                }
+            }
+        }
+    }
+    let hashes: Vec<u64> = (0..n)
+        .map(|g| key_hash(&merged.keys[g * nkeys..(g + 1) * nkeys], merged.keynulls[g]))
+        .collect();
+    let set_mem: Vec<usize> = (0..n)
+        .map(|g| {
+            merged.dsets[g * nsort..(g + 1) * nsort]
+                .iter()
+                .map(|d| d.as_ref().map_or(0, |s| s.mem_bytes()))
+                .sum()
+        })
+        .collect();
+    let total_set_mem = set_mem.iter().sum();
+    let order = order_groups(&merged.keys, &merged.keynulls, &order_spec, nkeys, n);
+    let rep_slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+    node.hashgroup = Some(Box::new(HashGroupedState {
+        phase: HgPhase::Emit { order, pos: 0 },
+        key_atts,
+        key_kinds,
+        max_att,
+        order_spec,
+        nkeys,
+        numtrans,
+        nsort,
+        table: Vec::new(),
+        hashes,
+        keys: merged.keys,
+        keynulls: merged.keynulls,
+        reps,
+        pergroup,
+        dsets: merged.dsets,
+        set_mem,
+        consumed: vec![false; n],
+        remaining: n,
+        cur: None,
+        base_mem: 0,
+        total_set_mem,
+        budget: hashgroup_budget(),
+        rep_slot,
+        rep_cursor: 0,
+        mcx,
+    }));
+    // The emit starts with NO group loaded; clear AND DROP leftover
+    // pertrans set state (begin's discipline — switch_to asserts no set is
+    // loaded between groups).
+    for ps in node.pertrans_sort.iter_mut() {
+        if let Some(mut d) = ps.dset.take() {
+            d.clear();
+        }
+        debug_assert!(!ps.dset_degraded);
+    }
+    Ok(())
 }
 
 /// The residual-phase group-begin hook (called from `initialize_aggregates`

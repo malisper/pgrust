@@ -218,6 +218,11 @@ pub struct SortNode<'mcx> {
     /// structural fusibility cascade must not run per pulled tuple); the
     /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
     pub lane_fusible: Option<bool>,
+    /// Lane-v2 parallel-DISTINCT worker-partial verdict (lanev2
+    /// `try_pardistinct_worker_sort`): None = not probed, Some(true) =
+    /// table handed off (this node emits nothing), Some(false) = probed and
+    /// refused or degraded (classic paths own the node).
+    pub pd_state: Option<bool>,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -739,6 +744,7 @@ pub fn exec_init_node<'mcx>(
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
                 outer_desc: Some(outer_desc),
                 lane_fusible: None,
+                pd_state: None,
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -1722,6 +1728,25 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::GatherMerge(gm) => {
+            // Lane-executor-v2 dispatch hooks (parallel exact-DISTINCT
+            // partials — lane-v2-pardistinct): the plain then the grouped
+            // leader drive. Both fall through to the UNCHANGED per-tuple
+            // exec_agg over exec_gather_merge on refuse. Lane logic +
+            // refuse-sets in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_plain_distinct_agg_over_gather_merge(agg, gm, estate)?
+                {
+                    return Ok(r);
+                }
+                if let Some(r) = crate::lanev2::try_own_sorted_distinct_agg_over_gather_merge(
+                    agg, gm, estate,
+                )? {
+                    return Ok(r);
+                }
+            }
+        }
         PlanStateNode::HashJoin(hj) => {
             // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
             // composition: hash-agg breaker over the hash-join breaker over
@@ -2098,10 +2123,14 @@ fn window_agg_arm<'mcx>(
 
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (Phase-2 sort pipeline-breaker): on
-    // refuse this falls through to the UNCHANGED paths below. Lane logic +
-    // refuse-set live in `lanev2`.
+    // Lane-executor-v2 dispatch hooks: the parallel-DISTINCT worker partial
+    // (a leader-registered fragment build — lane-v2-pardistinct), then the
+    // Phase-2 sort pipeline-breaker. On refuse this falls through to the
+    // UNCHANGED paths below. Lane logic + refuse-sets live in `lanev2`.
     if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_pardistinct_worker_sort(s, estate)? {
+            return Ok(r);
+        }
         if let Some(r) = crate::lanev2::try_own_sort(s, estate)? {
             return Ok(r);
         }
@@ -3697,7 +3726,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer, lane_fusible; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible, pd_state; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
