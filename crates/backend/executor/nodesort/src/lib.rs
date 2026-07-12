@@ -594,10 +594,13 @@ pub fn sort_lane_topk_tie_track_arm(node: &mut SortState<'_>) {
 }
 
 /// After `sort_lane_finish`, with tracking armed: could the selection or
-/// order of the emitted top-N depend on feed arrival order? (see
-/// `Tuplesort::topk_tie_ambiguous`). False when tracking was never armed.
-pub fn sort_lane_topk_tie_ambiguous(node: &SortState<'_>) -> bool {
-    node.tuplesortstate.as_ref().is_some_and(|ts| ts.topk_tie_ambiguous())
+/// order of the emitted top-N depend on feed arrival order, and which
+/// trigger fired? (see `Tuplesort::topk_tie_ambiguity`). `None` when
+/// tracking was never armed or no tie is arrival-sensitive.
+pub fn sort_lane_topk_tie_ambiguity(
+    node: &SortState<'_>,
+) -> Option<::tuplesort::TopkTieAmbiguity> {
+    node.tuplesortstate.as_ref().and_then(|ts| ts.topk_tie_ambiguity())
 }
 
 /// Demotion reset (the zone-adaptive feed observed an ambiguous boundary

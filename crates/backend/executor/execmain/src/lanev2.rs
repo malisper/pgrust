@@ -3811,9 +3811,21 @@ fn sort_feed_if_needed<'mcx>(
             // LIMIT cut (selection OR retained-tie order) demotes — fresh
             // tuplesort, adaptive disarmed, full physical-order re-feed,
             // reproducing the never-adaptive feed byte-for-byte.
-            if tracked && ::nodesort::sort_lane_topk_tie_ambiguous(state) {
+            let ambiguity = if tracked {
+                ::nodesort::sort_lane_topk_tie_ambiguity(state)
+            } else {
+                None
+            };
+            if let Some(kind) = ambiguity {
                 stats::tick_adaptive_topk_demoted();
-                lane_trace("adaptive topk demoted (ambiguous boundary tie): physical re-feed");
+                lane_trace(match kind {
+                    ::tuplesort::TopkTieAmbiguity::CutSelection => {
+                        "adaptive topk demoted (cut-selection tie): physical re-feed"
+                    }
+                    ::tuplesort::TopkTieAmbiguity::RetainedOrder => {
+                        "adaptive topk demoted (retained-tie order): physical re-feed"
+                    }
+                });
                 ::nodesort::sort_lane_reset_for_refeed(state);
                 ::nodeseqscan::seq_scan_adaptive_disarm_rescan(ss, estate)?;
                 let topk = topk_cut_arm(state, ss, estate);

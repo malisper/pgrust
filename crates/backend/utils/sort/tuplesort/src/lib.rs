@@ -217,6 +217,17 @@ struct ClusterTupleHeader {
 const _: () = assert!(mem::size_of::<ClusterTupleHeader>() == 16);
 
 
+/// Trigger classes for `Tuplesort::topk_tie_ambiguity` (top-k boundary-tie
+/// tracking, lane zone-adaptive sort feeds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopkTieAmbiguity {
+    /// Which rows made the LIMIT cut depends on arrival order.
+    CutSelection,
+    /// The cut set is exact; only equal-full-key emit order inside the
+    /// output is arrival-dependent.
+    RetainedOrder,
+}
+
 pub struct TuplesortData<'m> {
     mcx: Mcx<'m>,
     tuplecontext: MemoryContext,
@@ -1184,37 +1195,53 @@ impl Tuplesort {
     /// After `performsort`, with tie tracking armed: could the SELECTION or
     /// ORDER of the first `bound` output rows depend on input arrival order?
     /// True iff (a) a full-key tie group at the final k-th boundary extends
-    /// beyond the heap (`tie_dirty`, maintained by the bounded put paths), or
-    /// (b) any adjacent full-key-equal pair exists within the first `bound`
-    /// output rows or at the `bound`/`bound+1` cut (the in-memory qsort and
-    /// the bounded heapsort are both unstable, so retained-tie emit order is
-    /// arrival-dependent). Conservative `true` when the sort left memory
-    /// (spilled bounded feeds are out of the lane's admitted envelope).
-    /// False whenever tracking was never armed.
+    /// beyond the heap (`tie_dirty`, maintained by the bounded put paths;
+    /// also the never-bounded cut pair), or (b) any adjacent full-key-equal
+    /// pair exists within the first `bound` output rows (the in-memory qsort
+    /// and the bounded heapsort are both unstable, so retained-tie emit
+    /// order is arrival-dependent). Conservative `true` when the sort left
+    /// memory (spilled bounded feeds are out of the lane's admitted
+    /// envelope). False whenever tracking was never armed.
     pub fn topk_tie_ambiguous(&self) -> bool {
+        self.topk_tie_ambiguity().is_some()
+    }
+
+    /// `topk_tie_ambiguous` with the trigger distinguished: `CutSelection` =
+    /// which rows made the LIMIT cut is arrival-dependent (demotion is the
+    /// only byte-exact answer); `RetainedOrder` = the cut set is exact but
+    /// equal-full-key rows inside the output can emit in arrival-dependent
+    /// order (the surface the ratified tie-order relaxation covers).
+    /// `CutSelection` dominates when both hold.
+    pub fn topk_tie_ambiguity(&self) -> Option<TopkTieAmbiguity> {
         self.0.with(|st| {
             if !st.tie_track {
-                return false;
+                return None;
             }
             if st.tie_dirty || st.status != TupSortStatus::SortedInMem {
-                return true;
+                return Some(TopkTieAmbiguity::CutSelection);
             }
             debug_assert!(st.bounded && st.abbrev.is_none());
             let len = st.memtuples.len();
             // Pairs (i, i+1) for i < min(bound, len-1): every adjacent pair
             // inside the emitted prefix, plus the cut pair when more rows
-            // than the bound survived in memory (the never-bounded case).
-            let hi = (st.bound as usize).min(len.saturating_sub(1));
+            // than the bound survived in memory (the never-bounded case,
+            // where `tie_dirty` never armed — a cut-pair tie is selection
+            // ambiguity there, interior pairs are order-only).
+            let bound = st.bound as usize;
+            let hi = bound.min(len.saturating_sub(1));
             let ctx = ctx!(st);
             dispatch_cmp!(ctx, |cmp| {
-                let mut tie = false;
+                let mut kind = None;
                 for i in 0..hi {
                     if cmp(&st.memtuples[i], &st.memtuples[i + 1]) == 0 {
-                        tie = true;
-                        break;
+                        if i + 1 == bound {
+                            kind = Some(TopkTieAmbiguity::CutSelection);
+                            break;
+                        }
+                        kind = Some(TopkTieAmbiguity::RetainedOrder);
                     }
                 }
-                tie
+                kind
             })
         })
     }
