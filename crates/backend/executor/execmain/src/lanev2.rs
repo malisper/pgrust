@@ -7895,6 +7895,16 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
         return Ok(None);
     };
+    // v1 economics: engage the grouped arm only when the DISTINCT sets are
+    // the WHOLE transition load (empty vocabulary — the Q9 shape). Measured
+    // 2026-07-12 (10m bank, DOP 6): Q9 1.675 -> 0.894s, but the Q10 shape
+    // (sum/count/avg companions) REGRESSED 2.14 -> 2.31s — the per-row
+    // vocabulary accept underprices the fused classic drives. The batched
+    // vocabulary accept is the named follow-up; until then companion-agg
+    // shapes keep the classic parallel plan (FORCE overrides for the e2e).
+    if !spec.vocab.is_empty() && !pardistinct_force() {
+        return Ok(None);
+    }
     trace_feed("pardistinct grouped leader drive engaged");
     stats::tick_owned(ShapeClass::AggBuild);
     let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
