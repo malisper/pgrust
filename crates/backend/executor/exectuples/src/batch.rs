@@ -135,6 +135,17 @@ impl<'mcx> SoaBatch<'mcx> {
     pub fn col_isnull(&self, c: usize) -> &[bool] {
         &self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
     }
+
+    // Columnar-AM staging (cbstore): the AM writes decoded vectors directly.
+    #[inline]
+    pub fn col_values_mut(&mut self, c: usize) -> &mut [Datum] {
+        &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
+    }
+
+    #[inline]
+    pub fn col_isnull_mut(&mut self, c: usize) -> &mut [bool] {
+        &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
+    }
 }
 
 /// Varlena sort-key column plan: stage per-row pointers to one `attlen == -1`
@@ -148,6 +159,10 @@ pub struct SoaVarKeyPlan {
 }
 
 impl SoaVarKeyPlan {
+    pub fn key(&self) -> u16 {
+        self.key
+    }
+
     pub fn try_new(atts: &[CompactAttribute], key: usize) -> Option<SoaVarKeyPlan> {
         if key >= atts.len() || key >= u16::MAX as usize || atts[key].attlen != -1 {
             return None;
