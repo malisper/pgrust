@@ -4129,6 +4129,9 @@ pub(crate) fn copy_SelectStmt<'d>(mcx: Mcx<'d>, s: &SelectStmt<'_>) -> PgResult<
 pub(crate) fn copy_SeqScan<'d>(mcx: Mcx<'d>, s: &SeqScan<'_>) -> PgResult<SeqScan<'d>> {
     Ok(SeqScan {
         scan: copy_Scan(mcx, &s.scan)?,
+        // pgrust-only field (plannodes.rs SeqScan::cb_scan_cols) — hand-added:
+        // generate.py mirrors C's node set, which has no such field.
+        cb_scan_cols: s.cb_scan_cols.as_ref().map(|b| copy_bms(mcx, b)).transpose()?,
     })
 }
 

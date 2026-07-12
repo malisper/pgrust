@@ -718,6 +718,17 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     });
 }
 
+/// Exact scan-column-set kill switch (A/B tooling): `PGRUST_CB_SCANCOLS=0`/
+/// `off` makes `cb_scan_info` ignore `SeqScan::cb_scan_cols` and fall back to
+/// the plan-tlist walk (the physical-tlist-inflated needed set). Default ON;
+/// the lane GUC still gates the consumer.
+fn cb_scan_cols_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_CB_SCANCOLS").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// PREWHERE v1 kill switch (A/B tooling): `PGRUST_LANE_V2_PREWHERE=0`/`off`
 /// keeps cbstore lane quals on the kernel-bitmap/per-row paths. Default ON —
 /// the master `PGRUST_LANE_V2` switch still gates every caller.
@@ -2692,8 +2703,30 @@ fn cb_scan_info<'mcx>(
     for n in node.scan.plan.qual.iter() {
         cx.visit(n)?;
     }
-    for n in node.scan.plan.targetlist.iter() {
-        cx.visit(n)?;
+    // Exact consumed-column set (SeqScan::cb_scan_cols, pgrust-only): the
+    // planner's pre-physical-tlist read set. `use_physical_tlist` hands most
+    // scans a whole-row tlist — free on heap (lazy deform), catastrophic
+    // here: a one-column qual scan under count(*) decodes/decompresses every
+    // column of every surviving granule (the Q2/Q8 0.9s-serial pathology —
+    // 49% decompress_frame_into of columns nothing reads). Prefer the exact
+    // set; the qual walk above stays as fail-safe union (zone extraction
+    // needs it anyway). Lane-gated so the lane-off arm remains the untouched
+    // incumbent oracle; PGRUST_CB_SCANCOLS=0 is the A/B kill switch.
+    let exact = match &node.cb_scan_cols {
+        Some(cols) if cb_scan_cols_enabled() && ::guc_tables::backing::pgrust_lane_executor() => {
+            for a in 1..=natts as i32 {
+                if cols.is_member(a) {
+                    cx.needed[(a - 1) as usize] = true;
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+    if !exact {
+        for n in node.scan.plan.targetlist.iter() {
+            cx.visit(n)?;
+        }
     }
     if cx.syscol {
         return Err(Box::new(PgError::error(
