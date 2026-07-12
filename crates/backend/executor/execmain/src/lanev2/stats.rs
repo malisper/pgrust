@@ -90,9 +90,17 @@ pub(super) enum ShapeClass {
     /// kernels) and the regress corpus has no cbstore tables (its floor
     /// seeds from the dedicated cbstore e2e corpus).
     CbScan = 13,
+    /// Metadata-answered plain agg over a bare cbstore scan (the metaagg
+    /// footer-answer arm). OWNED ticks once per metadata-answered execution
+    /// event; refusals tick ONLY for cbstore-backed plain-agg offers (heap
+    /// scans are out of the arm's scope and tick nothing here) — structural
+    /// reasons once per memoized per-node choice, runtime reasons per
+    /// offered call. The regress corpus has no cbstore tables; the floor
+    /// seeds from the cbstore e2e corpus.
+    MetaAgg = 14,
 }
 
-const N_CLASSES: usize = 14;
+const N_CLASSES: usize = 15;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -110,6 +118,7 @@ impl ShapeClass {
         ShapeClass::Append,
         ShapeClass::ProjectSet,
         ShapeClass::CbScan,
+        ShapeClass::MetaAgg,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -128,6 +137,7 @@ impl ShapeClass {
             ShapeClass::Append => "append",
             ShapeClass::ProjectSet => "projectset",
             ShapeClass::CbScan => "cbscan",
+            ShapeClass::MetaAgg => "metaagg",
         }
     }
 }
@@ -139,10 +149,10 @@ impl ShapeClass {
 /// a reviewed, documented act.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RefuseReason {
-    /// Reserved: the master `PGRUST_LANE_V2` switch is checked by the dispatch
-    /// hooks *before* any lane code runs, so this never ticks today; it exists
-    /// so a future in-lane kill-switch has a stable name.
-    #[allow(dead_code)]
+    /// An in-lane kill switch is off. The master `PGRUST_LANE_V2` switch is
+    /// checked by the dispatch hooks *before* any lane code runs and never
+    /// ticks this; the metaagg arm's `PGRUST_LANE_V2_METAAGG=0` disarm ticks
+    /// it (once per memoized per-node choice on a cbstore-backed plain agg).
     EnvOff = 0,
     /// EvalPlanQual re-check active (model-incompatible, §4).
     Epq = 1,
@@ -222,9 +232,20 @@ pub(super) enum RefuseReason {
     /// standalone ownership) — zero upside today. Re-evaluated when the
     /// design's "SRFs = expanding operator" phase item lands.
     SrfSetExpansion = 24,
+    /// Metaagg arm structural shape refuse (once per memoized per-node
+    /// choice on a cbstore-backed plain agg): a transition set that is not
+    /// all-footer-answerable (classify_meta None — floats/bools/bitwise/
+    /// text, FILTER, DISTINCT/ORDER BY, non-affine transforms), or a scan
+    /// that is not bare (qual/projection/zone quals).
+    MetaShape = 25,
+    /// Metaagg arm runtime refuse (per offered call): the AM declined
+    /// (parallel scan desc / uncovered column type), or a guarded sum's
+    /// interval is unproven against the visible rows' footer min/max — the
+    /// per-row drive owns the call and raises C's overflow error at C's row.
+    MetaRuntime = 26,
 }
 
-const N_REASONS: usize = 25;
+const N_REASONS: usize = 27;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -254,6 +275,8 @@ impl RefuseReason {
             RefuseReason::MultiBatch => "multi-batch",
             RefuseReason::ChildNotLaneOwned => "child-not-lane-owned",
             RefuseReason::SrfSetExpansion => "srf-set-expansion",
+            RefuseReason::MetaShape => "meta-shape",
+            RefuseReason::MetaRuntime => "meta-runtime",
         }
     }
 
@@ -285,6 +308,8 @@ impl RefuseReason {
             MultiBatch,
             ChildNotLaneOwned,
             SrfSetExpansion,
+            MetaShape,
+            MetaRuntime,
         ][i]
     }
 }
