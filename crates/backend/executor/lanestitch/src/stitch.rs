@@ -37,19 +37,33 @@
 // there — see float_cond); float var-var and NaN consts refuse.
 //
 // SIMD tier (classify_simd): when the whole program is provably
-// non-erroring, the body runs 64-row blocks — NEON compare stencils build a
-// 64-bit pass word (8 Datums per iteration, 2x64 per q-register), non-SIMD
+// non-erroring, the body runs 64-row blocks — NEON stencils build a 64-bit
+// pass word (8 Datums per iteration, 2x64 per q-register), non-vector
 // clauses run per-row over the word's surviving bits in ascending order.
-// Legality is the vectorized interpreter's argument: every clause pure and
-// non-erroring makes cross-row/cross-clause reordering unobservable
-// (qual = AND). Any erroring (Arith) clause refuses the SIMD shape and the
-// program falls back to the scalar row-loop body, which keeps exact
-// per-row refuse-and-replay order.
+// Vector-pass shapes: CmpConst / FCmpConst / CmpVar / FCmpVar (the exact
+// NaN-mask formulation, see emit_fcmpvar_quad_2d), NullTestQ / BoolTestQ
+// (mask ops over the already-loaded isnull bytes / value words), and SaopQ
+// (one compare block per non-NULL element ORed into the pass word — SIMD
+// beats the scalar loop at every admitted length, see vector_pass_clause).
+// Legality is the vectorized interpreter's
+// argument, spelled out: the qual is an AND of clauses; with every clause
+// in the plan pure and non-erroring (classify_simd refuses any Arith),
+// each clause's per-row outcome is a pure function of the row's lane
+// bytes, so evaluating clauses in any order — across rows and across
+// clauses — produces the identical AND. A row failing a pure clause never
+// reaches any later clause in EITHER order, so short-circuit is
+// unobservable; there are no errors to reorder by construction. Any
+// erroring (Arith) clause refuses the SIMD shape and the program falls
+// back to the scalar row-loop body, which keeps exact per-row
+// refuse-and-replay order.
 
 use datum::Datum;
 
 use crate::emit::{Cond, Emitter, Label};
-use crate::spec::{is_float_cmp, ArithOp, CmpOp, Program, Step, MAX_COLS, MAX_REGS, MAX_ROWS};
+use crate::spec::{
+    is_float_cmp, ArithOp, BoolTestKind, CmpOp, NullTestKind, Program, Step, MAX_COLS, MAX_REGS,
+    MAX_ROWS,
+};
 
 // Params-block field offsets, provided by lib.rs from offset_of (asserted
 // against the repr(C) layout there).
@@ -94,6 +108,22 @@ pub(crate) enum ClauseShape {
     FCmpConst { col: u16, rel: FRel, konst_bits: u64, lane_f32: bool },
     /// !isnull(a) && !isnull(b) && int_cmp(a, b).
     CmpVar { a_col: u16, b_col: u16, op: CmpOp },
+    /// !isnull(a) && !isnull(b) && pgf_rel(a, b) — float var-var. Exact on
+    /// both tiers via explicit NaN masks (emit arms carry the proofs); both
+    /// sides evaluate at f64 (exact promotion).
+    FCmpVar { a_col: u16, b_col: u16, rel: FRel, a_f32: bool, b_f32: bool },
+    /// lane IS [NOT] NULL fused with its Qual: a pure predicate of the
+    /// row's isnull byte (NullTest never yields NULL).
+    NullTestQ { col: u16, kind: NullTestKind },
+    /// lane IS [NOT] TRUE/FALSE fused with its Qual: a pure predicate of
+    /// (isnull byte, value word != 0) (BooleanTest never yields NULL).
+    BoolTestQ { col: u16, kind: BoolTestKind },
+    /// lane <op> ANY (const array) fused with its Qual. The three-valued
+    /// SAOP surface collapses under a qual: the row passes iff the scalar
+    /// is non-NULL and some non-NULL element matches (a NULL result fails
+    /// the qual exactly like false), so NULL elements only matter by NOT
+    /// matching. Whitelisted non-erroring comparators only (no floats).
+    SaopQ { col: u16, op: CmpOp, arr: u16 },
     Generic { lo: usize, hi: usize },
 }
 
@@ -285,12 +315,63 @@ pub(crate) fn plan_clauses(prog: &Program, ncols: usize) -> Option<Plan> {
                     && !reg_bad(*out)
                     && col_ok(*ca)
                     && col_ok(*cb)
-                    && !is_float_cmp(*op)
                     && regs_dead_after(steps, hi, &[*r0, *r1, *out]) =>
             {
                 use_col(&mut used_cols, *ca);
                 use_col(&mut used_cols, *cb);
-                ClauseShape::CmpVar { a_col: *ca, b_col: *cb, op: *op }
+                if is_float_cmp(*op) {
+                    // Float var-var admits ONLY as this fused shape: the
+                    // stencils carry the exact pgf_* NaN-mask formulation
+                    // (a NaN rhs is possible per row, unlike the const
+                    // shape's baked non-NaN konst). The generic
+                    // register-file Cmp stencil still refuses floats.
+                    let (a_f32, b_f32) = float_family(*op);
+                    ClauseShape::FCmpVar {
+                        a_col: *ca,
+                        b_col: *cb,
+                        rel: float_rel(*op),
+                        a_f32,
+                        b_f32,
+                    }
+                } else {
+                    ClauseShape::CmpVar { a_col: *ca, b_col: *cb, op: *op }
+                }
+            }
+            [Step::LoadLane { col, out: r0 }, Step::NullTest { a, out: r1, kind }, Step::Qual { a: q }]
+                if a == r0
+                    && q == r1
+                    && !reg_bad(*r0)
+                    && !reg_bad(*r1)
+                    && col_ok(*col)
+                    && regs_dead_after(steps, hi, &[*r0, *r1]) =>
+            {
+                use_col(&mut used_cols, *col);
+                ClauseShape::NullTestQ { col: *col, kind: *kind }
+            }
+            [Step::LoadLane { col, out: r0 }, Step::BoolTest { a, out: r1, kind }, Step::Qual { a: q }]
+                if a == r0
+                    && q == r1
+                    && !reg_bad(*r0)
+                    && !reg_bad(*r1)
+                    && col_ok(*col)
+                    && regs_dead_after(steps, hi, &[*r0, *r1]) =>
+            {
+                use_col(&mut used_cols, *col);
+                ClauseShape::BoolTestQ { col: *col, kind: *kind }
+            }
+            [Step::LoadLane { col, out: r0 }, Step::SaopAny { a, out: r1, op, arr }, Step::Qual { a: q }]
+                if a == r0
+                    && q == r1
+                    && !reg_bad(*r0)
+                    && !reg_bad(*r1)
+                    && col_ok(*col)
+                    && !is_float_cmp(*op)
+                    && (*arr as usize) < prog.arrays.len()
+                    && prog.arrays[*arr as usize].len() <= MAX_SAOP_ELEMS
+                    && regs_dead_after(steps, hi, &[*r0, *r1]) =>
+            {
+                use_col(&mut used_cols, *col);
+                ClauseShape::SaopQ { col: *col, op: *op, arr: *arr }
             }
             window => {
                 // Generic clause: every step individually classifiable
@@ -613,6 +694,142 @@ fn emit_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, shape: &ClauseSha
                 e.cmp_w_w(11, 12);
             }
             e.b_cond(cond.inv(), ctx.row_fail);
+        }
+        ClauseShape::FCmpVar { a_col, b_col, rel, a_f32, b_f32 } => {
+            let nul_a = lane_isnull_reg(e, ctx, a_col, 8);
+            e.ldrb_idx(10, nul_a, ROW);
+            let nul_b = lane_isnull_reg(e, ctx, b_col, 8);
+            e.ldrb_idx(13, nul_b, ROW);
+            e.orr_w(10, 10, 13);
+            e.cbnz_w(10, ctx.row_fail);
+            let p0_a = lane_p0_reg(e, ctx, a_col, 8);
+            e.ldr_x_idx3(11, p0_a, ROW);
+            let p0_b = lane_p0_reg(e, ctx, b_col, 8);
+            e.ldr_x_idx3(12, p0_b, ROW);
+            if a_f32 {
+                e.fmov_s_w(0, 11);
+                e.fcvt_d_s(0, 0);
+            } else {
+                e.fmov_d_x(0, 11);
+            }
+            if b_f32 {
+                e.fmov_s_w(1, 12);
+                e.fcvt_d_s(1, 1);
+            } else {
+                e.fmov_d_x(1, 12);
+            }
+            // Exact pgf_* var-var relations from at most three fcmp probes
+            // (fcmp x,x sets V iff x is NaN; a mixed-NaN pair is unordered).
+            //   pgf_eq(a,b) = ordered(a==b) | (nan_a & nan_b)
+            //   pgf_lt(a,b) = ordered(a<b)  | (nan_b & !nan_a)
+            //   pgf_le(a,b) = nan_b | ordered(a<=b)
+            //   pgf_gt(a,b) = ordered(a>b)  | (nan_a & !nan_b)
+            //   pgf_ge(a,b) = nan_a | ordered(a>=b)
+            //   pgf_ne      = !pgf_eq
+            // After `fcmp d0, d1` the ordered relations read exactly as
+            // their integer conds (unordered NZCV=0011 reads false on
+            // Eq/Mi/Ls/Gt/Ge), so each relation is one ordered probe plus
+            // the NaN arm spelled out below.
+            let lpass = e.new_label();
+            match rel {
+                FRel::Eq => {
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Eq, lpass); // ordered equal
+                    e.fcmp_d(0, 0);
+                    e.b_cond(Cond::Vc, ctx.row_fail); // a non-NaN: fail
+                    e.fcmp_d(1, 1);
+                    e.b_cond(Cond::Vc, ctx.row_fail); // b non-NaN: fail
+                }
+                FRel::Ne => {
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Eq, ctx.row_fail); // ordered equal: fail
+                    e.fcmp_d(0, 0);
+                    e.b_cond(Cond::Vc, lpass); // a non-NaN: can't be both-NaN
+                    e.fcmp_d(1, 1);
+                    e.b_cond(Cond::Vs, ctx.row_fail); // both NaN: equal: fail
+                }
+                FRel::Lt => {
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Mi, lpass); // ordered a < b
+                    e.fcmp_d(1, 1);
+                    e.b_cond(Cond::Vc, ctx.row_fail); // b non-NaN: fail
+                    e.fcmp_d(0, 0);
+                    e.b_cond(Cond::Vs, ctx.row_fail); // a NaN too: fail
+                }
+                FRel::Le => {
+                    e.fcmp_d(1, 1);
+                    e.b_cond(Cond::Vs, lpass); // b NaN: everything <= NaN
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Hi, ctx.row_fail); // !(ordered a <= b)
+                }
+                FRel::Gt => {
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Gt, lpass); // ordered a > b
+                    e.fcmp_d(0, 0);
+                    e.b_cond(Cond::Vc, ctx.row_fail); // a non-NaN: fail
+                    e.fcmp_d(1, 1);
+                    e.b_cond(Cond::Vs, ctx.row_fail); // b NaN too: fail
+                }
+                FRel::Ge => {
+                    e.fcmp_d(0, 0);
+                    e.b_cond(Cond::Vs, lpass); // a NaN: NaN >= everything
+                    e.fcmp_d(0, 1);
+                    e.b_cond(Cond::Lt, ctx.row_fail); // !(ordered a >= b)
+                }
+            }
+            e.bind(lpass);
+        }
+        ClauseShape::NullTestQ { col, kind } => {
+            let nul = lane_isnull_reg(e, ctx, col, 8);
+            e.ldrb_idx(10, nul, ROW);
+            match kind {
+                NullTestKind::IsNull => e.cbz_w(10, ctx.row_fail),
+                NullTestKind::IsNotNull => e.cbnz_w(10, ctx.row_fail),
+            }
+        }
+        ClauseShape::BoolTestQ { col, kind } => {
+            use BoolTestKind::*;
+            let nul = lane_isnull_reg(e, ctx, col, 8);
+            e.ldrb_idx(10, nul, ROW);
+            let lpass = e.new_label();
+            // The NOT kinds pass outright on a NULL row; the plain kinds
+            // fail outright. Then truthiness (value word != 0, DatumGetBool)
+            // decides: IsTrue/IsNotFalse need it set, IsFalse/IsNotTrue
+            // need it clear.
+            match kind {
+                IsTrue | IsFalse => e.cbnz_w(10, ctx.row_fail),
+                IsNotTrue | IsNotFalse => e.cbnz_w(10, lpass),
+            }
+            let p0 = lane_p0_reg(e, ctx, col, 8);
+            e.ldr_x_idx3(11, p0, ROW);
+            match kind {
+                IsTrue | IsNotFalse => e.cbz_x(11, ctx.row_fail),
+                IsFalse | IsNotTrue => e.cbnz_x(11, ctx.row_fail),
+            }
+            e.bind(lpass);
+        }
+        ClauseShape::SaopQ { col, op, arr } => {
+            // Fused qual form: pass iff the scalar is non-NULL and some
+            // non-NULL element matches (NULL SAOP results fail a qual like
+            // false, so NULL elements need no code at all here).
+            let nul = lane_isnull_reg(e, ctx, col, 8);
+            e.ldrb_idx(10, nul, ROW);
+            e.cbnz_w(10, ctx.row_fail);
+            let p0 = lane_p0_reg(e, ctx, col, 8);
+            e.ldr_x_idx3(11, p0, ROW);
+            let (wide, cond) = cmp_cond(op);
+            let lpass = e.new_label();
+            for elem in prog.arrays[arr as usize].iter().filter(|e| !e.isnull) {
+                e.ldr_lit(12, elem.value.as_usize() as u64);
+                if wide {
+                    e.cmp_x_x(11, 12);
+                } else {
+                    e.cmp_w_w(11, 12);
+                }
+                e.b_cond(cond, lpass);
+            }
+            e.b(ctx.row_fail); // no element matched (or none exist)
+            e.bind(lpass);
         }
         ClauseShape::Generic { lo, hi } => {
             for step in &prog.steps[lo..hi] {
@@ -954,9 +1171,29 @@ fn vcmp(op: CmpOp) -> VCmp {
     }
 }
 
+/// True = this clause has a NEON vector-pass arm in emit_simd_blocks; false
+/// = inside a SIMD body it runs per-row over the pass word's surviving bits
+/// (Generic clauses). SaopQ is vector-pass at EVERY admitted length: the
+/// admission-economics bench (tests/simd_econ.rs, M-series, 1024-row
+/// batches) has the SIMD form beating the scalar unrolled loop at every k
+/// up to MAX_SAOP_ELEMS (8.8x at k=1, 1.4x at k=16, 1.22x at k=128), so no
+/// separate SIMD cap exists — narrowing it later means adding (and testing)
+/// a fused-clause bits path here.
+fn vector_pass_clause(c: &ClauseShape) -> bool {
+    !matches!(c, ClauseShape::Generic { .. })
+}
+
+/// The elements a SaopQ vector arm compares: NULL elements contribute
+/// nothing to a qual (a NULL SAOP result fails exactly like false), so only
+/// non-NULL elements count against the vector-tier cap or emit code.
+fn saop_vector_elems(prog: &Program, arr: u16) -> Vec<Datum> {
+    prog.arrays[arr as usize].iter().filter(|e| !e.isnull).map(|e| e.value).collect()
+}
+
 /// SIMD legality for a whole plan: every clause pure and non-erroring
-/// (no Arith anywhere), at least one NEON-shaped clause, and at most 5
-/// distinct compare constants (v24-v28).
+/// (no Arith anywhere — the header's reordering argument), at least one
+/// vector-pass clause, and at most 5 distinct hoisted compare constants
+/// (v24-v28; SaopQ and FCmpVar dup their operands per group, not here).
 fn classify_simd(plan: &Plan) -> bool {
     if !simd_enabled() || plan.has_arith {
         return false;
@@ -964,14 +1201,10 @@ fn classify_simd(plan: &Plan) -> bool {
     let mut nconst = 0u32;
     let mut any_simd = false;
     for c in &plan.clauses {
-        match c {
-            ClauseShape::CmpConst { .. } | ClauseShape::FCmpConst { .. } => {
-                nconst += 1;
-                any_simd = true;
-            }
-            ClauseShape::CmpVar { .. } => any_simd = true,
-            ClauseShape::Generic { .. } => {}
+        if let ClauseShape::CmpConst { .. } | ClauseShape::FCmpConst { .. } = c {
+            nconst += 1;
         }
+        any_simd |= vector_pass_clause(c);
     }
     any_simd && nconst <= 5
 }
@@ -1019,6 +1252,65 @@ fn emit_fcmp_quad_2d(e: &mut Emitter, rel: FRel, kreg: u32) {
             }
             FRel::Lt => e.fcmgt_2d(va, kreg, va),
             FRel::Le => e.fcmge_2d(va, kreg, va),
+        }
+    }
+}
+
+/// 8 float var-var comparisons: a-lanes in v0-v3 vs b-lanes in v4-v7 (all
+/// already f64), results into v0-v3. Exact pgf_* NaN-ordering semantics
+/// from ordered NEON compares plus explicit NaN masks (fcmeq x,x is the
+/// nonnan mask: false exactly on NaN lanes):
+///   pgf_eq(a,b) = ordered(a==b) | (nan_a & nan_b)
+///                 [nan_a & nan_b = ~(nonnan_a | nonnan_b), De Morgan]
+///   pgf_ne      = ~pgf_eq
+///   pgf_lt(a,b) = ordered(b>a) | (nonnan_a & ~nonnan_b)   [!nan_a & nan_b]
+///   pgf_le(a,b) = ordered(b>=a) | ~nonnan_b               [nan_b]
+///   pgf_gt(a,b) = ordered(a>b) | (nonnan_b & ~nonnan_a)   [nan_a & !nan_b]
+///   pgf_ge(a,b) = ordered(a>=b) | ~nonnan_a               [nan_a]
+/// Each ordered compare is false on any NaN lane, so the union with the
+/// NaN arm is disjoint-exact (utils/float.h truth table, both operands
+/// unrestricted). Scratch: v16, v17; clobbers the b-lane registers.
+fn emit_fcmpvar_quad_2d(e: &mut Emitter, rel: FRel) {
+    for i in 0..4u32 {
+        let (a, b) = (i, 4 + i);
+        match rel {
+            FRel::Eq | FRel::Ne => {
+                e.fcmeq_2d(16, a, a); // nonnan_a
+                e.fcmeq_2d(17, b, b); // nonnan_b
+                e.orr_16b(16, 16, 17);
+                e.not_16b(16, 16); // nan_a & nan_b
+                e.fcmeq_2d(a, a, b); // ordered a == b
+                e.orr_16b(a, a, 16);
+                if rel == FRel::Ne {
+                    e.not_16b(a, a);
+                }
+            }
+            FRel::Lt => {
+                e.fcmeq_2d(16, a, a); // nonnan_a
+                e.fcmeq_2d(17, b, b); // nonnan_b
+                e.bic_16b(16, 16, 17); // !nan_a & nan_b
+                e.fcmgt_2d(a, b, a); // ordered a < b
+                e.orr_16b(a, a, 16);
+            }
+            FRel::Le => {
+                e.fcmeq_2d(17, b, b);
+                e.not_16b(17, 17); // nan_b
+                e.fcmge_2d(a, b, a); // ordered a <= b
+                e.orr_16b(a, a, 17);
+            }
+            FRel::Gt => {
+                e.fcmeq_2d(16, b, b); // nonnan_b
+                e.fcmeq_2d(17, a, a); // nonnan_a
+                e.bic_16b(16, 16, 17); // nan_a & !nan_b
+                e.fcmgt_2d(a, a, b); // ordered a > b
+                e.orr_16b(a, a, 16);
+            }
+            FRel::Ge => {
+                e.fcmeq_2d(17, a, a);
+                e.not_16b(17, 17); // nan_a
+                e.fcmge_2d(a, a, b); // ordered a >= b
+                e.orr_16b(a, a, 17);
+            }
         }
     }
 }
@@ -1126,6 +1418,107 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
                 e.and_8b(17, 17, 16);
                 e.and_8b(0, 0, 17);
             }
+            ClauseShape::FCmpVar { a_col, b_col, rel, a_f32, b_f32 } => {
+                emit_load_group(e, ctx, a_col, 0);
+                emit_load_group(e, ctx, b_col, 4);
+                if a_f32 {
+                    for va in 0..4u32 {
+                        e.xtn_2s_2d(va, va);
+                        e.fcvtl_2d_2s(va, va);
+                    }
+                }
+                if b_f32 {
+                    for vb in 4..8u32 {
+                        e.xtn_2s_2d(vb, vb);
+                        e.fcvtl_2d_2s(vb, vb);
+                    }
+                }
+                emit_fcmpvar_quad_2d(e, rel);
+                emit_narrow_masks_8b(e, false);
+                emit_notnull_8b(e, ctx, a_col, 17);
+                emit_notnull_8b(e, ctx, b_col, 16);
+                e.and_8b(17, 17, 16);
+                e.and_8b(0, 0, 17);
+            }
+            ClauseShape::NullTestQ { col, kind } => {
+                // The clause mask IS the (inverted) notnull byte mask —
+                // NullTest never yields NULL and its value is a pure
+                // function of the isnull byte.
+                emit_notnull_8b(e, ctx, col, 0);
+                if kind == NullTestKind::IsNull {
+                    e.not_8b(0, 0);
+                }
+            }
+            ClauseShape::BoolTestQ { col, kind } => {
+                use BoolTestKind::*;
+                emit_load_group(e, ctx, col, 0);
+                // Falsy 2d masks (value word == 0); the narrow either keeps
+                // them (IsFalse/IsNotTrue want falsy) or complements to
+                // truthy (IsTrue/IsNotFalse).
+                for va in 0..4u32 {
+                    e.cmeq0_2d(va, va);
+                }
+                emit_narrow_masks_8b(e, matches!(kind, IsTrue | IsNotFalse));
+                emit_notnull_8b(e, ctx, col, 17);
+                match kind {
+                    // is_true = truthy & !null; is_false = falsy & !null.
+                    IsTrue | IsFalse => e.and_8b(0, 0, 17),
+                    // !is_true = falsy | null; !is_false = truthy | null.
+                    IsNotTrue | IsNotFalse => {
+                        e.not_8b(17, 17);
+                        e.orr_8b(0, 0, 17);
+                    }
+                }
+            }
+            ClauseShape::SaopQ { col, op, arr } => {
+                let elems = saop_vector_elems(prog, arr);
+                emit_load_group(e, ctx, col, 0);
+                let v = vcmp(op);
+                let ne = v == VCmp::Ne;
+                // Accumulators v4-v7. For every relation but Ne the row's
+                // match word is OR over elements of cmp(scalar, elem) —
+                // OR-accumulate from zeros. Ne needs OR of complements,
+                // which is NOT(AND of CMEQ) (De Morgan): AND-accumulate
+                // from ones, complement once in the narrow.
+                for i in 0..4u32 {
+                    if ne {
+                        e.cmeq_2d(4 + i, i, i); // x == x: all-ones
+                    } else {
+                        e.eor_16b(4 + i, 4 + i, 4 + i); // zeros
+                    }
+                }
+                for elem in &elems {
+                    e.ldr_lit(12, elem.as_usize() as u64);
+                    e.dup_2d_x(16, 12);
+                    for i in 0..4u32 {
+                        match v {
+                            VCmp::Eq | VCmp::Ne => e.cmeq_2d(17, i, 16),
+                            VCmp::Gt => e.cmgt_2d(17, i, 16),
+                            VCmp::Ge => e.cmge_2d(17, i, 16),
+                            VCmp::Lt => e.cmgt_2d(17, 16, i),
+                            VCmp::Le => e.cmge_2d(17, 16, i),
+                            VCmp::Hi => e.cmhi_2d(17, i, 16),
+                            VCmp::Hs => e.cmhs_2d(17, i, 16),
+                            VCmp::Lo => e.cmhi_2d(17, 16, i),
+                            VCmp::Ls => e.cmhs_2d(17, 16, i),
+                        }
+                        if ne {
+                            e.and_16b(4 + i, 4 + i, 17);
+                        } else {
+                            e.orr_16b(4 + i, 4 + i, 17);
+                        }
+                    }
+                }
+                // Empty element set falls out naturally: zeros (or
+                // NOT(ones) for Ne) — every row fails, matching the
+                // interpreter's false-or-NULL qual failure.
+                for i in 0..4u32 {
+                    e.orr_16b(i, 4 + i, 4 + i);
+                }
+                emit_narrow_masks_8b(e, ne);
+                emit_notnull_8b(e, ctx, col, 17);
+                e.and_8b(0, 0, 17);
+            }
             ClauseShape::Generic { .. } => continue,
         }
         if first {
@@ -1147,12 +1540,14 @@ fn emit_simd_blocks(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, plan: &Plan)
     e.str_x(9, 31, SPILL_MASK);
     e.str_x(ROW, 31, SPILL_BASE);
 
-    // Non-SIMD clauses per surviving row, ascending. Running them after
-    // every SIMD clause is exact: all clauses are pure and non-erroring
-    // (classify_simd refused arith), so the implicit AND commutes.
+    // Non-vector clauses per surviving row, ascending. Running them after
+    // every vector-pass clause is exact: all clauses are pure and
+    // non-erroring (classify_simd refused arith), so the implicit AND
+    // commutes — a row failing a pure clause never reaches an erroring
+    // clause in either order because no erroring clause exists here at all.
     for c in &plan.clauses {
-        if let ClauseShape::Generic { lo, hi } = *c {
-            emit_bits_clause(e, ctx, prog, &prog.steps[lo..hi]);
+        if !vector_pass_clause(c) {
+            emit_bits_clause(e, ctx, prog, c);
         }
     }
     e.ldr_x(ROW, 31, SPILL_BASE);
@@ -1189,15 +1584,14 @@ fn emit_bits_head(e: &mut Emitter) -> (Label, Label) {
     (head, done)
 }
 
-/// One non-SIMD clause over the block's surviving rows; a failing Qual
-/// clears the row's bit in the spilled pass word.
-fn emit_bits_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, steps: &[Step]) {
+/// One non-vector clause over the block's surviving rows (its scalar
+/// stencil with the fail/next labels re-aimed); a failing row clears its
+/// bit in the spilled pass word.
+fn emit_bits_clause(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, shape: &ClauseShape) {
     let (head, done) = emit_bits_head(e);
     let fail = e.new_label();
     let cctx = ctx.with_row_labels(fail, head);
-    for step in steps {
-        emit_step(e, &cctx, prog, step);
-    }
+    emit_clause(e, &cctx, prog, shape);
     e.b(head);
     e.bind(fail);
     e.ldr_x(13, 31, SPILL_BASE);
