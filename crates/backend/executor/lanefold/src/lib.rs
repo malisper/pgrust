@@ -956,6 +956,12 @@ fn minmax_advance(t: &LaneTrans, pg: &mut AggPerGroup, v: i64, want_max: bool) {
     }
 }
 
+::mcx::forget_safe_nodrop!(LaneTrans, CseGroup, GuardEntry);
+// SAFETY census: every field is an arena PgVec of no-drop elements (or bool).
+::mcx::forget_safe_struct!(
+    LanePlan<'_> { trans, cse, cse_members, cse_skip, guards, cols, resid, guarded },
+);
+
 #[inline(always)]
 fn for_each_row(rows: &[u64], mut f: impl FnMut(usize)) {
     for (w, &word) in rows.iter().enumerate() {
