@@ -199,6 +199,10 @@ pub struct SortNode<'mcx> {
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     // None only after exec_end_node (released for the forget path).
     pub outer_desc: Option<Rc<TupleDescData<'static>>>,
+    /// Lane-executor-v2 sort-breaker verdict, memoized at first call (the
+    /// structural fusibility cascade must not run per pulled tuple); the
+    /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
+    pub lane_fusible: Option<bool>,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -691,6 +695,7 @@ pub fn exec_init_node<'mcx>(
                 state,
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
                 outer_desc: Some(outer_desc),
+                lane_fusible: None,
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -1913,7 +1918,15 @@ fn window_agg_arm<'mcx>(
 
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    let SortNode { state, outer, outer_desc } = s;
+    // Lane-executor-v2 dispatch hook (Phase-2 sort pipeline-breaker): on
+    // refuse this falls through to the UNCHANGED paths below. Lane logic +
+    // refuse-set live in `lanev2`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_sort(s, estate)? {
+            return Ok(r);
+        }
+    }
+    let SortNode { state, outer, outer_desc, .. } = s;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     if !state.sort_done() {
         if let PlanStateNode::SeqScan(ss) = &mut **outer {
@@ -2101,7 +2114,9 @@ fn bitmap_heap_scan_arm<'mcx>(
 
 // BitmapTableScanSetup's MultiExec leg (nodeBitmapHeapscan.c): serial always
 // builds; parallel builds only in the participant that wins BM_INITIAL.
-fn bitmap_table_scan_setup_dispatch<'mcx>(
+// pub(crate): the lanev2 sort-breaker feed drives a BitmapHeapScan child
+// directly and must run the same setup the arm would.
+pub(crate) fn bitmap_table_scan_setup_dispatch<'mcx>(
     b: &mut BitmapHeapPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -3328,7 +3343,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin },
     MergeAppendNode<'_> { state, substates, subplan_origin },

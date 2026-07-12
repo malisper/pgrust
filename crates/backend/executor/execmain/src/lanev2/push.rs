@@ -67,6 +67,12 @@ pub(super) enum OpStatus {
     /// The sink went `Full` mid-batch; position saved (see
     /// `Operator::pending`), resumed on a later driver round.
     Paused,
+    /// NEW: operator will never produce again (LIMIT reached,
+    /// semi/anti satisfied, merge side exhausted). Only returned
+    /// when the root buffer is empty; a Full accept yields Paused
+    /// first so the boundary tuple is delivered.
+    #[allow(dead_code)]
+    Finished,
 }
 
 /// Produces batches — a scan is a source. `Node` is the executor node owning
@@ -198,6 +204,45 @@ where
                 return Ok(t);
             }
             OpStatus::NeedInput => {}
+            OpStatus::Finished => {
+                root.finish(estate)?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// The pipeline-breaker feed driver — pipeline N in full: pull every batch
+/// from the source and push it through the operator chain into a breaker
+/// `Sink`, then finalize the sink (`Sink::finish` = the breaker's build step:
+/// `tuplesort_performsort` / hash build / hashagg finalize). A breaker sink
+/// always returns `SinkFeed::NeedMore` (never `Full`), so the operator can
+/// never pause; the whole feed runs inside one `exec_proc_node` call, exactly
+/// like the row path's build leg (`exec_sort`'s feed loop), and the node-side
+/// phase flag then flips the breaker to its `Source` face for pipeline N+1.
+pub(super) fn feed_pipeline<'mcx, S, O>(
+    node: &mut S::Node,
+    src: &mut S,
+    op: &mut O,
+    sink: &mut dyn Sink<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    loop {
+        let batch = match op.pending(node) {
+            Some(b) => b,
+            None => match src.produce(node, estate)? {
+                Some(b) => b,
+                None => return sink.finish(estate),
+            },
+        };
+        match op.consume(node, batch, sink, estate)? {
+            OpStatus::NeedInput => {}
+            OpStatus::Paused => unreachable!("pipeline-breaker sink paused the feed"),
+            OpStatus::Finished => return sink.finish(estate),
         }
     }
 }
