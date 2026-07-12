@@ -371,25 +371,60 @@ pub fn try_own_seq_scan<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Standalone scan ownership: refused for heap (STANDALONE_SCAN_NO_UPSIDE
     // — the incumbent row drive carries the identical kernels), but ADMITTED
-    // for cbstore scans: the documented exception (phase4 design §7 /
-    // design-doc §4 "shrinks when standalone scans gain a kernel the row
-    // drive lacks"). The incumbent cbstore per-row drive (`getnextslot`) has
-    // NO SoA staging, NO kernel-qual bitmap and NO dict/PREWHERE tier, so
-    // lane ownership is staged-kernel upside, not adapter overhead.
-    // Bench-gated: the cbstore microbench keeps this admission honest.
-    // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
-    if STANDALONE_SCAN_NO_UPSIDE && !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    // for cbstore scans WITH AN ARMED QUAL KERNEL: the documented exception
+    // (phase4 design §7 / design-doc §4 "shrinks when standalone scans gain
+    // a kernel the row drive lacks"). The incumbent cbstore per-row drive
+    // (`getnextslot`) has NO SoA staging, NO kernel-qual bitmap and NO
+    // dict/PREWHERE tier, so lane ownership of a QUAL'D scan is staged-
+    // kernel upside. A kernel-less cbstore scan (no qual, or an unarmable
+    // one) is the heap case exactly — per-pull capacity-one adapter overhead
+    // with nothing to vectorize — and REFUSES: bench-gated 2026-07-12 on the
+    // 2M-row cbstore microbench, where unconditional admission ran
+    // count-star 1.33x, group-int (sorted-agg pull feed) 1.21x and
+    // merge-join-agg 1.10x lane-ON vs lane-OFF while the qual'd shapes won
+    // 0.45-0.84x; the qual-armed gate keeps the wins and returns the rest
+    // to the per-row drive. Per-PULL tick cadence (once per call).
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    if STANDALONE_SCAN_NO_UPSIDE && !is_cb {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
         return Ok(None);
     }
-    if !seq_scan_fusible(ss, estate)? {
+    if is_cb {
+        // Memoized per node: the arm outcome is static, and a refused scan
+        // must not re-run the fusibility + arm cascade per pulled tuple
+        // (measured +20% on kernel-less count(*) shapes). A refusal is
+        // byte-safe regardless of the dynamic gates, so the memoized-false
+        // path is one branch; the admitted path still re-checks the
+        // dynamic gates inside seq_scan_fusible every call.
+        match ss.cb_standalone_verdict() {
+            Some(false) => {
+                stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                return Ok(None);
+            }
+            Some(true) => {
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+            }
+            None => {
+                // First call: never memoize on a dynamic-gate refusal.
+                if !seq_scan_fusible(ss, estate)? {
+                    return Ok(None);
+                }
+                // Arm the qual staging (PREWHERE lane or kernel bitmap).
+                // Stitch stays off: tier-2 bodies are drain-pipeline-only,
+                // and this is a per-pull feed.
+                arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
+                let armed = ::nodeseqscan::seq_scan_batch_qual_bitmap_armed(ss);
+                ss.set_cb_standalone_verdict(armed);
+                if !armed {
+                    stats::tick_refused(ShapeClass::CbScan, RefuseReason::AdmissionEconomicsNoConsumer);
+                    return Ok(None);
+                }
+            }
+        }
+    } else if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
-    }
-    // Kernel-qual selection bitmap over the staged cbstore window (idempotent
-    // re-arm per pull; the heap standalone path never gets here). Stitch stays
-    // off: tier-2 bodies are drain-pipeline-only, and this is a per-pull feed.
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
-        arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "standalone cbstore scan", stitch: false })?;
     }
     debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
     // Assemble the scan-only push pipeline. Stages are stateless unit structs

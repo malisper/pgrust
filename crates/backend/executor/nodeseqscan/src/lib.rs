@@ -64,6 +64,12 @@ pub struct SeqScanState<'mcx> {
     // gates (EPQ, direction) stay in the lane. None = not yet evaluated.
     // Reset on park (rebind may change the backing scan).
     lane_verdict: Option<bool>,
+    // Memoized STANDALONE-ownership verdict for cbstore scans (lane-v2):
+    // admitted only with an armed qual kernel; the arm outcome is static per
+    // node, and the admission cascade must not re-run per pulled tuple (the
+    // per-pull walk measured +20% on kernel-less count(*) shapes). Reset
+    // with lane_verdict on park.
+    cb_standalone: Option<bool>,
     // cbstore relations only: plan-derived column need-set + zone-mappable
     // conjuncts, installed on the scan desc at open (cbstore-impl.md §7.3).
     cb_scan: Option<std::boxed::Box<CbScanInfo>>,
@@ -361,6 +367,15 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn set_lane_verdict(&mut self, v: bool) {
         self.lane_verdict = Some(v);
+    }
+
+    /// Memoized standalone cbstore ownership verdict (see the field doc).
+    pub fn cb_standalone_verdict(&self) -> Option<bool> {
+        self.cb_standalone
+    }
+
+    pub fn set_cb_standalone_verdict(&mut self, v: bool) {
+        self.cb_standalone = Some(v);
     }
 
     pub fn release_parallel(&mut self) {
@@ -2186,6 +2201,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         lane_pos: 0,
         lane_n: 0,
         lane_verdict: None,
+        cb_standalone: None,
         cb_scan,
     })
 }
@@ -2381,6 +2397,7 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.lane_pos = 0;
     node.lane_n = 0;
     node.lane_verdict = None;
+    node.cb_standalone = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -2482,7 +2499,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict;
+        lane_pos, lane_n, lane_verdict, cb_standalone;
         bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
