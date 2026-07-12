@@ -4,7 +4,10 @@ use std::sync::atomic::Ordering::{Relaxed, Release, SeqCst};
 use elog::{elog, ereport};
 use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
 use types_core::TransactionId;
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, FATAL, LOG, NOTICE, PANIC};
+use types_error::{
+    ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERRCODE_DATA_CORRUPTED, ERROR, FATAL, LOG,
+    NOTICE, PANIC,
+};
 use types_core::XLogRecPtr;
 
 use crate::control_file::{control_file, control_file_update};
@@ -19,6 +22,12 @@ use crate::*;
 fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("xlog.c", 0, func)
 }
+
+const STANDBY_SIGNAL_FILE: &str = "standby.signal";
+const RECOVERY_SIGNAL_FILE: &str = "recovery.signal";
+// wait_event_names.txt WaitEventIPC ordinals.
+const WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND: u32 = 0x0800_0001;
+const WAIT_EVENT_RECOVERY_END_COMMAND: u32 = 0x0800_002E;
 
 thread_local! {
     static LAST_FULL_PAGE_WRITES: Cell<bool> = const { Cell::new(false) };
@@ -155,7 +164,7 @@ pub fn StartupXLOG() -> PgResult<()> {
     };
 
     let init = xlogrecovery_seams::init_wal_recovery::call()?;
-    let _was_shutdown = init.was_shutdown;
+    let was_shutdown = init.was_shutdown;
     let check_point = control_file().checkPointCopy;
 
     procarray::TransamVariables().nextXid.store(check_point.nextXid.value, Relaxed);
@@ -276,11 +285,68 @@ pub fn StartupXLOG() -> PgResult<()> {
 
         snapmgr_seams::delete_all_exported_snapshot_files::call();
 
-        // Hot-standby init: archive-recovery leg, unported.
         if xlogrecovery_seams::archive_recovery_requested::call()
             && guc_tables::vars::EnableHotStandby.read()
         {
-            panic!("hot standby recovery init not ported");
+            let _ = elog(DEBUG1, "initializing for hot standby");
+
+            standby_seams::init_recovery_transaction_environment::call()?;
+
+            let oldest_active_xid = if was_shutdown {
+                // The prescan seam cannot return the prepared-xact xids list;
+                // it and StandbyRecoverPreparedTransactions are provably
+                // no-ops only while pg_twophase is empty.
+                if !dir_is_empty("pg_twophase") {
+                    panic!(
+                        "hot-standby init with prepared transactions not ported \
+                         (PrescanPreparedTransactions xids list / \
+                         StandbyRecoverPreparedTransactions)"
+                    );
+                }
+                if twophase_seams::prescan_prepared_transactions::is_installed() {
+                    twophase_seams::prescan_prepared_transactions::call()?
+                } else {
+                    types_core::FullTransactionId {
+                        value: procarray::TransamVariables().nextXid.load(Relaxed),
+                    }
+                    .xid()
+                }
+            } else {
+                check_point.oldestActiveXid
+            };
+            debug_assert!(oldest_active_xid != types_core::InvalidTransactionId);
+
+            procarray_seams::proc_array_init_recovery::call(
+                types_core::FullTransactionId {
+                    value: procarray::TransamVariables().nextXid.load(Relaxed),
+                }
+                .xid(),
+            );
+
+            subtrans_seams::startup_subtrans::call(oldest_active_xid)?;
+
+            if was_shutdown {
+                // Empty fake running-xacts record: no prepared xacts (guarded above).
+                let cx = mcx::MemoryContext::new("StartupXLOG/running-xacts");
+                let mut latest_completed_xid = check_point.nextXid.xid();
+                loop {
+                    latest_completed_xid = latest_completed_xid.wrapping_sub(1);
+                    if latest_completed_xid >= types_core::FirstNormalTransactionId {
+                        break;
+                    }
+                }
+                let running = types_storage::storage::RunningTransactionsData {
+                    xcnt: 0,
+                    subxcnt: 0,
+                    subxid_status: types_storage::storage::SUBXIDS_IN_SUBTRANS,
+                    nextXid: check_point.nextXid.xid(),
+                    oldestRunningXid: oldest_active_xid,
+                    oldestDatabaseRunningXid: types_core::InvalidTransactionId,
+                    latestCompletedXid: latest_completed_xid,
+                    xids: mcx::PgVec::new_in(cx.mcx()),
+                };
+                procarray_seams::proc_array_apply_recovery_info::call(&running)?;
+            }
         }
 
         xlogrecovery_seams::perform_wal_recovery::call()?;
@@ -291,7 +357,7 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     let end_of_recovery_info = xlogrecovery_seams::finish_wal_recovery::call()?;
     let mut end_of_log = end_of_recovery_info.endOfLog;
-    let _end_of_log_tli = end_of_recovery_info.endOfLogTLI;
+    let end_of_log_tli = end_of_recovery_info.endOfLogTLI;
 
     if xlogutils::in_recovery()
         && (end_of_log < crate::write::LOCAL_MIN_RECOVERY_POINT.get()
@@ -324,10 +390,28 @@ pub fn StartupXLOG() -> PgResult<()> {
 
     let mut new_tli = end_of_recovery_info.lastRecTLI;
     if xlogrecovery_seams::archive_recovery_requested::call() {
-        let _ = new_tli;
-        panic!("archive recovery timeline switch not ported (XLogInitNewTimeline)");
+        let recovery_target_tli = xlogrecovery_seams::recovery_target_tli::call();
+        new_tli = timeline_seams::find_newest_timeline::call(recovery_target_tli)? + 1;
+        let _ = elog(LOG, format!("selected new timeline ID: {new_tli}"));
+
+        XLogInitNewTimeline(end_of_log_tli, end_of_log, new_tli)?;
+
+        if end_of_recovery_info.standby_signal_file_found {
+            fd::durable_unlink(STANDBY_SIGNAL_FILE, FATAL)?;
+        }
+        if end_of_recovery_info.recovery_signal_file_found {
+            fd::durable_unlink(RECOVERY_SIGNAL_FILE, FATAL)?;
+        }
+
+        timeline_seams::write_timeline_history::call(
+            new_tli,
+            recovery_target_tli,
+            end_of_log,
+            &end_of_recovery_info.recoveryStopReason,
+        )?;
+
+        let _ = elog(LOG, "archive recovery complete");
     }
-    new_tli = end_of_recovery_info.lastRecTLI;
 
     ctl.info_lck.with(|| {
         ctl.InsertTimeLineID.store(new_tli, Relaxed);
@@ -390,7 +474,10 @@ pub fn StartupXLOG() -> PgResult<()> {
         procarray::TransamVariables().latestCompletedXid.store(latest, Relaxed);
     }
 
-    if subtrans_seams::startup_subtrans::is_installed() {
+    // Hot standby already ran StartupSUBTRANS in the redo phase.
+    if xlogutils::standby_state() == xlogutils::STANDBY_DISABLED
+        && subtrans_seams::startup_subtrans::is_installed()
+    {
         subtrans_seams::startup_subtrans::call(oldest_active_xid)?;
     }
     clog::TrimCLOG()?;
@@ -418,11 +505,17 @@ pub fn StartupXLOG() -> PgResult<()> {
     insert.fullPageWrites.store(LAST_FULL_PAGE_WRITES.get(), Relaxed);
     UpdateFullPageWrites()?;
 
-    if performed_wal_recovery {
-        PerformRecoveryXLogAction()?;
-    }
+    let promoted = if performed_wal_recovery {
+        PerformRecoveryXLogAction()?
+    } else {
+        false
+    };
 
     XLogReportParameters()?;
+
+    if xlogrecovery_seams::archive_recovery_requested::call() {
+        CleanupAfterArchiveRecovery(end_of_log_tli, end_of_log, new_tli)?;
+    }
 
     if commit_ts_seams::complete_commit_ts_initialization::is_installed() {
         commit_ts_seams::complete_commit_ts_initialization::call()?;
@@ -433,6 +526,20 @@ pub fn StartupXLOG() -> PgResult<()> {
     ctl.info_lck.with(|| ctl.SharedRecoveryState.store(RECOVERY_STATE_DONE, Relaxed));
     UpdateControlFile()?;
     LWLockRelease(ControlFileLock())?;
+
+    // Must follow RecoverPreparedTransactions and the RECOVERY_STATE_DONE
+    // flip so snapshots stop relying on KnownAssignedXids first.
+    if xlogutils::standby_state() != xlogutils::STANDBY_DISABLED {
+        standby_seams::shutdown_recovery_transaction_environment::call()?;
+    }
+
+    if walsender_seams::wal_snd_wakeup::is_installed() {
+        walsender_seams::wal_snd_wakeup::call(true, true);
+    }
+
+    if promoted {
+        checkpointer_seams::request_checkpoint::call(CHECKPOINT_FORCE)?;
+    }
 
     Ok(())
 }
@@ -518,29 +625,160 @@ fn CreateOverwriteContrecordRecord(
     Ok(recptr)
 }
 
-fn PerformRecoveryXLogAction() -> PgResult<()> {
+fn PerformRecoveryXLogAction() -> PgResult<bool> {
     let promoted = xlogrecovery_seams::archive_recovery_requested::call()
         && init_small::globals::IsUnderPostmaster()
         && xlogrecovery_seams::promote_is_triggered::call();
     if promoted {
-        panic!("CreateEndOfRecoveryRecord (promotion) not ported");
-    }
-    let flags = CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IMMEDIATE | CHECKPOINT_WAIT;
-    if checkpointer_seams::request_checkpoint::is_installed() {
-        checkpointer_seams::request_checkpoint::call(flags)?;
+        CreateEndOfRecoveryRecord()?;
     } else {
-        // C standalone-backend semantics: RequestCheckpoint runs the
-        // checkpoint in-process when there is no checkpointer.
-        CreateCheckPoint(flags)?;
+        let flags = CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IMMEDIATE | CHECKPOINT_WAIT;
+        if checkpointer_seams::request_checkpoint::is_installed() {
+            checkpointer_seams::request_checkpoint::call(flags)?;
+        } else {
+            // C standalone-backend semantics: RequestCheckpoint runs the
+            // checkpoint in-process when there is no checkpointer.
+            CreateCheckPoint(flags)?;
+        }
+    }
+    Ok(promoted)
+}
+
+fn CreateEndOfRecoveryRecord() -> PgResult<()> {
+    if !RecoveryInProgress() {
+        return ereport(ERROR)
+            .errmsg("can only be used to end recovery")
+            .finish(loc("CreateEndOfRecoveryRecord"));
+    }
+
+    let end_time = timestamp_seams::get_current_timestamp::call();
+    let wal_level_now = wal_level();
+
+    let ctl = XLogCtl();
+    WALInsertLockAcquireExclusive();
+    let this_tli = ctl.InsertTimeLineID.load(Relaxed);
+    let prev_tli = ctl.PrevTimeLineID.load(Relaxed);
+    WALInsertLockRelease();
+
+    init_small::globals::StartCriticalSection();
+
+    // xl_end_of_recovery (xlog_internal.h): end_time 0..8, ThisTimeLineID
+    // 8..12, PrevTimeLineID 12..16, wal_level 16..20; sizeof == 24 (8-byte
+    // struct align pads the tail).
+    let mut body = [0u8; 24];
+    body[0..8].copy_from_slice(&end_time.to_ne_bytes());
+    body[8..12].copy_from_slice(&this_tli.to_ne_bytes());
+    body[12..16].copy_from_slice(&prev_tli.to_ne_bytes());
+    body[16..20].copy_from_slice(&wal_level_now.to_ne_bytes());
+    let recptr = xloginsert_seams::xlog_insert::call(RM_XLOG_ID, XLOG_END_OF_RECOVERY, &[&body])?;
+
+    XLogFlush(recptr)?;
+
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    control_file_update(|cf| {
+        cf.minRecoveryPoint = recptr;
+        cf.minRecoveryPointTLI = this_tli;
+    });
+    UpdateControlFile()?;
+    LWLockRelease(ControlFileLock())?;
+
+    init_small::globals::EndCriticalSection();
+    Ok(())
+}
+
+fn XLogInitNewTimeline(
+    end_tli: TimeLineID,
+    end_of_log: XLogRecPtr,
+    new_tli: TimeLineID,
+) -> PgResult<()> {
+    debug_assert!(end_tli != new_tli);
+
+    crate::write::UpdateMinRecoveryPoint(InvalidXLogRecPtr, true)?;
+
+    let wal_segsz = wal_segment_size();
+    let end_log_seg_no = XLByteToPrevSeg(end_of_log, wal_segsz);
+    let start_log_seg_no = XLByteToSeg(end_of_log, wal_segsz);
+
+    if end_log_seg_no == start_log_seg_no {
+        crate::write::XLogFileCopy(
+            new_tli,
+            end_log_seg_no,
+            end_tli,
+            end_log_seg_no,
+            XLogSegmentOffset(end_of_log, wal_segsz) as i32,
+        )?;
+    } else {
+        let f = crate::write::XLogFileInit(start_log_seg_no, new_tli)?;
+        // SAFETY: f is the open fd returned by XLogFileInit.
+        if unsafe { libc::close(f) } != 0 {
+            let fname = XLogFileName(new_tli, start_log_seg_no, wal_segsz);
+            let e = std::io::Error::last_os_error();
+            return ereport(ERROR)
+                .errmsg(format!("could not close file \"{fname}\": {e}"))
+                .finish(loc("XLogInitNewTimeline"));
+        }
+    }
+
+    let fname = XLogFileName(new_tli, start_log_seg_no, wal_segsz);
+    crate::removal::xlog_archive_cleanup(&fname);
+    Ok(())
+}
+
+fn CleanupAfterArchiveRecovery(
+    end_of_log_tli: TimeLineID,
+    end_of_log: XLogRecPtr,
+    new_tli: TimeLineID,
+) -> PgResult<()> {
+    if guc_tables::vars::recoveryEndCommand.installed() {
+        if let Some(cmd) = guc_tables::vars::recoveryEndCommand.read() {
+            if !cmd.is_empty() {
+                xlogarchive_seams::execute_recovery_command::call(
+                    &cmd,
+                    "recovery_end_command",
+                    true,
+                    WAIT_EVENT_RECOVERY_END_COMMAND,
+                )?;
+            }
+        }
+    }
+
+    crate::removal::RemoveNonParentXlogFiles(end_of_log, new_tli)?;
+
+    // Mid-segment switch: archive the old timeline's last segment as *.partial.
+    let wal_segsz = wal_segment_size();
+    if XLogSegmentOffset(end_of_log, wal_segsz) != 0 && XLogArchivingActive() {
+        let end_log_seg_no = XLByteToPrevSeg(end_of_log, wal_segsz);
+        let origfname = XLogFileName(end_of_log_tli, end_log_seg_no, wal_segsz);
+
+        if !xlogarchive_seams::xlog_archive_is_ready_or_done::call(&origfname) {
+            if guc_tables::vars::summarize_wal.installed()
+                && guc_tables::vars::summarize_wal.read()
+            {
+                walsummarizer_seams::wait_for_wal_summarization::call(end_of_log)?;
+            }
+
+            let origpath = XLogFilePath(end_of_log_tli, end_log_seg_no, wal_segsz);
+            let partialfname = format!("{origfname}.partial");
+            let partialpath = format!("{origpath}.partial");
+
+            crate::removal::xlog_archive_cleanup(&partialfname);
+
+            fd::durable_rename(&origpath, &partialpath, ERROR)?;
+            xlogarchive_seams::xlog_archive_notify::call(&partialfname)?;
+        }
     }
     Ok(())
 }
 
-pub(crate) fn SetInstallXLogFileSegmentActive() -> PgResult<()> {
+pub fn SetInstallXLogFileSegmentActive() -> PgResult<()> {
     LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
     XLogCtl().InstallXLogFileSegmentActive.store(true, Relaxed);
     LWLockRelease(ControlFileLock())?;
     Ok(())
+}
+
+pub fn ResetInstallXLogFileSegmentActive() {
+    XLogCtl().InstallXLogFileSegmentActive.store(false, Relaxed);
 }
 
 pub fn XLogReportParameters() -> PgResult<()> {
@@ -931,17 +1169,228 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     Ok(true)
 }
 
+// Recovery-time checkpoint analog, anchored on the last replayed safe
+// checkpoint stashed by RecoveryRestartPoint; true = new restartpoint made.
+pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
+    let ctl = XLogCtl();
+
+    let (last_ckpt_rec_ptr, last_ckpt_end_ptr, last_ckpt) = ctl.info_lck.with(|| {
+        (
+            ctl.lastCheckPointRecPtr.load(Relaxed),
+            ctl.lastCheckPointEndPtr.load(Relaxed),
+            // SAFETY: lastCheckPoint accessed only under info_lck.
+            unsafe { *ctl.lastCheckPoint.get() },
+        )
+    });
+
+    if !RecoveryInProgress() {
+        let _ = elog(DEBUG2, "skipping restartpoint, recovery has already ended");
+        return Ok(false);
+    }
+
+    // No newer safe checkpoint replayed: only push minRecoveryPoint.
+    if XLogRecPtrIsInvalid(last_ckpt_rec_ptr)
+        || last_ckpt.redo <= control_file().checkPointCopy.redo
+    {
+        let _ = elog(
+            DEBUG2,
+            format!(
+                "skipping restartpoint, already performed at {:X}/{:X}",
+                last_ckpt.redo >> 32,
+                last_ckpt.redo as u32
+            ),
+        );
+        crate::write::UpdateMinRecoveryPoint(InvalidXLogRecPtr, true)?;
+        if flags & CHECKPOINT_IS_SHUTDOWN != 0 {
+            LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+            control_file_update(|cf| cf.state = DB_SHUTDOWNED_IN_RECOVERY);
+            UpdateControlFile()?;
+            LWLockRelease(ControlFileLock())?;
+        }
+        return Ok(false);
+    }
+
+    WALInsertLockAcquireExclusive();
+    crate::insert::set_local_redo_rec_ptr(last_ckpt.redo);
+    ctl.Insert.RedoRecPtr.store(last_ckpt.redo, Relaxed);
+    WALInsertLockRelease();
+    ctl.info_lck.with(|| ctl.RedoRecPtr.store(last_ckpt.redo, Relaxed));
+
+    CKPT_SEGS_ADDED.set(0);
+    CKPT_SEGS_REMOVED.set(0);
+    CKPT_SEGS_RECYCLED.set(0);
+    CKPT_SLRU_WRITTEN.set(0);
+
+    if guc_tables::vars::log_checkpoints.read() {
+        let _ = elog(LOG, format!("restartpoint starting: flags 0x{flags:x}"));
+    }
+
+    CheckPointGuts(last_ckpt.redo, flags)?;
+
+    let prior_redo_ptr = control_file().checkPointCopy.redo;
+
+    // Skip pg_control unless it still shows an older checkpoint (racing
+    // end-of-recovery checkpoint).
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    if control_file().checkPointCopy.redo < last_ckpt.redo {
+        control_file_update(|cf| {
+            cf.checkPoint = last_ckpt_rec_ptr;
+            cf.checkPointCopy = last_ckpt;
+
+            // A backup taken in recovery needs minRecoveryPoint past the
+            // checkpoint record to pick its WAL files.
+            if cf.state == DB_IN_ARCHIVE_RECOVERY {
+                if cf.minRecoveryPoint < last_ckpt_end_ptr {
+                    cf.minRecoveryPoint = last_ckpt_end_ptr;
+                    cf.minRecoveryPointTLI = last_ckpt.ThisTimeLineID;
+                    crate::write::LOCAL_MIN_RECOVERY_POINT.set(cf.minRecoveryPoint);
+                    crate::write::LOCAL_MIN_RECOVERY_POINT_TLI.set(cf.minRecoveryPointTLI);
+                }
+                if flags & CHECKPOINT_IS_SHUTDOWN != 0 {
+                    cf.state = DB_SHUTDOWNED_IN_RECOVERY;
+                }
+            }
+        });
+        UpdateControlFile()?;
+    }
+    LWLockRelease(ControlFileLock())?;
+
+    let redo_rec_ptr = crate::insert::local_redo_rec_ptr();
+    if prior_redo_ptr != InvalidXLogRecPtr {
+        crate::removal::UpdateCheckPointDistanceEstimate(redo_rec_ptr - prior_redo_ptr);
+    }
+
+    let mut log_seg_no = XLByteToSeg(redo_rec_ptr, wal_segment_size());
+
+    // C retreats _logSegNo by max(received, replayed); streaming receive is
+    // unported, so GetWalRcvFlushRecPtr's shmem value is provably 0 here.
+    let receive_ptr = InvalidXLogRecPtr;
+    let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
+    let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
+    // Same InvalidateObsoleteReplicationSlots gating as CreateCheckPoint:
+    // removing slot-protected WAL without invalidating the slot must be loud.
+    if crate::removal::KeepLogSeg(endptr, &mut log_seg_no)? {
+        panic!(
+            "max_slot_wal_keep_size would invalidate a replication slot: \
+             InvalidateObsoleteReplicationSlots not ported"
+        );
+    }
+    log_seg_no -= 1;
+
+    if !RecoveryInProgress() {
+        replay_tli = ctl.InsertTimeLineID.load(Relaxed);
+    }
+    crate::removal::RemoveOldXlogFiles(log_seg_no, redo_rec_ptr, endptr, replay_tli)?;
+
+    PreallocXlogFiles(endptr, replay_tli)?;
+
+    // DEBT(savepoint lane): same TruncateSUBTRANS skip as CreateCheckPoint.
+    if guc_tables::vars::EnableHotStandby.read()
+        && subtrans_seams::truncate_subtrans::is_installed()
+    {
+        subtrans_seams::truncate_subtrans::call(
+            procarray_seams::get_oldest_transaction_id_considered_running::call(),
+        )?;
+    }
+
+    if guc_tables::vars::log_checkpoints.read() {
+        let _ = elog(
+            LOG,
+            format!(
+                "restartpoint complete: wrote {} SLRU buffers; {} WAL file(s) added, {} removed, {} recycled",
+                CKPT_SLRU_WRITTEN.get(),
+                CKPT_SEGS_ADDED.get(),
+                CKPT_SEGS_REMOVED.get(),
+                CKPT_SEGS_RECYCLED.get()
+            ),
+        );
+    }
+
+    let level = if guc_tables::vars::log_checkpoints.read() { LOG } else { DEBUG2 };
+    let mut report = ereport(level).errmsg(format!(
+        "recovery restart point at {:X}/{:X}",
+        last_ckpt.redo >> 32,
+        last_ckpt.redo as u32
+    ));
+    if xlogrecovery_seams::get_latest_x_time::is_installed() {
+        let xtime = xlogrecovery_seams::get_latest_x_time::call();
+        if xtime != 0 {
+            report = report.errdetail(format!(
+                "Last completed transaction was at log time {}.",
+                timestamp_seams::timestamptz_to_str::call(xtime)
+            ));
+        }
+    }
+    report.finish(loc("CreateRestartPoint"))?;
+
+    if guc_tables::vars::archiveCleanupCommand.installed() {
+        if let Some(cmd) = guc_tables::vars::archiveCleanupCommand.read() {
+            if !cmd.is_empty() {
+                xlogarchive_seams::execute_recovery_command::call(
+                    &cmd,
+                    "archive_cleanup_command",
+                    false,
+                    WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND,
+                )?;
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+// PerformWalRecovery callback: crash recovery crossed into archive recovery.
+pub fn SwitchIntoArchiveRecovery(end_rec_ptr: XLogRecPtr, replay_tli: TimeLineID) -> PgResult<()> {
+    let ctl = XLogCtl();
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    control_file_update(|cf| {
+        cf.state = DB_IN_ARCHIVE_RECOVERY;
+        if cf.minRecoveryPoint < end_rec_ptr {
+            cf.minRecoveryPoint = end_rec_ptr;
+            cf.minRecoveryPointTLI = replay_tli;
+        }
+    });
+    let cf = control_file();
+    crate::write::LOCAL_MIN_RECOVERY_POINT.set(cf.minRecoveryPoint);
+    crate::write::LOCAL_MIN_RECOVERY_POINT_TLI.set(cf.minRecoveryPointTLI);
+    crate::write::set_update_min_recovery_point(true);
+    UpdateControlFile()?;
+    ctl.info_lck
+        .with(|| ctl.SharedRecoveryState.store(RECOVERY_STATE_ARCHIVE, Relaxed));
+    LWLockRelease(ControlFileLock())?;
+    Ok(())
+}
+
+// PerformWalRecovery callback: end of base backup, on-disk state consistent.
+pub fn ReachedEndOfBackup(end_rec_ptr: XLogRecPtr, tli: TimeLineID) -> PgResult<()> {
+    LWLockAcquire(ControlFileLock(), LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
+    control_file_update(|cf| {
+        if cf.minRecoveryPoint < end_rec_ptr {
+            cf.minRecoveryPoint = end_rec_ptr;
+            cf.minRecoveryPointTLI = tli;
+        }
+        cf.backupStartPoint = InvalidXLogRecPtr;
+        cf.backupEndPoint = InvalidXLogRecPtr;
+        cf.backupEndRequired = false;
+    });
+    UpdateControlFile()?;
+    LWLockRelease(ControlFileLock())?;
+    Ok(())
+}
+
 pub fn ShutdownXLOG() -> PgResult<()> {
     let level = if init_small::globals::IsPostmasterEnvironment() { LOG } else { NOTICE };
     let _ = elog(level, "shutting down");
 
     if RecoveryInProgress() {
-        panic!("CreateRestartPoint not ported (shutdown during recovery)");
+        CreateRestartPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
+    } else {
+        // Rotate first so every remaining record gets archived.
+        if XLogArchivingActive() {
+            crate::RequestXLogSwitch(false)?;
+        }
+        CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
     }
-    if XLogArchivingActive() {
-        crate::RequestXLogSwitch(false)?;
-    }
-    CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
     crate::write::open_log_file_close_if_open()?;
     Ok(())
 }

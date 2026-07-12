@@ -22,7 +22,7 @@ pub mod guc_vars;
 pub mod insert;
 pub mod redo;
 pub(crate) mod removal;
-pub use removal::{CheckXLogRemoved, XLogGetOldestSegno};
+pub use removal::{CheckXLogRemoved, RemoveNonParentXlogFiles, XLogGetOldestSegno};
 pub mod startup;
 pub mod write;
 
@@ -40,7 +40,11 @@ pub use insert::{
     GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr, GetXLogInsertRecPtr,
     RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
 };
-pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};
+pub use startup::{
+    CreateCheckPoint, CreateRestartPoint, ReachedEndOfBackup, ResetInstallXLogFileSegmentActive,
+    SetInstallXLogFileSegmentActive, ShutdownXLOG, StartupXLOG, SwitchIntoArchiveRecovery,
+    UpdateFullPageWrites,
+};
 pub use write::{
     GetFlushRecPtr, GetLastSegSwitchData, GetXLogWriteRecPtr, SetWalWriterSleeping,
     XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,

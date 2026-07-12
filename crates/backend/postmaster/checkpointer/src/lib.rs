@@ -461,7 +461,7 @@ fn checkpointer_main_loop() -> PgResult<()> {
             let ckpt_performed = if !do_restartpoint {
                 transam_xlog::CreateCheckPoint(flags)?
             } else {
-                panic!("CreateRestartPoint unported (transam_xlog; needs the replay path)");
+                transam_xlog::CreateRestartPoint(flags)?
             };
 
             smgr::smgrdestroyall()?;
