@@ -297,3 +297,55 @@ fn inline_layout_reset_reuses() {
     assert!(pr.is_new);
     assert_eq!(t.len(), 1);
 }
+
+#[test]
+fn probe_fold_matches_per_row() {
+    // The fused hoisted-locals driver must agree with per-row probe_int
+    // across the config matrix, growth, and two-level conversion.
+    let n = 300_000usize;
+    let card = 140_000u64; // crosses TWO_LEVEL_THRESHOLD
+    let keys: Vec<i64> = (0..n)
+        .map(|i| ((i as u64 * 48271 % card).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as i64)
+        .collect();
+    for hash in [HashKind::Fmix, HashKind::Crc] {
+        for layout in [EntryLayout::Salt8, EntryLayout::Inline16] {
+            let mut a = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
+            let mut new_seen = 0usize;
+            a.probe_fold_int(&keys, |s, i, is_new| {
+                if is_new {
+                    new_seen += 1;
+                }
+                // SAFETY: zeroed 16-byte states.
+                unsafe {
+                    let p = states_i64(s);
+                    *p = (*p).wrapping_add(keys[i as usize]);
+                    *p.add(1) += 1;
+                }
+            });
+            assert_eq!(new_seen, card as usize);
+            assert!(a.is_two_level());
+            let mut b = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
+            for &k in &keys {
+                let pr = b.probe_int(k, b.hash_key_int(k as u64));
+                // SAFETY: zeroed 16-byte states.
+                unsafe {
+                    let p = states_i64(pr.states);
+                    *p = (*p).wrapping_add(k);
+                    *p.add(1) += 1;
+                }
+            }
+            let dump = |t: &LaneAggTable| -> Vec<(i64, i64, i64)> {
+                let mut v: Vec<_> = (0..t.nrows())
+                    .map(|i| {
+                        let s = states_i64(t.row_states(i));
+                        // SAFETY: live rows.
+                        unsafe { (t.row_key_int(i).unwrap(), *s, *s.add(1)) }
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(dump(&a), dump(&b), "hash={hash:?} layout={layout:?}");
+        }
+    }
+}
