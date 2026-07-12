@@ -183,6 +183,7 @@ members = [
     "crates/backend/executor/exectuples_output",
     "crates/backend/executor/execexpr",
     "crates/backend/executor/lanefold",
+    "crates/backend/executor/lanestitch",
     "crates/backend/executor/executils",
     "crates/backend/executor/instrument",
     "crates/backend/executor/execjunk",
