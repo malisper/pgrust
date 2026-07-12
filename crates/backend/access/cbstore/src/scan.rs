@@ -822,12 +822,13 @@ impl<'mcx> CbScanDescData<'mcx> {
             if !self.needed[c] {
                 continue;
             }
-            // HARVEST NOTE (lane-v2): the old branch's lane-read-only fill
-            // skip (`soa.lane_fill_wanted`) and zero-decode dict-lane answer
-            // (`soa.set_dict_lane`) are trimmed here — the lane-v2 SoaBatch
-            // does not carry that surface yet (the exectuples dict-lane
-            // tranche re-adds it). Dictionary identity is still first-class
-            // on the scan surface via `staged_dict_lane`.
+            // Lane-read-only fill skip: when the lane armed a read mask,
+            // columns no SoA consumer reads stay stale (per-row consumers
+            // read the slot store_slot populates — soa_store_prefix is a
+            // virtual-slot no-op, so stale cells never escape).
+            if !soa.lane_fill_wanted(c) {
+                continue;
+            }
             self.batch_deform_col(c, soa);
         }
     }
@@ -841,10 +842,30 @@ impl<'mcx> CbScanDescData<'mcx> {
         self.ensure_col(c);
         let cd = &self.cols[c];
         if cd.is_dict {
-            // Dict-coded chunk with no dict-lane consumer on this branch
-            // yet: one-instruction escape, gather dict[code] into the Datum
-            // cells. Zero-decode publication returns with the exectuples
-            // dict-lane tranche (see `staged_dict_lane`).
+            // Zero-decode dict-lane answer for opted-in consumers: publish
+            // the staged window's codes + the per-RG dictionary identity
+            // (epoch = rg index; the scan pins its Rc<Part>, so the key is
+            // rescan-stable) and skip the Datum fill — the column's
+            // values/isnull cells stay stale and only the dict-lane reader
+            // consumes them (`col_datum_ready` is false).
+            if soa.dict_want(c) {
+                let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
+                soa.set_dict_lane(
+                    c,
+                    ::exectuples::SoaDictLane {
+                        codes: codes.as_ptr(),
+                        table: ::exectuples::SoaDictTable {
+                            dict: cd.dict.as_ptr(),
+                            ndict: cd.dict.len() as u32,
+                            epoch: self.rg as u64,
+                            sorted: cd.dict_sorted,
+                        },
+                    },
+                );
+                return;
+            }
+            // No dict-lane consumer: one-instruction escape, gather
+            // dict[code] into the Datum cells.
             let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
             for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
                 *out = cd.dict[code as usize];
