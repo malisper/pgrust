@@ -23,6 +23,11 @@ pub trait VarOps {
     fn leaf_cmp(a: &[u8], b: &[u8], ctx: &mut Ctx) -> PgResult<i32> {
         Self::cmp(a, b, ctx)
     }
+    // C f_eq, used by the NOT_EQUAL arm at every level; bit overrides with
+    // the biteq shape.
+    fn eq(a: &[u8], b: &[u8], ctx: &mut Ctx) -> PgResult<bool> {
+        Ok(Self::cmp(a, b, ctx)? == 0)
+    }
     // gbt_bit_l2n's xfrm; None for every other type.
     fn l2n(_leaf: &[u8]) -> Option<Vec<u8>> {
         None
@@ -392,7 +397,7 @@ pub fn consistent<T: VarOps>(
             }
         }
         BT_NOT_EQUAL => {
-            !(T::leaf_cmp(query, key.lower, ctx)? == 0 && T::leaf_cmp(query, key.upper, ctx)? == 0)
+            !(T::eq(query, key.lower, ctx)? && T::eq(query, key.upper, ctx)?)
         }
         _ => false,
     })

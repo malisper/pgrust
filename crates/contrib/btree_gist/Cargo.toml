@@ -29,4 +29,5 @@ adt_date = { path = "../../backend/utils/adt/adt_date" }
 adt_timestamp = { path = "../../backend/utils/adt/adt_timestamp" }
 adt_datetime = { path = "../../backend/utils/adt/adt_datetime" }
 adt_enum = { path = "../../backend/utils/adt/adt_enum" }
+adt_float = { path = "../../backend/utils/adt/float" }
 format_type = { path = "../../backend/utils/adt/format_type" }
