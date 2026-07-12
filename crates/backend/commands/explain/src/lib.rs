@@ -80,10 +80,12 @@ pub fn ExplainQuery<'mcx>(
     // SAFETY: fresh copy; this call holds its only live access.
     let mut query: Query<'mcx> = unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
         .expect("ExplainQuery: statement is not an analyzed Query");
-    if queryjumble::IsQueryIdEnabled() {
+    if parser_analyze::tap_post_parse_analyze::is_installed() {
+        let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+        parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
+    } else if queryjumble::IsQueryIdEnabled() {
         queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
     }
-    // post_parse_analyze_hook: no plugin surface exists.
     let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
 
     ExplainBeginOutput(&mut es);
@@ -271,10 +273,12 @@ fn ExplainOneUtility<'mcx>(
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("CTAS query is not an analyzed Query");
-            if queryjumble::IsQueryIdEnabled() {
+            if parser_analyze::tap_post_parse_analyze::is_installed() {
+                let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+                parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
+            } else if queryjumble::IsQueryIdEnabled() {
                 queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
             }
-            // post_parse_analyze_hook: no plugin surface exists.
             let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
             assert!(rewritten.len() == 1, "CTAS rewrite yielded {} queries", rewritten.len());
             let query = rewritten.into_iter().next().expect("len == 1");
@@ -305,10 +309,12 @@ fn ExplainOneUtility<'mcx>(
             let mut query: Query<'mcx> =
                 unsafe { query_node.with_mut::<Query, _>(core::mem::take) }
                     .expect("DECLARE CURSOR query is not an analyzed Query");
-            if queryjumble::IsQueryIdEnabled() {
+            if parser_analyze::tap_post_parse_analyze::is_installed() {
+                let js = queryjumble::JumbleQuery(mcx, &mut query)?;
+                parser_analyze::tap_post_parse_analyze::call_if(|f| f(&mut query, &js, query_string));
+            } else if queryjumble::IsQueryIdEnabled() {
                 queryjumble::JumbleQueryDiscard(mcx, &mut query)?;
             }
-            // post_parse_analyze_hook: no plugin surface exists.
             let rewritten = rewrite_handler_seams::query_rewrite::call(mcx, query)?;
             assert!(rewritten.len() == 1, "DECLARE rewrite yielded {} queries", rewritten.len());
             let query = rewritten.into_iter().next().expect("len == 1");
