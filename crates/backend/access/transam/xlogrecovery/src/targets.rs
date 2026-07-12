@@ -55,12 +55,21 @@ pub const RECOVERY_NOT_PAUSED: i32 = 0;
 pub const RECOVERY_PAUSE_REQUESTED: i32 = 1;
 pub const RECOVERY_PAUSED: i32 = 2;
 
-static RECOVERY_TARGET: AtomicI32 = AtomicI32::new(RecoveryTargetType::Unset as i32);
-static RECOVERY_TARGET_TIME: AtomicI64 = AtomicI64::new(0);
-static RECOVERY_TARGET_LSN: AtomicU64 = AtomicU64::new(0);
-static RECOVERY_TARGET_NAME: Mutex<String> = Mutex::new(String::new());
-static TIMELINE_GOAL: AtomicI32 = AtomicI32::new(RecoveryTargetTimeLineGoal::Latest as i32);
-static TLI_REQUESTED: AtomicU32 = AtomicU32::new(0);
+// GUC assign hooks replay per child thread (C: per process). The parsed
+// target state is therefore thread-local — each thread rebuilds its own
+// consistent defaults-then-config sequence, exactly like a C backend; the
+// startup thread's copy is the one recovery reads.
+thread_local! {
+    static RECOVERY_TARGET: Cell<i32> = const { Cell::new(RecoveryTargetType::Unset as i32) };
+    static RECOVERY_TARGET_TIME: Cell<TimestampTz> = const { Cell::new(0) };
+    static RECOVERY_TARGET_LSN: Cell<XLogRecPtr> = const { Cell::new(0) };
+    static RECOVERY_TARGET_NAME: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+    static TIMELINE_GOAL: Cell<i32> =
+        const { Cell::new(RecoveryTargetTimeLineGoal::Latest as i32) };
+    static TLI_REQUESTED: Cell<TimeLineID> = const { Cell::new(0) };
+    static RECOVERY_TARGET_XID_PARSED: Cell<u32> = const { Cell::new(0) };
+}
 
 static STOP_AFTER: AtomicBool = AtomicBool::new(false);
 static STOP_XID: AtomicU32 = AtomicU32::new(0);
@@ -81,7 +90,7 @@ thread_local! {
 }
 
 pub fn recovery_target() -> RecoveryTargetType {
-    match RECOVERY_TARGET.load(Relaxed) {
+    match RECOVERY_TARGET.with(|c| c.get()) {
         1 => RecoveryTargetType::Xid,
         2 => RecoveryTargetType::Time,
         3 => RecoveryTargetType::Name,
@@ -92,27 +101,24 @@ pub fn recovery_target() -> RecoveryTargetType {
 }
 
 fn set_recovery_target(t: RecoveryTargetType) {
-    RECOVERY_TARGET.store(t as i32, Relaxed);
+    RECOVERY_TARGET.with(|c| c.set(t as i32));
 }
 
 pub fn recovery_target_xid() -> TransactionId {
-    TransactionId::from(STOP_XID_SOURCE.load(Relaxed))
+    RECOVERY_TARGET_XID_PARSED.with(|c| c.get())
 }
-
-// recoveryTargetXid backing (separate from the stop bookkeeping).
-static STOP_XID_SOURCE: AtomicU32 = AtomicU32::new(0);
 
 pub fn recovery_target_time() -> TimestampTz {
-    RECOVERY_TARGET_TIME.load(Relaxed)
+    RECOVERY_TARGET_TIME.with(|c| c.get())
 }
 pub(crate) fn set_recovery_target_time(t: TimestampTz) {
-    RECOVERY_TARGET_TIME.store(t, Relaxed);
+    RECOVERY_TARGET_TIME.with(|c| c.set(t));
 }
 pub fn recovery_target_lsn() -> XLogRecPtr {
-    RECOVERY_TARGET_LSN.load(Relaxed)
+    RECOVERY_TARGET_LSN.with(|c| c.get())
 }
 pub fn recovery_target_name() -> String {
-    RECOVERY_TARGET_NAME.lock().unwrap().clone()
+    RECOVERY_TARGET_NAME.with(|c| c.borrow().clone())
 }
 pub fn recovery_target_time_string() -> String {
     guc_tables::vars::recovery_target_time_string
@@ -120,14 +126,14 @@ pub fn recovery_target_time_string() -> String {
         .unwrap_or_default()
 }
 pub fn timeline_goal() -> RecoveryTargetTimeLineGoal {
-    match TIMELINE_GOAL.load(Relaxed) {
+    match TIMELINE_GOAL.with(|c| c.get()) {
         0 => RecoveryTargetTimeLineGoal::ControlFile,
         2 => RecoveryTargetTimeLineGoal::Numeric,
         _ => RecoveryTargetTimeLineGoal::Latest,
     }
 }
 pub fn recovery_target_tli_requested() -> TimeLineID {
-    TLI_REQUESTED.load(Relaxed)
+    TLI_REQUESTED.with(|c| c.get())
 }
 pub fn recovery_target_inclusive() -> bool {
     guc_tables::vars::recoveryTargetInclusive.read()
@@ -681,7 +687,7 @@ pub(crate) fn install_guc_hooks() {
             let lsn = *extra
                 .and_then(|e| e.downcast_ref::<XLogRecPtr>())
                 .expect("check hook stored the parsed LSN");
-            RECOVERY_TARGET_LSN.store(lsn, Relaxed);
+            RECOVERY_TARGET_LSN.with(|c| c.set(lsn));
         } else {
             set_recovery_target(RecoveryTargetType::Unset);
         }
@@ -706,7 +712,7 @@ pub(crate) fn install_guc_hooks() {
         match newval {
             Some(v) if !v.is_empty() => {
                 set_recovery_target(RecoveryTargetType::Name);
-                *RECOVERY_TARGET_NAME.lock().unwrap() = v.to_string();
+                RECOVERY_TARGET_NAME.with(|c| *c.borrow_mut() = v.to_string());
             }
             _ => set_recovery_target(RecoveryTargetType::Unset),
         }
@@ -760,14 +766,12 @@ pub(crate) fn install_guc_hooks() {
         let goal = *extra
             .and_then(|e| e.downcast_ref::<RecoveryTargetTimeLineGoal>())
             .expect("check hook stored the goal");
-        TIMELINE_GOAL.store(goal as i32, Relaxed);
+        TIMELINE_GOAL.with(|c| c.set(goal as i32));
         if goal == RecoveryTargetTimeLineGoal::Numeric {
-            TLI_REQUESTED.store(
-                newval.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
-                Relaxed,
-            );
+            TLI_REQUESTED
+                .with(|c| c.set(newval.and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)));
         } else {
-            TLI_REQUESTED.store(0, Relaxed);
+            TLI_REQUESTED.with(|c| c.set(0));
         }
     });
 
@@ -791,7 +795,7 @@ pub(crate) fn install_guc_hooks() {
             let xid = *extra
                 .and_then(|e| e.downcast_ref::<u32>())
                 .expect("check hook stored the parsed xid");
-            STOP_XID_SOURCE.store(xid, Relaxed);
+            RECOVERY_TARGET_XID_PARSED.with(|c| c.set(xid));
         } else {
             set_recovery_target(RecoveryTargetType::Unset);
         }
