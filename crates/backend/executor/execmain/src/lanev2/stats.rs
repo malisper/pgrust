@@ -104,9 +104,15 @@ pub(super) enum ShapeClass {
     /// just feeds the sort unfiltered). Row-level effect is reported by the
     /// `counter` dump lines (`topkcut-rows-seen` / `topkcut-rows-cut`).
     TopkCut = 15,
+    /// Emit-side top-N boundary cut on the hash-agg-fed sort breaker
+    /// (lane-v2 topnemit): OWNED = one tick per agg sort feed the boundary
+    /// ARMED on (never a refusal class — non-admission just feeds the sort
+    /// unfiltered). Group-level effect is reported by the `counter` dump
+    /// lines (`topnemit-groups-seen` / `topnemit-groups-cut`).
+    TopnEmit = 16,
 }
 
-const N_CLASSES: usize = 16;
+const N_CLASSES: usize = 17;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -126,6 +132,7 @@ impl ShapeClass {
         ShapeClass::CbScan,
         ShapeClass::MetaAgg,
         ShapeClass::TopkCut,
+        ShapeClass::TopnEmit,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -146,6 +153,7 @@ impl ShapeClass {
             ShapeClass::CbScan => "cbscan",
             ShapeClass::MetaAgg => "metaagg",
             ShapeClass::TopkCut => "topkcut",
+            ShapeClass::TopnEmit => "topnemit",
         }
     }
 }
@@ -392,6 +400,13 @@ static OWNED: [AtomicU64; N_CLASSES] = [const { AtomicU64::new(0) }; N_CLASSES];
 /// tuplesort put.
 static TOPKCUT_ROWS_SEEN: AtomicU64 = AtomicU64::new(0);
 static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
+
+/// Group-level emit-side top-N boundary effect counters (lane-v2 topnemit;
+/// informational `counter` dump lines). `SEEN` counts groups walked by an
+/// armed retrieve (emitted + cut); `CUT` counts groups skipped ahead of
+/// finalize/projection/sort-put.
+static TOPNEMIT_GROUPS_SEEN: AtomicU64 = AtomicU64::new(0);
+static TOPNEMIT_GROUPS_CUT: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -441,6 +456,18 @@ pub(super) fn tick_topkcut_rows(seen: u64, cut: u64) {
     }
     TOPKCUT_ROWS_SEEN.fetch_add(seen, Relaxed);
     TOPKCUT_ROWS_CUT.fetch_add(cut, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one armed emit-side top-N feed: `seen` groups walked (emitted +
+/// cut), `cut` groups skipped ahead of finalize/projection/sort-put.
+#[inline]
+pub(super) fn tick_topnemit_groups(seen: u64, cut: u64) {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPNEMIT_GROUPS_SEEN.fetch_add(seen, Relaxed);
+    TOPNEMIT_GROUPS_CUT.fetch_add(cut, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -506,6 +533,14 @@ fn dump() {
     out.push_str(&format!(
         "counter\ttopkcut-rows-cut\t{}\n",
         TOPKCUT_ROWS_CUT.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopnemit-groups-seen\t{}\n",
+        TOPNEMIT_GROUPS_SEEN.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopnemit-groups-cut\t{}\n",
+        TOPNEMIT_GROUPS_CUT.load(Relaxed)
     ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
