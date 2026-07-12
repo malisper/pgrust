@@ -4525,6 +4525,12 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     // the first non-matching step otherwise.
     if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL != 0 {
         state.scan_cmp_clauses = select_scan_cmp_clauses(state);
+        // Contains-LIKE census (lane-v2 strsearch qual kernel): disjoint by
+        // construction (the cmp census admits only int comparators), so it
+        // only runs when that census refused.
+        if state.scan_cmp_clauses.is_none() {
+            state.scan_contains_clause = select_scan_contains_clause(state);
+        }
     }
     // Scan-projection census (lane-v2 stitched-projection tier): same
     // PRISTINE-program requirement as the qual census above. Non-quals only;
@@ -5061,6 +5067,110 @@ fn select_fused_qual(state: &ExprState<'_>) -> Option<Kernel> {
     let konst = unsafe { frame.arg_slot(const_argno).read().value };
     let cmp = if var_is_arg0 { cmp } else { cmp.commuted() };
     Some(Kernel::QualScanVarCmpConst { attnum, konst, cmp })
+}
+
+// Contains-LIKE qual census (the lane-v2 strsearch qual kernel): the same
+// 5-step single-clause shape as `select_fused_qual` — [SCAN_FETCHSOME,
+// SCAN_VAR -> arg0, FUNCEXPR_STRICT_2 (textlike, arg1 a compile-time
+// non-null Const pattern), QUAL, DONE_RETURN] — with the comparator replaced
+// by `textlike` and the Const pattern classified as contains-class
+// (`%…literal…%`, ScanContainsClause doc). Runs at ready time on the
+// PRISTINE program, like the cmp census. Fail-closed: any unrecognized
+// step, arg order (LIKE does not commute), pattern shape, encoding, or
+// pattern-Const header form refuses.
+fn select_scan_contains_clause(state: &ExprState<'_>) -> Option<crate::steps::ScanContainsClause> {
+    use ::types_tuple::varatt::{
+        varatt_is_1b, varatt_is_1b_e, varatt_is_4b_u, varsize_1b, varsize_4b, VARHDRSZ,
+        VARHDRSZ_SHORT,
+    };
+    let steps = state.steps.as_slice();
+    if steps.len() != 5 {
+        return None;
+    }
+    let Step::ScanFetchSome { .. } = steps[0] else {
+        return None;
+    };
+    let (src, attnum, var_out) = var_src(&steps[1])?;
+    if src != SlotSrc::Scan {
+        return None;
+    }
+    let Step::FuncExprStrict2 { call, out } = &steps[2] else {
+        return None;
+    };
+    if !state.is_result(*out) {
+        return None;
+    }
+    let Step::Qual { jumpdone } = steps[3] else {
+        return None;
+    };
+    if jumpdone != 4 || !matches!(steps[4], Step::DoneReturn) {
+        return None;
+    }
+
+    let frame = &state.frames[call.frame as usize];
+    // textlike's pg_proc entries (like.c texticlike/nlike stay per-row).
+    // SAFETY: frame-owned mcx-boxed FmgrInfo, read-only here.
+    let fn_oid = unsafe { frame.flinfo.as_ref() }.fn_oid;
+    if !matches!(fn_oid, 850 | 1569 | 1631) {
+        return None;
+    }
+    // LIKE argument order is fixed: text = arg0, pattern = arg1.
+    if var_out.0 != frame.arg_slot(0) {
+        return None;
+    }
+    if frame.const_args & (1 << 1) == 0 || frame.const_null_args & (1 << 1) != 0 {
+        return None;
+    }
+    // Encoding gate: only generic_match_text's ported arms (single-byte /
+    // UTF-8) — anything else keeps the per-row path and its error surface.
+    if ::mbutils::pg_database_encoding_max_length() != 1
+        && ::mbutils::GetDatabaseEncoding() != ::wchar::PG_UTF8
+    {
+        return None;
+    }
+    // Collation must be valid (invalid errors per-row; refuse so it does).
+    // SAFETY: frame-owned live fcinfo image, read-only borrow.
+    let collation = unsafe { crate::steps::fcinfo_mut(frame.fcinfo, frame.nargs) }.fncollation;
+    if !::types_core::OidIsValid(collation) {
+        return None;
+    }
+    // Pattern classification over the Const's varlena payload. Plan consts
+    // are in-memory varlenas (1B short or plain 4B); anything else refuses.
+    // SAFETY: const arg slot was written at compile and never re-targeted.
+    let pat = unsafe { frame.arg_slot(1).read().value };
+    let p = pat.as_usize() as *const u8;
+    // SAFETY: non-null compile-time text Const datum, readable via header.
+    let bytes: &[u8] = unsafe {
+        if varatt_is_1b(p) && !varatt_is_1b_e(p) {
+            core::slice::from_raw_parts(p.add(VARHDRSZ_SHORT), varsize_1b(p) - VARHDRSZ_SHORT)
+        } else if varatt_is_4b_u(p) {
+            core::slice::from_raw_parts(p.add(VARHDRSZ), varsize_4b(p) - VARHDRSZ)
+        } else {
+            return None;
+        }
+    };
+    // Shape: leading '%' run + metachar-free non-empty literal + trailing
+    // '%' run. Any '_' or '\' anywhere refuses (escape/underscore classes);
+    // any '%' inside the literal refuses (multi-segment patterns).
+    if bytes.len() < 3 || bytes.iter().any(|&b| b == b'_' || b == b'\\') {
+        return None;
+    }
+    let lead = bytes.iter().take_while(|&&b| b == b'%').count();
+    let trail = bytes.iter().rev().take_while(|&&b| b == b'%').count();
+    if lead == 0 || trail == 0 || lead + trail >= bytes.len() {
+        return None;
+    }
+    let needle = &bytes[lead..bytes.len() - trail];
+    if needle.iter().any(|&b| b == b'%') {
+        return None;
+    }
+    Some(crate::steps::ScanContainsClause::new(
+        attnum,
+        collation,
+        // SAFETY: in-bounds pointer into the live const varlena payload.
+        unsafe { core::ptr::NonNull::new_unchecked(needle.as_ptr() as *mut u8) },
+        needle.len() as u32,
+    ))
 }
 
 // Multi-clause generalization of `select_fused_qual` (the lane-v2 batched
