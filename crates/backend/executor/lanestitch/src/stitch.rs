@@ -495,11 +495,16 @@ const _: () = assert!(NEON_FRAME == 288 && SVE_FRAME == 624);
 
 /// Adaptive crossover: the SVE COMPACT survivor-extraction path engages for
 /// a block when the vector pass leaves at least this many survivors of 64.
-/// Measured on Graviton4 (notes/sve2-spike-2026-07-14.md, K1): the NEON
-/// pass-word + rbit/clz iteration wins below ~15% selectivity (crossover
-/// band ~10-13 of 64); SVE COMPACT is selectivity-invariant at 0.358 ns/row
-/// (-47% at 50% survivors, -65% at 90%).
-pub(crate) const SVE_SURVIVOR_CROSSOVER: u32 = 12;
+/// The spike measured the extraction-only crossover band at ~10-13 of 64
+/// (notes/sve2-spike-2026-07-14.md, K1: NEON pass-word + rbit/clz wins
+/// below ~15% selectivity; SVE COMPACT selectivity-invariant). The
+/// PRODUCTION stencils re-measured on c8gd (sve_ab, fleet job
+/// pgrust-fast-tests-7414f7a5b4-1783871662) put the whole-pipeline
+/// break-even nearer 20% — the per-survivor clause body costs the same on
+/// both arms, diluting the extraction margin — with the dense path -1.4%
+/// at 30%, -7.8% at 50%, -13.8% at 90%. 16/64 (25%) keeps the marginal
+/// band on NEON and takes the wins above it.
+pub(crate) const SVE_SURVIVOR_CROSSOVER: u32 = 16;
 
 /// Per-clause cap on SVE2 MATCH IN-list candidates (8 u16 candidates per
 /// 128-bit MATCH segment; the spike measured 1.8x at k=4 up to 8.8x at
