@@ -4097,8 +4097,9 @@ pub fn agg_plain_finish<'mcx>(
 /// refuses: any transition outside the exact-integer vocabulary
 /// (`pardistinct::vocab_kind` — `order_insensitive_exact_transfn` minus the
 /// Int128 family), any non-Var / FILTERed argument, or a non-integer group
-/// key type. The caller must have armed `force_distinct_set` (presorted
-/// entries count as set-mode).
+/// key type. Derivation treats presorted entries as set-mode (the arm always
+/// arms `force_distinct_set` before engaging — but only AFTER every refusal
+/// point, so a refusal leaves the classic path's adjacent-dedup untouched).
 pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
@@ -4146,7 +4147,7 @@ pub fn pd_derive_spec(
     let mut set_transnos: Vec<usize> = Vec::with_capacity(node.pertrans_sort.len());
     for ps in node.pertrans_sort.iter() {
         let kind = ps.set_kind?;
-        if !ps.set_active(node.force_distinct_set) || ps.num_inputs != 1 {
+        if !ps.set_active(true) || ps.num_inputs != 1 {
             return None;
         }
         let pa = node.peragg.iter().find(|pa| pa.transno as usize == ps.transno)?;
