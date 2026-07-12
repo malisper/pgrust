@@ -3141,6 +3141,219 @@ pub fn agg_plain_finish<'mcx>(
     plain_finish(node, estate)
 }
 
+// ===========================================================================
+// Lane-v2 sorted-agg (AGG_SORTED) streaming-operator delegation seam. The
+// lane hosts AGG_SORTED as a mid-pipeline operator (execmain/src/lanev2.rs
+// `SortedAggOp`): rows are PUSHED at it in the child's sorted order and it
+// emits one finalized group row per boundary — the control-flow inverse of
+// `agg_retrieve_sorted`'s pull loop. These thin entry points delegate every
+// substantive step to the SAME row-path machinery — the persort state
+// (first/pending slots + `have_pending`), the ported grouping-equality
+// ExprState (`ps.eq`), `initialize_aggregates`, the per-row transition
+// program, and the finalize/HAVING/project tail — split at
+// `agg_retrieve_sorted`'s own seams, so the same rows run the same
+// comparisons, transitions and finalizations in the same order
+// (byte-identical), and the node state is call-boundary-compatible with the
+// pull loop in BOTH directions (each returns with the current group closed
+// and at most a pending boundary tuple saved), making a per-call fallback to
+// `exec_agg` byte-safe.
+// ===========================================================================
+
+/// Agg-side admission for the lane-v2 sorted-agg streaming operator:
+/// AGG_SORTED single grouping set, no merge phase, no
+/// DISTINCT/ORDER-BY-within-aggregate internal sorts (`pertrans_sort` — the
+/// per-row path interleaves `collect_ordered_input`, which the lane does not
+/// drive), subplan-free transitions, and initplan-param-free everywhere (the
+/// lane drive, like `exec_agg_batched`, does not hoist pending initplans).
+/// Subplan-bearing HAVING/projection ARE admitted: the emit tail delegates to
+/// the same subplan-aware qual/project arms `agg_retrieve_sorted` uses.
+pub fn agg_sorted_lane_admissible(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_SORTED
+        && node.gsets.is_none()
+        && node.merge.is_none()
+        && node.pertrans_sort.is_empty()
+        && node.evaltrans.as_deref().is_some_and(|et| !et.has_subplan())
+        && node
+            .evaltrans
+            .as_deref()
+            .is_none_or(|et| et.param_exec_deps().is_empty())
+        && node.proj.param_exec_deps().is_empty()
+        && node.qual.as_deref().is_none_or(|q| q.param_exec_deps().is_empty())
+}
+
+/// A boundary tuple is saved and the next group has not started — the lane
+/// operator's cross-call resume flag (C's own `have_pending` state).
+pub fn agg_sorted_have_pending(node: &AggStateData<'_>) -> bool {
+    node.persort.as_ref().is_some_and(|ps| ps.have_pending)
+}
+
+/// Start a new group — `agg_retrieve_sorted`'s per-group prologue verbatim:
+/// reset the per-output context + aggcontext, install the group's first tuple
+/// (`Some(id)` = copy the pushed row; `None` = swap in the saved pending
+/// boundary tuple), `initialize_aggregates`, and run the transition program
+/// on the first tuple.
+pub fn agg_sorted_group_begin<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    first: Option<ExecSlotId>,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    estate.reset_expr_context(node.ps_ExprContext);
+    // SAFETY: sole access path to the node during the reset (the frames'
+    // copies are raw and dormant between evaluations).
+    unsafe { node.agg_node.as_mut() }.reset();
+    {
+        let AggStateData { persort, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        match first {
+            None => {
+                debug_assert!(ps.have_pending);
+                core::mem::swap(&mut ps.first_slot, &mut ps.pending_slot);
+                ps.have_pending = false;
+            }
+            Some(outer_id) => {
+                let outer_slot = estate.slot_mut(outer_id);
+                exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, mcx, mcx)?;
+            }
+        }
+    }
+    initialize_aggregates(node)?;
+    {
+        let AggStateData { persort, evaltrans, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        let et = evaltrans.as_mut().unwrap();
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+        exec_eval_expr(et, &mut slots)?;
+    }
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// The group-boundary comparison — the ported grouping-equality ExprState
+/// (`ps.eq`, C's ExecBuildGroupingEqual product; NULL grouping keys compare
+/// as same-group through it) over {inner: group first tuple, outer: pushed
+/// row}, exactly as `agg_retrieve_sorted`'s loop. `eq` None (numCols == 0,
+/// planner-proved-redundant keys) = never a boundary, as C's numCols > 0
+/// guard.
+pub fn agg_sorted_same_group<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<bool> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let AggStateData { persort, .. } = node;
+    let ps = persort.as_mut().expect("sorted Agg has persort");
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots {
+        scan: None,
+        inner: Some(&mut ps.first_slot),
+        outer: Some(&mut *outer_slot),
+    };
+    match ps.eq.as_mut() {
+        Some(eq) => exec_qual(Some(eq), &mut slots),
+        None => Ok(true),
+    }
+}
+
+/// One same-group row through the FULL per-row transition program —
+/// `agg_retrieve_sorted`'s loop body verbatim (no subplan / ordered-input
+/// arms: the lane admission refuses those shapes).
+pub fn agg_sorted_accept<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// Save the boundary row as the next group's first tuple (query-context copy
+/// into the pending slot — `agg_retrieve_sorted`'s boundary arm verbatim).
+pub fn agg_sorted_save_pending<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    let AggStateData { persort, .. } = node;
+    let ps = persort.as_mut().expect("sorted Agg has persort");
+    let outer_slot = estate.slot_mut(outer_id);
+    exectuples::exec_copy_slot(&mut ps.pending_slot, outer_slot, mcx, mcx)?;
+    ps.have_pending = true;
+    Ok(())
+}
+
+/// Finalize + HAVING + project the completed group —
+/// `agg_retrieve_sorted`'s post-loop tail verbatim (subplan-aware qual/proj
+/// arms included; the group's representative tuple rides in
+/// `persort.first_slot`). `None` = the HAVING qual rejected the group (the
+/// caller starts the next group / ends the stream, exactly as the pull
+/// loop's `continue`).
+pub fn agg_sorted_emit<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let mcx = estate.es_query_cxt;
+    process_ordered_aggregates(node, estate)?;
+    finalize_aggregates(node, estate, node.pergroup_base)?;
+
+    if node.proj.has_subplan() || node.qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ecxt = node.ps_ExprContext;
+        let result = node.ps_ResultTupleSlot;
+        let instr_idx = node.instr_idx;
+        let AggStateData { persort, qual, proj, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        if !::executils::exec_qual_with_subplans_outer(
+            qual.as_deref_mut(),
+            &mut ps.first_slot,
+            estate,
+            ecxt,
+        )? {
+            estate.instr_count_filtered1(instr_idx);
+            return Ok(None);
+        }
+        ::executils::exec_project_with_subplans_outer(
+            proj,
+            &mut ps.first_slot,
+            estate,
+            ecxt,
+            result,
+        )?;
+        return Ok(Some(result));
+    }
+    {
+        let AggStateData { persort, qual, .. } = node;
+        let ps = persort.as_mut().expect("sorted Agg has persort");
+        let mut slots =
+            EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+        if !exec_qual(qual.as_deref_mut(), &mut slots)? {
+            estate.instr_count_filtered1(node.instr_idx);
+            return Ok(None);
+        }
+    }
+    let result_slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    let ps = node.persort.as_mut().unwrap();
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut ps.first_slot) };
+    exec_project(&mut node.proj, &mut slots, result_slot, mcx)?;
+    Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// Input exhausted: `agg_retrieve_sorted`'s end-of-stream arm (sets
+/// `agg_done` BEFORE the last group finalizes, exactly as the pull loop's
+/// `fetch None` arms do).
+pub fn agg_sorted_input_done(node: &mut AggStateData<'_>) {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    node.agg_done = true;
+}
+
 const MAX_FINAL_ARGS: usize = 8;
 
 // finalize_aggregate(s) (nodeAgg.c): finalfn results land in ps_ExprContext's

@@ -1573,6 +1573,17 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::IndexScan(is) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over an index-ordered feed): falls through to the UNCHANGED
+            // fused/per-tuple paths on refuse. Lane logic + refuse-set live
+            // in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_sorted_agg_over_index_scan(agg, is, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && is.ss.qual.is_none()
                 && is.ss.ps_ProjInfo.is_none()
@@ -1589,6 +1600,15 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::IndexOnlyScan(ios) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over an index-ordered feed); see the IndexScan arm.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_sorted_agg_over_index_only_scan(agg, &mut **ios, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && ios.ss.qual.is_none()
                 && ios.ss.ps_ProjInfo.is_none()
@@ -1617,6 +1637,17 @@ fn agg_arm<'mcx>(
                 let outer_slot = b.scan.ss.ss_ScanTupleSlot;
                 let src = BitmapScanBatchSource { bhs: &mut b.scan, outer_slot };
                 return ::nodeagg::exec_agg_batched(agg, estate, src);
+            }
+        }
+        PlanStateNode::Sort(s) => {
+            // Lane-executor-v2 dispatch hook (sorted-agg streaming operator
+            // over the sort breaker): falls through to the UNCHANGED
+            // per-tuple exec_agg over exec_sort on refuse. Lane logic +
+            // refuse-set live in `lanev2`.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_sorted_agg_over_sort(agg, s, estate)? {
+                    return Ok(r);
+                }
             }
         }
         PlanStateNode::HashJoin(hj) => {
