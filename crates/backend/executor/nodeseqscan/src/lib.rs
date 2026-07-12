@@ -971,11 +971,26 @@ pub fn seq_scan_sortkey_direct<'mcx>(
             _ => return false,
         },
     };
+    arm_key_soa(node, estate, attnum)
+}
+
+/// Shared key-column staging body (fused-sort direct key feed + the lane's
+/// top-k cutoff pre-filter): arm a key-only `BatchSoa` (publish off, no qual)
+/// staging scan column `attnum` per page batch — the fixed-width prefix
+/// deform when the plan covers it, else the varlena key pass. Idempotent when
+/// the same key is already armed; refuses (false) rather than disturb a
+/// `BatchSoa` armed for anything else (kernel qual bitmap / stitch /
+/// different key), since `seq_scan_next_pagebatch`'s column-selection rule
+/// stages exactly one consumer's columns.
+fn arm_key_soa<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
     if let Some(b) = &node.batch_soa {
-        if b.key_col == Some(attnum) {
-            return true;
-        }
+        return b.key_col == Some(attnum);
     }
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
     let mcx = estate.es_query_cxt;
     let atts: &[_] = &rel.rd_att.compact_attrs;
     let (plan, varkey) =
@@ -1018,6 +1033,47 @@ pub fn seq_scan_sortkey_direct<'mcx>(
         mcx,
     ));
     true
+}
+
+/// Arm the staged key lane for the lane sort breaker's streaming top-k
+/// cutoff: stage scan column `attnum` (the sort's leading key, resolved by
+/// the lane) per page batch so the pre-filter can compare a whole staged
+/// batch against the tuplesort's k-th boundary vectorized. Requires a
+/// qual-less scan (the pre-filter skips rows without running their emit
+/// body, so no per-row evaluation may be observable) and a free or matching
+/// `BatchSoa`. False = not stageable; the sort feed proceeds unfiltered.
+pub fn seq_scan_topk_key_arm<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
+    if node.ss.qual.is_some() {
+        return false;
+    }
+    arm_key_soa(node, estate, attnum)
+}
+
+/// The staged key lane of the CURRENT page batch for the top-k cutoff
+/// pre-filter: `(values, isnull, fallback_words)` slices over the first `n`
+/// staged rows (fallback bits mark rows the deform skipped — narrow tuples —
+/// which the pre-filter must pass through). `None` = lane not armed or the
+/// staging did not cover this batch; the caller feeds unfiltered.
+#[inline]
+pub fn seq_scan_topk_key_lane<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+    n: u32,
+) -> Option<(&'a [::datum::Datum], &'a [bool], &'a [u64])> {
+    let b = node.batch_soa.as_deref()?;
+    b.key_col?;
+    if b.soa.nrows() < n {
+        return None;
+    }
+    let c = b.key_read_col as usize;
+    Some((
+        &b.soa.col_values(c)[..n as usize],
+        &b.soa.col_isnull(c)[..n as usize],
+        b.soa.fallback_words(),
+    ))
 }
 
 /// Arm the varlena lane feed for the lane-v2 agg fold: stage per-row datum
