@@ -44,7 +44,7 @@ use types_nodes::rawnodes::{
 };
 
 use types_nodes::rawnodes::CreateDomainStmt;
-use types_nodes::rawnodes::{AlterExtensionStmt, CreateExtensionStmt};
+use types_nodes::rawnodes::{AlterExtensionContentsStmt, AlterExtensionStmt, CreateExtensionStmt};
 use types_nodes::JoinType;
 use types_nodes::rawnodes::A_Expr_Kind::{self, AEXPR_OP};
 use types_nodes::primnodes::{CoercionContext, XmlExpr, XmlExprOp, XmlOptionType};
@@ -2040,6 +2040,38 @@ impl<'mcx> Parser<'mcx> {
                 let mut n = Node::build::<AlterExtensionStmt>(mcx)?;
                 n.extname = Some(view.v(3).str_val());
                 n.options = view.v(5).list();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // AlterExtensionContentsStmt: ALTER EXTENSION name add_drop
+            // {object_type_name name | object_type_any_name any_name |
+            //  FUNCTION function_with_argtypes} (cast/opclass/opfamily/
+            // aggregate/operator/domain/transform/type forms stay loud).
+            697 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = object_type(view.v(5).ival());
+                n.object = Some(Node::mk_string(mcx, view.v(6).str_val())?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            698 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = object_type(view.v(5).ival());
+                n.object = Some(Node::mk_list(mcx, view.v(6).list())?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            702 | 706 | 707 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = match rule {
+                    702 => ObjectType::OBJECT_FUNCTION,
+                    706 => ObjectType::OBJECT_PROCEDURE,
+                    _ => ObjectType::OBJECT_ROUTINE,
+                };
+                n.object = view.v(6).node();
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1710 => {
