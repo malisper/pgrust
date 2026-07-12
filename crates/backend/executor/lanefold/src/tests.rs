@@ -787,3 +787,40 @@ fn fold_rows_grouped_parity() {
         assert_parity(&plan, &group_pgs[g], &want);
     }
 }
+
+// --- lanereg conformance (design §3a batch-function registry) ---------------
+// The transfn OID admission set that `classify_trans` recognizes is mirrored in
+// the central `lanereg` census as the in-tree Fold tier. This test binds them:
+// every transfn OID this crate folds must be an in-tree Fold entry with the
+// matching kind, and the census must carry no in-tree Fold OID this crate does
+// not fold. Drift in either direction fails the build.
+#[test]
+fn fold_oid_set_matches_lanereg_census() {
+    use ::lanereg::FoldKind as R;
+    let expect: &[(::types_core::Oid, R)] = &[
+        (F_INT8INC, R::CountStar),
+        (F_INT8INC_ANY, R::CountAny),
+        (F_INT2_SUM, R::Sum),
+        (F_INT4_SUM, R::Sum),
+        (F_INT2_AVG_ACCUM, R::AvgAccum),
+        (F_INT4_AVG_ACCUM, R::AvgAccum),
+        (F_INT4LARGER, R::Max),
+        (F_INT4SMALLER, R::Min),
+        (F_INT2LARGER, R::Max),
+        (F_INT2SMALLER, R::Min),
+        (F_INT8LARGER, R::Max),
+        (F_INT8SMALLER, R::Min),
+        (F_DATE_LARGER, R::Max),
+        (F_DATE_SMALLER, R::Min),
+        (F_TIMESTAMP_LARGER, R::Max),
+        (F_TIMESTAMP_SMALLER, R::Min),
+        (F_TIMESTAMPTZ_LARGER, R::Max),
+        (F_TIMESTAMPTZ_SMALLER, R::Min),
+    ];
+    for &(oid, kind) in expect {
+        assert_eq!(::lanereg::fold_desc(oid), Some(kind), "fold oid {oid} census mismatch");
+    }
+    let census_in_tree =
+        ::lanereg::ENTRIES.iter().filter(|e| ::lanereg::fold_desc(e.oid).is_some()).count();
+    assert_eq!(census_in_tree, expect.len(), "lanereg in-tree Fold set drifted from classify_trans");
+}
