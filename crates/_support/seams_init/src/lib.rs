@@ -136,6 +136,7 @@ pub fn init_all() {
     snapbuild::init_seams();
     logical::init_seams();
     origin::init_seams();
+    logicalworker::init_seams();
     test_decoding::init_seams();
     pgoutput::init_seams();
     adt_formatting::init_seams();

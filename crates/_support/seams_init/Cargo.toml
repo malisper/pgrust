@@ -280,6 +280,7 @@ reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
 snapbuild = { path = "../../backend/replication/logical/snapbuild" }
 logical = { path = "../../backend/replication/logical/logical" }
 origin = { path = "../../backend/replication/origin" }
+logicalworker = { path = "../../backend/replication/logical/worker" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 pgoutput = { path = "../../contrib/pgoutput" }
