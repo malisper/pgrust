@@ -458,6 +458,32 @@ pub fn with_query_task_binding<T>(
     query_task_guard::with_query_task_binding(shared, body)
 }
 
+/// The binder's SESSION-state policy inputs, probed from the same sources
+/// `InitializeParallelDSM` serializes (temp namespace, serializable xact,
+/// pending invalidations) — the M1 runtime-scan leader's fail-closed
+/// admission reads this BEFORE creating a context: any set flag refuses
+/// engagement, because `validate()` (query_task_guard.rs) would refuse the
+/// bind on every helper anyway. `has_params` stays the caller's: params are
+/// executor state the leader already knows.
+pub fn query_task_policy_probe() -> QueryTaskBindingPolicy {
+    let (temp_ns, temp_toast_ns) = catalog_namespace::GetTempNamespaceState();
+    QueryTaskBindingPolicy {
+        has_params: false,
+        temp_state: temp_ns != InvalidOid || temp_toast_ns != InvalidOid,
+        serializable: xact::IsolationUsesXactSnapshot()
+            || predicate_seams::share_serializable_xact::call() != 0,
+        pending_invalidations: inval::TransactionHasPendingInvalidationMessages(),
+    }
+}
+
+/// One bounded leader latch wait + reset (the WaitForParallelWorkersToFinish
+/// wait quantum, recheck-cadence-bounded): the M1 runtime-scan leader's
+/// submit-and-park loop parks here between its completion/message/interrupt
+/// re-polls.
+pub fn wait_parallel_finish_quantum() {
+    wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH);
+}
+
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
 }
