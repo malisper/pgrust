@@ -4548,6 +4548,232 @@ impl<'mcx> Source<'mcx> for SortEmitSourceCfi {
     }
 }
 
+// ===========================================================================
+// Hash-grouped exact-DISTINCT arm (lane-v2-distincthash; nodeagg
+// hashgrouped.rs holds the state machine + the byte-identity argument). For
+// the narrow-sort shape (CB Q9/Q10) the group-prefix SORT itself is the
+// remaining dominant cost: this arm bypasses the plan's Sort node entirely —
+// the scan pipeline drains into a group hash table whose entries own the
+// order-insensitive transition state and the per-aggregate exact-DISTINCT
+// sets, the groups order by the prefix (groups, not rows — the cheap sort),
+// and the unchanged finalize/HAVING/project tail emits one group per pull.
+//
+// Admission tiers (demote-within-lane): the arm engages only where the
+// narrow-sort admission ALREADY holds, plus all-integer group keys +
+// integer set kinds + a SeqScan feed + planner-estimate economics
+// (`agg_hashgroup_economical`). Anything else falls to the narrow-sort arm
+// unchanged. At runtime, crossing the arm's memory budget mid-build
+// DEGRADES to the narrow-sort arm exactly once: the narrowed tuplesort is
+// begun late, the deferred group representatives + all remaining rows feed
+// it, and the narrow emit chain resumes with per-group residual-state
+// preload (nodeagg's `initialize_aggregates` hook) — so the arm is
+// spill-safe wherever the narrow-sort arm is.
+//
+// Fallback safety: once the build consumed the scan, the plan's Sort node
+// must never be fed again (it would rebuild empty from the exhausted scan).
+// The no-degrade emit therefore resumes BEFORE the per-call dynamic gates —
+// sound because the emit touches no scan, backward fetches imply
+// randomAccess (refused at admission, so the executor never runs this node
+// backward), and es_epq_active is constant for the estate this node was
+// built in (EPQ rechecks run their own estate). The degraded path needs no
+// such care: the sort IS built there, so the existing per-call narrow-arm
+// resume (and even the per-tuple C fallback) is byte-safe.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_DISTINCTHASH` kill switch (default ON inside the lane).
+fn distincthash_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_DISTINCTHASH").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
+/// economics (e2e harness lever — small tables would otherwise refuse and
+/// never exercise the arm; the runtime degrade still bounds memory).
+fn distincthash_force() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_FORCE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// Map the plan Sort's k-key prefix onto the grouping columns as the arm's
+/// group-emit order. `None` refuses (an operator outside the integer
+/// asc/desc vocabulary — bool/text group keys keep the narrow-sort arm).
+/// The multiset equality of prefix and group columns was already proven by
+/// the narrow admission; `used` disambiguates duplicated columns.
+fn hashgroup_order_spec(
+    agg: &::nodeagg::AggStateData<'_>,
+    sp: &::types_nodes::plannodes::Sort<'_>,
+    k: usize,
+) -> Option<Vec<::nodeagg::HashGroupOrderKey>> {
+    use ::execexpr::CmpOp;
+    let group_cols = ::nodeagg::agg_plan_group_cols(agg);
+    debug_assert_eq!(group_cols.len(), k);
+    let mut used = vec![false; k];
+    let mut out = Vec::with_capacity(k);
+    for i in 0..k {
+        let col = sp.sortColIdx[i];
+        let j = (0..k).find(|&j| !used[j] && group_cols[j] == col)?;
+        used[j] = true;
+        // Sort operator -> its comparison-kernel image -> ASC/DESC (the
+        // top-k cutoff's resolution path; int families only).
+        let opfn = ::lsyscache::get_opcode(sp.sortOperators[i]).ok()?;
+        let desc = match CmpOp::for_fn_oid(opfn)? {
+            CmpOp::Int2Lt | CmpOp::Int4Lt | CmpOp::Int8Lt => false,
+            CmpOp::Int2Gt | CmpOp::Int4Gt | CmpOp::Int8Gt => true,
+            _ => return None,
+        };
+        out.push(::nodeagg::HashGroupOrderKey {
+            key_idx: j,
+            desc,
+            nulls_first: sp.nullsFirst[i],
+        });
+    }
+    Some(out)
+}
+
+/// The hash-grouped build sink: rows feed the group table until the shared
+/// budget crosses, then the sink degrades IN PLACE — the narrowed tuplesort
+/// begins late, the deferred representatives dump into it, and every
+/// further row goes straight to the sort (the narrow-sort arm's feed,
+/// resumed mid-stream; section doc).
+struct HashGroupDistinctSink<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    sort: &'a mut ::nodesort::SortState<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    nkeys: usize,
+    degraded: bool,
+}
+
+impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        if self.degraded {
+            ::nodesort::sort_lane_put(self.sort, estate, tuple)?;
+        } else if !::nodeagg::agg_hashgroup_accept(self.agg, estate, tuple)? {
+            self.degrade_impl(estate)?;
+        }
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.degraded {
+            ::nodesort::sort_lane_finish(self.sort, estate)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Batch-granular feed: the default per-row delegation loop (the arm's
+/// accept is per-row by nature — group probe + transition program).
+impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {}
+
+impl<'mcx> HashGroupDistinctSink<'_, 'mcx> {
+    /// The one-shot degrade (section doc): begin the narrowed sort, dump
+    /// every deferred representative, flip the table to residual mode.
+    #[cold]
+    #[inline(never)]
+    fn degrade_impl(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        trace_feed("hash-grouped distinct arm degrading to narrowed sort");
+        ::nodesort::sort_lane_begin_narrowed(self.sort, self.outer_desc.clone(), self.nkeys)?;
+        let mcx = estate.es_query_cxt;
+        while let Some(slot) = ::nodeagg::agg_hashgroup_next_rep(self.agg) {
+            ::nodesort::sort_lane_put_slot(self.sort, mcx, slot)?;
+        }
+        ::nodeagg::agg_hashgroup_set_residual(self.agg);
+        self.degraded = true;
+        Ok(())
+    }
+}
+
+/// Build outcome of the hash-grouped arm's probe.
+enum HgBuild {
+    /// Table built; the arm owns the emit (groups in prefix order).
+    Emit,
+    /// Budget crossed mid-build: the narrowed sort is fed and finished; the
+    /// narrow-sort emit chain resumes over it (residual preload installed).
+    Degraded,
+    /// Arm not admitted (admission/economics/child shape): the caller runs
+    /// the narrow-sort feed exactly as before.
+    Refused,
+}
+
+/// Probe + build for the hash-grouped arm (called with the narrow admission
+/// already proven and `force_distinct_set` armed, BEFORE the sort exists).
+fn try_hashgroup_build<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    sort: &mut ::nodesort::SortState<'mcx>,
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    k: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<HgBuild> {
+    if !distincthash_enabled() {
+        return Ok(HgBuild::Refused);
+    }
+    // v1 feed scope: SeqScan child only (the Q9/Q10 shape; index/bitmap-fed
+    // sorts keep the narrow-sort arm).
+    let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
+        return Ok(HgBuild::Refused);
+    };
+    if !::nodeagg::agg_hashgroup_admissible(agg)
+        || !::nodeagg::agg_hashgroup_economical(agg, distincthash_force())
+    {
+        return Ok(HgBuild::Refused);
+    }
+    let Some(order) = hashgroup_order_spec(agg, sort.plan, k) else {
+        return Ok(HgBuild::Refused);
+    };
+    ::nodeagg::agg_hashgroup_begin(agg, estate, order)?;
+    trace_feed("sorted-agg hash-grouped distinct drive engaged");
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
+    )?;
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    // Force a forward child read for the feed's duration (`sort_feed`'s
+    // discipline — this drain replaces the sort's own feed).
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let mut sink = HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false };
+    let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+    let degraded = sink.degraded;
+    estate.es_direction = dir;
+    fed?;
+    if degraded {
+        return Ok(HgBuild::Degraded);
+    }
+    ::nodeagg::agg_hashgroup_finish_build(agg, estate)?;
+    Ok(HgBuild::Emit)
+}
+
+/// Emit loop over the hash-grouped table: one HAVING-passing group per PG
+/// pull, in the plan Sort's prefix order (C's group order). CFI per group —
+/// the pull loop's per-ExecSort-fetch cadence.
+fn hashgroup_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    loop {
+        ::postgres_seams::check_for_interrupts::call()?;
+        match ::nodeagg::agg_hashgroup_emit_next(agg, estate)? {
+            None => return Ok(None),
+            Some(None) => continue,
+            Some(Some(id)) => return Ok(Some(id)),
+        }
+    }
+}
+
 /// Try to let the lane own `Agg(AGG_SORTED) → Sort → scan`: the sort breaker
 /// feeds once (pipeline N), then the sorted-agg operator streams the
 /// read-back into one group row per PG pull. `None` = refused (caller falls
@@ -4559,6 +4785,12 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Hash-grouped arm mid-emit resume — BEFORE the dynamic gates (the arm's
+    // section doc: the plan's Sort was bypassed and must never be fed from
+    // the now-exhausted scan; the gates cannot flip mid-node here).
+    if ::nodeagg::agg_hashgroup_emitting(agg) {
+        return Ok(Some(hashgroup_emit(agg, estate)?));
+    }
     // Dynamic per-call gates (mirror the bare-sort breaker).
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
@@ -4643,22 +4875,49 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
         ::postgres_seams::check_for_interrupts::call()?;
-        if narrow.is_some() {
-            // Arm set-mode BEFORE any input (sticky; the arming doc), then
-            // build the narrowed sort below (the shared feed threads the
-            // narrow-key count into `sort_feed`).
+        if let Some(k) = narrow {
+            // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
-            trace_feed("sorted-agg distinct-set narrowed sort feed armed");
+            // Hash-grouped arm first (its own admission tier; Refused keeps
+            // the narrow-sort feed below exactly as before).
+            match try_hashgroup_build(agg, state, &mut **outer, outer_desc, k, estate)? {
+                HgBuild::Emit => {
+                    // One OWNED tick per lane-owned build event; the emit
+                    // owns the node from here (no sort exists).
+                    stats::tick_owned(ShapeClass::AggBuild);
+                    return Ok(Some(hashgroup_emit(agg, estate)?));
+                }
+                HgBuild::Degraded => {
+                    // The narrowed sort was fed and finished inside the
+                    // degrade (a real sort-feed event); the narrow-sort
+                    // emit chain below resumes over it, preloading residual
+                    // group state at each group begin (nodeagg's
+                    // initialize_aggregates hook).
+                    stats::tick_owned(ShapeClass::SortFeed);
+                    stats::tick_owned(ShapeClass::AggBuild);
+                }
+                HgBuild::Refused => {
+                    trace_feed("sorted-agg distinct-set narrowed sort feed armed");
+                    // The shared feed threads the narrow-key count in.
+                    if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
+                        return Ok(None);
+                    }
+                    stats::tick_owned(ShapeClass::AggBuild);
+                }
+            }
+        } else {
+            // The shared feed (a sort under a sorted agg is never bounded —
+            // no LIMIT pushdown crosses the agg — so its seqscan arm's top-k
+            // probe no-ops; false = the agg-child arm's spill refuse,
+            // byte-safe).
+            if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
+                return Ok(None);
+            }
+            // One OWNED tick per lane-owned sorted-agg stream start
+            // (feed/build EVENTS, once per (re)scan; the sort feed ticked
+            // its own class).
+            stats::tick_owned(ShapeClass::AggBuild);
         }
-        // The shared feed (a sort under a sorted agg is never bounded — no
-        // LIMIT pushdown crosses the agg — so its seqscan arm's top-k probe
-        // no-ops; false = the agg-child arm's spill refuse, byte-safe).
-        if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
-            return Ok(None);
-        }
-        // One OWNED tick per lane-owned sorted-agg stream start (feed/build
-        // EVENTS, once per (re)scan; the sort feed ticked its own class).
-        stats::tick_owned(ShapeClass::AggBuild);
     }
     // Emit phase (every call): sort read-back → sorted-agg operator → root,
     // one qual-passing group row per PG pull.
