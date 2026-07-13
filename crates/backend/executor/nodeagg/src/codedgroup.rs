@@ -146,6 +146,10 @@ pub(crate) struct CodedGroupState<'mcx> {
     heap: Vec<u32>,
     /// Scratch: the current merged group's state indices.
     gstates: Vec<u32>,
+    /// Emit scratch: the current group's chain values (all epochs) and the
+    /// batched-insert hash pass (lane-v2 cgemit — see `agg_codedgroup_emit_next`).
+    vals: Vec<i64>,
+    val_hashes: Vec<u64>,
     /// Degrade replay cursor.
     replay_state: usize,
     replay_next: u32,
@@ -380,6 +384,43 @@ fn codedgroup_budget() -> usize {
     crate::distinct_set_budget() / 2
 }
 
+/// `PGRUST_LANE_V2_CGEMIT` kill switch (default ON; `0`/`off` restores the
+/// per-element pooled-set union): the emit-tail small-group COUNT(DISTINCT)
+/// fastpath + batched set inserts. `PGRUST_LANE_V2_CGEMIT_SMALL` overrides
+/// the fastpath length bound (default 16; the pairwise dedup is O(n²) in
+/// registers below it). Results are byte-identical under every arm — the
+/// count is the value multiset's support cardinality either way.
+fn cgemit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CGEMIT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn cgemit_small_max() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_CGEMIT_SMALL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(16)
+    })
+}
+
+/// Distinct count of a small value slice by pairwise compares (no hashing,
+/// no table). Exact-set semantics: |support of the multiset|.
+#[inline]
+fn count_distinct_small(vals: &[i64]) -> i64 {
+    let mut n = 0i64;
+    for i in 0..vals.len() {
+        let v = vals[i];
+        if !vals[..i].contains(&v) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Planner-estimate economics: engage EXACTLY the density band the
 /// hash-grouped arm's tier refuses (near-unique keys, the Q14 class) — the
 /// higher-density single-text-key shapes keep the measured hash-arm text
@@ -446,6 +487,8 @@ pub fn agg_codedgroup_begin<'mcx>(
         cursor: Vec::new(),
         heap: Vec::new(),
         gstates: Vec::new(),
+        vals: Vec::new(),
+        val_hashes: Vec::new(),
         replay_state: 0,
         replay_next: REPLAY_HEAD,
         rep_slot,
@@ -603,24 +646,19 @@ pub fn agg_codedgroup_emit_next<'mcx>(
     estate.reset_expr_context(node.ps_ExprContext);
     let mcx = estate.es_query_cxt;
     {
-        // Union the group's chains into the pertrans set (dedup exactly
-        // there); the reused set cycles through ps.dset — the replay tail
-        // clears it and puts it back.
-        let AggStateData { codedgroup, pertrans_sort, .. } = node;
-        let cg = codedgroup.as_deref_mut().expect("codedgroup state");
-        let pt = &mut pertrans_sort[0];
-        let mut set = pt.dset.take().unwrap_or_else(DistinctSet::new);
-        debug_assert!(set.len() == 0 && !set.seen_null, "replay returns the set cleared");
+        // Collect the group's chain values (all merged states' chains) into
+        // the emit scratch — the same walk the per-element union did.
+        let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
+        cg.vals.clear();
         for gi in 0..cg.gstates.len() {
             let s = cg.gstates[gi];
             let mut link = cg.heads[s as usize];
             while link != 0 {
                 let (v, next) = cg.pool[(link - 1) as usize];
-                set.insert_i64(v);
+                cg.vals.push(v);
                 link = next;
             }
         }
-        pt.dset = Some(set);
     }
     // Group-init transition state (initialize_aggregates' one-transition
     // body; byval/null by admission, so no aggcontext copy).
@@ -635,6 +673,47 @@ pub fn agg_codedgroup_emit_next<'mcx>(
                 trans_value_is_null: init.isnull,
                 no_trans_value: init.isnull,
             });
+        }
+    }
+    {
+        // COUNT the group's distinct values (lane-v2 cgemit). Small groups —
+        // the overwhelming majority on the near-unique shapes this arm
+        // admits — dedup by pairwise compares and apply the count directly
+        // to the just-initialized pergroup state (the distinctfin shortcut's
+        // own arithmetic; the pooled set stays empty, so the drain's
+        // set-mode arm adds 0 and recycles it). Everything else unions into
+        // the pertrans set batch-wise (one hashing pass), and the drain
+        // counts it exactly as before. Byte identity: the count is the value
+        // multiset's support cardinality under i64 equality in every arm.
+        let base = node.pergroup_base;
+        let AggStateData { codedgroup, pertrans_sort, .. } = node;
+        let cg = codedgroup.as_deref_mut().expect("codedgroup state");
+        let pt = &mut pertrans_sort[0];
+        // SAFETY: transno 0 of the once-allocated pergroup array, just
+        // initialized above.
+        let pg = base.as_ptr();
+        let fast = cgemit_enabled()
+            && pt.set_count_transfn
+            && crate::distinctfin_enabled()
+            && !pt.dset_degraded
+            && cg.vals.len() <= cgemit_small_max()
+            // SAFETY: as `pg` above — the drain's own state guards.
+            && unsafe { !(*pg).no_trans_value && !(*pg).trans_value_is_null };
+        if fast {
+            // SAFETY: `pg` as above; non-null by-val i64 count state per the
+            // guard read.
+            unsafe { crate::count_distinct_apply(pg, count_distinct_small(&cg.vals))? };
+        } else {
+            let mut set = pt.dset.take().unwrap_or_else(DistinctSet::new);
+            debug_assert!(set.len() == 0 && !set.seen_null, "replay returns the set cleared");
+            if cgemit_enabled() {
+                set.insert_i64_batch(&cg.vals, &mut cg.val_hashes);
+            } else {
+                for &v in &cg.vals {
+                    set.insert_i64(v);
+                }
+            }
+            pt.dset = Some(set);
         }
     }
     // Synthesized representative (adopt_merged's argument — module doc).
@@ -718,5 +797,39 @@ mod tests {
         };
         assert_eq!(content(&arena, 0), b"abc");
         assert_eq!(content(&arena, short_off), b"abc");
+    }
+
+    #[test]
+    fn count_distinct_small_matches_set_semantics() {
+        // Boundary + duplicate shapes.
+        assert_eq!(count_distinct_small(&[]), 0);
+        assert_eq!(count_distinct_small(&[7]), 1);
+        assert_eq!(count_distinct_small(&[7, 7]), 1);
+        assert_eq!(count_distinct_small(&[7, -7, 7, 0, -7]), 3);
+        assert_eq!(count_distinct_small(&[i64::MIN, i64::MAX, 0, i64::MIN]), 3);
+        // Deterministic pseudo-random parity vs the exact-set count across
+        // the fastpath length band (incl. the default threshold boundary).
+        let mut x = 0x9e3779b97f4a7c15u64;
+        for len in 0..=17 {
+            for trial in 0..64 {
+                let mut vals = Vec::with_capacity(len);
+                for _ in 0..len {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    // Narrow domain to force duplicates.
+                    vals.push((x % (1 + (trial as u64 % 7))) as i64 - 3);
+                }
+                let mut set = DistinctSet::new();
+                for &v in &vals {
+                    set.insert_i64(v);
+                }
+                assert_eq!(
+                    count_distinct_small(&vals),
+                    set.len() as i64,
+                    "len={len} trial={trial} vals={vals:?}"
+                );
+            }
+        }
     }
 }

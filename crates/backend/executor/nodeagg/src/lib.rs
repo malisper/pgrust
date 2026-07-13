@@ -2736,6 +2736,28 @@ fn distinctfin_enabled() -> bool {
     })
 }
 
+/// Add a materialized COUNT(DISTINCT) contribution `n` to a count pergroup
+/// state — the distinctfin shortcut's arithmetic, shared with the codedgroup
+/// emit fastpath. Overflow parity: C's int8inc errors at the crossing
+/// increment (int8.c "bigint out of range") — unreachable in practice (the n
+/// distinct values were materialized by this backend), kept for the exact
+/// error surface.
+///
+/// SAFETY: `pg` must point at a live pergroup slot holding a NON-NULL by-val
+/// i64 transition state (`set_count_transfn` + the callers' null guards).
+pub(crate) unsafe fn count_distinct_apply(pg: *mut AggPerGroup, n: i64) -> PgResult<()> {
+    let cur = unsafe { (*pg).trans_value.as_i64() };
+    let Some(newv) = cur.checked_add(n) else {
+        return Err(Box::new(PgError::error("bigint out of range").with_sqlstate(
+            ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+        )));
+    };
+    unsafe {
+        (*pg).trans_value = Datum::from_i64(newv);
+    }
+    Ok(())
+}
+
 // Budget crossing (collect-time): first crossing picks the group's overflow
 // path once — the v2 set spill when the budget can absorb the tape write
 // buffers (`SPILL_MIN_BUDGET`), else the v1 degrade-to-tuplesort — and later
@@ -3255,23 +3277,9 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                             _ => dset.ints().len() as i64,
                         }
                     };
-                    // Overflow parity: C's int8inc errors at the crossing
-                    // increment (int8.c "bigint out of range") — unreachable
-                    // here (n distinct values were materialized by this
-                    // backend), kept for the exact error surface.
-                    // SAFETY: as the guard read above.
-                    let cur = unsafe { (*pg).trans_value.as_i64() };
-                    let Some(newv) = cur.checked_add(n) else {
-                        return Err(Box::new(
-                            PgError::error("bigint out of range").with_sqlstate(
-                                ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                            ),
-                        ));
-                    };
-                    // SAFETY: as above; by-val i64 state (count's int8).
-                    unsafe {
-                        (*pg).trans_value = Datum::from_i64(newv);
-                    }
+                    // SAFETY: pg is the once-allocated pergroup slot with a
+                    // non-null by-val i64 state (guard read above).
+                    unsafe { count_distinct_apply(pg, n)? };
                     dset.clear();
                     ps.dset = Some(dset);
                     continue;
