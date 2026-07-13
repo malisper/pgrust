@@ -676,3 +676,28 @@ fn pinned_rg_abort_reaped_by_driver() {
     assert!(work.claims.lock().unwrap().is_empty());
     assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "finalize work must not run");
 }
+
+/// External-lane leases are process-exclusive: 64 concurrent leases exhaust
+/// the mask, drop releases, and every lease maps to a distinct lane.
+#[test]
+fn external_lane_leases_are_exclusive() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 0,
+        slots: 4,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let mut lanes = Vec::new();
+    for _ in 0..MAX_EXTERNAL_LANES {
+        lanes.push(rt.acquire_external_lane().expect("lane available"));
+    }
+    let mut seen: Vec<usize> = lanes.iter().map(|l| l.ordinal()).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), MAX_EXTERNAL_LANES, "lanes must be distinct");
+    assert!(rt.acquire_external_lane().is_none(), "mask exhausted");
+    lanes.pop();
+    let again = rt.acquire_external_lane().expect("released lane reusable");
+    assert_eq!(again.ordinal(), MAX_EXTERNAL_LANES - 1);
+}

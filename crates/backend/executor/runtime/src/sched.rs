@@ -115,6 +115,10 @@ pub(crate) struct Scheduler {
     #[allow(dead_code)]
     mailboxes: Vec<WorkerMailbox>,
     pub(crate) park: ParkLot,
+    /// External pin-board lane lease bitmask (bit b = lane b busy). Lanes
+    /// are leased through Runtime::acquire_external_lane; MAX_EXTERNAL_LANES
+    /// = 64 keeps this one word.
+    pub(crate) external_lanes: AtomicU64,
     /// Execution-permit semaphore: exactly `permits` (= cores) permits; any
     /// task-executing thread holds one (acquired by the pool loop around
     /// worker_step). The hard runnable cap of the §2.5 permit model. The
@@ -157,6 +161,7 @@ impl Scheduler {
             pins: PinBoard::new(nthreads + MAX_EXTERNAL_LANES),
             mailboxes: (0..nthreads).map(|_| WorkerMailbox::new()).collect(),
             park: ParkLot::new(),
+            external_lanes: AtomicU64::new(0),
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
             clock,
