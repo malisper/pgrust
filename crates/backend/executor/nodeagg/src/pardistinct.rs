@@ -388,14 +388,19 @@ impl<'mcx> PdBuilder<'mcx> {
         debug_assert!(!self.frozen);
         let mut words = [0i64; 32];
         let nkeys = self.spec.nkeys();
-        let spec = self.spec.clone();
+        // NO per-row Arc clone of the spec: every participant's builder holds
+        // the SAME Arc<PdSpec> allocation, so a clone+drop here is two
+        // contended refcount RMWs per row on one shared cache line across all
+        // workers (the __aarch64_ldadd8_relax/_rel flat-profile signature).
+        // Disjoint field borrows below make the clone unnecessary.
+        let max_att = self.spec.max_att;
         let slot = estate.slot_mut(id);
-        exectuples::slot_getsomeattrs(slot, spec.max_att);
-        let (g, sets_delta_group) = {
+        exectuples::slot_getsomeattrs(slot, max_att);
+        let g = {
             let base = slot.base();
             let mut nulls = 0u32;
             for (i, (&att, &kind)) in
-                spec.key_atts.iter().zip(spec.key_kinds.iter()).enumerate()
+                self.spec.key_atts.iter().zip(self.spec.key_kinds.iter()).enumerate()
             {
                 if base.tts_isnull[att as usize] {
                     nulls |= 1 << i;
@@ -411,7 +416,8 @@ impl<'mcx> PdBuilder<'mcx> {
                 None => self.create_group(&words[..nkeys], nulls, h, slot_idx),
             };
             let gi = g as usize;
-            // Vocab transitions.
+            // Vocab transitions (spec/states are disjoint fields).
+            let spec = &self.spec;
             let st = &mut self.states[gi * 2 * spec.vocab.len()..];
             for (vi, v) in spec.vocab.iter().enumerate() {
                 let (acc, cnt) = (2 * vi, 2 * vi + 1);
@@ -430,23 +436,25 @@ impl<'mcx> PdBuilder<'mcx> {
                     }
                 }
             }
-            (gi, true)
+            gi
         };
         // Distinct-set collects (after the immutable-borrow block: bytes
         // inserts may need the estate for detoast).
-        if !spec.sets.is_empty() {
+        let nsets = self.spec.sets.len();
+        if nsets != 0 {
             let mut sets_mem = 0usize;
-            for (j, s) in spec.sets.iter().enumerate() {
+            for j in 0..nsets {
+                let PdSetSpec { att, kind } = self.spec.sets[j];
                 // Re-borrow per set: the bytes arm needs estate for detoast.
                 let (value, isnull) = {
                     let base = estate.slot_mut(id).base();
-                    (base.tts_values[s.att as usize], base.tts_isnull[s.att as usize])
+                    (base.tts_values[att as usize], base.tts_isnull[att as usize])
                 };
-                let dset = &mut self.dsets[g * spec.sets.len() + j];
+                let dset = &mut self.dsets[g * nsets + j];
                 if isnull {
                     dset.seen_null = true;
                 } else {
-                    match s.kind {
+                    match kind {
                         DistinctKeyKind::Int16 => dset.insert_i64(value.as_i16() as i64),
                         DistinctKeyKind::Int32 => dset.insert_i64(value.as_i32() as i64),
                         DistinctKeyKind::Int64 => dset.insert_i64(value.as_i64()),
@@ -466,10 +474,8 @@ impl<'mcx> PdBuilder<'mcx> {
                 }
                 sets_mem += dset.mem_bytes();
             }
-            if sets_delta_group {
-                self.total_set_mem = self.total_set_mem + sets_mem - self.set_mem[g];
-                self.set_mem[g] = sets_mem;
-            }
+            self.total_set_mem = self.total_set_mem + sets_mem - self.set_mem[g];
+            self.set_mem[g] = sets_mem;
         }
         if self.mem() <= self.budget.max(self.evict_floor) {
             return Ok(PdFeed::Ok);

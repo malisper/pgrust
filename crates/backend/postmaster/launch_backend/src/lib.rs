@@ -132,8 +132,41 @@ pub fn postmaster_child_name(child_type: BackendType) -> &'static str {
 
 static NEXT_CHILD_PID: AtomicI32 = AtomicI32::new(1000);
 
+/// Reserve a synthetic task pid. The synthetic pid namespace SHARES the
+/// latch owner-pid / wakeup-registry / thread-signal routing namespace with
+/// exactly one REAL OS pid: the postmaster's. A child whose synthetic pid
+/// equals PostmasterPid() hijacks the postmaster's pid->wakeup-pipe registry
+/// entry at InitializeWaitEventSupport (find-by-pid overwrite) — from that
+/// moment every SetLatch/pmsignal wake aimed at the postmaster is silently
+/// misrouted, and each child-exit/launch request the postmaster sleeps
+/// through costs one DetermineSleepTime period (60 s). Root-caused from
+/// ClickBench Q9 (job pgrust-cb-pdstall-1783929932: postmaster pid 1094,
+/// worker synthetic pid 1094 in the wedged rep, 12 exit announces processed
+/// exactly 60.03 s late; notes/pardistinct-contention-fix.md). The counter
+/// must therefore never emit the postmaster's pid.
+///
+/// PGRUST_TEST_CHILD_PID_BELOW_PM=N (test-only): first reservation restarts
+/// the counter N below PostmasterPid(), so an e2e crosses the collision
+/// point within a few worker launches instead of never/late.
 fn reserve_child_pid() -> pid_t {
-    NEXT_CHILD_PID.fetch_add(1, Ordering::Relaxed)
+    static TEST_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    TEST_INIT.get_or_init(|| {
+        if let Some(n) = std::env::var("PGRUST_TEST_CHILD_PID_BELOW_PM")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+        {
+            let start = init_small::globals::PostmasterPid() - n;
+            if start > 0 {
+                NEXT_CHILD_PID.store(start, Ordering::Relaxed);
+            }
+        }
+    });
+    loop {
+        let pid = NEXT_CHILD_PID.fetch_add(1, Ordering::Relaxed);
+        if pid != init_small::globals::PostmasterPid() {
+            return pid;
+        }
+    }
 }
 
 // C waitpid reports a child only after the process is fully dead; announce

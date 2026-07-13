@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use std::cell::{Cell, RefCell};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use init_small::globals::MyProcPid;
 use types_core::{pgsocket, PGINVALID_SOCKET};
@@ -434,8 +434,31 @@ pub fn WakeupMyProc() {
     }
 }
 
+// Test-only lost-wake fault injection (PGRUST_TEST_DROP_WAKE_1IN=N drops
+// every Nth cross-backend wake byte; unset/0 = off). This renders the
+// intermittent production deaf-endpoint wedge deterministically so the
+// shm_mq stall recheck cadence (stall.rs) has a regression test — the
+// is_set flag is already stored by set_latch before this runs, so a dropped
+// byte is EXACTLY the lost-wake shape: latch set, sleeper never signaled.
+fn drop_wake_1in() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_TEST_DROP_WAKE_1IN")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    })
+}
+
 // C: kill(pid, SIGURG); here: write the target backend's wakeup pipe.
 pub fn WakeupOtherProc(pid: i32) {
+    let n = drop_wake_1in();
+    if n > 0 {
+        static DROP_CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if DROP_CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % n == n - 1 {
+            return;
+        }
+    }
     let registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, write_fd)) = registry.iter().find(|(p, _)| *p == pid) {
         send_wakeup_byte(*write_fd);

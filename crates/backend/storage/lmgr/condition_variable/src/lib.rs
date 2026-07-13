@@ -127,6 +127,19 @@ fn wakeup_mut(cv: &ConditionVariable) -> &mut proclist_head {
     unsafe { &mut *cv.wakeup.ptr() }
 }
 
+/// PGRUST_MQ_RECHECK_MS (same knob as shm_mq::stall::recheck_ms; read here
+/// directly to keep this crate below shm_mq in the layering). Default
+/// 1000 ms; <= 0 restores the plain infinite sleep.
+fn recheck_ms() -> i64 {
+    static RECHECK: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *RECHECK.get_or_init(|| {
+        std::env::var("PGRUST_MQ_RECHECK_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1_000)
+    })
+}
+
 pub fn ConditionVariablePrepareToSleep(cv: &'static ConditionVariable) {
     let pgprocno = MyProcNumber();
     debug_assert!(pgprocno != INVALID_PROC_NUMBER);
@@ -165,6 +178,17 @@ pub fn ConditionVariableTimedSleep(
     let wait_events = if timeout >= 0 {
         debug_assert!(timeout <= i32::MAX as i64);
         cur_timeout = timeout;
+        WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH
+    } else if recheck_ms() > 0 {
+        // Recheck cadence (shm_mq stall.rs rationale): a CV signal removes
+        // this proc from the wakeup list and SetLatches it, but a lost
+        // cross-thread wake byte leaves the sleeper in epoll forever (the
+        // production BufferIo hang shape under wake loss). The loop below is
+        // a legal recheck: a timeout wake re-tests list membership, so a
+        // dropped signal costs at most one recheck period. The caller-facing
+        // contract is unchanged (we return only when signaled/cancelled or
+        // the caller's own timeout expires).
+        cur_timeout = recheck_ms();
         WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH
     } else {
         WL_LATCH_SET | WL_EXIT_ON_PM_DEATH
