@@ -4938,6 +4938,173 @@ fn sorted_perrow_step<'mcx>(
     pull_step_chain(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut op, &mut root, estate)
 }
 
+/// Granule length-stats meta-fold context (lane-v2-lenfooter): the sorted
+/// fold drive may consume whole INTERIOR granules of the open group from v7
+/// footer metadata — no decode, no staging — when every admitted transition
+/// is answerable from (passing rows, Σ octet_length) and the qual is absent
+/// or exactly `col <> ''` on the length column itself (the arithmetic:
+/// empty strings are precisely the rejected rows AND contribute zero to the
+/// byte-length sum, and cbstore stores no NULLs, so filtered count =
+/// rows − empties and the filtered sum IS the footer sum).
+struct SortedMetaFold {
+    // Columns whose footer stats the peek fetches: the plan's VarLenBytes
+    // length columns plus (if any) the qual column.
+    peek_cols: [u16; 4],
+    npeek: usize,
+    // Index into peek_cols of the `<> ''` qual column; None = no qual.
+    qual_idx: Option<usize>,
+}
+
+fn sorted_fold_meta_ctx<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    keys: &SortedFoldKeys,
+) -> Option<SortedMetaFold> {
+    if !metaagg_enabled() {
+        return None;
+    }
+    // The key compare below widens by attlen: only 2/4/8-byte keys arise on
+    // cbstore (i16/i32/date/i64/timestamp), but stay fail-closed.
+    for &(_, attlen) in &keys.cols[..keys.n] {
+        if !matches!(attlen, 2 | 4 | 8) {
+            return None;
+        }
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    let cols = ::lanefold::granule_meta_len_cols(plan)?;
+    let qual = ::nodeseqscan::seq_scan_meta_qual_shape(ss)?;
+    if let Some(qc) = qual {
+        // Under `qc <> ''` only length sums over qc itself stay exact:
+        // empty-string rows of qc contribute zero to qc's sum but arbitrary
+        // bytes to any OTHER length column's.
+        if !cols.iter().all(|&c| c == qc) {
+            return None;
+        }
+    }
+    let mut peek_cols = [0u16; 4];
+    let mut npeek = 0usize;
+    for &c in cols.iter() {
+        if npeek == peek_cols.len() {
+            return None;
+        }
+        peek_cols[npeek] = c;
+        npeek += 1;
+    }
+    let qual_idx = match qual {
+        None => None,
+        Some(qc) => Some(match peek_cols[..npeek].iter().position(|&c| c == qc) {
+            Some(i) => i,
+            None => {
+                if npeek == peek_cols.len() {
+                    return None;
+                }
+                peek_cols[npeek] = qc;
+                npeek += 1;
+                npeek - 1
+            }
+        }),
+    };
+    Some(SortedMetaFold { peek_cols, npeek, qual_idx })
+}
+
+/// Widen a by-value key datum to the decode-value domain granule zone
+/// entries live in (sign-extension per attlen — exactly how the cbstore
+/// decode widens i16/i32/date columns).
+#[inline]
+fn sorted_key_widen(d: ::datum::Datum, attlen: i16) -> i64 {
+    match attlen {
+        2 => d.as_i16() as i64,
+        4 => d.as_i32() as i64,
+        _ => d.as_i64(),
+    }
+}
+
+/// Consume 0+ whole granules of the OPEN group from footer metadata:
+/// peek each upcoming fresh granule; while it is key-constant AT the open
+/// group's key, fold its transitions from (rows, Σ octet_length, empties)
+/// and skip its decode entirely. Stops at a mid-granule position, a
+/// non-meta granule, a key change (boundary granules stage and fold/emit
+/// normally), or scan end. Byte-identity: the granule's rows are exactly
+/// the rows next_window would stage, all same-key (zone min == max) and
+/// non-fallback (nothing staged); the qual bitmap over them is the length
+/// predicate the footer arithmetic derives; fold_granule_meta's state
+/// mutations are fold_batch's own on that selection.
+fn sorted_fold_meta_granules<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    keys: &SortedFoldKeys,
+    cur_key: &[(::datum::Datum, bool); SORTED_FOLD_MAX_KEYS],
+    mf: &SortedMetaFold,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let nkeys = keys.n;
+    let mut key_cols = [0u16; SORTED_FOLD_MAX_KEYS];
+    let mut want_key = [0i64; SORTED_FOLD_MAX_KEYS];
+    for k in 0..nkeys {
+        // NULL keys never arise from a cbstore scan (no NULLs stored), but a
+        // null open-group key would not be zone-comparable — refuse.
+        if cur_key[k].1 {
+            return Ok(());
+        }
+        key_cols[k] = keys.cols[k].0;
+        want_key[k] = sorted_key_widen(cur_key[k].0, keys.cols[k].1);
+    }
+    let mut key_mm = [(0i64, 0i64); SORTED_FOLD_MAX_KEYS];
+    let mut stats = [(0u64, 0u32, 0u32); 4];
+    let mut consumed = 0u64;
+    loop {
+        match ::nodeseqscan::seq_scan_granule_meta_peek(
+            ss,
+            estate,
+            &key_cols[..nkeys],
+            &mf.peek_cols[..mf.npeek],
+            &mut key_mm[..nkeys],
+            &mut stats[..mf.npeek],
+        )? {
+            ::tableam::CbGranuleMetaStep::Meta { rows } => {
+                let same = (0..nkeys)
+                    .all(|k| key_mm[k].0 == key_mm[k].1 && key_mm[k].0 == want_key[k]);
+                if !same {
+                    break;
+                }
+                let passing = rows as i64
+                    - mf.qual_idx.map_or(0, |i| stats[i].2 as i64);
+                if passing > 0 {
+                    let plan =
+                        ::nodeagg::agg_lanefold_plan(agg).expect("meta ctx proved the plan");
+                    // SAFETY: pergroup contract identical to flush_run's
+                    // fold_batch call (once-allocated pergroup array, live
+                    // AvgAccum transarray); admissibility proven by
+                    // granule_meta_len_cols in sorted_fold_meta_ctx; every
+                    // sum_of column is in peek_cols by construction.
+                    unsafe {
+                        ::lanefold::fold_granule_meta(
+                            plan,
+                            passing,
+                            |c| {
+                                let i = mf.peek_cols[..mf.npeek]
+                                    .iter()
+                                    .position(|&pc| pc == c)
+                                    .expect("meta ctx staged every length column");
+                                stats[i].0 as i64
+                            },
+                            ::nodeagg::agg_sorted_pergroup_base(agg),
+                        );
+                    }
+                }
+                ::nodeseqscan::seq_scan_granule_meta_consume(ss);
+                consumed += 1;
+                ::postgres_seams::check_for_interrupts::call()?;
+            }
+            _ => break,
+        }
+    }
+    if consumed > 0 {
+        lane_trace(&format!("sorted-agg granule meta-fold: {consumed} granules"));
+    }
+    Ok(())
+}
+
 /// One PG pull's worth of the sorted FOLD drive: walk the staged window from
 /// the node-resident cursor, folding each group run whole-batch and emitting
 /// one qual-passing group row per pull (pausing with the boundary tuple
@@ -4962,6 +5129,9 @@ fn sorted_fold_step<'mcx>(
         ::nodeagg::agg_sorted_group_key(agg, &mut cur_key[..nkeys]);
         group_open = true;
     }
+    // Granule length-stats meta-fold admission (once per pull; the walk is a
+    // handful of transition matches). None = every granule stages normally.
+    let meta = sorted_fold_meta_ctx(agg, ss, &keys);
     loop {
         // The staged window (node-resident cursor) or the next one.
         let (pos, n) = {
@@ -4969,6 +5139,13 @@ fn sorted_fold_step<'mcx>(
             if pos < n {
                 (pos, n)
             } else {
+                // Between windows: consume whole interior granules of the
+                // open group from footer metadata (no decode) first.
+                if let Some(mf) = &meta {
+                    if group_open {
+                        sorted_fold_meta_granules(agg, ss, &keys, &cur_key, mf, estate)?;
+                    }
+                }
                 let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
                 ss.set_lane_cursor(0, n);
                 if n == 0 {

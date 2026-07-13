@@ -43,9 +43,30 @@ pub const CB_VERSION_V5: u32 = 5;
 //    cluster key at write time (per-RG sortedness; whole-part order is the
 //    v5 sorted flags' business).
 pub const CB_VERSION_V6: u32 = 6;
-pub const CB_VERSION: u32 = 6;
+// v7 (per-granule string-length statistics, the ORC StringStatistics.sum
+// precedent):
+//  - The footer prelude grows from 8 to 8 + ncols bytes: after nrgs/ncols,
+//    ncols u8 flags mark the columns carrying length-stats entries (the
+//    writer flags every text column). Fixed-position because read_footer_rgs
+//    sizes the body read before it parses anything, and ncols is known from
+//    the caller — one read still covers the prelude.
+//  - After the v6 cluster-key section the footer appends the length-stats
+//    body: nrgs x GRANULES_PER_RG x nlencols entries of
+//    CB_LENSTATS_ENTRY_LEN bytes (sum(octet_length) u64 | non-null count
+//    u32 | empty-string count u32, LE), rg-major, then granule slot, then
+//    flagged column in ascending column order. Granule slots past an RG's
+//    last row are zero. nlencols = number of set flag bytes.
+//  - Validity is per-RG via RG_FLAG_LENSTATS (0 is a valid sum, the
+//    RG_FLAG_SUMS precedent): RGs preserved from a v<=6 footer write zeros
+//    and lack the flag. v<=6 parts read as no-length-stats entirely.
+pub const CB_VERSION_V7: u32 = 7;
+pub const CB_VERSION: u32 = 7;
 pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;
 pub const CB_CLUSTER_KEY_SECTION_LEN: usize = 2 + CB_CLUSTER_KEY_MAX_COLS * 2;
+// v7 length-stats entry: sum u64 | nonnull u32 | empty u32. A granule sum is
+// bounded by GRANULE_ROWS x 2^30 (the varlena payload cap) < 2^44, and a
+// whole part's fold by 2^44 x nrgs — i128 accumulation can never overflow.
+pub const CB_LENSTATS_ENTRY_LEN: usize = 16;
 pub const CB_HEADER_LEN: u64 = 64;
 pub const CB_RG_MAGIC: u32 = 0x4342_5247; // "CBRG"
 pub const CB_RG_HEADER_LEN: usize = 32;
@@ -55,6 +76,8 @@ pub const CB_FOOTER_MAGIC: u32 = 0x4342_4654; // "CBFT"
 
 pub const RG_ROWS: usize = 65_536;
 pub const GRANULE_ROWS: usize = 8_192;
+// v7 length-stats granule slots per RG (fixed — partial RGs zero-pad).
+pub const GRANULES_PER_RG: usize = RG_ROWS / GRANULE_ROWS;
 // Executor window: divides GRANULE_ROWS exactly and fits SOA_MAX_ROWS (291).
 pub const WINDOW_ROWS: usize = 256;
 pub const WINDOWS_PER_GRANULE: usize = GRANULE_ROWS / WINDOW_ROWS;
@@ -74,6 +97,10 @@ pub const RG_FLAG_SUMS: u32 = 2;
 // (footer cluster-key section) using the writer's column-class order
 // (ints/date/timestamp: signed value; text: payload memcmp).
 pub const RG_FLAG_CLUSTERED: u32 = 4;
+// v7: the RG's per-granule length-stats entries are exact (sealed by a v7+
+// writer). Like RG_FLAG_SUMS, needed because every field of an entry can
+// legitimately be 0.
+pub const RG_FLAG_LENSTATS: u32 = 8;
 
 // Chunk sections between the granule directory and the payload, in this
 // order. Block zone maps: ngranules x BLOCKS_PER_GRANULE x (min i64, max

@@ -113,6 +113,23 @@ impl LaneQualProg {
             .any(|sc| matches!(sc.kind, StagedKind::Int { .. }) && sc.cols.contains(&c))
     }
 
+    /// The WHOLE qual is one `col <> ''` text clause: Some(col). No requal
+    /// tail, no other clauses, no int-lane reads — the selection bitmap is
+    /// then a pure length predicate (see DictClause::is_ne_empty), so a
+    /// granule length-stats consumer can derive it from footer empty-string
+    /// counts without staging the granule.
+    pub fn ne_empty_single_col(&self) -> Option<u16> {
+        if self.requal || self.nclauses != 1 || self.dict.len() != 1 {
+            return None;
+        }
+        let no_int_reads = !self
+            .prog
+            .steps
+            .iter()
+            .any(|s| matches!(*s, BStep::LoadLane { .. } | BStep::InListAnyConst { .. }));
+        (no_int_reads && self.dict[0].is_ne_empty()).then(|| self.dict[0].col)
+    }
+
     /// Prewhere staged evaluation: number of independently evaluable prefix
     /// clauses, in ascending estimated-cost order.
     pub fn nstaged(&self) -> usize {

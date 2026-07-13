@@ -1417,6 +1417,47 @@ pub fn seq_scan_window_value_minmax(
     ::tableam::table_scan_window_value_minmax(sd, col)
 }
 
+/// Qual coverage for the granule length-stats fold (lane-v2-lenfooter):
+/// `Some(None)` = the scan has no qual; `Some(Some(c))` = the WHOLE qual is
+/// `col c <> ''` hosted by the armed PREWHERE lane (its bitmap is then a
+/// pure length predicate — footer empty-string counts derive it exactly);
+/// `None` = not coverable, the meta arm must refuse.
+pub fn seq_scan_meta_qual_shape(node: &SeqScanState<'_>) -> Option<Option<u16>> {
+    if node.ss.qual.is_none() {
+        return Some(None);
+    }
+    let b = node.batch_soa.as_deref()?;
+    if b.lane_requal {
+        return None;
+    }
+    b.lane.as_deref()?.ne_empty_single_col().map(Some)
+}
+
+/// v7 granule length-stats metadata peek (cbstore; see
+/// `CbScanDescData::granule_meta_peek`). Callable only after the scan desc
+/// exists (the fold drive's staging loop guarantees it via next_pagebatch's
+/// ensure_scandesc; a missing desc reads as NotMeta).
+pub fn seq_scan_granule_meta_peek<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    key_cols: &[u16],
+    len_cols: &[u16],
+    key_mm: &mut [(i64, i64)],
+    len_stats: &mut [(u64, u32, u32)],
+) -> PgResult<::tableam::CbGranuleMetaStep> {
+    node.ensure_scandesc(estate)?;
+    let Some(sd) = node.ss.ss_currentScanDesc.as_mut() else {
+        return Ok(::tableam::CbGranuleMetaStep::NotMeta);
+    };
+    ::tableam::table_scan_granule_meta_peek(sd, key_cols, len_cols, key_mm, len_stats)
+}
+
+/// Consume the granule the peek just answered (never decoded).
+pub fn seq_scan_granule_meta_consume(node: &mut SeqScanState<'_>) {
+    let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
+    ::tableam::table_scan_granule_meta_consume(sd);
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
