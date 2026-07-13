@@ -109,11 +109,16 @@ struct AggSink {
     /// A Local crossed its memory budget: not an error — the leader falls
     /// back to the serial arm (R5 whole-attempt rerun).
     budget_refused: AtomicBool,
-    /// Combine-phase retained bytes (the per-bucket emit buffers, summed
-    /// across claims) — the m2-integration R3 accounting for the merged
-    /// RESULT, checked against the same `budget` (the merged output is one
-    /// logical hash-table's worth of memory, C's hash_mem_limit law).
-    /// Crossing = budget refusal, exactly the Local discipline.
+    /// Combine-phase retained CONTENT bytes (the per-bucket emit buffers,
+    /// summed across claims) — the m2-integration R3 accounting for the
+    /// merged RESULT, checked against the ADMITTED envelope (forked Locals
+    /// × per-Local budget; see the check site). Crossing = budget refusal.
+    /// LIFETIME NOTE: this sink object is strictly per-engagement
+    /// (constructed in try_engage_hashagg_runtime); if sink regeneration
+    /// (the M1+ re-publish regime sink.rs documents) ever reuses one sink
+    /// across generations, this counter — like the distinct arm's
+    /// merged_bytes — must reset at re-publish or regenerated engagements
+    /// double-count.
     combined_bytes: AtomicUsize,
 }
 
@@ -158,7 +163,7 @@ impl runtime::ParallelSink for AggSink {
         AggSinkLocal::default()
     }
 
-    fn accept_local(&self, local: &mut AggSinkLocal, worker: usize, range: runtime::MorselRange) {
+    fn accept_local(&self, local: &mut AggSinkLocal, _worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
@@ -207,7 +212,7 @@ impl runtime::ParallelSink for AggSink {
         SINK_NBUCKETS as u64
     }
 
-    fn combine(&self, part: u64, worker: usize, locals: &[AggSinkLocal]) {
+    fn combine(&self, part: u64, _worker: usize, locals: &[AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
@@ -237,12 +242,17 @@ impl runtime::ParallelSink for AggSink {
             let buf = sink_emit_bucket(&self.emit, &merged);
             // R3 accounting (m2-integration audit): the emit buffers are the
             // RETAINED merged result (held until the leader drains) — meter
-            // them against the budget; crossing = budget refusal (R5 rerun).
-            // The transient per-bucket merge table is bounded by <= dop
+            // them against the ADMITTED envelope (forked Locals × per-Local
+            // budget, the same law as the distinct sink): the union is
+            // bounded by the sum of the admitted Locals' content, so this
+            // trips only on real overhead/accounting surprises — fail-closed
+            // and visible without a deterministic refuse-and-rerun cliff for
+            // legitimately admitted dop-wide results (review finding). The
+            // transient per-bucket merge table is bounded by <= dop
             // concurrent claims of bucket-sized tables and drops here.
             let retained = buf.bytes();
             let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
-            if total > self.budget {
+            if total > self.budget.saturating_mul(locals.len().max(1)) {
                 self.refuse_budget();
                 return Ok(());
             }
@@ -534,7 +544,6 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
         return;
     };
     let mut local = lane.local();
-    let worker = payload.rt.nthreads() + lane.ordinal();
     let entered = std::cell::Cell::new(false);
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
