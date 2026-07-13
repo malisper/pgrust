@@ -282,7 +282,13 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         table: ::lanetable::LaneAggTable::with_config(
             ::lanetable::KeyRepr::Int,
             additionalsize,
-            (numgroups as usize).min(1 << 20),
+            // Capacity hint: the planner group estimate, honored well past
+            // the two-level threshold (the table presizes its 256 buckets
+            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // and was then discarded at conversion). The 8M cap bounds the
+            // birth prealloc at 256MB of entries; the spill/backstop gates
+            // already bounded the estimate against hash_mem.
+            (numgroups as usize).min(1 << 23),
             ::lanetable::HashKind::best(),
             layout,
         ),
@@ -407,7 +413,13 @@ pub fn agg_hash_compact_try_arm_mk(
         table: ::lanetable::LaneAggTable::with_config(
             repr,
             additionalsize,
-            (numgroups as usize).min(1 << 20),
+            // Capacity hint: the planner group estimate, honored well past
+            // the two-level threshold (the table presizes its 256 buckets
+            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // and was then discarded at conversion). The 8M cap bounds the
+            // birth prealloc at 256MB of entries; the spill/backstop gates
+            // already bounded the estimate against hash_mem.
+            (numgroups as usize).min(1 << 23),
             ::lanetable::HashKind::best(),
             layout,
         ),
@@ -495,7 +507,13 @@ pub fn agg_hash_compact_try_arm_reduced(
         table: ::lanetable::LaneAggTable::with_config(
             ::lanetable::KeyRepr::Int,
             additionalsize,
-            (numgroups as usize).min(1 << 20),
+            // Capacity hint: the planner group estimate, honored well past
+            // the two-level threshold (the table presizes its 256 buckets
+            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // and was then discarded at conversion). The 8M cap bounds the
+            // birth prealloc at 256MB of entries; the spill/backstop gates
+            // already bounded the estimate against hash_mem.
+            (numgroups as usize).min(1 << 23),
             ::lanetable::HashKind::best(),
             layout,
         ),
