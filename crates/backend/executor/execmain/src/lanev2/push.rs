@@ -206,6 +206,15 @@ pub(super) trait BatchEmit<'mcx> {
     /// admits int-family keys only). Default no-op; only the seqscan emit
     /// face forwards it to the AM, where an unarmed scan ignores it.
     fn push_topk_bound(&mut self, _key: ::datum::Datum) {}
+
+    /// Dict-code answer for the staged window's direct key column (the
+    /// distinct-set text key feed; armed via `seq_scan_key_dict_arm`).
+    /// `Some` = the window is dict-coded and the key's datum cells are STALE
+    /// — the sink must consume codes+dict for the whole window and skip
+    /// `emit_key`. Default: never serves (only the seqscan emit face can).
+    fn key_dict_lane(&self) -> Option<::exectuples::SoaDictLane> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3

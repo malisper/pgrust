@@ -707,7 +707,7 @@ impl<'mcx> PdBuilder<'mcx> {
 }
 
 #[inline]
-fn key_hash(words: &[i64], nulls: u32) -> u64 {
+pub(crate) fn key_hash(words: &[i64], nulls: u32) -> u64 {
     let mut h = (nulls as u64) ^ 0x9e37_79b9_7f4a_7c15;
     for &w in words {
         h = mix64(h ^ (w as u64));
