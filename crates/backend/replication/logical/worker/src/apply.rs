@@ -107,15 +107,20 @@ fn end_replication_step() -> PgResult<()> {
 fn should_apply_changes_for_rel(entry: &LogicalRepRelMapEntry) -> bool {
     const SUBREL_STATE_READY: u8 = b'r';
     const SUBREL_STATE_SYNCDONE: u8 = b's';
-    const SUBREL_STATE_UNKNOWN: u8 = 0;
+    if crate::tablesync::AM_TABLESYNC_WORKER.with(std::cell::Cell::get) {
+        // The tablesync worker applies only its own table's changes
+        // (worker.c:461); localreloid match is implied by the relmap entry.
+        let myrelid = launcher::worker_snapshot(launcher::my_worker_slot().expect("attached"))
+            .map(|w| w.relid)
+            .unwrap_or(types_core::InvalidOid);
+        return entry.localreloid == myrelid;
+    }
     match entry.state {
         SUBREL_STATE_READY => true,
         SUBREL_STATE_SYNCDONE => entry.statelsn <= REMOTE_FINAL_LSN.get(),
-        SUBREL_STATE_UNKNOWN => false,
-        other => panic!(
-            "unported: tablesync relation state '{}' during apply (round-4 inc E)",
-            other as char
-        ),
+        // INIT/DATASYNC/FINISHEDCOPY/SYNCWAIT/CATCHUP: the tablesync worker
+        // owns those changes; the leader skips them.
+        _ => false,
     }
 }
 
@@ -170,7 +175,7 @@ fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
 }
 
 // apply_handle_commit (worker.c:1010) + apply_handle_commit_internal (:2258).
-fn apply_handle_commit(mcx: Mcx<'_>, _conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
+fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
     let commit = logicalproto::logicalrep_read_commit(r)?;
 
     if commit.commit_lsn != REMOTE_FINAL_LSN.get() {
@@ -204,8 +209,7 @@ fn apply_handle_commit(mcx: Mcx<'_>, _conn: &mut PgConn, r: &mut Reader<'_>) -> 
     }
 
     IN_REMOTE_TRANSACTION.set(false);
-    // process_syncing_tables: no tablesync workers exist in this subset; a
-    // non-READY table would already have refused in should_apply_changes.
+    crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
     Ok(())
 }
 

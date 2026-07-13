@@ -34,6 +34,11 @@ logical_worker_seams = { path = "../../logical_worker_seams" }
 logicalproto = { path = "../proto" }
 logicalrelation = { path = "../relation" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+latch = { path = "../../../storage/ipc/latch" }
+init_small = { path = "../../../utils/init/init_small" }
+types_storage = { path = "../../../../_support/types/types_storage" }
+copy_cmd = { path = "../../../commands/copy", package = "copy_cmd" }
+table = { path = "../../../access/table/table" }
 nodemodifytable = { path = "../../../executor/nodemodifytable" }
 origin = { path = "../../origin" }
 pg_subscription = { path = "../../../catalog/pg_subscription" }
