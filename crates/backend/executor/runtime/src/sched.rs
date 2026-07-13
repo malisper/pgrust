@@ -307,13 +307,14 @@ impl Scheduler {
             ts.rg.rg_id, index
         ));
         let pinned = ts.rg.pinned;
+        let class = ts.rg.class;
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // Pinned RGs are invisible to the pool's pick: only external
         // participants (drive_pinned) may execute them — pool workers have
         // no session binding for the query (M1; §2.3 retires this in M2+).
         if !pinned {
-            self.set_active(slot, ts.rg.class);
+            self.set_active(slot, class);
         }
         RuntimeStats::tick(&self.stats.tasksets_published);
         // Wake parked workers: new work exists (external pinned drivers
