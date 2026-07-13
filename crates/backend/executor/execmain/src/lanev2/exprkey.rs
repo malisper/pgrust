@@ -1504,22 +1504,39 @@ fn exprkey_mk_batch<'mcx>(
                         .and_then(|soa| soa.dict_lane(base));
                     match lane {
                         Some(lane) => {
-                            // Per-epoch code → intern-id resolve (the scan
-                            // feed's exact cache, epoch-rolled per RG).
+                            // Code → intern-id resolve (the scan feed's
+                            // exact cache): per-epoch (RG-rolled), or under
+                            // a v7 stitch keyed on part-global codes and
+                            // the scan-stable gepoch (never re-rolled).
                             let ndict = lane.table.ndict as usize;
-                            if *epoch != Some(lane.table.epoch) {
-                                *epoch = Some(lane.table.epoch);
+                            let global = lane.table.has_stitch();
+                            let (ident, size) = if global {
+                                ((true, lane.table.gepoch), lane.table.gndv as usize)
+                            } else {
+                                ((false, lane.table.epoch), ndict)
+                            };
+                            if *epoch != Some(ident) {
+                                *epoch = Some(ident);
                                 code_ids.clear();
-                                code_ids.resize(ndict, None);
+                                code_ids.resize(size, None);
                             }
-                            debug_assert!(code_ids.len() >= ndict);
+                            debug_assert!(code_ids.len() >= size);
                             for (k, &i) in rows.iter().enumerate() {
-                                let code = lane.code(i as usize) as usize;
-                                debug_assert!(code < ndict, "filler contract: code < ndict");
+                                let local = lane.code(i as usize);
+                                debug_assert!(
+                                    (local as usize) < ndict,
+                                    "filler contract: code < ndict"
+                                );
+                                let code = if global {
+                                    lane.table.global_code(local) as usize
+                                } else {
+                                    local as usize
+                                };
+                                debug_assert!(code < size, "stitch contract: code < gndv");
                                 let id = match code_ids[code] {
                                     Some(id) => id,
                                     None => {
-                                        let d = lane.table.datum(code as u32);
+                                        let d = lane.table.datum(local);
                                         // SAFETY: dict entries are live
                                         // non-null text varlenas for the
                                         // staged window (dict lane

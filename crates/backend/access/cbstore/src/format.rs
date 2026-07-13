@@ -43,7 +43,24 @@ pub const CB_VERSION_V5: u32 = 5;
 //    cluster key at write time (per-RG sortedness; whole-part order is the
 //    v5 sorted flags' business).
 pub const CB_VERSION_V6: u32 = 6;
-pub const CB_VERSION: u32 = 6;
+// v7 (global stitched dictionaries): the footer appends a stitch section
+// after the v6 cluster-key section:
+//   ncols x u64 global NDV (0 = no stitch for the column), then
+//   nrgs x ncols x (u64 file_off | u32 count) stitch-blob directory
+//   (all-zero where absent).
+// A stitch blob is a per-RG per-column u32 array mapping the RG's LOCAL dict
+// codes to PART-GLOBAL codes; global codes are byte-rank over the union of
+// every RG's dict entries, so global-code order == byte order (the
+// CHUNK_FLAG_DICT_SORTED property lifted to part scope). Blobs live in the
+// file body between the last RG and the footer (64-aligned; dead on
+// append-refinalize, the footer-chain precedent). A column gets a stitch
+// only when EVERY RG's chunk is Dict/Lz4Dict with sorted codes; append onto
+// committed RGs invalidates to none (the NDV/sorted precedent). v<=6 parts
+// read as no-stitch.
+pub const CB_VERSION_V7: u32 = 7;
+pub const CB_VERSION: u32 = 7;
+// Stitch directory entry: u64 file_off | u32 count.
+pub const CB_STITCH_DIR_ENTRY_LEN: usize = 12;
 pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;
 pub const CB_CLUSTER_KEY_SECTION_LEN: usize = 2 + CB_CLUSTER_KEY_MAX_COLS * 2;
 pub const CB_HEADER_LEN: u64 = 64;

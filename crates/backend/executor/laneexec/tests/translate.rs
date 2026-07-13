@@ -479,6 +479,9 @@ impl DictFixture {
                 ndict: self.datums.len() as u32,
                 epoch,
                 sorted,
+                stitch: std::ptr::null(),
+                gndv: 0,
+                gepoch: 0,
             },
         }
     }

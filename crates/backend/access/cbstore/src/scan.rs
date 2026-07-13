@@ -249,10 +249,30 @@ pub struct CbScanDescData<'mcx> {
     pub blocks_pruned: u64,
     pub windows_staged: u64,
     pub granules_bound_skipped: u64,
+    // v7 stitch identity for this scan's dict lanes (SoaDictTable::gepoch):
+    // process-unique per scan instance, stable across RGs and rescans (the
+    // pinned part's stitch content never changes under a live scan). 0 when
+    // stitch publication is disabled (PGRUST_LANE_V2_GLOBALDICT=0).
+    scan_uid: u64,
 }
 
 fn env_off(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("on"))
+}
+
+// v7 stitch identity source: nonzero, process-unique per scan instance.
+// Returns 0 (publication disabled, per-epoch consumer behavior) under
+// PGRUST_LANE_V2_GLOBALDICT=0/off — the one switch that A/Bs every global
+// stitch consumer on the same on-disk bank.
+fn next_scan_uid() -> u64 {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_GLOBALDICT").as_deref(), Ok("0") | Ok("off"))
+    }) {
+        return 0;
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 // Staging window width (rows per staged batch), default WINDOW_ROWS.
@@ -334,6 +354,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             blocks_pruned: 0,
             windows_staged: 0,
             granules_bound_skipped: 0,
+            scan_uid: next_scan_uid(),
         }
     }
 
@@ -942,6 +963,25 @@ impl<'mcx> CbScanDescData<'mcx> {
                 // pins its Rc<Part>, so the epoch key is stable across
                 // rescans). Values/isnull cells stay stale per the
                 // set_dict_lane contract.
+                // v7 stitch: local -> part-global codes for this (rg, col),
+                // published when present, length-consistent with the dict,
+                // and the scan's stitch identity is armed (scan_uid != 0).
+                // Consumers fail open to per-epoch keying on a null stitch.
+                let stitch = if self.scan_uid != 0 {
+                    self.part
+                        .as_ref()
+                        .and_then(|p| p.stitch(self.rg, c))
+                        .filter(|s| s.len() == cd.dict.len())
+                } else {
+                    None
+                };
+                let gndv = self
+                    .part
+                    .as_ref()
+                    .map(|p| p.stitch_gndv(c))
+                    .filter(|&g| stitch.is_some() && g <= u32::MAX as u64)
+                    .unwrap_or(0);
+                let stitch = if gndv != 0 { stitch } else { None };
                 soa.set_dict_lane(
                     c,
                     ::exectuples::SoaDictLane {
@@ -951,6 +991,9 @@ impl<'mcx> CbScanDescData<'mcx> {
                             ndict: cd.dict.len() as u32,
                             epoch: self.rg as u64,
                             sorted: cd.dict_sorted,
+                            stitch: stitch.map_or(std::ptr::null(), |s| s.as_ptr()),
+                            gndv: gndv as u32,
+                            gepoch: if stitch.is_some() { self.scan_uid } else { 0 },
                         },
                     },
                 );

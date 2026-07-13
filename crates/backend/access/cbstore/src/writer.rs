@@ -209,6 +209,41 @@ enum ColBuilder {
     Text(TextBuilder),
 }
 
+/// v7 global-stitch builder for one text column: a part-lifetime interner
+/// assigning first-appearance global ids to the column's distinct strings,
+/// plus per sealed RG the local-code -> global-id map (local codes are the
+/// RG's byte-sorted dict order). At finish() ids are re-ranked byte-sorted
+/// (global code = byte rank over the part's union dict) and the per-RG maps
+/// are written as stitch blobs. Poisoned (and emptied) the moment any RG of
+/// the column is not dict-encoded — a partial global code space would break
+/// the part-scope facts consumers rely on.
+struct StitchCol {
+    ids: HashMap<Box<[u8]>, u32>,
+    rg_maps: Vec<Vec<u32>>,
+    poisoned: bool,
+}
+
+impl StitchCol {
+    fn new() -> StitchCol {
+        StitchCol { ids: HashMap::new(), rg_maps: Vec::new(), poisoned: false }
+    }
+
+    fn poison(&mut self) {
+        self.poisoned = true;
+        self.ids = HashMap::new();
+        self.rg_maps = Vec::new();
+    }
+}
+
+// Writer-side stitch kill switch (byte-identity-preserving A/B: stitch
+// tables are additive metadata; consumers fail open without them).
+fn stitch_write_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_CBSTORE_STITCH").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 pub struct CbWriter {
     file: SegFile,
     xid: TransactionId,
@@ -242,6 +277,11 @@ pub struct CbWriter {
     // drain at finish(); RGs sealed from the drain carry RG_FLAG_CLUSTERED.
     sorter: Option<Box<dyn CbIngestSort>>,
     draining_clustered: bool,
+    // v7 per-text-column global-stitch builders; None when appending to a
+    // part with committed RGs (their local dicts were never interned — the
+    // NDV/sorted invalidation precedent) or when stitch writing is disabled.
+    // Int columns hold None slots.
+    stitch: Option<Vec<Option<StitchCol>>>,
 }
 
 pub struct FooterRg {
@@ -363,7 +403,16 @@ fn open_writer_inner(
         opts,
         sorter: None,
         draining_clustered: false,
+        stitch: None,
     };
+    if stitch_write_enabled() {
+        w.stitch = Some(
+            w.coltypes
+                .iter()
+                .map(|t| if t.is_text() { Some(StitchCol::new()) } else { None })
+                .collect(),
+        );
+    }
     w.reset_builders();
     // Empty part; also a part whose header page is still a zero hole (a
     // pre-header-first writer aborted mid-COPY before ever publishing) —
@@ -381,7 +430,7 @@ fn open_writer_inner(
                     )));
                 }
                 if footer_off != 0 {
-                    let (rgs, footer_end, _ndv, _sorted, _ckey) = crate::reader::read_footer_rgs(
+                    let (rgs, footer_end, _ndv, _sorted, _ckey, _stitch) = crate::reader::read_footer_rgs(
                         &mut w.file,
                         footer_off,
                         w.ncols,
@@ -391,6 +440,7 @@ fn open_writer_inner(
                     if !rgs.is_empty() {
                         w.ndv = None;
                         w.sorted = None;
+                        w.stitch = None;
                     }
                     w.rgs = rgs;
                     w.write_off = align64(footer_end.max(footer_off));
@@ -543,7 +593,10 @@ impl CbWriter {
             let cc = CodecCtx { choice: self.opts.codec[c], zstd_level: self.opts.zstd_level };
             let (min, max) = match b {
                 ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
-                ColBuilder::Text(tb) => encode_text_chunk(&mut body, tb, ngranules, &cc),
+                ColBuilder::Text(tb) => {
+                    let stitch = self.stitch.as_mut().and_then(|s| s[c].as_mut());
+                    encode_text_chunk(&mut body, tb, ngranules, &cc, stitch)
+                }
             };
             chunk_meta.push((chunk_off, min, max));
             sums.push(match b {
@@ -588,6 +641,41 @@ impl CbWriter {
             }
         }
         self.seal_rg()?;
+        // v7 stitch blobs: re-rank the interned global ids byte-sorted
+        // (global code = byte rank over the part's union dict, lifting the
+        // per-RG CHUNK_FLAG_DICT_SORTED property to part scope) and write
+        // the per-RG local->global u32 maps into the file body ahead of the
+        // footer. On append-refinalize these become dead bytes, the
+        // footer-chain precedent.
+        let nrgs = self.rgs.len();
+        let mut stitch_gndv = vec![0u64; self.ncols];
+        let mut stitch_dir = vec![(0u64, 0u32); nrgs * self.ncols];
+        if let Some(cols) = self.stitch.take() {
+            for (c, st) in cols.into_iter().enumerate() {
+                let Some(st) = st else { continue };
+                if st.poisoned || st.ids.is_empty() || st.rg_maps.len() != nrgs {
+                    continue;
+                }
+                let gndv = st.ids.len();
+                let mut by_bytes: Vec<(Box<[u8]>, u32)> = st.ids.into_iter().collect();
+                by_bytes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                let mut rank = vec![0u32; gndv];
+                for (r, &(_, id)) in by_bytes.iter().enumerate() {
+                    rank[id as usize] = r as u32;
+                }
+                for (rg, map) in st.rg_maps.iter().enumerate() {
+                    let mut blob: Vec<u8> = Vec::with_capacity(map.len() * 4);
+                    for &gid in map {
+                        put_u32(&mut blob, rank[gid as usize]);
+                    }
+                    let off = align64(self.write_off);
+                    self.file.write_all_at(&blob, off)?;
+                    self.write_off = off + blob.len() as u64;
+                    stitch_dir[rg * self.ncols + c] = (off, map.len() as u32);
+                }
+                stitch_gndv[c] = gndv as u64;
+            }
+        }
         // Footer.
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));
         put_u32(&mut f, self.rgs.len() as u32);
@@ -635,6 +723,18 @@ impl CbWriter {
         for slot in 0..CB_CLUSTER_KEY_MAX_COLS {
             let c = self.opts.cluster_key.get(slot).map(|&(c, _)| c).unwrap_or(0);
             f.extend_from_slice(&c.to_le_bytes());
+        }
+        // v7 stitch section: per-column global NDV (0 = no stitch), then the
+        // per-(RG, column) stitch-blob directory (all-zero where absent).
+        for c in 0..self.ncols {
+            put_u64(&mut f, stitch_gndv[c]);
+        }
+        for rg in 0..nrgs {
+            for c in 0..self.ncols {
+                let (off, cnt) = stitch_dir[rg * self.ncols + c];
+                put_u64(&mut f, off);
+                put_u32(&mut f, cnt);
+            }
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -878,6 +978,7 @@ fn encode_text_chunk(
     tb: &TextBuilder,
     ngranules: u32,
     cc: &CodecCtx,
+    stitch: Option<&mut StitchCol>,
 ) -> (i64, i64) {
     let n = tb.offs.len();
 
@@ -934,6 +1035,20 @@ fn encode_text_chunk(
         let order: Vec<(u32, u32)> = perm.iter().map(|&o| order[o as usize]).collect();
         for c in codes.iter_mut() {
             *c = remap[*c as usize];
+        }
+        // v7 stitch registration: intern this RG's dict entries (in local
+        // code = byte-rank order) into the column's part-lifetime id space.
+        if let Some(st) = stitch {
+            if !st.poisoned {
+                let mut rg_map: Vec<u32> = Vec::with_capacity(ndv);
+                for &(off, len) in &order {
+                    let s = &tb.blob[off as usize..(off + len) as usize];
+                    let next = st.ids.len() as u32;
+                    let id = *st.ids.entry(Box::from(s)).or_insert(next);
+                    rg_map.push(id);
+                }
+                st.rg_maps.push(rg_map);
+            }
         }
         // Compressed-dict candidate: one frame over the varlena-image dict
         // blob (codec from the v6 menu, sampled on the blob itself), taken on
@@ -1007,6 +1122,12 @@ fn encode_text_chunk(
             body.extend_from_slice(&dict_blob);
         }
     } else {
+        // Non-dict RG: the column's global code space would be partial —
+        // drop the stitch for the whole column (consumers fail open to the
+        // per-epoch paths).
+        if let Some(st) = stitch {
+            st.poison();
+        }
         // Compressed-text candidate (S3 footprint step): per-granule frames
         // (codec from the v6 menu, sampled on granule 0's blob) over the
         // varlena-image blob, granule-relative offsets; decode is
@@ -1425,7 +1546,7 @@ mod dict_sort_tests {
             b"\xff", b"ab", b"abz", b"", b"apple", b"a", b"ab\xff\xff",
         ];
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&rows), 1, &test_codec_ctx());
+        encode_text_chunk(&mut body, &tb_of(&rows), 1, &test_codec_ctx(), None);
         let (hdr, codes, entries) = parse_dict_chunk(&body, rows.len());
         assert!(matches!(hdr.encoding, Encoding::Dict | Encoding::Lz4Dict));
         assert_ne!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
@@ -1448,7 +1569,7 @@ mod dict_sort_tests {
             .collect();
         let refs: Vec<&[u8]> = rows.iter().map(|v| &v[..]).collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&refs), 1, &test_codec_ctx());
+        encode_text_chunk(&mut body, &tb_of(&refs), 1, &test_codec_ctx(), None);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert!(matches!(hdr.encoding, Encoding::RawText | Encoding::Lz4Text));
         assert_eq!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
@@ -1544,7 +1665,7 @@ mod codec_tests {
         }
         let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT };
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb, 1, &cc);
+        encode_text_chunk(&mut body, &tb, 1, &cc, None);
         let cv = ChunkView::at(&body, 0, rows.len() as u32);
         assert_eq!(cv.hdr.encoding, Encoding::Lz4Dict);
         assert_eq!(cv.hdr.codec, Codec::Zstd);
@@ -1808,7 +1929,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT }, None);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -1823,9 +1944,146 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT }, None);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
         assert_eq!(decode_all(&body, n), rows);
+    }
+}
+
+#[cfg(test)]
+mod stitch_tests {
+    use super::*;
+    use crate::reader::Part;
+    use std::collections::BTreeSet;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-stitch-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    fn writer_at(path: &str, coltypes: Vec<ColType>) -> CbWriter {
+        let opts = CbWriterOpts::plain(coltypes.len());
+        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts)
+            .unwrap()
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    fn put_text_rows(w: &mut CbWriter, texts: &[Vec<u8>]) {
+        let mut keep = Vec::new();
+        for t in texts {
+            let vals = [Datum::from_i64(7), text_datum(t, &mut keep)];
+            w.append_row(&vals, &[false, false]).unwrap();
+        }
+    }
+
+    // Two RGs with overlapping-but-different dict vocabularies: the stitch
+    // maps each RG's byte-sorted local codes onto part-global byte ranks,
+    // the same string gets the same global code in both RGs, and gndv is
+    // the union NDV. Int columns carry no stitch.
+    #[test]
+    fn stitch_roundtrip_two_rgs() {
+        let path = tmp("rt2");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        // RG0: k000..k006 (cycled); RG1: e000..e004 plus k002/k005 overlap.
+        let rg0: Vec<Vec<u8>> =
+            (0..RG_ROWS).map(|i| format!("k{:03}", i % 7).into_bytes()).collect();
+        let rg1: Vec<Vec<u8>> = (0..100)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!("k{:03}", 2 + 3 * (i % 2)).into_bytes() // k002 / k005
+                } else {
+                    format!("e{:03}", i % 5).into_bytes()
+                }
+            })
+            .collect();
+        put_text_rows(&mut w, &rg0);
+        put_text_rows(&mut w, &rg1);
+        w.finish().unwrap();
+
+        let part = Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.rgs.len(), 2);
+        let set0: BTreeSet<&[u8]> = rg0.iter().map(|t| t.as_slice()).collect();
+        let set1: BTreeSet<&[u8]> = rg1.iter().map(|t| t.as_slice()).collect();
+        let union: Vec<&[u8]> = set0.union(&set1).copied().collect(); // byte-sorted
+        assert_eq!(part.stitch_gndv(1), union.len() as u64, "gndv = union NDV");
+        assert_eq!(part.stitch_gndv(0), 0, "int column has no stitch");
+        assert!(part.stitch(0, 0).is_none());
+        let rank = |s: &[u8]| union.iter().position(|&u| u == s).unwrap() as u32;
+        for (rg, set) in [(0usize, &set0), (1usize, &set1)] {
+            let expected: Vec<u32> = set.iter().map(|s| rank(s)).collect();
+            let got = part.stitch(rg, 1).expect("stitch present for all-dict text column");
+            assert_eq!(got, expected.as_slice(), "rg {rg}: local byte order -> global rank");
+            assert!(got.windows(2).all(|w| w[0] < w[1]), "stitch strictly increasing");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // A non-dict RG (all-distinct incompressible strings: dict and
+    // compressed-text both lose) poisons the column's stitch: partial global
+    // code spaces are never published.
+    #[test]
+    fn stitch_poisoned_by_rawtext_rg() {
+        let path = tmp("poison");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        let rg0: Vec<Vec<u8>> =
+            (0..RG_ROWS).map(|i| format!("k{:03}", i % 7).into_bytes()).collect();
+        // Incompressible all-distinct tail RG (the rawtext test recipe).
+        let rg1: Vec<Vec<u8>> = (0..200u64)
+            .map(|i| {
+                let mut x = i.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+                let mut s = Vec::with_capacity(64);
+                for _ in 0..8 {
+                    x ^= x >> 33;
+                    x = x.wrapping_mul(0xFF51AFD7ED558CCD);
+                    s.extend_from_slice(&x.to_le_bytes());
+                }
+                s
+            })
+            .collect();
+        put_text_rows(&mut w, &rg0);
+        put_text_rows(&mut w, &rg1);
+        w.finish().unwrap();
+
+        let part = Part::open(&path, 2).unwrap().unwrap();
+        let hdr = part.chunk(1, 1).hdr.encoding;
+        assert!(
+            matches!(hdr, Encoding::RawText | Encoding::Lz4Text),
+            "test premise: tail RG not dict-encoded (got {hdr:?})"
+        );
+        assert_eq!(part.stitch_gndv(1), 0, "poisoned column publishes no stitch");
+        assert!(part.stitch(0, 1).is_none());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // Reopen-append onto committed RGs invalidates the stitch (the
+    // NDV/sorted precedent): the preserved RGs' dicts were never interned.
+    #[test]
+    fn stitch_append_invalidates() {
+        let path = tmp("append");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        let rows: Vec<Vec<u8>> = (0..64).map(|i| format!("k{:03}", i % 7).into_bytes()).collect();
+        put_text_rows(&mut w, &rows);
+        w.finish().unwrap();
+        assert_eq!(Part::open(&path, 2).unwrap().unwrap().stitch_gndv(1), 7);
+
+        let mut w2 = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        put_text_rows(&mut w2, &rows);
+        w2.finish().unwrap();
+        let part = Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.rgs.len(), 2);
+        assert_eq!(part.stitch_gndv(1), 0, "append invalidates the stitch");
+        assert!(part.stitch(0, 1).is_none() && part.stitch(1, 1).is_none());
+        std::fs::remove_file(&path).unwrap();
     }
 }
