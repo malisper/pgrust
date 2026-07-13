@@ -4205,9 +4205,25 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-        match topn_emit_arm(state, &aps.agg) {
-            Some(spec) => sort_feed_agg_topn(state, &mut aps.agg, outer_desc, spec, estate)?,
-            None => sort_feed(
+        // Batched finalize+emit off the compact table (lane-v2 batchemit):
+        // resolved AFTER the build (the compact table must exist), composes
+        // with the emit-side top-N boundary cut when that also arms. Non-
+        // admission falls through to the per-row paths unchanged.
+        let spec = topn_emit_arm(state, &aps.agg);
+        let bplan = if batch_emit_enabled() {
+            ::nodeagg::batch_emit_resolve(&aps.agg)
+        } else {
+            None
+        };
+        match (bplan, spec) {
+            (Some(plan), spec) => {
+                lane_trace("batch emit armed (compact finalize kernels)");
+                sort_feed_agg_batched(state, &mut aps.agg, outer_desc, spec, plan, estate)?
+            }
+            (None, Some(spec)) => {
+                sort_feed_agg_topn(state, &mut aps.agg, outer_desc, spec, estate)?
+            }
+            (None, None) => sort_feed(
                 state,
                 &mut aps.agg,
                 HashAggSource,
@@ -4971,6 +4987,114 @@ fn sort_feed_agg_topn<'mcx>(
     }
     if stats::armed() {
         stats::tick_topnemit_groups(emitted + skipped, skipped);
+    }
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(())
+}
+
+// ===========================================================================
+// Batched finalize+emit from the compact agg table (lane-v2 batchemit; the
+// datekey lane's finalize-bucket charter). The per-row agg→sort feed pays,
+// PER GROUP: an ExprContext reset, the compact key scatter into first_slot,
+// a full fmgr finalize round-trip per aggregate (fcinfo frame + transarray
+// re-parse for avg), an interpreted projection into the result slot, and a
+// per-put tuplesort handle resolve. The batched feed walks the compact table
+// in blocks (`nodeagg::batch_emit_scan_block`) and builds each surviving
+// group's OUTPUT ROW directly (`nodeagg::batch_emit_row`) — admission
+// (`nodeagg::batch_emit_resolve`) proves every column byte-identical by
+// construction (raw byval transvalues; avg/sum images through the SAME
+// test-pinned kernels the finalfns call — see the invariant block there).
+//
+// Composes with the emit-side top-N boundary cut (topnemit): the boundary is
+// re-read once per BLOCK instead of per group. Boundaries only TIGHTEN as
+// puts land, so the hoisted (staler, looser) boundary can only UNDER-skip —
+// and every under-skipped group is one the downstream bounded tuplesort
+// compares and discards with no state change. Output bytes are unchanged;
+// only no-observable-effect work moves.
+//
+// Non-admission falls through to the per-row paths unchanged (never a lane
+// refusal). Kill switch: PGRUST_LANE_V2_BATCHEMIT=0.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_BATCHEMIT` kill switch (default ON inside the lane).
+fn batch_emit_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_BATCHEMIT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// `SortLaneBatchFeed` face of the batched compact emit: staged position `i`
+/// is the i-th surviving row of the current block (`plan.idx`), built
+/// directly into the agg's result slot.
+struct BatchEmitFeed<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    plan: &'a mut ::nodeagg::BatchEmitPlan,
+}
+
+impl<'mcx> ::nodesort::SortLaneBatchFeed<'mcx> for BatchEmitFeed<'_, 'mcx> {
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<::executils::ExecSlotId>> {
+        ::nodeagg::batch_emit_row(self.agg, estate, self.plan, i).map(Some)
+    }
+}
+
+/// The batched agg→sort feed: `sort_feed_agg_topn`'s begin/finish frame
+/// around a block loop — scan a block of surviving compact rows (boundary
+/// cut applied row-wise against the block-hoisted k-th boundary), then put
+/// the block through `sort_lane_put_batch` (tuplesort handle hoisted; each
+/// row built by `batch_emit_row`). `spec` None = no top-N cut (unbounded or
+/// unresolvable sort key) — the walk emits every group, still batched.
+fn sort_feed_agg_batched<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    spec: Option<::nodeagg::TopnEmitSpec>,
+    mut plan: ::nodeagg::BatchEmitPlan,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let mut emitted: u64 = 0;
+    let mut skipped: u64 = 0;
+    loop {
+        // Block-hoisted boundary read (under-skips only; see the invariant
+        // block above). None until the bounded heap fills, or on a NULL
+        // boundary (a NULL's rank depends on NULLS placement).
+        let cut = spec.and_then(|spec| match ::nodesort::sort_lane_topk_boundary(sort) {
+            Some((b, false)) => Some(::nodeagg::TopnEmitCut {
+                spec,
+                bound: b.as_i64(),
+                skipped: &mut skipped,
+            }),
+            _ => None,
+        });
+        let (n, drained) = ::nodeagg::batch_emit_scan_block(agg, estate, &mut plan, cut)?;
+        if n > 0 {
+            emitted += u64::from(n);
+            ::nodesort::sort_lane_put_batch(
+                sort,
+                estate,
+                0,
+                n,
+                false,
+                &mut BatchEmitFeed { agg, plan: &mut plan },
+            )?;
+        }
+        if drained {
+            break;
+        }
+    }
+    if stats::armed() {
+        if spec.is_some() {
+            stats::tick_topnemit_groups(emitted + skipped, skipped);
+        }
+        stats::tick_batchemit_groups(emitted, 1);
     }
     ::nodesort::sort_lane_finish(sort, estate)?;
     estate.es_direction = dir;

@@ -438,6 +438,12 @@ static ADAPTIVE_TOPK_TIE_RELAXED: AtomicU64 = AtomicU64::new(0);
 /// finalize/projection/sort-put.
 static TOPNEMIT_GROUPS_SEEN: AtomicU64 = AtomicU64::new(0);
 static TOPNEMIT_GROUPS_CUT: AtomicU64 = AtomicU64::new(0);
+/// Batched compact finalize+emit effect counters (lane-v2 batchemit;
+/// informational `counter` dump lines). `GROUPS` counts groups emitted
+/// through the batched kernels (no per-group fmgr finalize / projection /
+/// first_slot scatter); `FEEDS` counts armed feeds.
+static BATCHEMIT_GROUPS: AtomicU64 = AtomicU64::new(0);
+static BATCHEMIT_FEEDS: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -525,6 +531,18 @@ pub(super) fn tick_topnemit_groups(seen: u64, cut: u64) {
     arm_dump_on_thread_exit();
 }
 
+/// Record one armed batched compact finalize+emit feed: `groups` emitted
+/// through the batched kernels, `feeds` armed feed events (always 1).
+#[inline]
+pub(super) fn tick_batchemit_groups(groups: u64, feeds: u64) {
+    if stats_dir().is_none() {
+        return;
+    }
+    BATCHEMIT_GROUPS.fetch_add(groups, Relaxed);
+    BATCHEMIT_FEEDS.fetch_add(feeds, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 /// TLS drop guard: any backend thread that ticked dumps the cumulative totals
 /// on its way out (backend exit = thread exit in this server). Dump-on-exit
 /// keeps the hot path free of I/O and needs no exit-callback registration.
@@ -603,6 +621,14 @@ fn dump() {
     out.push_str(&format!(
         "counter\ttopnemit-groups-cut\t{}\n",
         TOPNEMIT_GROUPS_CUT.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tbatchemit-groups\t{}\n",
+        BATCHEMIT_GROUPS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tbatchemit-feeds\t{}\n",
+        BATCHEMIT_FEEDS.load(Relaxed)
     ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
