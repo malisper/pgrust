@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aio_seams = { path = "../aio_seams" }
+waiter = { path = "../../ipc/waiter" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
 bufmgr = { path = "../../buffer/bufmgr" }
 datum = { path = "../../../../_support/types/datum" }
