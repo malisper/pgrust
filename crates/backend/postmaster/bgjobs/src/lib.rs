@@ -86,10 +86,29 @@ pub enum CycleOutcome {
     Exit,
 }
 
+/// Control-plane verdict from [`BgJob::control`], evaluated ON THE
+/// DISPATCHER THREAD while the job is idle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Continue,
+    /// Clean shutdown: the dispatcher runs [`BgJob::teardown`] and retires
+    /// the job.
+    Exit,
+    /// Crash leg: retire WITHOUT teardown (shared memory is being reset
+    /// wholesale — the wpool abandon-not-teardown discipline). The job's
+    /// control() does its own crash announce before returning this.
+    Abandon,
+}
+
 /// One migrated daemon. Implementations run their C loop body ONCE per
 /// `run_cycle` call (ResetLatch → drain/interrupt legs → body → stats
 /// flush) and return the deadline the C loop tail would have passed to
 /// WaitLatch.
+///
+/// THREAD CONTRACT: `startup`/`control`/`teardown` run on the DISPATCHER
+/// thread — the job's stable home for identity TLS, signal drains, and
+/// config reloads (docs/design/m4-bgjobs.md §3.2). `run_cycle` runs on an
+/// arbitrary pool worker; the implementation binds its envelope there.
 pub trait BgJob: Send + Sync + 'static {
     fn name(&self) -> &'static str;
 
@@ -98,6 +117,23 @@ pub trait BgJob: Send + Sync + 'static {
     /// identity; the dispatcher only borrows its waker word while the job
     /// is idle.
     fn latch(&self) -> Option<&'static Latch>;
+
+    /// Identity acquisition (the daemon main's prelude), once, before the
+    /// first cycle. Err retires the job immediately — the implementation
+    /// owns its failure announce.
+    fn startup(&self) -> Result<(), Box<types_error::PgError>> {
+        Ok(())
+    }
+
+    /// Signal/reload/shutdown processing, every dispatcher pass while the
+    /// job is idle, BEFORE wake/deadline evaluation.
+    fn control(&self) -> Control {
+        Control::Continue
+    }
+
+    /// Clean-exit teardown (identity release + exit announce), after
+    /// [`Control::Exit`] or [`CycleOutcome::Exit`].
+    fn teardown(&self) {}
 
     /// One daemon cycle, executed on a pool worker under a Maintenance RG.
     fn run_cycle(&self, reason: CycleReason) -> CycleOutcome;
@@ -152,38 +188,52 @@ pub struct Dispatcher {
     shared: Arc<Shared>,
 }
 
+static DISPATCHER: OnceLock<Dispatcher> = OnceLock::new();
+
 /// Start the dispatcher iff `PGRUST_RUNTIME_BGJOBS=1`. Called by
-/// launch_backend::rtpool::start() after the pool spawned; postmaster
-/// thread only. Idempotent.
-pub fn start_if_enabled(rt: &Arc<Runtime>) -> Option<&'static Dispatcher> {
+/// launch_backend (rtpool glue / job launch); postmaster thread only.
+/// Idempotent. `spawner` wraps the dispatcher thread's spawn so the caller
+/// can apply the child prelude (fork-inherited globals) — the dispatcher
+/// hosts job identity init and config reloads, which need them.
+pub fn start_if_enabled(
+    rt: &Arc<Runtime>,
+    spawner: fn(Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>>,
+) -> Option<&'static Dispatcher> {
     if !bgjobs_enabled() {
         return None;
     }
-    Some(start(rt))
+    Some(DISPATCHER.get_or_init(|| Dispatcher::spawn_with(Arc::clone(rt), spawner)))
 }
 
-/// Start (or get) the process dispatcher. Test-reachable without the env
-/// flag; production goes through [`start_if_enabled`].
-pub fn start(rt: &Arc<Runtime>) -> &'static Dispatcher {
-    static DISPATCHER: OnceLock<Dispatcher> = OnceLock::new();
-    DISPATCHER.get_or_init(|| Dispatcher::spawn(Arc::clone(rt)))
+/// The process dispatcher, if [`start_if_enabled`] started it.
+pub fn get() -> Option<&'static Dispatcher> {
+    DISPATCHER.get()
 }
 
 impl Dispatcher {
-    /// Spawn a dispatcher over `rt`. Process-lifetime in production
-    /// (through [`start`]); tests may spawn private instances.
-    pub fn spawn(rt: Arc<Runtime>) -> Dispatcher {
+    /// Spawn a dispatcher over `rt` with a caller-supplied thread spawner.
+    /// Process-lifetime in production; tests may spawn private instances
+    /// through [`Dispatcher::spawn`].
+    pub fn spawn_with(
+        rt: Arc<Runtime>,
+        spawner: fn(Box<dyn FnOnce() + Send>) -> std::io::Result<std::thread::JoinHandle<()>>,
+    ) -> Dispatcher {
         let shared = Arc::new(Shared {
             jobs: Mutex::new(Vec::new()),
             waker: AtomicU64::new(0),
             rt,
         });
         let thread_shared = Arc::clone(&shared);
-        std::thread::Builder::new()
-            .name("pg-bgjobs-dispatcher".into())
-            .spawn(move || dispatcher_loop(thread_shared))
+        spawner(Box::new(move || dispatcher_loop(thread_shared)))
             .expect("could not spawn bgjobs dispatcher thread");
         Dispatcher { shared }
+    }
+
+    /// Bare-thread spawn (tests).
+    pub fn spawn(rt: Arc<Runtime>) -> Dispatcher {
+        Dispatcher::spawn_with(rt, |body| {
+            std::thread::Builder::new().name("pg-bgjobs-dispatcher".into()).spawn(body)
+        })
     }
 
     /// Register a job; its first cycle is submitted immediately with
@@ -301,6 +351,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
     let mut nearest: Option<Duration> = None;
     let wd = Duration::from_millis(watchdog_ms());
 
+    let mut jobs_teardown: Vec<JobId> = Vec::new();
     let mut jobs = shared.jobs.lock().unwrap();
     for id in 0..jobs.len() {
         // Harvest a finished in-flight cycle (immutable borrows only; the
@@ -312,7 +363,10 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                     (RgOutcome::Completed, Some(CycleOutcome::Sleep(d))) => {
                         Phase::Idle { due: now + d }
                     }
-                    (RgOutcome::Completed, Some(CycleOutcome::Exit)) => Phase::Exited,
+                    (RgOutcome::Completed, Some(CycleOutcome::Exit)) => {
+                        jobs_teardown.push(id);
+                        Phase::Exited
+                    }
                     (RgOutcome::Completed, None) => {
                         // Structurally unreachable (the single morsel filled
                         // the outcome before finalize); refuse to spin.
@@ -337,6 +391,12 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
         };
         if let Some(p) = harvested {
             jobs[id].phase = p;
+            if jobs_teardown.last() == Some(&id) {
+                // CycleOutcome::Exit: clean teardown on the dispatcher.
+                jobs[id].job.teardown();
+                jobs_teardown.pop();
+                continue;
+            }
         }
 
         // Decide, with immutable borrows; apply after.
@@ -349,6 +409,21 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
         let act = match &jobs[id].phase {
             Phase::Idle { due } => {
                 let job = &jobs[id].job;
+                // Control plane first (dispatcher thread; §3.2): signal
+                // drain, reload, shutdown. Runs under the jobs lock —
+                // acceptable: the only other lockers are register/poke.
+                match job.control() {
+                    Control::Continue => {}
+                    Control::Exit => {
+                        job.teardown();
+                        jobs[id].phase = Phase::Exited;
+                        continue;
+                    }
+                    Control::Abandon => {
+                        jobs[id].phase = Phase::Exited;
+                        continue;
+                    }
+                }
                 // Latch wake: an is_set latch dispatches NOW.
                 if job.latch().is_some_and(|l| l.is_set()) {
                     Act::Dispatch(CycleReason::Wake)
@@ -392,13 +467,19 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 if let Some(l) = job.latch() {
                     l.set_maybe_sleeping(false);
                 }
-                let reason = if matches!(reason, CycleReason::Deadline)
-                    && jobs[id].never_ran
-                {
-                    CycleReason::Startup
-                } else {
-                    reason
-                };
+                let reason = if jobs[id].never_ran { CycleReason::Startup } else { reason };
+                if jobs[id].never_ran {
+                    // Identity acquisition, once, on the dispatcher (§3.2).
+                    if let Err(e) = job.startup() {
+                        elog_report(&format!(
+                            "bgjobs: job \"{}\" startup failed: {}; retiring it",
+                            job.name(),
+                            e.message()
+                        ));
+                        jobs[id].phase = Phase::Exited;
+                        continue;
+                    }
+                }
                 jobs[id].never_ran = false;
                 jobs[id].wake_pending = false;
                 jobs[id].phase = submit_cycle(shared, id, job, reason);

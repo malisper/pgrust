@@ -23,6 +23,8 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 #[cfg(test)]
 mod tests;
 
+pub mod job;
+
 const HIBERNATE_FACTOR: i64 = 50;
 const LOG_SNAPSHOT_INTERVAL_MS: i64 = 15000;
 
