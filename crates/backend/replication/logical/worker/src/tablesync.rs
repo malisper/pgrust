@@ -206,10 +206,25 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
             if current_lsn >= lsn {
                 state = SUBREL_STATE_READY;
                 lsn = current_lsn;
-                // Drop the tablesync origin (its work is done).
+                // C (tablesync.c:502): hold the subscription object lock and
+                // pg_subscription_rel open RowExclusive across origin drop +
+                // state update; UpdateSubscriptionRelState(already_locked)
+                // asserts that lock is already held.
+                lmgr::LockSharedObject(
+                    pg_subscription::SubscriptionRelationId,
+                    subid,
+                    0,
+                    types_rel::AccessShareLock,
+                )?;
+                let relrel = table::table_open(
+                    mcx,
+                    pg_subscription::SubscriptionRelRelationId,
+                    types_rel::RowExclusiveLock,
+                )?;
                 let originname = format!("pg_{subid}_{relid}");
                 origin::replorigin_drop_by_name(mcx, &originname, true, false)?;
                 UpdateSubscriptionRelState(mcx, subid, relid, state, lsn, true)?;
+                relrel.close(types_rel::NoLock)?;
             }
             continue;
         }

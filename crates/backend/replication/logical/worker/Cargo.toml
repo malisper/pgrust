@@ -8,6 +8,7 @@ name = "logicalworker"
 path = "src/lib.rs"
 
 [dependencies]
+lmgr = { path = "../../../storage/lmgr/lmgr" }
 datum = { path = "../../../../_support/types/datum" }
 elog = { path = "../../../utils/error/elog" }
 fmgr = { path = "../../../../_support/types/fmgr", package = "types_fmgr" }
