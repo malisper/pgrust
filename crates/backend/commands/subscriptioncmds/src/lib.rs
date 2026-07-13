@@ -762,6 +762,10 @@ pub fn CreateSubscription<'mcx>(
 
     pgstat::subscription::pgstat_create_subscription(subid);
 
+    if opts.enabled {
+        launcher::ApplyLauncherWakeupAtCommit();
+    }
+
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
 }
 
@@ -987,6 +991,10 @@ pub fn AlterSubscription<'mcx>(
             values[(Anum_pg_subscription_subenabled - 1) as usize] =
                 Datum::from_bool(opts.enabled);
             replaces[(Anum_pg_subscription_subenabled - 1) as usize] = true;
+
+            if opts.enabled {
+                launcher::ApplyLauncherWakeupAtCommit();
+            }
 
             update_tuple = true;
         }
@@ -1230,7 +1238,15 @@ pub fn DropSubscription<'mcx>(
     let tid = tup.as_tuple().t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
 
-    // logicalrep worker shutdown + launcher bookkeeping: no workers exist.
+    // Stop all the subscription workers immediately (new ones can't start:
+    // we hold AccessExclusiveLock on the subscription till end of txn), then
+    // drop the launcher's last-start entry (subscriptioncmds.c:1739-1767).
+    for slot in launcher::logicalrep_workers_find(subid, false) {
+        if let Some(w) = launcher::worker_snapshot(slot) {
+            launcher::logicalrep_worker_stop(w.subid, w.relid)?;
+        }
+    }
+    launcher::ApplyLauncherForgetWorkerStartTime(subid);
 
     let rstates = GetSubscriptionRelations(mcx, subid, true)?;
     for rstate in rstates.iter() {

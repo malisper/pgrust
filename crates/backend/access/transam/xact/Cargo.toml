@@ -30,7 +30,7 @@ relmapper = { path = "../../../utils/cache/relmapper" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 smgr = { path = "../../../storage/smgr/smgr" }
-launcher = { path = "../../../replication/launcher" }
+launcher_seams = { path = "../../../replication/launcher_seams" }
 pg_prng = { path = "../../../../common/pg_prng" }
 varsup = { path = "../varsup" }
 waitevent = { path = "../../../utils/activity/waitevent" }
