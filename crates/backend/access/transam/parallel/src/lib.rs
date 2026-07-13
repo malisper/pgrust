@@ -55,6 +55,27 @@ const QUERY_TASK_TEMP: u8 = 1 << 2;
 const QUERY_TASK_SERIALIZABLE: u8 = 1 << 3;
 const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 
+// Post-task park hooks (harvested with the query-task binder from
+// morsel/query-task-binder-20260710 @ 1b3cba43f; entrypoint-table precedent).
+// POST_TASK_PARK runs on a worker thread after its task fully ended and
+// Terminate was sent — the leader's finish wait is already satisfied, so
+// parking there cannot deadlock it. PRIVATE_SHUTDOWN runs in
+// DestroyParallelContext before it waits for worker exit: it must release
+// anything a worker could still be parked on. Inert unless registered; on
+// this tree only the binder substrate e2e registers them (the runtime
+// pool/scheduler lane owns the production park).
+static POST_TASK_PARK: std::sync::OnceLock<fn(&ParallelShared)> = std::sync::OnceLock::new();
+static PRIVATE_SHUTDOWN: std::sync::OnceLock<fn(&(dyn Any + Send + Sync))> =
+    std::sync::OnceLock::new();
+
+pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
+    let _ = POST_TASK_PARK.set(f);
+}
+
+pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
+    let _ = PRIVATE_SHUTDOWN.set(f);
+}
+
 pub enum WorkerMessage {
     Error(Box<PgError>),
     Notice(Box<PgError>),
@@ -737,6 +758,13 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
 
+    // Release parked helpers BEFORE waiting for worker exit below.
+    if let Some(f) = PRIVATE_SHUTDOWN.get() {
+        if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+            f(&*p);
+        }
+    }
+
     for w in pcxt.workers.iter_mut() {
         if w.error_receiver.is_some() {
             if let Some(handle) = w.bgwhandle {
@@ -1047,6 +1075,15 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
         shared.parallel_leader_proc_number,
     );
     MY_WORKER_SHARED.with(|s| *s.borrow_mut() = None);
+    // Successful tasks may park on the query's ready work instead of
+    // returning to the pool at once; the hook returns when the leader
+    // releases it (DestroyParallelContext at the latest). A hook panic must
+    // not corrupt the already-sent outcome.
+    if outcome.is_ok() {
+        if let Some(f) = POST_TASK_PARK.get() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
+        }
+    }
     outcome
 }
 
