@@ -317,3 +317,53 @@ fn worker_pin_bind_reproduces_leader_state_and_base() {
     // Leader unaffected.
     assert!(!enable_incremental_sort());
 }
+
+// Inc-3 launch path: a child brought up from the shared base (typed bind, no
+// string re-parse) reproduces the postmaster's nondefault state — value,
+// source, and registry end-state — and adopts the base as its started-with
+// view. Mirrors postmaster_child_launch's base_share_enabled arm.
+#[test]
+fn child_bringup_from_shared_base_matches_postmaster_state() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    guc::layers::reset_layers_for_tests();
+    setup_seams();
+    guc::store::initialize_guc_options().unwrap();
+
+    guc::SetConfigOption(
+        "archive_library",
+        Some("walarch-base"),
+        GucContext::PGC_SIGHUP,
+        GucSource::PGC_S_FILE,
+    )
+    .unwrap();
+    guc::SetConfigOption(
+        "work_mem",
+        Some("4321"),
+        GucContext::PGC_POSTMASTER,
+        GucSource::PGC_S_ARGV,
+    )
+    .unwrap();
+    let base = guc::layers::ensure_base_current();
+    assert!(base.contains("archive_library") && base.contains("work_mem"));
+
+    let child_base = base.clone();
+    let base_epoch = base.epoch();
+    std::thread::spawn(move || {
+        miscinit::SetUserIdAndSecContext(10, 0);
+        guc::store::initialize_guc_options_for_child_base(&child_base).unwrap();
+        guc::layers::bind_base(&child_base).unwrap();
+        assert_eq!(
+            guc::store::get_string("archive_library"),
+            Some(Some("walarch-base".into())),
+            "typed base bind must land the postmaster's string value"
+        );
+        assert_eq!(guc::store::get_int("work_mem"), Some(4321));
+        assert_eq!(
+            guc::layers::session_base().epoch(),
+            base_epoch,
+            "child must adopt the base it was launched from"
+        );
+    })
+    .join()
+    .unwrap();
+}
