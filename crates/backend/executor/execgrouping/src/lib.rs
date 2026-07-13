@@ -517,7 +517,12 @@ pub fn build_tuple_hash_table<'mcx>(
     );
 
     Ok(TupleHashTable {
-        entries: vec_with_capacity_in(metacxt, nbuckets)?,
+        // C: simplehash SH_CREATE allocates the element array via SH_ALLOCATE
+        // = MemoryContextAllocExtended(MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO), so
+        // the initial entry array may exceed MaxAllocSize (1GB) when
+        // hash_mem allows it (large work_mem x hash_mem_multiplier); only
+        // MaxAllocHugeSize bounds it.
+        entries: ::mcx::vec_with_capacity_huge_in(metacxt, nbuckets)?,
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
