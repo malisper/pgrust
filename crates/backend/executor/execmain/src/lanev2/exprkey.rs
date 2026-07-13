@@ -1043,6 +1043,40 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     if !mm.cols.is_empty() {
         trace_feed("fold str min/max dict-code memo armed (expr-key)");
     }
+    // Code-histogram build arming (lane-v2-codehist): the Dict key class
+    // where ONE dict column feeds the key AND every admitted transition —
+    // selected rows count per (epoch, code) and each (group, code) advances
+    // ONCE with multiplicity. Str-kind plans additionally require the
+    // no-spill estimate (their per-row tie-copies collapse; see
+    // agg_hash_spill_unlikely). Non-armed shapes keep the per-row dg leg,
+    // byte-identically.
+    let mut ch: Option<CodeHistState> = if codehist_enabled() {
+        match &xk.kind {
+            ExprKeyKind::Dict { input_col, .. } if !has_resid => {
+                let plan =
+                    ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
+                let icol = *input_col;
+                let ntrans = plan.trans.len();
+                let has_str = plan.trans.iter().any(|t| {
+                    matches!(
+                        t.kind,
+                        ::lanefold::LaneKind::StrMin | ::lanefold::LaneKind::StrMax
+                    )
+                });
+                let hostable = ::lanefold::plan_code_hostable(plan)
+                    .is_some_and(|pc| xk.map.get(pc as usize).copied().flatten() == Some(icol));
+                if hostable && (!has_str || ::nodeagg::agg_hash_spill_unlikely(agg)) {
+                    trace_feed("expr-key code-histogram build engaged");
+                    Some(CodeHistState::new(ntrans, has_str))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     // Fresh per-build epoch map (rescans must not reuse stale pergroups).
     xk.dg_epoch = None;
     xk.dg_slots.clear();
@@ -1070,11 +1104,236 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             &mut idxs,
             &mut groups,
             &mut mm,
+            &mut ch,
             n,
             estate,
         )?;
     }
+    // Pending histogram counts flush at feed end (before the phase flip).
+    ch_flush(agg, xk, &mut ch, &mut mm.scratch)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// `PGRUST_LANE_V2_CODEHIST=0|off` kill switch (default ON inside the lane).
+fn codehist_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CODEHIST").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Per-build code-histogram state (lane-v2-codehist). Per-epoch (row-group)
+/// arrays are keyed by dict code; per-code caches fill at FIRST TOUCH while
+/// the window's dict datum is valid and are pointer-free afterwards (int
+/// values + a varlena IMAGE copy for str advances), so the flush never
+/// dereferences a dict pointer — dict lifetimes stay window-scoped as
+/// documented. Flushing is ALWAYS sound at any point: splitting a code's
+/// count into several advances is byte-invisible (wrapping sums split;
+/// min/max re-advance of an equal value keeps equal bytes; only the
+/// ALLOCATION count changes, which the str/no-spill gate already covers) —
+/// so the feed flushes liberally: epoch rollover, Raw windows, any per-row
+/// route, feed end.
+struct CodeHistState {
+    ntrans: usize,
+    has_str: bool,
+    epoch: Option<u64>,
+    /// Per-code selected-row counts (this epoch, since the last flush).
+    hist: Vec<u32>,
+    /// Codes with hist > 0, first-occurrence order.
+    touched: Vec<u32>,
+    /// 0 unknown / 1 proven / 2 failed (`datum_code_guards_ok`).
+    guard: Vec<u8>,
+    /// Per-code transition values (`code_trans_vals`), ntrans stride.
+    valsflat: Vec<i64>,
+    /// Per-code (offset, len) into `simg` (str plans only).
+    simg_off: Vec<(u32, u32)>,
+    /// Concatenated varlena images (byte-identical to the dict entries).
+    simg: Vec<u8>,
+    vals_scratch: Vec<i64>,
+    rowcodes: Vec<u32>,
+    /// Sticky spill-mode disarm: later batches keep the per-row dg leg.
+    disarmed: bool,
+}
+
+enum ChVerdict {
+    /// Batch counted into the histogram — no per-row probe/fold/resid runs.
+    Counted,
+    /// A touched code failed the per-code data proof: route the WHOLE batch
+    /// through the per-row program (identical to a row-domain check_guards
+    /// demote — the failing value IS selected in this batch).
+    Demote,
+    /// Spill-mode probe miss: disarm sticky; the existing per-row dg leg
+    /// runs this batch (re-probes hit; the missing code spills per row).
+    Disarm,
+}
+
+impl CodeHistState {
+    fn new(ntrans: usize, has_str: bool) -> CodeHistState {
+        CodeHistState {
+            ntrans,
+            has_str,
+            epoch: None,
+            hist: Vec::new(),
+            touched: Vec::new(),
+            guard: Vec::new(),
+            valsflat: Vec::new(),
+            simg_off: Vec::new(),
+            simg: Vec::new(),
+            vals_scratch: Vec::new(),
+            rowcodes: Vec::new(),
+            disarmed: false,
+        }
+    }
+
+    /// Reset the per-epoch arrays for a new dictionary (caller flushed).
+    fn begin_epoch(&mut self, epoch: u64, ndict: usize) {
+        self.epoch = Some(epoch);
+        self.hist.clear();
+        self.hist.resize(ndict, 0);
+        self.touched.clear();
+        self.guard.clear();
+        self.guard.resize(ndict, 0);
+        self.valsflat.clear();
+        self.valsflat.resize(ndict * self.ntrans, 0);
+        if self.has_str {
+            self.simg_off.clear();
+            self.simg_off.resize(ndict, (0, 0));
+            self.simg.clear();
+        }
+    }
+}
+
+/// Flush pending histogram counts: one `fold_code_group` per touched code,
+/// first-occurrence order, off the pointer-free per-code caches. Clears the
+/// counts (per-code caches stay — the epoch is still live) and invalidates
+/// the str MIN/MAX memo (these advances bypass it). No-op when unarmed or
+/// empty.
+fn ch_flush<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    xk: &ExprKeyState,
+    ch: &mut Option<CodeHistState>,
+    mm_scratch: &mut ::lanefold::StrMmScratch,
+) -> PgResult<()> {
+    let Some(ch) = ch.as_mut() else { return Ok(()) };
+    if ch.touched.is_empty() {
+        return Ok(());
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
+    let aggcx = ::nodeagg::agg_aggcontext(agg);
+    for &code in &ch.touched {
+        let c = code as usize;
+        let n = ch.hist[c] as i64;
+        debug_assert!(n >= 1);
+        ch.hist[c] = 0;
+        let pg = xk.dg_slots[c].expect("counted codes were resolved at first touch");
+        let vals = &ch.valsflat[c * ch.ntrans..(c + 1) * ch.ntrans];
+        let strd = if ch.has_str {
+            let (off, _len) = ch.simg_off[c];
+            ::datum::Datum::from_usize(ch.simg[off as usize..].as_ptr() as usize)
+        } else {
+            ::datum::Datum::null()
+        };
+        // SAFETY: pergroup arrays cover every transno (probe contract);
+        // aggcx is the node's agg context; strd is a live inline varlena
+        // image copy for str plans (begin_epoch/simg discipline); guards
+        // proven per code at first touch.
+        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx)? };
+    }
+    ch.touched.clear();
+    // The advances above bypassed the per-group str memo.
+    mm_scratch.invalidate();
+    Ok(())
+}
+
+/// One dict-window batch through the code histogram: prove + cache each NEW
+/// touched code (guards, transition values, str image) while the window's
+/// dict datum is valid, resolve unresolved groups through the SAME staged
+/// probe leg at the first surviving row (identical first-arrival insertion
+/// order), then count every survivor into the per-epoch histogram. Counting
+/// happens ONLY after the whole batch validated (a Demote/Disarm exit
+/// leaves the histogram untouched — the per-row route replays the batch
+/// cleanly).
+fn ch_batch<'mcx>(
+    ch: &mut CodeHistState,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    xk: &mut ExprKeyState,
+    lane: &::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ChVerdict> {
+    debug_assert_eq!(ch.epoch, Some(lane.table.epoch));
+    let ndict = lane.table.ndict as usize;
+    // Pass 1 (plan borrowed, agg immutable): per-code proofs + caches at
+    // first touch; collect the batch's code-per-row sequence.
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
+        ch.rowcodes.clear();
+        for k in 0..xk.rows.len() {
+            let i = xk.rows[k] as usize;
+            let code = lane.code(i);
+            let c = code as usize;
+            debug_assert!(c < ndict, "filler contract: code < ndict");
+            match ch.guard[c] {
+                1 => {}
+                2 => return Ok(ChVerdict::Demote),
+                _ => {
+                    let d = lane.table.datum(code);
+                    // SAFETY: dict entries are live inline varlena images
+                    // for the staged window (decode contract).
+                    if !unsafe { ::lanefold::datum_code_guards_ok(plan, d) } {
+                        ch.guard[c] = 2;
+                        return Ok(ChVerdict::Demote);
+                    }
+                    // SAFETY: guards just proven for d.
+                    unsafe { ::lanefold::code_trans_vals(plan, d, &mut ch.vals_scratch) };
+                    ch.valsflat[c * ch.ntrans..(c + 1) * ch.ntrans]
+                        .copy_from_slice(&ch.vals_scratch);
+                    if ch.has_str {
+                        // Pointer-free image copy (4-aligned so the 4B
+                        // varlena header reads stay aligned), byte-identical
+                        // to the dict entry — the flush advance datumCopies
+                        // exactly these bytes.
+                        while ch.simg.len() % 4 != 0 {
+                            ch.simg.push(0);
+                        }
+                        let off = ch.simg.len() as u32;
+                        // SAFETY: inline varlena (vguard above) — the image
+                        // spans varsize_any bytes from the header.
+                        let img = unsafe {
+                            let ptr = d.as_usize() as *const u8;
+                            let len = ::types_tuple::varatt::varsize_any(ptr);
+                            core::slice::from_raw_parts(ptr, len)
+                        };
+                        ch.simg.extend_from_slice(img);
+                        ch.simg_off[c] = (off, img.len() as u32);
+                    }
+                    ch.guard[c] = 1;
+                }
+            }
+            ch.rowcodes.push(code);
+        }
+    }
+    // Pass 2 (agg mutable): resolve unresolved groups in first-occurrence
+    // row order — the dg leg's exact probe sequence.
+    for (k, &code) in ch.rowcodes.iter().enumerate() {
+        let c = code as usize;
+        if xk.dg_slots[c].is_none() {
+            let (key, isnull) = (xk.keys[k], xk.knull[k]);
+            ::nodeagg::agg_hash_hash_staged(agg, &[key], &[isnull], &mut xk.hash1)?;
+            match ::nodeagg::agg_hash_probe_staged(agg, estate, key, isnull, xk.hash1[0])? {
+                Some(pg) => xk.dg_slots[c] = Some(pg),
+                None => return Ok(ChVerdict::Disarm),
+            }
+        }
+    }
+    // Pass 3: count (validated batch only).
+    for &code in &ch.rowcodes {
+        let c = code as usize;
+        if ch.hist[c] == 0 {
+            ch.touched.push(code);
+        }
+        ch.hist[c] += 1;
+    }
+    Ok(ChVerdict::Counted)
 }
 
 /// Per-build str MIN/MAX dict-code memo state (see `StrMmScratch`).
@@ -1098,6 +1357,7 @@ fn exprkey_batch<'mcx>(
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     mm: &mut MmState,
+    ch: &mut Option<CodeHistState>,
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -1140,7 +1400,10 @@ fn exprkey_batch<'mcx>(
     if !batched {
         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
         return {
-            // Whole-batch per-row route: str advances bypass the memo.
+            // Whole-batch per-row route: str advances bypass the memo, and
+            // pending histogram counts flush first (always sound; the
+            // permuted advance order is byte-invisible on transvalues).
+            ch_flush(agg, xk, ch, &mut mm.scratch)?;
             mm.scratch.invalidate();
             per_row_batch(agg, ss, n, estate)
         };
@@ -1207,7 +1470,10 @@ fn exprkey_batch<'mcx>(
                 trace_feed("expr-key arith trap: replaying batch per-row (sticky)");
                 ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
                 return {
-            // Whole-batch per-row route: str advances bypass the memo.
+            // Whole-batch per-row route: str advances bypass the memo, and
+            // pending histogram counts flush first (always sound; the
+            // permuted advance order is byte-invisible on transvalues).
+            ch_flush(agg, xk, ch, &mut mm.scratch)?;
             mm.scratch.invalidate();
             per_row_batch(agg, ss, n, estate)
         };
@@ -1232,7 +1498,10 @@ fn exprkey_batch<'mcx>(
                         ::laneexec::log_dicteval_demoted(reason);
                         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
                         return {
-            // Whole-batch per-row route: str advances bypass the memo.
+            // Whole-batch per-row route: str advances bypass the memo, and
+            // pending histogram counts flush first (always sound; the
+            // permuted advance order is byte-invisible on transvalues).
+            ch_flush(agg, xk, ch, &mut mm.scratch)?;
             mm.scratch.invalidate();
             per_row_batch(agg, ss, n, estate)
         };
@@ -1254,7 +1523,12 @@ fn exprkey_batch<'mcx>(
     }
     // Guarded plans (int2-Var OpExpr admissions): prove the survivors
     // before any fold — the main feed's discipline over the remapped lanes.
-    {
+    // Code-histogram dict batches skip the row-domain walk: the ch path
+    // proves per TOUCHED CODE instead (values of selected rows ⊆ touched
+    // dict entries — `datum_code_guards_ok`), and its Demote/Disarm exits
+    // route the whole batch per-row, which re-proves row-domain.
+    let ch_owns_batch = dict_lane.is_some() && ch.as_ref().is_some_and(|c| !c.disarmed);
+    if !ch_owns_batch {
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
         if plan.guarded {
             let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -1272,7 +1546,10 @@ fn exprkey_batch<'mcx>(
             if demote {
                 ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
                 return {
-            // Whole-batch per-row route: str advances bypass the memo.
+            // Whole-batch per-row route: str advances bypass the memo, and
+            // pending histogram counts flush first (always sound; the
+            // permuted advance order is byte-invisible on transvalues).
+            ch_flush(agg, xk, ch, &mut mm.scratch)?;
             mm.scratch.invalidate();
             per_row_batch(agg, ss, n, estate)
         };
@@ -1323,10 +1600,53 @@ fn exprkey_batch<'mcx>(
         // the first surviving row (first-arrival order, spill decisions
         // identical to the per-row path).
         let ndict = lane.table.ndict as usize;
+        // Code-histogram epoch rollover: pending counts flush BEFORE the
+        // code→pergroup map resets (the flush reads it).
+        if let Some(chs) = ch.as_mut() {
+            if !chs.disarmed && chs.epoch != Some(lane.table.epoch) {
+                ch_flush(agg, xk, ch, &mut mm.scratch)?;
+                let chs = ch.as_mut().expect("just matched Some");
+                chs.begin_epoch(lane.table.epoch, ndict);
+            }
+        }
         if xk.dg_epoch != Some(lane.table.epoch) {
             xk.dg_epoch = Some(lane.table.epoch);
             xk.dg_slots.clear();
             xk.dg_slots.resize(ndict, None);
+        }
+        // Code-histogram batch (lane-v2-codehist): count survivors per code
+        // instead of probing + folding per row. Demote/Disarm verdicts fall
+        // back byte-identically (ChVerdict doc).
+        if ch.as_ref().is_some_and(|c| !c.disarmed) {
+            let chs = ch.as_mut().expect("just checked Some");
+            match ch_batch(chs, agg, xk, &lane, estate)? {
+                ChVerdict::Counted => return Ok(()),
+                ChVerdict::Demote => {
+                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+                    return {
+                        // Whole-batch per-row route: flush + memo drop as at
+                        // every other per-row return.
+                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+                        mm.scratch.invalidate();
+                        per_row_batch(agg, ss, n, estate)
+                    };
+                }
+                ChVerdict::Disarm => {
+                    let chs = ch.as_mut().expect("just checked Some");
+                    chs.disarmed = true;
+                    trace_feed("expr-key code-histogram disarmed (spill mode)");
+                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+                    return {
+                        // The batch's row-domain guard proof was skipped for
+                        // the ch path, so it must not reach the dg fold leg:
+                        // the universal per-row route runs it instead
+                        // (byte-identical; spill rows take C's row path).
+                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+                        mm.scratch.invalidate();
+                        per_row_batch(agg, ss, n, estate)
+                    };
+                }
+            }
         }
         for k in 0..xk.rows.len() {
             let i = xk.rows[k];
@@ -1359,7 +1679,10 @@ fn exprkey_batch<'mcx>(
         }
     } else {
         // Raw window / arith key: batched hash pre-pass + in-order probe
-        // (the K2 leg exactly, with the derived key lane).
+        // (the K2 leg exactly, with the derived key lane). A Raw window for
+        // the dict input column means its epoch ended — flush pending
+        // histogram counts (always sound; see CodeHistState).
+        ch_flush(agg, xk, ch, &mut mm.scratch)?;
         {
             let ExprKeyState { keys, knull, hashes, .. } = &mut *xk;
             ::nodeagg::agg_hash_hash_staged(agg, keys, knull, hashes)?;

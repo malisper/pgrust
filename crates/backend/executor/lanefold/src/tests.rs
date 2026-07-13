@@ -3007,3 +3007,190 @@ fn fold_rows_grouped_dictcode_memo_parity() {
         }
     }
 }
+
+// ===========================================================================
+// Code-histogram kernels (lane-v2-codehist): fold_code_group with
+// multiplicity n must be bit-identical to n per-row transitions.
+// ===========================================================================
+
+#[test]
+fn plan_code_hostable_admission() {
+    let mcx = leaked_mcx();
+    install_utf8_seams();
+    let empty = NodeList::default();
+    // Hostable: count(*), min(url), max(url), avg(length(url)),
+    // sum(octet_length(url)), max(octet_length(url)) — one common column.
+    let a1 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a2 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a3 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a4 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a5 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [
+        mk_spec(1219, false, &empty),
+        mk_spec_coll(459, &a1, COLL_C),
+        mk_spec_coll(458, &a2, COLL_C),
+        mk_spec(1963, false, &a3),
+        mk_spec(1841, true, &a4),
+        mk_spec(768, true, &a5),
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert!(plan.resid.is_empty());
+    assert_eq!(plan_code_hostable(&plan), Some(0));
+    // Two different columns refuse.
+    let b1 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let b2 = arg_list(mcx, mk_var(mcx, 2, TEXTV));
+    let specs2 = [mk_spec_coll(459, &b1, COLL_C), mk_spec_coll(458, &b2, COLL_C)];
+    let plan2 = classify(mcx, &specs2).expect("admits");
+    assert_eq!(plan_code_hostable(&plan2), None);
+    // Pure count(*) refuses (nothing code-valued).
+    let specs3 = [mk_spec(1219, false, &empty)];
+    let plan3 = classify(mcx, &specs3).expect("admits");
+    assert_eq!(plan_code_hostable(&plan3), None);
+    // bpchar min refuses (its kind is not multiplicity-legal here).
+    let c1 = arg_list(mcx, mk_var(mcx, 1, BPCHARV));
+    let specs4 = [mk_spec_coll(1064, &c1, COLL_C)];
+    let plan4 = classify(mcx, &specs4).expect("admits");
+    assert_eq!(plan_code_hostable(&plan4), None);
+}
+
+#[test]
+fn datum_code_guards() {
+    let mcx = leaked_mcx();
+    install_utf8_seams();
+    // Chars-width lane (uguard) + str min (vguard), one column.
+    let a1 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a2 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [mk_spec_coll(459, &a1, COLL_C), mk_spec(1963, false, &a2)];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert!(!plan.vguards.is_empty() && !plan.uguards.is_empty());
+    // SAFETY: live inline varlena test datums (or header-readable fakes).
+    unsafe {
+        assert!(datum_code_guards_ok(&plan, vl_short(b"ok")));
+        assert!(datum_code_guards_ok(&plan, vl_4b("é漢🦀".as_bytes())));
+        // Non-inline forms fail the vguard half.
+        assert!(!datum_code_guards_ok(&plan, vl_4b_compressed_fake()));
+        assert!(!datum_code_guards_ok(&plan, vl_external_fake()));
+        // Invalid UTF-8 / embedded NUL fail the uguard half (chars lane).
+        assert!(!datum_code_guards_ok(&plan, vl_short(b"\xff\xfe")));
+        assert!(!datum_code_guards_ok(&plan, vl_short(b"a\x00b")));
+    }
+}
+
+// fold_code_group(n) vs n per-row fold_rows_grouped advances, per kind mix,
+// across (group, code) interleavings and epoch changes (a flush at ANY
+// point must be byte-invisible on transvalues).
+#[test]
+fn fold_code_group_multiplicity_parity() {
+    let mcx = leaked_mcx();
+    install_utf8_seams();
+    let empty = NodeList::default();
+    let a1 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a2 = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a3 = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a4 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a5 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [
+        mk_spec(1219, false, &empty),   // count(*)
+        mk_spec_coll(459, &a1, COLL_C), // min(text)
+        mk_spec_coll(458, &a2, COLL_C), // max(text)
+        mk_spec(1963, false, &a3),      // avg(length)
+        mk_spec(1841, true, &a4),       // sum(octet_length)
+        mk_spec(768, true, &a5),        // max(octet_length)
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert_eq!(plan_code_hostable(&plan), Some(0));
+    let ntrans = specs.len();
+    // Two epochs' dictionaries with overlapping values (cross-epoch ties).
+    let ep1 = DictEpoch::new(1, &dict_payload_pool_utf8());
+    let pool2: Vec<&[u8]> = vec![b"a", b"ab", b"mm", b"zz", "\u{e9}".as_bytes()];
+    let ep2 = DictEpoch::new(2, &pool2);
+    let ngroups = 3usize;
+    // (epoch, group, code, multiplicity) advance script, first-occurrence
+    // order per epoch; the 65536 case pins the epoch-max multiplicity.
+    let script: Vec<(&DictEpoch, usize, u32, i64)> = vec![
+        (&ep1, 0, 0, 7),
+        (&ep1, 1, 3, 1),
+        (&ep1, 0, 5, 4),
+        (&ep1, 2, 0, 2),
+        (&ep1, 1, 0, 65536),
+        (&ep2, 0, 1, 3),
+        (&ep2, 1, 4, 9),
+        (&ep2, 0, 0, 1),
+        (&ep2, 2, 2, 5),
+    ];
+    let mut code_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut ref_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut vals: Vec<i64> = Vec::new();
+    for &(ep, g, code, n) in &script {
+        let d = ep.dict[code as usize];
+        // SAFETY: live inline varlena dict entries; the pools are valid
+        // UTF-8 without NUL, so the guards hold by construction.
+        unsafe {
+            assert!(datum_code_guards_ok(&plan, d));
+            code_trans_vals(&plan, d, &mut vals);
+            fold_code_group(
+                &plan,
+                &vals,
+                d,
+                n,
+                NonNull::new(code_pgs[g].as_mut_ptr()).unwrap(),
+                mcx,
+            )
+            .expect("code fold");
+        }
+        // Reference: n single-row grouped advances through the per-row
+        // kernel (itself parity-tested against the C reference above).
+        let data = vec![vec![Some(d)]];
+        let cols = TestCols::from_datum_rows(1, &data);
+        let idxs = vec![0u32];
+        for _ in 0..n {
+            let groups = vec![NonNull::new(ref_pgs[g].as_mut_ptr()).unwrap()];
+            // SAFETY: live pergroups + inline varlena lane.
+            unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("ref") };
+        }
+    }
+    for g in 0..ngroups {
+        for tn in 0..ntrans {
+            let (a, b) = (&code_pgs[g][tn], &ref_pgs[g][tn]);
+            assert_eq!(a.no_trans_value, b.no_trans_value, "g{g} t{tn}");
+            assert_eq!(a.trans_value_is_null, b.trans_value_is_null, "g{g} t{tn}");
+            if !a.trans_value_is_null && !a.no_trans_value {
+                match plan.trans[tn].kind {
+                    // By-ref transvalues (str winners, avg int8[2]
+                    // transarrays): compare the full varlena image.
+                    LaneKind::StrMin | LaneKind::StrMax | LaneKind::AvgAccum => {
+                        assert_eq!(
+                            vl_image(a.trans_value),
+                            vl_image(b.trans_value),
+                            "g{g} t{tn}"
+                        );
+                    }
+                    _ => assert_eq!(
+                        a.trans_value.as_i64(),
+                        b.trans_value.as_i64(),
+                        "g{g} t{tn}"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+// UTF-8-only payload pool (the codehist plans carry chars lanes whose
+// uguard the dict pool must satisfy).
+fn dict_payload_pool_utf8() -> Vec<&'static [u8]> {
+    vec![
+        b"",
+        b"\x01",
+        b"a",
+        b"ab",
+        b"abc",
+        "é".as_bytes(),
+        "漢字".as_bytes(),
+        "🦀".as_bytes(),
+        b"zz",
+        b"mid-500",
+    ]
+}
