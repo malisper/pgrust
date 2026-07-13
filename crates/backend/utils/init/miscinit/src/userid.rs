@@ -23,6 +23,49 @@ thread_local! {
     static SET_ROLE_IS_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionIdentityState {
+    pub authenticated_user_id: Oid,
+    pub session_user_id: Oid,
+    pub outer_user_id: Oid,
+    pub current_user_id: Oid,
+    pub system_user: Option<&'static str>,
+    pub session_user_is_superuser: bool,
+    pub security_restriction_context: i32,
+    pub set_role_is_active: bool,
+}
+
+pub fn CaptureSessionIdentityState() -> SessionIdentityState {
+    SessionIdentityState {
+        authenticated_user_id: AUTHENTICATED_USER_ID.get(),
+        session_user_id: SESSION_USER_ID.get(),
+        outer_user_id: OUTER_USER_ID.get(),
+        current_user_id: CURRENT_USER_ID.get(),
+        system_user: SYSTEM_USER.get(),
+        session_user_is_superuser: SESSION_USER_IS_SUPERUSER.get(),
+        security_restriction_context: SECURITY_RESTRICTION_CONTEXT.get(),
+        set_role_is_active: SET_ROLE_IS_ACTIVE.get(),
+    }
+}
+
+pub fn ReplaceSessionIdentityState(state: SessionIdentityState) -> SessionIdentityState {
+    let old = CaptureSessionIdentityState();
+    AUTHENTICATED_USER_ID.set(state.authenticated_user_id);
+    SESSION_USER_ID.set(state.session_user_id);
+    OUTER_USER_ID.set(state.outer_user_id);
+    CURRENT_USER_ID.set(state.current_user_id);
+    SYSTEM_USER.set(state.system_user);
+    SESSION_USER_IS_SUPERUSER.set(state.session_user_is_superuser);
+    SECURITY_RESTRICTION_CONTEXT.set(state.security_restriction_context);
+    SET_ROLE_IS_ACTIVE.set(state.set_role_is_active);
+    if let Some(procno) = lmgr_proc::MyProc() {
+        lmgr_proc::GetPGProcByNumber(procno)
+            .roleId
+            .store(state.authenticated_user_id, std::sync::atomic::Ordering::Relaxed);
+    }
+    old
+}
+
 pub fn GetUserId() -> Oid {
     debug_assert_ne!(CURRENT_USER_ID.get(), InvalidOid);
     CURRENT_USER_ID.get()

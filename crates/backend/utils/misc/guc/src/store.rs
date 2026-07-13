@@ -3,9 +3,13 @@ use std::cell::{Cell, RefCell};
 use guc_tables::{all_settings, GucDefaultValue, GucSetting};
 use types_core::Oid;
 use types_error::{ErrorLevel, PgResult, FATAL};
-use types_guc::{config_type, GucContext, GucSource, PGC_POSTMASTER, PGC_S_ENV_VAR, PGC_S_OVERRIDE};
+use types_guc::{
+    config_type, GucContext, GucSource, PGC_POSTMASTER, PGC_S_ENV_VAR, PGC_S_OVERRIDE,
+};
 
-use crate::model::{config_bool, config_enum, config_generic, config_int, config_real, config_string};
+use crate::model::{
+    config_bool, config_enum, config_generic, config_int, config_real, config_string,
+};
 use crate::registry::{DeferredAssignHook, GucRegistry, GucVariable};
 
 thread_local! {
@@ -156,22 +160,24 @@ fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
 
     let mut reg = GucRegistry::new();
     for setting in all_settings() {
-        let Some(mut var) = build_variable(setting) else { continue };
+        let Some(mut var) = build_variable(setting) else {
+            continue;
+        };
         // A check-hook failure on a boot value is C's elog(FATAL, "failed to
         // initialize %s to ...").
         crate::registry::initialize_one_guc_option_hooks(&mut var, publish(setting.name()))
             .map_err(|e| {
-            Box::new(
-                elog::ereport(FATAL)
-                    .errmsg(format!(
-                        "failed to initialize {} to {:?}: {}",
-                        var.name(),
-                        setting.default_value(),
-                        e.message()
-                    ))
-                    .into_error(),
-            )
-        })?;
+                Box::new(
+                    elog::ereport(FATAL)
+                        .errmsg(format!(
+                            "failed to initialize {} to {:?}: {}",
+                            var.name(),
+                            setting.default_value(),
+                            e.message()
+                        ))
+                        .into_error(),
+                )
+            })?;
         reg.define(var)?;
     }
     GUC_STORE.with(|c| *c.borrow_mut() = Some(reg));
@@ -180,9 +186,24 @@ fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
 
     // Prevent any attempt to override the transaction modes from
     // non-interactive sources.
-    crate::SetConfigOption("transaction_isolation", Some("read committed"), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
-    crate::SetConfigOption("transaction_read_only", Some("no"), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
-    crate::SetConfigOption("transaction_deferrable", Some("no"), PGC_POSTMASTER, PGC_S_OVERRIDE)?;
+    crate::SetConfigOption(
+        "transaction_isolation",
+        Some("read committed"),
+        PGC_POSTMASTER,
+        PGC_S_OVERRIDE,
+    )?;
+    crate::SetConfigOption(
+        "transaction_read_only",
+        Some("no"),
+        PGC_POSTMASTER,
+        PGC_S_OVERRIDE,
+    )?;
+    crate::SetConfigOption(
+        "transaction_deferrable",
+        Some("no"),
+        PGC_POSTMASTER,
+        PGC_S_OVERRIDE,
+    )?;
 
     initialize_guc_options_from_environment()?;
     Ok(())
@@ -284,6 +305,48 @@ pub fn restore_nondefault_variables(vars: &[NondefaultGuc]) -> PgResult<()> {
 
 pub use crate::registry::CapturedGuc;
 
+#[derive(Clone)]
+pub struct ExactGucState {
+    registry: GucRegistry,
+    pg_reload_time: i64,
+    has_stacked_hint: bool,
+    report_pending_hint: bool,
+}
+
+pub fn capture_exact_guc_state() -> ExactGucState {
+    ExactGucState {
+        registry: with_store(crate::registry::clone_current_state)
+            .unwrap_or_else(|| store_uninitialized("capture_exact_guc_state")),
+        pg_reload_time: PG_RELOAD_TIME.get(),
+        has_stacked_hint: HAS_STACKED_HINT.get(),
+        report_pending_hint: REPORT_PENDING_HINT.get(),
+    }
+}
+
+pub fn replace_exact_guc_state(state: &ExactGucState) -> ExactGucState {
+    let saved = capture_exact_guc_state();
+    let mut deferred_hooks = Vec::new();
+    with_store_mut(|reg| {
+        *reg = state.registry.clone();
+        crate::registry::activate_current_values(reg, &mut deferred_hooks);
+    })
+    .unwrap_or_else(|| store_uninitialized("replace_exact_guc_state"));
+    PG_RELOAD_TIME.set(state.pg_reload_time);
+    HAS_STACKED_HINT.set(state.has_stacked_hint);
+    REPORT_PENDING_HINT.set(state.report_pending_hint);
+    for hook in deferred_hooks {
+        hook();
+    }
+    saved
+}
+
+// The donor lineage also poisoned a warm-rebind fingerprint (LAST_BIND_FP)
+// here; the lane-executor-v2 store has no fingerprint machinery, so envelope
+// replacement is identical to the plain exact replacement.
+pub fn replace_exact_guc_state_for_envelope(state: &ExactGucState) -> ExactGucState {
+    replace_exact_guc_state(state)
+}
+
 // PGRUST_NO_GUC_BIND reverts parallel workers to the string
 // serialize/restore path (check hooks rerun per launch) for A/B.
 pub fn session_guc_bind_enabled() -> bool {
@@ -324,12 +387,28 @@ pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
     );
     SESSION_BOUND.set(true);
     let binding = SessionGucBinding { _not_send: std::marker::PhantomData };
+    apply_captured_session_gucs_impl(caps, false)?;
+    Ok(binding)
+}
+
+/// Applies a captured session GUC set onto this thread's store without
+/// touching the session-bind marker; the session-envelope restore path
+/// reuses it (harvested from 0a71b80a9 + a1c4e48cc, ported onto the
+/// lane-executor-v2 store which has no bind fingerprint/stamp machinery).
+///
+/// Envelope restore is an exact replacement: source priority from the inner
+/// binding must not suppress the outer session's captured value.
+pub fn apply_captured_session_gucs(caps: &[CapturedGuc]) -> PgResult<()> {
+    apply_captured_session_gucs_impl(caps, true)
+}
+
+fn apply_captured_session_gucs_impl(caps: &[CapturedGuc], exact: bool) -> PgResult<()> {
     let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
     let t0 = trace.then(std::time::Instant::now);
     for cap in caps {
         let mut deferred_hooks: Vec<DeferredAssignHook> = Vec::new();
-        with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks))
-            .unwrap_or_else(|| store_uninitialized("bind_session_gucs"))?;
+        with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred_hooks, exact))
+            .unwrap_or_else(|| store_uninitialized("apply_captured_session_gucs"))?;
         for hook in deferred_hooks {
             hook();
         }
@@ -337,7 +416,7 @@ pub fn bind_session_gucs(caps: &[CapturedGuc]) -> PgResult<SessionGucBinding> {
     if let Some(t0) = t0 {
         eprintln!("GTRACE guc.bind n={} total_us={}", caps.len(), t0.elapsed().as_micros());
     }
-    Ok(binding)
+    Ok(())
 }
 
 pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {

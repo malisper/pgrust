@@ -33,7 +33,7 @@ use crate::{GUC_ACTION_LOCAL, GUC_ACTION_SAVE, GUC_ACTION_SET};
 
 pub type GucAction = u32;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum GucVariable {
     Bool(config_bool),
     Int(config_int),
@@ -71,7 +71,7 @@ impl GucVariable {
 // guc_hashtab plus the three intrusive lists (guc.c:226): guc_stack_list and
 // guc_report_list make AtEOXact_GUC / ReportChangedGUCOptions O(changed) not
 // O(~400); guc_nondef_list makes ResetAllOptions walk only non-default vars.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GucRegistry {
     vars: Vec<GucVariable>,
     index: HashMap<Box<str>, usize, GucNameHasherBuilder>,
@@ -190,11 +190,15 @@ impl GucRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &GucVariable> {
-        self.vars.iter().filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
+        self.vars
+            .iter()
+            .filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut GucVariable> {
-        self.vars.iter_mut().filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
+        self.vars
+            .iter_mut()
+            .filter(|v| v.gen().status & crate::model::GUC_REMOVED == 0)
     }
 
     // MarkGUCPrefixReserved's placeholder purge (guc.c:5285): C removes the
@@ -288,7 +292,10 @@ fn resolve_elevel(elevel: ErrorLevel, source: GucSource) -> ErrorLevel {
 
 #[cold]
 fn err(sqlstate: SqlState, message: String) -> PgError {
-    ereport(ERROR).errcode(sqlstate).errmsg(message).into_error()
+    ereport(ERROR)
+        .errcode(sqlstate)
+        .errmsg(message)
+        .into_error()
 }
 
 // C return convention: ereport(elevel) throws at >= ERROR, else logs and the
@@ -353,9 +360,7 @@ fn check_can_set(
             } else if context != PGC_POSTMASTER {
                 return Ok(AccessCheck::Reject(err(
                     ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
-                    format!(
-                        "parameter \"{name}\" cannot be changed without restarting the server"
-                    ),
+                    format!("parameter \"{name}\" cannot be changed without restarting the server"),
                 )));
             }
         }
@@ -533,7 +538,9 @@ pub fn parse_and_validate_value(
                     let hint = config_enum_get_options(conf, "Available values: ", ".", ", ");
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-                        .errmsg(format!("invalid value for parameter \"{name}\": \"{value}\""))
+                        .errmsg(format!(
+                            "invalid value for parameter \"{name}\": \"{value}\""
+                        ))
                         .errhint(hint)
                         .into_error()
                         .into());
@@ -562,7 +569,9 @@ fn truncate_name(s: &str) -> PgResult<String> {
 fn invalid_value_error(name: &str, value: &str, hint: Option<&str>) -> PgError {
     let mut b = ereport(ERROR)
         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-        .errmsg(format!("invalid value for parameter \"{name}\": \"{value}\""));
+        .errmsg(format!(
+            "invalid value for parameter \"{name}\": \"{value}\""
+        ));
     if let Some(h) = hint {
         b = b.errhint(h.to_string());
     }
@@ -623,18 +632,27 @@ macro_rules! check_hook_caller {
     };
 }
 
-check_hook_caller!(call_bool_check_hook, config_bool, bool, |c: &config_bool, v: &bool| format!(
-    "invalid value for parameter \"{}\": {}",
-    c.gen.name, *v as i32
-));
-check_hook_caller!(call_int_check_hook, config_int, i32, |c: &config_int, v: &i32| format!(
-    "invalid value for parameter \"{}\": {}",
-    c.gen.name, v
-));
-check_hook_caller!(call_real_check_hook, config_real, f64, |c: &config_real, v: &f64| format!(
-    "invalid value for parameter \"{}\": {}",
-    c.gen.name, v
-));
+check_hook_caller!(
+    call_bool_check_hook,
+    config_bool,
+    bool,
+    |c: &config_bool, v: &bool| format!(
+        "invalid value for parameter \"{}\": {}",
+        c.gen.name, *v as i32
+    )
+);
+check_hook_caller!(
+    call_int_check_hook,
+    config_int,
+    i32,
+    |c: &config_int, v: &i32| format!("invalid value for parameter \"{}\": {}", c.gen.name, v)
+);
+check_hook_caller!(
+    call_real_check_hook,
+    config_real,
+    f64,
+    |c: &config_real, v: &f64| format!("invalid value for parameter \"{}\": {}", c.gen.name, v)
+);
 check_hook_caller!(
     call_string_check_hook,
     config_string,
@@ -645,11 +663,16 @@ check_hook_caller!(
         v.as_deref().unwrap_or("")
     )
 );
-check_hook_caller!(call_enum_check_hook, config_enum, i32, |c: &config_enum, v: &i32| format!(
-    "invalid value for parameter \"{}\": \"{}\"",
-    c.gen.name,
-    config_enum_lookup_by_value(c, *v).unwrap_or("?")
-));
+check_hook_caller!(
+    call_enum_check_hook,
+    config_enum,
+    i32,
+    |c: &config_enum, v: &i32| format!(
+        "invalid value for parameter \"{}\": \"{}\"",
+        c.gen.name,
+        config_enum_lookup_by_value(c, *v).unwrap_or("?")
+    )
+);
 
 // InitializeOneGUCOption's hook step (guc.c:1644): run the check hook on the
 // boot value for its extra, fire the assign hook, stash extra in gen.extra and
@@ -796,7 +819,11 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
                     return (slot.get())();
                 }
             }
-            if current_bool(conf) { "on".to_string() } else { "off".to_string() }
+            if current_bool(conf) {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
         }
         GucVariable::Int(conf) => {
             if let Some(slot) = conf.show_hook {
@@ -834,7 +861,9 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
                     return (slot.get())();
                 }
             }
-            current_string(conf).filter(|s| !s.is_empty()).unwrap_or_default()
+            current_string(conf)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default()
         }
         GucVariable::Enum(conf) => {
             if let Some(slot) = conf.show_hook {
@@ -842,7 +871,9 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
                     return (slot.get())();
                 }
             }
-            config_enum_lookup_by_value(conf, current_enum(conf)).unwrap_or("?").to_string()
+            config_enum_lookup_by_value(conf, current_enum(conf))
+                .unwrap_or("?")
+                .to_string()
         }
     }
 }
@@ -850,7 +881,11 @@ pub fn show_guc_option(record: &GucVariable, use_units: bool) -> String {
 pub fn reset_value_string(record: &GucVariable) -> Option<String> {
     Some(match record {
         GucVariable::Bool(c) => {
-            if c.reset_val { "on".to_string() } else { "off".to_string() }
+            if c.reset_val {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
         }
         GucVariable::Int(c) => format!("{}", c.reset_val),
         GucVariable::Real(c) => fmt_g(c.reset_val),
@@ -1028,9 +1063,7 @@ pub fn set_config_option(
                 elevel,
                 err(
                     ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
-                    format!(
-                        "parameter \"{name}\" cannot be changed without restarting the server"
-                    ),
+                    format!("parameter \"{name}\" cannot be changed without restarting the server"),
                 ),
             );
         }
@@ -1059,7 +1092,8 @@ pub fn set_config_option(
         // NONE with the same lifetime; deferred past the store borrow like the
         // assign hooks (it re-enters set_config_option_global).
         if !is_reload && guc_name_eq(name, "session_authorization") {
-            let role_value: Option<&'static str> = if value.is_some() { Some("none") } else { None };
+            let role_value: Option<&'static str> =
+                if value.is_some() { Some("none") } else { None };
             let role_source = if orig_source == PGC_S_OVERRIDE {
                 PGC_S_DYNAMIC_DEFAULT
             } else {
@@ -1162,6 +1196,53 @@ fn current_value(record: &GucVariable) -> config_var_val {
     }
 }
 
+fn stored_value(record: &GucVariable) -> config_var_val {
+    match record {
+        GucVariable::Bool(c) => config_var_val::Boolval(c.value.unwrap_or(c.boot_val)),
+        GucVariable::Int(c) => config_var_val::Intval(c.value.unwrap_or(c.boot_val)),
+        GucVariable::Real(c) => config_var_val::Realval(c.value.unwrap_or(c.boot_val)),
+        GucVariable::String(c) => {
+            config_var_val::Stringval(c.value.clone().unwrap_or_else(|| c.boot_val.clone()))
+        }
+        GucVariable::Enum(c) => config_var_val::Enumval(c.value.unwrap_or(c.boot_val)),
+    }
+}
+
+pub(crate) fn clone_current_state(reg: &GucRegistry) -> GucRegistry {
+    let mut cloned = reg.clone();
+    for (dst, src) in cloned.vars.iter_mut().zip(&reg.vars) {
+        let value = current_value(src);
+        match (dst, value) {
+            (GucVariable::Bool(c), config_var_val::Boolval(v)) => c.value = Some(v),
+            (GucVariable::Int(c), config_var_val::Intval(v)) => c.value = Some(v),
+            (GucVariable::Real(c), config_var_val::Realval(v)) => c.value = Some(v),
+            (GucVariable::String(c), config_var_val::Stringval(v)) => c.value = Some(v),
+            (GucVariable::Enum(c), config_var_val::Enumval(v)) => c.value = Some(v),
+            _ => unreachable!("GUC registry clone changed variable type"),
+        }
+    }
+    cloned
+}
+
+pub(crate) fn activate_current_values(
+    reg: &mut GucRegistry,
+    deferred_hooks: &mut Vec<DeferredAssignHook>,
+) {
+    for record in &mut reg.vars {
+        let value = stored_value(record);
+        if !current_value_differs(record, &value) {
+            continue;
+        }
+        let gen = record.gen();
+        let extra = gen.extra.clone();
+        let context = gen.scontext;
+        let role = gen.srole;
+        if let Some(hook) = apply_value(record, value, extra, context, role) {
+            deferred_hooks.push(hook);
+        }
+    }
+}
+
 // SerializeGUCState, typed: same variable set as capture_nondefault_variables
 // (both sides of a launch share the postmaster snapshot as baseline, so
 // nondefault-only transfers the whole leader/worker difference).
@@ -1189,6 +1270,7 @@ pub(crate) fn bind_captured_guc(
     reg: &mut GucRegistry,
     cap: &CapturedGuc,
     deferred_hooks: &mut Vec<DeferredAssignHook>,
+    exact: bool,
 ) -> PgResult<()> {
     let elevel = resolve_elevel(ErrorLevel(0), cap.source);
     let idx = match reg.find_index(&cap.name) {
@@ -1220,7 +1302,7 @@ pub(crate) fn bind_captured_guc(
 
     let make_default = cap.source <= PGC_S_OVERRIDE;
     let mut change_val = true;
-    if reg.vars[idx].gen().source > cap.source {
+    if !exact && reg.vars[idx].gen().source > cap.source {
         if !make_default {
             return Ok(());
         }
@@ -1254,9 +1336,13 @@ pub(crate) fn bind_captured_guc(
             push_old_value(record, GUC_ACTION_SET);
             newly_stacked = was_empty && record.gen().stack.is_some();
         }
-        if let Some(hook) =
-            apply_value(record, cap.val.clone(), cap.extra.clone(), cap.scontext, cap.srole)
-        {
+        if let Some(hook) = apply_value(
+            record,
+            cap.val.clone(),
+            cap.extra.clone(),
+            cap.scontext,
+            cap.srole,
+        ) {
             deferred_hooks.push(hook);
         }
         reg.set_source(idx, cap.source);
@@ -1285,9 +1371,10 @@ fn reset_value_and_extra(record: &GucVariable) -> (config_var_val, Option<Shared
         GucVariable::Bool(c) => (config_var_val::Boolval(c.reset_val), c.reset_extra.clone()),
         GucVariable::Int(c) => (config_var_val::Intval(c.reset_val), c.reset_extra.clone()),
         GucVariable::Real(c) => (config_var_val::Realval(c.reset_val), c.reset_extra.clone()),
-        GucVariable::String(c) => {
-            (config_var_val::Stringval(c.reset_val.clone()), c.reset_extra.clone())
-        }
+        GucVariable::String(c) => (
+            config_var_val::Stringval(c.reset_val.clone()),
+            c.reset_extra.clone(),
+        ),
         GucVariable::Enum(c) => (config_var_val::Enumval(c.reset_val), c.reset_extra.clone()),
     }
 }
@@ -1465,7 +1552,11 @@ fn push_old_value(record: &mut GucVariable, action: GucAction) {
         return;
     }
 
-    let has_current = record.gen().stack.as_ref().is_some_and(|s| s.nest_level >= nest_level);
+    let has_current = record
+        .gen()
+        .stack
+        .as_ref()
+        .is_some_and(|s| s.nest_level >= nest_level);
     if has_current {
         let masked_snapshot = if action == GUC_ACTION_LOCAL {
             let mut v = config_var_value::default();
@@ -1745,7 +1836,12 @@ fn pop_var_stack(
                     stack.masked_srole,
                 )
             } else {
-                (core::mem::take(&mut stack.prior), stack.source, stack.scontext, stack.srole)
+                (
+                    core::mem::take(&mut stack.prior),
+                    stack.source,
+                    stack.scontext,
+                    stack.srole,
+                )
             };
 
             changed = restore_stacked_value(record, &newvalue, deferred_hooks);

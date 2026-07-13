@@ -17,6 +17,7 @@ latch = { path = "../latch" }
 fd = { path = "../../file/fd" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 waiteventset_seams = { path = "../waiteventset_seams" }
+waiter = { path = "../waiter" }
 libc = "0.2"
 
 [dev-dependencies]

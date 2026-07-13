@@ -290,13 +290,15 @@ fn run_child_task(
 
     // ClosePostmasterPorts: no-op, shared fd table (module doc).
     if init_small::wretain::warm_claim() {
-        // Retained thread (wretain): the once-per-thread half (wait-event
+        // Retained thread (wretain): the once-per-thread half (waiter wake
         // pipe, latch wait set, sigmask, SIGQUIT disposition) survived the
-        // park; only the per-task pid/start-time identity refreshes. The
-        // wakeup registry is keyed by task pid (WakeupOtherProc is SetLatch's
-        // cross-thread wake), so it must follow the fresh synthetic pid —
-        // a stale key silently drops every wake to this thread (P1 wedge:
-        // repeated parallel queries, workers asleep in shm_mq/CV waits).
+        // park; only the per-task pid/start-time identity refreshes. Wake
+        // routing is NOT pid-keyed anymore (SetLatch unparks the waker
+        // handle the owner publishes at every wait — the old registry's
+        // stale-key wedge class is structurally gone); the seam now
+        // reissues this thread's waiter token so handles published for the
+        // PREVIOUS task go stale instead of delivering stray wakes into the
+        // new one.
         miscinit::InitProcessGlobals(child_pid);
         waiteventset_seams::rekey_wakeup_registry::call();
     } else {
@@ -837,5 +839,76 @@ pub mod wpool {
         if let Some(entry) = t.iter_mut().find(|(p, _)| *p == old_pid) {
             entry.0 = new_pid;
         }
+    }
+}
+
+pub mod rtpool {
+    //! M0 runtime worker-pool spawn glue (docs/design/parallelism-redesign-
+    //! 2026-07.md §2.1/§2.8, §5 M0). INERT IN M0: nothing in production
+    //! calls [`start_if_enabled`] yet (M1 wires it into postmaster startup);
+    //! `PGRUST_RUNTIME=1` is the only way in and defaults OFF, so this
+    //! module is dead code in every production path — the M0 gate is zero
+    //! behavior change.
+    //!
+    //! Spawn discipline (wpool-inherited):
+    //! - synthetic pids come from the SAME guarded counter as every child
+    //!   (`reserve_child_pid` — inherits the pid-collision fix: never emits
+    //!   `PostmasterPid()`; notes/pardistinct-contention-fix.md §2b);
+    //! - standard child stack size + fork-inherited globals prelude +
+    //!   per-thread stack base, exactly the warm costs wpool standbys
+    //!   pre-pay;
+    //! - runtime workers are EXECUTORS, not sessions (redesign §2.1): no
+    //!   PGPROC, no bgworker slot, no GUC session bind, no reaper entry
+    //!   (process-lifetime threads, never announced), and NO latch /
+    //!   wakeup-registry entry — they park on the runtime's eventcount, so
+    //!   the pid-keyed registry-hijack wedge class has no surface. If pool
+    //!   threads ever take latch waits (M1+), they must follow the
+    //!   `waiteventset_seams::rekey_wakeup_registry` discipline wpool uses.
+
+    use std::sync::{Arc, OnceLock};
+
+    use types_core::pid_t;
+
+    static RUNTIME: OnceLock<Arc<runtime::Runtime>> = OnceLock::new();
+
+    /// The process runtime, if the kill switch enabled it. M0: called by
+    /// nothing in production; tests and (later) M1 postmaster startup.
+    pub fn start_if_enabled() -> Option<&'static Arc<runtime::Runtime>> {
+        if !runtime::runtime_enabled() {
+            return None;
+        }
+        Some(start())
+    }
+
+    /// Start (or get) the process runtime pool: `workers + standbys`
+    /// executor threads per the env-derived config (workers = cores).
+    /// Postmaster thread only (the Inherited/GUC capture rule wpool's
+    /// maintain() documents applies to the prelude capture here too).
+    pub fn start() -> &'static Arc<runtime::Runtime> {
+        RUNTIME.get_or_init(|| {
+            let rt = runtime::Runtime::new(runtime::RuntimeConfig::from_env());
+            let pool = runtime::WorkerPool::spawn_with(Arc::clone(&rt), spawn_worker)
+                .expect("runtime worker pool spawn failed");
+            // Process-lifetime pool: the handles are never joined; leak the
+            // pool handle so its Drop (if any ever grows one) can't fire.
+            std::mem::forget(pool);
+            rt
+        })
+    }
+
+    fn spawn_worker(
+        ordinal: usize,
+        body: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let pid: pid_t = super::reserve_child_pid();
+        let inherited = super::Inherited::capture();
+        std::thread::Builder::new()
+            .name(format!("pg:rtworker{ordinal}:{pid}"))
+            .stack_size(super::child_thread_stack_size())
+            .spawn(move || {
+                inherited.apply();
+                let _ = stack_depth::set_stack_base();
+                body();
+            })
     }
 }

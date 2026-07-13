@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 types_core = { path = "../../../_support/types/types_core" }
 pg_sema_seams = { path = "../pg_sema_seams" }
+waiter = { path = "../../storage/ipc/waiter" }
