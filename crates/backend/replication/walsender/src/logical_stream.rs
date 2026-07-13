@@ -292,15 +292,27 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             break;
         }
 
-        // We only send regular messages for full decoded transactions; ping
-        // with the flush location so an otherwise-idle receiver replies.
-        WalSndKeepaliveIfNecessary()?;
-
-        WalSndCheckTimeOut();
+        // We only send regular messages for full decoded transactions, but
+        // sync rep / shutdown may wait for a later location: before sleeping,
+        // ping with the flush location. An otherwise-idle receiver replies,
+        // and processing the reply updates MyWalSnd (walsender.c:1896) — this
+        // is also what lets pg_recvlogical --endpos return on a quiet slot.
+        let sent = crate::SENT_PTR.with(|c| c.get());
+        if crate::my_flush() < sent
+            && crate::my_write() < sent
+            && !crate::WAITING_FOR_PING_RESPONSE.with(|c| c.get())
+        {
+            crate::streaming::WalSndKeepalive(false, InvalidXLogRecPtr)?;
+        }
 
         if pqcomm::pq_flush_if_writable()? != 0 {
             WalSndShutdown();
         }
+
+        WalSndCheckTimeOut();
+
+        // Send keepalive if the time has come.
+        WalSndKeepaliveIfNecessary()?;
 
         let now = get_ts();
         let sleeptime: c_long = WalSndComputeSleeptime(now);

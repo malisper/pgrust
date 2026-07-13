@@ -18030,6 +18030,7 @@ dependencies = [
  "latch",
  "libc",
  "libpq_pqsignal",
+ "mbutils_seams",
  "mcx",
  "miscinit",
  "pg_b64",
