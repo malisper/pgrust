@@ -33,6 +33,7 @@ sink = { path = "../sink" }
 backup_copy = { path = "../backup_copy" }
 backup_copy_seams = { path = "../backup_copy_seams" }
 throttle = { path = "../throttle" }
+sink_support = { path = "../sink_support" }
 manifest = { path = "../manifest" }
 
 # DestRemoteSimple result-set bridge (SendXlogRecPtrResult / SendTablespaceList).
