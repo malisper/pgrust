@@ -255,6 +255,11 @@ pub struct FooterRg {
     // Per column i128 sums; meaningful only when flags & RG_FLAG_SUMS
     // (empty on RGs parsed from v<=3 footers).
     pub sums: Vec<i128>,
+    // v7 per-granule text length stats: (sum(octet_length), non-null count,
+    // empty-string count) per GRANULES_PER_RG granule slot x flagged text
+    // column ascending (index = slot * nlencols + rank). Meaningful only when
+    // flags & RG_FLAG_LENSTATS; empty on RGs parsed from v<=6 footers.
+    pub lenstats: Vec<(u64, u32, u32)>,
 }
 
 thread_local! {
@@ -382,7 +387,8 @@ fn open_writer_inner(
                     )));
                 }
                 if footer_off != 0 {
-                    let (rgs, footer_end, _ndv, _sorted, _ckey) = crate::reader::read_footer_rgs(
+                    let (rgs, footer_end, _ndv, _sorted, _ckey, _lenflags) =
+                        crate::reader::read_footer_rgs(
                         &mut w.file,
                         footer_off,
                         w.ncols,
@@ -523,6 +529,7 @@ impl CbWriter {
         let ngranules = nrows.div_ceil(GRANULE_ROWS) as u32;
         let flags = (if self.frozen { RG_FLAG_FROZEN } else { 0 })
             | RG_FLAG_SUMS
+            | RG_FLAG_LENSTATS
             | (if self.draining_clustered { RG_FLAG_CLUSTERED } else { 0 });
         let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
         // rg_header placeholder; length patched at the end.
@@ -553,6 +560,31 @@ impl CbWriter {
             });
             let _ = c;
         }
+        // v7 per-granule length stats, straight off the buffered per-row
+        // (off, len) ranges (exact octet_length: the stored payload byte
+        // count). Granule slots past the last row stay zero. cbstore stores
+        // no NULLs (append_row errors), so nonnull = granule rows.
+        let nlencols = self.coltypes.iter().filter(|t| t.is_text()).count();
+        let mut lenstats: Vec<(u64, u32, u32)> = Vec::new();
+        if nlencols > 0 {
+            lenstats = vec![(0u64, 0u32, 0u32); GRANULES_PER_RG * nlencols];
+            let mut rank = 0usize;
+            for b in builders.iter() {
+                let ColBuilder::Text(tb) = b else { continue };
+                for g in 0..nrows.div_ceil(GRANULE_ROWS) {
+                    let lo = g * GRANULE_ROWS;
+                    let hi = (lo + GRANULE_ROWS).min(nrows);
+                    let mut sum = 0u64;
+                    let mut empty = 0u32;
+                    for &(_, len) in &tb.offs[lo..hi] {
+                        sum += len as u64;
+                        empty += (len == 0) as u32;
+                    }
+                    lenstats[g * nlencols + rank] = (sum, (hi - lo) as u32, empty);
+                }
+                rank += 1;
+            }
+        }
         // Patch total RG length.
         let total = align64(body.len() as u64);
         body[16..24].copy_from_slice(&total.to_le_bytes());
@@ -568,6 +600,7 @@ impl CbWriter {
             flags,
             chunks: chunk_meta,
             sums,
+            lenstats,
         });
         self.reset_builders();
         Ok(())
@@ -593,6 +626,13 @@ impl CbWriter {
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));
         put_u32(&mut f, self.rgs.len() as u32);
         put_u32(&mut f, self.ncols as u32);
+        // v7 prelude tail: per-column length-stats flags (1 = the column has
+        // per-granule entries in the trailing length-stats section). In the
+        // prelude — not appended — because read_footer_rgs must size the
+        // body read from nrgs/ncols alone.
+        for t in &self.coltypes {
+            f.push(t.is_text() as u8);
+        }
         for rg in &self.rgs {
             put_u64(&mut f, rg.file_off);
             put_u32(&mut f, rg.nrows);
@@ -636,6 +676,19 @@ impl CbWriter {
         for slot in 0..CB_CLUSTER_KEY_MAX_COLS {
             let c = self.opts.cluster_key.get(slot).map(|&(c, _)| c).unwrap_or(0);
             f.extend_from_slice(&c.to_le_bytes());
+        }
+        // v7 length-stats section (format.rs doc): rg-major, GRANULES_PER_RG
+        // fixed granule slots, flagged columns ascending. RGs preserved from
+        // v<=6 footers carry no entries (empty lenstats) and lack
+        // RG_FLAG_LENSTATS — they write zeros.
+        let nlencols = self.coltypes.iter().filter(|t| t.is_text()).count();
+        for rg in &self.rgs {
+            for slot in 0..GRANULES_PER_RG * nlencols {
+                let (s, n, e) = rg.lenstats.get(slot).copied().unwrap_or((0, 0, 0));
+                put_u64(&mut f, s);
+                put_u32(&mut f, n);
+                put_u32(&mut f, e);
+            }
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -1275,6 +1328,126 @@ mod abortsafe_tests {
         let (footer_off, fp, version) =
             crate::reader::read_header(&bytes[..CB_HEADER_LEN as usize]).unwrap();
         assert_eq!((footer_off, fp, version), (0, 0x5aa5, CB_VERSION));
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod lenstats_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-lenstats-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    fn writer_at(path: &str, coltypes: Vec<ColType>) -> CbWriter {
+        let opts = CbWriterOpts::plain(coltypes.len());
+        open_writer_inner(SegFile::open_rw(path).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts)
+            .unwrap()
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // Deterministic length pattern with empties sprinkled in (multibyte
+    // bytes included — the stats are octet counts, encoding-agnostic).
+    fn row_text(i: usize) -> Vec<u8> {
+        match i % 7 {
+            0 => Vec::new(),
+            1 => b"\xc3\xa9".to_vec(), // 2-byte UTF-8
+            k => vec![b'x'; k * 3],
+        }
+    }
+
+    #[test]
+    fn lenstats_roundtrip_exact_per_granule() {
+        let path = tmp("rt");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        // 2 RGs, the second partial mid-granule (RG_ROWS + 1.5 granules).
+        let n = RG_ROWS + GRANULE_ROWS + GRANULE_ROWS / 2;
+        let mut keep = Vec::new();
+        for i in 0..n {
+            let t = row_text(i);
+            let vals = [Datum::from_i64(i as i64), text_datum(&t, &mut keep)];
+            w.append_row(&vals, &[false, false]).unwrap();
+            keep.clear();
+        }
+        w.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert!(part.has_len_stats(1));
+        assert!(!part.has_len_stats(0));
+        for rg in 0..part.rgs.len() {
+            assert_ne!(part.rgs[rg].flags & RG_FLAG_LENSTATS, 0);
+            let rg_rows = part.rgs[rg].nrows as usize;
+            for g in 0..rg_rows.div_ceil(GRANULE_ROWS) {
+                let lo = rg * RG_ROWS + g * GRANULE_ROWS;
+                let hi = lo + (rg_rows - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                let (mut sum, mut empty) = (0u64, 0u32);
+                for i in lo..hi {
+                    let t = row_text(i);
+                    sum += t.len() as u64;
+                    empty += t.is_empty() as u32;
+                }
+                assert_eq!(
+                    part.granule_len_stats(rg, g, 1),
+                    Some((sum, (hi - lo) as u32, empty)),
+                    "rg {rg} g {g}"
+                );
+                assert_eq!(part.granule_len_stats(rg, g, 0), None);
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn lenstats_survive_reopen_append() {
+        let path = tmp("reopen");
+        let mut w = writer_at(&path, vec![ColType::I32, ColType::Text]);
+        let mut keep = Vec::new();
+        for i in 0..1000usize {
+            let t = row_text(i);
+            let vals = [Datum::from_i64(i as i64), text_datum(&t, &mut keep)];
+            w.append_row(&vals, &[false, false]).unwrap();
+            keep.clear();
+        }
+        w.finish().unwrap();
+        // Reopen-append: the preserved RG's stats must re-emit exactly; the
+        // new RG gets its own.
+        let mut w2 = writer_at(&path, vec![ColType::I32, ColType::Text]);
+        let d = text_datum(b"tail-row", &mut keep);
+        w2.append_row(&[Datum::from_i64(7), d], &[false, false]).unwrap();
+        w2.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert_eq!(part.rgs.len(), 2);
+        let (mut sum, mut empty) = (0u64, 0u32);
+        for i in 0..1000usize {
+            let t = row_text(i);
+            sum += t.len() as u64;
+            empty += t.is_empty() as u32;
+        }
+        assert_eq!(part.granule_len_stats(0, 0, 1), Some((sum, 1000, empty)));
+        assert_eq!(part.granule_len_stats(1, 0, 1), Some((8, 1, 0)));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn lenstats_absent_without_text_columns() {
+        let path = tmp("notext");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::I32]);
+        w.append_row(&[Datum::from_i64(1), Datum::from_i64(2)], &[false, false]).unwrap();
+        w.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert!(!part.has_len_stats(0) && !part.has_len_stats(1));
+        assert_eq!(part.granule_len_stats(0, 0, 0), None);
         std::fs::remove_file(&path).unwrap();
     }
 }

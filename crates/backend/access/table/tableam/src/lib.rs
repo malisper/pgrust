@@ -1029,13 +1029,14 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
         TableScanDesc::Cbstore(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
                     c.blocks_pruned,
                     c.granules_bound_skipped,
-                    c.adaptive_probe_reverts
+                    c.adaptive_probe_reverts,
+                    c.granules_meta
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
@@ -1243,6 +1244,31 @@ pub fn table_scan_window_value_minmax(
     match scan {
         TableScanDesc::Heap(_) => None,
         TableScanDesc::Cbstore(c) => c.staged_window_value_minmax(col),
+    }
+}
+
+pub use ::cbstore::CbGranuleMetaStep;
+
+/// v7 granule length-stats metadata peek (cbstore only; see
+/// `CbScanDescData::granule_meta_peek`). Heap scans are never meta.
+pub fn table_scan_granule_meta_peek(
+    scan: &mut TableScanDesc<'_>,
+    key_cols: &[u16],
+    len_cols: &[u16],
+    key_mm: &mut [(i64, i64)],
+    len_stats: &mut [(u64, u32, u32)],
+) -> PgResult<CbGranuleMetaStep> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(CbGranuleMetaStep::NotMeta),
+        TableScanDesc::Cbstore(c) => c.granule_meta_peek(key_cols, len_cols, key_mm, len_stats),
+    }
+}
+
+/// Consume the granule the peek just answered (cbstore only).
+pub fn table_scan_granule_meta_consume(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => unreachable!("granule meta is cbstore-only"),
+        TableScanDesc::Cbstore(c) => c.granule_meta_consume(),
     }
 }
 

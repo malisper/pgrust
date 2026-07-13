@@ -3194,3 +3194,94 @@ fn dict_payload_pool_utf8() -> Vec<&'static [u8]> {
         b"mid-500",
     ]
 }
+// ---- granule-metadata fold (lane-v2-lenfooter) -----------------------------
+
+#[test]
+fn granule_meta_admission_matrix() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let cs_args = NodeList::nil();
+    let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a_chr = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let a_var = arg_list(mcx, mk_var(mcx, 2, TEXTV));
+    // count(*) + count(col) + avg/sum(octet_length): admits, one length col.
+    let specs = [
+        mk_spec(1219, false, &cs_args),
+        mk_spec(2804, false, &a_var),
+        mk_spec(1963, false, &a_oct),
+        mk_spec(1841, true, &a_oct),
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert!(plan.resid.is_empty());
+    assert_eq!(granule_meta_len_cols(&plan), Some(vec![0u16]));
+    // Char-count lanes refuse (footer sums carry byte lengths).
+    let specs_chr = [mk_spec(1963, false, &a_chr)];
+    let plan_chr = classify(mcx, &specs_chr).expect("admits");
+    assert_eq!(granule_meta_len_cols(&plan_chr), None);
+    // Any other kind refuses (min over length).
+    let specs_min = [mk_spec(769, true, &a_oct)];
+    let plan_min = classify(mcx, &specs_min).expect("admits");
+    assert_eq!(granule_meta_len_cols(&plan_min), None);
+}
+
+// fold_granule_meta vs fold_batch byte parity on Q28's transition family,
+// under both qual shapes the meta arm hosts: no qual (all rows selected) and
+// `col <> ''` (empty-string rows rejected). The footer-style inputs are
+// (passing, Σ octet_length over ALL rows) — empties contribute zero, so the
+// sum serves both selections.
+#[test]
+fn granule_meta_fold_matches_fold_batch() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let cs_args = NodeList::nil();
+    let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
+    let specs = [
+        mk_spec(1219, false, &cs_args), // count(*)
+        mk_spec(1963, false, &a_oct),   // avg(octet_length(c0))
+        mk_spec(1841, true, &a_oct),    // sum(octet_length(c0))
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert_eq!(granule_meta_len_cols(&plan), Some(vec![0u16]));
+    // A no-NULLs "granule" (cbstore stores no NULLs) with empties mixed in.
+    let data: Vec<Option<Datum>> = (0..37)
+        .map(|i| {
+            Some(match i % 5 {
+                0 => vl_short(b""),
+                1 => vl_short("héllo".as_bytes()),
+                k => vl_4b(&vec![b'u'; k * 17]),
+            })
+        })
+        .collect();
+    let n = data.len();
+    let rows_datum: Vec<Vec<Option<Datum>>> = data.iter().map(|d| vec![*d]).collect();
+    let cols = TestCols::from_datum_rows(1, &rows_datum);
+    let footer_sum: i64 = data.iter().map(|d| oracle_bytelen(d.unwrap())).sum();
+    let empties = data.iter().filter(|d| oracle_bytelen(d.unwrap()) == 0).count() as i64;
+    for qual_ne_empty in [false, true] {
+        let sel = |i: usize| !qual_ne_empty || oracle_bytelen(data[i].unwrap()) != 0;
+        let rows = selmask(n, sel);
+        // Reference: the ordinary staged fold over the same selection.
+        let mut want = pergroups_for(mcx, &plan, specs.len());
+        let gc = unsafe { check_guards(&plan, &cols, &rows, |_| None) };
+        assert_eq!(gc, GuardCheck::Pass { zone: false, data: true });
+        unsafe {
+            fold_batch(&plan, &cols, &rows, n, NonNull::new(want.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        // Meta arm: footer arithmetic only.
+        let passing = if qual_ne_empty { n as i64 - empties } else { n as i64 };
+        let mut got = pergroups_for(mcx, &plan, specs.len());
+        unsafe {
+            fold_granule_meta(
+                &plan,
+                passing,
+                |c| {
+                    assert_eq!(c, 0);
+                    footer_sum
+                },
+                NonNull::new(got.as_mut_ptr()).unwrap(),
+            );
+        }
+        assert_parity(&plan, &got, &want);
+    }
+}
