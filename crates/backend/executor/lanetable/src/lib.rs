@@ -1601,12 +1601,24 @@ impl LaneAggTable {
         unsafe { self.rows.row_ptr(i).add(self.key_words).cast() }
     }
 
-    /// Drop all groups, keeping (bounded) allocations for reuse (rescan).
+    /// Drop all groups, keeping allocations for reuse. The entry structure
+    /// (single/two-level, per-set capacities) is KEPT and zeroed in place:
+    /// the Stage-4 exchange re-arms the same table after every mid-fill
+    /// flush, and rebuilding from 64 slots re-paid the two-level conversion
+    /// + per-bucket growth rehashes on every refill. Capacities are bounded
+    /// by the caller's own sizing (hint/exchange cap), so retention is the
+    /// working envelope, not a leak.
     pub fn reset(&mut self) {
         self.rows.clear();
         self.arena.clear();
-        self.single = EntrySet::with_capacity_pow2(64, self.slot_words);
-        self.buckets = None;
+        self.single.entries.fill(0);
+        self.single.members = 0;
+        if let Some(bs) = &mut self.buckets {
+            for set in bs.iter_mut() {
+                set.entries.fill(0);
+                set.members = 0;
+            }
+        }
         self.null_row = None;
         self.total_members = 0;
     }
