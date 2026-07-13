@@ -540,6 +540,80 @@ impl<'a> ChunkView<'a> {
                 // SAFETY: dst (the first `n` spare slots) was fully written above.
                 unsafe { out.set_len(out.len() + n) };
             }
+            Encoding::DeltaFor => {
+                // Always framed (format.rs §DeltaFor). comp_len == raw_len
+                // marks an in-place uncompressed frame — the writer's
+                // expansion guard never emits a compressed frame at exactly
+                // raw_len, so the test is unambiguous.
+                let fo = self.granule(g).payload_off as usize;
+                let raw_len = get_u32(p, fo) as usize;
+                let comp_len = get_u32(p, fo + 4) as usize;
+                let img: &[u8] = if comp_len == raw_len {
+                    &p[fo + 8..fo + 8 + raw_len]
+                } else {
+                    let dst = arena_frame(arena, raw_len);
+                    decompress_frame_into(
+                        self.hdr.frame_codec(),
+                        &p[fo + 8..fo + 8 + comp_len],
+                        dst,
+                        raw_len,
+                    );
+                    &dst[..raw_len]
+                };
+                let first = i64::from_le_bytes(img[0..8].try_into().unwrap());
+                let dmin = i64::from_le_bytes(img[8..16].try_into().unwrap());
+                let w = img[16] as usize;
+                debug_assert_eq!(raw_len, 24 + (n - 1) * w);
+                let packed = &img[24..];
+                // Prefix sum in the wrapping domain: v[i] = v[i-1] +w
+                // (dmin +w packed[i-1]); packed entries zero-extend.
+                let dst = &mut out.spare_capacity_mut()[..n];
+                dst[0].write(Datum::from_i64(first));
+                let mut acc = first;
+                match w {
+                    0 => {
+                        for d in dst[1..].iter_mut() {
+                            acc = acc.wrapping_add(dmin);
+                            d.write(Datum::from_i64(acc));
+                        }
+                    }
+                    1 => {
+                        for (d, &b) in dst[1..].iter_mut().zip(&packed[..n - 1]) {
+                            acc = acc.wrapping_add(dmin.wrapping_add(b as i64));
+                            d.write(Datum::from_i64(acc));
+                        }
+                    }
+                    2 => {
+                        for (d, c) in
+                            dst[1..].iter_mut().zip(packed[..(n - 1) * 2].chunks_exact(2))
+                        {
+                            let b = u16::from_le_bytes(c.try_into().unwrap()) as i64;
+                            acc = acc.wrapping_add(dmin.wrapping_add(b));
+                            d.write(Datum::from_i64(acc));
+                        }
+                    }
+                    4 => {
+                        for (d, c) in
+                            dst[1..].iter_mut().zip(packed[..(n - 1) * 4].chunks_exact(4))
+                        {
+                            let b = u32::from_le_bytes(c.try_into().unwrap()) as i64;
+                            acc = acc.wrapping_add(dmin.wrapping_add(b));
+                            d.write(Datum::from_i64(acc));
+                        }
+                    }
+                    _ => {
+                        for (d, c) in
+                            dst[1..].iter_mut().zip(packed[..(n - 1) * 8].chunks_exact(8))
+                        {
+                            let b = i64::from_le_bytes(c.try_into().unwrap());
+                            acc = acc.wrapping_add(dmin.wrapping_add(b));
+                            d.write(Datum::from_i64(acc));
+                        }
+                    }
+                }
+                // SAFETY: dst[0] plus the n-1 zipped slots above cover all n.
+                unsafe { out.set_len(out.len() + n) };
+            }
             Encoding::Dict | Encoding::Lz4Dict => {
                 self.build_dict(dict, arena);
                 let w = self.hdr.width as usize;

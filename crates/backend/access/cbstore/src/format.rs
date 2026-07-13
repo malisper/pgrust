@@ -105,6 +105,23 @@ pub enum Encoding {
     // the dict_off table stay plain (the per-row gather is untouched — the
     // blob is decompressed once per RG when the dict table is built).
     Lz4Dict = 6,
+    // Int shape, delta-transformed (intcodec lane). Per-granule frames
+    // (u32 raw_len | u32 comp_len | image, align4) at the granule
+    // directory's payload_off — ALWAYS framed, even under Codec::None
+    // (comp_len == raw_len, image stored in place). The raw image is
+    //   [0..8)   first row value (i64 LE)
+    //   [8..16)  delta FOR base dmin (i64 LE, wrapping domain)
+    //   [16]     delta byte width in {0,1,2,4,8}; 0 = every delta == dmin
+    //   [17..24) zero pad
+    //   [24..)   (d[i] -w dmin) at width, i in 1..n (n-1 entries), where
+    //            d[i] = v[i] -w v[i-1] (wrapping i64 arithmetic throughout)
+    // Zone maps / block ZMs / blooms / footer sums are computed from the
+    // plain values exactly as For/Raw — value-domain metadata is untouched
+    // by the payload transform. Like the RawText/Lz4Text reuse precedent
+    // this is an encoding tag, NOT a version bump: frozen banks are never
+    // rewritten and new banks get new keys, so no pre-intcodec reader ever
+    // sees the tag. ChunkHeader.aux = chunk min (as For); width = 0.
+    DeltaFor = 7,
 }
 
 impl Encoding {
@@ -117,6 +134,7 @@ impl Encoding {
             4 => Encoding::RawText,
             5 => Encoding::Lz4Text,
             6 => Encoding::Lz4Dict,
+            7 => Encoding::DeltaFor,
             _ => return None,
         })
     }
