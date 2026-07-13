@@ -628,6 +628,11 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // harness / kill-switch path. The session backing cell IS the gate the
     // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
     GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.condition_cache: the cbstore per-granule qual-verdict cache
+    // (ClickHouse QueryConditionCache counterpart; approved 2026-07-10 as
+    // the one sanctioned cross-query in-memory cache, GUC-gated). Default
+    // OFF; benchmark arms enable it explicitly and record it in manifests.
+    GucBoolSetting { name: "pgrust.condition_cache", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the cbstore condition cache (cross-query cached qual verdicts per granule)."), long_desc: None, flags: 0, variable: &vars::pgrust_condition_cache, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.regex_pattern_program: the anchored pattern-program regex fast
     // tier under the auto RE2 dispatch (regexp_alt::program). Hidden like
     // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
@@ -790,6 +795,9 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     GucIntSetting { name: "scram_iterations", context: PGC_USERSET, group: CONN_AUTH_AUTH, short_desc: Some("Sets the iteration count for SCRAM secret generation."), long_desc: None, flags: GUC_REPORT, variable: &vars::scram_sha_256_iterations, boot_val: GucDefaultValue::Int(SCRAM_SHA_256_DEFAULT_ITERATIONS), min: 1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
     GucIntSetting { name: "hnsw.ef_search", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the size of the dynamic candidate list for search"), long_desc: Some("Valid range is 1..1000."), flags: 0, variable: &vars::hnsw_ef_search, boot_val: GucDefaultValue::Int(40), min: 1, max: 1000, check_hook: None, assign_hook: None, show_hook: None },
     GucIntSetting { name: "hnsw.max_scan_tuples", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the max number of tuples to visit for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_max_scan_tuples, boot_val: GucDefaultValue::Int(20000), min: 1, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.condition_cache_size: the condition cache's LRU byte budget
+    // (default 100MB — ClickHouse's query_condition_cache_size default).
+    GucIntSetting { name: "pgrust.condition_cache_size", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the memory budget of the cbstore condition cache."), long_desc: None, flags: GUC_UNIT_KB, variable: &vars::pgrust_condition_cache_size, boot_val: GucDefaultValue::Int(102400), min: 0, max: MAX_KILOBYTES, check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesReal: &[GucRealSetting] = &[

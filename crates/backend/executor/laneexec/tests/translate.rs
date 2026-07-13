@@ -679,3 +679,89 @@ fn textlen_modes_and_eval() {
     assert_eq!(laneexec::lane_text_payload(d), Some(&b"xyz"[..]));
     assert!(laneexec::inline_const_ok(d));
 }
+
+// ===========================================================================
+// Condition-cache fingerprints (translate::fingerprint_prefix through
+// LaneQualProg.fingerprint): deterministic per identical prefix, sensitive
+// to every keyed component (column, operator, commutation, collation,
+// constant VALUE), and insensitive to the requal tail (cached bits are
+// prefix verdicts only).
+// ===========================================================================
+
+#[test]
+fn condcache_fingerprint_deterministic_and_value_sensitive() {
+    let fp = |clauses: Vec<LaneClause>| {
+        translate_scan_qual(&shape(clauses, LaneSuffix::None), true)
+            .expect("translates")
+            .fingerprint
+            .expect("cacheable prefix")
+    };
+    let base = || {
+        vec![
+            cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        ]
+    };
+    // Deterministic across independent translations.
+    assert_eq!(fp(base()), fp(base()));
+    // Every keyed component moves the fingerprint.
+    let variants = [
+        vec![
+            cmp_clause(1, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        ],
+        vec![
+            cmp_clause(0, F_INT4GT, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        ],
+        vec![
+            cmp_clause(0, F_INT4EQ, true, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        ],
+        vec![
+            cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(101))),
+            text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        ],
+        vec![
+            cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTLIKE, false, b"%googleX%"),
+        ],
+        vec![
+            cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+            text_clause(2, F_TEXTNLIKE, false, b"%google%"),
+        ],
+    ];
+    let b = fp(base());
+    for (i, v) in variants.into_iter().enumerate() {
+        assert_ne!(b, fp(v), "variant {i} must not share the fingerprint");
+    }
+    // Clause order is keyed too (original order is the canonical spelling).
+    let swapped = vec![
+        text_clause(2, F_TEXTLIKE, false, b"%google%"),
+        cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(100))),
+    ];
+    assert_ne!(b, fp(swapped));
+}
+
+#[test]
+fn condcache_fingerprint_ignores_requal_tail() {
+    // Same 2-clause prefix; one shape carries a non-volatile per-row tail
+    // (int4eq is provably non-volatile only with a syscache — use a second
+    // undecodable-but-parsed clause via LaneSuffix::None vs a trailing
+    // parsed clause is walker territory; here: identical prefixes across
+    // two translations, one truncated one not, must match because the
+    // fingerprint hashes prefix clauses only). The tail-bearing shape needs
+    // the hybrid gate: prefix >= 2 clauses.
+    let prefix = || {
+        vec![
+            cmp_clause(0, F_INT4EQ, false, LaneCmpRhs::Const(Datum::from_i32(7))),
+            cmp_clause(1, F_INT4LT, false, LaneCmpRhs::Const(Datum::from_i32(9))),
+        ]
+    };
+    let plain = translate_scan_qual(&shape(prefix(), LaneSuffix::None), true)
+        .expect("translates");
+    let tailed = translate_scan_qual(&shape(prefix(), LaneSuffix::Opaque), true)
+        .expect("hybrid engages at prefix >= 2");
+    assert!(tailed.requal && !plain.requal);
+    assert_eq!(plain.fingerprint, tailed.fingerprint);
+}
