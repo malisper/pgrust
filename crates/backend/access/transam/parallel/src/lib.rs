@@ -484,6 +484,27 @@ pub fn wait_parallel_finish_quantum() {
     wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH);
 }
 
+/// True when every launched worker's underlying bgworker task has ENDED
+/// (thread exited, died, or parked back to the pool). The M1 runtime-scan
+/// leader's liveness probe: all stopped while the pinned RG is incomplete
+/// means nobody will ever finish the submitted work (helpers died pre-hook
+/// — e.g. an init-path panic-to-ERROR — leaves no channel message after
+/// Terminate and no refusal count). During normal hook driving the tasks
+/// are still BGWH_STARTED, so this cannot false-positive mid-drive.
+pub fn parallel_workers_all_stopped(id: ParallelContextId) -> bool {
+    let n = with_pcxt(id, |p| p.workers.len());
+    for i in 0..n {
+        let handle = with_pcxt(id, |p| p.workers.get(i).and_then(|w| w.bgwhandle));
+        let Some(handle) = handle else { continue };
+        match bgworker::GetBackgroundWorkerPid(&handle).0 {
+            bgworker::BgwHandleStatus::BGWH_STOPPED
+            | bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
 }
