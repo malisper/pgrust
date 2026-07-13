@@ -9923,6 +9923,7 @@ dependencies = [
  "postgres_seams",
  "predicate_seams",
  "procarray",
+ "procarray_seams",
  "procsignal",
  "relcache_seams",
  "relmapper",

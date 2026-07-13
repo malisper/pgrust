@@ -1134,10 +1134,28 @@ pub mod rtgang {
                         ipc::run_deferred_exit_callbacks(code)
                     }));
                 } else {
+                    // Generic panic: unlike run_child_task there is no exit
+                    // announce here (registry-invisible thread), so no
+                    // crash-reinit backstop reclaims this identity — a
+                    // leaked procarray/sinval entry would block DROP
+                    // DATABASE forever and a leaked PGPROC drains the
+                    // freelist. Run the drain (best effort, ProcKill
+                    // included); a mid-drain panic leaves us no worse.
                     let _ = elog::elog(
                         types_error::WARNING,
-                        format!("standing executor {ordinal} died on a panic"),
+                        format!(
+                            "standing executor {ordinal} died on a panic; releasing identity"
+                        ),
                     );
+                    // proc_exit arms the deferred-callback flag (and
+                    // unwinds ProcExitThread, caught here); the drain then
+                    // actually runs the stack.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::proc_exit(2, init_small::globals::MyProcPid())
+                    }));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::run_deferred_exit_callbacks(2)
+                    }));
                 }
             }
         }

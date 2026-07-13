@@ -290,36 +290,84 @@ fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     }
     parallel::gtrace("w.entry.drive.begin");
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive_entry(&payload)));
-    if r.is_err() {
-        mark_self_errored();
-        payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
-        let _ = teardown_worker_exec(false);
-    }
+    let outcome = match r {
+        Ok(o) => o,
+        Err(unwind) => {
+            mark_self_errored();
+            payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
+            let _ = teardown_worker_exec(false);
+            if parallel::standing::is_exit_unwind(&*unwind) {
+                // Exit-committed unwind: keep dying (ParallelWorkerMain's
+                // FATAL arm owns the leader notification).
+                latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+                    shared.parallel_leader_proc_number,
+                ));
+                std::panic::resume_unwind(unwind);
+            }
+            Err(Box::new(PgError::new(
+                ERROR,
+                "runtime scan worker failed (see leader error)",
+            )))
+        }
+    };
     parallel::gtrace("w.entry.drive.end");
     // Wake the parked leader: completion/refusal/error all re-poll there.
     latch::SetLatch(::types_storage::latch::LatchHandle::proc(
         shared.parallel_leader_proc_number,
     ));
-    Ok(())
+    outcome
 }
 
 /// Entry-task drive: the bound-context body (lane lease + executor build +
 /// pinned drive + teardown), errors recorded payload-side. Mirrors
 /// helper_drive minus the binder wrap.
-fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) {
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+///
+/// Self-error discipline: the error is recorded payload-side (the leader
+/// rethrows it PLAIN — usually before it can drain the message channel,
+/// because the completion poll precedes ProcessParallelMessages) AND
+/// returned, so parallel_worker_body ABORTS the worker transaction — a
+/// released mid-batch executor must not ride a commit (the hook path gets
+/// the same via the binder's finish(false); resource-release-at-commit
+/// would warn on leaked pins).
+fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
     // Process-wide lane lease: exhaustion = fail-closed non-participation
     // (the leader's all-refused fallback counts it exactly like a bind
     // refusal on the hook path).
     let Some(lane) = payload.rt.acquire_external_lane() else {
         payload.refused.fetch_add(1, Ordering::SeqCst);
-        return;
+        return Ok(());
     };
     let mut local = lane.local();
     payload.started.fetch_add(1, Ordering::SeqCst);
-    if let Err(e) = drive_bound(payload, lane.ordinal(), &mut local, &rg) {
+    if let Err(e) = build_worker_exec(payload) {
+        // Clean build failure (qd already released): commit is safe.
         payload.fail(e);
+        return Ok(());
     }
+    let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    // Teardown mode per drive_bound: self-error takes the release path;
+    // the abort discipline is the transaction-level Err below (the hook
+    // path gets the same via the binder's finish(false)).
+    let self_errored = WORKER_EXEC
+        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let teardown = teardown_worker_exec(!self_errored);
+    if let Err(e) = teardown {
+        payload.fail(e);
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime scan worker failed (see leader error)",
+        )));
+    }
+    if self_errored {
+        // Mid-batch executor released: abort the worker transaction (the
+        // morsel body already recorded the original error payload-side).
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime scan worker failed (see leader error)",
+        )));
+    }
+    Ok(())
 }
 
 /// PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1 POST_TASK_PARK drive.
@@ -550,26 +598,32 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 /// so every helper's drive loop observes completion and exits the hook.
 fn runtime_scan_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<RuntimeScanShared>() else { return };
-    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
+    let rg = payload.rg.get().and_then(|w| w.upgrade());
+    if let Some(rg) = &rg {
         rg.abort();
-        // Standing channel (inc-3): a leader unwind (error/panic between
-        // publish and standing_wait's own cleanup) reaches here through
-        // DestroyParallelContext with claimed workers possibly still
-        // driving. Complete the RG (drain releases drives parked on the
-        // aborted generation) and hold the frame until every participant
-        // detached — the leader arena must outlive their SendConst refs.
-        let entry = payload
-            .standing
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
-        if let Some(entry) = entry {
+    }
+    // Standing channel (inc-3): a leader unwind (error/panic between
+    // publish and standing_wait's own cleanup) reaches here through
+    // DestroyParallelContext with claimed workers possibly still driving.
+    // Complete the RG (drain releases drives parked on the aborted
+    // generation) and hold the frame until every participant detached —
+    // the leader arena must outlive their SendConst refs. UNCONDITIONAL
+    // on the rg upgrade: a dead weak handle still leaves the board entry
+    // occupied (every future try_engage would refuse and parked workers
+    // would wedge against an entry nobody removes).
+    let entry = payload
+        .standing
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(entry) = entry {
+        if let Some(rg) = &rg {
             if rg.try_outcome().is_none() {
                 // drain_rg aborts (idempotent) and drives protocol cleanup.
-                drain_rg_raw(payload.rt, &rg);
+                drain_rg_raw(payload.rt, rg);
             }
-            parallel::standing::close_and_await(&entry);
         }
+        parallel::standing::close_and_await(&entry);
     }
 }
 
@@ -953,9 +1007,11 @@ fn engage<'mcx>(
     // lifetime (CreateParallelContext asserts it); an error unwind aborts
     // the transaction, which destroys live contexts and resets the mode
     // (AtEOXact_Parallel — the Gather discipline).
+    parallel::gtrace("l.engage.begin");
     xact::EnterParallelMode();
     let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload);
     xact::ExitParallelMode();
+    parallel::gtrace("l.engage.end");
     engaged
 }
 
@@ -1309,8 +1365,19 @@ fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
     let Some(private) = shared.private() else { return };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
-    if r.is_err() {
+    if let Err(unwind) = r {
         payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            shared.parallel_leader_proc_number,
+        ));
+        // Exit-committed unwinds (FATAL) must keep unwinding: the worker
+        // is terminating; parallel::standing rethrows them to the glue,
+        // whose proc_exit drain releases identity. Swallowing one here
+        // would resurrect a dead backend into the standing pool.
+        if parallel::standing::is_exit_unwind(&*unwind) {
+            std::panic::resume_unwind(unwind);
+        }
+        return;
     }
     latch::SetLatch(::types_storage::latch::LatchHandle::proc(
         shared.parallel_leader_proc_number,
