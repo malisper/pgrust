@@ -133,8 +133,20 @@ impl RuntimeScanShared {
 // into an RG abort — the runtime protocol never sees an unwind.
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
+enum DriveMode {
+    /// Fold-classified shape reading lane columns: the serial fold drain.
+    Fold,
+    /// Count-only census shape (fold plan reads NO columns; the serial
+    /// decider refuses it because the footer is the serial lever): the
+    /// per-row drain — PREWHERE bitmap + the full per-row transition
+    /// program, no SoA-lane expectations.
+    PerRow,
+}
+
 struct WorkerExec {
     qd: ::types_portal::QueryDescHandle,
+    mode: DriveMode,
     /// THIS helper contributed an error (its executor may be mid-batch —
     /// take the release/abort teardown, not finish/end).
     errored: std::cell::Cell<bool>,
@@ -185,6 +197,7 @@ impl RuntimeScanShared {
                     "runtime scan morsel without a bound executor",
                 )));
             };
+            let mode = ex.mode;
             crate::querydesc::with_qd(ex.qd, |q| {
                 let x = q.exec.as_mut().expect("runtime scan worker executor state");
                 x.with_mut(|d| -> PgResult<()> {
@@ -214,7 +227,22 @@ impl RuntimeScanShared {
                             "runtime scan worker scan is not cbstore",
                         )));
                     }
-                    super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?;
+                    match mode {
+                        DriveMode::Fold => {
+                            super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                        }
+                        DriveMode::PerRow => {
+                            let mut sink =
+                                super::PlainAggBuildSink { agg: &mut aps.agg };
+                            super::push::drain_pipeline(
+                                ss,
+                                &mut super::SeqScanSource,
+                                &mut super::SeqScanFilterProject,
+                                &mut sink,
+                                estate,
+                            )?
+                        }
+                    }
                     // Cumulative partial export (overwrite): the worker's
                     // LAST morsel's export — which precedes its settle, and
                     // therefore RG completion — is the one the leader reads.
@@ -344,11 +372,11 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
             ::types_portal::QueryEnvHandle::NULL,
             0,
         )?;
-        let armed = (|| -> PgResult<()> {
+        let armed = (|| -> PgResult<DriveMode> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("runtime scan worker ExecutorStart");
-                x.with_mut(|d| -> PgResult<()> {
+                x.with_mut(|d| -> PgResult<DriveMode> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
                     else {
@@ -370,23 +398,40 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                             "runtime scan worker fold plan diverged from the leader's",
                         )));
                     }
-                    // The serial fold feed's arm/init half, once per worker;
-                    // the drain half re-runs per morsel (fold feed split).
-                    super::arm_scan_staging(
-                        ss,
-                        estate,
-                        super::ScanFeedShape::FoldPrefix { agg: &aps.agg },
-                    )?;
-                    super::arm_fold_len_lanes(&aps.agg, ss);
+                    let mode = drive_mode(&aps.agg);
+                    match mode {
+                        DriveMode::Fold => {
+                            // The serial fold feed's arm/init half, once per
+                            // worker; the drain half re-runs per morsel.
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::FoldPrefix { agg: &aps.agg },
+                            )?;
+                            super::arm_fold_len_lanes(&aps.agg, ss);
+                        }
+                        DriveMode::PerRow => {
+                            // Census shape: per-row staging (PREWHERE /
+                            // kernel bitmap when the qual has kernel shape).
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime scan census feed",
+                                    stitch: true,
+                                },
+                            )?;
+                        }
+                    }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
-                    Ok(())
+                    Ok(mode)
                 })
             })
         })();
         match armed {
-            Ok(()) => {
+            Ok(mode) => {
                 *cell.borrow_mut() =
-                    Some(WorkerExec { qd, errored: std::cell::Cell::new(false) });
+                    Some(WorkerExec { qd, mode, errored: std::cell::Cell::new(false) });
                 Ok(())
             }
             Err(e) => {
@@ -445,6 +490,16 @@ fn ensure_hooks_registered() {
         parallel::register_parallel_post_task_park(runtime_scan_post_task_park);
         parallel::register_parallel_private_shutdown(runtime_scan_private_shutdown);
     });
+}
+
+/// Fold when the plan reads lane columns (the serial Fold choice); the
+/// census shape (no columns) takes the per-row drain. Deterministic from
+/// the classified plan, so leader and workers always agree.
+fn drive_mode(agg: &::nodeagg::AggStateData<'_>) -> DriveMode {
+    match ::nodeagg::agg_lanefold_plan(agg) {
+        Some(plan) if plan.cols.is_empty() => DriveMode::PerRow,
+        _ => DriveMode::Fold,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +643,14 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(None);
+    }
+    // Census shapes (fold plan reads no columns) engage only with a qual:
+    // the bare count(*) is the Meta/footer arm's, and a qual-less census
+    // scan would stage nothing for the per-row drive.
+    if ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
+        && ss.ss.qual.is_none()
+    {
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
