@@ -219,6 +219,12 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
     if g.slots.is_empty() {
         g.slots = vec![SlotState::Vacant; size];
     }
+    // Crash-fence recovery: a leader engaging proves reinit completed
+    // (backends only run against live shared memory). Pre-crash threads
+    // stay fenced by the epoch bump; without this clear, every respawned
+    // worker would raw-exit on the stale retire_all and leak its freshly
+    // claimed PGPROC against LIVE shmem, draining the bgworker freelist.
+    g.retire_all = false;
     // The engaging leader IS connected to this database — it exists again;
     // any retire entry for its oid is stale (recreated oid). Prune so
     // freshly-pinned workers don't spuriously exit at their next wake.
@@ -314,6 +320,13 @@ pub enum GangExit {
     Raw,
 }
 
+/// True when an unwind payload is EXIT-COMMITTED (FATAL's ProcExitThread /
+/// PanicExitThread): drivers and containment layers must rethrow these —
+/// the thread is dying and its proc_exit callback chain owns cleanup.
+pub fn is_exit_unwind(payload: &(dyn std::any::Any + Send)) -> bool {
+    payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>()
+}
+
 /// Glue: mark a slot respawnable (worker exit / init failure).
 pub fn note_worker_exit(ordinal: usize) {
     if GANG.get().is_none() {
@@ -374,7 +387,17 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
         };
         match wake {
             Wake::RetireRaw => return GangExit::Raw,
-            Wake::Retire => return GangExit::Clean,
+            Wake::Retire => {
+                // Parked workers are procarray-ABSENT (serve_ticket's
+                // bracket); the exit-callback chain (RemoveProcFromArray)
+                // expects membership — rejoin before proc_exit.
+                if init_small::globals::MyDatabaseId() != InvalidOid {
+                    let _ = procarray_seams::proc_array_add::call(
+                        init_small::globals::MyProcNumber(),
+                    );
+                }
+                return GangExit::Clean;
+            }
             Wake::Engage(entry) => match entry.try_claim() {
                 Some(ticket) => serve_ticket(&entry, ticket),
                 None => park_until_board_changes(&entry),
@@ -405,9 +428,20 @@ fn park_until_board_changes(entry: &Arc<StandingEngagement>) {
 /// parallel worker, join the leader's lock group, run the driver (which
 /// owns the single binder bind + executor build + pinned drive), then
 /// restore the standing state. Detach is Drop-guaranteed.
+///
+/// PROCARRAY VISIBILITY brackets the bound span (the wpool park
+/// precedent: a PARKED worker must be invisible to CountOtherDBBackends
+/// — an idle procarray entry pinned to a database blocks DROP DATABASE,
+/// whose retire rider fires only in late dropdb cleanup, after the
+/// count). First use: InitPostgres's InitProcessPhase2 adds; later
+/// engagements re-add here. The NORMAL tail removes; unwind paths
+/// deliberately leave the entry for the thread-exit callback
+/// (RemoveProcFromArray) — removing under unwind would double-remove at
+/// the thread top and abort the callback drain that releases the PGPROC.
 fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     let shared = &entry.shared;
     let detach = DetachGuard { entry };
+    let mut in_procarray = false;
 
     // First engagement on this worker: adopt the engagement's database
     // (exactly parallel_worker_body's connect flags).
@@ -446,6 +480,22 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
                 resume_unwind(payload);
             }
         }
+        in_procarray = true; // InitPostgres's InitProcessPhase2 added us.
+    } else {
+        // Re-engagement on a connected worker: rejoin the procarray
+        // BEFORE any snapshot state exists (the binder's snapshot restore
+        // publishes xmin, which only counts while visible).
+        if let Err(e) = procarray_seams::proc_array_add::call(
+            init_small::globals::MyProcNumber(),
+        ) {
+            let _ = elog::elog(
+                WARNING,
+                format!("standing executor procarray re-add failed: {}", e.message()),
+            );
+            entry.refused.fetch_add(1, SeqCst);
+            return;
+        }
+        in_procarray = true;
     }
     debug_assert_eq!(init_small::globals::MyDatabaseId(), shared.database_id);
 
@@ -461,8 +511,21 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             let driver = DRIVER.get().expect("standing driver registered (try_engage gate)");
             // The driver catches its own panics into the payload (the M1
             // hook discipline); this outer catch is containment of last
-            // resort so lock-group leave + unimpersonation always run.
-            let _ = catch_unwind(AssertUnwindSafe(|| driver(shared)));
+            // resort so lock-group leave + unimpersonation always run —
+            // EXCEPT for exit-committed unwinds (FATAL's ProcExitThread /
+            // PanicExitThread): a backend must actually die after FATAL,
+            // and its proc_exit callback chain (ProcKill) performs the
+            // lock-group leave; swallowing it would leave a terminated
+            // worker serving future engagements. DetachGuard already
+            // covers the leader's join on this path.
+            let r = catch_unwind(AssertUnwindSafe(|| driver(shared)));
+            if let Err(payload) = r {
+                if payload.is::<ipc::ProcExitThread>()
+                    || payload.is::<types_error::PanicExitThread>()
+                {
+                    resume_unwind(payload);
+                }
+            }
             lmgr_proc::LeaveLockGroup();
         }
         Ok(false) => {
@@ -478,4 +541,18 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
     }
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
+    // Leave the procarray for the park (see the fn doc: parked workers
+    // must be invisible to CountOtherDBBackends). Unwind paths above
+    // skip this deliberately — the thread-exit callback removes then.
+    if in_procarray {
+        if let Err(e) = procarray_seams::proc_array_remove::call(
+            init_small::globals::MyProcNumber(),
+            types_core::InvalidTransactionId,
+        ) {
+            let _ = elog::elog(
+                WARNING,
+                format!("standing executor procarray remove failed: {}", e.message()),
+            );
+        }
+    }
 }

@@ -965,6 +965,11 @@ pub fn LeaveLockGroup() {
         .expect("partition lock in LeaveLockGroup");
     debug_assert!(!plist_is_empty(&leader.lockGroupMembers));
     plist_delete(hdr, &leader.lockGroupMembers, procno, group_link_of);
+    // Unlike ProcKill's dying caller, this proc lives on: its own
+    // lockGroupLeader must clear in BOTH arms (the postcondition the next
+    // BecomeLockGroupMember asserts) — in the leader-exited-first arm a
+    // stale pointer would advertise membership in a recycled PGPROC slot.
+    proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
     if plist_is_empty(&leader.lockGroupMembers) {
         leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
         // Leader exited first; return its PGPROC (ProcKill parity).
@@ -972,8 +977,6 @@ pub fn LeaveLockGroup() {
         spin_acquire(&ProcStructLock);
         plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
         ProcStructLock.unlock();
-    } else {
-        proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
     }
     lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in LeaveLockGroup");
 }
