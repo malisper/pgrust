@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+memchr = { version = "2", default-features = false }
 mcx = { path = "../../../../_support/mcx" }
 types_error = { path = "../../../../_support/types/types_error" }
 regex_spencer = { path = "../../../../_support/types/regex", package = "regex" }
