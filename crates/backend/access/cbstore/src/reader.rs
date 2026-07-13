@@ -385,6 +385,10 @@ pub struct Part {
     // File offset of the v7 per-granule zero-count section (0 = none):
     // like sums, read lazily through the mmap (granule_zerocnt).
     zerocnt_off: u64,
+    // First byte past the row-group data region (stitch blobs and the
+    // footer follow): the last row group's readahead extent ceiling.
+    // Computed at open from footer metadata only.
+    data_end: u64,
     // Immutable part identity for cross-query caches (condition cache): the
     // part-cache staleness probe's exact vocabulary — (st_dev, st_ino,
     // st_size, footer_off), stat'd BEFORE the footer read (a publish racing
@@ -454,6 +458,17 @@ impl Part {
         } else {
             0
         };
+        // Row-group data region end: the footer follows the last RG, with
+        // v7 stitch blobs (if any) between — the smallest stitch-blob offset
+        // tightens the bound so readahead never fetches blob/footer bytes.
+        let data_end = stitch
+            .dir
+            .iter()
+            .filter(|&&(off, count)| count > 0 && off > 0)
+            .map(|&(off, _)| off)
+            .min()
+            .unwrap_or(footer_off)
+            .min(footer_off);
         let identity = {
             use std::os::unix::fs::MetadataExt;
             match ident_stat {
@@ -481,6 +496,7 @@ impl Part {
             nlencols,
             stitch,
             zerocnt_off,
+            data_end,
             identity,
         }))
     }
@@ -581,6 +597,100 @@ impl Part {
         let base = (m.file_off + m.chunks[col].0) as usize;
         ChunkView::at(self.bytes(), base, m.nrows)
     }
+
+    // End of row group `rg`'s body: the next RG's file offset (the writer
+    // appends RGs at ascending align64 offsets), or the data region's end
+    // for the last one. 0 = the footer's RG order is not ascending here
+    // (foreign/legacy part) — callers skip rather than guess.
+    fn rg_end(&self, rg: usize) -> u64 {
+        let end = match self.rgs.get(rg + 1) {
+            Some(next) => next.file_off,
+            None => self.data_end,
+        };
+        if end <= self.rgs[rg].file_off { 0 } else { end }
+    }
+
+    /// Claim-time readahead (parallelism-redesign §2.8): madvise(WILLNEED)
+    /// the mmap extents of row group `rg`'s chunks for the given column set
+    /// (`cols` ascending, the scan's needed_idx vocabulary). Extents come
+    /// from footer metadata only — chunk `c` spans [chunks[c].0,
+    /// chunks[c+1].0) of the RG body (the writer lays chunks out in column
+    /// order), the last chunk ending at the RG body's end — so this call
+    /// never touches (= faults) the mapped bytes itself. Adjacent needed
+    /// columns coalesce into one madvise. Purely advisory: kernel errors
+    /// are ignored; returns whether at least one advise was issued.
+    pub fn advise_willneed(&self, rg: usize, cols: &[u16]) -> bool {
+        let Some(m) = self.rgs.get(rg) else { return false };
+        let rg_end = self.rg_end(rg);
+        if rg_end == 0 {
+            return false;
+        }
+        let bytes = self.bytes();
+        let mut issued = false;
+        let mut pending: Option<(u64, u64)> = None;
+        let mut flush = |ext: (u64, u64)| {
+            issued |= advise_extent(bytes, ext.0, ext.1);
+        };
+        for &c in cols {
+            let c = c as usize;
+            let Some(&(off, _, _)) = m.chunks.get(c) else { continue };
+            let start = m.file_off + off;
+            let end = match m.chunks.get(c + 1) {
+                Some(&(next_off, _, _)) => m.file_off + next_off,
+                None => rg_end,
+            };
+            // Defensive on foreign layouts: a non-ascending chunk directory
+            // yields an empty/inverted extent — skip it, never advise junk.
+            let end = end.min(rg_end);
+            if end <= start || end > bytes.len() as u64 {
+                continue;
+            }
+            match pending {
+                // Consecutive needed columns share a boundary: coalesce.
+                Some((ps, pe)) if start <= pe => pending = Some((ps, pe.max(end))),
+                Some(ext) => {
+                    flush(ext);
+                    pending = Some((start, end));
+                }
+                None => pending = Some((start, end)),
+            }
+        }
+        if let Some(ext) = pending {
+            flush(ext);
+        }
+        issued
+    }
+}
+
+// One page-aligned madvise(MADV_WILLNEED) over bytes[start..end); advisory
+// (errors ignored). Bounds are the caller's business; start/end are only
+// page-rounded here.
+#[cfg(unix)]
+fn advise_extent(bytes: &[u8], start: u64, end: u64) -> bool {
+    static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let page = *PAGE.get_or_init(|| {
+        // SAFETY: sysconf is always safe to call.
+        let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if p > 0 { p as u64 } else { 4096 }
+    });
+    let a_start = start / page * page;
+    let len = (end - a_start) as usize;
+    // SAFETY: [a_start, end) lies within the part's live mapping (caller
+    // bounds-checked against bytes.len(); the mmap base is page-aligned so
+    // rounding start down stays inside it). madvise reads no user memory.
+    unsafe {
+        libc::madvise(
+            bytes.as_ptr().add(a_start as usize) as *mut libc::c_void,
+            len,
+            libc::MADV_WILLNEED,
+        );
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn advise_extent(_bytes: &[u8], _start: u64, _end: u64) -> bool {
+    false
 }
 
 // Decompress one v6 frame (u32 raw_len | u32 comp_len | bytes) body into
