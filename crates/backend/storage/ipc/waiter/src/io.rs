@@ -3,8 +3,10 @@
 //! An in-flight IO is (owning ring id, cqe id, list of Waiter handles):
 //! tasks park on the token via their Waiter handle, and ANY completing
 //! thread unparks every registered handle — the generalization of bufmgr's
-//! io_wref/WaitIO any-thread-completes discipline onto the Waiter. M0 ships
-//! the API + unit/loom coverage only; the uring wiring lands in M1.
+//! io_wref/WaitIO any-thread-completes discipline onto the Waiter. M0
+//! shipped the API + unit/loom coverage; M1 wires it under bufmgr's uring
+//! reads (aio_uring holds one token per in-flight ring slot, boundary/
+//! blocking reaps complete it, WaitIO waiters ride [`IoTokenCore::wait_with`]).
 //!
 //! Contract:
 //!   * `register(handle)` under the token mutex: returns `AlreadyCompleted`
@@ -32,6 +34,21 @@ pub enum IoRegister {
     Registered,
     /// The IO already completed: do not park, proceed immediately.
     AlreadyCompleted,
+}
+
+/// How [`IoTokenCore::wait_with`] observed the IO finish (M1 §2.9 wiring).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IoWaitOutcome {
+    /// Completed before we registered (completed-fast-path; never parked).
+    AlreadyCompleted,
+    /// A completer's unpark (or a latched notify) delivered the completion.
+    Completed,
+    /// The recheck backstop observed the authoritative IO state settled
+    /// while the token wake was lost/late — the lost-completion recovery.
+    StateSettled,
+    /// Still pending after a full recheck cadence: the waiter degraded to
+    /// the caller's targeted blocking reap and drove the IO home itself.
+    Reaped,
 }
 
 struct IoState<H> {
@@ -88,6 +105,58 @@ impl<H> IoTokenCore<H> {
     /// True once any thread completed the token.
     pub fn is_completed(&self) -> bool {
         self.lock().completed
+    }
+
+    /// The §2.9 waiter-side wait protocol (M1: the body of bufmgr WaitIO's
+    /// `uring_buf_read_wait` arm when the owning ring is boundary-reaped by
+    /// a pool worker). Generic over the park primitive, the authoritative
+    /// IO-state probe, and the targeted blocking reap so the loom models can
+    /// drive every interleaving against model slots.
+    ///
+    /// Shape: register (completed-fast-path first), then a predicate loop
+    /// around `park`. `Notified` re-tests `is_completed` and re-parks
+    /// (spurious/stray notifies are consumed by design). `Recheck`/
+    /// `TimedOut` — the cadence backstop — first re-tests the token, then
+    /// probes `state_settled()` (catches a completion whose token wake was
+    /// dropped: the state advanced without our unpark), and if the IO is
+    /// GENUINELY still pending after a full cadence it degrades to
+    /// `blocking_reap()` — the owner may never reach another task boundary
+    /// (parked idle, wedged), so the waiter drives its ring home itself,
+    /// preserving the any-thread-completes discipline.
+    ///
+    /// Liveness: requires either a live completer (unpark), a bounded park
+    /// (`park` returning Recheck/TimedOut eventually — the production
+    /// cadence default), or both. The abandoned registration decays per the
+    /// module contract.
+    pub fn wait_with(
+        &self,
+        handle: H,
+        mut park: impl FnMut() -> crate::ParkResult,
+        mut state_settled: impl FnMut() -> bool,
+        blocking_reap: impl FnOnce(),
+    ) -> IoWaitOutcome {
+        match self.register(handle) {
+            IoRegister::AlreadyCompleted => return IoWaitOutcome::AlreadyCompleted,
+            IoRegister::Registered => {}
+        }
+        loop {
+            if self.is_completed() {
+                return IoWaitOutcome::Completed;
+            }
+            match park() {
+                crate::ParkResult::Notified => {}
+                crate::ParkResult::Recheck | crate::ParkResult::TimedOut => {
+                    if self.is_completed() {
+                        return IoWaitOutcome::Completed;
+                    }
+                    if state_settled() {
+                        return IoWaitOutcome::StateSettled;
+                    }
+                    blocking_reap();
+                    return IoWaitOutcome::Reaped;
+                }
+            }
+        }
     }
 
     /// Mark complete and hand every registrant to `unpark` (ANY thread may
