@@ -225,7 +225,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      touch another task's parking slot, and a parked thread's slot
     //      routes wakes correctly across session rebinds by construction
     //      (handles go stale by token, not by TLS swap).
-    assert_eq!(count_tree(crates), 464, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 466, re-pinned at m2-agg-sink (M1 scan pipelines + M2 aggregation
+    // sink merged): the two runtime engagement arms each add a per-helper
+    // executor slot —
+    //   4. executor/execmain/src/lanev2/runtime_scan.rs WORKER_EXEC
+    //   5. executor/execmain/src/lanev2/runtime_agg.rs WORKER_EXEC
+    //      — each holds the BOUND HELPER's thread-local QueryDesc handle for
+    //      one engagement drive (built inside the query-task binding, torn
+    //      down before unbind on every path, stale-checked at rebuild).
+    //      Deliberately non-session TLS: the slot exists only between
+    //      POST_TASK_PARK entry and exit on a parallel helper thread; no
+    //      session survives across it and the binder owns all session state
+    //      movement (envelope capture/restore must never see a mid-drive
+    //      executor).
+    assert_eq!(count_tree(crates), 466, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
