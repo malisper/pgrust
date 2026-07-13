@@ -51,34 +51,75 @@ pub fn read_header_opt(hdr: &[u8]) -> PgResult<Option<(u64, u64, u32)>> {
     read_header(hdr).map(Some)
 }
 
-// want_sums materializes the v4 per-RG sums into FooterRg::sums (the writer's
-// reopen-append path re-emits them); readers leave them on disk and consume
-// lazily via Part::rg_sum. The CRC always covers the whole footer body.
+// Deterministic footer section lengths for a (version, nrgs, ncols) footer;
+// the v7 length-stats section additionally needs the prelude's flag count.
+pub(crate) struct FooterLayout {
+    pub pre_len: usize,
+    pub ndv_len: usize,
+    pub sums_len: usize,
+    pub sorted_len: usize,
+    pub ckey_len: usize,
+}
+
+pub(crate) fn footer_layout(version: u32, nrgs: usize, ncols: usize) -> FooterLayout {
+    FooterLayout {
+        // v7 prelude: nrgs u32 | ncols u32 | ncols length-stats flag bytes.
+        pre_len: if version >= CB_VERSION_V7 { 8 + ncols } else { 8 },
+        ndv_len: if version >= CB_VERSION_V2 { ncols * 8 } else { 0 },
+        sums_len: if version >= CB_VERSION_V4 { nrgs * ncols * 16 } else { 0 },
+        sorted_len: if version >= CB_VERSION_V5 { ncols } else { 0 },
+        ckey_len: if version >= CB_VERSION_V6 { CB_CLUSTER_KEY_SECTION_LEN } else { 0 },
+    }
+}
+
+impl FooterLayout {
+    // Byte offset (footer-relative) of the v7 length-stats section.
+    pub(crate) fn lenstats_off(&self, nrgs: usize, ncols: usize) -> usize {
+        self.pre_len
+            + nrgs * 24
+            + nrgs * ncols * 24
+            + self.ndv_len
+            + self.sums_len
+            + self.sorted_len
+            + self.ckey_len
+    }
+}
+
+// want_sums materializes the v4 per-RG sums (and the v7 per-granule length
+// stats) into FooterRg for the writer's reopen-append re-emit; readers leave
+// both on disk and consume lazily via Part::rg_sum / Part::granule_len_stats.
+// The CRC always covers the whole footer body.
 pub fn read_footer_rgs(
     file: &mut SegFile,
     footer_off: u64,
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>)> {
+) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>)> {
     let total_len = file.total_len();
-    if footer_off < CB_HEADER_LEN || footer_off.checked_add(8).is_none_or(|e| e > total_len) {
+    let pre_len = if version >= CB_VERSION_V7 { 8 + ncols } else { 8 };
+    if footer_off < CB_HEADER_LEN
+        || footer_off.checked_add(pre_len as u64).is_none_or(|e| e > total_len)
+    {
         return Err(Box::new(PgError::error(
             "cbstore: corrupt part (footer offset out of bounds)".to_string(),
         )));
     }
-    let mut fixed = [0u8; 8];
+    let mut fixed = vec![0u8; pre_len];
     file.read_exact_at(&mut fixed, footer_off)?;
     let nrgs = get_u32(&fixed, 0) as usize;
     let fncols = get_u32(&fixed, 4) as usize;
     if fncols != ncols {
         return Err(Box::new(PgError::error("cbstore: footer ncols mismatch".to_string())));
     }
-    let ndv_len = if version >= CB_VERSION_V2 { ncols * 8 } else { 0 };
-    let sums_len = if version >= CB_VERSION_V4 { nrgs * ncols * 16 } else { 0 };
-    let sorted_len = if version >= CB_VERSION_V5 { ncols } else { 0 };
-    let ckey_len = if version >= CB_VERSION_V6 { CB_CLUSTER_KEY_SECTION_LEN } else { 0 };
-    let body_len = 8 + nrgs * 24 + nrgs * ncols * 24 + ndv_len + sums_len + sorted_len + ckey_len + 16;
+    let lay = footer_layout(version, nrgs, ncols);
+    let nlencols = if version >= CB_VERSION_V7 {
+        fixed[8..8 + ncols].iter().filter(|&&b| b != 0).count()
+    } else {
+        0
+    };
+    let lenstats_len = nrgs * GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
+    let body_len = lay.lenstats_off(nrgs, ncols) + lenstats_len + 16;
     // Bounds-gate before the allocation and read: a torn/garbage footer word
     // must produce a clean error, not a huge alloc or a read past EOF.
     if body_len as u64 > total_len - footer_off {
@@ -88,8 +129,9 @@ pub fn read_footer_rgs(
     }
     let mut buf = vec![0u8; body_len];
     file.read_exact_at(&mut buf, footer_off)?;
-    parse_footer(&buf, nrgs, ncols, version, want_sums)
-        .map(|(rgs, ndv, sorted, ckey)| (rgs, footer_off + body_len as u64, ndv, sorted, ckey))
+    parse_footer(&buf, nrgs, ncols, version, want_sums).map(|(rgs, ndv, sorted, ckey, lenflags)| {
+        (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags)
+    })
 }
 
 pub fn parse_footer(
@@ -98,7 +140,7 @@ pub fn parse_footer(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>)> {
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>)> {
     let tail = buf.len() - 16;
     if get_u32(buf, tail + 12) != CB_FOOTER_MAGIC
         || get_u64(buf, tail) != buf.len() as u64
@@ -106,8 +148,14 @@ pub fn parse_footer(
     {
         return Err(Box::new(PgError::error("cbstore: corrupt footer".to_string())));
     }
+    // v7 prelude tail: per-column length-stats flags; all-0 on pre-v7 parts.
+    let mut lenflags = vec![0u8; ncols];
+    if version >= CB_VERSION_V7 {
+        lenflags.copy_from_slice(&buf[8..8 + ncols]);
+    }
+    let nlencols = lenflags.iter().filter(|&&b| b != 0).count();
     let mut rgs = Vec::with_capacity(nrgs);
-    let mut off = 8;
+    let mut off = if version >= CB_VERSION_V7 { 8 + ncols } else { 8 };
     for _ in 0..nrgs {
         rgs.push(FooterRg {
             file_off: get_u64(buf, off),
@@ -116,6 +164,7 @@ pub fn parse_footer(
             flags: get_u32(buf, off + 16),
             chunks: Vec::with_capacity(ncols),
             sums: Vec::new(),
+            lenstats: Vec::new(),
         });
         off += 24;
     }
@@ -166,8 +215,26 @@ pub fn parse_footer(
             let o = off + 2 + k * 2;
             cluster_key.push(u16::from_le_bytes(buf[o..o + 2].try_into().unwrap()));
         }
+        off += CB_CLUSTER_KEY_SECTION_LEN;
     }
-    Ok((rgs, ndv, sorted, cluster_key))
+    // v7 per-granule length-stats section: materialized only for the writer's
+    // reopen re-emit (want_sums); readers consume it lazily off the mmap
+    // (Part::granule_len_stats). Entries of RGs without RG_FLAG_LENSTATS are
+    // zeros and stay unmaterialized.
+    if version >= CB_VERSION_V7 && nlencols > 0 && want_sums {
+        for rg in rgs.iter_mut() {
+            if rg.flags & RG_FLAG_LENSTATS != 0 {
+                let nslots = GRANULES_PER_RG * nlencols;
+                rg.lenstats.reserve(nslots);
+                for s in 0..nslots {
+                    let e = off + s * CB_LENSTATS_ENTRY_LEN;
+                    rg.lenstats.push((get_u64(buf, e), get_u32(buf, e + 8), get_u32(buf, e + 12)));
+                }
+            }
+            off += GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
+        }
+    }
+    Ok((rgs, ndv, sorted, cluster_key, lenflags))
 }
 
 // Planner sizing: header + footer reads only (no SegMap mmap of the data
@@ -183,7 +250,7 @@ pub fn part_footer_rows(path: &str, ncols: usize) -> PgResult<Option<u64>> {
     if footer_off == 0 {
         return Ok(None);
     }
-    let (rgs, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (rgs, _, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(rgs.iter().map(|rg| rg.nrows as u64).sum()))
 }
 
@@ -200,7 +267,7 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
     if footer_off == 0 || version < CB_VERSION_V2 {
         return Ok(None);
     }
-    let (_, _, ndv, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (_, _, ndv, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(ndv))
 }
 
@@ -221,6 +288,12 @@ pub struct Part {
     // disk, CRC-validated with the footer at open, and are read through the
     // mmap only when a metadata-sum consumer asks (rg_sum).
     sums_off: u64,
+    // v7 per-granule length-stats section (0 = none), consumed lazily like
+    // sums. lenrank maps a column to its dense flagged-column rank (-1 =
+    // no entries for the column).
+    lenstats_off: u64,
+    lenrank: Vec<i16>,
+    nlencols: usize,
 }
 
 impl Part {
@@ -236,7 +309,7 @@ impl Part {
         if footer_off == 0 {
             return Ok(None);
         }
-        let (rgs, _footer_end, _ndv, sorted, cluster_key) =
+        let (rgs, _footer_end, _ndv, sorted, cluster_key, lenflags) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         let Some(map) = SegMap::open(path)? else { return Ok(None) };
@@ -250,13 +323,43 @@ impl Part {
                 )));
             }
         }
+        let lay = footer_layout(version, rgs.len(), ncols);
         let sums_off = if version >= CB_VERSION_V4 {
-            let ndv_len = if version >= CB_VERSION_V2 { ncols * 8 } else { 0 };
-            footer_off + (8 + rgs.len() * 24 + rgs.len() * ncols * 24 + ndv_len) as u64
+            footer_off
+                + (lay.pre_len + rgs.len() * 24 + rgs.len() * ncols * 24 + lay.ndv_len) as u64
         } else {
             0
         };
-        Ok(Some(Part { map, rgs, ncols, footer_off, sorted, cluster_key, sums_off }))
+        let nlencols = lenflags.iter().filter(|&&b| b != 0).count();
+        let lenstats_off = if version >= CB_VERSION_V7 && nlencols > 0 {
+            footer_off + lay.lenstats_off(rgs.len(), ncols) as u64
+        } else {
+            0
+        };
+        let mut rank = 0i16;
+        let lenrank = lenflags
+            .iter()
+            .map(|&f| {
+                if f != 0 {
+                    rank += 1;
+                    rank - 1
+                } else {
+                    -1
+                }
+            })
+            .collect();
+        Ok(Some(Part {
+            map,
+            rgs,
+            ncols,
+            footer_off,
+            sorted,
+            cluster_key,
+            sums_off,
+            lenstats_off,
+            lenrank,
+            nlencols,
+        }))
     }
 
     // Footer sum for (rg, col); caller gates on RG_FLAG_SUMS (which only a
@@ -264,6 +367,33 @@ impl Part {
     pub fn rg_sum(&self, rg: usize, col: usize) -> i128 {
         debug_assert!(self.sums_off != 0 && self.rgs[rg].flags & RG_FLAG_SUMS != 0);
         get_i128(self.bytes(), self.sums_off as usize + (rg * self.ncols + col) * 16)
+    }
+
+    /// True when the part carries a v7 length-stats section with entries for
+    /// column `col` (per-RG exactness is still RG_FLAG_LENSTATS's business —
+    /// see `granule_len_stats`).
+    pub fn has_len_stats(&self, col: usize) -> bool {
+        self.lenstats_off != 0 && self.lenrank.get(col).is_some_and(|&r| r >= 0)
+    }
+
+    /// v7 footer length stats for (rg, granule, col): (sum(octet_length),
+    /// non-null count, empty-string count) over the granule's rows. None =
+    /// the part/RG/column carries no stats (v<=6 part, preserved RG, or a
+    /// non-text column) — callers fall back to the row path.
+    pub fn granule_len_stats(&self, rg: usize, g: usize, col: usize) -> Option<(u64, u32, u32)> {
+        if self.lenstats_off == 0 || self.rgs[rg].flags & RG_FLAG_LENSTATS == 0 {
+            return None;
+        }
+        let rank = *self.lenrank.get(col)?;
+        if rank < 0 {
+            return None;
+        }
+        debug_assert!(g < GRANULES_PER_RG);
+        let e = self.lenstats_off as usize
+            + ((rg * GRANULES_PER_RG + g) * self.nlencols + rank as usize)
+                * CB_LENSTATS_ENTRY_LEN;
+        let b = self.bytes();
+        Some((get_u64(b, e), get_u32(b, e + 8), get_u32(b, e + 12)))
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -624,6 +754,10 @@ mod tests {
         let mut f = Vec::new();
         put_u32(&mut f, rg_rows.len() as u32);
         put_u32(&mut f, ncols as u32);
+        if version >= CB_VERSION_V7 {
+            // No length-stats columns: all-zero flags, empty stats section.
+            f.extend_from_slice(&vec![0u8; ncols]);
+        }
         for &n in rg_rows {
             put_u64(&mut f, 0);
             put_u32(&mut f, n);
@@ -770,7 +904,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _, _) =
+        let (rgs, _, _, _, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 2, CB_VERSION_V4, true).unwrap();
         assert_eq!(rgs[0].flags & RG_FLAG_SUMS, RG_FLAG_SUMS);
         assert_eq!(rgs[0].sums, vec![-(1i128 << 70), 42]);
@@ -785,6 +919,9 @@ mod tests {
         let mut f = Vec::new();
         put_u32(&mut f, 2);
         put_u32(&mut f, 2);
+        // v7 prelude flags (header below stamps CB_VERSION): no length-stats
+        // columns.
+        f.extend_from_slice(&[0u8, 0u8]);
         for n in [100u32, 50] {
             put_u64(&mut f, 0);
             put_u32(&mut f, n);
@@ -840,12 +977,29 @@ mod tests {
         let path = tmp("sums3");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V3, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, sorted, _) =
+        let (rgs, _, _, sorted, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V3, true).unwrap();
         assert_eq!(sorted, vec![0, 0, 0]);
         for rg in &rgs {
             assert_eq!(rg.flags & RG_FLAG_SUMS, 0);
             assert!(rg.sums.is_empty());
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn footer_v6_reads_lenstats_unknown() {
+        // Feature detection: pre-v7 footers carry no length-stats flags or
+        // entries; readers see all-unknown and fall back to the row path.
+        let path = tmp("lens6");
+        write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V6, &[1, 1, 1], &[]);
+        let mut file = SegFile::open_rw(&path).unwrap();
+        let (rgs, _, _, _, _, lenflags) =
+            read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V6, true).unwrap();
+        assert_eq!(lenflags, vec![0, 0, 0]);
+        for rg in &rgs {
+            assert_eq!(rg.flags & RG_FLAG_LENSTATS, 0);
+            assert!(rg.lenstats.is_empty());
         }
         std::fs::remove_file(&path).unwrap();
     }
