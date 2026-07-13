@@ -618,7 +618,7 @@ fn classify_str_var(expr: Node<'_>, expected: Oid) -> Option<(u16, LaneWidth)> {
 // DEFAULT and libc/ICU collations refuse: their per-row comparison can
 // allocate and (ICU) error mid-batch, which the fold cannot replay at C's
 // row.
-fn str_collation_safe(collid: Oid) -> bool {
+pub fn str_collation_safe(collid: Oid) -> bool {
     if collid == C_COLLATION_OID || collid == POSIX_COLLATION_OID {
         return true;
     }
