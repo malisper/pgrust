@@ -14496,6 +14496,7 @@ dependencies = [
  "pg_walinspect",
  "pgarch",
  "pgcrypto",
+ "pgoutput",
  "pgstat",
  "pgtz",
  "pgvector",

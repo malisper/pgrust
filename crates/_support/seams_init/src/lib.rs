@@ -137,6 +137,7 @@ pub fn init_all() {
     logical::init_seams();
     origin::init_seams();
     test_decoding::init_seams();
+    pgoutput::init_seams();
     adt_formatting::init_seams();
     citext::init_seams();
     uuid_ossp::init_seams();

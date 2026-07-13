@@ -282,6 +282,7 @@ logical = { path = "../../backend/replication/logical/logical" }
 origin = { path = "../../backend/replication/origin" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
+pgoutput = { path = "../../contrib/pgoutput" }
 test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
