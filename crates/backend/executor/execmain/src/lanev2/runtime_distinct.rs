@@ -558,6 +558,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     sort: &mut ::nodesort::SortState<'mcx>,
     outer: &mut crate::procnode::PlanStateNode<'mcx>,
     outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    rd_shape_refused: &mut bool,
     k: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -567,6 +568,11 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    // Static shape refusal memo: the plan-shape gates below cannot flip for
+    // this node; skip the whole probe (incl. spec derivation) on re-pulls.
+    if *rd_shape_refused {
+        return Ok(None);
+    }
     lane_trace("runtime-distinct: probed");
 
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
@@ -604,6 +610,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
     let Some(order) = super::hashgroup_order_spec(agg, sort.plan, k) else {
         refused("order spec");
+        *rd_shape_refused = true;
         return Ok(None);
     };
     let Some(desc) = outer_desc.as_ref() else {
@@ -612,10 +619,12 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     };
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc) else {
         refused("spec derivation");
+        *rd_shape_refused = true;
         return Ok(None);
     };
     if spec.max_att > desc.natts {
         refused("att bound");
+        *rd_shape_refused = true;
         return Ok(None);
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
@@ -638,11 +647,13 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         || !std::ptr::eq(sort_node.as_sort().expect("Sort tag"), sort.plan)
     {
         refused("agg child not this Sort");
+        *rd_shape_refused = true;
         return Ok(None);
     }
     let Some(scan_node) = sort.plan.plan.lefttree else { return Ok(None) };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
         refused("sort child not SeqScan");
+        *rd_shape_refused = true;
         return Ok(None);
     }
     let scan_plan = scan_node.as_seq_scan().expect("SeqScan tag");
@@ -650,6 +661,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         || !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
     {
         refused("parallel-unsafe scan exprs");
+        *rd_shape_refused = true;
         return Ok(None);
     }
     if !estate

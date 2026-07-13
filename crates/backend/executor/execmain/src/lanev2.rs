@@ -4251,7 +4251,7 @@ pub fn try_own_sort<'mcx>(
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
 
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
@@ -6902,7 +6902,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !state.sort_done() {
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
@@ -6915,7 +6915,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
             // GUC read and fall through). Owns the node on engagement;
             // refusal/fallback keeps every serial arm below byte-identical.
             match runtime_distinct::try_own_sorted_distinct_runtime(
-                agg, state, &mut **outer, outer_desc, k, estate,
+                agg, state, &mut **outer, outer_desc, rd_shape_refused, k, estate,
             )? {
                 Some(row) => return Ok(Some(row)),
                 None => {}
@@ -10027,7 +10027,7 @@ pub fn try_own_limit<'mcx>(
             // (the tuplesort bound set by the prologue makes it top-N,
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
             if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple
@@ -11148,7 +11148,7 @@ pub fn try_pardistinct_worker_sort<'mcx>(
         s.pd_state = Some(false);
         return Ok(None);
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
         s.pd_state = Some(false);
         return Ok(None);
