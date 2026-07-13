@@ -200,7 +200,7 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
         _target_rec_ptr: XLogRecPtr,
         cur_page: &mut [u8],
     ) -> PgResult<i32> {
-        let flushptr = WalSndWaitForWal(target_page_ptr + req_len as u64)?;
+        let mut flushptr = WalSndWaitForWal(target_page_ptr + req_len as u64)?;
 
         // Fail if not enough WAL (implies we are going to shut down).
         if flushptr < target_page_ptr + req_len as u64 {
@@ -208,12 +208,26 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
         }
 
         // Non-cascading: the current insertion timeline. (Logical decoding on
-        // standby is refused upstream.)
+        // standby is refused upstream.) A slot restarting before a promotion
+        // reads pages from a HISTORIC timeline: XLogReadDetermineTimeline
+        // picks it, the read is clamped to the switch point, and the read
+        // goes to the old timeline's segment (C delegates the same decision
+        // to WalSndSegmentOpen via state->currTLI; the local-read guts here
+        // mirror read_local_xlog_page, which 010's SQL path already proves).
         let curr_tli = transam_xlog::ctl::GetWALInsertionTimeLine();
         xlogutils::XLogReadDetermineTimeline(v, target_page_ptr, req_len as u32, curr_tli)?;
+        let read_tli = if v.currTLI != curr_tli {
+            // Historical timeline: read only up to the switch point.
+            flushptr = v.currTLIValidUntil;
+            v.currTLI
+        } else {
+            curr_tli
+        };
 
         let count: i32 = if target_page_ptr + transam_xlog::XLOG_BLCKSZ as u64 <= flushptr {
             transam_xlog::XLOG_BLCKSZ as i32
+        } else if target_page_ptr + req_len as u64 > flushptr {
+            return Ok(-1);
         } else {
             (flushptr - target_page_ptr) as i32
         };
@@ -223,7 +237,7 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
             &mut cur_page[..count as usize],
             target_page_ptr,
             count as usize,
-            curr_tli,
+            read_tli,
         )? {
             ereport(ERROR)
                 .errcode_for_file_access()
