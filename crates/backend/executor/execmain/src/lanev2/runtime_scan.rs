@@ -281,7 +281,12 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
             } else {
                 // Binder validate() refusal: fail-closed non-participation.
                 // The leader detects the nobody-participates case and falls
-                // back to the serial arm.
+                // back to the serial arm. Traced: a persistent refusal on
+                // re-parked helpers is a helper-state bug, not a shape gate.
+                lane_trace(&format!(
+                    "runtime-scan: helper bind refused: {}",
+                    e.message()
+                ));
                 payload.refused.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -718,8 +723,13 @@ fn engage_ceremony<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_scan_main", dop)?;
 
+    // Every exit past submission must complete the pinned RG (nobody but
+    // this frame's helpers can drive it): held OUTSIDE the body closure so
+    // `?`-propagated errors reap it too.
+    let mut submitted: Option<runtime::RgHandle> = None;
+
     // From here on, every exit runs the teardown tail below.
-    let body = (|| -> PgResult<EngageOutcome> {
+    let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
         let nworkers = parallel::nworkers(pcxt);
         if nworkers <= 0 {
@@ -747,9 +757,11 @@ fn engage_ceremony<'mcx>(
             .rg
             .set(rg.downgrade())
             .unwrap_or_else(|_| unreachable!("rg set once"));
+        *mut_submitted = Some(rg.clone());
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         if launched <= 0 {
+            lane_trace("runtime-scan: zero workers launched");
             drain_rg(rt, payload, &rg);
             return Ok(EngageOutcome::Fallback);
         }
@@ -777,6 +789,7 @@ fn engage_ceremony<'mcx>(
             let refused = payload.refused.load(Ordering::SeqCst);
             let started = payload.started.load(Ordering::SeqCst);
             if started == 0 && refused >= launched as usize {
+                lane_trace(&format!("runtime-scan: all {refused} helpers refused the bind"));
                 rg.abort();
                 drain_rg(rt, payload, &rg);
                 return Ok(EngageOutcome::Fallback);
@@ -804,10 +817,17 @@ fn engage_ceremony<'mcx>(
             return Ok(EngageOutcome::Fallback);
         }
         Ok(EngageOutcome::Completed)
-    })();
+    })(&mut submitted);
 
-    // Teardown tail (every path): destroy joins helpers; the RG is complete
-    // by construction on every branch above.
+    // Teardown tail (every path): a submitted RG must be COMPLETE before
+    // the parallel context is destroyed and before this frame's arena can
+    // unwind (helpers reference it). Ordinary completion already happened
+    // on the Ok paths; error paths reap here (idempotent).
+    if let Some(rg) = &submitted {
+        if rg.try_outcome().is_none() {
+            drain_rg(rt, payload, rg);
+        }
+    }
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
