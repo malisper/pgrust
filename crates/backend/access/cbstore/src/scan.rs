@@ -13,6 +13,24 @@ use std::sync::atomic::Ordering;
 use crate::format::*;
 use crate::reader::Part;
 
+// Reader-side intcodec kill switch: PGRUST_CBSTORE_INTCODEC_READ=off drops
+// DeltaFor chunks from the int fast paths that key on granule zone maps
+// (adaptive traversal, staged window min/max) — decode itself is unaffected
+// (the data must stay readable regardless).
+pub(crate) fn intcodec_read_fastpaths() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("PGRUST_CBSTORE_INTCODEC_READ") {
+        Ok(v) => !matches!(v.trim(), "off" | "0" | "false"),
+        Err(_) => true,
+    })
+}
+
+// An int-shape chunk whose granule zone maps may drive value fast paths.
+pub(crate) fn int_zonemap_encoding(e: Encoding) -> bool {
+    matches!(e, Encoding::Raw | Encoding::For | Encoding::Const)
+        || (e == Encoding::DeltaFor && intcodec_read_fastpaths())
+}
+
 struct ColDecode {
     datums: Vec<Datum>,
     dict: Vec<Datum>,
@@ -486,9 +504,8 @@ impl<'mcx> CbScanDescData<'mcx> {
                 }
                 let ngranules = (part.rgs[rg].nrows as usize).div_ceil(GRANULE_ROWS);
                 let chunk = part.chunk(rg, col);
-                match chunk.hdr.encoding {
-                    Encoding::Raw | Encoding::For | Encoding::Const => {}
-                    _ => return Ok(false),
+                if !int_zonemap_encoding(chunk.hdr.encoding) {
+                    return Ok(false);
                 }
                 for g in 0..ngranules {
                     let ge = chunk.granule(g);
@@ -1019,9 +1036,8 @@ impl<'mcx> CbScanDescData<'mcx> {
         }
         let part = self.part.as_ref()?;
         let chunk = part.chunk(self.rg, c);
-        match chunk.hdr.encoding {
-            Encoding::Raw | Encoding::For | Encoding::Const => {}
-            _ => return None,
+        if !int_zonemap_encoding(chunk.hdr.encoding) {
+            return None;
         }
         let ge = chunk.granule(self.granule);
         Some((ge.min, ge.max))

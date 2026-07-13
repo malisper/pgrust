@@ -150,7 +150,7 @@ fn main() {
         let is_int = (0..part.rgs.len()).all(|rg| {
             matches!(
                 part.chunk(rg, c).hdr.encoding,
-                Encoding::Raw | Encoding::For | Encoding::Const
+                Encoding::Raw | Encoding::For | Encoding::Const | Encoding::DeltaFor
             )
         });
         if !is_int {

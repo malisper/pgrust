@@ -39,6 +39,47 @@ pub struct CbWriterOpts {
     // Per-column codec choice (explicit override or the table default).
     pub codec: Vec<CodecChoice>,
     pub zstd_level: i32,
+    // Per-column intcodec (DeltaFor) ingest gate. Default from the global
+    // kill switch PGRUST_CBSTORE_INTCODEC (on unless off/0/false);
+    // per-column overrides via PGRUST_CBSTORE_INTCODEC_COLS
+    // ("UserID=off,URLHash=on"), resolved against the relation in
+    // writer_opts_of — unknown names error (the codec_cols posture).
+    pub delta: Vec<bool>,
+}
+
+// Global intcodec ingest kill switch, read once per writer open.
+pub(crate) fn intcodec_env_default() -> bool {
+    match std::env::var("PGRUST_CBSTORE_INTCODEC") {
+        Ok(v) => !matches!(v.trim(), "off" | "0" | "false"),
+        Err(_) => true,
+    }
+}
+
+fn apply_intcodec_cols_env(
+    rel: &::types_rel::Relation<'_>,
+    delta: &mut [bool],
+) -> PgResult<()> {
+    let Ok(cols) = std::env::var("PGRUST_CBSTORE_INTCODEC_COLS") else {
+        return Ok(());
+    };
+    for pair in cols.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (name, v) = pair.split_once('=').ok_or_else(|| {
+            Box::new(PgError::error(format!(
+                "cbstore: bad PGRUST_CBSTORE_INTCODEC_COLS entry \"{pair}\""
+            )))
+        })?;
+        let idx = col_index_of(rel, name.trim())? as usize;
+        delta[idx] = match v.trim() {
+            "on" | "1" | "true" => true,
+            "off" | "0" | "false" => false,
+            other => {
+                return Err(Box::new(PgError::error(format!(
+                    "cbstore: bad PGRUST_CBSTORE_INTCODEC_COLS value \"{other}\""
+                ))))
+            }
+        };
+    }
+    Ok(())
 }
 
 impl CbWriterOpts {
@@ -48,6 +89,7 @@ impl CbWriterOpts {
             // Train #8 ingest default: LZ4 (matches CbstoreOptions::default).
             codec: vec![CodecChoice::Lz4; ncols],
             zstd_level: ZSTD_LEVEL_DEFAULT,
+            delta: vec![intcodec_env_default(); ncols],
         }
     }
 }
@@ -82,6 +124,7 @@ pub fn writer_opts_of(
 ) -> PgResult<CbWriterOpts> {
     let mut out = CbWriterOpts::plain(coltypes.len());
     let Some(o) = rel.rd_options.as_ref().and_then(|o| o.cbstore()) else {
+        apply_intcodec_cols_env(rel, &mut out.delta)?;
         return Ok(out);
     };
     out.zstd_level = o.zstd_level;
@@ -118,6 +161,7 @@ pub fn writer_opts_of(
             }
         };
     }
+    apply_intcodec_cols_env(rel, &mut out.delta)?;
     Ok(out)
 }
 
@@ -127,6 +171,8 @@ pub fn writer_opts_of(
 pub(crate) struct CodecCtx {
     pub choice: CodecChoice,
     pub zstd_level: i32,
+    /// intcodec: DeltaFor may be considered for this column's chunks.
+    pub delta: bool,
 }
 
 impl CodecCtx {
@@ -192,7 +238,22 @@ pub(crate) fn frame_len(comp_len: usize) -> usize {
 
 #[cfg(test)]
 pub(crate) fn test_codec_ctx() -> CodecCtx {
-    CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT }
+    // delta off: the pre-intcodec encoder tests pin For/Raw/Const shapes;
+    // DeltaFor coverage lives in the dedicated intcodec tests.
+    CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false }
+}
+
+// intcodec ingest counters (gate observability, text_gate posture).
+pub(crate) static INTCODEC_DELTA_CHOSEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static INTCODEC_KEPT_PLAIN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// (delta_chosen, kept_plain) chunk counts since boot. `kept_plain` counts
+/// only chunks where the delta arm was evaluated and lost.
+pub fn intcodec_stats() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (INTCODEC_DELTA_CHOSEN.load(Relaxed), INTCODEC_KEPT_PLAIN.load(Relaxed))
 }
 
 struct IntBuilder {
@@ -541,7 +602,11 @@ impl CbWriter {
                 body.push(0);
             }
             let chunk_off = body.len() as u64;
-            let cc = CodecCtx { choice: self.opts.codec[c], zstd_level: self.opts.zstd_level };
+            let cc = CodecCtx {
+                choice: self.opts.codec[c],
+                zstd_level: self.opts.zstd_level,
+                delta: self.opts.delta[c],
+            };
             let (min, max) = match b {
                 ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
                 ColBuilder::Text(tb) => encode_text_chunk(&mut body, tb, ngranules, &cc),
@@ -721,6 +786,71 @@ fn enc_int_granule(out: &mut Vec<u8>, vals: &[i64], g: usize, encoding: Encoding
     }
 }
 
+// Serialize granule g's DeltaFor raw image into `out` (format.rs §DeltaFor):
+// [first i64 | dmin i64 | width u8 | pad7 | (d[i]-dmin) at width, i in 1..n].
+// All arithmetic wraps (i64 bounds legal); width 0 = every delta == dmin.
+fn enc_delta_granule(out: &mut Vec<u8>, vals: &[i64], g: usize) {
+    let lo = g * GRANULE_ROWS;
+    let hi = (lo + GRANULE_ROWS).min(vals.len());
+    let v = &vals[lo..hi];
+    let mut dmin = 0i64;
+    let mut dmax = 0i64;
+    for i in 1..v.len() {
+        let d = v[i].wrapping_sub(v[i - 1]);
+        if i == 1 {
+            (dmin, dmax) = (d, d);
+        } else {
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
+        }
+    }
+    let range = (dmax as i128 - dmin as i128) as u128;
+    let width: u8 = if range == 0 {
+        0
+    } else if range <= u8::MAX as u128 {
+        1
+    } else if range <= u16::MAX as u128 {
+        2
+    } else if range <= u32::MAX as u128 {
+        4
+    } else {
+        8
+    };
+    out.extend_from_slice(&v[0].to_le_bytes());
+    out.extend_from_slice(&dmin.to_le_bytes());
+    out.push(width);
+    out.extend_from_slice(&[0u8; 7]);
+    // (d - dmin) truncated to `width` bytes: the true difference is < 2^(8w)
+    // for w <= 4 by the range test, and mod-2^64 for w == 8 — the decoder
+    // adds dmin back in the same wrapping domain either way.
+    match width {
+        0 => {}
+        1 => {
+            for i in 1..v.len() {
+                out.push(v[i].wrapping_sub(v[i - 1]).wrapping_sub(dmin) as u8);
+            }
+        }
+        2 => {
+            for i in 1..v.len() {
+                let d = v[i].wrapping_sub(v[i - 1]).wrapping_sub(dmin) as u16;
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+        4 => {
+            for i in 1..v.len() {
+                let d = v[i].wrapping_sub(v[i - 1]).wrapping_sub(dmin) as u32;
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+        _ => {
+            for i in 1..v.len() {
+                let d = v[i].wrapping_sub(v[i - 1]).wrapping_sub(dmin) as u64;
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+    }
+}
+
 pub(crate) fn encode_int_chunk(
     body: &mut Vec<u8>,
     vals: &[i64],
@@ -761,6 +891,8 @@ pub(crate) fn encode_int_chunk(
     // granule; keep the plain zero-decode lane unless the full chunk clears
     // the >=10% win gate too. Narrow FOR lanes (1-2B) are the decode-hot
     // class — pick() holds them to a stricter ZSTD threshold.
+    let mut encoding = encoding;
+    let mut width = width;
     let mut frames: Vec<(Vec<u8>, u32)> = Vec::new();
     let mut codec = Codec::None;
     if encoding != Encoding::Const {
@@ -787,13 +919,56 @@ pub(crate) fn encode_int_chunk(
             }
         }
     }
-    let payload_len = match encoding {
+    let mut payload_len = match encoding {
         Encoding::Const => 0u64,
         _ if codec != Codec::None => {
             frames.iter().map(|(f, _)| frame_len(f.len()) as u64).sum()
         }
         _ => (n * width as usize) as u64,
     };
+    // intcodec delta arm: encode every granule's DeltaFor image, sample
+    // granule 0 for the frame codec, and switch the whole chunk to DeltaFor
+    // iff the framed delta payload beats the plain arm's FINAL size (incl.
+    // its codec win) by >=10%. Deterministic — the decision is fully
+    // recorded in the chunk header (encoding + codec tags).
+    if cc.delta && encoding != Encoding::Const {
+        let mut dframes: Vec<(Vec<u8>, u32)> = Vec::with_capacity(ng);
+        let mut dcodec = Codec::None;
+        let mut dtotal = 0u64;
+        let mut img = Vec::with_capacity(24 + GRANULE_ROWS * 8);
+        for g in 0..ng {
+            img.clear();
+            enc_delta_granule(&mut img, vals, g);
+            if g == 0 {
+                // Delta lanes decode through a prefix sum regardless, so the
+                // narrow_hot LZ4 bias does not apply — let ZSTD compete on
+                // ratio (survey: delta+ZSTD dominates on the CB bank).
+                dcodec = cc.pick(&img, false).unwrap_or(Codec::None);
+            }
+            let stored = match dcodec {
+                Codec::None => img.clone(),
+                c => {
+                    let comp = cc.compress(c, &img);
+                    // Per-granule incompressible guard: a frame must never
+                    // expand past its raw image (keeps worst case bounded).
+                    if comp.len() >= img.len() { img.clone() } else { comp }
+                }
+            };
+            // comp_len == raw_len marks an in-place (uncompressed) frame.
+            dtotal += frame_len(stored.len()) as u64;
+            dframes.push((stored, img.len() as u32));
+        }
+        if dtotal * 10 <= payload_len * 9 {
+            encoding = Encoding::DeltaFor;
+            width = 0;
+            codec = dcodec;
+            frames = dframes;
+            payload_len = dtotal;
+            INTCODEC_DELTA_CHOSEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            INTCODEC_KEPT_PLAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     ChunkHeader {
         encoding,
         width,
@@ -805,8 +980,11 @@ pub(crate) fn encode_int_chunk(
     }
     .encode(body);
     let mut frame_off = 0u64;
+    // DeltaFor granules are ALWAYS framed (even under Codec::None), so their
+    // directory offsets are frame offsets unconditionally.
+    let framed = codec != Codec::None || encoding == Encoding::DeltaFor;
     for (g, &(gmin, gmax)) in gmm.iter().enumerate() {
-        let off = if codec != Codec::None {
+        let off = if framed {
             let o = frame_off;
             frame_off += frame_len(frames[g].0.len()) as u64;
             o
@@ -854,6 +1032,11 @@ pub(crate) fn encode_int_chunk(
     }
     match encoding {
         Encoding::Const => {}
+        Encoding::DeltaFor => {
+            for (stored, raw_len) in &frames {
+                push_frame(body, *raw_len as usize, stored);
+            }
+        }
         Encoding::For | Encoding::Raw => {
             if codec != Codec::None {
                 for (comp, raw_len) in &frames {
@@ -1479,7 +1662,7 @@ mod codec_tests {
         let n = GRANULE_ROWS * 2 + GRANULE_ROWS / 2;
         let vals: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + (i % 97) * 3).collect();
         for choice in [CodecChoice::Lz4, CodecChoice::Zstd] {
-            let cc = CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT };
+            let cc = CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
             let mut body = Vec::new();
             let (min, max) =
                 encode_int_chunk(&mut body, &vals, n.div_ceil(GRANULE_ROWS) as u32, &cc);
@@ -1522,7 +1705,7 @@ mod codec_tests {
     fn plain_choice_writes_v5_shape() {
         let n = GRANULE_ROWS;
         let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
-        let cc = CodecCtx { choice: CodecChoice::Plain, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let cc = CodecCtx { choice: CodecChoice::Plain, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
         let mut body = Vec::new();
         encode_int_chunk(&mut body, &vals, 1, &cc);
         let cv = ChunkView::at(&body, 0, n as u32);
@@ -1543,7 +1726,7 @@ mod codec_tests {
             tb.offs.push((tb.blob.len() as u32, r.len() as u32));
             tb.blob.extend_from_slice(r);
         }
-        let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT };
+        let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
         let mut body = Vec::new();
         encode_text_chunk(&mut body, &tb, 1, &cc);
         let cv = ChunkView::at(&body, 0, rows.len() as u32);
@@ -1601,6 +1784,154 @@ mod codec_tests {
         for (i, d) in out.iter().enumerate() {
             assert_eq!(crate::varlena_bytes(*d).unwrap(), &rows[i][..], "row {i}");
         }
+    }
+}
+
+#[cfg(test)]
+mod intcodec_tests {
+    use super::*;
+    use crate::reader::ChunkView;
+
+    fn delta_ctx(choice: CodecChoice) -> CodecCtx {
+        CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT, delta: true }
+    }
+
+    fn decode_ints(body: &[u8], nrows: usize) -> Vec<i64> {
+        let cv = ChunkView::at(body, 0, nrows as u32);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut got = Vec::new();
+        for g in 0..cv.hdr.ngranules as usize {
+            cv.decode_granule(g, &mut out, &mut dict, &mut arena);
+            got.extend(out.iter().map(|d| d.as_i64()));
+        }
+        got
+    }
+
+    fn encode(vals: &[i64], cc: &CodecCtx) -> (Vec<u8>, i64, i64) {
+        let mut body = Vec::new();
+        let ng = vals.len().div_ceil(GRANULE_ROWS) as u32;
+        let (min, max) = encode_int_chunk(&mut body, vals, ng, cc);
+        (body, min, max)
+    }
+
+    // Sorted-run BIGINTs (the UserID/EventTime shape): DeltaFor + a codec
+    // frame wins, round-trips across granules incl. a partial tail, and the
+    // granule directory zone maps stay value-domain-exact.
+    #[test]
+    fn deltafor_sorted_run_roundtrip() {
+        let n = GRANULE_ROWS * 2 + GRANULE_ROWS / 2;
+        let mut v = 1_600_000_000_000_000i64; // epoch-us scale
+        let vals: Vec<i64> = (0..n)
+            .map(|i| {
+                v += (i % 7) as i64 * 1_000;
+                v
+            })
+            .collect();
+        let (body, min, max) = encode(&vals, &delta_ctx(CodecChoice::Auto));
+        assert_eq!((min, max), (vals[0], *vals.last().unwrap()));
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.encoding, Encoding::DeltaFor);
+        assert_ne!(cv.hdr.codec, Codec::None);
+        // >=10% smaller than the plain arm's raw 8B image at minimum.
+        assert!((cv.hdr.payload_len as usize) * 10 <= n * 8 * 9);
+        assert_eq!(decode_ints(&body, n), vals);
+        for g in 0..cv.hdr.ngranules as usize {
+            let lo = g * GRANULE_ROWS;
+            let hi = (lo + GRANULE_ROWS).min(n);
+            let ge = cv.granule(g);
+            assert_eq!(ge.min, *vals[lo..hi].iter().min().unwrap(), "g{g}");
+            assert_eq!(ge.max, *vals[lo..hi].iter().max().unwrap(), "g{g}");
+        }
+    }
+
+    // i64 bound wrap: alternating MAX/MIN makes every delta wrap the i64
+    // domain; the Plain choice forces the uncompressed-frame (Codec::None,
+    // comp_len == raw_len) DeltaFor leg. Exact round-trip required.
+    #[test]
+    fn deltafor_i64_bounds_wrapping_plain_frames() {
+        let n = GRANULE_ROWS + 3; // partial tail granule of 3 rows
+        let vals: Vec<i64> =
+            (0..n).map(|i| if i % 2 == 0 { i64::MAX } else { i64::MIN }).collect();
+        let (body, min, max) = encode(&vals, &delta_ctx(CodecChoice::Plain));
+        assert_eq!((min, max), (i64::MIN, i64::MAX));
+        let cv = ChunkView::at(&body, 0, n as u32);
+        // deltas alternate +1/-1 (wrapped): width-1 image, 8x under plain.
+        assert_eq!(cv.hdr.encoding, Encoding::DeltaFor);
+        assert_eq!(cv.hdr.codec, Codec::None);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Strictly descending values: negative deltas throughout.
+    #[test]
+    fn deltafor_negative_deltas_descending() {
+        let n = GRANULE_ROWS * 2;
+        let vals: Vec<i64> = (0..n).map(|i| 5_000_000_000i64 - (i as i64) * 3).collect();
+        let (body, ..) = encode(&vals, &delta_ctx(CodecChoice::Auto));
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.encoding, Encoding::DeltaFor);
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Epoch sentinels: long zero runs punctuated by real timestamps (the
+    // ClientEventTime shape). The sentinel jumps force width-8 deltas, so
+    // the delta arm rightly LOSES the >=10% gate to the (equally
+    // compressible) plain image — the value here is exact round-trip and
+    // gate determinism, not a DeltaFor pick.
+    #[test]
+    fn deltafor_epoch_sentinels() {
+        let n = GRANULE_ROWS * 2;
+        let vals: Vec<i64> = (0..n)
+            .map(|i| if i % 53 == 0 { 1_700_000_000_000_000 + i as i64 } else { 0 })
+            .collect();
+        let (body, ..) = encode(&vals, &delta_ctx(CodecChoice::Auto));
+        let (body2, ..) = encode(&vals, &delta_ctx(CodecChoice::Auto));
+        assert_eq!(body, body2, "gate must be deterministic");
+        assert_eq!(decode_ints(&body, n), vals);
+    }
+
+    // Single-row chunk: min == max collapses to Const before the delta arm;
+    // two distinct rows exercise the 1-delta image.
+    #[test]
+    fn deltafor_tiny_chunks() {
+        let (body, ..) = encode(&[42], &delta_ctx(CodecChoice::Auto));
+        let cv = ChunkView::at(&body, 0, 1);
+        assert_eq!(cv.hdr.encoding, Encoding::Const);
+        assert_eq!(decode_ints(&body, 1), vec![42]);
+
+        let (body, ..) = encode(&[42, -7], &delta_ctx(CodecChoice::Plain));
+        let cv = ChunkView::at(&body, 0, 2);
+        // 24B meta + 0-1B payload never beats the 2x8B plain image by 10%
+        // at this size under Plain -> stays Raw; correctness is the point.
+        assert_eq!(decode_ints(&body, 2), vec![42, -7]);
+        let _ = cv;
+    }
+
+    // Incompressible hash-domain values (the WatchID/URLHash shape): the
+    // delta arm must lose the gate and keep the plain zero-decode lane.
+    #[test]
+    fn deltafor_gate_keeps_plain_on_hashes() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as u64).map(|i| crate::hll::mix64(i) as i64).collect();
+        let before = intcodec_stats();
+        let (body, ..) = encode(&vals, &delta_ctx(CodecChoice::Auto));
+        let after = intcodec_stats();
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_eq!(cv.hdr.encoding, Encoding::Raw);
+        assert_eq!(decode_ints(&body, n), vals);
+        assert!(after.1 > before.1, "kept_plain counter must move");
+    }
+
+    // delta: false (the ingest kill switch's per-chunk effect) never emits
+    // DeltaFor even on the friendliest input.
+    #[test]
+    fn ingest_kill_switch_pins_plain() {
+        let n = GRANULE_ROWS;
+        let vals: Vec<i64> = (0..n as i64).map(|i| i * 1000).collect();
+        let cc = CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
+        let (body, ..) = encode(&vals, &cc);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        assert_ne!(cv.hdr.encoding, Encoding::DeltaFor);
+        assert_eq!(decode_ints(&body, n), vals);
     }
 }
 
@@ -1809,7 +2140,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false });
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -1824,7 +2155,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT });
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false });
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
         assert_eq!(decode_all(&body, n), rows);
