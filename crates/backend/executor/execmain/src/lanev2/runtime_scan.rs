@@ -941,6 +941,33 @@ fn engage_ceremony<'mcx>(
                 drain_rg(rt, payload, &rg);
                 return Ok(EngageOutcome::Fallback);
             }
+            // LIVENESS: every launched helper's task has ENDED (normal hook
+            // exit keeps BGWH_STARTED until after the drive, so this cannot
+            // trip mid-drive) yet the RG is incomplete — helpers died
+            // without a channel message (post-Terminate death, e.g. an
+            // init-path panic-to-ERROR). Nothing claimed => clean fallback;
+            // claimed => reap if possible and surface a real error.
+            if parallel::parallel_workers_all_stopped(pcxt) {
+                if let Some(o) = waiter.try_wait() {
+                    break o;
+                }
+                let claimed = rg.stats().tasks_claimed;
+                lane_trace(&format!(
+                    "runtime-scan: helpers all stopped, rg incomplete (claimed={claimed})"
+                ));
+                rg.abort();
+                let drained = drain_rg(rt, payload, &rg);
+                if claimed == 0 && drained {
+                    return Ok(EngageOutcome::Fallback);
+                }
+                if let Some(e) = payload.take_error() {
+                    return Err(e);
+                }
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime scan helpers exited before completing the scan",
+                )));
+            }
             parallel::wait_parallel_finish_quantum();
         };
 
@@ -1010,21 +1037,37 @@ enum EngageOutcome {
 /// drives the protocol itself — the closed generation refuses every join,
 /// so no morsel work runs; the drive just executes invalidate/finalize/
 /// completion. This is cleanup driving, not leader work execution (§2.5).
+/// Abort + BOUNDED drain of a pinned RG. True = the RG completed (the
+/// normal case: a closed generation refuses every join, so the drive is
+/// pure protocol cleanup and settles within a morsel). False = it could not
+/// be completed — a participant died holding an unsettled pin (worker-death
+/// containment): the RG and its slot are deliberately LEAKED (bounded by
+/// the 128-slot array; a process restart resets everything) and the caller
+/// must surface an error rather than wait forever.
 fn drain_rg(
     rt: &'static Arc<runtime::Runtime>,
     payload: &Arc<RuntimeScanShared>,
     rg: &runtime::RgHandle,
-) {
+) -> bool {
     let _ = payload;
     rg.abort();
-    // Lane exhaustion here would strand the RG; spin-wait for one (bounded
-    // by helper drives, which settle within a morsel).
-    let lane = loop {
+    // Bounded lane wait (~2s): helper drives settle within a morsel.
+    let mut lane = None;
+    for _ in 0..4000 {
         if let Some(l) = rt.acquire_external_lane() {
-            break l;
+            lane = Some(l);
+            break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let Some(lane) = lane else {
+        lane_trace("runtime-scan: LEAKED pinned RG (no external lane for the drain)");
+        return false;
     };
     let mut local = lane.local();
-    let _ = rt.drive_pinned(&mut local, rg);
+    let drained = rt.try_drain_pinned(&mut local, rg, 4000).is_some();
+    if !drained {
+        lane_trace("runtime-scan: LEAKED pinned RG (drain gave up — dead participant?)");
+    }
+    drained
 }
