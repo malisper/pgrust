@@ -540,7 +540,12 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
         Ok(()) => {}
         Err(e) => {
             if entered.get() {
-                payload.sink.fail(e);
+                // Budget refusals are NOT query errors (the leader falls
+                // back to the serial arm); the Err only routed the binder
+                // through its abort-side cleanup.
+                if !payload.sink.budget_refused.load(Ordering::SeqCst) {
+                    payload.sink.fail(e);
+                }
             } else {
                 lane_trace(&format!("runtime-agg: helper bind refused: {}", e.message()));
                 payload.refused.fetch_add(1, Ordering::SeqCst);
@@ -575,7 +580,23 @@ fn drive_bound(
     let _outcome = payload.rt.drive_pinned(local, rg);
     let self_errored =
         WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
-    teardown_worker_exec(!self_errored)
+    let teardown = teardown_worker_exec(!self_errored);
+    if self_errored {
+        // A released (not finished) executor may still hold registered
+        // snapshots — the binder's NORMAL unbind asserts a cleared xmin, so
+        // route through its transaction-ABORT path by returning an error
+        // (observed live: snapmgr xmin assertion at worker slot teardown
+        // after a budget refusal). The real error (if any) was recorded
+        // first (fail() is first-wins); budget refusals record none and
+        // helper_drive swallows this marker.
+        teardown?;
+        return Err(PgError::new(
+            ERROR,
+            "runtime agg worker unwound (recorded upstream)",
+        )
+        .into());
+    }
+    teardown
 }
 
 /// Build + SINK-ARM this helper's executor over the shared worker
