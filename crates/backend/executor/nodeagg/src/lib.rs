@@ -64,6 +64,7 @@ pub use hashgrouped::{
     agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
     agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
     agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
+    agg_hashgroup_text_key_count,
     HashGroupOrderKey,
 };
 pub use ::execgrouping::GroupKeyKind;
@@ -2544,8 +2545,12 @@ pub(crate) fn restart_pertrans_sortstates(
 }
 
 // initialize_aggregates (nodeAgg.c); by-ref initvals datumCopy into the
-// aggcontext.
-fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
+// aggcontext. `estate` serves only the hash-grouped residual hook's text-key
+// detoast (per-tuple memory).
+fn initialize_aggregates<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
     restart_pertrans_sortstates(&mut node.pertrans_sort, 0, node.force_distinct_set)?;
     for (transno, init) in node.trans_init.iter().enumerate() {
         let typ = node.trans_typ[transno];
@@ -2577,7 +2582,7 @@ fn initialize_aggregates(node: &mut AggStateData<'_>) -> PgResult<()> {
     // both resume the degraded node identically. No-op unless the arm
     // degraded on this node.
     if node.hashgroup.is_some() {
-        hashgrouped::residual_preload(node)?;
+        hashgrouped::residual_preload(node, estate)?;
     }
     Ok(())
 }
@@ -3418,7 +3423,7 @@ where
     if node.plan.aggstrategy == AGG_SORTED {
         return agg_retrieve_sorted(node, estate, &mut fetch_outer);
     }
-    initialize_aggregates(node)?;
+    initialize_aggregates(node, estate)?;
 
     while let Some(outer_id) = fetch_outer(estate)? {
         estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
@@ -3531,7 +3536,7 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
         }
         return agg_retrieve_hash_table(node, estate);
     }
-    initialize_aggregates(node)?;
+    initialize_aggregates(node, estate)?;
 
     let storeless = src.storeless_ok()
         && matches!(
@@ -3933,9 +3938,12 @@ pub fn agg_plain_perrow_admissible(node: &AggStateData<'_>) -> bool {
 
 /// Feed-phase begin: `exec_agg`'s `initialize_aggregates` (fresh initval
 /// pergroups — a rescan re-enters here with `agg_done` cleared).
-pub fn agg_plain_build_begin(node: &mut AggStateData<'_>) -> PgResult<()> {
+pub fn agg_plain_build_begin<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
-    initialize_aggregates(node)
+    initialize_aggregates(node, estate)
 }
 
 /// One outer row through the FULL per-row transition program — `exec_agg`'s
@@ -4226,7 +4234,7 @@ pub fn exec_agg_meta<'mcx>(
     if node.agg_done {
         return Ok(None);
     }
-    initialize_aggregates(node)?;
+    initialize_aggregates(node, estate)?;
     if rows > 0 {
         let metas = node.meta_aggs.as_deref().expect("meta arm requires a meta plan");
         for t in metas {
@@ -4446,7 +4454,7 @@ pub fn agg_sorted_group_begin<'mcx>(
             }
         }
     }
-    initialize_aggregates(node)?;
+    initialize_aggregates(node, estate)?;
     {
         let AggStateData { persort, evaltrans, .. } = node;
         let ps = persort.as_mut().expect("sorted Agg has persort");
@@ -4928,7 +4936,7 @@ where
                 }
             }
         }
-        initialize_aggregates(node)?;
+        initialize_aggregates(node, estate)?;
         {
             let tmpcontext = node.tmpcontext;
             let AggStateData { persort, evaltrans, .. } = node;

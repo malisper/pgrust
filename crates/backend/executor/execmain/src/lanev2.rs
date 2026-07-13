@@ -1964,7 +1964,7 @@ fn agg_plain_perrow_feed<'mcx>(
     )?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let mut sink = PlainAggBuildSink { agg };
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
 }
@@ -2213,7 +2213,7 @@ fn agg_plain_fold_feed<'mcx>(
     arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
     loop {
@@ -2572,7 +2572,7 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     }
     // initialize_aggregates (delegated): fresh initval pergroups + cleared
     // sets; a rescan re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct, key_bytes);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     // Retrieve (delegated): set replay + finalize + HAVING + project — one
@@ -2662,7 +2662,7 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
         arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
         ::nodeseqscan::seq_scan_stitch_arm(ss);
     }
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct, key_bytes);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
@@ -4588,6 +4588,20 @@ fn distincthash_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_TEXT` kill switch (default ON): text group
+/// keys for the hash-grouped arm (the Q11/Q12/Q14 shape). Off, text-keyed
+/// nodes fall to the narrow-sort arm exactly as before this lane — the A/B
+/// attribution channel for the text-key delta.
+fn distincthash_text_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXT").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -4602,16 +4616,25 @@ fn distincthash_force() -> bool {
 }
 
 /// Map the plan Sort's k-key prefix onto the grouping columns as the arm's
-/// group-emit order. `None` refuses (an operator outside the integer
-/// asc/desc vocabulary — bool/text group keys keep the narrow-sort arm).
-/// The multiset equality of prefix and group columns was already proven by
-/// the narrow admission; `used` disambiguates duplicated columns.
+/// group-emit order. `None` refuses (an operator outside the integer/text
+/// asc/desc vocabulary — bool group keys keep the narrow-sort arm). Text
+/// keys carry the plan Sort's collation for the group-order comparator
+/// (`varstr_cmp`'s authority) and require it valid + DETERMINISTIC (the
+/// no-ties total-order invariant; nondeterministic collations keep the C
+/// sort path per the textsets rule — the equality-side admission refuses
+/// them independently). The multiset equality of prefix and group columns
+/// was already proven by the narrow admission; `used` disambiguates
+/// duplicated columns.
 fn hashgroup_order_spec(
     agg: &::nodeagg::AggStateData<'_>,
     sp: &::types_nodes::plannodes::Sort<'_>,
     k: usize,
 ) -> Option<Vec<::nodeagg::HashGroupOrderKey>> {
     use ::execexpr::CmpOp;
+    /// pg_proc text_lt / text_gt — the btree text opclass's `<` / `>`
+    /// support (varchar sorts through the same text operators).
+    const F_TEXT_LT: ::types_core::Oid = 740;
+    const F_TEXT_GT: ::types_core::Oid = 742;
     let group_cols = ::nodeagg::agg_plan_group_cols(agg);
     debug_assert_eq!(group_cols.len(), k);
     let mut used = vec![false; k];
@@ -4621,17 +4644,30 @@ fn hashgroup_order_spec(
         let j = (0..k).find(|&j| !used[j] && group_cols[j] == col)?;
         used[j] = true;
         // Sort operator -> its comparison-kernel image -> ASC/DESC (the
-        // top-k cutoff's resolution path; int families only).
+        // top-k cutoff's resolution path), or the text operator pair.
         let opfn = ::lsyscache::get_opcode(sp.sortOperators[i]).ok()?;
-        let desc = match CmpOp::for_fn_oid(opfn)? {
-            CmpOp::Int2Lt | CmpOp::Int4Lt | CmpOp::Int8Lt => false,
-            CmpOp::Int2Gt | CmpOp::Int4Gt | CmpOp::Int8Gt => true,
-            _ => return None,
+        let (desc, collation) = match opfn {
+            F_TEXT_LT | F_TEXT_GT => {
+                let coll = sp.collations[i];
+                if coll == 0 || !::lsyscache::get_collation_isdeterministic(coll).ok()? {
+                    return None;
+                }
+                (opfn == F_TEXT_GT, coll)
+            }
+            _ => {
+                let desc = match CmpOp::for_fn_oid(opfn)? {
+                    CmpOp::Int2Lt | CmpOp::Int4Lt | CmpOp::Int8Lt => false,
+                    CmpOp::Int2Gt | CmpOp::Int4Gt | CmpOp::Int8Gt => true,
+                    _ => return None,
+                };
+                (desc, 0)
+            }
         };
         out.push(::nodeagg::HashGroupOrderKey {
             key_idx: j,
             desc,
             nulls_first: sp.nullsFirst[i],
+            collation,
         });
     }
     Some(out)
@@ -4730,11 +4766,18 @@ fn try_hashgroup_build<'mcx>(
     {
         return Ok(HgBuild::Refused);
     }
+    let text_keys = ::nodeagg::agg_hashgroup_text_key_count(agg);
+    if text_keys > 0 && !distincthash_text_enabled() {
+        return Ok(HgBuild::Refused);
+    }
     let Some(order) = hashgroup_order_spec(agg, sort.plan, k) else {
         return Ok(HgBuild::Refused);
     };
     ::nodeagg::agg_hashgroup_begin(agg, estate, order)?;
     trace_feed("sorted-agg hash-grouped distinct drive engaged");
+    if text_keys > 0 {
+        trace_feed("hash-grouped distinct arm: text group keys armed");
+    }
     arm_scan_staging(
         ss,
         estate,

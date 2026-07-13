@@ -14,15 +14,23 @@
 //! byte-identical to C):
 //!   * same groups: the group hash key is the representational image of the
 //!     grouping columns (admission requires `group_eq_representational` AND
-//!     all-integer group columns, so word equality == the grouping equality
-//!     operator's verdict, NULL keys collapsing to same-group exactly as C's
-//!     grouping equality does);
-//!   * same group ORDER: groups emit sorted by the plan Sort's key prefix
-//!     under the exact btree integer order (signed word compare, the plan's
-//!     ASC/DESC + NULLS FIRST/LAST flags). The prefix covers every grouping
-//!     column (the narrow arm's multiset check), and two DISTINCT groups
-//!     cannot compare equal on all of them, so the order is total and equals
-//!     the order C's row sort induces on group boundaries;
+//!     integer-or-text group columns). Integer keys: word equality == the
+//!     grouping equality operator's verdict. TEXT/VARCHAR keys: the stored
+//!     image is the detoasted content bytes, and the grouping equality is
+//!     `texteq` under a DETERMINISTIC collation (the representational
+//!     admission's texteq arm), which IS length+memcmp of those bytes — so
+//!     byte equality == the operator's verdict. NULL keys collapse to
+//!     same-group exactly as C's grouping equality does;
+//!   * same group ORDER: groups emit sorted by the plan Sort's key prefix —
+//!     integer keys under the exact btree integer order (signed word
+//!     compare), text keys under `varstr_cmp` with the plan Sort's
+//!     collation (C's bttextcmp/ssup authority; the ported comparator
+//!     carries C's deterministic memcmp tie-break, so byte-distinct keys
+//!     never compare equal) — with the plan's ASC/DESC + NULLS FIRST/LAST
+//!     flags. The prefix covers every grouping column (the narrow arm's
+//!     multiset check), and two DISTINCT groups cannot compare equal on all
+//!     of them, so the order is total and equals the order C's row sort
+//!     induces on group boundaries;
 //!   * same values: every transition is order-insensitive-EXACT
 //!     (`trans_order_insensitive` — counting / exact integer / Int128
 //!     accumulation) and runs through the SAME compiled transition program /
@@ -63,8 +71,9 @@
 
 use core::ptr::NonNull;
 
+use ::datum::Datum;
 use ::execexpr::{exec_eval_expr, AggPerGroup, EvalSlots};
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::heaptuple::MinimalTuple;
 use ::mcx::Mcx;
 use ::types_error::PgResult;
@@ -76,20 +85,42 @@ use crate::{agg_sorted_emit, AggStateData};
 /// One emit-order key: `key_idx` indexes the GROUP KEY WORDS (the admission
 /// proved the prefix is a permutation of the grouping columns), `desc` /
 /// `nulls_first` are the plan Sort's flags for that prefix position.
+/// `collation` is the plan Sort's collation for that key — consulted only
+/// for text keys (`varstr_cmp`'s authority); 0 for integer keys.
 pub struct HashGroupOrderKey {
     pub key_idx: usize,
     pub desc: bool,
     pub nulls_first: bool,
+    pub collation: ::types_core::Oid,
 }
 
-/// Integer group-key representation (the admission's all-integer rule; the
-/// stored word is the sign-extended value, so word equality is the grouping
-/// operator's equality and signed word order is the btree operator order).
+/// Group-key representation. Integer kinds store the sign-extended value in
+/// the key word, so word equality is the grouping operator's equality and
+/// signed word order is the btree operator order. `Text` stores the
+/// detoasted content bytes in the state's arena, the key word packing
+/// `(arena offset << 32) | len`; byte equality is the grouping operator's
+/// equality (deterministic-collation `texteq` — module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HgKeyKind {
     Int16,
     Int32,
     Int64,
+    Text,
+}
+
+/// Pack an arena span into a key word (create time). Offsets stay < 4GiB
+/// structurally: the arena is metered against the arm's budget (≤ half of
+/// work_mem's tuplesort allowance, itself capped well under 4GiB) and a
+/// single row overshoots by at most one detoasted value (≤ 1GiB varlena).
+#[inline]
+fn pack_span(off: usize, len: usize) -> i64 {
+    debug_assert!(off <= u32::MAX as usize && len <= u32::MAX as usize);
+    (((off as u64) << 32) | len as u64) as i64
+}
+
+#[inline]
+fn unpack_span(word: i64) -> (usize, usize) {
+    ((word as u64 >> 32) as usize, (word as u64 & 0xffff_ffff) as usize)
 }
 
 enum HgPhase {
@@ -134,8 +165,16 @@ pub(crate) struct HashGroupedState<'mcx> {
     table: Vec<u32>,
     /// Per group: saved key hash (grow/probe prefilter).
     hashes: Vec<u64>,
-    /// Group g's key words at `[g*nkeys .. (g+1)*nkeys]` (sign-extended).
+    /// Group g's key words at `[g*nkeys .. (g+1)*nkeys]` (sign-extended
+    /// integers, or packed arena spans for text keys).
     keys: Vec<i64>,
+    /// Text-key content bytes (packed spans in `keys` index into this).
+    arena: Vec<u8>,
+    /// Per-row staging for the CURRENT row's text key bytes (probe side):
+    /// `probe_spans[i]` spans `probe_buf` for text key column i. Rewritten
+    /// by every `stage_row_keys`; meaningless for int/NULL columns.
+    probe_buf: Vec<u8>,
+    probe_spans: Vec<(u32, u32)>,
     /// Per group: NULL bitmask over the key columns (nkeys <= 32).
     keynulls: Vec<u32>,
     /// Per group: the DEFERRED representative row (first row in scan order,
@@ -175,20 +214,26 @@ impl HashGroupedState<'_> {
 
     #[inline]
     fn mem(&self) -> usize {
-        self.base_mem + self.total_set_mem
+        self.base_mem + self.total_set_mem + self.arena.capacity()
     }
 }
 
+const INT2OID: ::types_core::Oid = 21;
+const INT4OID: ::types_core::Oid = 23;
+const INT8OID: ::types_core::Oid = 20;
+const TEXTOID: ::types_core::Oid = 25;
+const VARCHAROID: ::types_core::Oid = 1043;
+
 /// Structural admission for the hash-grouped arm, ON TOP of the narrow-sort
 /// admission (`agg_sorted_distinct_narrow_admissible`, re-checked here):
-/// every grouping column is int2/int4/int8 (word-packable, representational
-/// equality already proved) and every internal-sort entry's set kind is an
-/// integer kind (no text sets in v1 — the narrow-sort arm keeps those).
-/// Group-col count capped at 32 (the NULL bitmask word).
+/// every grouping column is int2/int4/int8 (word-packable) or text/varchar
+/// (byte-imaged; the narrow admission's `group_eq_representational` texteq
+/// arm already proved a DETERMINISTIC collation, so byte equality is the
+/// grouping operator's verdict — bpchar never passes that admission), and
+/// every internal-sort entry's set kind is an integer kind (no text sets in
+/// v1 — the narrow-sort arm keeps those). Group-col count capped at 32 (the
+/// NULL bitmask word).
 pub fn agg_hashgroup_admissible(node: &AggStateData<'_>) -> bool {
-    const INT2OID: ::types_core::Oid = 21;
-    const INT4OID: ::types_core::Oid = 23;
-    const INT8OID: ::types_core::Oid = 20;
     if !crate::agg_sorted_distinct_narrow_admissible(node) {
         return false;
     }
@@ -207,7 +252,7 @@ pub fn agg_hashgroup_admissible(node: &AggStateData<'_>) -> bool {
             return false;
         }
         let t = desc.attr((col - 1) as usize).atttypid;
-        if !matches!(t, INT2OID | INT4OID | INT8OID) {
+        if !matches!(t, INT2OID | INT4OID | INT8OID | TEXTOID | VARCHAROID) {
             return false;
         }
     }
@@ -217,6 +262,26 @@ pub fn agg_hashgroup_admissible(node: &AggStateData<'_>) -> bool {
             Some(DistinctKeyKind::Int16 | DistinctKeyKind::Int32 | DistinctKeyKind::Int64)
         )
     })
+}
+
+/// How many grouping columns are text/varchar (the lane drive's text-switch
+/// / trace / economics input). Callable only where `persort` exists.
+pub fn agg_hashgroup_text_key_count(node: &AggStateData<'_>) -> usize {
+    let Some(ps) = node.persort.as_ref() else {
+        return 0;
+    };
+    let Some(desc) = ps.first_slot.base().tts_tupleDescriptor.as_ref() else {
+        return 0;
+    };
+    node.plan
+        .grpColIdx
+        .iter()
+        .filter(|&&col| {
+            col >= 1
+                && (col as i32) <= desc.natts
+                && matches!(desc.attr((col - 1) as usize).atttypid, TEXTOID | VARCHAROID)
+        })
+        .count()
 }
 
 /// The arm's build budget: HALF the displaced tuplesort's work_mem allowance
@@ -237,8 +302,13 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool) -> bool {
         return true;
     }
     const PER_GROUP_EST: f64 = 256.0;
+    /// Extra per-group estimate per TEXT key column (arena content bytes;
+    /// conservative mean — the runtime degrade bounds the real usage).
+    const PER_TEXT_KEY_EST: f64 = 64.0;
     let est_groups = (node.plan.numGroups as f64).max(1.0);
-    est_groups * PER_GROUP_EST * 2.0 <= hashgroup_budget() as f64
+    let per_group =
+        PER_GROUP_EST + PER_TEXT_KEY_EST * agg_hashgroup_text_key_count(node) as f64;
+    est_groups * per_group * 2.0 <= hashgroup_budget() as f64
 }
 
 /// Whether the arm is mid-emit (the drive routes straight to
@@ -287,8 +357,6 @@ pub fn agg_hashgroup_begin<'mcx>(
     estate: &mut EStateData<'mcx>,
     order_spec: Vec<HashGroupOrderKey>,
 ) -> PgResult<()> {
-    const INT2OID: ::types_core::Oid = 21;
-    const INT4OID: ::types_core::Oid = 23;
     debug_assert!(agg_hashgroup_admissible(node));
     debug_assert!(node.force_distinct_set);
     debug_assert!(node.hashgroup.is_none());
@@ -310,6 +378,7 @@ pub fn agg_hashgroup_begin<'mcx>(
         key_kinds.push(match desc.attr((col - 1) as usize).atttypid {
             INT2OID => HgKeyKind::Int16,
             INT4OID => HgKeyKind::Int32,
+            TEXTOID | VARCHAROID => HgKeyKind::Text,
             _ => HgKeyKind::Int64,
         });
     }
@@ -330,6 +399,9 @@ pub fn agg_hashgroup_begin<'mcx>(
         table: vec![0u32; INIT_TABLE],
         hashes: Vec::new(),
         keys: Vec::new(),
+        arena: Vec::new(),
+        probe_buf: Vec::new(),
+        probe_spans: vec![(0, 0); nkeys],
         keynulls: Vec::new(),
         reps: Vec::new(),
         pergroup: Vec::new(),
@@ -357,13 +429,17 @@ pub fn agg_hashgroup_begin<'mcx>(
     Ok(())
 }
 
-/// Sign-extended key words + NULL bitmask for the slot's grouping columns.
-fn extract_keys(
+/// Phase A of key extraction (slot borrow only): sign-extended key words +
+/// NULL bitmask for the slot's grouping columns. Text columns leave their
+/// word 0 and stash the raw datum in `text_datums[i]` for phase B (the
+/// detoast needs a per-tuple-memory borrow the slot borrow excludes).
+fn read_key_datums(
     slot: &mut SlotData<'_>,
     key_atts: &[u16],
     key_kinds: &[HgKeyKind],
     max_att: i32,
     words: &mut [i64],
+    text_datums: &mut [Datum],
 ) -> u32 {
     exectuples::slot_getsomeattrs(slot, max_att);
     let base = slot.base();
@@ -379,21 +455,112 @@ fn extract_keys(
             HgKeyKind::Int16 => d.as_i16() as i64,
             HgKeyKind::Int32 => d.as_i32() as i64,
             HgKeyKind::Int64 => d.as_i64(),
+            HgKeyKind::Text => {
+                text_datums[i] = d;
+                0
+            }
         };
     }
     nulls
 }
 
+/// Fold a byte string into the running hash, 8 LE bytes per mix round plus
+/// a length round (any deterministic hash is legal — module doc).
 #[inline]
-fn key_hash(words: &[i64], nulls: u32) -> u64 {
-    let mut h = (nulls as u64) ^ 0x9e37_79b9_7f4a_7c15;
-    for &w in words {
-        h = mix64(h ^ (w as u64));
+fn fold_bytes(mut h: u64, b: &[u8]) -> u64 {
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        h = mix64(h ^ u64::from_le_bytes(c.try_into().unwrap()));
     }
-    h
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut last = [0u8; 8];
+        last[..rem.len()].copy_from_slice(rem);
+        h = mix64(h ^ u64::from_le_bytes(last));
+    }
+    mix64(h ^ b.len() as u64)
 }
 
 impl HashGroupedState<'_> {
+    /// Phase B of key extraction: detoast each non-NULL text key into the
+    /// probe staging (content bytes in `probe_buf`, span in `probe_spans`).
+    /// Detoast copies land in per-tuple memory exactly as the per-row set
+    /// collect's (`datum_varlena_packed`); the staged copy in `probe_buf`
+    /// is what probe/create read, so the per-tuple lifetime never escapes.
+    fn stage_text_keys(
+        &mut self,
+        estate: &EStateData<'_>,
+        tmp: EcxtId,
+        text_datums: &[Datum],
+        nulls: u32,
+    ) -> PgResult<()> {
+        self.probe_buf.clear();
+        for i in 0..self.nkeys {
+            if self.key_kinds[i] != HgKeyKind::Text || nulls & (1 << i) != 0 {
+                continue;
+            }
+            // SAFETY: non-null live text/varchar varlena — the admission
+            // proved the column type.
+            let v = unsafe {
+                ::types_fmgr::datum_varlena_packed(
+                    text_datums[i],
+                    estate.ecxt(tmp).per_tuple_mcx(),
+                )
+            }?;
+            let b = v.data();
+            let off = self.probe_buf.len();
+            self.probe_buf.extend_from_slice(b);
+            self.probe_spans[i] = (off as u32, b.len() as u32);
+        }
+        Ok(())
+    }
+
+    /// Group-key hash over the staged row: integer keys mix their word,
+    /// text keys fold their staged bytes (NULL text mixes word 0, like a
+    /// NULL integer — the nulls seed already separates the bitmasks).
+    fn key_hash(&self, words: &[i64], nulls: u32) -> u64 {
+        let mut h = (nulls as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        for (i, &w) in words.iter().enumerate() {
+            if self.key_kinds[i] == HgKeyKind::Text && nulls & (1 << i) == 0 {
+                let (off, len) = self.probe_spans[i];
+                h = fold_bytes(h, &self.probe_buf[off as usize..(off + len) as usize]);
+            } else {
+                h = mix64(h ^ (w as u64));
+            }
+        }
+        h
+    }
+
+    /// Column-wise key equality of group `g` against the staged row (equal
+    /// NULL bitmasks already checked): integer keys by word, text keys by
+    /// arena-vs-staging byte compare (deterministic-collation texteq).
+    fn keys_equal(&self, g: usize, words: &[i64], nulls: u32) -> bool {
+        let base = g * self.nkeys;
+        for i in 0..self.nkeys {
+            match self.key_kinds[i] {
+                HgKeyKind::Text => {
+                    if nulls & (1 << i) != 0 {
+                        continue;
+                    }
+                    let (off, len) = unpack_span(self.keys[base + i]);
+                    let (poff, plen) = self.probe_spans[i];
+                    if len != plen as usize
+                        || self.arena[off..off + len]
+                            != self.probe_buf[poff as usize..(poff + plen) as usize]
+                    {
+                        return false;
+                    }
+                }
+                _ => {
+                    if self.keys[base + i] != words[i] {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Probe for an existing group; on miss, also return the empty slot the
     /// insert must claim.
     fn probe(&self, words: &[i64], nulls: u32, h: u64) -> (Option<u32>, usize) {
@@ -406,7 +573,7 @@ impl HashGroupedState<'_> {
                     let g = (e - 1) as usize;
                     if self.hashes[g] == h
                         && self.keynulls[g] == nulls
-                        && &self.keys[g * self.nkeys..(g + 1) * self.nkeys] == words
+                        && self.keys_equal(g, words, nulls)
                     {
                         return (Some(e - 1), slot);
                     }
@@ -488,14 +655,15 @@ fn switch_to(node: &mut AggStateData<'_>, g: u32) {
     hg.cur = Some(g);
 }
 
-/// Create a new group from the current row: push key/hash/rep/init-state.
-/// The row itself is DEFERRED (module doc — the degrade path's sort
-/// representative). Does NOT make the group current.
+/// Create a new group from the current row: push key/hash/rep/init-state
+/// (text keys copy their staged bytes into the arena and pack the span into
+/// their key word). The row itself is DEFERRED (module doc — the degrade
+/// path's sort representative). Does NOT make the group current.
 fn create_group<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     id: ExecSlotId,
-    words: &[i64],
+    words: &mut [i64],
     nulls: u32,
     h: u64,
     slot_idx: usize,
@@ -529,6 +697,17 @@ fn create_group<'mcx>(
     let rep = exectuples::exec_copy_slot_minimal_tuple(slot, mcx, mcx, 0)?;
     let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
     let rep_len = rep.t_len() as usize;
+    // Text keys: land the staged bytes in the arena, pack the span (the
+    // packing's u32 bounds hold structurally — `pack_span` doc).
+    for i in 0..hg.nkeys {
+        if hg.key_kinds[i] == HgKeyKind::Text && nulls & (1 << i) == 0 {
+            let (poff, plen) = hg.probe_spans[i];
+            let off = hg.arena.len();
+            hg.arena
+                .extend_from_slice(&hg.probe_buf[poff as usize..(poff + plen) as usize]);
+            words[i] = pack_span(off, plen as usize);
+        }
+    }
     hg.hashes.push(h);
     hg.keynulls.push(nulls);
     hg.keys.extend_from_slice(words);
@@ -624,14 +803,25 @@ pub fn agg_hashgroup_accept<'mcx>(
         node.hashgroup.as_deref(),
         Some(HashGroupedState { phase: HgPhase::Building, .. })
     ));
+    let tmp = node.tmpcontext;
     let mut words = [0i64; 32];
+    let mut text_datums = [Datum::null(); 32];
     let (found, slot_idx, h, nulls, nkeys) = {
         let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
         let nkeys = hg.nkeys;
-        let slot = estate.slot_mut(id);
-        let nulls =
-            extract_keys(slot, &hg.key_atts, &hg.key_kinds, hg.max_att, &mut words[..nkeys]);
-        let h = key_hash(&words[..nkeys], nulls);
+        let nulls = {
+            let slot = estate.slot_mut(id);
+            read_key_datums(
+                slot,
+                &hg.key_atts,
+                &hg.key_kinds,
+                hg.max_att,
+                &mut words[..nkeys],
+                &mut text_datums[..nkeys],
+            )
+        };
+        hg.stage_text_keys(estate, tmp, &text_datums[..nkeys], nulls)?;
+        let h = hg.key_hash(&words[..nkeys], nulls);
         let (found, slot_idx) = hg.probe(&words[..nkeys], nulls, h);
         (found, slot_idx, h, nulls, nkeys)
     };
@@ -651,9 +841,19 @@ pub fn agg_hashgroup_accept<'mcx>(
             hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
             hg.set_mem[c] = sets;
         }
-        None => create_group(node, estate, id, &words[..nkeys], nulls, h, slot_idx)?,
+        None => {
+            create_group(node, estate, id, &mut words[..nkeys], nulls, h, slot_idx)?;
+            // The existing-group arm resets per-tuple memory inside run_row;
+            // the create arm defers the row (no run_row), so any text-key
+            // detoast copies reset here instead.
+            estate.reset_expr_context(tmp);
+        }
     }
-    let hg = node.hashgroup.as_deref().expect("hashgroup state");
+    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+    // A one-off giant detoasted key must not pin probe staging capacity.
+    if hg.probe_buf.capacity() > (1 << 20) {
+        hg.probe_buf = Vec::new();
+    }
     Ok(hg.mem() <= hg.budget)
 }
 
@@ -697,7 +897,11 @@ pub fn agg_hashgroup_finish_build<'mcx>(
     let mcx = hg.mcx;
     exectuples::exec_clear_tuple(&mut hg.rep_slot, mcx);
     let mut order: Vec<u32> = (0..n as u32).collect();
-    let (keys, keynulls, spec, nkeys) = (&hg.keys, &hg.keynulls, &hg.order_spec, hg.nkeys);
+    let (keys, keynulls, spec, nkeys, kinds, arena) =
+        (&hg.keys, &hg.keynulls, &hg.order_spec, hg.nkeys, &hg.key_kinds, &hg.arena);
+    // varstr_cmp is fallible (collation seams); the comparator parks the
+    // first error and the sort result is discarded on Err below.
+    let mut cmp_err = None;
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
         for k in spec.iter() {
@@ -723,10 +927,33 @@ pub fn agg_hashgroup_finish_build<'mcx>(
                 }
                 (false, false) => {
                     let (wa, wb) = (keys[a * nkeys + k.key_idx], keys[b * nkeys + k.key_idx]);
-                    if k.desc {
-                        wb.cmp(&wa)
+                    let ord = if kinds[k.key_idx] == HgKeyKind::Text {
+                        // C's text btree order: varstr_cmp under the plan
+                        // Sort's collation (module doc — deterministic
+                        // collations tie-break by bytes, so byte-distinct
+                        // keys never compare equal).
+                        let (oa, la) = unpack_span(wa);
+                        let (ob, lb) = unpack_span(wb);
+                        match ::varlena::varstr_cmp(
+                            &arena[oa..oa + la],
+                            &arena[ob..ob + lb],
+                            k.collation,
+                        ) {
+                            Ok(c) => c.cmp(&0),
+                            Err(e) => {
+                                if cmp_err.is_none() {
+                                    cmp_err = Some(e);
+                                }
+                                core::cmp::Ordering::Equal
+                            }
+                        }
                     } else {
                         wa.cmp(&wb)
+                    };
+                    if k.desc {
+                        ord.reverse()
+                    } else {
+                        ord
                     }
                 }
             };
@@ -734,9 +961,12 @@ pub fn agg_hashgroup_finish_build<'mcx>(
                 return ord;
             }
         }
-        debug_assert_eq!(a, b, "distinct groups compare equal on the full prefix");
+        debug_assert!(a == b || cmp_err.is_some(), "distinct groups compare equal on the full prefix");
         core::cmp::Ordering::Equal
     });
+    if let Some(e) = cmp_err {
+        return Err(e);
+    }
     hg.phase = HgPhase::Emit { order, pos: 0 };
     Ok(())
 }
@@ -849,24 +1079,33 @@ pub fn agg_hashgroup_set_residual(node: &mut AggStateData<'_>) {
 /// values over the freshly initialized ones, sets into the pertrans slots —
 /// so pre-degrade rows count exactly once. Drops the whole state once every
 /// residual group has been consumed (the aggcontext reset then resumes).
-pub(crate) fn residual_preload(node: &mut AggStateData<'_>) -> PgResult<()> {
+pub(crate) fn residual_preload<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> PgResult<()> {
     if !agg_hashgroup_residual_active(node) {
         return Ok(());
     }
+    let tmp = node.tmpcontext;
     let mut words = [0i64; 32];
+    let mut text_datums = [Datum::null(); 32];
     let hit = {
         let AggStateData { hashgroup, persort, .. } = node;
         let hg = hashgroup.as_deref_mut().expect("residual state");
         let ps = persort.as_mut().expect("sorted Agg has persort");
         let nkeys = hg.nkeys;
-        let nulls = extract_keys(
+        let nulls = read_key_datums(
             &mut ps.first_slot,
             &hg.key_atts,
             &hg.key_kinds,
             hg.max_att,
             &mut words[..nkeys],
+            &mut text_datums[..nkeys],
         );
-        let h = key_hash(&words[..nkeys], nulls);
+        // Detoast copies land in per-tuple memory (reset by the group's row
+        // processing, exactly as the accept path's).
+        hg.stage_text_keys(estate, tmp, &text_datums[..nkeys], nulls)?;
+        let h = hg.key_hash(&words[..nkeys], nulls);
         let (found, _) = hg.probe(&words[..nkeys], nulls, h);
         found.filter(|&g| !hg.consumed[g as usize])
     };
@@ -895,4 +1134,31 @@ pub(crate) fn residual_preload(node: &mut AggStateData<'_>) -> PgResult<()> {
         agg_hashgroup_reset(node);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_pack_roundtrip() {
+        for &(off, len) in
+            &[(0usize, 0usize), (1, 1), (0xdead_beef, 0x7fff_ffff), (u32::MAX as usize, 0)]
+        {
+            assert_eq!(unpack_span(pack_span(off, len)), (off, len));
+        }
+    }
+
+    #[test]
+    fn byte_fold_separates_length_and_content() {
+        let h = |b: &[u8]| fold_bytes(0x1234_5678, b);
+        // Equal bytes hash equal (the probe prefilter's requirement)...
+        assert_eq!(h(b"search phrase"), h(b"search phrase"));
+        assert_eq!(h(b""), h(b""));
+        // ...and the padded tail must not collide with explicit zero bytes
+        // or a shorter prefix (the length round).
+        assert_ne!(h(b"abc"), h(b"abc\0"));
+        assert_ne!(h(b"abc"), h(b"ab"));
+        assert_ne!(h(b"12345678"), h(b"1234567"));
+    }
 }
