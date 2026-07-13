@@ -95,12 +95,114 @@ pub struct WorkerLocal {
     /// Slot-word cache: (seq, task set) per slot; revalidated by one atomic
     /// read of the slot word.
     cache: Vec<Option<(u64, Arc<TaskSetRt>)>>,
+    /// Per-slot WFIN accumulation (marker contract; see [`markers_enabled`]).
+    /// Untouched (empty vec) when markers are off.
+    wfin: Vec<Option<WfinStat>>,
+    /// Pinned-drive fast path: the last (slot, seq) this local drove for its
+    /// pinned RG. Revalidated by one slot-word read per step; the membership
+    /// lock is touched only when it goes stale (publish/finalize events).
+    pinned_slot: Option<(usize, u64)>,
     /// INERT until M5: thread-local stride state (SIGMOD'21 §2.3 — each
     /// worker runs stride scheduling locally over the same slot set).
     #[allow(dead_code)]
     local_pass: u64,
     #[allow(dead_code)]
     global_pass: u64,
+}
+
+/// `PGRUST_MORSEL_MARKERS=1` arms the acceptance-instrument marker channel:
+/// one server-stderr line per (worker, task set) participation —
+/// `MORSEL|WFIN|qid=|pipe=|worker=|t_us=|tasks=|task_avg_us=` — parsed by the
+/// M0 instruments' worker-finish-spread verdict (fabled
+/// m0-acceptance-instruments; ≤1-task-duration acceptance). Default OFF:
+/// zero cost beyond one branch per task.
+fn markers_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// One worker's accumulated participation in one published task set.
+struct WfinStat {
+    seq: u64,
+    qid: u64,
+    pipe: usize,
+    tasks: u64,
+    task_ns: u64,
+    /// Monotonic end of the worker's LAST task in the set (the finish time
+    /// the spread instrument reads).
+    last_end_ns: u64,
+}
+
+impl WfinStat {
+    fn emit(&self, worker: usize) {
+        let avg_us = if self.tasks > 0 { self.task_ns / self.tasks / 1000 } else { 0 };
+        eprintln!(
+            "MORSEL|WFIN|qid={}|pipe={}|worker={}|t_us={}|tasks={}|task_avg_us={}",
+            self.qid,
+            self.pipe,
+            worker,
+            self.last_end_ns / 1000,
+            self.tasks,
+            avg_us
+        );
+    }
+}
+
+impl WorkerLocal {
+    /// Fold one completed task into the slot's WFIN accumulator; a stale
+    /// accumulator (earlier publication in the same slot) flushes first.
+    fn wfin_observe(&mut self, ts: &TaskSetRt, task_ns: u64, end_ns: u64) {
+        if self.wfin.is_empty() {
+            return;
+        }
+        let slot = &mut self.wfin[ts.slot];
+        match slot {
+            Some(s) if s.seq == ts.seq => {
+                s.tasks += 1;
+                s.task_ns += task_ns;
+                s.last_end_ns = end_ns;
+            }
+            _ => {
+                if let Some(old) = slot.take() {
+                    old.emit(self.worker);
+                }
+                *slot = Some(WfinStat {
+                    seq: ts.seq,
+                    qid: ts.rg.query_id,
+                    pipe: ts.index,
+                    tasks: 1,
+                    task_ns,
+                    last_end_ns: end_ns,
+                });
+            }
+        }
+    }
+
+    /// Flush the slot's accumulator (the worker observed the set exhausted —
+    /// its participation is over; no worker can claim past an exhausted
+    /// cursor).
+    fn wfin_flush_slot(&mut self, slot: usize) {
+        if self.wfin.is_empty() {
+            return;
+        }
+        if let Some(s) = self.wfin[slot].take() {
+            s.emit(self.worker);
+        }
+    }
+
+    /// Flush every accumulator (idle transition / pinned-drive exit): any
+    /// remaining participation record is final — the worker is leaving the
+    /// execution loop.
+    pub(crate) fn wfin_flush_all(&mut self) {
+        if self.wfin.is_empty() {
+            return;
+        }
+        for slot in 0..self.wfin.len() {
+            self.wfin_flush_slot(slot);
+        }
+    }
 }
 
 pub(crate) struct Scheduler {
@@ -183,6 +285,12 @@ impl Scheduler {
         WorkerLocal {
             worker,
             cache: (0..self.slots.len()).map(|_| None).collect(),
+            wfin: if markers_enabled() {
+                (0..self.slots.len()).map(|_| None).collect()
+            } else {
+                Vec::new()
+            },
+            pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
@@ -195,6 +303,12 @@ impl Scheduler {
         WorkerLocal {
             worker: self.nthreads + ordinal,
             cache: (0..self.slots.len()).map(|_| None).collect(),
+            wfin: if markers_enabled() {
+                (0..self.slots.len()).map(|_| None).collect()
+            } else {
+                Vec::new()
+            },
+            pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
@@ -327,6 +441,9 @@ impl Scheduler {
             return Step::Stop;
         }
         let Some(slot) = self.pick_slot() else {
+            // Idle transition: nothing is runnable — any WFIN accumulation
+            // still held is this worker's final word on those sets.
+            local.wfin_flush_all();
             return Step::Idle;
         };
 
@@ -364,11 +481,27 @@ impl Scheduler {
         local: &mut WorkerLocal,
         rg: &Arc<ResourceGroup>,
     ) -> Step {
-        let slot = {
-            let m = lock(&self.membership);
-            m.owned
-                .iter()
-                .position(|e| e.as_ref().is_some_and(|e| Arc::ptr_eq(&e.ts.rg, rg)))
+        // Fast path: the cached (slot, seq) revalidated by one slot-word
+        // read — the membership lock is a publish/finalize-event cost, not a
+        // per-step cost (the sched-probe decision-cost budget).
+        let slot = match local.pinned_slot {
+            Some((slot, seq))
+                if self.slots[slot].word.load(Ordering::SeqCst) == (seq << 1) | 1 =>
+            {
+                Some(slot)
+            }
+            _ => {
+                let found = {
+                    let m = lock(&self.membership);
+                    m.owned.iter().enumerate().find_map(|(i, e)| {
+                        e.as_ref()
+                            .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                            .map(|e| (i, e.seq))
+                    })
+                };
+                local.pinned_slot = found;
+                found.map(|(slot, _)| slot)
+            }
         };
         let Some(slot) = slot else {
             // Queued behind other RGs, or completed: the caller re-tests
@@ -429,6 +562,7 @@ impl Scheduler {
     fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> bool {
         RuntimeStats::tick(&self.stats.tasks_claimed);
         RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
+        let task_t0 = if local.wfin.is_empty() { 0 } else { self.clock.now_ns() };
         ts.active_workers.fetch_add(1, Ordering::SeqCst);
 
         // Generation gate (H1): a task of an aborted (closed) generation is
@@ -498,6 +632,17 @@ impl Scheduler {
         ts.active_workers.fetch_sub(1, Ordering::SeqCst);
         RuntimeStats::tick(&self.stats.tasks_completed);
         RuntimeStats::tick(&ts.rg.stats.tasks_completed);
+        // WFIN marker channel (off = one branch): fold this task into the
+        // slot's accumulator; an observed exhaustion ends this worker's
+        // participation (no claim can succeed past an exhausted cursor), so
+        // flush its line here.
+        if !local.wfin.is_empty() {
+            let end = self.clock.now_ns();
+            local.wfin_observe(ts, end.saturating_sub(task_t0), end);
+            if exhausted {
+                local.wfin_flush_slot(ts.slot);
+            }
+        }
         exhausted
     }
 

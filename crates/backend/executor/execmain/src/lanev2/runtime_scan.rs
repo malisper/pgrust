@@ -133,8 +133,21 @@ impl RuntimeScanShared {
 // into an RG abort — the runtime protocol never sees an unwind.
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
+enum DriveMode {
+    /// Fold-classified shape reading lane columns: the serial fold drain.
+    Fold,
+    /// Count-only census shape (fold plan reads NO columns; the serial
+    /// decider refuses it because the footer is the serial lever): the
+    /// census drain — kernel-qual selection bitmap counted whole-word via
+    /// `fold_batch` (CountStar reads no lanes), fallback/scalar-qual rows
+    /// through the per-row program. Graceful when no SoA/bitmap staged.
+    Census,
+}
+
 struct WorkerExec {
     qd: ::types_portal::QueryDescHandle,
+    mode: DriveMode,
     /// THIS helper contributed an error (its executor may be mid-batch —
     /// take the release/abort teardown, not finish/end).
     errored: std::cell::Cell<bool>,
@@ -185,6 +198,7 @@ impl RuntimeScanShared {
                     "runtime scan morsel without a bound executor",
                 )));
             };
+            let mode = ex.mode;
             crate::querydesc::with_qd(ex.qd, |q| {
                 let x = q.exec.as_mut().expect("runtime scan worker executor state");
                 x.with_mut(|d| -> PgResult<()> {
@@ -214,7 +228,12 @@ impl RuntimeScanShared {
                             "runtime scan worker scan is not cbstore",
                         )));
                     }
-                    super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?;
+                    match mode {
+                        DriveMode::Fold => {
+                            super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                        }
+                        DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
+                    }
                     // Cumulative partial export (overwrite): the worker's
                     // LAST morsel's export — which precedes its settle, and
                     // therefore RG completion — is the one the leader reads.
@@ -357,11 +376,11 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
             ::types_portal::QueryEnvHandle::NULL,
             0,
         )?;
-        let armed = (|| -> PgResult<()> {
+        let armed = (|| -> PgResult<DriveMode> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("runtime scan worker ExecutorStart");
-                x.with_mut(|d| -> PgResult<()> {
+                x.with_mut(|d| -> PgResult<DriveMode> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
                     else {
@@ -383,23 +402,41 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                             "runtime scan worker fold plan diverged from the leader's",
                         )));
                     }
-                    // The serial fold feed's arm/init half, once per worker;
-                    // the drain half re-runs per morsel (fold feed split).
-                    super::arm_scan_staging(
-                        ss,
-                        estate,
-                        super::ScanFeedShape::FoldPrefix { agg: &aps.agg },
-                    )?;
-                    super::arm_fold_len_lanes(&aps.agg, ss);
+                    let mode = drive_mode(&aps.agg);
+                    match mode {
+                        DriveMode::Fold => {
+                            // The serial fold feed's arm/init half, once per
+                            // worker; the drain half re-runs per morsel.
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::FoldPrefix { agg: &aps.agg },
+                            )?;
+                            super::arm_fold_len_lanes(&aps.agg, ss);
+                        }
+                        DriveMode::Census => {
+                            // Census shape: row-feed staging (kernel-qual
+                            // selection bitmap / PREWHERE when the qual has
+                            // kernel shape; stitched tiers on).
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime scan census feed",
+                                    stitch: true,
+                                },
+                            )?;
+                        }
+                    }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
-                    Ok(())
+                    Ok(mode)
                 })
             })
         })();
         match armed {
-            Ok(()) => {
+            Ok(mode) => {
                 *cell.borrow_mut() =
-                    Some(WorkerExec { qd, errored: std::cell::Cell::new(false) });
+                    Some(WorkerExec { qd, mode, errored: std::cell::Cell::new(false) });
                 Ok(())
             }
             Err(e) => {
@@ -460,6 +497,108 @@ fn ensure_hooks_registered() {
     });
 }
 
+/// Fold when the plan reads lane columns (the serial Fold choice); the
+/// census shape (no columns) takes the per-row drain. Deterministic from
+/// the classified plan, so leader and workers always agree.
+fn drive_mode(agg: &::nodeagg::AggStateData<'_>) -> DriveMode {
+    match ::nodeagg::agg_lanefold_plan(agg) {
+        Some(plan) if plan.cols.is_empty() => DriveMode::Census,
+        _ => DriveMode::Fold,
+    }
+}
+
+/// The census morsel drain: the fold drain's structure specialized to
+/// count-only plans (no residuals, no guards, no lane reads, no str-mm
+/// memos) with a graceful no-SoA/no-bitmap fallback. Byte-identity: the
+/// same rows pass the same qual — the staged bitmap IS the kernel qual's
+/// verdict (fallback rows re-check per row through `seq_scan_batch_emit`,
+/// exactly the fold drain's discipline) — and a CountStar transition's
+/// whole effect is one increment per surviving row, which `fold_batch`
+/// applies as a popcount over the same selection.
+fn census_drain<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(::nodeagg::agg_lanefold_plan(agg)
+        .is_some_and(|p| p.cols.is_empty() && p.resid.is_empty() && !p.guarded));
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of claim: drop the scan slot's pin (fold drain parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let nwords = (n as usize).div_ceil(64);
+        let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+        let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
+        let fast = {
+            let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+            let bitmap_qual = sel.is_some();
+            match ::nodeseqscan::seq_scan_batch_soa(ss) {
+                Some(soa) if bitmap_qual || ss.ss.qual.is_none() => {
+                    let fb = soa.fallback_words();
+                    for w in 0..nwords {
+                        rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
+                        fallback[w] = fb[w];
+                    }
+                    if n % 64 != 0 {
+                        rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                        fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        };
+        if fast {
+            // Fallback rows: full per-row program off the stored tuple
+            // (qual re-checked inside emit).
+            for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
+                while bits != 0 {
+                    let i = (w as u32) * 64 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                    }
+                }
+            }
+            if rows[..nwords].iter().any(|w| *w != 0) {
+                let aggcx = ::nodeagg::agg_aggcontext(agg);
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("checked above: SoA staged");
+                let plan =
+                    ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
+                // SAFETY: pergroup_base is the node's once-allocated
+                // single-group pergroup array covering every transno;
+                // CountStar kernels read no lane columns, so the col
+                // contract is vacuous; the plan is unguarded (asserted).
+                unsafe {
+                    ::lanefold::fold_batch(
+                        plan,
+                        soa,
+                        &rows[..nwords],
+                        n as usize,
+                        ::nodeagg::agg_plain_pergroup_base(agg),
+                        aggcx,
+                    )?;
+                }
+            }
+        } else {
+            // No staged bitmap/SoA (scalar qual, unstaged batch): the full
+            // per-row path for every row.
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // The morsel source: cbstore granule geometry.
 // ---------------------------------------------------------------------------
@@ -469,9 +608,9 @@ fn ensure_hooks_registered() {
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
-struct CbstoreGranuleSource {
+pub(super) struct CbstoreGranuleSource {
     /// Row-group start prefix sums (len nrgs+1; last = total).
-    starts: Vec<u64>,
+    pub(super) starts: Vec<u64>,
 }
 
 impl runtime::MorselSource for CbstoreGranuleSource {
@@ -552,7 +691,7 @@ impl<'mcx> ::nodes_core::NodeWalker<'mcx> for SafetyCx {
     }
 }
 
-fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
+pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
     let mut cx = SafetyCx { safe: true };
     for n in nodes {
         use ::nodes_core::NodeWalker as _;
@@ -570,7 +709,7 @@ fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResul
 
 /// Env floor for engagement (granules): below it the serial fold wins
 /// outright and launching helpers is pure overhead.
-fn min_granules() -> u64 {
+pub(super) fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_SCAN_MIN_GRANULES")
@@ -601,6 +740,14 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(None);
+    }
+    // Census shapes (fold plan reads no columns) engage only with a qual:
+    // the bare count(*) is the Meta/footer arm's, and a qual-less census
+    // scan would stage nothing for the per-row drive.
+    if ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
+        && ss.ss.qual.is_none()
+    {
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
@@ -807,6 +954,33 @@ fn engage_ceremony<'mcx>(
                 drain_rg(rt, payload, &rg);
                 return Ok(EngageOutcome::Fallback);
             }
+            // LIVENESS: every launched helper's task has ENDED (normal hook
+            // exit keeps BGWH_STARTED until after the drive, so this cannot
+            // trip mid-drive) yet the RG is incomplete — helpers died
+            // without a channel message (post-Terminate death, e.g. an
+            // init-path panic-to-ERROR). Nothing claimed => clean fallback;
+            // claimed => reap if possible and surface a real error.
+            if parallel::parallel_workers_all_stopped(pcxt) {
+                if let Some(o) = waiter.try_wait() {
+                    break o;
+                }
+                let claimed = rg.stats().tasks_claimed;
+                lane_trace(&format!(
+                    "runtime-scan: helpers all stopped, rg incomplete (claimed={claimed})"
+                ));
+                rg.abort();
+                let drained = drain_rg(rt, payload, &rg);
+                if claimed == 0 && drained {
+                    return Ok(EngageOutcome::Fallback);
+                }
+                if let Some(e) = payload.take_error() {
+                    return Err(e);
+                }
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime scan helpers exited before completing the scan",
+                )));
+            }
             parallel::wait_parallel_finish_quantum();
         };
 
@@ -876,21 +1050,37 @@ enum EngageOutcome {
 /// drives the protocol itself — the closed generation refuses every join,
 /// so no morsel work runs; the drive just executes invalidate/finalize/
 /// completion. This is cleanup driving, not leader work execution (§2.5).
+/// Abort + BOUNDED drain of a pinned RG. True = the RG completed (the
+/// normal case: a closed generation refuses every join, so the drive is
+/// pure protocol cleanup and settles within a morsel). False = it could not
+/// be completed — a participant died holding an unsettled pin (worker-death
+/// containment): the RG and its slot are deliberately LEAKED (bounded by
+/// the 128-slot array; a process restart resets everything) and the caller
+/// must surface an error rather than wait forever.
 fn drain_rg(
     rt: &'static Arc<runtime::Runtime>,
     payload: &Arc<RuntimeScanShared>,
     rg: &runtime::RgHandle,
-) {
+) -> bool {
     let _ = payload;
     rg.abort();
-    // Lane exhaustion here would strand the RG; spin-wait for one (bounded
-    // by helper drives, which settle within a morsel).
-    let lane = loop {
+    // Bounded lane wait (~2s): helper drives settle within a morsel.
+    let mut lane = None;
+    for _ in 0..4000 {
         if let Some(l) = rt.acquire_external_lane() {
-            break l;
+            lane = Some(l);
+            break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let Some(lane) = lane else {
+        lane_trace("runtime-scan: LEAKED pinned RG (no external lane for the drain)");
+        return false;
     };
     let mut local = lane.local();
-    let _ = rt.drive_pinned(&mut local, rg);
+    let drained = rt.try_drain_pinned(&mut local, rg, 4000).is_some();
+    if !drained {
+        lane_trace("runtime-scan: LEAKED pinned RG (drain gave up — dead participant?)");
+    }
+    drained
 }

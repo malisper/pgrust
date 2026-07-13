@@ -64,29 +64,29 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // anything a worker could still be parked on. Inert unless registered; on
 // this tree only the binder substrate e2e registers them (the runtime
 // pool/scheduler lane owns the production park).
-// MULTI-registrant (m2-agg-sink fix): the runtime scan arm and the M2
-// aggregation sink both register — a single OnceLock slot silently dropped
-// the second arm's hook (its helpers would park as no-ops and wedge the
-// leader's wait). Hooks self-select by downcasting the context's private
-// payload, so calling every registrant in registration order is correct by
-// construction. Registration is idempotent (fn-pointer dedup) and happens a
-// handful of times per process — a Mutex<Vec> is fine.
-static POST_TASK_PARK: std::sync::Mutex<Vec<fn(&ParallelShared)>> =
-    std::sync::Mutex::new(Vec::new());
-static PRIVATE_SHUTDOWN: std::sync::Mutex<Vec<fn(&(dyn Any + Send + Sync))>> =
-    std::sync::Mutex::new(Vec::new());
+// MULTI-REGISTRANT (M2 reconciliation of both lanes' independent fixes):
+// several runtime arms coexist (M1 runtime-scan, the M2 agg + distinct sink
+// arms), each with its own private-payload type — a single OnceLock slot
+// silently dropped the second arm's hook (its helpers would park as no-ops
+// and wedge the leader's wait). Every hook downcasts the context's private
+// payload and no-ops on foreign types, so calling every registrant in
+// registration order is correct by construction. Registration is append-only
+// and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
+// written once per arm per process, read per worker task.
+static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
-    let mut g = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
-    if !g.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
-        g.push(f);
+    let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
     }
 }
 
 pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
-    let mut g = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
-    if !g.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
-        g.push(f);
+    let mut v = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
     }
 }
 
@@ -506,6 +506,27 @@ pub fn wait_parallel_finish_quantum() {
     wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH);
 }
 
+/// True when every launched worker's underlying bgworker task has ENDED
+/// (thread exited, died, or parked back to the pool). The M1 runtime-scan
+/// leader's liveness probe: all stopped while the pinned RG is incomplete
+/// means nobody will ever finish the submitted work (helpers died pre-hook
+/// — e.g. an init-path panic-to-ERROR — leaves no channel message after
+/// Terminate and no refusal count). During normal hook driving the tasks
+/// are still BGWH_STARTED, so this cannot false-positive mid-drive.
+pub fn parallel_workers_all_stopped(id: ParallelContextId) -> bool {
+    let n = with_pcxt(id, |p| p.workers.len());
+    for i in 0..n {
+        let handle = with_pcxt(id, |p| p.workers.get(i).and_then(|w| w.bgwhandle));
+        let Some(handle) = handle else { continue };
+        match bgworker::GetBackgroundWorkerPid(&handle).0 {
+            bgworker::BgwHandleStatus::BGWH_STOPPED
+            | bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
 }
@@ -806,7 +827,8 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
 
-    // Release parked helpers BEFORE waiting for worker exit below.
+    // Release parked helpers BEFORE waiting for worker exit below. Every
+    // registered hook runs; each no-ops on foreign payload types.
     if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
         for f in private_shutdown_hooks() {
             f(&*p);

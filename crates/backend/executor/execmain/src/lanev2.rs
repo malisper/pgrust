@@ -36,6 +36,7 @@
 
 mod exprkey;
 mod runtime_agg;
+mod runtime_distinct;
 mod runtime_scan;
 mod push;
 mod stats;
@@ -2189,6 +2190,19 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
         }
         return try_meta_agg_answer(agg, ss, estate);
     }
+    // M1 runtime scan arm (the Meta arm preempts above — footer answers
+    // beat any parallel scan): FORCED engagement under PGRUST_RUNTIME=1 +
+    // pgrust.runtime_scan_pool, serial plan surface unchanged. Owns the
+    // Fold shapes AND the cbstore count-only census shape (a qualed
+    // count(*) — serial-refused because the footer is the serial lever,
+    // but a parallel PREWHERE scan is exactly M1's LIKE-count target).
+    // None = not engaged/refused — fall through byte-identically (nothing
+    // was consumed).
+    if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
+        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+            return Ok(Some(r));
+        }
+    }
     if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
@@ -2196,16 +2210,6 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // stays drained until rescan clears `agg_done`.
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
-    }
-    // M1 runtime scan arm (fold shapes only; the Meta arm preempts above —
-    // footer answers beat any parallel scan): FORCED engagement under
-    // PGRUST_RUNTIME=1 + pgrust.runtime_scan_pool, serial plan surface
-    // unchanged. None = not engaged/refused — fall through to the serial
-    // feeds byte-identically (nothing was consumed).
-    if c == AggLaneChoice::Fold {
-        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
-            return Ok(Some(r));
-        }
     }
     // One OWNED tick per lane-owned plain-agg build event (the gate's
     // aggbuild floor counts builds, not calls; a plain node builds once per
@@ -4259,7 +4263,7 @@ pub fn try_own_sort<'mcx>(
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
 
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
@@ -6910,7 +6914,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !state.sort_done() {
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
@@ -6918,6 +6922,16 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         if let Some(k) = narrow {
             // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
+            // M2 runtime DISTINCT sink first (armed only under
+            // PGRUST_RUNTIME=1 + pgrust.runtime_scan_pool > 0 — absent, one
+            // GUC read and fall through). Owns the node on engagement;
+            // refusal/fallback keeps every serial arm below byte-identical.
+            match runtime_distinct::try_own_sorted_distinct_runtime(
+                agg, state, &mut **outer, outer_desc, rd_shape_refused, k, estate,
+            )? {
+                Some(row) => return Ok(Some(row)),
+                None => {}
+            }
             // Dict-code distinct arm first: it owns EXACTLY the density band
             // the hash arm's tier refuses (Q14-class near-unique text keys;
             // the two admissions partition the density axis), so ordering
@@ -10025,7 +10039,7 @@ pub fn try_own_limit<'mcx>(
             // (the tuplesort bound set by the prologue makes it top-N,
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
             if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple
@@ -11146,7 +11160,7 @@ pub fn try_pardistinct_worker_sort<'mcx>(
         s.pd_state = Some(false);
         return Ok(None);
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
         s.pd_state = Some(false);
         return Ok(None);
