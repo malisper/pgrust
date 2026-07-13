@@ -360,7 +360,9 @@ fn load_dh_file(cx: &InitCx, filename: &str) -> PgResult<Option<Dh<Params>>> {
             ereport(cx.level())
                 .with_saved_errno(e.raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
-                .errmsg(format!("could not open DH parameters file \"{filename}\": %m"))
+                .errmsg(format!(
+                    "could not open DH parameters file \"{filename}\": %m"
+                ))
                 .finish(loc("load_dh_file"))?;
             return Ok(None);
         }
@@ -689,7 +691,10 @@ pub fn be_tls_init(is_server_start: bool) -> PgResult<i32> {
         match (loaded, root_cert_list) {
             (Ok(()), Ok(list)) => {
                 ctx.set_client_ca_list(list);
-                ctx.set_verify_callback(SslVerifyMode::PEER | SslVerifyMode::CLIENT_ONCE, verify_cb);
+                ctx.set_verify_callback(
+                    SslVerifyMode::PEER | SslVerifyMode::CLIENT_ONCE,
+                    verify_cb,
+                );
             }
             (r, l) => {
                 let st = r.err().or_else(|| l.err());
@@ -1039,12 +1044,7 @@ fn extract_peer_cn(peer: &X509Ref) -> PgResult<Result<Option<String>, ()>> {
     let mut buf = vec![0u8; len as usize + 1];
     // SAFETY: buf holds len+1 writable bytes as the API requires.
     let r = unsafe {
-        cffi::X509_NAME_get_text_by_NID(
-            name,
-            NID_COMMON_NAME,
-            buf.as_mut_ptr().cast(),
-            len + 1,
-        )
+        cffi::X509_NAME_get_text_by_NID(name, NID_COMMON_NAME, buf.as_mut_ptr().cast(), len + 1)
     };
     if r != len {
         return Ok(Err(()));
@@ -1108,7 +1108,11 @@ fn classify_io(res: Result<usize, openssl::ssl::Error>, is_read: bool) -> PgResu
                 ereport(COMMERROR)
                     .errcode(ERRCODE_PROTOCOL_VIOLATION)
                     .errmsg(format!("SSL error: {}", ssl_errmessage(err.ssl_error())))
-                    .finish(loc(if is_read { "be_tls_read" } else { "be_tls_write" }))?;
+                    .finish(loc(if is_read {
+                        "be_tls_read"
+                    } else {
+                        "be_tls_write"
+                    }))?;
                 Ok(TlsIo {
                     n: -1,
                     errno: libc::ECONNRESET,
@@ -1134,7 +1138,11 @@ fn classify_io(res: Result<usize, openssl::ssl::Error>, is_read: bool) -> PgResu
                 ereport(COMMERROR)
                     .errcode(ERRCODE_PROTOCOL_VIOLATION)
                     .errmsg(format!("unrecognized SSL error code: {}", code.as_raw()))
-                    .finish(loc(if is_read { "be_tls_read" } else { "be_tls_write" }))?;
+                    .finish(loc(if is_read {
+                        "be_tls_read"
+                    } else {
+                        "be_tls_write"
+                    }))?;
                 Ok(TlsIo {
                     n: -1,
                     errno: libc::ECONNRESET,
@@ -1169,7 +1177,12 @@ pub fn be_tls_get_cipher_bits() -> i32 {
     CONN.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|conn| conn.stream.ssl().current_cipher().map(|ci| ci.bits().secret))
+            .and_then(|conn| {
+                conn.stream
+                    .ssl()
+                    .current_cipher()
+                    .map(|ci| ci.bits().secret)
+            })
             .unwrap_or(0)
     })
 }
@@ -1221,6 +1234,47 @@ pub fn be_tls_get_peer_serial() -> Option<String> {
             .and_then(|peer| peer.serial_number().to_bn().ok())
             .and_then(|b| b.to_dec_str().ok().map(|s| s.to_string()))
     })
+}
+
+// contrib/sslinfo accessors. C's sslinfo.c reads MyProcPort->peer and walks
+// the X509 with libcrypto directly; the pgrust peer lives in this backend's
+// CONN, so the walks are exposed as be_tls_*-style getters here.
+
+pub use cffi::{DnFieldLookup, X509ExtensionInfo, X509ExtensionsError};
+
+/// `MyProcPort->peer != NULL` (sslinfo.c ssl_issuer_field's only guard).
+pub fn be_tls_has_peer_certificate() -> bool {
+    CONN.with(|c| c.borrow().as_ref().is_some_and(|conn| conn.peer.is_some()))
+}
+
+/// sslinfo.c X509_NAME_field_to_text over the peer's subject (or issuer)
+/// name. None when there is no TLS connection or no peer certificate.
+pub fn be_tls_get_peer_dn_field(field: &std::ffi::CStr, issuer: bool) -> Option<DnFieldLookup> {
+    CONN.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|conn| conn.peer.as_ref())
+            .map(|peer| {
+                let name = if issuer {
+                    peer.issuer_name()
+                } else {
+                    peer.subject_name()
+                };
+                cffi::x509_name_field_utf8(name.as_ptr(), field)
+            })
+    })
+}
+
+/// sslinfo.c ssl_extension_info's extension walk; no connection or no peer
+/// certificate yields no rows (C: `max_calls = cert != NULL ?
+/// X509_get_ext_count(cert) : 0`).
+pub fn be_tls_get_peer_extensions() -> Result<Vec<X509ExtensionInfo>, X509ExtensionsError> {
+    CONN.with(
+        |c| match c.borrow().as_ref().and_then(|conn| conn.peer.as_ref()) {
+            Some(peer) => cffi::x509_extensions(peer.as_ptr()),
+            None => Ok(Vec::new()),
+        },
+    )
 }
 
 const NID_MD5: libc::c_int = 4;

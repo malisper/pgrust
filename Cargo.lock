@@ -14947,6 +14947,7 @@ dependencies = [
  "spgist_text",
  "spi",
  "sql_functions",
+ "sslinfo",
  "stack_depth",
  "standby",
  "statistics",
@@ -16076,6 +16077,24 @@ dependencies = [
  "types_portal",
  "types_slot",
  "types_tuple",
+]
+
+[[package]]
+name = "sslinfo"
+version = "0.0.0"
+dependencies = [
+ "adt_numeric",
+ "be_secure_openssl",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "init_small",
+ "mbutils",
+ "mcx",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
