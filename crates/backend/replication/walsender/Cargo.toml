@@ -44,6 +44,7 @@ ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 repl_gram = { path = "../repl_gram" }
 resowner = { path = "../../utils/resowner/resowner" }
 slot = { path = "../slot" }
+procsignal = { path = "../../storage/ipc/procsignal" }
 logical = { path = "../logical/logical" }
 logical_decode = { path = "../logical/logical_decode" }
 syncrep_seams = { path = "../syncrep_seams" }

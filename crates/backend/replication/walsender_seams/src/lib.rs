@@ -83,3 +83,16 @@ seam_core::seam!(
     // installed by walsender; the SQL function body lives in pgstatfuncs.
     pub fn pg_stat_wal_senders_snapshot() -> Vec<WalSndStatRow>
 );
+
+seam_core::seam!(
+    // HandleWalSndInitStopping (walsender.c:3560): procsignal PROCSIG_WALSND_INIT_STOPPING.
+    pub fn handle_walsnd_init_stopping() -> ()
+);
+seam_core::seam!(
+    // WalSndInitStopping (walsender.c:3796): shutdown checkpoint's first leg.
+    pub fn wal_snd_init_stopping() -> ()
+);
+seam_core::seam!(
+    // WalSndWaitStopping (walsender.c:3822): wait for stopping/exit of all walsenders.
+    pub fn wal_snd_wait_stopping() -> ()
+);

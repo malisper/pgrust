@@ -236,6 +236,57 @@ fn WalSndKill(_code: i32, _arg: usize) {
     WalSndCtl().walsnds[i as usize].lock().expect("walsnd mutex").pid = 0;
 }
 
+// HandleWalSndInitStopping (walsender.c:3560): if replication has not yet
+// started, die like SIGTERM; if active, flag the main loop — it sends any
+// outstanding WAL, waits for the ack, and exits gracefully (the logical
+// walsender self-arms got_SIGUSR2 when caught up; see XLogSendLogical).
+pub fn HandleWalSndInitStopping() {
+    debug_assert!(walsender_seams::am_walsender());
+    if !REPLICATION_ACTIVE.get() {
+        let _ = procsignal::SendThreadSignal(init_small::globals::MyProcPid(), libc::SIGTERM);
+    } else {
+        GOT_STOPPING.set(true);
+    }
+}
+
+// WalSndInitStopping (walsender.c:3796): checkpointer tells every walsender
+// to move to the stopping state before the shutdown checkpoint.
+pub fn WalSndInitStopping() {
+    for slot in WalSndCtl().walsnds.iter() {
+        let pid = slot.lock().expect("walsnd mutex").pid;
+        if pid == 0 {
+            continue;
+        }
+        let _ = procsignal::SendProcSignal(
+            pid,
+            types_storage::storage::ProcSignalReason::PROCSIG_WALSND_INIT_STOPPING,
+            types_core::INVALID_PROC_NUMBER,
+        );
+    }
+}
+
+// WalSndWaitStopping (walsender.c:3822): wait until every walsender has quit
+// or reached the stopping state, so the shutdown checkpoint can proceed.
+pub fn WalSndWaitStopping() {
+    loop {
+        let mut all_stopped = true;
+        for slot in WalSndCtl().walsnds.iter() {
+            let w = slot.lock().expect("walsnd mutex");
+            if w.pid == 0 {
+                continue;
+            }
+            if w.state != WalSndState::Stopping {
+                all_stopped = false;
+                break;
+            }
+        }
+        if all_stopped {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 // WalSndGetStateString (walsender.c:3888).
 pub fn WalSndGetStateString(state: WalSndState) -> &'static str {
     match state {
@@ -1125,6 +1176,9 @@ pub fn init_seams() {
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);
     // WalSndLastCycleHandler (walsender.c:3475).
+    walsender_seams::handle_walsnd_init_stopping::set(HandleWalSndInitStopping);
+    walsender_seams::wal_snd_init_stopping::set(WalSndInitStopping);
+    walsender_seams::wal_snd_wait_stopping::set(WalSndWaitStopping);
     walsender_seams::wal_snd_last_cycle_handler::set(|| {
         GOT_SIGUSR2.set(true);
         latch_seams::set_latch_my_latch::call();
