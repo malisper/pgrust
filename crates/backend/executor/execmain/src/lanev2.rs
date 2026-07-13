@@ -6248,6 +6248,22 @@ fn distincthash_text_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_BATCH` kill switch (default ON): the
+/// batched fast leg of the hash-grouped distinct feed (staged-cell key
+/// probe + direct set insert, skipping per-row slot projection and the
+/// transition program for the all-set-mode bare-Var shape — Q9-class).
+/// Off, the sink feeds per-row exactly as before — the A/B attribution
+/// channel for the batch delta.
+fn distincthash_batch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_BATCH").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -6324,12 +6340,25 @@ fn hashgroup_order_spec(
 /// begins late, the deferred representatives dump into it, and every
 /// further row goes straight to the sort (the narrow-sort arm's feed,
 /// resumed mid-stream; section doc).
+/// Scan-column map for the batched fast leg (`agg_hashgroup_batch_shape`
+/// order): the grouping keys' and the per-pertrans DISTINCT args' 0-based
+/// SCAN columns — every mapped outer column proved a bare Var, so the
+/// staged scan cell IS the projected outer cell.
+struct HgBatchCols {
+    key_cols: Vec<u16>,
+    arg_cols: Vec<u16>,
+}
+
 struct HashGroupDistinctSink<'a, 'mcx> {
     agg: &'a mut ::nodeagg::AggStateData<'mcx>,
     sort: &'a mut ::nodesort::SortState<'mcx>,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
     nkeys: usize,
     degraded: bool,
+    /// `Some` = the batched fast leg is admitted (shape + Var map +
+    /// `distincthash_batch_enabled`); per-batch availability still gates
+    /// each staged window (`refsort_key_batch`'s soundness contract).
+    batch: Option<HgBatchCols>,
 }
 
 impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
@@ -6355,9 +6384,133 @@ impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
     }
 }
 
-/// Batch-granular feed: the default per-row delegation loop (the arm's
-/// accept is per-row by nature — group probe + transition program).
-impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {}
+/// Batch-granular feed. Default: the per-row delegation loop (group probe +
+/// transition program per row). With `batch` armed (all-int keys, every
+/// transition a set-mode bare-Var pertrans) the FAST LEG reads the keys and
+/// DISTINCT args straight from the staged scan cells and absorbs found-group
+/// rows with zero slot work — no `emit` projection, no `slot_getsomeattrs`,
+/// no transition program (`agg_hashgroup_accept_batch_row` reproduces
+/// `run_row`'s set collect verbatim). Rows the fast leg cannot host go
+/// through the exact per-row path in ROW ORDER (single pass): qual-dead rows
+/// skip (the whole-qual bitmap verdict — the emit's own verdict), forced-
+/// fallback rows and probe misses (group creation defers the row as the
+/// group's rep, which needs a materialized slot) take `emit` + `accept`.
+/// Byte identity: same rows, same order, same group-creation order, same
+/// rep bytes, same degrade point (`Absorbed(false)` mirrors `accept`'s
+/// `Ok(false)` — the row is absorbed first, then the one-shot degrade).
+impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        'fast: {
+            if self.degraded || self.batch.is_none() {
+                break 'fast;
+            }
+            let cols = self.batch.as_ref().expect("checked");
+            // Snapshot the staged views: value/isnull cell pointers per
+            // needed column + one copy of the shared fallback/sel words.
+            // Any column unavailable this batch -> the per-row loop.
+            // SAFETY of the raw pointers: the staged window (SoA cells,
+            // bitmap words) is stable for the whole batch — `emit.emit`
+            // projects into a slot and never restages (the dict-lane feed
+            // relies on the same window-stability contract); the pointers
+            // are consumed before this call returns.
+            let nc = cols.key_cols.len() + cols.arg_cols.len();
+            let mut views: Vec<(*const ::datum::Datum, *const bool)> = Vec::with_capacity(nc);
+            let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
+            let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            for (ci, &col) in
+                cols.key_cols.iter().chain(cols.arg_cols.iter()).enumerate()
+            {
+                let Some((vals, nulls, fallback, sel)) = emit.refsort_key_batch(col, n)
+                else {
+                    break 'fast;
+                };
+                if ci == 0 {
+                    fb[..fallback.len()].copy_from_slice(fallback);
+                    selw = sel.map(|s| {
+                        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                        w[..s.len()].copy_from_slice(s);
+                        w
+                    });
+                }
+                views.push((vals.as_ptr(), nulls.as_ptr()));
+            }
+            // Interrupt cadence floor: one check per staged batch (the
+            // refsort fast leg's cadence; per-row-path rows keep their
+            // per-row check inside `emit`).
+            ::postgres_seams::check_for_interrupts::call()?;
+            let nk = cols.key_cols.len();
+            let mut keyd = [::datum::Datum::null(); 32];
+            let mut keyn = [false; 32];
+            let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
+            for i in pos..n {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
+                if let Some(s) = &selw {
+                    if s[w] & bit == 0 {
+                        continue; // qual-filtered (exact whole-qual verdict)
+                    }
+                }
+                if self.degraded || fb[w] & bit != 0 {
+                    // Post-degrade remainder / forced-fallback row: the
+                    // exact per-row path (emit re-checks + C detoast).
+                    if let Some(slot) = emit.emit(i, estate)? {
+                        self.accept(slot, estate)?;
+                    }
+                    continue;
+                }
+                // SAFETY: per the snapshot contract above; `i < n` and every
+                // view spans `n` staged rows.
+                unsafe {
+                    for (j, &(v, nl)) in views[..nk].iter().enumerate() {
+                        keyd[j] = *v.add(i as usize);
+                        keyn[j] = *nl.add(i as usize);
+                    }
+                    for (j, &(v, nl)) in views[nk..].iter().enumerate() {
+                        args[j] = (*v.add(i as usize), *nl.add(i as usize));
+                    }
+                }
+                match ::nodeagg::agg_hashgroup_accept_batch_row(
+                    self.agg,
+                    &keyd[..nk],
+                    &keyn[..nk],
+                    &args,
+                ) {
+                    ::nodeagg::HgBatchRow::Absorbed(true) => {}
+                    ::nodeagg::HgBatchRow::Absorbed(false) => self.degrade_impl(estate)?,
+                    ::nodeagg::HgBatchRow::NeedSlot => {
+                        // Probe miss: group creation defers this row as the
+                        // rep — materialize it and run the per-row accept
+                        // (byte-identical creation order + rep bytes).
+                        if let Some(slot) = emit.emit(i, estate)? {
+                            self.accept(slot, estate)?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // Per-row delegation loop (the default impl, verbatim).
+        for i in pos..n {
+            if let Some(slot) = emit.emit(i, estate)? {
+                match self.accept(slot, estate)? {
+                    SinkFeed::NeedMore => {}
+                    SinkFeed::Full => {
+                        return Err(Box::new(::types_error::PgError::error(
+                            "lane-v2 batch feed: breaker sink returned Full".to_string(),
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl<'mcx> HashGroupDistinctSink<'_, 'mcx> {
     /// The one-shot degrade (section doc): begin the narrowed sort, dump
@@ -6436,11 +6589,43 @@ fn try_hashgroup_build<'mcx>(
         ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
     )?;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    // Batched fast-leg admission (conversion 3): the all-set-mode bare-Var
+    // int shape + every needed outer column a bare Var of a scan column
+    // (identity for bare scans; through the projection classification
+    // otherwise — the staged scan cell is then the projected outer cell).
+    let batch = if distincthash_batch_enabled() {
+        ::nodeagg::agg_hashgroup_batch_shape(agg).and_then(|(katts, aatts)| {
+            let map = |att: u16| -> Option<u16> {
+                match ss.ss.ps_ProjInfo.as_ref() {
+                    None => Some(att),
+                    Some(p) => {
+                        let cols = p.pi_state.scan_proj_cols()?;
+                        if (att as usize) >= cols.n as usize {
+                            return None;
+                        }
+                        match cols.cols[att as usize] {
+                            ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                            _ => None,
+                        }
+                    }
+                }
+            };
+            let key_cols: Option<Vec<u16>> = katts.iter().map(|&a| map(a)).collect();
+            let arg_cols: Option<Vec<u16>> = aatts.iter().map(|&a| map(a)).collect();
+            Some(HgBatchCols { key_cols: key_cols?, arg_cols: arg_cols? })
+        })
+    } else {
+        None
+    };
+    if batch.is_some() {
+        trace_feed("hash-grouped distinct batch accept armed");
+    }
     // Force a forward child read for the feed's duration (`sort_feed`'s
     // discipline — this drain replaces the sort's own feed).
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false };
+    let mut sink =
+        HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false, batch };
     let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
     let degraded = sink.degraded;
     estate.es_direction = dir;
