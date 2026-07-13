@@ -234,10 +234,13 @@ fn arm_scan_staging<'mcx>(
             }
             ScanFeedShape::FoldPrefix { agg } => fused_agg_soa_prefix(agg, ss).unwrap_or(0),
         };
+        // Every varlena fold column joins the lane's prefix ask — the single
+        // varkey-shaped column AND the multi-varlena set (lane-v2-
+        // dictminmax): the cbstore (virtual-)prefix deform hosts any column
+        // type, and vguard columns must be staged for the fold + guard proof.
         let vcol = match &shape {
-            ScanFeedShape::HashAggFold { agg } => {
-                ::nodeagg::agg_lanefold_plan(agg).and_then(lanefold_varlane_col)
-            }
+            ScanFeedShape::HashAggFold { agg } => ::nodeagg::agg_lanefold_plan(agg)
+                .and_then(|p| p.vguards.iter().copied().max()),
             _ => None,
         };
         let ask = match vcol {
@@ -282,6 +285,16 @@ fn arm_scan_staging<'mcx>(
                 // decide-phase probe already proved it arms).
                 let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol);
                 debug_assert!(armed, "varlane re-arm is idempotent");
+            } else if ::nodeagg::agg_lanefold_plan(agg)
+                .is_some_and(|p| !p.vguards.is_empty())
+            {
+                // Multi-varlena fold (Q23-class): re-arm the cbstore
+                // virtual-prefix staging the decide-phase probe proved
+                // (idempotent). A lost arm leaves the SoA unarmed and the
+                // feed's (None, _) route asserts no lane reader — so a
+                // failed re-arm here would be a bug, not a silent demote.
+                let armed = try_arm_cb_multivar(agg, ss, estate)?;
+                debug_assert!(armed, "multi-varlena re-arm is idempotent");
             } else if soa_prefix > 0 {
                 // Force the SoA deform when the fold reads lane columns, OR when
                 // the K2 deferred probe could host this shape (the K2 key lane
@@ -354,6 +367,44 @@ fn arm_scan_staging<'mcx>(
         }
     }
     Ok(())
+}
+
+/// Multi-varlena fold staging (lane-v2-dictminmax, the Q23-class
+/// `MIN(URL), MIN(Title)` shape): a plan whose lane set carries 2+ varlena
+/// columns (or one varlena among fixed-width lanes) is unhostable by the
+/// heap paths — the fixed-width prefix deform cannot stage `attlen == -1`
+/// and the varkey pass stages exactly one column — but the cbstore
+/// virtual-prefix staging hosts ANY column type. Arm it: PREWHERE for
+/// qualled scans (it owns the staging + selection bitmap; ask widened to
+/// every fold/vguard column), the offset-free columnar arm for bare scans.
+/// False = not that shape, or the staging refused — the decider keeps the
+/// per-row feed, byte-safely.
+fn try_arm_cb_multivar<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return Ok(false);
+    }
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+        return Ok(false);
+    };
+    if plan.vguards.is_empty() || lanefold_varlane_col(plan).is_some() {
+        return Ok(false);
+    }
+    let Some(mut prefix) = fused_agg_soa_prefix(agg, ss) else {
+        return Ok(false);
+    };
+    for &c in plan.cols.iter().chain(plan.vguards.iter()) {
+        prefix = prefix.max(c as i32 + 1);
+    }
+    let armed = if ss.ss.qual.is_some() {
+        ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix)?
+    } else {
+        ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
+    };
+    Ok(armed && ::nodeseqscan::seq_scan_batch_soa(ss).is_some())
 }
 
 /// Decide-phase admission probe: arm the forced fold prefix NOW so an
@@ -1507,7 +1558,9 @@ fn decide_agg_lane<'mcx>(
                     Some(vcol) => {
                         ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol)
                     }
-                    None => false,
+                    // Multi-varlena (Q23-class): cbstore's virtual-prefix
+                    // staging hosts it (lane-v2-dictminmax); heap refuses.
+                    None => try_arm_cb_multivar(agg, ss, estate)?,
                 }
             } else if plan.cols.is_empty() {
                 true
@@ -1578,6 +1631,77 @@ impl ::lanefold::LaneCols for VarLaneCols<'_, '_> {
     fn col_isnull(&self, c: usize) -> &[bool] {
         debug_assert_eq!(c, self.col as usize);
         self.soa.col_isnull(0)
+    }
+}
+
+/// `LaneCols` wrapper carrying the str MIN/MAX dict-code side channel
+/// (lane-v2-dictminmax): delegates the lane reads to `inner` and answers
+/// `col_codes` from the per-batch codes list the feed collected through
+/// `seq_scan_batch_dict_codes` (which certifies the values-were-gathered
+/// half of the contract; the sortedness half is the writer's
+/// CHUNK_FLAG_DICT_SORTED, carried in the table). Keys are the PLAN's
+/// column indexes (the inner wrapper owns any scan remap).
+struct CodesCols<'a, C: ::lanefold::LaneCols> {
+    inner: &'a C,
+    codes: &'a [(u16, ::exectuples::SoaDictLane)],
+}
+
+impl<C: ::lanefold::LaneCols> ::lanefold::LaneCols for CodesCols<'_, C> {
+    #[inline(always)]
+    fn col_values(&self, c: usize) -> &[::datum::Datum] {
+        self.inner.col_values(c)
+    }
+
+    #[inline(always)]
+    fn col_isnull(&self, c: usize) -> &[bool] {
+        self.inner.col_isnull(c)
+    }
+
+    #[inline(always)]
+    fn col_len_staged(&self, c: usize) -> bool {
+        self.inner.col_len_staged(c)
+    }
+
+    #[inline(always)]
+    fn col_codes(&self, c: usize) -> Option<::exectuples::SoaDictLane> {
+        self.codes.iter().find(|(pc, _)| *pc as usize == c).map(|(_, l)| *l)
+    }
+}
+
+/// The plan's str MIN/MAX (text kinds only — bpchar never rides codes)
+/// column list: (plan col, scan col) pairs, deduped. `map` translates plan
+/// columns to scan columns (`None` entries never admit str transitions —
+/// identity when absent).
+fn mm_str_cols(
+    plan: &::lanefold::LanePlan<'_>,
+    map: impl Fn(u16) -> Option<u16>,
+) -> Vec<(u16, u16)> {
+    let mut out: Vec<(u16, u16)> = Vec::new();
+    for t in plan.trans.iter() {
+        if matches!(t.kind, ::lanefold::LaneKind::StrMin | ::lanefold::LaneKind::StrMax)
+            && !out.iter().any(|&(pc, _)| pc == t.col)
+        {
+            if let Some(sc) = map(t.col) {
+                out.push((t.col, sc));
+            }
+        }
+    }
+    out
+}
+
+/// Per-batch dict-code collection for the mm columns: `Some(lane)` per
+/// column exactly when the CURRENT staged window certifies the `col_codes`
+/// contract (dict window, values gathered — `seq_scan_batch_dict_codes`).
+fn collect_mm_codes(
+    ss: &::nodeseqscan::SeqScanState<'_>,
+    mm_cols: &[(u16, u16)],
+    out: &mut Vec<(u16, ::exectuples::SoaDictLane)>,
+) {
+    out.clear();
+    for &(pc, sc) in mm_cols {
+        if let Some(lane) = ::nodeseqscan::seq_scan_batch_dict_codes(ss, sc as usize) {
+            out.push((pc, lane));
+        }
     }
 }
 
@@ -1668,11 +1792,18 @@ fn agg_hash_build_fold_feed<'mcx>(
     let mut idxs: Vec<u32> = Vec::new();
     let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
     // Varlena-lane plans read their one column through the varkey staging at
-    // SoA column 0 (see lanefold_varlane_col / VarLaneCols). The decide phase
-    // admitted Fold only for the single-column varlena shape.
+    // SoA column 0 (see lanefold_varlane_col / VarLaneCols). Multi-varlena
+    // plans (lane-v2-dictminmax, Q23-class) admitted only over the cbstore
+    // virtual-prefix staging, which stages every column at its NATURAL index
+    // — no remap (vcol None).
     let vcol = {
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
-        debug_assert!(plan.vguards.is_empty() || lanefold_varlane_col(plan).is_some());
+        debug_assert!(
+            plan.vguards.is_empty()
+                || lanefold_varlane_col(plan).is_some()
+                || ::nodeseqscan::seq_scan_batch_soa(ss).is_some(),
+            "multi-varlena fold without the cbstore staging armed"
+        );
         lanefold_varlane_col(plan)
     };
     // Dual arm (q22coexist): when the PREWHERE lane owns the staging, the
@@ -1682,6 +1813,19 @@ fn agg_hash_build_fold_feed<'mcx>(
     // to the selection bitmap (unselected cells may be stale pointers).
     let lane_owned = ::nodeseqscan::seq_scan_batch_lane_armed(ss);
     let vremap = if lane_owned { None } else { vcol };
+    // Str MIN/MAX dict-code memo (lane-v2-dictminmax): plan columns == scan
+    // columns on this feed (identity map). Codes collect per batch; the
+    // scratch invalidates whenever any row advanced str transitions through
+    // the per-row program (demote / fallback / arrival-probe routes).
+    let mm_cols = {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+        mm_str_cols(plan, Some)
+    };
+    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        trace_feed("fold str min/max dict-code memo armed");
+    }
+    let mut mm_scratch = ::lanefold::StrMmScratch::default();
+    let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
     let mut k2s = ScanK2Scratch::default();
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -1759,6 +1903,9 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
         }
         if demote {
+            // The per-row program advances the admitted str transitions
+            // behind the memo's back — drop every memo (StrMmScratch doc).
+            mm_scratch.invalidate();
             for i in 0..n {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
@@ -1788,6 +1935,9 @@ fn agg_hash_build_fold_feed<'mcx>(
                     n,
                     estate,
                 )?;
+                // The K2 fold ran without the memo (str advances bypass it)
+                // — keep the memo coherent for any later arrival batch.
+                mm_scratch.invalidate();
                 continue;
             }
             // A fallback-bearing batch routes through the arrival probe (the
@@ -1809,6 +1959,8 @@ fn agg_hash_build_fold_feed<'mcx>(
                     if scan_mk_batch(
                         agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, estate,
                     )? {
+                        // As the K2 arm: the mk fold bypassed the memo.
+                        mm_scratch.invalidate();
                         continue;
                     }
                 } else {
@@ -1832,17 +1984,41 @@ fn agg_hash_build_fold_feed<'mcx>(
                 agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
             }
         }
+        // Fallback rows advanced str transitions through the full per-row
+        // accept above — drop every memo before this batch's fold.
+        if !mm_cols.is_empty()
+            && ::nodeseqscan::seq_scan_batch_soa(ss)
+                .is_some_and(|soa| soa.fallback_words().iter().any(|&w| w != 0))
+        {
+            mm_scratch.invalidate();
+        }
         // SAFETY: non-fallback rows carry valid deformed lane values for
         // every plan column (the SoA prefix covers the evaltrans fetch
         // bound; varlena lanes are page datum pointers from the varkey
         // staging, pinned for the staged batch); guarded plans passed
-        // `check_guards` above; the rest is `agg_fold_staged`'s per-feed
-        // contract.
+        // `check_guards` above; dict-code views satisfy the col_codes
+        // contract (`seq_scan_batch_dict_codes`); the rest is
+        // `agg_fold_staged`'s per-feed contract.
+        collect_mm_codes(ss, &mm_cols, &mut mm_codes);
         match (::nodeseqscan::seq_scan_batch_soa(ss), vremap) {
             (Some(soa), Some(cix)) => unsafe {
-                agg_fold_staged(agg, &VarLaneCols { soa, col: cix }, &idxs, &groups)?
+                agg_fold_staged_mm(
+                    agg,
+                    &CodesCols { inner: &VarLaneCols { soa, col: cix }, codes: &mm_codes },
+                    &idxs,
+                    &groups,
+                    Some(&mut mm_scratch),
+                )?
             },
-            (Some(soa), None) => unsafe { agg_fold_staged(agg, soa, &idxs, &groups)? },
+            (Some(soa), None) => unsafe {
+                agg_fold_staged_mm(
+                    agg,
+                    &CodesCols { inner: soa, codes: &mm_codes },
+                    &idxs,
+                    &groups,
+                    Some(&mut mm_scratch),
+                )?
+            },
             (None, _) => {
                 debug_assert!(
                     ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
@@ -2236,6 +2412,16 @@ fn agg_plain_fold_feed<'mcx>(
     ::nodeagg::agg_plain_build_begin(agg)?;
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
+    // Str MIN/MAX dict-code side channel (lane-v2-dictminmax; identity plan→
+    // scan column map on this feed).
+    let mm_cols = {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
+        mm_str_cols(plan, Some)
+    };
+    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_cbstore(ss) {
+        trace_feed("fold str min/max dict-code memo armed");
+    }
+    let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
@@ -2349,6 +2535,10 @@ fn agg_plain_fold_feed<'mcx>(
         if rows[..nwords].iter().any(|w| *w != 0) {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
             let aggcx = ::nodeagg::agg_aggcontext(agg);
+            // Str MIN/MAX dict-code views for this batch (lane-v2-
+            // dictminmax): the ungrouped fold's batch winner becomes an
+            // integer code scan — no scratch (fold_batch needs no memo).
+            collect_mm_codes(ss, &mm_cols, &mut mm_codes);
             let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                 .expect("plain fold plans read lane columns");
             // SAFETY: pergroup_base is the node's once-allocated single-group
@@ -2360,11 +2550,12 @@ fn agg_plain_fold_feed<'mcx>(
             // initialize_aggregates; Int128AvgAccum pergroups are NULL or
             // hold the aggcontext state the fold/transfn chain installed, and
             // `aggcx` is that same aggcontext; guarded plans passed
-            // `check_guards` above.
+            // `check_guards` above; dict-code views satisfy the col_codes
+            // contract (`seq_scan_batch_dict_codes`).
             unsafe {
                 ::lanefold::fold_batch(
                     plan,
-                    soa,
+                    &CodesCols { inner: soa, codes: &mm_codes },
                     &rows[..nwords],
                     n as usize,
                     ::nodeagg::agg_plain_pergroup_base(agg),
@@ -3588,13 +3779,36 @@ unsafe fn agg_fold_staged<'mcx>(
     idxs: &[u32],
     groups: &[core::ptr::NonNull<::execexpr::AggPerGroup>],
 ) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe { agg_fold_staged_mm(agg, cols, idxs, groups, None) }
+}
+
+/// `agg_fold_staged` with the str MIN/MAX dict-code memo (lane-v2-
+/// dictminmax): a `Some(scratch)` routes str advances whose column carries a
+/// sorted dict-code view (`LaneCols::col_codes`) through integer code
+/// compares — transvalue bytes and datumCopy sequence provably unchanged
+/// (`lanefold::str_advance_coded`). The FEED owns the scratch's
+/// invalidation: any row of the build that advances an admitted str
+/// transition outside this call (demote, fallback, arrival-probe accept)
+/// must `invalidate()` before the next fold.
+///
+/// # Safety
+/// As `agg_fold_staged`, plus the `col_codes` contract for every answered
+/// column when `mm` is `Some`.
+unsafe fn agg_fold_staged_mm<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    cols: &impl ::lanefold::LaneCols,
+    idxs: &[u32],
+    groups: &[core::ptr::NonNull<::execexpr::AggPerGroup>],
+    mm: Option<&mut ::lanefold::StrMmScratch>,
+) -> PgResult<()> {
     if idxs.is_empty() {
         return Ok(());
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
-    // SAFETY: caller contract (above) is exactly fold_rows_grouped's.
-    unsafe { ::lanefold::fold_rows_grouped(plan, cols, idxs, groups, aggcx) }
+    // SAFETY: caller contract (above) is exactly fold_rows_grouped_mm's.
+    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm) }
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
@@ -5916,6 +6130,12 @@ fn sorted_fold_window<'mcx>(
             if run_any {
                 let plan = ::nodeagg::agg_lanefold_plan(agg).unwrap();
                 let aggcx = ::nodeagg::agg_aggcontext(agg);
+                // Str MIN/MAX dict-code views for this window (lane-v2-
+                // dictminmax; identity plan→scan map, no scratch —
+                // fold_batch's batch winner is codes-only).
+                let mm_cols = mm_str_cols(plan, Some);
+                let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
+                collect_mm_codes(ss, &mm_cols, &mut mm_codes);
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                     .expect("fold drive staged the SoA");
                 // SAFETY: pergroup_base is the node's once-allocated current-
@@ -5930,7 +6150,7 @@ fn sorted_fold_window<'mcx>(
                 unsafe {
                     ::lanefold::fold_batch(
                         plan,
-                        soa,
+                        &CodesCols { inner: soa, codes: &mm_codes },
                         &run[..nwords],
                         n as usize,
                         ::nodeagg::agg_sorted_pergroup_base(agg),

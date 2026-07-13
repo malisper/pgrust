@@ -85,7 +85,7 @@ use core::ptr::NonNull;
 use ::adt_numeric::aggregates::{do_int128_accum, Int128AggState};
 use ::datum::Datum;
 use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
-use ::exectuples::SoaBatch;
+use ::exectuples::{SoaBatch, SoaDictLane};
 use ::mcx::{Mcx, PgVec};
 use ::types_core::catalog::{
     BOOLOID, BPCHAROID, C_COLLATION_OID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
@@ -196,6 +196,30 @@ pub trait LaneCols {
     #[inline(always)]
     fn col_len_staged(&self, _c: usize) -> bool {
         false
+    }
+
+    /// Dict-code side channel for a str MIN/MAX column (lane-v2-dictminmax).
+    /// `Some(lane)` is the feed's PROOF, per staged batch, that
+    ///
+    /// 1. for every SELECTED non-null staged row `i`, `col_values(c)[i]` is
+    ///    the (inline varlena) datum `lane.table.datum(lane.code(i))` — the
+    ///    column's datum cells were gathered from this very dictionary, so
+    ///    the datum a kernel advances/copies IS the code's decoded value;
+    /// 2. when `lane.table.sorted`, the dictionary entries are DEDUPLICATED
+    ///    and strictly ascending in `varstrfastcmp_c` order (byte-lexicographic
+    ///    memcmp + length tiebreak — cbstore's writer sorts payload byte
+    ///    slices with exactly that order), so within this epoch
+    ///    `sign(varstrfastcmp_c(dict[a], dict[b])) == sign(cmp(a, b))` and
+    ///    equal codes are the SAME datum pointer.
+    ///
+    /// The kernels consult it only for `StrMin`/`StrMax` (the admission gate
+    /// already proved a memcmp-tier collation, under which varstr_cmp IS
+    /// varstrfastcmp_c) and only when `sorted`; bpchar kinds never use it
+    /// (bcTruelen's trailing-blank trim breaks the code order). Feeds
+    /// without a dict view keep the default.
+    #[inline(always)]
+    fn col_codes(&self, _c: usize) -> Option<SoaDictLane> {
+        None
     }
 }
 
@@ -1546,6 +1570,47 @@ pub unsafe fn fold_batch(
             // final winner); AGG_PLAIN has no memory-fed spill decisions, so
             // the intermediate-copy difference is unobservable.
             LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax => {
+                // Dict-code fast arm (lane-v2-dictminmax): under a SORTED
+                // dict view (LaneCols::col_codes contract) the batch winner
+                // is the min/max CODE among selected non-null rows — an
+                // integer scan, no payload memcmp. The advanced datum is the
+                // winning row's values cell, which the contract pins to
+                // `dict[code]`: equal codes are the SAME pointer, so the
+                // picked datum is bit-identical to the memcmp pre-fold's
+                // last-tied winner (dedup makes ties within an epoch
+                // impossible across DIFFERENT datums). Str kinds only —
+                // bpchar's trailing-blank trim breaks the code order.
+                let code_lane = match t.kind {
+                    LaneKind::StrMin | LaneKind::StrMax => {
+                        cols.col_codes(t.col as usize).filter(|l| l.table.sorted)
+                    }
+                    _ => None,
+                };
+                if let Some(lane) = code_lane {
+                    let want_max = t.kind == LaneKind::StrMax;
+                    let mut best: Option<(u32, usize)> = None;
+                    for_each_row(rows, |i| {
+                        if !isnull[i] {
+                            let c = lane.code(i);
+                            best = Some(match best {
+                                None => (c, i),
+                                Some((b, bi)) => {
+                                    if if want_max { c > b } else { c < b } {
+                                        (c, i)
+                                    } else {
+                                        (b, bi)
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    if let Some((_, i)) = best {
+                        // SAFETY: col_codes contract — values[i] is the
+                        // inline varlena dict datum; live pergroup + aggcxt.
+                        unsafe { str_advance(t, pg, values[i], aggcxt)? };
+                    }
+                    continue;
+                }
                 let mut m: Option<Datum> = None;
                 for_each_row(rows, |i| {
                     if !isnull[i] {
@@ -1934,6 +1999,182 @@ fn for_each_row(rows: &[u64], mut f: impl FnMut(usize)) {
     }
 }
 
+/// Per-(group, transition) memo for the grouped str MIN/MAX dict-code path:
+/// keyed by the pergroup CELL address (base + transno — unique per group per
+/// transition, stable for the life of one build feed). `gen` is the
+/// validity generation: the feed MUST call `invalidate()` whenever any row
+/// of the build advanced an admitted str transition OUTSIDE
+/// `fold_rows_grouped_mm` (a guard demote, a fallback row, an arrival-probe
+/// accept, a dicteval demote — anything running the per-row transition
+/// program), because the memo mirrors the transvalue and a bypassed advance
+/// silently desynchronizes it. Entries from older generations read as
+/// absent. Plain std heap (never the agg context): scratch memory must not
+/// perturb hash-agg memory accounting.
+pub struct StrMmScratch {
+    map: std::collections::HashMap<usize, MmMemo, core::hash::BuildHasherDefault<PtrHash>>,
+    gen: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MmMemo {
+    gen: u32,
+    /// Dictionary identity the memo's `code` lives in.
+    epoch: u64,
+    /// Best (min for StrMin / max for StrMax) code this path advanced for
+    /// the group in `epoch`.
+    code: u32,
+    /// True: the transvalue is an aggcxt copy of `dict[code]` (byte-equal
+    /// payload). False: the transvalue STRICTLY beats `dict[code]` under the
+    /// kind's order (a previous-epoch winner that survived this epoch's
+    /// codes so far).
+    tv_code: bool,
+}
+
+/// Multiply-shift pointer hash (Fibonacci constant): deterministic, one
+/// multiply — the per-row memo probe must not pay SipHash.
+#[derive(Default)]
+pub struct PtrHash(u64);
+
+impl core::hash::Hasher for PtrHash {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 ^= self.0 >> 29;
+    }
+}
+
+impl Default for StrMmScratch {
+    fn default() -> Self {
+        StrMmScratch { map: Default::default(), gen: 0 }
+    }
+}
+
+impl StrMmScratch {
+    /// Drop every memo (O(1) generation bump). See the struct doc for the
+    /// feed's invalidation obligations.
+    pub fn invalidate(&mut self) {
+        self.gen = match self.gen.checked_add(1) {
+            Some(g) => g,
+            None => {
+                self.map.clear();
+                0
+            }
+        };
+    }
+}
+
+/// The grouped str MIN/MAX advance through the dict-code memo — bit-identical
+/// transvalue AND datumCopy sequence to `str_advance(t, pg, d)` with
+/// `d = values[i] = dict[code]` (the `col_codes` contract), proven case by
+/// case (MIN shown; MAX mirrors with the order flipped):
+///
+/// * memo hit, `code` worse than `memo.code` (`>` for MIN): the transvalue
+///   is `dict[memo.code]` (tv_code) or strictly smaller (¬tv_code); either
+///   way `tv < dict[code]` strictly, so the per-row advance KEEPS with no
+///   copy — and so do we, without touching the payload.
+/// * memo hit, `code == memo.code`: tv_code ⇒ memcmp tie ⇒ the per-row
+///   advance REPLACES (text's last-tied-wins datumCopies every tied row) —
+///   we copy identically; ¬tv_code ⇒ `tv < dict[code]` strict ⇒ keep.
+/// * memo hit, `code` better (`<` for MIN): tv_code ⇒ `tv = dict[memo.code]
+///   > dict[code]` ⇒ replace + copy, memo.code = code; ¬tv_code ⇒ order
+///   unknown ⇒ ONE payload compare (exactly the per-row advance's memcmp)
+///   decides keep (memo.code = code, tv still strictly smaller) vs replace.
+/// * memo miss / stale epoch / stale gen: run the plain advance body (its
+///   memcmp, its copies — the install case included), then seed the memo
+///   from the outcome: replaced-or-installed ⇒ tv_code (the transvalue IS
+///   the copy of `dict[code]`); kept ⇒ ¬tv_code (`tv` strictly beat it).
+///
+/// Every branch's copy set equals the per-row advance's copy set, so
+/// aggcontext allocation SEQUENCE — and with it hash-agg memory accounting
+/// and spill decisions — is unchanged.
+///
+/// # Safety
+/// As `str_advance`; `d == dict[code]` per the `col_codes` contract; `key`
+/// is the live pergroup CELL address for `(group, t.transno)`.
+#[inline(always)]
+unsafe fn str_advance_coded(
+    t: &LaneTrans,
+    pg: &mut AggPerGroup,
+    d: Datum,
+    code: u32,
+    epoch: u64,
+    key: usize,
+    mm: &mut StrMmScratch,
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
+    let want_max = t.kind == LaneKind::StrMax;
+    let gen = mm.gen;
+    if let Some(m) = mm.map.get_mut(&key) {
+        if m.gen == gen && m.epoch == epoch && !pg.no_trans_value && !pg.trans_value_is_null {
+            let better = if want_max { code > m.code } else { code < m.code };
+            if !better {
+                if code == m.code && m.tv_code {
+                    // Tie against the code-valued transvalue: text's
+                    // last-tied-wins replaces (and copies) per tied row.
+                    // SAFETY: forwarded caller contract.
+                    pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                }
+                return Ok(());
+            }
+            if m.tv_code {
+                // SAFETY: forwarded caller contract.
+                pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                m.code = code;
+                return Ok(());
+            }
+            // Cross-epoch survivor vs a better code: one payload compare —
+            // exactly the memcmp the per-row advance would run.
+            // SAFETY: forwarded caller contract (inline varlenas).
+            if unsafe { str_keep(t.kind, pg.trans_value, d) } {
+                m.code = code;
+            } else {
+                // SAFETY: forwarded caller contract.
+                pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                m.code = code;
+                m.tv_code = true;
+            }
+            return Ok(());
+        }
+    }
+    // Miss / stale: the plain advance body (str_advance inlined so the
+    // outcome — installed / replaced / kept — seeds the memo).
+    let tv_code;
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if pg.no_trans_value {
+            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+            pg.trans_value_is_null = false;
+            pg.no_trans_value = false;
+            tv_code = true;
+        } else if !pg.trans_value_is_null {
+            if str_keep(t.kind, pg.trans_value, d) {
+                tv_code = false;
+            } else {
+                pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+                tv_code = true;
+            }
+        } else {
+            // NULL transvalue outside the install state: str_advance leaves
+            // it untouched; no memo (the state is not code-describable).
+            return Ok(());
+        }
+    }
+    mm.map.insert(key, MmMemo { gen, epoch, code, tv_code });
+    Ok(())
+}
+
 /// Grouped fold: the probe stays per-row (the hash lookup repoints the
 /// pergroup cell; the caller snapshots it per row), transitions batch per
 /// pergroup-pointer lane. Per-group accumulation order within a transition is
@@ -1959,6 +2200,31 @@ pub unsafe fn fold_rows_grouped(
     groups: &[NonNull<AggPerGroup>],
     aggcxt: Mcx<'_>,
 ) -> PgResult<()> {
+    // SAFETY: forwarded caller contract.
+    unsafe { fold_rows_grouped_mm(plan, cols, idxs, groups, aggcxt, None) }
+}
+
+/// `fold_rows_grouped` with the str MIN/MAX dict-code memo (lane-v2-
+/// dictminmax): when the feed passes a scratch AND `cols.col_codes` answers
+/// a SORTED dict view for a `StrMin`/`StrMax` column, each row's advance
+/// routes through `str_advance_coded` — integer code compares against the
+/// per-group memo instead of a payload memcmp per row, with the transvalue
+/// bytes and the datumCopy sequence provably unchanged (see
+/// `str_advance_coded`). The feed owns the scratch's invalidation
+/// obligations (`StrMmScratch` doc).
+///
+/// # Safety
+/// As `fold_rows_grouped`; a passed `mm` additionally requires the
+/// `col_codes` contract for every answered column and the scratch's
+/// generation to have been invalidated after any out-of-band advance.
+pub unsafe fn fold_rows_grouped_mm(
+    plan: &LanePlan<'_>,
+    cols: &impl LaneCols,
+    idxs: &[u32],
+    groups: &[NonNull<AggPerGroup>],
+    aggcxt: Mcx<'_>,
+    mut mm: Option<&mut StrMmScratch>,
+) -> PgResult<()> {
     debug_assert_eq!(idxs.len(), groups.len());
     for t in plan.trans.iter() {
         let transno = t.transno as usize;
@@ -1975,6 +2241,14 @@ pub unsafe fn fold_rows_grouped(
         let (values, isnull) =
             (cols.col_values(t.col as usize), cols.col_isnull(t.col as usize));
         let w = read_width(cols, t.col, t.width);
+        // Dict-code memo route for this transition (str kinds only, sorted
+        // dict view up, scratch provided) — resolved once per transition.
+        let code_lane = match (t.kind, mm.as_deref_mut()) {
+            (LaneKind::StrMin | LaneKind::StrMax, Some(_)) => {
+                cols.col_codes(t.col as usize).filter(|l| l.table.sorted)
+            }
+            _ => None,
+        };
         if t.kind == LaneKind::Int128AvgAccum {
             // Dedicated row loop: the non-strict transfn runs for NULL
             // inputs too (state alloc on the group's first row of any
@@ -2027,9 +2301,29 @@ pub unsafe fn fold_rows_grouped(
                     bit_advance(t, pg, v, t.kind == LaneKind::BitAnd);
                 }
                 LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax => {
-                    // SAFETY: vguard-passed batch + live aggcxt (caller
-                    // contract).
-                    unsafe { str_advance(t, pg, values[i], aggcxt)? };
+                    match (&code_lane, mm.as_deref_mut()) {
+                        (Some(lane), Some(scratch)) => {
+                            let cell = unsafe { g.as_ptr().add(transno) } as usize;
+                            // SAFETY: col_codes contract (values[i] ==
+                            // dict[code], inline varlena) + live pergroup and
+                            // aggcxt (caller contract).
+                            unsafe {
+                                str_advance_coded(
+                                    t,
+                                    pg,
+                                    values[i],
+                                    lane.code(i),
+                                    lane.table.epoch,
+                                    cell,
+                                    scratch,
+                                    aggcxt,
+                                )?
+                            };
+                        }
+                        // SAFETY: vguard-passed batch + live aggcxt (caller
+                        // contract).
+                        _ => unsafe { str_advance(t, pg, values[i], aggcxt)? },
+                    }
                 }
             }
         }
