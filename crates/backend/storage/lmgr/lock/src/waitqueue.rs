@@ -257,11 +257,18 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
     debug_assert_eq!(awaited_lock().map(|(t, _)| t), Some(*localtag));
     debug_assert!(!lwlock::LWLockHeldByMe(partition_lock));
 
-    // InHotStandby (only the startup process takes lock waits during
-    // recovery): delegate the wait to standby.c's
+    // InHotStandby (proc.c) — standbyState >= SNAPSHOT_PENDING, a per-process
+    // (here per-thread, xlogutils) state only the STARTUP process ever sets:
+    // only its lock waits delegate to standby.c's
     // ResolveRecoveryConflictWithLock, with the deadlock_timeout-based
     // "recovery still waiting" reporting when log_recovery_conflict_waits.
-    let in_hot_standby = transam_xlog_seams::recovery_in_progress::call();
+    // NOT RecoveryInProgress(): that is true for every backend on a standby,
+    // and routing a regular backend's lock wait through the startup-only
+    // conflict path breaks its wakeup and deadlock detection (031 case 5:
+    // the cursor session's table2 wait hung 120s and the buffer-pin deadlock
+    // never got the chance to resolve).
+    let in_hot_standby = xlogutils_seams::in_hot_standby::is_installed()
+        && xlogutils_seams::in_hot_standby::call();
     let standby_wait_start: i64 = if in_hot_standby {
         if guc_tables::vars::log_recovery_conflict_waits.installed()
             && guc_tables::vars::log_recovery_conflict_waits.read()
