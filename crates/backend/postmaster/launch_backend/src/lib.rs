@@ -896,6 +896,11 @@ pub mod rtpool {
             // scan arm reaches the runtime through `runtime::global()`,
             // avoiding an execmain -> launch_backend dependency).
             runtime::install_global(Arc::clone(&rt));
+            // M4 background-job dispatcher (docs/design/m4-bgjobs.md §3.2):
+            // its own kill switch on top of the pool's; with
+            // PGRUST_RUNTIME_BGJOBS unset this is a no-op and no dispatcher
+            // thread exists.
+            let _ = bgjobs::start_if_enabled(&rt);
             rt
         })
     }

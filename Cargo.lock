@@ -1906,6 +1906,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bgjobs"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "latch",
+ "runtime",
+ "types_error",
+ "types_storage",
+ "waiter",
+]
+
+[[package]]
 name = "bgworker"
 version = "0.0.0"
 dependencies = [
@@ -7646,6 +7658,7 @@ version = "0.0.0"
 dependencies = [
  "autovacuum",
  "backend_startup",
+ "bgjobs",
  "bgworker",
  "bgwriter",
  "checkpointer",
