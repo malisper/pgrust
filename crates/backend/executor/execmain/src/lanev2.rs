@@ -2748,13 +2748,18 @@ struct PlainDistinctAggBuildSink<'a, 'mcx> {
     keys: Vec<::datum::Datum>,
     ints: Vec<i64>,
     hashes: Vec<u64>,
-    /// Dict-code insert memo, EPOCH-SCOPED (cleared whenever the staged dict
-    /// lane's epoch changes): bit = this code's value was already fed this
-    /// epoch. Never carries across epochs — epoch-scoped ids are not stable
-    /// value identities (the set stores full bytes; the memo only filters
-    /// repeat inserts, which every downstream consumer dedups anyway).
+    /// Dict-code insert memo, IDENTITY-SCOPED (cleared whenever the memo
+    /// identity changes): bit = this code's value was already fed under this
+    /// identity. Without a v7 stitch the identity is `(false, epoch)` and
+    /// bits are local codes — never carries across epochs (epoch-scoped ids
+    /// are not stable value identities). With a stitch the identity is
+    /// `(true, gepoch)` and bits are PART-GLOBAL codes (0..gndv) — the memo
+    /// never resets at row-group rolls, deleting the per-epoch re-insert tax
+    /// (the global-dict lane's distinct-set consumer, mirroring dict-group).
+    /// Either way the set stores full bytes; the memo only filters repeat
+    /// inserts, which every downstream consumer dedups anyway.
     dict_memo: Vec<u64>,
-    dict_epoch: Option<u64>,
+    dict_ident: Option<(bool, u64)>,
 }
 
 impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
@@ -2771,7 +2776,7 @@ impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
             ints: Vec::new(),
             hashes: Vec::new(),
             dict_memo: Vec::new(),
-            dict_epoch: None,
+            dict_ident: None,
         }
     }
 }
@@ -2816,18 +2821,35 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
         if self.key_bytes {
             if let Some(lane) = emit.key_dict_lane() {
                 let t = lane.table;
-                if self.dict_epoch != Some(t.epoch) {
+                // Memo identity roll: part-global (gepoch, never resets
+                // across row groups) when the v7 stitch is published, else
+                // per-epoch local codes (see the field doc).
+                let global = t.has_stitch();
+                let (ident, size) = if global {
+                    ((true, t.gepoch), t.gndv as usize)
+                } else {
+                    ((false, t.epoch), t.ndict as usize)
+                };
+                if self.dict_ident != Some(ident) {
                     self.dict_memo.clear();
-                    self.dict_memo.resize((t.ndict as usize).div_ceil(64), 0);
-                    self.dict_epoch = Some(t.epoch);
+                    self.dict_memo.resize(size.div_ceil(64), 0);
+                    self.dict_ident = Some(ident);
+                    trace_feed(&format!(
+                        "distinct-set dict memo {} {} (n={size})",
+                        if global { "gepoch" } else { "epoch" },
+                        ident.1
+                    ));
                 }
                 // SAFETY: the lane covers the staged window's `n` rows and
-                // `ndict` dict entries (the fill's contract); consumed
+                // `ndict` dict entries (the fill's contract; the stitch spans
+                // `ndict` u32s per the Part::stitch length check); consumed
                 // before the next window stages.
-                let (codes, dict) = unsafe {
+                let (codes, dict, stitch) = unsafe {
                     (
                         core::slice::from_raw_parts(lane.codes, n as usize),
                         core::slice::from_raw_parts(t.dict, t.ndict as usize),
+                        global
+                            .then(|| core::slice::from_raw_parts(t.stitch, t.ndict as usize)),
                     )
                 };
                 return ::nodeagg::agg_plain_distinct_insert_dict_batch(
@@ -2835,6 +2857,7 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                     estate,
                     &codes[pos as usize..],
                     dict,
+                    stitch,
                     &mut self.dict_memo,
                 );
             }

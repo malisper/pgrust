@@ -130,12 +130,26 @@ pub(crate) struct CodedGroupState<'mcx> {
     /// Shared DISTINCT-arg chain pool: (sign-extended value, next + 1).
     pool: Vec<(i64, u32)>,
     arena: Vec<u8>,
-    /// Per-epoch direct map: code → state index + 1 (0 = unseen). Dense
-    /// (`ndict`-sized), rebuilt at every epoch roll.
+    /// Code-domain mode, fixed at the first absorbed window: `Some(true)` =
+    /// PART-GLOBAL codes (the v7 stitch): `code_map` is indexed by
+    /// `global_code(local)` (dense 0..gndv over the part's union dict),
+    /// keyed on the scan-stable gepoch, and NEVER cleared at epoch rolls —
+    /// the same string in every row group lands on ONE state (its image
+    /// copied once part-wide), and because global codes are strictly
+    /// byte-rank ordered part-wide the whole build closes into a SINGLE
+    /// merge run (the k-way emit machinery degenerates to a run walk).
+    /// `Some(false)` = per-epoch local codes (below). A mid-build mode flip
+    /// degrades (defensive; a pinned scan's stitch is column-stable).
+    mode_global: Option<bool>,
+    /// Direct map: code → state index + 1 (0 = unseen). Local mode: dense
+    /// `ndict`-sized, rebuilt at every epoch roll (`cur_epoch` = epoch).
+    /// Global mode: dense `gndv`-sized, built once (`cur_epoch` = gepoch).
     cur_epoch: Option<u64>,
     code_map: Vec<u32>,
-    /// (code, state) pairs created in the CURRENT epoch, sorted by code at
-    /// the epoch close — code order IS byte order (sorted dicts).
+    /// (code, state) pairs not yet closed into a run, sorted by code at the
+    /// close — code order IS byte order (sorted dicts; global codes are
+    /// byte-rank by construction). Local mode closes per epoch; global mode
+    /// closes once at finish (states are globally unique, one total run).
     epoch_pairs: Vec<(u32, u32)>,
     /// Closed epochs: `runs[e] = [start, end)` into `order`, whose entries
     /// are state indices in byte order within the epoch.
@@ -438,6 +452,7 @@ pub fn agg_codedgroup_begin<'mcx>(
         heads: Vec::new(),
         pool: Vec::new(),
         arena: Vec::new(),
+        mode_global: None,
         cur_epoch: None,
         code_map: Vec::new(),
         epoch_pairs: Vec::new(),
@@ -479,14 +494,31 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
     let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
     debug_assert!(matches!(cg.phase, CgPhase::Building));
     debug_assert!(lane.table.sorted, "caller admits sorted dicts only");
-    let ndict = lane.table.ndict as usize;
-    if cg.cur_epoch != Some(lane.table.epoch) {
-        cg.close_epoch();
-        cg.cur_epoch = Some(lane.table.epoch);
-        cg.code_map.clear();
-        cg.code_map.resize(ndict, 0);
+    let t = lane.table;
+    let ndict = t.ndict as usize;
+    // Code-domain mode, fixed at the first window (field doc). A flip mid
+    // build degrades before absorbing anything from this batch.
+    let global = t.has_stitch();
+    match cg.mode_global {
+        None => cg.mode_global = Some(global),
+        Some(m) if m != global => return CgAccept { consumed: 0, keep: false },
+        Some(_) => {}
     }
-    debug_assert!(cg.code_map.len() >= ndict, "dict size is fixed per epoch");
+    let (ident, map_size) = if global {
+        ((t.gepoch), t.gndv as usize)
+    } else {
+        ((t.epoch), ndict)
+    };
+    if cg.cur_epoch != Some(ident) {
+        // Local mode: epoch roll (close the run, rebuild the map). Global
+        // mode: gepoch is scan-stable, so only the FIRST window lands here.
+        debug_assert!(!global || cg.cur_epoch.is_none(), "gepoch is scan-stable");
+        cg.close_epoch();
+        cg.cur_epoch = Some(ident);
+        cg.code_map.clear();
+        cg.code_map.resize(map_size, 0);
+    }
+    debug_assert!(cg.code_map.len() >= map_size, "map size is fixed per identity");
     for (idx, &i) in rows.iter().enumerate() {
         // NULL DISTINCT arg: C feeds it through seen_null; this arm keeps
         // v1 simple and degrades (unreachable on cbstore — no NULLs).
@@ -495,11 +527,15 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
         }
         let code = lane.code(i as usize) as usize;
         debug_assert!(code < ndict, "filler contract: code < ndict");
-        let s = match cg.code_map[code] {
+        // Map index: part-global byte-rank code when stitched (one state
+        // per distinct string part-wide), local code otherwise.
+        let mcode = if global { t.global_code(code as u32) as usize } else { code };
+        debug_assert!(mcode < cg.code_map.len(), "stitch contract: global code < gndv");
+        let s = match cg.code_map[mcode] {
             0 => {
-                // First surviving row of (epoch, code): land the dict
+                // First surviving row of (identity, code): land the dict
                 // entry's varlena image in the arena (8-aligned).
-                let p = lane.table.datum(code as u32).as_usize() as *const u8;
+                let p = t.datum(code as u32).as_usize() as *const u8;
                 // SAFETY: dict entries are live decoded varlena datums for
                 // the pinned scan's lifetime (SoaDictTable contract),
                 // readable through their header.
@@ -520,8 +556,8 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
                 cg.spans.push((off as u32, len as u32));
                 cg.heads.push(0);
                 let s = (cg.spans.len() - 1) as u32;
-                cg.code_map[code] = s + 1;
-                cg.epoch_pairs.push((code as u32, s));
+                cg.code_map[mcode] = s + 1;
+                cg.epoch_pairs.push((mcode as u32, s));
                 s
             }
             m => m - 1,
