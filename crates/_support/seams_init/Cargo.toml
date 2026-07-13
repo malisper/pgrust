@@ -281,6 +281,7 @@ snapbuild = { path = "../../backend/replication/logical/snapbuild" }
 logical = { path = "../../backend/replication/logical/logical" }
 origin = { path = "../../backend/replication/origin" }
 logicalworker = { path = "../../backend/replication/logical/worker" }
+logicalrelation = { path = "../../backend/replication/logical/relation" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 pgoutput = { path = "../../contrib/pgoutput" }

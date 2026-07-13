@@ -287,6 +287,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(shmem::SHMEM_BUILTINS);
     fmgr_core::register_late_builtins(aio_funcs::AIO_FUNCS_BUILTINS);
     fmgr_core::register_late_builtins(origin::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(logicalrelation::LOGICALRELATION_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

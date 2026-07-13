@@ -8038,6 +8038,7 @@ dependencies = [
  "table",
  "types_core",
  "types_error",
+ "types_fmgr",
  "types_rel",
 ]
 
@@ -14487,6 +14488,7 @@ dependencies = [
  "lock",
  "logical",
  "logicalfuncs",
+ "logicalrelation",
  "logicalworker",
  "lsyscache",
  "ltree",
