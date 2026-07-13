@@ -105,6 +105,12 @@ pub(super) struct RuntimeScanShared {
     failed: AtomicBool,
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
+    /// inc-2 bind-once: helpers drive from the ENTRY TASK (already fully
+    /// bound by parallel_worker_body — a strict superset of the query-task
+    /// binder's bind) instead of re-binding at POST_TASK_PARK. The hook
+    /// skips these payloads. PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1
+    /// hook path (kill-switch layering).
+    drive_at_entry: bool,
 }
 
 impl RuntimeScanShared {
@@ -252,12 +258,70 @@ impl RuntimeScanShared {
 // Worker (helper) side: entry task + the POST_TASK_PARK drive.
 // ---------------------------------------------------------------------------
 
-/// The launched task body: nothing — all real work happens bound, at
-/// POST_TASK_PARK. (The full parallel_worker_body init/teardown around this
-/// is what makes the helper a bindable parked helper: connected to the
+/// The launched task body. M1 shape: nothing — all real work happens bound,
+/// at POST_TASK_PARK. (The full parallel_worker_body init/teardown around
+/// this is what makes the helper a bindable parked helper: connected to the
 /// leader's database, lock-group member, IsParallelWorker.)
-fn runtime_scan_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
+///
+/// inc-2 bind-once (payload.drive_at_entry): the entry task is ALREADY the
+/// bound context — parallel_worker_body's init is a strict superset of the
+/// query-task binder's bind (identity, lock group, db connect, transaction,
+/// relmap/combocid, snapshots, sinval drain, GUC pin, namespace, client,
+/// parallel mode) — so drive the pinned RG right here and skip the
+/// unbind->binder-rebind->unbind cycle M1-a attributed. Error surface is
+/// preserved: fold/executor errors are recorded in the payload (the leader
+/// rethrows them plain, the serial arm's surface) and the entry task
+/// returns Ok — never the parallel message channel, exactly the hook
+/// path's discipline. The binder's validate() is unnecessary here: the
+/// leader's fail-closed admission (policy probe, params, MVCC snapshot)
+/// covered the session gates, and the body itself established db/leader/
+/// worker-number; the only per-helper refusal left is lane exhaustion.
+fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
+    let Some(private) = shared.private() else { return Ok(()) };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return Ok(()) };
+    if !payload.drive_at_entry {
+        return Ok(());
+    }
+    parallel::gtrace("w.entry.drive.begin");
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive_entry(&payload)));
+    if r.is_err() {
+        mark_self_errored();
+        payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
+        let _ = teardown_worker_exec(false);
+    }
+    parallel::gtrace("w.entry.drive.end");
+    // Wake the parked leader: completion/refusal/error all re-poll there.
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
     Ok(())
+}
+
+/// Entry-task drive: the bound-context body (lane lease + executor build +
+/// pinned drive + teardown), errors recorded payload-side. Mirrors
+/// helper_drive minus the binder wrap.
+fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) {
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // Process-wide lane lease: exhaustion = fail-closed non-participation
+    // (the leader's all-refused fallback counts it exactly like a bind
+    // refusal on the hook path).
+    let Some(lane) = payload.rt.acquire_external_lane() else {
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let mut local = lane.local();
+    payload.started.fetch_add(1, Ordering::SeqCst);
+    if let Err(e) = drive_bound(payload, lane.ordinal(), &mut local, &rg) {
+        payload.fail(e);
+    }
+}
+
+/// PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1 POST_TASK_PARK drive.
+fn entry_drive_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ENTRY_DRIVE").map_or(true, |v| v.trim() != "0")
+    })
 }
 
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker
@@ -265,6 +329,12 @@ fn runtime_scan_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> 
 fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
     let Some(private) = shared.private() else { return };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
+    if payload.drive_at_entry {
+        // inc-2: the entry task already drove this engagement — a second
+        // bind+drive here would rebuild the executor against a completed
+        // (or aborted) RG for nothing.
+        return;
+    }
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
@@ -344,6 +414,13 @@ fn mark_self_errored() {
 }
 
 fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+    parallel::gtrace("w.exec.build.begin");
+    let r = build_worker_exec_inner(payload);
+    parallel::gtrace("w.exec.build.end");
+    r
+}
+
+fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
         // Defensive: stale state from an aborted previous drive would alias
         // a freed leader arena.
@@ -843,6 +920,7 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        drive_at_entry: entry_drive_enabled(),
     });
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context
@@ -1002,7 +1080,9 @@ fn engage_ceremony<'mcx>(
             drain_rg(rt, payload, rg);
         }
     }
+    parallel::gtrace("l.destroy.begin");
     let destroy = parallel::DestroyParallelContext(pcxt);
+    parallel::gtrace("l.destroy.end");
     let outcome = body?;
     destroy?;
 
