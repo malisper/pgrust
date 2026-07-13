@@ -85,6 +85,7 @@ pub type LogicalRepRelId = u32;
 /// A tuple received via logical replication; columns are the REMOTE table's.
 /// colvalues[i] is Some for TEXT/BINARY columns (no trailing NUL) and None
 /// for NULL/UNCHANGED.
+#[derive(Clone)]
 pub struct LogicalRepTupleData {
     pub colvalues: Vec<Option<Vec<u8>>>,
     pub colstatus: Vec<u8>,
@@ -94,6 +95,7 @@ pub struct LogicalRepTupleData {
 /// Relation metadata received via logical replication. attkeys\[i\] is true
 /// when column i (0-based remote index) is part of the replica identity (C's
 /// attkeys Bitmapset).
+#[derive(Clone)]
 pub struct LogicalRepRelation {
     pub remoteid: LogicalRepRelId,
     pub nspname: String,
@@ -106,18 +108,21 @@ pub struct LogicalRepRelation {
     pub attkeys: Vec<bool>,
 }
 
+#[derive(Clone)]
 pub struct LogicalRepTyp {
     pub remoteid: Oid,
     pub nspname: String,
     pub typname: String,
 }
 
+#[derive(Clone)]
 pub struct LogicalRepBeginData {
     pub final_lsn: XLogRecPtr,
     pub committime: TimestampTz,
     pub xid: TransactionId,
 }
 
+#[derive(Clone)]
 pub struct LogicalRepCommitData {
     pub commit_lsn: XLogRecPtr,
     pub end_lsn: XLogRecPtr,
