@@ -61,8 +61,10 @@ pub use lifecycle::{
     TaskHandle, TaskLifecycle, TaskParticipant,
 };
 pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
-pub use rg::{CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork};
-pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS};
+pub use rg::{
+    CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
+};
+pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
 pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_T_MIN_NS, EWMA_ALPHA};
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
@@ -89,6 +91,23 @@ pub use parallel::{
 pub fn runtime_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "1"))
+}
+
+/// Process-global runtime handle (M1): published once by the postmaster's
+/// rtpool start (launch_backend::rtpool) so executor-side engagement can
+/// reach the runtime without depending on the postmaster crates. None until
+/// (and unless) the kill switch spawned the pool.
+#[cfg(not(loom))]
+static GLOBAL: std::sync::OnceLock<Arc<Runtime>> = std::sync::OnceLock::new();
+
+#[cfg(not(loom))]
+pub fn install_global(rt: Arc<Runtime>) -> &'static Arc<Runtime> {
+    GLOBAL.get_or_init(|| rt)
+}
+
+#[cfg(not(loom))]
+pub fn global() -> Option<&'static Arc<Runtime>> {
+    GLOBAL.get()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -191,8 +210,62 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec);
+        let rg = self.sched.submit(spec, false);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Submit a PINNED resource group (M1 scan pipelines): executed only by
+    /// external participant threads driving [`Runtime::drive_pinned`] — the
+    /// query's own bound parallel helpers, which carry the session state the
+    /// work needs. Pool workers never claim from pinned RGs (they cannot
+    /// bind foreign query state yet; §2.3 db-pinned pool binding is the M2+
+    /// retirement path, at which point pinned submission collapses into
+    /// `submit`). Everything else — morsel cursor, adaptive sizing, the
+    /// last-worker-out finalization protocol, abort drain, completion — is
+    /// the ordinary runtime machinery.
+    pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Per-thread bookkeeping for an external participant (pin-board lane
+    /// `nthreads + ordinal`; at most [`sched::MAX_EXTERNAL_LANES`] lanes).
+    pub fn external_local(&self, ordinal: usize) -> WorkerLocal {
+        self.sched.external_local(ordinal)
+    }
+
+    /// Drive one pinned RG as an external participant until it completes.
+    /// (Production-only: the loom models drive `worker_step` shapes and
+    /// poll try_wait; the pinned driver's yield is a std thread op.)
+    /// The participant obeys the execution-permit cap (a permit is held
+    /// across each step, released before parking) and observes aborts at
+    /// morsel boundaries like any pool worker. The WORK must not unwind
+    /// (TaskSetWork::run_morsel is infallible by contract — implementations
+    /// catch their own errors, record them, and abort the RG); a panic
+    /// escaping a step would strand the participant's pin and wedge the
+    /// finalization protocol.
+    #[cfg(not(loom))]
+    pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
+        loop {
+            if let Some(outcome) = rg.try_outcome() {
+                return outcome;
+            }
+            let epoch = self.park_epoch();
+            self.execution_permits().acquire();
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            self.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => std::thread::yield_now(),
+                Step::Idle => {
+                    if rg.try_outcome().is_some() {
+                        continue;
+                    }
+                    self.park(epoch);
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        }
     }
 
     /// Per-thread scheduling bookkeeping; `worker` ∈ 0..nthreads().

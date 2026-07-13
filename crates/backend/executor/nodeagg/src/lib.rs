@@ -54,6 +54,7 @@ mod gsets;
 mod hashgrouped;
 pub mod merge;
 pub mod pardistinct;
+pub mod runtime_partial;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
