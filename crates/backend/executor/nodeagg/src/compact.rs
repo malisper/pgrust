@@ -896,6 +896,31 @@ pub fn mk_numeric_key_bits(key: ::adt_numeric::NumericKeyForm, width: u8) -> u64
     }
 }
 
+/// Pack an INTEGER value straight into its `width`-byte component bits —
+/// the bits `mk_numeric_datum_bits` would produce for the materialized
+/// `int64_to_numeric(v)` datum (dscale-0, canonical digit form: always
+/// packable up to the mantissa range), without building the numeric. The
+/// canonical key form of an integer strips trailing decimal zeros into
+/// exp10. `None` = |mantissa| exceeds the width's range — the caller
+/// demotes, exactly the datum path's verdict.
+pub fn mk_numeric_i64_bits(v: i64, width: u8) -> Option<u64> {
+    let mut m = v;
+    let mut e: i32 = 0;
+    while m != 0 && m % 10 == 0 {
+        m /= 10;
+        e += 1;
+    }
+    // i64's trailing-zero-stripped mantissa caps e at 18 << the exp bound.
+    debug_assert!(e <= ::adt_numeric::NUMERIC_KEY_EXP_MAX);
+    if m.unsigned_abs() > mk_numeric_mant_abs_max(width) {
+        return None;
+    }
+    Some(mk_numeric_key_bits(
+        ::adt_numeric::NumericKeyForm::Finite { mantissa: m, exp10: e },
+        width,
+    ))
+}
+
 /// Decode component bits back to the canonical key form.
 #[inline]
 fn mk_numeric_key_decode(bits: u64, width: u8) -> ::adt_numeric::NumericKeyForm {
@@ -1225,6 +1250,33 @@ mod numeric_key_tests {
         let a = mk_numeric_datum_bits(datum_of(&short), 4).expect("short image packs");
         let b = mk_numeric_datum_bits(datum_of(img.as_bytes()), 4).expect("long image packs");
         assert_eq!(a, b, "short and long images of one value pack identically");
+    }
+
+    #[test]
+    fn i64_bits_match_materialized_datum_bits() {
+        // The integer fast pack (Q19 extract-key class) must produce the
+        // EXACT bits of the datum path over int64_to_numeric — same key,
+        // same read-back datum — across the trailing-zero ladder, signs,
+        // the width-4/8 range gates, and a deterministic sweep.
+        let mut cases: Vec<i64> = (-70..=70).collect();
+        cases.extend_from_slice(&[
+            100, -100, 1000, 9999, 10000, 123450, 8388600, 8388607, 8388608, -8388607,
+            -8388608, 83886070, 83886080, i64::MAX, i64::MIN, i64::MIN + 1,
+        ]);
+        let mut x: u64 = 0x243f6a8885a308d3;
+        for _ in 0..2000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push(x as i64);
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push((x as i64) % 10_000);
+        }
+        for w in [4u8, 8] {
+            for &v in &cases {
+                let img = ::adt_numeric::int64_to_numeric(v);
+                let datum_bits = mk_numeric_datum_bits(datum_of(img.as_bytes()), w);
+                assert_eq!(mk_numeric_i64_bits(v, w), datum_bits, "v={v} width={w}");
+            }
+        }
     }
 
     #[test]
