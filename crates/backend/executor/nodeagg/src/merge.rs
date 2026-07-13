@@ -1360,6 +1360,11 @@ fn exchange_resolve(node: &mut AggStateData<'_>) {
 /// table cannot become spill-eligible, so the arm gates/sizes by the cap
 /// instead of the full plan-time group estimate.
 pub(crate) fn exchange_cap_for_build(node: &mut AggStateData<'_>) -> Option<u32> {
+    // M2 sink worker builds (sink.rs): the sink cap plays the exchange cap's
+    // role — bounded table, flush at the cap — without any handoff registry.
+    if let Some(cap) = node.perhash.as_ref().and_then(|ph| ph.sink_cap) {
+        return Some(cap);
+    }
     if matches!(
         node.perhash.as_ref().expect("hashed Agg has perhash").exchange,
         ExchangeState::Unresolved

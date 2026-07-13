@@ -161,6 +161,10 @@ pub struct AggStateData<'mcx> {
     // (building or emitting). Plain Rust memory only — no aggcontext
     // residue, no interplay with the group-boundary resets (module doc).
     codedgroup: Option<Box<codedgroup::CodedGroupState<'mcx>>>,
+    // M2 aggregation sink (sink.rs): the LEADER's adopted parallel emit
+    // state — published per-bucket identity-projected rows drained one per
+    // call. Plain Rust memory; no aggcontext residue.
+    sink_emit: Option<Box<sink::SinkEmitState>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -597,6 +601,11 @@ struct PerHashData<'mcx> {
     // Stage-4 §4.4 radix exchange (merge.rs): the worker-side bounded-table
     // state, lazily resolved off the handoff registry on the first probe.
     exchange: merge::ExchangeState,
+    // M2 aggregation sink (sink.rs): Some(cap) on a SINK WORKER build — the
+    // compact arms size/gate by the cap (bounded Local discipline) and the
+    // backstop must never migrate into the C table (the sink cannot export
+    // it); the sink drain flushes at the cap instead.
+    sink_cap: Option<u32>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1516,6 +1525,7 @@ pub fn exec_init_agg<'mcx>(
         hash_build_combined: false,
         hashgroup: None,
         codedgroup: None,
+        sink_emit: None,
     })
 }
 
@@ -1899,6 +1909,7 @@ fn init_perhash<'mcx>(
         table_filled: false,
         compact: None,
         exchange: merge::ExchangeState::Unresolved,
+        sink_cap: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -6015,6 +6026,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
     merge::reset_merge_for_rescan(node);
+    // M2 sink: a rescan re-engages (or falls back) from scratch; any adopted
+    // parallel emit state is spent.
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6062,6 +6076,8 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
+    // M2 sink: spent on rescan (see exec_rescan_agg_chg).
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6179,7 +6195,7 @@ mcx::forget_safe_struct!(
         spill, tapeset, rslot, wslot, tmp_ctx },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill;
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
@@ -6188,7 +6204,8 @@ mcx::forget_safe_struct!(
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup },
+        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup,
+        sink_emit },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },
