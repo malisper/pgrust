@@ -61,6 +61,30 @@ pub(crate) fn logicalrep_relmap_prepare() -> PgResult<()> {
     logicalrelation::logicalrep_relmap_init()
 }
 
+// Per-handler input-function cache: one FmgrInfo per local column, alive
+// until after the DML executes. THE LIFETIME MATTERS: this port's fmgr
+// convention lets a function's result live in flinfo-owned scratch
+// (fn_extra, e.g. fc_textin's OutBuf) — dropping the FmgrInfo frees the
+// returned datum's storage. COPY keeps in_functions alive for the whole
+// statement for the same reason; a per-call FmgrInfo here produced
+// nondeterministic dangling varlenas in heap_form_tuple (round-4 crash).
+pub(crate) struct InFuncs {
+    per_col: Vec<Option<(fmgr::FmgrInfo, Oid)>>,
+}
+
+impl InFuncs {
+    fn new(natts: usize) -> Self {
+        InFuncs { per_col: (0..natts).map(|_| None).collect() }
+    }
+    fn get(&mut self, i: usize, atttypid: Oid) -> PgResult<&mut (fmgr::FmgrInfo, Oid)> {
+        if self.per_col[i].is_none() {
+            let (typinput, typioparam) = lsyscache::getTypeInputInfo(atttypid)?;
+            self.per_col[i] = Some((fmgr_seams::fmgr_info::call(typinput)?, typioparam));
+        }
+        Ok(self.per_col[i].as_mut().expect("just filled"))
+    }
+}
+
 // begin_replication_step (worker.c:501).
 fn begin_replication_step(mcx: Mcx<'_>) -> PgResult<()> {
     if !xact::IsTransactionState() {
@@ -200,6 +224,7 @@ fn slot_store_data<'mcx>(
     entry: &LogicalRepRelMapEntry,
     rel: &Relation<'mcx>,
     tup: &LogicalRepTupleData,
+    infuncs: &mut InFuncs,
 ) -> PgResult<()> {
     let natts = rel.rd_att.natts as usize;
     exectuples::exec_clear_tuple(slot, mcx);
@@ -212,19 +237,21 @@ fn slot_store_data<'mcx>(
             debug_assert!(m < tup.ncols);
             match tup.colstatus[m] {
                 LOGICALREP_COLUMN_TEXT => {
-                    let (typinput, typioparam) = lsyscache::getTypeInputInfo(att.atttypid)?;
-                    let mut flinfo = fmgr_seams::fmgr_info::call(typinput)?;
+                    let atttypmod = att.atttypmod;
+                    let atttypid = att.atttypid;
                     let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
                     let cstr = CString::new(bytes).map_err(|_| {
                         Box::new(types_error::PgError::error(
                             "invalid text column data in logical replication message".to_string(),
                         ))
                     })?;
+                    let (flinfo, typioparam) = infuncs.get(i, atttypid)?;
+                    let ioparam = *typioparam;
                     let d = fmgr::soft::input_function_call(
-                        &mut flinfo,
+                        flinfo,
                         Some(cstr.as_c_str()),
-                        typioparam,
-                        att.atttypmod,
+                        ioparam,
+                        atttypmod,
                         mcx,
                     )?;
                     (d, false)
@@ -254,6 +281,7 @@ fn slot_modify_data<'mcx>(
     entry: &LogicalRepRelMapEntry,
     rel: &Relation<'mcx>,
     tup: &LogicalRepTupleData,
+    infuncs: &mut InFuncs,
 ) -> PgResult<()> {
     let natts = rel.rd_att.natts as usize;
     exectuples::exec_clear_tuple(slot, mcx);
@@ -281,19 +309,21 @@ fn slot_modify_data<'mcx>(
         }
         let (value, isnull) = match tup.colstatus[m] {
             LOGICALREP_COLUMN_TEXT => {
-                let (typinput, typioparam) = lsyscache::getTypeInputInfo(att.atttypid)?;
-                let mut flinfo = fmgr_seams::fmgr_info::call(typinput)?;
+                let atttypmod = att.atttypmod;
+                let atttypid = att.atttypid;
                 let bytes = tup.colvalues[m].as_deref().unwrap_or(&[]);
                 let cstr = CString::new(bytes).map_err(|_| {
                     Box::new(types_error::PgError::error(
                         "invalid text column data in logical replication message".to_string(),
                     ))
                 })?;
+                let (flinfo, typioparam) = infuncs.get(i, atttypid)?;
+                let ioparam = *typioparam;
                 let d = fmgr::soft::input_function_call(
-                    &mut flinfo,
+                    flinfo,
                     Some(cstr.as_c_str()),
-                    typioparam,
-                    att.atttypmod,
+                    ioparam,
+                    atttypmod,
                     mcx,
                 )?;
                 (d, false)
@@ -468,6 +498,9 @@ fn find_repl_tuple_by_index<'mcx>(
             types_scan::sdir::ScanDirection::ForwardScanDirection,
             outslot,
         )? {
+            // ExecMaterializeSlot (execReplication.c:228): own the tuple
+            // before the scan's pin goes away.
+            exectuples::exec_materialize_slot(outslot, mcx)?;
             found = true;
             break;
         }
@@ -587,6 +620,9 @@ fn find_repl_tuple_seq<'mcx>(
             }
             outslot.base_mut().tts_tid = scanslot.base().tts_tid;
             exectuples::exec_store_virtual_tuple(outslot);
+            // ExecCopySlot is a DEEP copy in C: materialize now, while the
+            // datums still point into scanslot's pinned buffer.
+            exectuples::exec_materialize_slot(outslot, mcx)?;
 
             let tid = outslot.base().tts_tid;
             snapmgr::PushActiveSnapshot(&snapmgr::GetLatestSnapshot()?)?;
@@ -734,8 +770,11 @@ fn apply_handle_insert(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
         return end_replication_step();
     }
 
+    // Keep the input-function cache alive past do_insert: flinfo-owned
+    // scratch backs the by-ref datums in the slot (see InFuncs).
+    let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
-    slot_store_data(mcx, &mut remoteslot, &entry, &rel, &newtup)?;
+    slot_store_data(mcx, &mut remoteslot, &entry, &rel, &newtup, &mut infuncs)?;
     // slot_fill_defaults: subscriber-only columns keep NULL; evaluating
     // non-NULL column defaults on apply is not ported (recorded divergence —
     // C fills defaults for columns absent on the publisher).
@@ -760,20 +799,24 @@ fn apply_handle_update(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
     check_relation_updatable(&entry)?;
 
+    let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
     let searchtup = if upd.has_oldtuple {
         upd.oldtup.as_ref().expect("oldtuple present")
     } else {
         &upd.newtup
     };
-    slot_store_data(mcx, &mut remoteslot, &entry, &rel, searchtup)?;
+    slot_store_data(mcx, &mut remoteslot, &entry, &rel, searchtup, &mut infuncs)?;
 
     let mut localslot = tableam_real::table_slot_create(mcx, &rel)?;
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
 
     if found {
+        // A second cache: slot_modify_data's writes reuse per-column scratch,
+        // which would invalidate remoteslot's datums mid-use otherwise.
+        let mut modfuncs = InFuncs::new(rel.rd_att.natts as usize);
         let mut newslot = tableam_real::table_slot_create(mcx, &rel)?;
-        slot_modify_data(mcx, &mut newslot, &mut localslot, &entry, &rel, &upd.newtup)?;
+        slot_modify_data(mcx, &mut newslot, &mut localslot, &entry, &rel, &upd.newtup, &mut modfuncs)?;
         do_update(mcx, &rel, &mut localslot, &mut newslot)?;
     } else {
         let (nsp, name) =
@@ -805,8 +848,9 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
     check_relation_updatable(&entry)?;
 
+    let mut infuncs = InFuncs::new(rel.rd_att.natts as usize);
     let mut remoteslot = tableam_real::table_slot_create(mcx, &rel)?;
-    slot_store_data(mcx, &mut remoteslot, &entry, &rel, &oldtup)?;
+    slot_store_data(mcx, &mut remoteslot, &entry, &rel, &oldtup, &mut infuncs)?;
 
     let mut localslot = tableam_real::table_slot_create(mcx, &rel)?;
     let found = find_repl_tuple(mcx, &rel, &entry, &mut remoteslot, &mut localslot)?;
