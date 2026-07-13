@@ -56,6 +56,20 @@ pub enum RgOutcome {
     Aborted,
 }
 
+/// RG scheduling class (M4, docs/design/m4-bgjobs.md §3.5). Maintenance RGs
+/// (background-job cycles) are preferred by the pool's pick over foreground
+/// FIFO order, and overtake the wait queue on submission — the minimal
+/// starvation floor, deliberately NOT a scheduler: maintenance slots are few
+/// (one per due job cycle) and their task sets are single-morsel, so the
+/// foreground tax is bounded by one worker × one cycle body. The slot word
+/// stays the sole execution authority; the class only orders the pick.
+/// Stride/priority activation stays M5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RgClass {
+    Foreground,
+    Maintenance,
+}
+
 pub(crate) struct RgProgress {
     pub(crate) started: Vec<bool>,
     pub(crate) done: Vec<bool>,
@@ -183,6 +197,9 @@ pub struct ResourceGroup {
     /// machinery (cursor, sizing, pin board, last-worker-out finalization,
     /// abort drain) is identical.
     pub(crate) pinned: bool,
+    /// M4 scheduling class (see [`RgClass`]). Maintenance implies !pinned
+    /// (asserted at submit): job cycles are executed by pool workers.
+    pub(crate) class: RgClass,
     /// Query-owned generation machinery (H1 structural fix): every task the
     /// runtime carves for this RG carries (query_id, generation) and enters
     /// shared state only through the generation's fail-closed armed join
@@ -205,7 +222,12 @@ pub struct ResourceGroup {
 }
 
 impl ResourceGroup {
-    pub(crate) fn new(rg_id: u64, spec: QuerySpec, pinned: bool) -> Arc<ResourceGroup> {
+    pub(crate) fn new(
+        rg_id: u64,
+        spec: QuerySpec,
+        pinned: bool,
+        class: RgClass,
+    ) -> Arc<ResourceGroup> {
         let n = spec.tasksets.len();
         for (i, ts) in spec.tasksets.iter().enumerate() {
             for &d in &ts.deps {
@@ -218,6 +240,7 @@ impl ResourceGroup {
             rg_id,
             query_id: spec.query_id,
             pinned,
+            class,
             task,
             handle,
             tasksets: spec.tasksets,

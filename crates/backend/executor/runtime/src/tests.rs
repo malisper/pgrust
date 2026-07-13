@@ -701,3 +701,79 @@ fn external_lane_leases_are_exclusive() {
     let again = rt.acquire_external_lane().expect("released lane reusable");
     assert_eq!(again.ordinal(), MAX_EXTERNAL_LANES - 1);
 }
+
+// ---- M4 maintenance class (docs/design/m4-bgjobs.md §3.5) -------------------
+
+/// The starvation floor, deterministically: a Maintenance RG submitted while
+/// a Foreground RG occupies a LOWER slot index is picked at the very next
+/// task boundary — one worker_step — and completes while the foreground RG
+/// is still incomplete. Under pure FIFO pick it would wait for the whole
+/// foreground RG.
+#[test]
+fn maintenance_preferred_over_foreground_fifo() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    let total = 16_000u64;
+    let fg = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (_h, fg_waiter) = rt.submit(spec_one(&fg, Arc::new(SyntheticMorselSource::new(total))));
+
+    let mut local = rt.worker_local(0);
+    // One foreground task runs (slot 0 is the only active slot).
+    assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    assert!(fg_waiter.try_wait().is_none(), "foreground must not be complete yet");
+
+    // A job cycle arrives: single-granule task set, higher slot index.
+    let mt = SyntheticWork::new(1, Some(Arc::clone(&clock)), 1_000);
+    let (_mh, mt_waiter) = rt.submit_maintenance(spec_one(&mt, Arc::new(SyntheticMorselSource::new(1))));
+
+    // The very next step must pick the maintenance slot (preference beats
+    // the lower-index foreground slot) and drive it to completion.
+    assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    assert_eq!(mt_waiter.try_wait(), Some(RgOutcome::Completed), "maintenance cycle must complete at the first boundary");
+    assert!(fg_waiter.try_wait().is_none(), "foreground still has granules");
+    mt.assert_all_executed_once();
+
+    // Drain the foreground RG; nothing is lost.
+    while fg_waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(fg_waiter.wait(), RgOutcome::Completed);
+    fg.assert_all_executed_once();
+    assert_eq!(rt.stats().rgs_completed, 2);
+}
+
+/// Queue overtake: with every slot busy, a Maintenance RG goes to the FRONT
+/// of the wait queue — it is admitted before an earlier-queued Foreground RG.
+#[test]
+fn maintenance_overtakes_wait_queue() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = RuntimeConfig::new(1);
+    cfg.slots = 1;
+    let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+
+    let fg1 = SyntheticWork::new(64, Some(Arc::clone(&clock)), 1_000);
+    let (_h1, w1) = rt.submit(spec_one(&fg1, Arc::new(SyntheticMorselSource::new(64))));
+    let fg2 = SyntheticWork::new(64, Some(Arc::clone(&clock)), 1_000);
+    let (_h2, w2) = rt.submit(spec_one(&fg2, Arc::new(SyntheticMorselSource::new(64))));
+    let mt = SyntheticWork::new(1, Some(Arc::clone(&clock)), 1_000);
+    let (_mh, mw) = rt.submit_maintenance(spec_one(&mt, Arc::new(SyntheticMorselSource::new(1))));
+
+    let mut local = rt.worker_local(0);
+    // Drive fg1 to completion; the released slot must admit the maintenance
+    // RG (queue front), NOT fg2.
+    while w1.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    while mw.try_wait().is_none() {
+        assert!(w2.try_wait().is_none(), "fg2 must not complete before the overtaking maintenance RG");
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(mw.try_wait(), Some(RgOutcome::Completed));
+    assert!(w2.try_wait().is_none(), "fg2 admitted after the maintenance RG");
+    while w2.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    fg1.assert_all_executed_once();
+    fg2.assert_all_executed_once();
+    mt.assert_all_executed_once();
+}
