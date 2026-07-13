@@ -8025,8 +8025,19 @@ dependencies = [
 name = "logicalrelation"
 version = "0.1.0"
 dependencies = [
+ "catalog_namespace",
+ "datum",
+ "elog",
+ "inval",
+ "logicalproto",
+ "mcx",
+ "pg_subscription",
+ "rel_vocab",
+ "relcache",
+ "table",
  "types_core",
  "types_error",
+ "types_rel",
 ]
 
 [[package]]
