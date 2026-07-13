@@ -1055,7 +1055,8 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                let pubs: Vec<&str> = pubnames.iter().copied().collect();
+                connect::AlterSubscription_refresh(mcx, &sub, opts.copy_data, &pubs, Some(&pubs))?;
             }
         }
 
@@ -1114,7 +1115,19 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                let pubs: Vec<&str> = publist.iter().copied().collect();
+                let added: Vec<&str> = if isadd {
+                    publist_names(mcx, &stmt.publication)?.iter().copied().collect()
+                } else {
+                    Vec::new()
+                };
+                connect::AlterSubscription_refresh(
+                    mcx,
+                    &sub,
+                    opts.copy_data,
+                    &pubs,
+                    if isadd { Some(&added) } else { None },
+                )?;
             }
         }
 
@@ -1144,7 +1157,8 @@ pub fn AlterSubscription<'mcx>(
 
             xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION ... REFRESH")?;
 
-            panic!("unported: AlterSubscription_refresh (walrcv connect)");
+            let pubs: Vec<&str> = sub.publications.iter().copied().collect();
+            connect::AlterSubscription_refresh(mcx, &sub, opts.copy_data, &pubs, None)?;
         }
 
         ALTER_SUBSCRIPTION_SKIP => {

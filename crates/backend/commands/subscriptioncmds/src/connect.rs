@@ -206,3 +206,143 @@ pub(crate) fn connect(
 ) -> PgResult<Result<PgConn, String>> {
     walreceiver::client::connect_extended(conninfo, true, true, must_use_password, appname)
 }
+
+// AlterSubscription_refresh (subscriptioncmds.c): diff the publisher's
+// published-table set against pg_subscription_rel; add new tables (INIT when
+// copy_data, READY otherwise), remove vanished ones (stop their sync workers,
+// drop their origins and — for pre-SYNCDONE states — their tablesync slots on
+// the publisher).
+#[allow(non_snake_case)]
+pub(crate) fn AlterSubscription_refresh<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    sub: &pg_subscription::Subscription<'_>,
+    copy_data: bool,
+    publications: &[&str],
+    validate_publications: Option<&[&str]>,
+) -> PgResult<()> {
+    use types_error::DEBUG1;
+
+    let must_use_password = sub.passwordrequired && !superuser::superuser_arg(sub.owner)?;
+    let subname: &str = &sub.name;
+    let mut wrconn = match connect(mcx, &sub.conninfo, must_use_password, subname)? {
+        Ok(c) => c,
+        Err(errmsg) => {
+            return Err(err(
+                format!("subscription \"{subname}\" could not connect to the publisher: {errmsg}"),
+                ERRCODE_CONNECTION_FAILURE,
+            ));
+        }
+    };
+
+    let refreshed = (|| -> PgResult<Vec<(types_core::Oid, u8)>> {
+        if let Some(v) = validate_publications {
+            check_publications(&mut wrconn, v)?;
+        }
+
+        let pubrels = fetch_table_list(&mut wrconn, publications)?;
+
+        let subrel_states = pg_subscription::GetSubscriptionRelations(mcx, sub.oid, false)?;
+        let mut subrel_local_oids: Vec<types_core::Oid> =
+            subrel_states.iter().map(|r| r.relid).collect();
+        subrel_local_oids.sort_unstable();
+
+        check_publications_origin(
+            &mut wrconn,
+            publications,
+            copy_data,
+            Some(&sub.origin),
+            subname,
+        )?;
+
+        // Add remote tables missing locally.
+        let mut pubrel_local_oids: Vec<types_core::Oid> = Vec::with_capacity(pubrels.len());
+        for (nspname, relname) in &pubrels {
+            let rv = rel_vocab::RangeVar {
+                catalogname: None,
+                schemaname: Some(nspname.as_str()),
+                relname: relname.as_str(),
+                inh: true,
+                relpersistence: b'p',
+                location: -1,
+            };
+            let relid = catalog_namespace::RangeVarGetRelid(&rv, types_rel::AccessShareLock, false)?;
+            crate::CheckSubscriptionRelkind(
+                lsyscache::get_rel_relkind(relid)? as u8,
+                nspname,
+                relname,
+            )?;
+            pubrel_local_oids.push(relid);
+
+            if subrel_local_oids.binary_search(&relid).is_err() {
+                pg_subscription::AddSubscriptionRelState(
+                    mcx,
+                    sub.oid,
+                    relid,
+                    if copy_data {
+                        pg_subscription::SUBREL_STATE_INIT
+                    } else {
+                        pg_subscription::SUBREL_STATE_READY
+                    },
+                    types_core::InvalidXLogRecPtr,
+                    true,
+                )?;
+                let _ = elog::elog(
+                    DEBUG1,
+                    format!("table \"{nspname}.{relname}\" added to subscription \"{subname}\""),
+                );
+            }
+        }
+
+        // Remove local entries whose tables vanished from the publications.
+        pubrel_local_oids.sort_unstable();
+        let mut removed: Vec<(types_core::Oid, u8)> = Vec::new();
+        for rstate in subrel_states.iter() {
+            let relid = rstate.relid;
+            if pubrel_local_oids.binary_search(&relid).is_ok() {
+                continue;
+            }
+            let (state, _lsn) = pg_subscription::GetSubscriptionRelState(mcx, sub.oid, relid)?;
+            removed.push((relid, state));
+            pg_subscription::RemoveSubscriptionRel(mcx, sub.oid, relid)?;
+            launcher::logicalrep_worker_stop(sub.oid, relid)?;
+            if state != pg_subscription::SUBREL_STATE_READY {
+                let originname = format!("pg_{}_{relid}", sub.oid);
+                origin::replorigin_drop_by_name(mcx, &originname, true, false)?;
+            }
+            let _ = elog::elog(
+                DEBUG1,
+                format!("table with OID {relid} removed from subscription \"{subname}\""),
+            );
+        }
+        Ok(removed)
+    })();
+
+    // Drop tablesync slots for removed pre-SYNCDONE tables last (C: cannot
+    // roll back dropped slots).
+    let result = match refreshed {
+        Ok(removed) => {
+            let mut r = Ok(());
+            for (relid, state) in removed {
+                if state != pg_subscription::SUBREL_STATE_READY
+                    && state != pg_subscription::SUBREL_STATE_SYNCDONE
+                {
+                    // ReplicationSlotNameForTablesync (tablesync.c:1302); the
+                    // canonical impl + format test live in logicalworker.
+                    let syncslot = format!(
+                        "pg_{}_sync_{relid}_{}",
+                        sub.oid,
+                        transam_xlog::control_file::GetSystemIdentifier()
+                    );
+                    if let Err(e) = drop_slot_at_pub_node(&mut wrconn, &syncslot, true) {
+                        r = Err(e);
+                        break;
+                    }
+                }
+            }
+            r
+        }
+        Err(e) => Err(e),
+    };
+    drop(wrconn);
+    result
+}

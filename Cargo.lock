@@ -15910,6 +15910,7 @@ dependencies = [
  "rel_vocab",
  "superuser",
  "table",
+ "transam_xlog",
  "transam_xlog_seams",
  "types_core",
  "types_error",
