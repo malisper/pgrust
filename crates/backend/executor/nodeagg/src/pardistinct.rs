@@ -801,6 +801,18 @@ pub struct PdMerged<'mcx> {
     pub(crate) dsets: Vec<Option<DistinctSet<'mcx>>>,
 }
 
+impl PdMerged<'_> {
+    /// Retained footprint of one merged bucket (R3 accounting for the
+    /// combine phase — the merged result is held until the leader adopts).
+    pub fn mem_bytes(&self) -> usize {
+        self.keys.capacity() * 8
+            + self.keynulls.capacity() * 4
+            + self.states.capacity() * 8
+            + self.dsets.capacity() * core::mem::size_of::<Option<DistinctSet<'_>>>()
+            + self.dsets.iter().flatten().map(|d| d.mem_bytes()).sum::<usize>()
+    }
+}
+
 impl PdMerged<'static> {
     /// Rebind a scoped-thread-built (never-spilled) merge result to the
     /// node's `'mcx` (see `DistinctSet::unspilled_into`).

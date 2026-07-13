@@ -323,6 +323,11 @@ impl Scheduler {
         self.park.wake_all();
     }
 
+    /// Call sites must guard with `if self.trace { ... }` BEFORE building the
+    /// message — the format! argument otherwise allocates on every
+    /// submit/publish/finalize even with tracing off (m2-integration
+    /// std-collections audit, AGENTS.md rule 7: mallocs are a tracked
+    /// metric on engaged paths).
     fn trace(&self, msg: &str) {
         if self.trace {
             eprintln!("[pgrust-runtime] {msg}");
@@ -335,7 +340,9 @@ impl Scheduler {
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
         let rg = ResourceGroup::new(rg_id, spec, pinned);
         RuntimeStats::tick(&self.stats.rgs_submitted);
-        self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
+        if self.trace {
+            self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
+        }
         if rg.tasksets.is_empty() {
             rg.completion.complete(RgOutcome::Completed);
             RuntimeStats::tick(&self.stats.rgs_completed);
@@ -388,10 +395,12 @@ impl Scheduler {
             finalized: AtomicBool::new(false),
             c0,
         });
-        self.trace(&format!(
-            "publish rg {} taskset {} in slot {slot} seq {seq}",
-            ts.rg.rg_id, index
-        ));
+        if self.trace {
+            self.trace(&format!(
+                "publish rg {} taskset {} in slot {slot} seq {seq}",
+                ts.rg.rg_id, index
+            ));
+        }
         let pinned = ts.rg.pinned;
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
@@ -689,10 +698,12 @@ impl Scheduler {
         }
         self.clear_active(ts.slot);
         RuntimeStats::tick(&self.stats.tasksets_invalidated);
-        self.trace(&format!(
-            "invalidate rg {} taskset {} slot {} seq {}",
-            ts.rg.rg_id, ts.index, ts.slot, ts.seq
-        ));
+        if self.trace {
+            self.trace(&format!(
+                "invalidate rg {} taskset {} slot {} seq {}",
+                ts.rg.rg_id, ts.index, ts.slot, ts.seq
+            ));
+        }
         let mut marked = 0i64;
         for w in 0..self.nthreads + MAX_EXTERNAL_LANES {
             if self.pins.mark(w, ts.slot) {
@@ -750,10 +761,12 @@ impl Scheduler {
             ts.work().finalize();
         }
         RuntimeStats::tick(&self.stats.finalize_events);
-        self.trace(&format!(
-            "finalize rg {} taskset {} (aborted={aborted})",
-            rg.rg_id, ts.index
-        ));
+        if self.trace {
+            self.trace(&format!(
+                "finalize rg {} taskset {} (aborted={aborted})",
+                rg.rg_id, ts.index
+            ));
+        }
 
         // Progress under the RG lock only (never while holding membership).
         let next = {
@@ -803,7 +816,9 @@ impl Scheduler {
                 // try_outcome after a wake; the completion word itself only
                 // unparks registered leader waiters.
                 self.park.wake_all();
-                self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+                if self.trace {
+                    self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+                }
             }
         }
     }

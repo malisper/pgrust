@@ -225,6 +225,14 @@ pub struct SinkPart {
     pub has_null: bool,
 }
 
+impl SinkPart {
+    /// Retained footprint (R3 accounting: the SEAL index lives until the
+    /// combine set finishes and is charged like a run).
+    pub fn bytes(&self) -> usize {
+        (self.starts.capacity() + self.idx.capacity()) * core::mem::size_of::<u32>()
+    }
+}
+
 pub fn sink_partition_remainder(t: &LaneAggTable) -> SinkPart {
     let n = t.nrows();
     let mut counts = [0u32; SINK_NBUCKETS];
