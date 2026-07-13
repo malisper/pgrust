@@ -49,7 +49,18 @@ pub fn PGSemaphoreCreate(procno: ProcNumber) {
 }
 
 pub fn PGSemaphoreReset(procno: ProcNumber) {
-    sema(procno).count.store(0, SeqCst);
+    let s = sema(procno);
+    s.count.store(0, SeqCst);
+    // Fresh proc lifetime (InitProcess resets its PGPROC's semaphore): clear
+    // the published wake route too. PGSemaphoreLock deliberately leaves its
+    // handle in the slot between parks (same-owner re-parks consume it), so
+    // PGPROC slot REUSE by a new worker thread would otherwise find the
+    // previous owner's stale handle and trip the single-waiter invariant —
+    // observed live as `pg_sema: concurrent waiters on one PGPROC semaphore`
+    // on back-to-back parallel engagements (m2-agg-sink e2e, dev asserts;
+    // in release the stale handle only made the first wake take the waiter
+    // cadence recheck instead of a direct unpark).
+    s.waiter.store(0, SeqCst);
 }
 
 pub fn PGSemaphoreLock(procno: ProcNumber) {
