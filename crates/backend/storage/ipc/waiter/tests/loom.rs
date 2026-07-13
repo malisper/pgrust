@@ -17,6 +17,11 @@
 //!      that entered the wait loop always observes is_set (no lost wake),
 //!      with the recheck cadence DISABLED — proving the primitive alone,
 //!      not the backstop.
+//!   5. pg_sema-over-Waiter — a mirror of pg_sema's count + waiter-word
+//!      Dekker (crates/backend/port/pg_sema): a concurrent lock/unlock pair
+//!      never loses a wake, and the retire-on-return discipline leaves NO
+//!      handle residue for the next ownership epoch (proc-slot/pool-thread
+//!      reuse; the 2026-07 dev-profile "concurrent waiters" wedge shape).
 #![cfg(loom)]
 
 use loom::sync::atomic::{fence, AtomicI32, AtomicU64, Ordering};
@@ -266,6 +271,171 @@ fn latch_dekker_set_before_wait_short_circuits() {
         // No sleeper was armed: wait must return without parking forever.
         latch.wait(&slot, token);
         assert_eq!(latch.is_set.load(Ordering::SeqCst), 1);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// pg_sema-over-Waiter.
+//
+// Mirror of crates/backend/port/pg_sema's PGSemaphoreLock/Unlock protocol
+// (count + published waiter word) over the slot core: the count post and the
+// handle publication form the same Dekker pair as the latch — an unlock
+// either sees the published handle (unpark delivers) or the locker's recheck
+// sees the posted count. The models additionally pin the RETIRE-ON-RETURN
+// discipline: a returned lock leaves waiter == 0, so an ownership-epoch
+// change (proc-slot reuse, wretain token reissue — the 2026-07 dev-profile
+// "concurrent waiters on one PGPROC semaphore" wedge) finds no stale
+// residue, and the in-lock single-waiter assert stays exact.
+// ---------------------------------------------------------------------------
+
+struct ModelSema {
+    count: AtomicI32,
+    /// Packed handle word of the blocked owner (0 = none). The model packs
+    /// (1 << 32) | token, mirroring WakerHandle's never-zero layout.
+    waiter: AtomicU64,
+}
+
+fn pack(token: u32) -> u64 {
+    (1u64 << 32) | token as u64
+}
+
+impl ModelSema {
+    fn new() -> Self {
+        ModelSema {
+            count: AtomicI32::new(0),
+            waiter: AtomicU64::new(0),
+        }
+    }
+
+    /// pg_sema PGSemaphoreLock. Flag edges are RMWs where the production
+    /// code uses fence-disciplined plain stores/loads — the same loom-0.7
+    /// expressibility translation as ModelLatch (see set()'s comment): the
+    /// count recheck read, the waiter read in unlock(), and the retire
+    /// store are RMWs so loom carries the recency the SeqCst fences
+    /// guarantee on the real memory model, at equal-or-stronger ordering.
+    fn lock(&self, slot: &Slot, token: u32) {
+        let handle = pack(token);
+        let mut published = false;
+        loop {
+            let mut c = self.count.load(Ordering::Acquire);
+            while c > 0 {
+                match self
+                    .count
+                    .compare_exchange_weak(c, c - 1, Ordering::SeqCst, Ordering::Acquire)
+                {
+                    Ok(_) => {
+                        if published {
+                            // Retire-on-return (production: store(0, SeqCst)).
+                            self.waiter.swap(0, Ordering::SeqCst);
+                        }
+                        return;
+                    }
+                    Err(actual) => c = actual,
+                }
+            }
+            let prev = self.waiter.swap(handle, Ordering::SeqCst);
+            // The production debug_assert: with retire-on-return, prev is 0
+            // or this call's own handle in EVERY interleaving and EVERY
+            // ownership epoch — anything else is a concurrent waiter (or,
+            // pre-fix, the cross-epoch residue this model regression-pins).
+            assert!(
+                prev == 0 || prev == handle,
+                "pg_sema model: concurrent waiters / stale cross-epoch residue"
+            );
+            published = true;
+            fence(Ordering::SeqCst);
+            if self.count.fetch_add(0, Ordering::SeqCst) > 0 {
+                continue;
+            }
+            let r = slot.park_core(None, None, &CLOCK);
+            assert!(matches!(r, ParkResult::Notified | ParkResult::Recheck));
+        }
+    }
+
+    /// pg_sema PGSemaphoreUnlock: post the count, then wake the published
+    /// handle (production: fence + load(Acquire) + handle-validated unpark).
+    fn unlock(&self, slot: &Slot) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        let word = self.waiter.fetch_add(0, Ordering::SeqCst);
+        if word != 0 {
+            // Handle-validated in production (a stale token is a no-op).
+            slot.unpark_token(word as u32);
+        }
+    }
+}
+
+#[test]
+fn pg_sema_lock_unlock_no_lost_wake() {
+    loom::model(|| {
+        let slot = fresh_slot();
+        let token = slot.issue_token();
+        let sema = Arc::new(ModelSema::new());
+
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+
+        // Any interleaving (post-before-lock, post-during-publication,
+        // post-after-park) must complete: loom's deadlock detector is the
+        // lost-wake oracle.
+        sema.lock(&slot, token);
+        assert_eq!(sema.count.load(Ordering::SeqCst), 0);
+
+        unlocker.join().unwrap();
+    });
+}
+
+#[test]
+fn pg_sema_retire_on_return_no_epoch_residue() {
+    loom::model(|| {
+        let slot = fresh_slot();
+        let token1 = slot.issue_token();
+        let sema = Arc::new(ModelSema::new());
+
+        // Epoch 1: a lock/unlock pair in every interleaving (parked or
+        // fast-path).
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+        sema.lock(&slot, token1);
+        unlocker.join().unwrap();
+
+        // Retire-on-return: NO residue may survive the returned lock —
+        // this is exactly what the pre-fix code violated (the handle stayed
+        // published after the wait).
+        assert_eq!(
+            sema.waiter.load(Ordering::SeqCst),
+            0,
+            "returned lock left its handle published"
+        );
+
+        // Ownership-epoch boundary: pool-thread reuse reissues the token
+        // (outstanding handles go stale); proc-slot reuse hands the sema to
+        // a thread with a different handle. Pre-fix, epoch 2's lock read
+        // epoch 1's handle here and tripped the single-waiter assert.
+        let token2 = slot.reissue_token();
+        assert_ne!(token1, token2);
+
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+        sema.lock(&slot, token2);
+        unlocker.join().unwrap();
+
+        assert_eq!(sema.waiter.load(Ordering::SeqCst), 0);
     });
 }
 
