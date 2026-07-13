@@ -211,6 +211,14 @@ struct PerTransSortData<'mcx> {
     set_kind: Option<distinctset::DistinctKeyKind>,
     dset: Option<distinctset::DistinctSet<'mcx>>,
     dset_degraded: bool,
+    // COUNT(DISTINCT x) finalize shortcut eligibility: this set-capable
+    // entry's transition is exactly int8inc_any (count(x), strict, initcond
+    // '0'). Replaying the deduped set through int8inc_any is one increment
+    // per non-null distinct value with the at-most-one NULL strict-skipped,
+    // so the set-mode finalize collapses to `transvalue += |set|` — the set
+    // is the counter (`process_ordered_aggregates_set`). False keeps the
+    // per-element transfn replay.
+    set_count_transfn: bool,
     // The aggregate's single argument is exactly OUTER column 0 with no
     // FILTER (recorded at init from the Aggref): the per-row transition
     // program's whole effect for this entry is "park outer col 0 + flag", so
@@ -437,6 +445,9 @@ fn init_pertrans_sort<'mcx>(
             set_kind,
             dset: None,
             dset_degraded: false,
+            // 2804 = int8inc_any, count(x)'s transition (`distinct_set_kind`'s
+            // F_INT8INC_ANY admission row).
+            set_count_transfn: set_kind.is_some() && transfn_oid == 2804,
             direct_col0,
             sortstates: Vec::new(),
             insert_slot,
@@ -2675,6 +2686,18 @@ fn distinct_set_budget() -> usize {
     (kb * 1024).min(1 << 31)
 }
 
+/// `PGRUST_LANE_V2_DISTINCTFIN` kill switch (default ON): the
+/// COUNT(DISTINCT) finalize shortcut (`set_count_transfn` field doc) — the
+/// set-mode replay of a bare int8inc_any transition collapses to
+/// `transvalue += |set|`. `0`/`off` keeps the per-element transfn replay
+/// (the A/B off arm; results are byte-identical either way).
+fn distinctfin_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_DISTINCTFIN").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 // Budget crossing (collect-time): first crossing picks the group's overflow
 // path once — the v2 set spill when the budget can absorb the tape write
 // buffers (`SPILL_MIN_BUDGET`), else the v1 degrade-to-tuplesort — and later
@@ -3150,6 +3173,71 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                     continue;
                 };
                 let kind = ps.set_kind.expect("set-mode pertrans");
+                // COUNT(DISTINCT x) finalize shortcut (`set_count_transfn`
+                // field doc): the deduped set IS the count. n int8inc_any
+                // replays from the current state add exactly n (strict fn,
+                // by-val i64 state, no finalfn side channel); the at-most-one
+                // NULL replay strict-skips, contributing 0. The state guards
+                // are structural for count (initcond '0' → non-null i64
+                // before any replay) and fall back to the literal replay if
+                // ever violated.
+                if ps.set_count_transfn
+                    && distinctfin_enabled()
+                    // SAFETY: pg is the once-allocated pergroup slot (loop
+                    // invariant above).
+                    && unsafe { !(*pg).no_trans_value && !(*pg).trans_value_is_null }
+                {
+                    let n: i64 = if dset.spilled() {
+                        // The spilled load-dedup machinery runs unchanged
+                        // (partition load, oversize-partition tuplesort with
+                        // adjacent dedup); only the per-element transfn call
+                        // becomes a counter bump.
+                        let mut n = 0i64;
+                        let mut count = |_ps: &mut PerTransSortData<'mcx>,
+                                         estate: &mut EStateData<'mcx>,
+                                         nd: NullableDatum|
+                         -> PgResult<()> {
+                            debug_assert!(!nd.isnull, "partition tapes carry no NULLs");
+                            estate.reset_expr_context(tmp);
+                            n += 1;
+                            Ok(())
+                        };
+                        replay_spilled_distinct_set(
+                            &mut dset,
+                            ps,
+                            kind,
+                            estate,
+                            tmp,
+                            &mut count,
+                        )?;
+                        n
+                    } else {
+                        match kind {
+                            distinctset::DistinctKeyKind::Bytes => dset.n_bytes() as i64,
+                            _ => dset.ints().len() as i64,
+                        }
+                    };
+                    // Overflow parity: C's int8inc errors at the crossing
+                    // increment (int8.c "bigint out of range") — unreachable
+                    // here (n distinct values were materialized by this
+                    // backend), kept for the exact error surface.
+                    // SAFETY: as the guard read above.
+                    let cur = unsafe { (*pg).trans_value.as_i64() };
+                    let Some(newv) = cur.checked_add(n) else {
+                        return Err(Box::new(
+                            PgError::error("bigint out of range").with_sqlstate(
+                                ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+                            ),
+                        ));
+                    };
+                    // SAFETY: as above; by-val i64 state (count's int8).
+                    unsafe {
+                        (*pg).trans_value = Datum::from_i64(newv);
+                    }
+                    dset.clear();
+                    ps.dset = Some(dset);
+                    continue;
+                }
                 let mut replay = |ps: &mut PerTransSortData<'mcx>,
                                   estate: &mut EStateData<'mcx>,
                                   nd: NullableDatum|
