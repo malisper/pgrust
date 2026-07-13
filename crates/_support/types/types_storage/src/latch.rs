@@ -38,6 +38,11 @@ impl LatchHandle {
         self.0
     }
 
+    /// Rebuild a handle from `as_usize`'s value (stored-in-atomic round trip).
+    pub fn from_raw(raw: usize) -> Self {
+        LatchHandle(raw)
+    }
+
     pub fn kind(self) -> LatchKind {
         if self.0 == RECOVERY_WAKEUP_ID {
             LatchKind::RecoveryWakeup

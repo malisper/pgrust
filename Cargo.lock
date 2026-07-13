@@ -18625,6 +18625,7 @@ dependencies = [
  "predicate_seams",
  "procarray",
  "procarray_seams",
+ "procsignal_seams",
  "pruneheap_seams",
  "ps_status_seams",
  "relcache_seams",
