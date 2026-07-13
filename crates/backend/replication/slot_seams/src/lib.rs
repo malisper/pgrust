@@ -40,3 +40,9 @@ seam_core::seam!(
         snapshot_conflict_horizon: types_core::TransactionId,
     ) -> types_error::PgResult<bool>
 );
+
+seam_core::seam!(
+    // ReplicationSlotsDropDBSlots (slot.c) — dropdb (dbcommands.c:1852) and
+    // dbase_redo's XLOG_DBASE_DROP arm drop the database's slots.
+    pub fn replication_slots_drop_db_slots(dboid: types_core::Oid) -> types_error::PgResult<()>
+);
