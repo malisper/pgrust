@@ -234,6 +234,10 @@ impl Scheduler {
     ) {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let c0 = rg.tasksets[index].source.startup_c0();
+        // Generation binding (H1): hand the work its generation BEFORE the
+        // slot word below admits any worker — generation-keyed partial state
+        // (the M2 sink plumbing) is armed before the first claim can land.
+        rg.tasksets[index].work.bind_generation(rg.generation());
         let ts = Arc::new(TaskSetRt {
             rg,
             index,
