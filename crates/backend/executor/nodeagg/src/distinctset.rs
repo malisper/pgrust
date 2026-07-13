@@ -284,16 +284,23 @@ impl<'mcx> DistinctSet<'mcx> {
 
     /// Flush-time reset: values only — `seen_null` (never spilled) and the
     /// spill state survive; capacities are retained for the next epoch.
+    /// Stringhash arms clear by CONTENTS (the value arrays), not capacity:
+    /// the pooled per-group reuse (codedgroup emit) lets one big group
+    /// inflate the retained table, and a capacity-bounded memset would then
+    /// tax every later small group with it (the train-10 Q14 +17%).
     fn reset_values(&mut self) {
-        match &mut self.table {
+        let DistinctSet { table, ints, blob, spans, .. } = self;
+        match table {
             ProbeTab::Empty => {}
             ProbeTab::Legacy(t) => t.iter_mut().for_each(|s| *s = 0),
-            ProbeTab::Int(t) => t.clear(),
-            ProbeTab::Bytes(t) => t.clear(),
+            ProbeTab::Int(t) => t.clear_with_keys(ints),
+            ProbeTab::Bytes(t) => t.clear_with_entries(
+                spans.iter().map(|s| (s.hash, s.off + varatt::VARHDRSZ as u32)),
+            ),
         }
-        self.ints.clear();
-        self.blob.clear();
-        self.spans.clear();
+        ints.clear();
+        blob.clear();
+        spans.clear();
     }
 
     /// Degrade-time reset: give the memory back (the tuplesort owns the
