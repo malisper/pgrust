@@ -66,7 +66,10 @@ pub use rg::{
     CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
 pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
-pub use sink::{sink_tasksets, ParallelSink, SinkProbe, SinkTaskSets};
+pub use sink::{
+    sealed_sink_tasksets, sink_tasksets, ParallelSink, SealedParallelSink, SealedSinkTaskSets,
+    SinkProbe, SinkTaskSets,
+};
 pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_T_MIN_NS, EWMA_ALPHA};
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
@@ -277,10 +280,50 @@ impl Runtime {
     /// catch their own errors, record them, and abort the RG); a panic
     /// escaping a step would strand the participant's pin and wedge the
     /// finalization protocol.
+    /// Bounded pinned drive for CLEANUP paths (abort drains): like
+    /// [`Runtime::drive_pinned`] but gives up after `max_idle` consecutive
+    /// idle observations (never parks — cleanup must not sleep on wakes a
+    /// dead participant will never send). None = the RG could not be
+    /// completed (a participant died holding an unsettled pin); the caller
+    /// must treat the RG as leaked and error out loudly.
+    #[cfg(not(loom))]
+    pub fn try_drain_pinned(
+        &self,
+        local: &mut WorkerLocal,
+        rg: &RgHandle,
+        max_idle: u32,
+    ) -> Option<RgOutcome> {
+        let mut idle = 0u32;
+        loop {
+            if let Some(outcome) = rg.try_outcome() {
+                return Some(outcome);
+            }
+            self.execution_permits().acquire();
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            self.execution_permits().release();
+            match step {
+                Step::Ran => idle = 0,
+                Step::Retry => std::thread::yield_now(),
+                Step::Idle => {
+                    idle += 1;
+                    if idle >= max_idle {
+                        return rg.try_outcome();
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(500));
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        }
+    }
+
     #[cfg(not(loom))]
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                // WFIN marker channel: the drive is over — flush any
+                // participation this driver still holds (a worker whose last
+                // task did not observe exhaustion emits here).
+                local.wfin_flush_all();
                 return outcome;
             }
             let epoch = self.park_epoch();
