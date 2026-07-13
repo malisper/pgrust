@@ -28,7 +28,7 @@ fn loc(funcname: &'static str) -> ErrorLocation {
 
 const MAX_BUFFERS_TO_EXTEND_BY: usize = 64;
 
-fn GetAdditionalPinLimit() -> u32 {
+pub(crate) fn GetAdditionalPinLimit() -> u32 {
     let estimated_pins_held = overflowed_count() + REFCOUNT_ARRAY_ENTRIES as u32;
     (GetPinLimit().max(0) as u32).saturating_sub(estimated_pins_held)
 }
