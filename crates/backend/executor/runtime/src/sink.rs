@@ -57,6 +57,7 @@ use std::sync::Arc;
 use crate::lifecycle::Generation;
 use crate::morsel::{MorselRange, MorselSource};
 use crate::rg::{TaskSetSpec, TaskSetWork};
+use crate::sched::MAX_EXTERNAL_LANES;
 use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::{lock, Mutex};
 
@@ -96,6 +97,15 @@ pub trait ParallelSink: Send + Sync {
     /// rows/batches into `local` (see m2-sinks.md §2 layering note).
     fn accept_local(&self, local: &mut Self::Local, worker: usize, range: MorselRange);
 
+    /// SEAL-side per-Local preparation, called ONCE by the accept set's
+    /// last-worker-out finalizer on the collected generation-matching Locals
+    /// (worker-slot order), strictly before any combine task can observe
+    /// them. Single-threaded by the last-worker-out protocol. The M2 agg
+    /// sink partitions its remainder tables here (counting sort — O(total
+    /// remainder rows), a one-time cost the combine's bucket claims then
+    /// read immutably). Default: nothing.
+    fn seal(&self, _locals: &mut [Self::Local]) {}
+
     /// Number of combine partitions (the donors: 256 radix buckets over the
     /// top-8 hash bits; 64 element partitions per distinct set). Fixed for
     /// the sink's lifetime; this is the combine task set's morsel space.
@@ -106,7 +116,8 @@ pub trait ParallelSink: Send + Sync {
     /// partition's results in the same pass. Parallel across partitions;
     /// deterministic output requires the donor discipline: visit `locals`
     /// in slice order, first-seen insertion order within the partition.
-    fn combine(&self, part: u64, locals: &[Self::Local]);
+    /// `worker` is the claiming worker's index (observability — WFIN).
+    fn combine(&self, part: u64, worker: usize, locals: &[Self::Local]);
 
     /// Single-threaded epilogue under last-worker-out of the combine set.
     /// Every `combine` call has returned. Keep it MINIMAL.
@@ -206,6 +217,9 @@ impl<S: ParallelSink> TaskSetWork for SinkAccept<S> {
                 None => {}
             }
         }
+        // Sink-side SEAL preparation (single-threaded here by protocol);
+        // the Locals freeze immutable behind the Arc right after.
+        self.0.sink.seal(&mut sealed);
         *lock(&self.0.sealed) = Some((generation, Arc::new(sealed)));
     }
 }
@@ -235,7 +249,7 @@ impl<S: ParallelSink> TaskSetWork for SinkCombine<S> {
         *lock(&self.0.bound) = Some(generation);
     }
 
-    fn run_morsel(&self, _worker: usize, range: MorselRange) {
+    fn run_morsel(&self, worker: usize, range: MorselRange) {
         let generation = self.0.bound_generation();
         let Some(locals) = self.sealed_for(generation) else {
             // Fail-closed: no matching seal ⇒ combine nothing. Reachable
@@ -246,7 +260,7 @@ impl<S: ParallelSink> TaskSetWork for SinkCombine<S> {
             return;
         };
         for part in range {
-            self.0.sink.combine(part, &locals);
+            self.0.sink.combine(part, worker, &locals);
         }
     }
 
@@ -309,9 +323,14 @@ pub struct SinkTaskSets {
 }
 
 /// Build the accept + combine task sets for `sink` over `source`.
-/// `nthreads` sizes the worker-indexed Local slots — the RUNTIME'S total
-/// thread count ([`crate::Runtime::nthreads`]), not the permit count: a
-/// standby thread absorbing a permit is a first-class worker index.
+/// `nthreads` is the RUNTIME'S total thread count
+/// ([`crate::Runtime::nthreads`]), not the permit count: a standby thread
+/// absorbing a permit is a first-class worker index. The Local slot array is
+/// sized `nthreads + MAX_EXTERNAL_LANES` — external pinned participants
+/// (M1 bound helpers, worker index = nthreads + lane ordinal) are
+/// first-class sink workers too, and under the pinned-engagement regime
+/// they are the ONLY touchers, so forks ≤ launched helpers = the R3
+/// per-launched-worker memory envelope (docs/design/m2-sinks.md §8-R3(a)).
 pub fn sink_tasksets<S: ParallelSink + 'static>(
     sink: Arc<S>,
     source: Arc<dyn MorselSource>,
@@ -325,7 +344,7 @@ pub fn sink_tasksets<S: ParallelSink + 'static>(
     let shared = Arc::new(SinkShared {
         sink,
         bound: Mutex::new(None),
-        locals: (0..nthreads).map(|_| Mutex::new(None)).collect(),
+        locals: (0..nthreads + MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
         sealed: Mutex::new(None),
         probe: Arc::clone(&probe),
     });
@@ -656,7 +675,7 @@ mod tests {
             self.parts
         }
 
-        fn combine(&self, part: u64, locals: &[ToyLocal]) {
+        fn combine(&self, part: u64, _worker: usize, locals: &[ToyLocal]) {
             let prev = self.combine_calls[part as usize].fetch_add(1, StdOrdering::SeqCst);
             assert_eq!(prev, 0, "partition {part} combined twice");
             let sum: u64 = locals.iter().map(|l| l.sums[part as usize]).sum();
@@ -775,6 +794,58 @@ mod tests {
         assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
     }
 
+    /// Pinned-engagement leg (M2 phase 1, R3(a)): EXTERNAL participants —
+    /// worker indexes above nthreads, the M1 bound-helper shape — drive a
+    /// pinned RG's sink task sets end to end. Verifies the Local slot array
+    /// covers external pin-board lanes, forks ≤ participants, and the full
+    /// accept→seal→combine→finalize protocol under drive_pinned.
+    #[test]
+    fn toy_sink_pinned_external_participants() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 1,
+            slots: 8,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let sink = ToySink::new(16);
+        let total = 100_000u64;
+        let nthreads = rt.nthreads();
+        let SinkTaskSets { accept, combine, probe } = sink_tasksets(
+            Arc::clone(&sink),
+            Arc::new(SyntheticMorselSource::new(total)),
+            nthreads,
+            0,
+        );
+        let (handle, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 43,
+            tasksets: vec![accept, combine],
+        });
+        let helpers = 3usize;
+        std::thread::scope(|scope| {
+            for _ in 0..helpers {
+                let rt = Arc::clone(&rt);
+                let handle = handle.clone();
+                scope.spawn(move || {
+                    let lane = rt.acquire_external_lane().expect("external lane");
+                    let mut local = lane.local();
+                    let outcome = rt.drive_pinned(&mut local, &handle);
+                    assert_eq!(outcome, RgOutcome::Completed);
+                });
+            }
+        });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+
+        assert_eq!(sink.result.load(StdOrdering::SeqCst), expected_sum(total));
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+        let forks = sink.forks.load(StdOrdering::SeqCst);
+        assert!(forks >= 1 && forks <= helpers as u64, "forks={forks}");
+        assert_eq!(sink.locals_seen_at_finalize.load(StdOrdering::SeqCst), forks);
+        assert_eq!(sink.drops.load(StdOrdering::SeqCst), forks);
+        assert_eq!(probe.stale_locals_dropped(), 0);
+        assert_eq!(probe.combine_refusals(), 0);
+    }
+
     /// H1 leg 1: an aborted RG never combines and never finalizes; every
     /// forked Local is dropped (unconsumable, discarded with the RG).
     #[test]
@@ -797,7 +868,7 @@ mod tests {
             fn partitions(&self) -> u64 {
                 self.inner.partitions()
             }
-            fn combine(&self, _part: u64, _locals: &[ToyLocal]) {
+            fn combine(&self, _part: u64, _worker: usize, _locals: &[ToyLocal]) {
                 panic!("aborted sink must never combine");
             }
             fn finalize(&self, _locals: &[ToyLocal]) {

@@ -177,7 +177,7 @@ pub(crate) struct CompactHash {
     /// text bytes → dense u32 id (id = insertion row index; the id is also
     /// stored in the row's 8 state bytes for hit-side read-back). The
     /// reverse map IS the table's key arena (`row_key_bytes`).
-    intern: Option<::lanetable::LaneAggTable>,
+    pub(crate) intern: Option<::lanetable::LaneAggTable>,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -477,8 +477,13 @@ fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm>
     let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
         return Err(CompactArm::Off);
     };
-    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
     let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    // M2 sink worker builds: the cap bounds the table (flush-at-cap), so the
+    // spill gate and sizing work off the cap — the exchange-cap discipline.
+    if let Some(cap) = ph.sink_cap {
+        numgroups = numgroups.min(cap as u64);
+    }
     let additionalsize = ph.hashtable.additionalsize();
     debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
     let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
@@ -702,6 +707,16 @@ pub fn agg_hash_compact_backstop<'mcx>(
             + aggctx.context().subtree_used();
         if (ch.table.len() as u64) < ph.hash_ngroups_limit / 2 && mem < ph.hash_mem_limit / 2 {
             return Ok(true);
+        }
+        // M2 sink worker builds must NEVER migrate into the C tuplehash (the
+        // sink cannot export it). The sink drain flushes at its cap well
+        // below these limits; reaching them is a shape-estimate failure —
+        // fail the parallel attempt (RG abort → serial rerun), never a
+        // silent migration.
+        if ph.sink_cap.is_some() {
+            return Err(crate::sink::sink_shape_error(
+                "worker compact table crossed the hash memory limits under the sink cap",
+            ));
         }
     }
     compact_migrate(node, estate)?;

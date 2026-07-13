@@ -64,24 +64,28 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // anything a worker could still be parked on. Inert unless registered; on
 // this tree only the binder substrate e2e registers them (the runtime
 // pool/scheduler lane owns the production park).
-// MULTI-REGISTRANT (M2 sinks): several runtime arms coexist (M1 runtime-scan,
-// the M2 sink arms), each with its own private-payload type; every hook
-// downcasts the payload and no-ops on foreign types, so ALL registered hooks
-// run. Registration is append-only and idempotent (fn-pointer dedup); the
-// lists are tiny, written once per arm per process, read per worker task.
+// MULTI-REGISTRANT (M2 reconciliation of both lanes' independent fixes):
+// several runtime arms coexist (M1 runtime-scan, the M2 agg + distinct sink
+// arms), each with its own private-payload type — a single OnceLock slot
+// silently dropped the second arm's hook (its helpers would park as no-ops
+// and wedge the leader's wait). Every hook downcasts the context's private
+// payload and no-ops on foreign types, so calling every registrant in
+// registration order is correct by construction. Registration is append-only
+// and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
+// written once per arm per process, read per worker task.
 static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
 static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
     let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
-    if !v.contains(&f) {
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
         v.push(f);
     }
 }
 
 pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
     let mut v = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
-    if !v.contains(&f) {
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
         v.push(f);
     }
 }

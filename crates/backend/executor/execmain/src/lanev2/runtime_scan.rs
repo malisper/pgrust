@@ -332,6 +332,19 @@ fn drive_bound(
         .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
     let teardown = teardown_worker_exec(!self_errored);
     let _ = ordinal;
+    if self_errored {
+        // Route the binder through its transaction-ABORT unbind: a released
+        // executor may hold registered snapshots, and the normal unbind
+        // asserts a cleared xmin (the m2-agg-sink lane hit this live; the
+        // scan arm shares the teardown shape). The morsel body recorded the
+        // real error first (fail() is first-wins).
+        teardown?;
+        return Err(PgError::new(
+            ERROR,
+            "runtime scan worker unwound (recorded upstream)",
+        )
+        .into());
+    }
     teardown
 }
 
