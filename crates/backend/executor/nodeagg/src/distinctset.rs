@@ -68,6 +68,30 @@ struct BytesSpan {
     hash: u32,
 }
 
+/// Probe-table arm: the legacy slot->index table, or the stringhash
+/// one-miss inline-key tables (crates/common/stringhash set variants). The
+/// value arrays (`ints` / `blob`+`spans`) are IDENTICAL under both arms —
+/// spill record formats, replay order, and the parallel export never see the
+/// difference. Chosen at the first insert; kill switch
+/// PGRUST_LANE_V2_STRINGHASH_SET=0/off keeps the legacy table.
+enum ProbeTab {
+    /// Undecided (empty set) — also the replay-only state (`from_values`).
+    Empty,
+    Legacy(Vec<u32>),
+    Int(::stringhash::IntSet),
+    Bytes(::stringhash::BytesDedup),
+}
+
+fn stringhash_set_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_STRINGHASH_SET").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
 /// Exact-distinct hash set over one admitted key kind. Either `ints` or
 /// (`blob`+`spans`) is populated, never both (the kind is fixed per
 /// pertrans). `seen_null` stands in for the at-most-one NULL the C sort path
@@ -75,8 +99,9 @@ struct BytesSpan {
 /// process_ordered_aggregate_single's `oldIsNull && *isNull` arm); the
 /// replay passes it through the same transfn call C would.
 pub(crate) struct DistinctSet<'mcx> {
-    /// Open-addressing table: slot -> entry index + 1; 0 = empty. Pow2 len.
-    table: Vec<u32>,
+    /// Probe table (see `ProbeTab`; legacy arm: slot -> entry index + 1,
+    /// 0 = empty, pow2 len).
+    table: ProbeTab,
     ints: Vec<i64>,
     blob: Vec<u8>,
     spans: Vec<BytesSpan>,
@@ -189,7 +214,7 @@ const INIT_TABLE: usize = 64;
 impl<'mcx> DistinctSet<'mcx> {
     pub(crate) fn new() -> Self {
         DistinctSet {
-            table: Vec::new(),
+            table: ProbeTab::Empty,
             ints: Vec::new(),
             blob: Vec::new(),
             spans: Vec::new(),
@@ -206,8 +231,13 @@ impl<'mcx> DistinctSet<'mcx> {
     /// Bytes the set holds (capacities — actual allocation, the conservative
     /// figure the work_mem budget check wants).
     pub(crate) fn mem_bytes(&self) -> usize {
-        self.table.capacity() * core::mem::size_of::<u32>()
-            + self.ints.capacity() * core::mem::size_of::<i64>()
+        let tab = match &self.table {
+            ProbeTab::Empty => 0,
+            ProbeTab::Legacy(t) => t.capacity() * core::mem::size_of::<u32>(),
+            ProbeTab::Int(t) => t.mem_bytes(),
+            ProbeTab::Bytes(t) => t.mem_bytes(),
+        };
+        tab + self.ints.capacity() * core::mem::size_of::<i64>()
             + self.blob.capacity()
             + self.spans.capacity() * core::mem::size_of::<BytesSpan>()
     }
@@ -228,7 +258,12 @@ impl<'mcx> DistinctSet<'mcx> {
     /// Flush-time reset: values only — `seen_null` (never spilled) and the
     /// spill state survive; capacities are retained for the next epoch.
     fn reset_values(&mut self) {
-        self.table.iter_mut().for_each(|s| *s = 0);
+        match &mut self.table {
+            ProbeTab::Empty => {}
+            ProbeTab::Legacy(t) => t.iter_mut().for_each(|s| *s = 0),
+            ProbeTab::Int(t) => t.clear(),
+            ProbeTab::Bytes(t) => t.clear(),
+        }
         self.ints.clear();
         self.blob.clear();
         self.spans.clear();
@@ -241,22 +276,27 @@ impl<'mcx> DistinctSet<'mcx> {
         *self = DistinctSet::new();
     }
 
-    /// Grow-if-needed, then return the probe mask. 7/8 load factor.
+    /// Legacy arm: grow-if-needed, then return the probe mask. 7/8 load
+    /// factor. Decides the arm on first use (kill-switch aware).
     #[inline]
-    fn probe_ready(&mut self) -> usize {
+    fn probe_ready_legacy(&mut self) -> usize {
+        if matches!(self.table, ProbeTab::Empty) {
+            self.table = ProbeTab::Legacy(vec![0u32; INIT_TABLE]);
+        }
         let len = self.len();
-        if self.table.is_empty() {
-            self.table.resize(INIT_TABLE, 0);
-        } else if (len + 1) * 8 > self.table.len() * 7 {
+        let ProbeTab::Legacy(t) = &self.table else { unreachable!("legacy arm") };
+        if (len + 1) * 8 > t.len() * 7 {
             self.grow();
         }
-        self.table.len() - 1
+        let ProbeTab::Legacy(t) = &self.table else { unreachable!("legacy arm") };
+        t.len() - 1
     }
 
     #[cold]
     #[inline(never)]
     fn grow(&mut self) {
-        let new_len = self.table.len() * 2;
+        let ProbeTab::Legacy(cur) = &self.table else { unreachable!("legacy arm") };
+        let new_len = cur.len() * 2;
         let mask = new_len - 1;
         let mut table = vec![0u32; new_len];
         let rehash = |table: &mut [u32], h: u64, e: u32| {
@@ -272,12 +312,17 @@ impl<'mcx> DistinctSet<'mcx> {
         for (i, sp) in self.spans.iter().enumerate() {
             rehash(&mut table, mix64(sp.hash as u64), (i + 1) as u32);
         }
-        self.table = table;
+        self.table = ProbeTab::Legacy(table);
     }
 
     /// Insert a sign-extended integer key (no-op if present).
     #[inline]
     pub(crate) fn insert_i64(&mut self, k: i64) {
+        if stringhash_set_enabled() {
+            // Int arm hashes internally (hardware CRC); mix64 skipped.
+            self.insert_i64_hashed(k, 0);
+            return;
+        }
         self.insert_i64_hashed(k, mix64(k as u64));
     }
 
@@ -286,6 +331,13 @@ impl<'mcx> DistinctSet<'mcx> {
     /// in row order with the precomputed hash. Element-for-element identical
     /// to `insert_i64` in the same order.
     pub(crate) fn insert_i64_batch(&mut self, keys: &[i64], hashes: &mut Vec<u64>) {
+        if stringhash_set_enabled() {
+            // Int arm: no precomputed-hash pass (the kernel hashes in-probe).
+            for &k in keys {
+                self.insert_i64_hashed(k, 0);
+            }
+            return;
+        }
         hashes.clear();
         hashes.extend(keys.iter().map(|&k| mix64(k as u64)));
         for (&k, &h) in keys.iter().zip(hashes.iter()) {
@@ -295,13 +347,25 @@ impl<'mcx> DistinctSet<'mcx> {
 
     #[inline]
     fn insert_i64_hashed(&mut self, k: i64, h: u64) {
-        let mask = self.probe_ready();
+        if matches!(self.table, ProbeTab::Empty) && stringhash_set_enabled() {
+            self.table = ProbeTab::Int(::stringhash::IntSet::new());
+        }
+        if let ProbeTab::Int(t) = &mut self.table {
+            // One-miss inline-key probe; the value array stays the spill /
+            // replay / export authority, insertion order unchanged.
+            if t.insert(k) {
+                self.ints.push(k);
+            }
+            return;
+        }
+        let mask = self.probe_ready_legacy();
+        let ProbeTab::Legacy(table) = &mut self.table else { unreachable!("legacy arm") };
         let mut slot = (h as usize) & mask;
         loop {
-            match self.table[slot] {
+            match table[slot] {
                 0 => {
                     self.ints.push(k);
-                    self.table[slot] = self.ints.len() as u32;
+                    table[slot] = self.ints.len() as u32;
                     return;
                 }
                 e => {
@@ -318,12 +382,36 @@ impl<'mcx> DistinctSet<'mcx> {
     /// canonical 4B-header varlena image so replay can hand the transfn a
     /// live datum pointer.
     pub(crate) fn insert_bytes(&mut self, content: &[u8]) {
-        let mask = self.probe_ready();
         let hash = ::hashfn::hash_bytes(content);
+        if matches!(self.table, ProbeTab::Empty) && stringhash_set_enabled() {
+            self.table = ProbeTab::Bytes(::stringhash::BytesDedup::new());
+        }
+        if let ProbeTab::Bytes(t) = &mut self.table {
+            // Prospective image layout (identical bytes to the legacy arm);
+            // committed only on true.
+            let pad = (8 - (self.blob.len() & 7)) & 7;
+            let img_off = self.blob.len() + pad;
+            let content_off = (img_off + varatt::VARHDRSZ) as u32;
+            if t.insert(hash, content, &self.blob, content_off) {
+                self.blob.resize(img_off, 0);
+                let word =
+                    varatt::set_varsize_4b_word((content.len() + varatt::VARHDRSZ) as u32);
+                self.blob.extend_from_slice(&word.to_ne_bytes());
+                self.blob.extend_from_slice(content);
+                self.spans.push(BytesSpan {
+                    off: img_off as u32,
+                    len: content.len() as u32,
+                    hash,
+                });
+            }
+            return;
+        }
+        let mask = self.probe_ready_legacy();
         let h = mix64(hash as u64);
         let mut slot = (h as usize) & mask;
+        let ProbeTab::Legacy(table) = &mut self.table else { unreachable!("legacy arm") };
         loop {
-            match self.table[slot] {
+            match table[slot] {
                 0 => {
                     // 8-align the image (palloc alignment; varlena header
                     // reads stay in-bounds and aligned).
@@ -340,7 +428,7 @@ impl<'mcx> DistinctSet<'mcx> {
                         len: content.len() as u32,
                         hash,
                     });
-                    self.table[slot] = self.spans.len() as u32;
+                    table[slot] = self.spans.len() as u32;
                     return;
                 }
                 e => {
@@ -402,7 +490,7 @@ impl<'mcx> DistinctSet<'mcx> {
     #[inline]
     pub(crate) fn take_ints(&mut self) -> Vec<i64> {
         debug_assert!(self.spill.is_none());
-        self.table.clear();
+        self.table = ProbeTab::Empty;
         core::mem::take(&mut self.ints)
     }
 
@@ -558,7 +646,7 @@ impl<'mcx> DistinctSet<'mcx> {
         // Drop the build-phase capacities (they crossed the budget by
         // definition): the per-partition loads regrow to partition size, and
         // `mem_bytes` — capacity-based — must meter THAT, not the build peak.
-        self.table = Vec::new();
+        self.table = ProbeTab::Empty;
         self.ints = Vec::new();
         self.blob = Vec::new();
         self.spans = Vec::new();
