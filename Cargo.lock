@@ -13049,6 +13049,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -18316,6 +18317,7 @@ dependencies = [
  "postgres_seams",
  "pqcomm",
  "procarray",
+ "procsignal",
  "ps_status_seams",
  "repl_gram",
  "resowner",

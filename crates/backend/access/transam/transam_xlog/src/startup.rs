@@ -1411,6 +1411,14 @@ pub fn ShutdownXLOG() -> PgResult<()> {
     let level = if init_small::globals::IsPostmasterEnvironment() { LOG } else { NOTICE };
     let _ = elog(level, "shutting down");
 
+    // Signal walsenders to move to stopping state, and wait: prevents
+    // commands from writing new WAL during the shutdown checkpoint
+    // (xlog.c:6682). Logical walsenders drain and exit here.
+    if walsender_seams::wal_snd_init_stopping::is_installed() {
+        walsender_seams::wal_snd_init_stopping::call();
+        walsender_seams::wal_snd_wait_stopping::call();
+    }
+
     if RecoveryInProgress() {
         CreateRestartPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE)?;
     } else {

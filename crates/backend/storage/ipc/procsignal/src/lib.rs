@@ -649,7 +649,11 @@ pub fn procsignal_sigusr1_handler() {
         parallel_seams::handle_parallel_message_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_WALSND_INIT_STOPPING) {
-        unported_handler("HandleWalSndInitStopping (replication/walsender.c)");
+        if walsender_seams::handle_walsnd_init_stopping::is_installed() {
+            walsender_seams::handle_walsnd_init_stopping::call();
+        } else {
+            unported_handler("HandleWalSndInitStopping (replication/walsender.c)");
+        }
     }
     if CheckProcSignal(PROCSIG_BARRIER) {
         HandleProcSignalBarrierInterrupt();
