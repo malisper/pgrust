@@ -4773,9 +4773,11 @@ pub fn pd_derive_spec(
 /// Vocab aggfnoids map through the transfn whitelist; re-exported check the
 /// leader arm uses to pair `pd_derive_spec` with its admission story.
 pub use pardistinct::{
-    pd_adopt_registry, pd_clear_thread_registry, pd_export_registry, pd_registry_get,
-    pd_registry_insert, pd_registry_nonempty, pd_registry_remove, pd_parallel_merge_grouped,
-    pd_parallel_merge_plain, PdBuilder, PdExport, PdFeed, PdHandoff, PdMerged,
+    pd_adopt_registry, pd_clear_thread_registry, pd_concat_buckets, pd_empty_grouped_table,
+    pd_export_registry, pd_merge_bucket, pd_parallel_merge_grouped, pd_parallel_merge_plain,
+    pd_registry_get, pd_registry_insert, pd_registry_nonempty, pd_registry_remove, PdBuilder,
+    PdExport, PdFeed, PdHandedTable, PdHandoff, PdMerged, PdSinkLocal, PdSinkMerged, PdSpec,
+    PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +

@@ -1119,3 +1119,144 @@ pub(crate) fn vocab_kind(transfn_oid: Oid, att: Option<(u16, PdInt)>) -> Option<
 pub(crate) fn pd_internal(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("pardistinct internal: {msg}")))
 }
+
+// ===========================================================================
+// M2 runtime-sink surface (m2-distinct-sink): the donor machinery above,
+// re-shaped for the morsel runtime's SealedParallelSink contract. The
+// builder becomes a lifetime-erased, Send-able worker Local; freeze is the
+// seal; `pd_merge_bucket` is the per-partition combine; the concatenation
+// helper assembles the published merged result. The Gather-era registry /
+// handoff / leader-partial machinery above is NOT used by the sink (it
+// remains the compat path until the runtime arm subsumes it).
+// ===========================================================================
+
+/// A worker-side [`PdBuilder`] with its `'mcx` lifetime erased to `'static`.
+///
+/// SOUNDNESS (the module-level worker discipline, made a type invariant):
+/// the wrapped builder is constructed with `mcx: None`, so it can never
+/// spill and never holds an arena handle; every byte it retains is owned
+/// plain data (`DistinctSet` copies inserted content into its own blob; the
+/// detoast scratch lives in the CALLER's per-tuple context and is reset per
+/// row). Nothing borrowed from any `EStateData` survives an `accept` call,
+/// which is what makes the lifetime erasure and the `Send` below sound —
+/// the same self-contained-buffer argument as [`PdHandedTable`].
+pub struct PdSinkLocal {
+    builder: PdBuilder<'static>,
+}
+
+// SAFETY: `mcx` is `None` by construction (`new` is the only constructor)
+// and `DistinctSet` without spill state is owned plain data; see the type
+// doc.
+unsafe impl Send for PdSinkLocal {}
+
+impl PdSinkLocal {
+    pub fn new(spec: Arc<PdSpec>, budget: usize) -> PdSinkLocal {
+        PdSinkLocal { builder: PdBuilder::new(spec, budget, None) }
+    }
+
+    /// Feed one row (the worker accept). `PdFeed::Crossed` = the worker
+    /// budget crossed — the sink arm's policy is abort-and-refuse (the
+    /// runtime has no degrade target; the leader reruns the serial arm).
+    #[inline]
+    pub fn accept<'mcx>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        id: ExecSlotId,
+        tmp: EcxtId,
+    ) -> PgResult<PdFeed> {
+        // SAFETY: pure lifetime erasure — the `mcx: None` builder retains no
+        // borrow from `estate` (type invariant above); shortening `'static`
+        // to `'mcx` on the receiver is the safe direction for every field
+        // the call can touch.
+        let b: &mut PdBuilder<'mcx> =
+            unsafe { core::mem::transmute::<&mut PdBuilder<'static>, &mut PdBuilder<'mcx>>(
+                &mut self.builder,
+            ) };
+        b.accept(estate, id, tmp)
+    }
+
+    /// Seal: freeze into the partitioned wire form.
+    pub fn freeze(self) -> PgResult<PdHandedTable> {
+        self.builder.freeze()
+    }
+
+    pub fn ngroups(&self) -> usize {
+        self.builder.ngroups()
+    }
+
+    pub fn mem_bytes(&self) -> usize {
+        self.builder.mem_bytes()
+    }
+}
+
+/// An empty, well-formed GROUPED handed table (the seal error path's
+/// placeholder: the RG is already aborting, but the wire shape must stay
+/// consumable by any combine that races the abort observation).
+pub fn pd_empty_grouped_table(spec: &Arc<PdSpec>) -> PdHandedTable {
+    PdBuilder::new(Arc::clone(spec), usize::MAX, None)
+        .freeze()
+        .expect("freezing an empty builder cannot fail")
+}
+
+/// Number of grouped combine partitions (the sink's partition space).
+pub const PD_SINK_GROUP_PARTS: u64 = PD_GROUP_PARTS as u64;
+
+/// Merge ONE group partition across the sealed tables (slice order = worker
+/// slot order = the combine's deterministic input order). This is the
+/// donors' `merge_bucket` verbatim, exposed for the runtime sink's
+/// partition-claim combine.
+pub fn pd_merge_bucket(
+    spec: &PdSpec,
+    tables: &[PdHandedTable],
+    bucket: usize,
+) -> PdMerged<'static> {
+    merge_bucket(spec, tables, bucket)
+}
+
+/// Concatenate per-bucket merge outputs (bucket order) into the one merged
+/// result — the grouped parallel merge's tail, exposed for the sink's
+/// finalize.
+pub fn pd_concat_buckets(buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
+    let mut merged = PdMerged {
+        ngroups: 0,
+        keys: Vec::new(),
+        keynulls: Vec::new(),
+        states: Vec::new(),
+        dsets: Vec::new(),
+    };
+    for m in buckets {
+        merged.ngroups += m.ngroups;
+        merged.keys.extend(m.keys);
+        merged.keynulls.extend(m.keynulls);
+        merged.states.extend(m.states);
+        merged.dsets.extend(m.dsets);
+    }
+    merged
+}
+
+/// A merged result crossing threads (helper finalize → parked leader).
+///
+/// SAFETY invariant: only ever constructed from `pd_merge_bucket` outputs —
+/// bucket merges build FRESH, never-spilled `DistinctSet<'static>`s (no
+/// tape state, no arena handles), so the payload is owned plain data.
+pub struct PdSinkMerged(PdMerged<'static>);
+
+// SAFETY: see the type doc (never-spilled sets are owned plain data — the
+// `PdHandedTable` argument).
+unsafe impl Send for PdSinkMerged {}
+
+impl PdSinkMerged {
+    pub fn new(merged: PdMerged<'static>) -> PdSinkMerged {
+        PdSinkMerged(merged)
+    }
+
+    /// Rebind to the consuming node's `'mcx` (the `into_lt` law: sound for
+    /// never-spilled merge results, which is the constructor's invariant).
+    pub fn into_merged<'m>(self) -> PdMerged<'m> {
+        self.0.into_lt()
+    }
+
+    pub fn ngroups(&self) -> usize {
+        self.0.ngroups
+    }
+}
