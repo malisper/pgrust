@@ -284,6 +284,10 @@ impl Runtime {
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                // WFIN marker channel: the drive is over — flush any
+                // participation this driver still holds (a worker whose last
+                // task did not observe exhaustion emits here).
+                local.wfin_flush_all();
                 return outcome;
             }
             let epoch = self.park_epoch();
