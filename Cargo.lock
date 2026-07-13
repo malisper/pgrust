@@ -12361,6 +12361,7 @@ dependencies = [
  "miscinit",
  "miscinit_seams",
  "pg_path",
+ "pg_prng",
  "pg_sema_seams",
  "pgarch",
  "pgstat",

@@ -77,3 +77,4 @@ mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 file_seams = { path = "../../storage/file/file_seams" }
 backend_status_seams = { path = "../../utils/activity/backend_status_seams" }
 aio_config = { path = "../../storage/aio/aio_config" }
+pg_prng = { path = "../../../common/pg_prng" }
