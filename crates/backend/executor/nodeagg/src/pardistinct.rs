@@ -1083,29 +1083,41 @@ pub fn pd_parallel_merge_plain<'m>(
 // AggStateData. Everything here is per-plan static.
 // ===========================================================================
 
-/// Map a transfn to its vocab kind given the (single) argument's outer
-/// attno + width. The oids are `order_insensitive_exact_transfn`'s, minus
-/// the Int128 family (int8_avg_accum — v1 refusal).
-pub(crate) fn vocab_kind(transfn_oid: Oid, att: Option<(u16, PdInt)>) -> Option<PdVocabKind> {
-    const F_INT8INC: Oid = 1219;
-    const F_INT8INC_ANY: Oid = 2804;
-    const F_INT2_SUM: Oid = 1840;
-    const F_INT4_SUM: Oid = 1841;
-    const F_INT2_AVG_ACCUM: Oid = 1962;
-    const F_INT4_AVG_ACCUM: Oid = 1963;
-    match transfn_oid {
-        F_INT8INC => Some(PdVocabKind::CountStar),
-        F_INT8INC_ANY => att.map(|(a, _)| PdVocabKind::CountAny { att: a }),
-        F_INT2_SUM => att.and_then(|(a, k)| {
+/// Map an AGGREGATE (Aggref.aggfnoid — what the derivation actually holds)
+/// to its vocab kind given the (single) argument's outer attno + width.
+/// These aggregates' transfns are exactly the
+/// `order_insensitive_exact_transfn` whitelist minus the Int128 family
+/// (count(*)→int8inc, count(any)→int8inc_any, sum(int2/4)→int2/4_sum,
+/// avg(int2/4)→int2/4_avg_accum; avg/sum(int8) accumulate Int128/numeric —
+/// v1 refusal).
+///
+/// HISTORY NOTE (m2-distinct-sink): the original table listed the TRANSFN
+/// proc oids while the caller passed `ar.aggfnoid` — no vocab shape could
+/// ever derive. Unobservable under the Gather-era arm (its v1 economics
+/// refused non-empty vocab before deriving); found by the sink's Q10-class
+/// e2e engagement coverage.
+pub(crate) fn vocab_kind(aggfnoid: Oid, att: Option<(u16, PdInt)>) -> Option<PdVocabKind> {
+    /// pg_proc: count(*) / count(any) / sum(int2) / sum(int4) /
+    /// avg(int2) / avg(int4).
+    const AGG_COUNT_STAR: Oid = 2803;
+    const AGG_COUNT_ANY: Oid = 2147;
+    const AGG_SUM_INT2: Oid = 2109;
+    const AGG_SUM_INT4: Oid = 2108;
+    const AGG_AVG_INT2: Oid = 2102;
+    const AGG_AVG_INT4: Oid = 2101;
+    match aggfnoid {
+        AGG_COUNT_STAR => Some(PdVocabKind::CountStar),
+        AGG_COUNT_ANY => att.map(|(a, _)| PdVocabKind::CountAny { att: a }),
+        AGG_SUM_INT2 => att.and_then(|(a, k)| {
             (k == PdInt::I16).then_some(PdVocabKind::SumInt { att: a, kind: k })
         }),
-        F_INT4_SUM => att.and_then(|(a, k)| {
+        AGG_SUM_INT4 => att.and_then(|(a, k)| {
             (k == PdInt::I32).then_some(PdVocabKind::SumInt { att: a, kind: k })
         }),
-        F_INT2_AVG_ACCUM => att.and_then(|(a, k)| {
+        AGG_AVG_INT2 => att.and_then(|(a, k)| {
             (k == PdInt::I16).then_some(PdVocabKind::AvgInt { att: a, kind: k })
         }),
-        F_INT4_AVG_ACCUM => att.and_then(|(a, k)| {
+        AGG_AVG_INT4 => att.and_then(|(a, k)| {
             (k == PdInt::I32).then_some(PdVocabKind::AvgInt { att: a, kind: k })
         }),
         _ => None,
