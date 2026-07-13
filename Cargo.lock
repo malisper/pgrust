@@ -1751,6 +1751,7 @@ version = "0.0.0"
 dependencies = [
  "backup_copy",
  "backup_copy_seams",
+ "basebackup_target",
  "datum",
  "elog",
  "exectuples_output",
@@ -1785,11 +1786,17 @@ dependencies = [
 name = "basebackup_target"
 version = "0.0.0"
 dependencies = [
+ "acl_seams",
  "elog",
+ "fd",
+ "libc",
  "mcx",
+ "miscinit_seams",
  "sink",
  "types_core",
  "types_error",
+ "types_storage",
+ "xact_seams",
 ]
 
 [[package]]
