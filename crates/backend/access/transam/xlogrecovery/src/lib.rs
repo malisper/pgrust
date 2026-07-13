@@ -102,6 +102,15 @@ thread_local! {
     static PENDING_WALRCV_RESTART: Cell<bool> = const { Cell::new(false) };
     static WALRCV_STARTED_WITH: RefCell<Option<(String, String, bool)>> =
         const { RefCell::new(None) };
+    // XLogReceiptTime/XLogReceiptSource (xlogrecovery.c file statics). NOT
+    // PageSource fields: GetXLogReceiptTime is read by the startup ITSELF
+    // mid-replay (ResolveRecoveryConflictWithBufferPin -> GetStandbyLimitTime)
+    // while PerformWalRecovery has the Recovery struct taken out of RECOVERY —
+    // a (0, false) fallback there put the standby-delay limit in the past and
+    // every buffer-pin conflict cancelled instantly with the BUFFERPIN reason
+    // (031's missing startup-deadlock detail).
+    static RECEIPT_TIME: Cell<TimestampTz> = const { Cell::new(0) };
+    static RECEIPT_SOURCE: Cell<XLogSource> = const { Cell::new(XLogSource::Any) };
 }
 
 pub fn ArchiveRecoveryRequested() -> bool {
@@ -216,8 +225,6 @@ struct PageSource {
     last_complaint: XLogRecPtr,
     flushed_upto: XLogRecPtr,
     receive_tli: TimeLineID,
-    receipt_time: TimestampTz,
-    receipt_source: XLogSource,
     last_fail_time: TimestampTz,
     // minRecoveryPoint & friends (file statics; consistency bookkeeping).
     min_recovery_point: XLogRecPtr,
@@ -247,8 +254,6 @@ impl PageSource {
             last_complaint: InvalidXLogRecPtr,
             flushed_upto: InvalidXLogRecPtr,
             receive_tli: 0,
-            receipt_time: 0,
-            receipt_source: XLogSource::Any,
             last_fail_time: 0,
             min_recovery_point: InvalidXLogRecPtr,
             min_recovery_point_tli: 0,
@@ -327,9 +332,9 @@ impl PageSource {
                 ps_status_seams::set_ps_display::call(&format!("recovering {fname}"));
             }
             self.read_source = source;
-            self.receipt_source = source;
+            RECEIPT_SOURCE.with(|c| c.set(source));
             if source != XLogSource::Stream {
-                self.receipt_time = timestamp_seams::get_current_timestamp::call();
+                RECEIPT_TIME.with(|c| c.set(timestamp_seams::get_current_timestamp::call()));
             }
             return Ok(fd);
         }
@@ -615,9 +620,10 @@ impl PageSource {
                         if rec_ptr < self.flushed_upto && self.receive_tli == self.cur_file_tli {
                             havedata = true;
                             if latest_chunk_start <= rec_ptr {
-                                self.receipt_time =
+                                let rt =
                                     timestamp_seams::get_current_timestamp::call();
-                                targets::SetCurrentChunkStartTime(self.receipt_time);
+                                RECEIPT_TIME.with(|c| c.set(rt));
+                                targets::SetCurrentChunkStartTime(rt);
                             }
                         }
                     }
@@ -637,7 +643,7 @@ impl PageSource {
                             debug_assert!(self.read_file >= 0);
                         } else {
                             self.read_source = XLogSource::Stream;
-                            self.receipt_source = XLogSource::Stream;
+                            RECEIPT_SOURCE.with(|c| c.set(XLogSource::Stream));
                             return Ok(XLREAD_SUCCESS);
                         }
                     } else {
@@ -1820,7 +1826,7 @@ fn perform_wal_recovery_guts(rec: &mut Recovery) -> PgResult<()> {
     targets::SetLatestXTime(0);
     targets::SetCurrentChunkStartTime(0);
     targets::SetRecoveryPause(false);
-    rec.src.receipt_time = timestamp_seams::get_current_timestamp::call();
+    RECEIPT_TIME.with(|c| c.set(timestamp_seams::get_current_timestamp::call()));
 
     if init_small::globals::IsUnderPostmaster() {
         pmsignal::SendPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_RECOVERY_STARTED);
@@ -2068,12 +2074,10 @@ pub fn StartupRequestWalReceiverRestart() {
 }
 
 pub fn GetXLogReceiptTime() -> (TimestampTz, bool) {
-    RECOVERY.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|r| (r.src.receipt_time, r.src.receipt_source == XLogSource::Stream))
-            .unwrap_or((0, false))
-    })
+    (
+        RECEIPT_TIME.with(Cell::get),
+        RECEIPT_SOURCE.with(Cell::get) == XLogSource::Stream,
+    )
 }
 
 fn recovery_oldest_active_xid() -> TransactionId {
