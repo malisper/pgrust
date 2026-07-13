@@ -60,9 +60,35 @@ pub fn StartupProcShutdownHandler() {
     WakeupRecovery();
 }
 
+// StartupRereadConfig (startup.c:157): diff the streaming-replication GUCs
+// across the reload; a change forces a walreceiver restart so the new
+// primary_conninfo/slot takes effect (048_vacuum_horizon_floor relies on the
+// walreceiver dying when primary_conninfo goes invalid).
 fn StartupRereadConfig() -> PgResult<()> {
-    // Walreceiver-restart diff dropped: no walreceiver exists while unported.
-    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)
+    let read_str = |v: &guc_tables::GucStringVar| -> String {
+        if v.installed() { v.read().unwrap_or_default() } else { String::new() }
+    };
+    let conninfo = read_str(&guc_tables::vars::PrimaryConnInfo);
+    let slotname = read_str(&guc_tables::vars::PrimarySlotName);
+    let temp_slot = guc_tables::vars::wal_receiver_create_temp_slot.installed()
+        && guc_tables::vars::wal_receiver_create_temp_slot.read();
+
+    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+
+    let conninfo_changed = conninfo != read_str(&guc_tables::vars::PrimaryConnInfo);
+    let slotname_changed = slotname != read_str(&guc_tables::vars::PrimarySlotName);
+    // wal_receiver_create_temp_slot only matters with no slot configured.
+    let temp_slot_changed = !slotname_changed
+        && slotname.is_empty()
+        && guc_tables::vars::wal_receiver_create_temp_slot.installed()
+        && temp_slot != guc_tables::vars::wal_receiver_create_temp_slot.read();
+
+    if (conninfo_changed || slotname_changed || temp_slot_changed)
+        && xlogrecovery_seams::startup_request_wal_receiver_restart::is_installed()
+    {
+        xlogrecovery_seams::startup_request_wal_receiver_restart::call();
+    }
+    Ok(())
 }
 
 pub fn ProcessStartupProcInterrupts() -> PgResult<()> {
