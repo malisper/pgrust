@@ -1272,3 +1272,43 @@ impl PdSinkMerged {
         self.0.ngroups
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (m2-distinct-sink): the vocab table must key on AGGREGATE
+    /// oids — the derivation passes `Aggref.aggfnoid`. The original table
+    /// listed transfn proc oids and no vocab shape could ever derive.
+    #[test]
+    fn vocab_kind_keys_on_aggregate_oids() {
+        assert!(matches!(vocab_kind(2803, None), Some(PdVocabKind::CountStar)));
+        assert!(matches!(
+            vocab_kind(2147, Some((3, PdInt::I64))),
+            Some(PdVocabKind::CountAny { att: 3 })
+        ));
+        assert!(matches!(
+            vocab_kind(2109, Some((1, PdInt::I16))),
+            Some(PdVocabKind::SumInt { att: 1, kind: PdInt::I16 })
+        ));
+        assert!(matches!(
+            vocab_kind(2108, Some((2, PdInt::I32))),
+            Some(PdVocabKind::SumInt { att: 2, kind: PdInt::I32 })
+        ));
+        assert!(matches!(
+            vocab_kind(2102, Some((4, PdInt::I16))),
+            Some(PdVocabKind::AvgInt { att: 4, kind: PdInt::I16 })
+        ));
+        assert!(matches!(
+            vocab_kind(2101, Some((5, PdInt::I32))),
+            Some(PdVocabKind::AvgInt { att: 5, kind: PdInt::I32 })
+        ));
+        // Width mismatches and the Int128/numeric families refuse.
+        assert!(vocab_kind(2108, Some((2, PdInt::I16))).is_none());
+        assert!(vocab_kind(2107, Some((2, PdInt::I64))).is_none()); // sum(int8)
+        assert!(vocab_kind(2100, Some((2, PdInt::I64))).is_none()); // avg(int8)
+        // The OLD (buggy) transfn oids must NOT match.
+        assert!(vocab_kind(1219, None).is_none());
+        assert!(vocab_kind(2804, Some((0, PdInt::I64))).is_none());
+    }
+}
