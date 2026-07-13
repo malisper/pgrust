@@ -7625,6 +7625,8 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
+ "waitevent_seams",
  "waiteventset_seams",
 ]
 
@@ -10630,6 +10632,7 @@ dependencies = [
  "init_small",
  "postgres_seams",
  "types_error",
+ "waiter",
 ]
 
 [[package]]
@@ -11250,6 +11253,7 @@ version = "0.0.0"
 dependencies = [
  "pg_sema_seams",
  "types_core",
+ "waiter",
 ]
 
 [[package]]
@@ -14183,6 +14187,7 @@ version = "0.0.0"
 dependencies = [
  "pg_prng",
  "s_lock_seams",
+ "waiter",
  "waitevent_seams",
 ]
 
@@ -14814,6 +14819,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
  "waitevent_seams",
  "waiteventset",
  "waiteventset_seams",
@@ -18094,6 +18100,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "waiter"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "loom",
+]
+
+[[package]]
 name = "waitevent"
 version = "0.0.0"
 dependencies = [
@@ -18134,6 +18148,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
  "waitevent_seams",
  "waiteventset_seams",
 ]

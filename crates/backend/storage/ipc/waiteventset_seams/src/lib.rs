@@ -44,23 +44,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // Reachable from SetLatch in signal handlers: impls must be allocation-free.
-    pub fn wakeup_my_proc()
+    // SendPostmasterSignal's kill(PostmasterPid, SIGUSR1) analog: unpark the
+    // postmaster's published waiter handle (the one well-known wake route;
+    // backend-to-backend wakes go through Latch.waker directly).
+    pub fn wakeup_postmaster()
 );
 
 seam_core::seam!(
-    pub fn wakeup_other_proc(pid: i32)
-);
-
-seam_core::seam!(
-    // Retained-thread pid refresh (wretain): re-key this thread's wakeup-pipe
-    // registry entry to the current MyProcPid.
+    // Pooled-thread reuse boundary (wretain warm claim): reissue this
+    // thread's waiter token so handles published for the previous task go
+    // stale. (Name kept from the retired pid-keyed wakeup registry.)
     pub fn rekey_wakeup_registry()
-);
-
-seam_core::seam!(
-    // Diagnostics only (MQ stall self-reports): the wakeup-pipe registry
-    // entry (write fd) for `pid`, plus the registry length. A missing entry
-    // for a live waiter's pid is the lost-wakeup ("deaf worker") signature.
-    pub fn wakeup_registry_snapshot(pid: i32) -> (Option<i32>, usize)
 );

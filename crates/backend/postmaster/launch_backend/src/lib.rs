@@ -290,13 +290,15 @@ fn run_child_task(
 
     // ClosePostmasterPorts: no-op, shared fd table (module doc).
     if init_small::wretain::warm_claim() {
-        // Retained thread (wretain): the once-per-thread half (wait-event
+        // Retained thread (wretain): the once-per-thread half (waiter wake
         // pipe, latch wait set, sigmask, SIGQUIT disposition) survived the
-        // park; only the per-task pid/start-time identity refreshes. The
-        // wakeup registry is keyed by task pid (WakeupOtherProc is SetLatch's
-        // cross-thread wake), so it must follow the fresh synthetic pid —
-        // a stale key silently drops every wake to this thread (P1 wedge:
-        // repeated parallel queries, workers asleep in shm_mq/CV waits).
+        // park; only the per-task pid/start-time identity refreshes. Wake
+        // routing is NOT pid-keyed anymore (SetLatch unparks the waker
+        // handle the owner publishes at every wait — the old registry's
+        // stale-key wedge class is structurally gone); the seam now
+        // reissues this thread's waiter token so handles published for the
+        // PREVIOUS task go stale instead of delivering stray wakes into the
+        // new one.
         miscinit::InitProcessGlobals(child_pid);
         waiteventset_seams::rekey_wakeup_registry::call();
     } else {

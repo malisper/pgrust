@@ -109,6 +109,7 @@ pub fn InitLatch(latch: LatchHandle) {
     let l = latch_ref(latch);
     l.is_set.store(0, Relaxed);
     l.maybe_sleeping.store(0, Relaxed);
+    l.waker.store(0, Relaxed);
     l.owner_pid.store(MyProcPid(), Relaxed);
     l.is_shared.store(false, Release);
 }
@@ -117,6 +118,7 @@ pub fn InitSharedLatch(latch: LatchHandle) {
     let l = latch_ref(latch);
     l.is_set.store(0, Relaxed);
     l.maybe_sleeping.store(0, Relaxed);
+    l.waker.store(0, Relaxed);
     l.owner_pid.store(0, Relaxed);
     l.is_shared.store(true, Release);
 }
@@ -148,9 +150,18 @@ pub fn DisownLatch(latch: LatchHandle) {
     debug_assert!(l.is_shared.load(Acquire));
     debug_assert_eq!(l.owner_pid.load(Acquire), MyProcPid());
 
+    // Route hygiene: the next owner publishes its own waker at wait entry;
+    // clearing here keeps a disowned latch from unparking the old owner.
+    l.waker.store(0, Release);
     l.owner_pid.store(0, Release);
 }
 
+// Latch-only waits park on the thread's Waiter directly (no epoll, no
+// self-pipe): the owner re-publishes its waker handle into `Latch.waker`
+// before arming maybe_sleeping (Dekker order), and set_latch unparks that
+// handle. Socket-mixed waits still go through WaitEventSet (fd-park mode).
+// The postmaster-death events are inert in the thread model (one address
+// space), so dropping them from this path changes nothing.
 pub fn WaitLatch(
     latch: Option<LatchHandle>,
     wakeEvents: u32,
@@ -166,32 +177,77 @@ pub fn WaitLatch(
     } else {
         None
     };
-    let set = LATCH_WAIT_SET
-        .get()
-        .expect("LatchWaitSet is not initialized");
-    wes::modify_wait_event::call(set, LatchWaitSetLatchPos, WL_LATCH_SET, latch)?;
+    let timeout = if wakeEvents & WL_TIMEOUT != 0 {
+        debug_assert!(timeout >= 0);
+        Some(timeout)
+    } else {
+        None
+    };
 
-    if IsUnderPostmaster() {
-        wes::modify_wait_event::call(
-            set,
-            LatchWaitSetPostmasterDeathPos,
-            wakeEvents & (WL_EXIT_ON_PM_DEATH | WL_POSTMASTER_DEATH),
-            None,
-        )?;
+    // Guarded like the drain seams below: pgstat wait reporting is
+    // diagnostics; unit tests run without the activity seams installed.
+    let report = waitevent_seams::pgstat_report_wait_start::is_installed();
+    if report {
+        waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
+    }
+    let res = wait_latch_on_waiter(latch, timeout);
+    if report {
+        waitevent_seams::pgstat_report_wait_end::call();
     }
 
-    let timeout = if wakeEvents & WL_TIMEOUT != 0 {
-        timeout
-    } else {
-        -1
-    };
-    let res = match wes::wait_event_set_wait_one::call(set, timeout, wait_event_info)? {
-        None => Ok(WL_TIMEOUT),
-        Some(event) => Ok(event.events),
-    };
     drain_timeout_interrupt();
     drain_thread_signals()?;
-    res
+    Ok(res)
+}
+
+fn wait_latch_on_waiter(latch: Option<LatchHandle>, timeout: Option<i64>) -> u32 {
+    let l = latch.map(latch_ref);
+    if let Some(l) = l {
+        debug_assert_eq!(l.owner_pid.load(Acquire), MyProcPid());
+    }
+    let deadline = timeout.map(|t| waiter::now_ms().saturating_add(t));
+    loop {
+        if let Some(l) = l {
+            if l.is_set() {
+                return WL_LATCH_SET;
+            }
+        }
+        let remaining = deadline.map(|d| d - waiter::now_ms());
+        if let Some(r) = remaining {
+            if r <= 0 {
+                return WL_TIMEOUT;
+            }
+        }
+        let Some(l) = l else {
+            // No latch to wake us: a pure timed sleep (C: epoll on nothing).
+            match remaining {
+                Some(r) => {
+                    waiter::sleep(core::time::Duration::from_millis(r as u64));
+                }
+                None => {
+                    let _ = waiter::park();
+                }
+            }
+            continue;
+        };
+        // Dekker arm: publish the wake route, then maybe_sleeping (SeqCst
+        // store), then recheck is_set. set_latch's fence + Acquire
+        // maybe_sleeping load pairs with this so it either sees is_set
+        // before we arm, or sees maybe_sleeping AND our fresh waker word.
+        l.waker.store(waiter::current_handle().as_u64(), Release);
+        l.set_maybe_sleeping(true);
+        if l.is_set() {
+            l.set_maybe_sleeping(false);
+            return WL_LATCH_SET;
+        }
+        let _ = match remaining {
+            Some(r) => waiter::park_timeout(core::time::Duration::from_millis(r as u64)),
+            None => waiter::park(),
+        };
+        l.set_maybe_sleeping(false);
+        // Notified, cadence recheck, or timeout: the loop re-tests is_set
+        // and the deadline.
+    }
 }
 
 // The thread model's SIGALRM delivery point: C's handler interrupts the sleep
@@ -278,7 +334,9 @@ pub fn SetLatch(latch: LatchHandle) {
     set_latch(latch_ref(latch));
 }
 
-// Signal-handler-reachable: no allocation, no locks, no errors.
+// Signal-handler-reachable: no allocation, no unbounded locks, no errors
+// (waiter::unpark takes one uncontended per-slot mutex, the same class of
+// section the old registry mutex was).
 pub fn set_latch(latch: &Latch) {
     // pg_memory_barrier(): flag stores by this backend must be globally
     // visible before is_set is checked/set. Full fence, matching C — the
@@ -291,19 +349,18 @@ pub fn set_latch(latch: &Latch) {
     latch.is_set.store(1, Relaxed);
 
     fence(SeqCst);
-    if latch.maybe_sleeping.load(Relaxed) == 0 {
+    // Acquire is load-bearing (loom model latch_dekker_over_waiter): it
+    // pairs with the waiter's SeqCst maybe_sleeping store, ordering the
+    // waker word published before it. With a Relaxed load here a stale
+    // waker (0 on a first wait) can be read and the wake lost.
+    if latch.maybe_sleeping.load(Acquire) == 0 {
         return;
     }
 
-    // owner_pid read exactly once: a concurrent own/disown may lose this
-    // wake, which C tolerates — waiters recheck at the bottom of their loops.
-    let owner_pid = latch.owner_pid.load(Relaxed);
-    if owner_pid == 0 {
-    } else if owner_pid == MyProcPid() {
-        wes::wakeup_my_proc::call();
-    } else {
-        wes::wakeup_other_proc::call(owner_pid);
-    }
+    // The wake route is the waker handle the owner published at wait entry;
+    // a stale/retired handle is a token-validated no-op (waiters recheck at
+    // the bottom of their loops, as with C's own/disown race tolerance).
+    waiter::unpark_word(latch.waker.load(Acquire));
 }
 
 pub fn ResetLatch(latch: LatchHandle) {

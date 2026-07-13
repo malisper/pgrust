@@ -220,9 +220,11 @@ pub fn wait_on_my_latch_reporting(
     Ok(())
 }
 
-// One endpoint's wake-path state: PGPROC latch bits plus whether the wakeup
-// registry can still route a SetLatch to its pid. "registry=MISSING" on a
-// live blocked endpoint is the deaf-worker signature.
+// One endpoint's wake-path state: PGPROC latch bits plus whether the
+// published waker handle can still route a SetLatch to its owner (the
+// waker word in the latch replaced the pid-keyed wakeup registry).
+// "registry=MISSING"/"registry=STALE(...)" on a live blocked endpoint is
+// the deaf-worker signature.
 fn describe_endpoint(procno: Option<types_core::ProcNumber>) -> String {
     let Some(procno) = procno else { return "procno=none".into() };
     if !lmgr_proc_seams::proc_latch::is_installed() {
@@ -232,15 +234,10 @@ fn describe_endpoint(procno: Option<types_core::ProcNumber>) -> String {
     let pid = latch.owner_pid.load(std::sync::atomic::Ordering::Relaxed);
     let is_set = latch.is_set.load(std::sync::atomic::Ordering::Relaxed);
     let sleeping = latch.maybe_sleeping.load(std::sync::atomic::Ordering::Relaxed);
-    let registry = if waiteventset_seams::wakeup_registry_snapshot::is_installed() {
-        let (fd, len) = waiteventset_seams::wakeup_registry_snapshot::call(pid);
-        match fd {
-            Some(fd) => format!("registry=fd:{fd}/len:{len}"),
-            None => format!("registry=MISSING/len:{len}"),
-        }
-    } else {
-        "registry=unavailable".into()
-    };
+    let registry = format!(
+        "registry={}",
+        waiter::describe_word(latch.waker.load(std::sync::atomic::Ordering::Acquire))
+    );
     format!(
         "procno={procno} pid={pid} latch_set={is_set} latch_sleeping={sleeping} {registry}"
     )
