@@ -401,7 +401,20 @@ pub fn postmaster_child_launch(
 
     let child_pid = reserve_child_pid();
     let inherited = Inherited::capture();
-    let guc_snapshot = guc::store::capture_nondefault_variables();
+    // Keep the process-wide BASE snapshot current with this (postmaster)
+    // thread's store: first launch publishes the boot base, later launches
+    // republish only if the postmaster's config changed (guc::layers). The
+    // child's GUC bring-up shares that Arc — one typed capture per config
+    // change instead of a string render per launch, and the child applies
+    // postmaster-validated values (no re-parse, no check-hook rerun; assign
+    // hooks still fire on the child thread). PGRUST_NO_GUC_BASE reverts to
+    // the per-launch string capture/restore path for A/B.
+    let guc_base = guc::layers::ensure_base_current();
+    let guc_snapshot = if guc::layers::base_share_enabled() {
+        Vec::new()
+    } else {
+        guc::store::capture_nondefault_variables()
+    };
 
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
@@ -417,9 +430,15 @@ pub fn postmaster_child_launch(
             // C records the stack base once in main(); each thread owns its own.
             let _ = stack_depth::set_stack_base();
 
-            guc::store::initialize_guc_options_for_child(&guc_snapshot)
-                .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
-                .unwrap_or_else(|e| panic!("child GUC restore failed: {e:?}"));
+            if guc::layers::base_share_enabled() {
+                guc::store::initialize_guc_options_for_child_base(&guc_base)
+                    .and_then(|()| guc::layers::bind_base(&guc_base))
+                    .unwrap_or_else(|e| panic!("child GUC base bind failed: {e:?}"));
+            } else {
+                guc::store::initialize_guc_options_for_child(&guc_snapshot)
+                    .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                    .unwrap_or_else(|e| panic!("child GUC restore failed: {e:?}"));
+            }
 
             run_child_task(child_type, child_pid, child_slot, startup_data, client_sock);
         });
@@ -601,7 +620,15 @@ pub mod wpool {
     fn spawn_standby() -> bool {
         let spawn_pid = super::reserve_child_pid();
         let inherited = super::Inherited::capture();
-        let guc_snapshot = guc::store::capture_nondefault_variables();
+        // Base share, same contract as postmaster_child_launch; wpool::flush
+        // on reload still retires parked standbys so respawns pick up the
+        // NEW base on the next maintain().
+        let guc_base = guc::layers::ensure_base_current();
+        let guc_snapshot = if guc::layers::base_share_enabled() {
+            Vec::new()
+        } else {
+            guc::store::capture_nondefault_variables()
+        };
         let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let spawned = std::thread::Builder::new()
@@ -622,9 +649,15 @@ pub mod wpool {
                 let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
-                guc::store::initialize_guc_options_for_child(&guc_snapshot)
-                    .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
-                    .unwrap_or_else(|e| panic!("standby GUC restore failed: {e:?}"));
+                if guc::layers::base_share_enabled() {
+                    guc::store::initialize_guc_options_for_child_base(&guc_base)
+                        .and_then(|()| guc::layers::bind_base(&guc_base))
+                        .unwrap_or_else(|e| panic!("standby GUC base bind failed: {e:?}"));
+                } else {
+                    guc::store::initialize_guc_options_for_child(&guc_snapshot)
+                        .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                        .unwrap_or_else(|e| panic!("standby GUC restore failed: {e:?}"));
+                }
                 standby_loop(spawn_pid, rx, ack_tx);
             });
         match spawned {

@@ -286,6 +286,11 @@ pub fn process_pm_reload_request() -> PgResult<()> {
             "process_pm_reload_request",
         );
         guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+        // Publish the post-reload BASE snapshot before children are told to
+        // re-read: a child's own reload pass (and any reload-diff it runs)
+        // then sees one atomic old-base -> new-base transition
+        // (guc::layers, parallelism-redesign §2.4).
+        guc::layers::ensure_base_current();
         pmchild_seams::signal_children::call(
             libc::SIGHUP,
             btmask_all_except(&[BackendType::DeadEndBackend]),
