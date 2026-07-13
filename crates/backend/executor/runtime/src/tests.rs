@@ -497,6 +497,104 @@ fn io_guard_releases_and_reacquires() {
     assert_eq!(sem.available(), 2);
 }
 
+// ---- spill blocking-section facade (M3.5 §6.1) --------------------------------
+
+/// Unregistered thread: the facade is a no-op — no semaphore is touched
+/// (there is none to touch) and the guard drop does nothing.
+#[test]
+fn blocking_facade_noop_off_pool_thread() {
+    let s = crate::blocking_io_section();
+    drop(s);
+    // And nested/no-guard sequencing is harmless.
+    let a = crate::blocking_io_section();
+    let b = crate::blocking_io_section();
+    drop(a);
+    drop(b);
+}
+
+/// Registered thread holding a permit: the facade donates it for the
+/// section and reacquires on drop; after the registration guard drops the
+/// facade reverts to no-op.
+#[test]
+fn blocking_facade_arms_on_registered_thread() {
+    let sem = Semaphore::new(1);
+    sem.acquire();
+    {
+        // SAFETY: sem outlives the guard; we hold its permit.
+        let _reg = unsafe { crate::blocking::PermitThreadReg::new(&sem) };
+        {
+            let _s = crate::blocking_io_section();
+            assert_eq!(sem.available(), 1, "permit donated for the section");
+            assert!(sem.try_acquire(), "standby can absorb it");
+            sem.release();
+        }
+        assert_eq!(sem.available(), 0, "permit reacquired at section end");
+    }
+    // Registration gone: facade is a no-op again.
+    {
+        let _s = crate::blocking_io_section();
+        assert_eq!(sem.available(), 0);
+    }
+    sem.release();
+    assert_eq!(sem.available(), 1);
+}
+
+/// End-to-end through the pool: a task body calls the facade with NO
+/// runtime reference (the spill-substrate call shape); the pool loop's
+/// registration makes it donate the worker's permit, and the standby
+/// absorbs it (the RG completes with 1 worker + 1 standby over one permit
+/// while the first morsel blocks inside the section).
+#[test]
+fn blocking_facade_end_to_end_in_pool_task() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 1,
+        standbys: 1,
+        slots: 4,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+
+    struct FacadeIoWork {
+        inner: Arc<SyntheticWork>,
+        blocked_once: AtomicBool,
+    }
+    impl TaskSetWork for FacadeIoWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if !self.blocked_once.swap(true, Ordering::SeqCst) {
+                let _io = crate::blocking_io_section();
+                // Simulated blocking spill I/O: hold the section long
+                // enough for the standby to claim morsels on the donated
+                // permit.
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            self.inner.run_morsel(worker, range);
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    let total = 64u64;
+    let inner = SyntheticWork::new(total, None, 0);
+    let work = Arc::new(FacadeIoWork {
+        inner: Arc::clone(&inner),
+        blocked_once: AtomicBool::new(false),
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let (_h, waiter) = rt.submit(QuerySpec {
+        query_id: 1,
+        tasksets: vec![TaskSetSpec {
+            source: Arc::new(SyntheticMorselSource::new(total).with_c0(1)),
+            work,
+            deps: vec![],
+        }],
+    });
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    pool.shutdown();
+    inner.assert_all_executed_once();
+    assert_eq!(inner.finalizes.load(Ordering::SeqCst), 1);
+}
+
 /// Standby absorption end-to-end: 1 worker + 1 standby over 2 pool threads
 /// and ONE permit. The worker's morsel enters an I/O section; completion of
 /// the whole RG proves the standby could make progress on the released

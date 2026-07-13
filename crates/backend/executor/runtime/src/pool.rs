@@ -28,6 +28,13 @@ use crate::Runtime;
 /// never lost.
 pub fn worker_loop(rt: &Runtime, worker: usize) {
     let mut local = rt.worker_local(worker);
+    // Register this thread for the spill blocking-section facade (M3.5
+    // §6.1): spill code inside task bodies may donate this thread's permit
+    // to a standby for the duration of a blocking syscall region.
+    // SAFETY: the permit semaphore lives in `rt`, which outlives this loop;
+    // blocking_io_section is only reachable from task bodies inside
+    // worker_step, where the permit is held.
+    let _blocking_reg = unsafe { crate::blocking::PermitThreadReg::new(rt.execution_permits()) };
     loop {
         let epoch = rt.park_epoch();
         rt.execution_permits().acquire();
