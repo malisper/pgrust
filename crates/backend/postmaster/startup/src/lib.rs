@@ -47,6 +47,7 @@ pub fn StartupProcTriggerHandler() {
 
 /// SIGHUP handler body.
 pub fn StartupProcSigHupHandler() {
+    let _ = elog::elog(types_error::DEBUG1, "startup: SIGHUP disposition ran".to_string());
     GOT_SIGHUP.store(true, Relaxed);
     WakeupRecovery();
 }
@@ -76,6 +77,14 @@ fn StartupRereadConfig() -> PgResult<()> {
     guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
 
     let conninfo_changed = conninfo != read_str(&guc_tables::vars::PrimaryConnInfo);
+    let _ = elog::elog(
+        types_error::DEBUG1,
+        format!(
+            "startup: reread config, conninfo [{}] -> [{}]",
+            conninfo,
+            read_str(&guc_tables::vars::PrimaryConnInfo)
+        ),
+    );
     let slotname_changed = slotname != read_str(&guc_tables::vars::PrimarySlotName);
     // wal_receiver_create_temp_slot only matters with no slot configured.
     let temp_slot_changed = !slotname_changed
