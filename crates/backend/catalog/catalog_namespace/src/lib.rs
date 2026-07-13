@@ -25,22 +25,24 @@ pub mod builtins;
 mod lookup;
 mod path;
 mod temp;
-mod visibility;
 #[cfg(test)]
 mod tests;
+mod visibility;
 
 pub use temp::{
-    AccessTempTableNamespace, GetTempTableNamespace, RangeVarAdjustRelationPersistence,
-    QualifiedNameGetCreationNamespace, RangeVarGetCreationNamespace, ResetTempTableNamespace,
+    AccessTempTableNamespace, GetTempTableNamespace, QualifiedNameGetCreationNamespace,
+    RangeVarAdjustRelationPersistence, RangeVarGetCreationNamespace, ResetTempTableNamespace,
 };
 
 pub use lookup::{
-    get_collation_oid, get_collation_oid_list, get_namespace_oid, get_ts_config_oid,
-    get_conversion_oid, get_ts_dict_oid, get_ts_parser_oid, get_ts_template_oid, is_encoding_supported_by_icu, CheckSetNamespace, DeconstructQualifiedName,
-    FuncCandidate, FuncnameGetCandidates, FuncnameGetCandidatesExtended, LookupCreationNamespace,
-    LookupExplicitNamespace, LookupNamespaceNoError, OperCandidate, OpernameGetCandidates,
-    OpclassnameGetOpcid, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid, RangeVarGetRelidExtended, RelnameGetRelid,
-    TypenameGetTypidExtended, RVR_MISSING_OK, RVR_NOWAIT, RVR_SKIP_LOCKED,
+    get_collation_oid, get_collation_oid_list, get_conversion_oid, get_namespace_oid,
+    get_ts_config_oid, get_ts_dict_oid, get_ts_parser_oid, get_ts_template_oid,
+    is_encoding_supported_by_icu, CheckSetNamespace, DeconstructQualifiedName, FuncCandidate,
+    FuncnameGetCandidates, FuncnameGetCandidatesExtended, LookupCreationNamespace,
+    LookupExplicitNamespace, LookupNamespaceNoError, OpclassnameGetOpcid, OperCandidate,
+    OpernameGetCandidates, OpernameGetOprid, OpfamilynameGetOpfid, RangeVarGetRelid,
+    RangeVarGetRelidExtended, RelnameGetRelid, TypenameGetTypidExtended, RVR_MISSING_OK,
+    RVR_NOWAIT, RVR_SKIP_LOCKED,
 };
 pub use path::{
     assign_search_path, check_search_path, fetch_search_path, fetch_search_path_array,
@@ -84,7 +86,10 @@ pub(crate) fn with_path_state<R>(f: impl FnOnce(&mut PathState) -> R) -> R {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
             let mcx = Box::leak(Box::new(MemoryContext::new("namespace base search path"))).mcx();
-            ManuallyDrop::new(PathState { mcx, base_search_path: PgVec::new_in(mcx) })
+            ManuallyDrop::new(PathState {
+                mcx,
+                base_search_path: PgVec::new_in(mcx),
+            })
         });
         f(st)
     })
@@ -177,14 +182,66 @@ pub fn GetTempToastNamespace() -> Oid {
     mttn
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionNamespaceState {
+    temp_namespace: Oid,
+    temp_toast_namespace: Oid,
+    temp_namespace_sub_id: SubTransactionId,
+    namespace_user: Oid,
+    base_creation_namespace: Oid,
+    base_temp_creation_pending: bool,
+    active_path_generation: u64,
+    namespace_search_path: Option<String>,
+}
+
+pub fn CaptureSessionNamespaceState() -> SessionNamespaceState {
+    SessionNamespaceState {
+        temp_namespace: my_temp_namespace(),
+        temp_toast_namespace: my_temp_toast_namespace(),
+        temp_namespace_sub_id: MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get),
+        namespace_user: NAMESPACE_USER.with(Cell::get),
+        base_creation_namespace: BASE_CREATION_NAMESPACE.with(Cell::get),
+        base_temp_creation_pending: BASE_TEMP_CREATION_PENDING.with(Cell::get),
+        active_path_generation: ACTIVE_PATH_GENERATION.with(Cell::get),
+        namespace_search_path: NAMESPACE_SEARCH_PATH.with(|v| v.borrow().clone()),
+    }
+}
+
+pub fn ReplaceSessionNamespaceState(state: &SessionNamespaceState) -> SessionNamespaceState {
+    let old = CaptureSessionNamespaceState();
+    MY_TEMP_NAMESPACE.with(|c| c.set(state.temp_namespace));
+    MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(state.temp_toast_namespace));
+    MY_TEMP_NAMESPACE_SUB_ID.with(|c| c.set(state.temp_namespace_sub_id));
+    NAMESPACE_USER.with(|c| c.set(state.namespace_user));
+    BASE_CREATION_NAMESPACE.with(|c| c.set(state.base_creation_namespace));
+    BASE_TEMP_CREATION_PENDING.with(|c| c.set(state.base_temp_creation_pending));
+    ACTIVE_PATH_GENERATION.with(|c| c.set(state.active_path_generation));
+    NAMESPACE_SEARCH_PATH.with(|v| *v.borrow_mut() = state.namespace_search_path.clone());
+    BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+    path::invalidate_search_path_cache();
+    old
+}
+
 pub fn GetTempNamespaceState() -> (Oid, Oid) {
     (my_temp_namespace(), my_temp_toast_namespace())
+}
+
+pub fn ReplaceTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) -> (Oid, Oid) {
+    let old = GetTempNamespaceState();
+    MY_TEMP_NAMESPACE.with(|c| c.set(tempNamespaceId));
+    MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(tempToastNamespaceId));
+    BASE_SEARCH_PATH_VALID.with(|c| c.set(false));
+    path::invalidate_search_path_cache();
+    old
 }
 
 pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
     debug_assert_eq!(my_temp_namespace(), InvalidOid);
     debug_assert_eq!(my_temp_toast_namespace(), InvalidOid);
-    debug_assert_eq!(MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get), InvalidSubTransactionId);
+    debug_assert_eq!(
+        MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get),
+        InvalidSubTransactionId
+    );
 
     MY_TEMP_NAMESPACE.with(|c| c.set(tempNamespaceId));
     MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(tempToastNamespaceId));
@@ -197,7 +254,10 @@ pub fn SetTempNamespaceState(tempNamespaceId: Oid, tempToastNamespaceId: Oid) {
 // pooled worker thread (wretain park) must leave it as a fresh process would,
 // or the next task's SetTempNamespaceState precondition breaks.
 pub fn ResetTempNamespaceStateForRetainedPark() {
-    debug_assert_eq!(MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get), InvalidSubTransactionId);
+    debug_assert_eq!(
+        MY_TEMP_NAMESPACE_SUB_ID.with(Cell::get),
+        InvalidSubTransactionId
+    );
     MY_TEMP_NAMESPACE.with(|c| c.set(InvalidOid));
     MY_TEMP_TOAST_NAMESPACE.with(|c| c.set(InvalidOid));
     BASE_SEARCH_PATH_VALID.with(|c| c.set(false));

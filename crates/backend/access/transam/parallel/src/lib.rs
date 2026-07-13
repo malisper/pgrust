@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::SeqCst};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +16,15 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
 use types_storage::RelFileLocator;
+
+mod query_task_guard;
+
+pub use query_task_guard::QueryTaskBindingGuard;
+
+#[cfg(debug_assertions)]
+pub use query_task_guard::{
+    set_query_task_fault, QueryTaskFaultAction, QueryTaskFaultPoint,
+};
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +40,41 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
 const PARALLEL_ERROR_QUEUE_MSGS: usize = 64;
 
 pub type ParallelWorkerEntry = fn(&ParallelShared) -> PgResult<()>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryTaskBindingPolicy {
+    pub has_params: bool,
+    pub temp_state: bool,
+    pub serializable: bool,
+    pub pending_invalidations: bool,
+}
+
+const QUERY_TASK_INSTALLED: u8 = 1 << 0;
+const QUERY_TASK_PARAMS: u8 = 1 << 1;
+const QUERY_TASK_TEMP: u8 = 1 << 2;
+const QUERY_TASK_SERIALIZABLE: u8 = 1 << 3;
+const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
+
+// Post-task park hooks (harvested with the query-task binder from
+// morsel/query-task-binder-20260710 @ 1b3cba43f; entrypoint-table precedent).
+// POST_TASK_PARK runs on a worker thread after its task fully ended and
+// Terminate was sent — the leader's finish wait is already satisfied, so
+// parking there cannot deadlock it. PRIVATE_SHUTDOWN runs in
+// DestroyParallelContext before it waits for worker exit: it must release
+// anything a worker could still be parked on. Inert unless registered; on
+// this tree only the binder substrate e2e registers them (the runtime
+// pool/scheduler lane owns the production park).
+static POST_TASK_PARK: std::sync::OnceLock<fn(&ParallelShared)> = std::sync::OnceLock::new();
+static PRIVATE_SHUTDOWN: std::sync::OnceLock<fn(&(dyn Any + Send + Sync))> =
+    std::sync::OnceLock::new();
+
+pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
+    let _ = POST_TASK_PARK.set(f);
+}
+
+pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
+    let _ = PRIVATE_SHUTDOWN.set(f);
+}
 
 pub enum WorkerMessage {
     Error(Box<PgError>),
@@ -86,6 +130,7 @@ pub struct ParallelShared {
     error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    query_task_binding: AtomicU8,
 }
 
 const _: fn() = || {
@@ -355,6 +400,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         error_senders,
         worker_attached,
         private: Mutex::new(None),
+        query_task_binding: AtomicU8::new(0),
     });
 
     with_pcxt(id, |p| {
@@ -381,6 +427,35 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
 pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
     let shared = shared_for(id);
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+pub fn InstallQueryTaskBinding(
+    id: ParallelContextId,
+    policy: QueryTaskBindingPolicy,
+) -> PgResult<()> {
+    let shared = shared_for(id);
+    let encoded = QUERY_TASK_INSTALLED
+        | u8::from(policy.has_params) * QUERY_TASK_PARAMS
+        | u8::from(policy.temp_state) * QUERY_TASK_TEMP
+        | u8::from(policy.serializable) * QUERY_TASK_SERIALIZABLE
+        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS;
+    shared
+        .query_task_binding
+        .compare_exchange(0, encoded, SeqCst, SeqCst)
+        .map(|_| ())
+        .map_err(|_| {
+            Box::new(
+                PgError::new(ERROR, "parallel query-task binding was installed twice")
+                    .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            )
+        })
+}
+
+pub fn with_query_task_binding<T>(
+    shared: &Arc<ParallelShared>,
+    body: impl FnOnce() -> PgResult<T>,
+) -> PgResult<T> {
+    query_task_guard::with_query_task_binding(shared, body)
 }
 
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
@@ -682,6 +757,13 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
         list.remove(idx)
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
+
+    // Release parked helpers BEFORE waiting for worker exit below.
+    if let Some(f) = PRIVATE_SHUTDOWN.get() {
+        if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+            f(&*p);
+        }
+    }
 
     for w in pcxt.workers.iter_mut() {
         if w.error_receiver.is_some() {
@@ -993,6 +1075,15 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
         shared.parallel_leader_proc_number,
     );
     MY_WORKER_SHARED.with(|s| *s.borrow_mut() = None);
+    // Successful tasks may park on the query's ready work instead of
+    // returning to the pool at once; the hook returns when the leader
+    // releases it (DestroyParallelContext at the latest). A hook panic must
+    // not corrupt the already-sent outcome.
+    if outcome.is_ok() {
+        if let Some(f) = POST_TASK_PARK.get() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
+        }
+    }
     outcome
 }
 

@@ -4,7 +4,10 @@ use guc_tables::{
     GucShowHook, GucStringAssignHook, GucStringCheckHook,
 };
 use types_core::{Oid, BOOTSTRAP_SUPERUSERID};
-use types_guc::{config_enum_entry, config_group, config_type, GucContext, GucSource, PGC_INTERNAL, PGC_S_DEFAULT};
+use types_guc::{
+    config_enum_entry, config_group, config_type, GucContext, GucSource, PGC_INTERNAL,
+    PGC_S_DEFAULT,
+};
 
 // guc_tables.h transient status bits.
 pub const GUC_IS_IN_FILE: i32 = 0x0001;
@@ -36,13 +39,13 @@ pub enum config_var_val {
     Enumval(i32),
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct config_var_value {
     pub val: Option<config_var_val>,
     pub extra: Option<SharedExtra>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct GucStack {
     pub prev: Option<Box<GucStack>>,
     pub nest_level: i32,
@@ -56,7 +59,7 @@ pub struct GucStack {
     pub masked: config_var_value,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_generic {
     pub name: &'static str,
     pub context: GucContext,
@@ -113,7 +116,7 @@ impl config_generic {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_bool {
     pub gen: config_generic,
     pub variable: &'static guc_tables::GucBoolVar,
@@ -126,7 +129,7 @@ pub struct config_bool {
     pub reset_extra: Option<SharedExtra>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_int {
     pub gen: config_generic,
     pub variable: &'static guc_tables::GucIntVar,
@@ -141,7 +144,7 @@ pub struct config_int {
     pub reset_extra: Option<SharedExtra>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_real {
     pub gen: config_generic,
     pub variable: &'static guc_tables::GucRealVar,
@@ -156,7 +159,7 @@ pub struct config_real {
     pub reset_extra: Option<SharedExtra>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_string {
     pub gen: config_generic,
     pub variable: &'static guc_tables::GucStringVar,
@@ -169,7 +172,7 @@ pub struct config_string {
     pub reset_extra: Option<SharedExtra>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct config_enum {
     pub gen: config_generic,
     pub variable: &'static guc_tables::GucEnumVar,
