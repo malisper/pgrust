@@ -33,11 +33,13 @@
 //!    falls back to the serial arm (whole-attempt rerun; nothing consumed
 //!    twice).
 //!
-//! WFIN markers (M0 acceptance instrument contract): each helper prints
+//! WFIN markers (M0 acceptance instrument contract): emitted by the
+//! runtime's generic sched.rs channel under `PGRUST_MORSEL_MARKERS=1` —
 //! `MORSEL|WFIN|qid=..|pipe=..|worker=..|t_us=..|tasks=..|task_avg_us=..`
-//! per pipe (0 = ACCEPT, 1 = COMBINE) at drive exit; `t_us` is the worker's
-//! LAST task settle on that pipe (monotonic, process base), `tasks` counts
-//! claimed morsels.
+//! per (worker, task set); pipe = task-set index (0 = ACCEPT, 1 = COMBINE).
+//! The arm's own duplicate emitter was removed at m2-integration: with the
+//! sched channel armed, double emission (different time bases) garbled the
+//! instrument parser's spread verdicts.
 
 use core::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -70,27 +72,6 @@ pub(super) struct AggSinkLocal {
     run_bytes: usize,
     table: Option<SinkTableHandle>,
     part: Option<SinkPart>,
-}
-
-/// Per-(pipe, worker) WFIN accounting.
-#[derive(Default)]
-struct WfinPipe {
-    tasks: AtomicU64,
-    busy_ns: AtomicU64,
-    last_settle_us: AtomicU64,
-}
-
-impl WfinPipe {
-    fn record(&self, dt_ns: u64) {
-        self.tasks.fetch_add(1, Ordering::Relaxed);
-        self.busy_ns.fetch_add(dt_ns, Ordering::Relaxed);
-        self.last_settle_us.store(mono_us(), Ordering::Relaxed);
-    }
-}
-
-fn mono_us() -> u64 {
-    static BASE: OnceLock<std::time::Instant> = OnceLock::new();
-    BASE.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
 }
 
 /// Which worker drain feeds the sink build.
@@ -134,8 +115,6 @@ struct AggSink {
     /// logical hash-table's worth of memory, C's hash_mem_limit law).
     /// Crossing = budget refusal, exactly the Local discipline.
     combined_bytes: AtomicUsize,
-    /// WFIN accounting, indexed by worker slot (pin-board lane).
-    wfin: Vec<[WfinPipe; 2]>,
 }
 
 // SAFETY: out_emit cells are written only by the exclusive claimer of their
@@ -183,7 +162,6 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
-        let t0 = std::time::Instant::now();
         let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, range)));
         match r {
             Ok(Ok(())) => {}
@@ -199,9 +177,6 @@ impl runtime::ParallelSink for AggSink {
                 mark_self_errored();
                 self.fail(PgError::new(ERROR, "runtime agg sink worker panicked").into());
             }
-        }
-        if let Some(w) = self.wfin.get(worker) {
-            w[0].record(t0.elapsed().as_nanos() as u64);
         }
     }
 
@@ -236,7 +211,6 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
-        let t0 = std::time::Instant::now();
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
             // Std-collections audit note: this views Vec is a per-claim
             // allocation, but the combine morsel space is a FIXED 256
@@ -283,9 +257,6 @@ impl runtime::ParallelSink for AggSink {
             Err(_panic) => {
                 self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
             }
-        }
-        if let Some(w) = self.wfin.get(worker) {
-            w[1].record(t0.elapsed().as_nanos() as u64);
         }
     }
 
@@ -586,23 +557,11 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
             }
         }
     }
-    // WFIN marker emission (M0 instrument contract): one line per pipe this
-    // worker touched, at drive exit.
-    let qid = payload.query_id.load(Ordering::SeqCst);
-    if let Some(w) = payload.sink.wfin.get(worker) {
-        for (pipe, p) in w.iter().enumerate() {
-            let tasks = p.tasks.load(Ordering::Relaxed);
-            if tasks == 0 {
-                continue;
-            }
-            let busy_us = p.busy_ns.load(Ordering::Relaxed) / 1_000;
-            eprintln!(
-                "MORSEL|WFIN|qid={qid}|pipe={pipe}|worker={worker}|t_us={}|tasks={tasks}|task_avg_us={}",
-                p.last_settle_us.load(Ordering::Relaxed),
-                busy_us / tasks.max(1),
-            );
-        }
-    }
+    // WFIN markers: emitted by the runtime's generic channel (sched.rs,
+    // PGRUST_MORSEL_MARKERS=1) — one line per (worker, task set). The arm's
+    // own duplicate emitter was removed at m2-integration: with the sched
+    // channel armed the double emission (different time bases) garbled the
+    // instrument parser's spread verdicts.
 }
 
 fn drive_bound(
@@ -1060,9 +1019,6 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
         combined_bytes: AtomicUsize::new(0),
-        wfin: (0..rt.nthreads() + runtime::MAX_EXTERNAL_LANES)
-            .map(|_| [WfinPipe::default(), WfinPipe::default()])
-            .collect(),
     });
     engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink)
 }
