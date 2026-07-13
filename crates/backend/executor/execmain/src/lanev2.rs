@@ -2189,6 +2189,19 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
         }
         return try_meta_agg_answer(agg, ss, estate);
     }
+    // M1 runtime scan arm (the Meta arm preempts above — footer answers
+    // beat any parallel scan): FORCED engagement under PGRUST_RUNTIME=1 +
+    // pgrust.runtime_scan_pool, serial plan surface unchanged. Owns the
+    // Fold shapes AND the cbstore count-only census shape (a qualed
+    // count(*) — serial-refused because the footer is the serial lever,
+    // but a parallel PREWHERE scan is exactly M1's LIKE-count target).
+    // None = not engaged/refused — fall through byte-identically (nothing
+    // was consumed).
+    if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
+        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+            return Ok(Some(r));
+        }
+    }
     if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
@@ -2196,16 +2209,6 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // stays drained until rescan clears `agg_done`.
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
-    }
-    // M1 runtime scan arm (fold shapes only; the Meta arm preempts above —
-    // footer answers beat any parallel scan): FORCED engagement under
-    // PGRUST_RUNTIME=1 + pgrust.runtime_scan_pool, serial plan surface
-    // unchanged. None = not engaged/refused — fall through to the serial
-    // feeds byte-identically (nothing was consumed).
-    if c == AggLaneChoice::Fold {
-        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
-            return Ok(Some(r));
-        }
     }
     // One OWNED tick per lane-owned plain-agg build event (the gate's
     // aggbuild floor counts builds, not calls; a plain node builds once per
