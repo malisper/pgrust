@@ -104,6 +104,47 @@ pub struct OutputPluginCallbacks {
     pub streaming_requested: bool,
 }
 
+// C's ctx->out is a StringInfo carrying either textual (test_decoding) or
+// binary (pgoutput 'w'-payload) data. A String can't hold arbitrary bytes, so
+// the buffer is a Vec<u8> with the String-flavored methods the textual
+// plugins use; binary writers (logicalproto) reach the Vec directly.
+#[derive(Default)]
+pub struct OutBuf {
+    buf: Vec<u8>,
+}
+
+impl OutBuf {
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+    pub fn push_str(&mut self, s: &str) {
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+    pub fn push(&mut self, c: char) {
+        let mut b = [0u8; 4];
+        self.buf.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+    }
+}
+
+impl core::fmt::Write for OutBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.buf.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+}
+
 pub type LogicalOutputPluginWriterWrite =
     fn(&mut OutputPluginContext, XLogRecPtr, TransactionId, bool) -> PgResult<()>;
 pub type LogicalOutputPluginWriterPrepareWrite = LogicalOutputPluginWriterWrite;
@@ -121,7 +162,7 @@ pub struct OutputPluginContext {
     pub prepare_write: Option<LogicalOutputPluginWriterPrepareWrite>,
     pub write: Option<LogicalOutputPluginWriterWrite>,
     pub update_progress: Option<LogicalOutputPluginWriterUpdateProgress>,
-    pub out: String,
+    pub out: OutBuf,
     pub output_plugin_private: usize,
     pub output_writer_private: usize,
     pub accept_writes: bool,
@@ -250,7 +291,7 @@ fn StartupDecodingContext(
         prepare_write,
         write: do_write,
         update_progress,
-        out: String::new(),
+        out: OutBuf::default(),
         output_plugin_private: 0,
         output_writer_private: 0,
         accept_writes: false,

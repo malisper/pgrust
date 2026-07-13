@@ -254,7 +254,7 @@ fn pg_decode_filter(opc: &mut OutputPluginContext, origin_id: RepOriginId) -> Pg
     Ok(data.only_local && origin_id != 0)
 }
 
-fn print_literal(s: &mut String, typid: Oid, outputstr: &str) {
+fn print_literal(s: &mut logical::OutBuf, typid: Oid, outputstr: &str) {
     match typid {
         INT2OID | INT4OID | INT8OID | OIDOID | FLOAT4OID | FLOAT8OID | NUMERICOID => {
             s.push_str(outputstr);
@@ -297,7 +297,7 @@ fn varatt_is_external_ondisk(val: Datum) -> bool {
 }
 
 fn tuple_to_stringinfo(
-    s: &mut String,
+    s: &mut logical::OutBuf,
     mcx: Mcx<'_>,
     tupdesc: &TupleDescData<'static>,
     tuple: &HeapTupleData<'_>,
