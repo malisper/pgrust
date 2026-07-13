@@ -152,7 +152,15 @@ fn validate(shared: &ParallelShared) -> PgResult<()> {
     Ok(())
 }
 
-struct QueryTaskBindingGuard {
+/// RAII binder for one query task executing on a foreign (parked helper)
+/// thread: binds identity, xact, snapshot, GUCs, temp-namespace, client and
+/// record-registry state, and restores the helper's exact pre-bind state on
+/// every exit path (success, error, cancellation, panic; cleanup-panic gets
+/// one retry). Opaque outside this crate: construction and completion are
+/// only reachable through `with_query_task_binding`, which owns the
+/// catch-unwind and cleanup-retry choreography this type's safety depends on.
+/// Re-exported as `runtime::QueryTaskGuard` (pinned M0 interface).
+pub struct QueryTaskBindingGuard {
     saved_worker_shared: Option<Arc<ParallelShared>>,
     saved_identity: miscinit::SessionIdentityState,
     saved_xact_characteristics: SavedTransactionCharacteristics,
