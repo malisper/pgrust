@@ -227,6 +227,42 @@ pub fn bind_query_pin(pin: &Arc<GucQuerySnapshot>) -> PgResult<store::SessionGuc
     Ok(binding)
 }
 
+/// PGRUST_NO_GUC_BASE reverts child launches to the per-launch string
+/// capture/re-parse path (check hooks rerun per child) for A/B.
+pub fn base_share_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PGRUST_NO_GUC_BASE").is_none())
+}
+
+/// Child bring-up from a shared base (the launch_backend path): applies every
+/// base var onto this thread's freshly initialized store — same guard
+/// sequence and end-state as the string restore (set_config_option with
+/// GUC_ACTION_SET, is_reload=true), minus only the parse + check-hook rerun
+/// (the postmaster validated; extras cross by Arc, assign hooks rerun here) —
+/// then adopts the base as this thread's started-with view.
+pub fn bind_base(base: &Arc<GucBaseSnapshot>) -> PgResult<()> {
+    let trace = std::env::var_os("PGRUST_GATHER_TRACE").is_some();
+    let t0 = trace.then(std::time::Instant::now);
+    for cap in base.vars() {
+        let mut deferred: Vec<crate::registry::DeferredAssignHook> = Vec::new();
+        store::with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred))
+            .expect("bind_base: InitializeGUCOptions must run on this thread first")?;
+        for hook in deferred {
+            hook();
+        }
+    }
+    set_session_base(base.clone());
+    if let Some(t0) = t0 {
+        eprintln!(
+            "GTRACE guc.bind_base n={} epoch={} total_us={}",
+            base.vars().len(),
+            base.epoch(),
+            t0.elapsed().as_micros()
+        );
+    }
+    Ok(())
+}
+
 /// Test-only: drop process-wide publisher state so each test can stand up its
 /// own "postmaster" thread. Production code must never call this.
 #[doc(hidden)]

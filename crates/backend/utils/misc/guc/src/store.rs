@@ -160,6 +160,15 @@ pub fn initialize_guc_options_for_child(snapshot: &[NondefaultGuc]) -> PgResult<
     initialize_guc_options_impl(|name| !snapshot.iter().any(|v| v.name == name))
 }
 
+// Same suppression contract, keyed on a shared base snapshot (guc::layers):
+// boot values must not be published over process-shared backings for
+// variables the subsequent bind_base is about to overwrite.
+pub fn initialize_guc_options_for_child_base(
+    base: &crate::layers::GucBaseSnapshot,
+) -> PgResult<()> {
+    initialize_guc_options_impl(|name| !base.contains(name))
+}
+
 fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
     // Before log_line_prefix-style GUCs can demand elog timestamps.
     pgtz::pg_timezone_initialize();
