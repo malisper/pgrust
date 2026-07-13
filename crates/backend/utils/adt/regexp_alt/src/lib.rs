@@ -34,10 +34,17 @@ use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 pub use guc_tables::consts::{REGEX_ENGINE_AUTO, REGEX_ENGINE_RE2, REGEX_ENGINE_SPENCER};
 
 mod classify;
+pub mod program;
 pub use classify::{classify as classify_pattern, re2_compatible, Classification, Compat};
 
 guc_tables::session_guc_cluster!(RegexpAltGucs, REGEXP_ALT_GUCS:
     (regex_engine_cell, i32, regex_engine, set_regex_engine, guc_tables::consts::REGEX_ENGINE_AUTO),
+    // pgrust.regex_pattern_program: the anchored pattern-program fast tier
+    // under the auto RE2 arm (program.rs). OFF = the exact pre-tier RE2
+    // behavior; the toggle exists for the four-engine differential gate and
+    // as an escape hatch, and is read per exec so flips act on cached
+    // patterns immediately.
+    (regex_pattern_program_cell, bool, regex_pattern_program, set_regex_pattern_program, true),
 );
 
 pub fn install() {
@@ -45,6 +52,12 @@ pub fn install() {
         get: regex_engine,
         set: set_regex_engine,
     });
+    guc_tables::vars::pgrust_regex_pattern_program.install_if_absent(
+        guc_tables::GucVarAccessors {
+            get: regex_pattern_program,
+            set: set_regex_pattern_program,
+        },
+    );
 }
 
 pub fn re2_available() -> bool {
@@ -67,6 +80,10 @@ pub struct Re2Pattern {
     #[allow(dead_code)]
     inner: Rc<re2::Re2Re>,
     capture_safe: bool,
+    // The anchored pattern-program fast tier (program.rs): compiled once at
+    // auto-dispatch time for CaptureSafe patterns inside the program subset,
+    // consulted by exec for start-of-subject evaluations, RE2 otherwise.
+    program: Option<Rc<program::Program>>,
 }
 
 impl core::fmt::Debug for Re2Pattern {
@@ -84,6 +101,12 @@ impl Re2Pattern {
         self.capture_safe
     }
 
+    // Whether the anchored pattern-program fast tier compiled for this
+    // pattern (observability + tests).
+    pub fn has_program(&self) -> bool {
+        self.program.is_some()
+    }
+
     // Capture group count, excluding group 0.
     pub fn ngroups(&self) -> usize {
         #[cfg(have_re2)]
@@ -96,7 +119,22 @@ impl Re2Pattern {
 
     // Fills out (group 0 first) and returns true on match. out may be empty
     // for a boolean match. start is a byte offset into hay.
+    //
+    // The pattern-program fast tier answers start-of-subject evaluations
+    // when it was compiled for this pattern (anchored subset) and the GUC
+    // keeps it on; a budget bail (pathological backtracking) or a nonzero
+    // start falls through to the RE2 arm — the tier can refuse, never
+    // answer differently.
     pub fn exec(&self, hay: &[u8], start: usize, out: &mut [GroupSpan]) -> bool {
+        if start == 0 {
+            if let Some(prog) = &self.program {
+                if regex_pattern_program() {
+                    if let Some(matched) = prog.exec(hay, out) {
+                        return matched;
+                    }
+                }
+            }
+        }
         #[cfg(have_re2)]
         {
             self.inner.match_at(hay, start, out)
@@ -246,12 +284,25 @@ fn compile_auto(
         return Ok(Re2Pattern {
             inner: Rc::new(re2::compile(pattern, true, false)?),
             capture_safe,
+            program: None,
         });
     }
     let mut full = Vec::with_capacity(pattern.len() + 4);
     full.extend_from_slice(b"(?s)");
     full.extend_from_slice(pattern);
-    Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false, needs_longest)?), capture_safe })
+    let inner = Rc::new(re2::compile(&full, false, needs_longest)?);
+    // The pattern-program fast tier: only for CaptureSafe, alternation-free
+    // (needs_longest=false, so the RE2 arm it mirrors is leftmost-first)
+    // patterns inside program.rs's anchored subset. The group-count check is
+    // belt-and-suspenders — the subset guarantees it.
+    let program = if capture_safe && !needs_longest {
+        program::compile(pattern)
+            .filter(|p| p.ngroups() == inner.ngroups())
+            .map(Rc::new)
+    } else {
+        None
+    };
+    Ok(Re2Pattern { inner, capture_safe, program })
 }
 
 // The forced path (regex_engine=re2): no classifier; ICASE/NLSTOP/NLANCH map
@@ -284,6 +335,7 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
             return Ok(Re2Pattern {
                 inner: Rc::new(re2::compile(pattern, true, false)?),
                 capture_safe: true,
+                program: None,
             });
         }
         let mut full = Vec::with_capacity(pattern.len() + 12);
@@ -303,8 +355,13 @@ fn compile_forced(pattern: &[u8], cflags: i32) -> PgResult<Re2Pattern> {
         }
         // Forced mode is the testing knob: it exposes RE2 semantics whole,
         // capture handling included; longest mode matches the auto arm's
-        // alternation semantics.
-        Ok(Re2Pattern { inner: Rc::new(re2::compile(&full, false, true)?), capture_safe: true })
+        // alternation semantics. No pattern program: forced re2 stays pure
+        // RE2 so tests can differentiate the arms.
+        Ok(Re2Pattern {
+            inner: Rc::new(re2::compile(&full, false, true)?),
+            capture_safe: true,
+            program: None,
+        })
     }
 }
 
