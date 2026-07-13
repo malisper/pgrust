@@ -1333,13 +1333,17 @@ pub fn exec_init_agg<'mcx>(
     }
 
     // Lane-v2 agg-breaker fold plan (lanefold crate), classified once at
-    // init — only when the lane can ever engage this node (env-gated; hashed
-    // or plain, single set, no sorted transitions, subplan- and param-free
-    // transition program — the lane's own admission gate re-checks the rest
-    // per call).
+    // init — only when the lane can ever engage this node (env-gated; hashed,
+    // plain, or sorted, single set, no sorted transitions, subplan- and
+    // param-free transition program — the lane's own admission gate re-checks
+    // the rest per call). AGG_SORTED joins for the sorted-fold arm
+    // (lanev2 `try_own_sorted_agg_over_seq_scan`): its per-group-run fold
+    // targets the same fixed `pergroup_base` the plain fold does.
     let lanefold = if lane_v2_enabled()
         && gs.is_none()
-        && (node.aggstrategy == AGG_HASHED || node.aggstrategy == AGG_PLAIN)
+        && (node.aggstrategy == AGG_HASHED
+            || node.aggstrategy == AGG_PLAIN
+            || node.aggstrategy == AGG_SORTED)
         && pertrans_sort.is_empty()
         && evaltrans
             .as_deref()
@@ -1364,8 +1368,9 @@ pub fn exec_init_agg<'mcx>(
                             )
                         })?
                     } else {
-                        // AGG_PLAIN: fixed pergroup targets (spec.pergroup =
-                        // pergroup_base + transno), same as the full evaltrans.
+                        // AGG_PLAIN / AGG_SORTED: fixed pergroup targets
+                        // (spec.pergroup = pergroup_base + transno), same as
+                        // the full evaltrans both strategies build.
                         ::executils::with_subplan_compile_env(estate, |env| {
                             ::execexpr::exec_build_agg_trans_plain_masked(
                                 mcx, &specs, &keep, fm_agg_node, params, env,
@@ -1404,11 +1409,13 @@ pub fn exec_init_agg<'mcx>(
         None
     };
 
-    // Narrow-sort admission leg (field doc): probed only where the arm can
-    // ever engage (lane on, AGG_SORTED with internal-sort entries).
+    // Narrow-sort + sorted-fold admission leg (field doc): probed wherever a
+    // sorted-agg lane arm can engage (lane on, AGG_SORTED, real grouping
+    // keys) — the narrow-sort arm needs it for internal-sort entries, the
+    // sorted-fold arm (lanev2 sorted-agg over cbstore SeqScan) for its
+    // raw-datum group-boundary compare.
     let group_eq_representational = if lane_v2_enabled()
         && node.aggstrategy == AGG_SORTED
-        && !pertrans_sort.is_empty()
         && node.numCols > 0
     {
         let mut ok = true;
@@ -1420,7 +1427,12 @@ pub fn exec_init_agg<'mcx>(
             const F_INT8EQ: Oid = 467;
             ok &= match lsyscache::get_opcode(op)? {
                 F_BOOLEQ | F_INT2EQ | F_INT4EQ | F_INT8EQ => true,
-                F_TEXTEQ => {
+                // Text keys serve only the narrow-sort arm (the sorted-fold
+                // arm's raw compare is by-value-width only), so probe the
+                // collation only where that arm can engage — and unit
+                // harnesses without the collation syscache seam never build
+                // internal-sort entries, so they never reach the lookup.
+                F_TEXTEQ if !pertrans_sort.is_empty() => {
                     let coll = node.grpCollations[i];
                     coll != 0 && lsyscache::get_collation_isdeterministic(coll)?
                 }
@@ -4793,6 +4805,70 @@ pub fn agg_sorted_emit<'mcx>(
 pub fn agg_sorted_input_done(node: &mut AggStateData<'_>) {
     debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
     node.agg_done = true;
+}
+
+/// Sorted-FOLD admission (lanev2 `try_own_sorted_agg_over_seq_scan`'s
+/// vectorized arm): the plain sorted admission PLUS a classified lanefold
+/// plan, no internal sorts at all (the fold cannot interleave ordered-input
+/// collection), real grouping keys, and representational grouping equality —
+/// the grant under which the lane's raw-datum boundary compare over the
+/// staged key lanes returns exactly the ported grouping-equality program's
+/// verdict (NULL keys grouping together handled by the lane's null-pair
+/// compare).
+pub fn agg_sorted_fold_admissible(node: &AggStateData<'_>) -> bool {
+    agg_sorted_lane_admissible(node)
+        && node.pertrans_sort.is_empty()
+        && node.lanefold.is_some()
+        && node.plan.numCols > 0
+        && node.group_eq_representational
+}
+
+/// The current group's pergroup array — the sorted fold target: the same
+/// once-allocated base `initialize_aggregates` re-initializes at every
+/// `agg_sorted_group_begin`.
+pub fn agg_sorted_pergroup_base(node: &AggStateData<'_>) -> NonNull<AggPerGroup> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    node.pergroup_base
+}
+
+/// One same-group row through only the RESIDUAL transitions (the transnos
+/// classify refused) — the fold-feed discipline: the admitted transitions
+/// fold per group run over `agg_sorted_pergroup_base`. No-op when the plan
+/// admitted every transition. Mirrors `agg_plain_build_accept_resid`.
+pub fn agg_sorted_accept_resid<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let Some(resid) = node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut()) else {
+        return Ok(());
+    };
+    estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
+    let outer_slot = estate.slot_mut(outer_id);
+    let mut slots = EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
+    exec_eval_expr(resid, &mut slots)?;
+    estate.reset_expr_context(node.tmpcontext);
+    Ok(())
+}
+
+/// The OPEN group's grouping-key datums, read from the group's first tuple
+/// (`persort.first_slot` — installed at `agg_sorted_group_begin`, live until
+/// the group emits). `out` receives one `(value, isnull)` per grouping
+/// column in `grpColIdx` order. The sorted-fold arm re-derives its boundary
+/// comparand through this after every group begin (fresh, from-pending, and
+/// cross-call resumes alike) — by-value key columns only per that arm's
+/// admission, so the returned Datums are self-contained.
+pub fn agg_sorted_group_key(node: &mut AggStateData<'_>, out: &mut [(Datum, bool)]) {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_SORTED);
+    let cols = node.plan.grpColIdx;
+    debug_assert_eq!(out.len(), cols.len());
+    let ps = node.persort.as_mut().expect("sorted Agg has persort");
+    for (o, &attno) in out.iter_mut().zip(cols.iter()) {
+        let mut isnull = false;
+        let d = exectuples::slot_getattr(&mut ps.first_slot, attno as i32, &mut isnull);
+        *o = (d, isnull);
+    }
 }
 
 // ===========================================================================
