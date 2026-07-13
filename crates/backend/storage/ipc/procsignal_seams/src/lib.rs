@@ -28,3 +28,15 @@ seam_core::seam!(
     // WakeupRecovery()). Raw = LatchHandle::as_usize; None clears.
     pub fn set_thread_signal_extra_wake_latch(raw_latch: Option<usize>) -> ()
 );
+
+seam_core::seam!(
+    // SendProcSignal (procsignal.c) for seams-only callers (slot.c's
+    // InvalidatePossiblyObsoleteSlot signaling the startup's logical-slot
+    // conflict). proc_number = INVALID_PROC_NUMBER for the pid-scan path.
+    // Returns 0 on success, -1 (ESRCH) otherwise.
+    pub fn send_proc_signal(
+        pid: i32,
+        reason: types_storage::storage::ProcSignalReason,
+        proc_number: i32,
+    ) -> i32
+);

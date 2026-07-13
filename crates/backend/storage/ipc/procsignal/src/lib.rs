@@ -802,6 +802,7 @@ pub fn init_seams() {
     procsignal_seams::set_thread_signal_extra_wake_latch::set(|raw| {
         SetThreadSignalExtraWakeLatch(raw.map(types_storage::latch::LatchHandle::from_raw))
     });
+    procsignal_seams::send_proc_signal::set(SendProcSignal);
 }
 
 #[cfg(test)]
