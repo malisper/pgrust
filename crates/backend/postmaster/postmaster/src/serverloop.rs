@@ -85,6 +85,10 @@ fn now_secs() -> i64 {
 }
 
 pub fn ServerLoop() -> PgResult<i32> {
+    // M1: spawn the morsel-runtime worker pool at postmaster start when (and
+    // only when) PGRUST_RUNTIME=1 (redesign §2.1 fixed pool; default OFF =
+    // zero threads, zero behavior change — the M0 kill-switch contract).
+    let _ = launch_backend::rtpool::start_if_enabled();
     ConfigurePostmasterWaitSet(true)?;
     let mut last_lockfile_recheck_time = now_secs();
     let mut last_touch_time = last_lockfile_recheck_time;
