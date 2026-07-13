@@ -69,3 +69,29 @@ pub fn runtime_scan_pool_dop() -> i32 {
 pub fn runtime_scan_pool_armed() -> bool {
     runtime_scan_pool_dop() > 0
 }
+
+/// The armed runtime SORT DOP (M3 top-N sink, docs/design/m3-sort.md §9):
+/// `pgrust.runtime_sort_pool` clamped to available cores, or 0 when unarmed.
+/// Same layering as the scan knob — a customized option the planner never
+/// consults; callers additionally gate on `PGRUST_RUNTIME=1` + shape/binder
+/// admission. Deliberately does NOT embed any other arm's kill switch (the
+/// m2-distinct coupling gotcha: `runtime_scan_pool_dop` folds
+/// PGRUST_RUNTIME_SCAN in, so scan-kill disarms its borrowers too) — the
+/// sort arm's own kill (`PGRUST_RUNTIME_SORT`) lives with the arm.
+pub fn runtime_sort_pool_dop() -> i32 {
+    if !crate::backing::pgrust_lane_executor() {
+        return 0;
+    }
+    if !guc_seams::get_config_option_missing_ok::is_installed() {
+        return 0;
+    }
+    let dop = guc_seams::get_config_option_missing_ok::call("pgrust.runtime_sort_pool")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    if dop <= 0 {
+        return 0;
+    }
+    dop.min(max_runtime_scan_workers())
+}

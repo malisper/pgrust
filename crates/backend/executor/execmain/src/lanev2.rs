@@ -37,6 +37,7 @@
 mod exprkey;
 mod runtime_distinct;
 mod runtime_scan;
+mod runtime_sort;
 mod push;
 mod stats;
 
@@ -4409,6 +4410,16 @@ fn sort_feed_if_needed<'mcx>(
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
             arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
+            // M3 runtime top-N sink (docs/design/m3-sort.md; PGRUST_RUNTIME=1
+            // + pgrust.runtime_sort_pool + PGRUST_RUNTIME_SORT layering —
+            // absent, one GUC read and today's serial path byte-identically).
+            // Probed BEFORE the serial arms arm anything: true = the winners
+            // are gathered and buffered, the refsort emit face is live;
+            // false = refused or fell back with nothing consumed and no sort
+            // state touched.
+            if runtime_sort::try_own_sort_topn(state, ss, &outer_desc, estate)? {
+                return Ok(true);
+            }
             // Zone-adaptive top-N granule order (cbstore bounded sorts; None
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
