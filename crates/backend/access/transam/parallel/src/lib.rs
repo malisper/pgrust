@@ -15,7 +15,6 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use types_storage::RelFileLocator;
 
 #[cfg(test)]
@@ -570,7 +569,14 @@ const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 32;
 
 fn wait_on_my_latch(wait_event: u32) {
     let latch = g::MyLatch().expect("parallel leader without MyLatch");
-    let _ = latch::WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event);
+    // Both callers are recheck loops (worker attach/finish state), and the
+    // wakes they rely on are the same cross-thread SetLatch delivery the
+    // shm_mq stall class loses intermittently — bound the sleep with the
+    // shared recheck cadence so a lost wake costs one period, not forever
+    // (shm_mq stall.rs rationale; a timeout return is a legal spurious wake
+    // because the caller re-polls before re-blocking).
+    let mut d = shm_mq::stall::StallDetector::new();
+    let _ = shm_mq::stall::wait_latch_reporting(latch, wait_event, &mut d, &mut |_| {});
     latch::ResetLatch(latch);
 }
 

@@ -12,9 +12,24 @@
 //
 // Cost when not stalled: nothing on any path that doesn't block; a blocked
 // wait arms its deadline with one clock read and sleeps with a timeout
-// instead of forever. After the single report the wait reverts to the plain
-// infinite sleep. PGRUST_MQ_STALL_REPORT_MS overrides the 60 s default
+// instead of forever. PGRUST_MQ_STALL_REPORT_MS overrides the 60 s default
 // (<= 0 disables; diagnostics knob, read once).
+//
+// RECHECK CADENCE (fix-pardistinct-contention, 2026-07-13): the original
+// detector kept waiting untouched after its one report, which made every
+// LOST latch wake cost exactly one threshold (the wait un-wedged only when
+// the next WaitLatch entry saw a stuck is_set) and made a SECOND lost wake
+// on the same blocked operation a PERMANENT hang (post-report the sleep
+// reverted to infinite). Production hit this repeatedly (ClickBench Q15
+// default plan: 173 s for a 0.3 s query = wedge timeouts, S3 job
+// pgrust-cb-flatprof-1783927152; the same 60 s-cadence signature on two
+// pods in notes/batchemit-lane.md). The blocked sleeps now time out every
+// PGRUST_MQ_RECHECK_MS (default 1000, <= 0 restores the old infinite
+// behavior) and RETURN to the caller as a spurious wake — every wait site
+// is a recheck loop (ResetLatch + re-poll progress state), so a lost wake
+// now costs at most one recheck period instead of 60 s / forever. The
+// one-shot LOG report still fires when total blocked time crosses the
+// report threshold, so the wedge evidence is preserved.
 
 use std::sync::OnceLock;
 
@@ -28,6 +43,7 @@ use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT}
 use crate::ShmMq;
 
 const DEFAULT_THRESHOLD_MS: i64 = 60_000;
+const DEFAULT_RECHECK_MS: i64 = 1_000;
 
 fn threshold_ms() -> i64 {
     static THRESHOLD: OnceLock<i64> = OnceLock::new();
@@ -36,6 +52,19 @@ fn threshold_ms() -> i64 {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(DEFAULT_THRESHOLD_MS)
+    })
+}
+
+/// The process-wide blocked-wait recheck cadence (PGRUST_MQ_RECHECK_MS,
+/// default 1000 ms, <= 0 disables) — pub for latch-wait sites whose flag
+/// mix (WL_POSTMASTER_DEATH) cannot reuse wait_latch_reporting.
+pub fn recheck_ms() -> i64 {
+    static RECHECK: OnceLock<i64> = OnceLock::new();
+    *RECHECK.get_or_init(|| {
+        std::env::var("PGRUST_MQ_RECHECK_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(DEFAULT_RECHECK_MS)
     })
 }
 
@@ -53,32 +82,53 @@ fn now_ms() -> i64 {
 /// most once per stall.
 pub struct StallDetector {
     threshold_ms: i64,
+    recheck_ms: i64,
     start_ms: Option<i64>,
     reported: bool,
 }
 
 impl StallDetector {
     pub fn new() -> Self {
-        Self::with_threshold(threshold_ms())
+        Self::with_thresholds(threshold_ms(), recheck_ms())
     }
 
     pub fn with_threshold(threshold_ms: i64) -> Self {
-        StallDetector { threshold_ms, start_ms: None, reported: false }
+        // Test/diagnostic constructor: report threshold only, no recheck
+        // cadence (the original report-then-wait-on shape).
+        Self::with_thresholds(threshold_ms, 0)
+    }
+
+    pub fn with_thresholds(threshold_ms: i64, recheck_ms: i64) -> Self {
+        StallDetector { threshold_ms, recheck_ms, start_ms: None, reported: false }
     }
 
     fn active(&self) -> bool {
         self.threshold_ms > 0 && !self.reported
     }
 
-    /// Timeout (ms) for the next latch sleep; None = sleep forever (detector
-    /// disabled, or the one report already fired). Arms the deadline at the
-    /// first block.
+    /// True = a timed-out sleep should return to the caller as a spurious
+    /// wake (the caller rechecks its progress condition), bounding the cost
+    /// of a lost latch wake to one recheck period.
+    fn recheck_enabled(&self) -> bool {
+        self.recheck_ms > 0
+    }
+
+    /// Timeout (ms) for the next latch sleep; None = sleep forever (both
+    /// mechanisms disabled). The report deadline arms at the first block;
+    /// the recheck cadence caps every sleep.
     fn next_timeout_ms(&mut self, now: i64) -> Option<i64> {
-        if !self.active() {
-            return None;
+        let deadline = if self.active() {
+            let start = *self.start_ms.get_or_insert(now);
+            Some((start + self.threshold_ms - now).max(1))
+        } else {
+            None
+        };
+        let recheck = self.recheck_enabled().then_some(self.recheck_ms);
+        match (deadline, recheck) {
+            (Some(d), Some(r)) => Some(d.min(r)),
+            (Some(d), None) => Some(d),
+            (None, r) => r,
         }
-        let start = *self.start_ms.get_or_insert(now);
-        Some((start + self.threshold_ms - now).max(1))
     }
 
     /// The sleep timed out: Some(waited_ms) exactly once, when the total
@@ -110,10 +160,13 @@ impl Default for StallDetector {
     }
 }
 
-/// Core reporting sleep: WaitLatch until the latch fires, timing out at the
-/// detector's deadline to emit the caller's report, then waiting on. Returns
-/// only on a latch wake — the caller's ResetLatch/CFI/recheck tail is
-/// untouched, so behavior without a stall is exactly WaitLatch(latch, forever).
+/// Core reporting sleep: WaitLatch until the latch fires OR the detector's
+/// recheck cadence elapses. A timed-out sleep past the report threshold
+/// emits the caller's report (once per stall); with the recheck cadence
+/// enabled every timeout RETURNS to the caller as a spurious wake — all
+/// wait sites are recheck loops, so a lost latch wake costs at most one
+/// recheck period. With both knobs disabled this is exactly
+/// WaitLatch(latch, forever).
 pub fn wait_latch_reporting(
     latch: LatchHandle,
     wait_event_info: u32,
@@ -139,9 +192,15 @@ pub fn wait_latch_reporting(
             return Ok(());
         }
         // Timed out. Do NOT ResetLatch here: a set that raced the timeout
-        // must survive for the recheck. Report once, keep waiting.
+        // must survive for the recheck. Report once per stall.
         if let Some(waited_ms) = detector.note_timeout(now_ms()) {
             report(waited_ms);
+        }
+        if detector.recheck_enabled() {
+            // Spurious-wake return: the caller re-polls its progress
+            // condition, which un-wedges every lost-wake class (including
+            // the ones where is_set was never stuck on).
+            return Ok(());
         }
     }
 }
@@ -275,5 +334,28 @@ mod stall_tests {
         assert_eq!(d.note_timeout(100_000), None);
         let mut d = StallDetector::with_threshold(-5);
         assert_eq!(d.next_timeout_ms(0), None);
+    }
+
+    #[test]
+    fn recheck_cadence_caps_every_sleep() {
+        let mut d = StallDetector::with_thresholds(60_000, 1_000);
+        assert!(d.recheck_enabled());
+        // Far from the report deadline: the recheck cadence wins.
+        assert_eq!(d.next_timeout_ms(0), Some(1_000));
+        assert_eq!(d.next_timeout_ms(30_000), Some(1_000));
+        // Near the deadline: the report deadline wins.
+        assert_eq!(d.next_timeout_ms(59_500), Some(500));
+        // Report fires on total blocked time, once.
+        assert_eq!(d.note_timeout(60_010), Some(60_010));
+        assert_eq!(d.note_timeout(120_000), None);
+        // Post-report the cadence continues (no infinite sleep).
+        assert_eq!(d.next_timeout_ms(120_000), Some(1_000));
+    }
+
+    #[test]
+    fn recheck_without_threshold_never_reports() {
+        let mut d = StallDetector::with_thresholds(0, 1_000);
+        assert_eq!(d.next_timeout_ms(0), Some(1_000));
+        assert_eq!(d.note_timeout(100_000), None);
     }
 }

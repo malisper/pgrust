@@ -21,7 +21,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, LOG,
 };
 use types_startup::StartupData;
-use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
+use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
 
 #[cfg(test)]
 mod tests;
@@ -582,12 +582,17 @@ pub fn WaitForBackgroundWorkerStartup(
             return Ok((status, pid));
         }
 
-        let rc = latch::WaitLatch(
-            g::MyLatch(),
-            WL_LATCH_SET | WL_POSTMASTER_DEATH,
-            0,
-            WAIT_EVENT_BGWORKER_STARTUP,
-        )?;
+        // Recheck cadence (shm_mq stall.rs rationale): the wake for this
+        // wait is postmaster-routed and was production-lost (pm-pid
+        // collision class); a bounded sleep re-polls the slot instead of
+        // sleeping forever on a dropped wake.
+        let recheck = ::shm_mq::stall::recheck_ms();
+        let (flags, timeout) = if recheck > 0 {
+            (WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, recheck)
+        } else {
+            (WL_LATCH_SET | WL_POSTMASTER_DEATH, 0)
+        };
+        let rc = latch::WaitLatch(g::MyLatch(), flags, timeout, WAIT_EVENT_BGWORKER_STARTUP)?;
         if rc & WL_POSTMASTER_DEATH != 0 {
             return Ok((BgwHandleStatus::BGWH_POSTMASTER_DIED, 0));
         }
@@ -606,12 +611,14 @@ pub fn WaitForBackgroundWorkerShutdown(handle: &BackgroundWorkerHandle) -> PgRes
             return Ok(status);
         }
 
-        let rc = latch::WaitLatch(
-            g::MyLatch(),
-            WL_LATCH_SET | WL_POSTMASTER_DEATH,
-            0,
-            WAIT_EVENT_BGWORKER_SHUTDOWN,
-        )?;
+        // Recheck cadence — see WaitForBackgroundWorkerStartup.
+        let recheck = ::shm_mq::stall::recheck_ms();
+        let (flags, timeout) = if recheck > 0 {
+            (WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, recheck)
+        } else {
+            (WL_LATCH_SET | WL_POSTMASTER_DEATH, 0)
+        };
+        let rc = latch::WaitLatch(g::MyLatch(), flags, timeout, WAIT_EVENT_BGWORKER_SHUTDOWN)?;
         if rc & WL_POSTMASTER_DEATH != 0 {
             return Ok(BgwHandleStatus::BGWH_POSTMASTER_DIED);
         }

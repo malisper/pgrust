@@ -1917,6 +1917,7 @@ dependencies = [
  "postinit",
  "postmaster_seams",
  "procsignal",
+ "shm_mq",
  "timeout_seams",
  "types_core",
  "types_error",
