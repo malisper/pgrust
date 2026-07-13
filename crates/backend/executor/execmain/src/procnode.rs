@@ -223,6 +223,12 @@ pub struct SortNode<'mcx> {
     /// table handed off (this node emits nothing), Some(false) = probed and
     /// refused or degraded (classic paths own the node).
     pub pd_state: Option<bool>,
+    /// M2 runtime DISTINCT-sink STATIC shape refusal memo (lanev2
+    /// `runtime_distinct`): once the plan-shape gates (order spec / spec
+    /// derivation / subtree shape / expr safety) refuse, later pulls skip
+    /// the whole probe. Dynamic gates (arming, EPQ, instrumentation,
+    /// economics, granule floor) stay per-call.
+    pub rd_shape_refused: bool,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -745,6 +751,7 @@ pub fn exec_init_node<'mcx>(
                 outer_desc: Some(outer_desc),
                 lane_fusible: None,
                 pd_state: None,
+                rd_shape_refused: false,
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -3726,7 +3733,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer, lane_fusible, pd_state; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
