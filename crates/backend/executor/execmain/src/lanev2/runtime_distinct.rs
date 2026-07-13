@@ -577,6 +577,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    lane_trace("runtime-distinct: probed");
 
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
     let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
