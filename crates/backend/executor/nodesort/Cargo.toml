@@ -12,6 +12,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 exectuples = { path = "../exectuples" }
+heaptuple = { path = "../../access/common/heaptuple" }
 executils = { path = "../executils" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 tuplesort = { path = "../../utils/sort/tuplesort" }

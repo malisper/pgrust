@@ -9381,6 +9381,7 @@ dependencies = [
  "datum",
  "exectuples",
  "executils",
+ "heaptuple",
  "init_small",
  "mcx",
  "postgres_seams",
