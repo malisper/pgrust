@@ -245,7 +245,13 @@ pub fn bind_base(base: &Arc<GucBaseSnapshot>) -> PgResult<()> {
     let t0 = trace.then(std::time::Instant::now);
     for cap in base.vars() {
         let mut deferred: Vec<crate::registry::DeferredAssignHook> = Vec::new();
-        store::with_store_mut(|reg| crate::registry::bind_captured_guc(reg, cap, &mut deferred))
+        // exact=false: the child-launch base bind keeps the legacy restore
+        // semantics guc-snapshots was ratified under (source-priority guards
+        // active). exact=true is reserved for M0's session-envelope exact
+        // replacement (apply_captured_session_gucs_impl), which added the param.
+        store::with_store_mut(|reg| {
+            crate::registry::bind_captured_guc(reg, cap, &mut deferred, false)
+        })
             .expect("bind_base: InitializeGUCOptions must run on this thread first")?;
         for hook in deferred {
             hook();
