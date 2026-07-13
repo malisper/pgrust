@@ -1,0 +1,12 @@
+[package]
+name = "stringhash"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Root-workspace member (phase 2). Only dependency is libc for
+# madvise(MADV_HUGEPAGE) on the large table/arena allocations — the same
+# advice lane-v2-hugepages applies to the existing arenas, so lane
+# comparisons aren't confounded by page size.
+[dependencies]
+libc = "0.2"
