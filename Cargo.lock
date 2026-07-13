@@ -7661,6 +7661,7 @@ dependencies = [
  "postmaster_startup",
  "pqcomm_seams",
  "procsignal",
+ "runtime",
  "scalar_seams",
  "sinval",
  "stack_depth",
@@ -14151,13 +14152,12 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "init_small",
  "loom",
  "parallel",
  "postgres_seams",
- "types_core",
  "types_error",
 ]
 

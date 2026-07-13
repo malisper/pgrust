@@ -35,9 +35,16 @@
 //! Everything here is inert until the runtime's pool/scheduler (lane B) and
 //! an execution owner arm it; no production caller exists at M0.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+// MERGE NOTE (m0-integration): synchronization comes from the crate's
+// loom/std shim so lane B's scheduler models (tests/loom.rs) explore the
+// lifecycle's own edges too — under `--cfg loom` every CAS, mutex, and
+// condvar below is a loom-checked type. `Arc` stays std per the shim's
+// rules (sync.rs). Semantics are the donor's, unchanged.
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::{Condvar, Mutex};
 
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
@@ -573,7 +580,13 @@ fn unfinished_error(message: &'static str) -> Box<PgError> {
     PgError::new(ERROR, message).into()
 }
 
-#[cfg(test)]
+// Unit tests run under plain `cargo test` (shim = std there). Under
+// `--cfg loom` they are compiled out: they use real threads and timed waits
+// outside loom::model, which loom types forbid. The donor loom model below
+// (`loom_join_and_close_share_one_linearization_domain`) builds its own loom
+// atomics and runs as a PLAIN test via the unconditional loom dev-dependency
+// — exactly how lane A's gates ran it.
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64 as StdAtomicU64, AtomicUsize};
