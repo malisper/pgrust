@@ -560,14 +560,29 @@ fn engine_snapshot(m: Mcx<'_>, s: &[u8], p: &[u8]) -> String {
 }
 
 fn assert_engine_parity(m: Mcx<'_>, s: &[u8], p: &[u8]) {
+    // Three arms through every entry point: forced Spencer, auto with the
+    // pattern-program tier disabled (pure RE2 dispatch), and auto with the
+    // tier on (the default). Together with the forced-re2 crate tests this
+    // is the four-engine differential — spencer / re2 / auto-RE2 /
+    // pattern-program — over results AND errors.
     regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_SPENCER);
     let spencer = engine_snapshot(m, s, p);
     regexp_alt::set_regex_engine(regexp_alt::REGEX_ENGINE_AUTO);
-    let auto = engine_snapshot(m, s, p);
+    regexp_alt::set_regex_pattern_program(false);
+    let auto_re2 = engine_snapshot(m, s, p);
+    regexp_alt::set_regex_pattern_program(true);
+    let auto_prog = engine_snapshot(m, s, p);
     assert_eq!(
         spencer,
-        auto,
-        "auto diverges from spencer: pattern {:?} input {:?}",
+        auto_re2,
+        "auto (program off) diverges from spencer: pattern {:?} input {:?}",
+        String::from_utf8_lossy(p),
+        String::from_utf8_lossy(s)
+    );
+    assert_eq!(
+        spencer,
+        auto_prog,
+        "auto (pattern program) diverges from spencer: pattern {:?} input {:?}",
         String::from_utf8_lossy(p),
         String::from_utf8_lossy(s)
     );
@@ -624,6 +639,15 @@ fn auto_vs_spencer_differential() {
         "b[^b]+",
         r"\.",
         "a\nb",
+        // Pattern-program subset shapes (the anchored fast tier): the
+        // three-arm parity harness runs these program-on AND program-off.
+        "^https?://",
+        r"^(?:www\.)?([^/]+)$",
+        "^([a-z0-9]+) ",
+        "^[^,]*,",
+        "^a.+$",
+        "^é?a",
+        "^([0-9]{1,3})b",
     ];
     let incompatible: &[&str] =
         &[r"(a)\1", r"\w+", r"\bword\b", "a*?", "[[:alpha:]]", r"\d", r"[\d]", "(?i)a"];
