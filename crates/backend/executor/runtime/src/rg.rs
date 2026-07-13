@@ -27,6 +27,15 @@ pub const INITIAL_PRIORITY: u32 = 10_000;
 /// (fork → accept_local → combine → finalize maps onto run_morsel/finalize
 /// at this altitude — the sink contract lives above this trait).
 pub trait TaskSetWork: Send + Sync {
+    /// Generation binding (H1 structural fix, M2-prep): called by the
+    /// scheduler when this task set is PUBLISHED — strictly before any
+    /// worker can claim a morsel of it (the slot word that admits workers
+    /// is stored after this call) and again on every re-publish (rescan
+    /// regeneration, M1+). Work that keys partial state by generation (the
+    /// sink plumbing in [`crate::sink`]) records it here; stateless work
+    /// keeps the default no-op.
+    fn bind_generation(&self, _generation: Generation) {}
+
     /// Execute one claimed morsel (whole-granule range). Called in parallel
     /// from many workers.
     fn run_morsel(&self, worker: usize, range: MorselRange);
