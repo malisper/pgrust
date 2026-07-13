@@ -1,0 +1,12 @@
+[package]
+name = "logicalworker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "logicalworker"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }

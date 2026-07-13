@@ -7983,6 +7983,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "logicalproto"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "logicalrelation"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+]
+
+[[package]]
+name = "logicalworker"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "lsyscache"
 version = "0.1.0"
 dependencies = [
@@ -9768,6 +9792,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "origin"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
@@ -11497,6 +11529,14 @@ dependencies = [
 [[package]]
 name = "pglz"
 version = "0.1.0"
+
+[[package]]
+name = "pgoutput"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_error",
+]
 
 [[package]]
 name = "pgstat"
