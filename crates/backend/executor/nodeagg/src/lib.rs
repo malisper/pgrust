@@ -47,6 +47,7 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests;
 
+mod codedgroup;
 mod compact;
 mod distinctset;
 mod gsets;
@@ -62,6 +63,12 @@ pub use compact::{
     agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
     RedDerived, RedOp, RedShape,
+};
+pub use codedgroup::{
+    agg_codedgroup_accept_batch, agg_codedgroup_admissible, agg_codedgroup_begin,
+    agg_codedgroup_economical, agg_codedgroup_emit_next, agg_codedgroup_emitting,
+    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_next_replay,
+    agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
     agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_adopt_merged,
@@ -146,6 +153,11 @@ pub struct AggStateData<'mcx> {
     // While it exists, group-boundary aggcontext resets are SKIPPED — the
     // table's by-ref transvalues live in aggcontext (module doc).
     hashgroup: Option<Box<hashgrouped::HashGroupedState<'mcx>>>,
+    // Lane-v2 dict-code batched exact-DISTINCT grouping (codedgroup.rs, the
+    // Q14-class near-unique text-key shape): Some while the arm holds state
+    // (building or emitting). Plain Rust memory only — no aggcontext
+    // residue, no interplay with the group-boundary resets (module doc).
+    codedgroup: Option<Box<codedgroup::CodedGroupState<'mcx>>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -220,12 +232,14 @@ struct PerTransSortData<'mcx> {
     // is the counter (`process_ordered_aggregates_set`). False keeps the
     // per-element transfn replay.
     set_count_transfn: bool,
-    // The aggregate's single argument is exactly OUTER column 0 with no
-    // FILTER (recorded at init from the Aggref): the per-row transition
-    // program's whole effect for this entry is "park outer col 0 + flag", so
-    // a lane drive may feed the staged scan key lane directly
-    // (`agg_plain_distinct_insert_batch`) instead of running the program.
-    direct_col0: bool,
+    // The aggregate's single argument is exactly OUTER column `att`
+    // (0-based) with no FILTER (recorded at init from the Aggref): the
+    // per-row transition program's whole effect for this entry is "park
+    // outer col att + flag", so a lane drive may feed the staged scan lane
+    // directly (`agg_plain_distinct_insert_batch` requires att 0; the
+    // codedgroup batch feed reads any recorded att) instead of running the
+    // program. None = the arg is not a bare OUTER Var (or FILTER exists).
+    direct_att: Option<u16>,
     // One sortstate per grouping set (C sortstates[maxsets]); [0] otherwise.
     sortstates: Vec<Option<Tuplesort>>,
     insert_slot: Option<SlotData<'mcx>>,
@@ -410,16 +424,21 @@ fn init_pertrans_sort<'mcx>(
     } else {
         None
     };
-    // Direct staged-key feed shape (`direct_col0` field doc): single input
-    // whose expression is exactly Var(OUTER, attno 1) and no FILTER.
-    let direct_col0 = num_inputs == 1
-        && aggref.aggfilter.is_none()
-        && aggref.args.iter().next().is_some_and(|n| {
-            let tle = n.as_target_entry().expect("Aggref.args cell");
-            tle.expr.as_var().is_some_and(|v| {
-                v.varno == ::execexpr::OUTER_VAR && v.varlevelsup == 0 && v.varattno == 1
+    // Direct staged feed shape (`direct_att` field doc): single input whose
+    // expression is exactly a bare Var(OUTER, attno) and no FILTER.
+    let direct_att = (num_inputs == 1 && aggref.aggfilter.is_none())
+        .then(|| {
+            aggref.args.iter().next().and_then(|n| {
+                let tle = n.as_target_entry().expect("Aggref.args cell");
+                tle.expr.as_var().and_then(|v| {
+                    (v.varno == ::execexpr::OUTER_VAR
+                        && v.varlevelsup == 0
+                        && v.varattno >= 1)
+                        .then(|| (v.varattno - 1) as u16)
+                })
             })
-        });
+        })
+        .flatten();
     Ok((
         PerTransSortData {
             transno,
@@ -449,7 +468,7 @@ fn init_pertrans_sort<'mcx>(
             // 2804 = int8inc_any, count(x)'s transition (`distinct_set_kind`'s
             // F_INT8INC_ANY admission row).
             set_count_transfn: set_kind.is_some() && transfn_oid == 2804,
-            direct_col0,
+            direct_att,
             sortstates: Vec::new(),
             insert_slot,
             slot1,
@@ -1493,6 +1512,7 @@ pub fn exec_init_agg<'mcx>(
         instr_idx: None,
         hash_build_combined: false,
         hashgroup: None,
+        codedgroup: None,
     })
 }
 
@@ -4222,7 +4242,7 @@ pub fn agg_plain_build_accept<'mcx>(
 
 /// Direct staged-key feed admission (the lane distinct drives' batched arm):
 /// the node's ONE transition is a set-mode exact-DISTINCT whose argument is
-/// exactly outer column 0 with no FILTER (`direct_col0`). For that shape the
+/// exactly outer column 0 with no FILTER (`direct_att == Some(0)`). For that shape the
 /// per-row transition program's entire effect is "park outer column 0 +
 /// flag" and the collect inserts it into the set — so feeding the staged
 /// scan key lane straight into the set (`agg_plain_distinct_insert_batch`
@@ -4235,7 +4255,7 @@ pub fn agg_plain_distinct_direct_shape(node: &AggStateData<'_>) -> bool {
         let ps = &node.pertrans_sort[0];
         ps.set_active(node.force_distinct_set)
             && ps.num_inputs == 1
-            && ps.direct_col0
+            && ps.direct_att == Some(0)
             && ps.set_kind.is_some()
     }
 }
@@ -5792,6 +5812,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.qual = None;
     node.merge = None;
     hashgrouped::agg_hashgroup_reset(node);
+    codedgroup::agg_codedgroup_reset(node);
     if let Some(ph) = node.perhash.as_mut() {
         hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
@@ -5825,6 +5846,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     // Hash-grouped-arm state (any phase) rebuilds from scratch: drop it so
     // the aggcontext reset below can free its by-ref transvalues safely.
     hashgrouped::agg_hashgroup_reset(node);
+    codedgroup::agg_codedgroup_reset(node);
     merge::reset_merge_for_rescan(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
@@ -5869,6 +5891,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // Hash-grouped-arm state (any phase) rebuilds from scratch (see
     // exec_rescan_agg_chg).
     hashgrouped::agg_hashgroup_reset(node);
+    codedgroup::agg_codedgroup_reset(node);
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
@@ -5998,7 +6021,7 @@ mcx::forget_safe_struct!(
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold, meta_aggs, hashgroup },
+        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },

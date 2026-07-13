@@ -1568,6 +1568,20 @@ pub fn seq_scan_batch_slotfree_filter(node: &SeqScanState<'_>) -> Option<SlotFre
     (b.qual_armed && !b.lane_requal && b.nwords > 0).then_some(SlotFreeFilter::Bitmap)
 }
 
+/// Whole-qual selection verdicts for the CURRENT staged batch when the armed
+/// bitmap decides the ENTIRE qual (no hybrid requal tail) — the slot-free
+/// filter's Bitmap arm WITHOUT the projection gate, for lane consumers that
+/// never materialize the scan slot at all (the caller must have proven every
+/// projection column skip-safe, e.g. bare Vars — the codedgroup feed's
+/// admission). Forced-fallback rows still carry a set bit demanding the
+/// per-row re-check; callers admit fallback-free batches only. None = the
+/// per-row emit owns the batch.
+#[inline]
+pub fn seq_scan_batch_whole_qual_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    (b.qual_armed && !b.lane_requal && b.nwords > 0).then_some(&b.sel[..])
+}
+
 /// Footer value min/max covering EVERY row of the CURRENT staged window
 /// (cbstore granule zone entry; int-family columns only; `col` is the
 /// 0-based scan column). None = no zone metadata / heap scan. Consumers use
