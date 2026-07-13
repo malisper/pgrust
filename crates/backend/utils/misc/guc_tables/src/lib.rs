@@ -194,6 +194,14 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_lane_executor,
         set: backing::set_pgrust_lane_executor,
     });
+    vars::pgrust_condition_cache.install(GucVarAccessors {
+        get: backing::pgrust_condition_cache,
+        set: backing::set_pgrust_condition_cache,
+    });
+    vars::pgrust_condition_cache_size.install(GucVarAccessors {
+        get: backing::pgrust_condition_cache_size,
+        set: backing::set_pgrust_condition_cache_size,
+    });
     vars::check_function_bodies.install(GucVarAccessors {
         get: backing::check_function_bodies,
         set: backing::set_check_function_bodies,

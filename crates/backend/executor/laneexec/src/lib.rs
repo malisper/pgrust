@@ -69,6 +69,20 @@ pub fn log_staged_qual(nclauses: usize) {
     log(format!("lane_executor: prewhere staged qual ({nclauses} clauses)"));
 }
 
+// Arm-time marker: the condition cache engaged on this scan's staged prefix.
+pub fn log_condcache_armed() {
+    log("lane_executor: condition cache armed".to_string());
+}
+
+// End-of-scan stats line (cumulative process counters; the battery greps
+// this from the server log like the other lane stats).
+pub fn log_condcache_stats(hits: u64, misses: u64, insertions: u64, evictions: u64) {
+    log(format!(
+        "lane_executor: condition cache stats \
+         (hits={hits} misses={misses} insertions={insertions} evictions={evictions})"
+    ));
+}
+
 // Arm-time marker: n text clauses joined the prefix on the dict tier.
 pub fn log_dict_clauses(n: u32) {
     log(format!("lane_executor: dict clauses ({n})"));
