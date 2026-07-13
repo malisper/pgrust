@@ -62,4 +62,5 @@ xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
 walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
 walsender_config = { path = "../walsender_config" }
 walsender_seams = { path = "../walsender_seams" }
+snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }

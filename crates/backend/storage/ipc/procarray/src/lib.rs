@@ -178,6 +178,24 @@ pub fn ProcSetStatusFlagInLogicalDecoding() -> PgResult<()> {
     Ok(())
 }
 
+/// SnapBuildInitialSnapshot's xmin adoption (snapbuild.c): MyProc->xmin =
+/// snap->xmin — changing only our own value needs no lock; the caller has
+/// already verified the horizon is enforced.
+pub fn ProcArraySetOwnXmin(xmin: TransactionId) {
+    if let Some(my_procno) = MyProc() {
+        GetPGProcByNumber(my_procno).xmin.value.store(xmin, Relaxed);
+    }
+    TRANSACTION_XMIN.set(xmin);
+}
+
+/// MyProc->xmin as seen by other backends (validity check sites).
+pub fn ProcArrayOwnXmin() -> TransactionId {
+    match MyProc() {
+        Some(my_procno) => GetPGProcByNumber(my_procno).xmin.read(),
+        None => InvalidTransactionId,
+    }
+}
+
 /// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
 /// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
 /// value the same way. False = source xact no longer running.
