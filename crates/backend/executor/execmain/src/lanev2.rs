@@ -248,24 +248,34 @@ fn arm_scan_staging<'mcx>(
             if vcol.is_some() {
                 lane_trace("cbstore prewhere+varlane dual arm engaged");
             }
-            // Dict-group co-arm on the PREWHERE-owned batch (§2.1 under
-            // PREWHERE — Q13/Q15-class `... WHERE SearchPhrase <> '' GROUP BY
-            // <dict text key>`): count(*)-only fold plans take decide's
+            // Multi-key dict co-arm on the PREWHERE-owned batch (Q15-class
+            // `... WHERE SearchPhrase <> '' GROUP BY SearchEngineID,
+            // SearchPhrase`): count(*)-only fold plans take decide's
             // `plan.cols.is_empty()` shortcut, so no decide-phase probe ever
-            // registered the grouping key as a dict lane, and the early
-            // return here used to skip the dict-group arms entirely — the
-            // K2 feed then hashed materialized strings (single key) and the
-            // multi-key feed refused (`MultiKeyShape`: no dict registration).
-            // `seq_scan_cb_columnar_arm` registers the consumer ON the live
-            // lane batch (its forced full prefix covers the feed's ask by
-            // construction: `ask` >= the fused prefix); the fill answers the
-            // key as codes+dict from the next window on, and the
-            // gather-to-Raw skip keeps the codes up past the qual. Refusal
-            // falls through to the Raw/per-row key paths, byte-identically.
+            // registered the text component as a dict lane, and the early
+            // return here used to skip the arm entirely — the multi-key feed
+            // then refused (`MultiKeyShape`: no dict registration) down to
+            // the per-row arrival probe. `seq_scan_cb_columnar_arm` registers
+            // the consumer ON the live lane batch (its forced full prefix
+            // covers the feed's ask by construction: `ask` >= the fused
+            // prefix); the fill answers the component as codes+dict and the
+            // pack pre-pass interns per (epoch, code). Refusal falls through
+            // byte-identically. Measured (CB 10M sorted-v2, serial hot):
+            // Q15 0.572 -> 0.375 s.
+            //
+            // DELIBERATELY NOT the single-key dict-group co-arm: for the
+            // Q13 class (single dict key under a SELECTIVE qual) the
+            // survivors-per-epoch ~ distinct-codes-per-epoch, so the lazy
+            // per-(epoch, code) resolve dominates and dict-code grouping
+            // measured SLOWER than the K2 staged text probe it would replace
+            // (0.381 -> 0.413 s serial, +10% parallel; jobs
+            // pgrust-clickbench-explain-1783907728 / -1783908658). The K2
+            // text probe stays the single-key path under PREWHERE; the
+            // multi-key arm has no such fallback (its alternative is the
+            // per-row arrival probe, far behind the packed feed even with
+            // cold resolves).
             if let ScanFeedShape::HashAggFold { agg } = &shape {
-                if try_arm_cb_dictgroup(agg, ss, estate) {
-                    lane_trace("cbstore dict-group co-armed on prewhere lane");
-                } else if try_arm_cb_multikey_dict(agg, ss, estate) {
+                if try_arm_cb_multikey_dict(agg, ss, estate) {
                     lane_trace("cbstore multikey co-armed on prewhere lane");
                 }
             }
