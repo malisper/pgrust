@@ -14481,6 +14481,7 @@ dependencies = [
  "lock",
  "logical",
  "logicalfuncs",
+ "logicalworker",
  "lsyscache",
  "ltree",
  "mbutils",
