@@ -1,0 +1,192 @@
+//! M3 shared-build hash join — executor bridge (m3-joins.md §3/§5).
+//!
+//! The per-row halves the runtime arm drives on each helper:
+//! - BUILD-ACCEPT: [`shared_build_accept`] — the row path's build hash
+//!   (`hash_insert_slot`'s eval, verbatim: non-strict fold keeps NULL-key
+//!   tuples; they never match the recheck, so results equal C for every
+//!   jointype) + minimal-tuple materialization into the worker's
+//!   [`JoinBuildLocal`], instead of `ExecHashTableInsert`.
+//! - PROBE: [`shared_probe_outer`] — `exec_hash_join`'s per-outer-row
+//!   HJ_NEED_NEW_OUTER → HJ_SCAN_BUCKET → HJ_FILL_OUTER_TUPLE arc over the
+//!   [`FrozenJoinTable`], single-batch, no dense seat, no bloom (v1),
+//!   emitting joined/projected rows through a callback. Phase-1 join types
+//!   only: INNER / LEFT / SEMI / ANTI (all probe-local; no match flags).
+//!
+//! The leader's HashJoinState is NEVER driven by the runtime arm — each
+//! helper probes with its OWN executor's node state; the only cross-thread
+//! object is the frozen table. Row order within one outer row's matches is
+//! chain order; ACROSS outer rows the runtime interleaves morsels — order-
+//! insensitive by contract (the 2026-07-13 directive; tie-normalized
+//! oracle).
+
+use std::ptr::NonNull;
+
+use ::exectuples::exec_fetch_slot_minimal_tuple;
+use ::executils::{EStateData, ExecSlotId};
+use ::execexpr::{exec_qual, EvalSlots};
+use ::types_error::PgResult;
+use ::types_nodes::JoinType;
+use ::types_tuple::MinimalTupleData;
+
+use crate::shared_build::{BudgetExceeded, FrozenJoinTable, JoinBuildLocal};
+use crate::{eval_probe_qual, project_result, HashJoinState};
+use ::nodehash::HashState;
+
+/// Phase-1 admission, runtime-join side: the four probe-local join types
+/// (right-fill family = inc-3) on top of the serial lane's expression
+/// admission (subplan/param-free quals + projection + hash exprs,
+/// uninstrumented) and the build hash admission.
+pub fn shared_join_admissible(node: &HashJoinState<'_>, hs: &HashState<'_>) -> bool {
+    matches!(
+        node.plan.join.jointype,
+        JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_SEMI | JoinType::JOIN_ANTI
+    ) && crate::lane_join_admissible(node)
+        && ::nodehash::lane_build_hash_admissible(hs)
+}
+
+/// One build-side row into the worker's Local: hash it exactly as the row
+/// path's `hash_insert_slot` (via [`HashState::eval_build_hash`] — the same
+/// reset + eval), materialize the minimal tuple, push. `Err(BudgetExceeded)`
+/// = the shared envelope crossed (§6): the caller records the refusal and
+/// aborts the RG (R5 whole-attempt rerun).
+pub fn shared_build_accept<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    local: &mut JoinBuildLocal,
+) -> PgResult<Result<(), BudgetExceeded>> {
+    let hashvalue = hs.eval_build_hash(estate, slot_id)?;
+    let query_mcx = estate.es_query_cxt;
+    let (slot, scratch_mcx) = estate.slot_and_per_tuple_mcx(slot_id, hs.ps_ExprContext);
+    let fetched = exec_fetch_slot_minimal_tuple(slot, query_mcx, scratch_mcx)?;
+    let (ptr, t_len): (*const u8, u32) = match &fetched {
+        exectuples::FetchedMinimalTuple::Slot(m, _) => {
+            // SAFETY: live stored image; header read.
+            (m.as_ptr().cast_const().cast(), unsafe { m.as_ref().t_len })
+        }
+        exectuples::FetchedMinimalTuple::Copied(t) => (t.as_ptr(), t.t_len()),
+    };
+    // SAFETY: a minimal tuple image is t_len readable bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, t_len as usize) };
+    Ok(local.push(hashvalue, bytes))
+}
+
+/// Probe one outer row against the frozen table: `exec_hash_join`'s
+/// HJ_NEED_NEW_OUTER hash eval + HJ_SCAN_BUCKET candidate loop (hashvalue
+/// prefilter, hashclauses recheck, joinqual, per-jointype arm, otherqual,
+/// projection) + the HJ_FILL_OUTER_TUPLE null-fill arm — inlined for one
+/// outer row, no node-resident cursor (the runtime arm never pauses
+/// mid-expansion; the downstream is a sink absorb, not a Volcano pull).
+///
+/// `emit` receives the join's projected result slot for each output row.
+pub fn shared_probe_outer<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    outer_slot: ExecSlotId,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
+    let ecxt = node.ps_ExprContext;
+    {
+        let e = estate.ecxt_mut(ecxt);
+        e.reset();
+        e.ecxt_outertuple = Some(outer_slot);
+    }
+    // Outer-key hash: get_outer_tuple's eval (keep-nulls semantics baked
+    // into outer_hash_expr at init, per join type — C parity).
+    let hashvalue = ::executils::exec_eval_expr_with_subplans_inner_slot(
+        &mut node.outer_hash_expr,
+        estate,
+        ecxt,
+        outer_slot,
+    )?
+    .value
+    .as_u32();
+
+    let jointype = node.plan.join.jointype;
+    let hslot = hs.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+
+    let mut matched_outer = false;
+    for cand in table.chain(hashvalue) {
+        // hashvalue prefilter before payload deref (scan_hash_bucket's
+        // discipline; the tag word already filtered most misses).
+        if cand.hashvalue() != hashvalue {
+            continue;
+        }
+        let payload = cand.payload();
+        // SAFETY: the frozen chunk image is a live minimal tuple readable
+        // for t_len bytes for the table's lifetime (word-aligned storage);
+        // the slot holds it only within this call's emit path.
+        unsafe {
+            let mtup = NonNull::new_unchecked(payload.as_ptr() as *mut MinimalTupleData);
+            exectuples::exec_store_minimal_tuple_ptr(
+                &mut estate.es_tupleTable[hslot.0 as usize],
+                mcx,
+                mtup,
+            );
+        }
+        // hashclauses recheck (ExecScanHashBucket's qual; subplan-bearing
+        // shapes are refused at admission).
+        let key_eq = {
+            let tbl = &mut estate.es_tupleTable[..];
+            let [inner, outer] = tbl
+                .get_disjoint_mut([hslot.0 as usize, outer_slot.0 as usize])
+                .expect("distinct in-range hashjoin slot ids");
+            let mut slots = EvalSlots { scan: None, inner: Some(inner), outer: Some(outer) };
+            exec_qual(node.hashclauses.as_deref_mut(), &mut slots)?
+        };
+        if !key_eq {
+            continue;
+        }
+        // joinqual (HJ_SCAN_BUCKET's arm, verbatim order).
+        let matched = eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, hslot, estate)?;
+        if !matched {
+            estate.instr_count_filtered1(node.js_instr);
+            continue;
+        }
+        matched_outer = true;
+        match jointype {
+            JoinType::JOIN_ANTI => break, // matched anti-outer emits nothing
+            JoinType::JOIN_SEMI => {
+                let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
+                if pass {
+                    let out = project_result(node, hslot, estate)?;
+                    emit(node, estate, out)?;
+                } else {
+                    estate.instr_count_filtered2(node.js_instr);
+                }
+                break; // js_single_match: first joinqual match ends the walk
+            }
+            _ => {
+                let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
+                if pass {
+                    let out = project_result(node, hslot, estate)?;
+                    emit(node, estate, out)?;
+                } else {
+                    estate.instr_count_filtered2(node.js_instr);
+                }
+                if node.js_single_match {
+                    break; // inner_unique INNER/LEFT
+                }
+            }
+        }
+    }
+    // HJ_FILL_OUTER_TUPLE: LEFT and ANTI null-fill unmatched outers
+    // (hj_fill_outer covers both; FULL is not phase-1).
+    if !matched_outer && node.hj_fill_outer {
+        let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
+        estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
+        let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, null_inner, estate)?;
+        if pass {
+            let out = project_result(node, null_inner, estate)?;
+            emit(node, estate, out)?;
+        } else {
+            estate.instr_count_filtered2(node.js_instr);
+        }
+    }
+    Ok(())
+}

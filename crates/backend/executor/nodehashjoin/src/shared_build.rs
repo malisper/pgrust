@@ -35,7 +35,7 @@
 //! # Concurrency contract (enforced by the caller, asserted here)
 //!
 //! - A `JoinBuildLocal` is single-threaded (one worker's sink Local).
-//! - `SealedBuild::combine_partition(part)` is called EXACTLY ONCE per
+//! - `CombinePlan::combine_partition(part, locals)` is called EXACTLY ONCE per
 //!   partition (the ParallelSink combine contract); a partition's bucket
 //!   range and its tuples' `next` words have a single writer. Stores are
 //!   relaxed atomics; cross-task visibility is the runtime's task-set
@@ -157,7 +157,6 @@ pub struct BudgetExceeded;
 
 struct Chunk {
     words: Box<[UnsafeCell<u64>]>,
-    used: usize,
 }
 
 // SAFETY: cross-thread access follows the module contract: payload and
@@ -171,17 +170,12 @@ unsafe impl Sync for Chunk {}
 impl Chunk {
     fn new(words: usize) -> Chunk {
         let v: Vec<UnsafeCell<u64>> = (0..words).map(|_| UnsafeCell::new(0)).collect();
-        Chunk { words: v.into_boxed_slice(), used: 0 }
+        Chunk { words: v.into_boxed_slice() }
     }
 
     #[inline]
     fn capacity_bytes(&self) -> usize {
         self.words.len() * 8
-    }
-
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.words.len() - self.used
     }
 
     /// SAFETY: caller respects the single-writer/atomic-view contract.
@@ -220,7 +214,12 @@ struct RunHeader {
 
 pub struct JoinBuildLocal {
     ordinal: u8,
-    chunks: Vec<Chunk>,
+    /// Arc so the frozen table can adopt the storage by reference while the
+    /// sink plumbing still owns (and later drops) the Locals themselves —
+    /// the ParallelSink contract hands `finalize` only `&[Local]`.
+    chunks: Vec<Arc<Chunk>>,
+    /// Bump offset into the LAST chunk (chunks before it are full).
+    cur_used: usize,
     /// Per-partition tuple refs in materialization (= scan) order.
     part_refs: Vec<Vec<u64>>,
     runs: Vec<RunHeader>,
@@ -238,6 +237,7 @@ impl JoinBuildLocal {
         JoinBuildLocal {
             ordinal: ordinal as u8,
             chunks: Vec::new(),
+            cur_used: 0,
             part_refs: (0..PARTITIONS).map(|_| Vec::new()).collect(),
             runs: Vec::new(),
             in_run: false,
@@ -278,7 +278,7 @@ impl JoinBuildLocal {
         let payload_words = payload.len().div_ceil(8);
         let need = HDR_WORDS + payload_words;
 
-        if self.chunks.last().map_or(true, |c| c.remaining() < need) {
+        if self.chunks.last().map_or(true, |c| c.words.len() - self.cur_used < need) {
             let mut cap = self
                 .chunks
                 .last()
@@ -294,15 +294,16 @@ impl JoinBuildLocal {
             if !self.budget.try_charge(chunk.capacity_bytes()) {
                 return Err(BudgetExceeded);
             }
-            self.chunks.push(chunk);
+            self.chunks.push(Arc::new(chunk));
+            self.cur_used = 0;
         }
         if !self.budget.try_charge(8) {
             return Err(BudgetExceeded);
         }
 
         let chunk_idx = self.chunks.len() - 1;
-        let chunk = &mut self.chunks[chunk_idx];
-        let off = chunk.used;
+        let chunk = &self.chunks[chunk_idx];
+        let off = self.cur_used;
         // SAFETY: single-threaded owner writing fresh, in-bounds words.
         unsafe {
             *chunk.word_mut(off) = 0; // next: end of chain
@@ -318,7 +319,7 @@ impl JoinBuildLocal {
                 );
             }
         }
-        chunk.used = off + need;
+        self.cur_used = off + need;
 
         let r = pack_ref(self.ordinal, chunk_idx, off);
         self.part_refs[partition_of(hashvalue)].push(r);
@@ -332,26 +333,30 @@ impl JoinBuildLocal {
 }
 
 // ---------------------------------------------------------------------------
-// SealedBuild (§4): SEAL output → partition-parallel combine.
+// CombinePlan (§4): SEAL output → partition-parallel combine, over BORROWED
+// Locals — the ParallelSink contract hands combine/finalize `&[Local]`, so
+// the plan never owns the Locals; the frozen table adopts their chunk Arcs.
 // ---------------------------------------------------------------------------
 
-pub struct SealedBuild {
-    locals: Vec<JoinBuildLocal>,
-    /// ordinal → dense index into `locals` (u16::MAX = absent).
+pub struct CombinePlan {
+    /// ordinal → dense index into the sealed Locals slice (u16::MAX = absent).
     by_ordinal: Box<[u16]>,
-    /// All runs across all Locals, ascending by range_start — THE
-    /// deterministic combine order.
+    /// All runs across all Locals, ascending by range_start — the
+    /// reproducible combine order (a debugging nicety since the 2026-07-13
+    /// order directive; NOT a correctness contract).
     run_order: Vec<(u64, u32, u32)>, // (range_start, local, run)
     buckets: Box<[AtomicU64]>,
     log2_nbuckets: u32,
     total_tuples: u64,
 }
 
-impl SealedBuild {
-    /// SEAL (accept finalize, single-threaded): size the table from the
-    /// TRUE tuple count (no parity constraint on nbuckets — §4), charge
-    /// the bucket array to the envelope, order the runs.
-    pub fn seal(locals: Vec<JoinBuildLocal>, budget: &JoinBudget) -> Result<SealedBuild, BudgetExceeded> {
+impl CombinePlan {
+    /// SEAL (single-threaded, or first-combine lazy init under the caller's
+    /// lock): size the table from the TRUE tuple count (no constraint on
+    /// nbuckets — §4), charge the bucket array to the envelope, order the
+    /// runs. Every later call must pass the SAME `locals` slice (the sink
+    /// plumbing's sealed Arc guarantees it).
+    pub fn plan(locals: &[JoinBuildLocal], budget: &JoinBudget) -> Result<CombinePlan, BudgetExceeded> {
         let mut by_ordinal = vec![u16::MAX; 256].into_boxed_slice();
         let mut total = 0u64;
         let mut run_order = Vec::new();
@@ -380,8 +385,7 @@ impl SealedBuild {
             return Err(BudgetExceeded);
         }
         let buckets: Vec<AtomicU64> = (0..nbuckets).map(|_| AtomicU64::new(0)).collect();
-        Ok(SealedBuild {
-            locals,
+        Ok(CombinePlan {
             by_ordinal,
             run_order,
             buckets: buckets.into_boxed_slice(),
@@ -399,11 +403,11 @@ impl SealedBuild {
     }
 
     #[inline]
-    fn chunk(&self, r: u64) -> (&Chunk, usize) {
+    fn chunk<'a>(&self, locals: &'a [JoinBuildLocal], r: u64) -> (&'a Chunk, usize) {
         let (ord, ci, off) = unpack_ref(r);
         let li = self.by_ordinal[ord];
         debug_assert!(li != u16::MAX, "ref to unknown Local ordinal");
-        (&self.locals[li as usize].chunks[ci], off)
+        (&locals[li as usize].chunks[ci], off)
     }
 
     /// Build partition `part`'s bucket range: walk runs in ascending
@@ -411,17 +415,17 @@ impl SealedBuild {
     /// EXACTLY-ONCE per partition, single writer for the partition's
     /// buckets and its tuples' `next` words (the ParallelSink combine
     /// contract) — hence plain relaxed stores.
-    pub fn combine_partition(&self, part: u64) {
+    pub fn combine_partition(&self, part: u64, locals: &[JoinBuildLocal]) {
         let part = part as usize;
         assert!(part < PARTITIONS);
         for &(_, li, ri) in &self.run_order {
-            let l = &self.locals[li as usize];
+            let l = &locals[li as usize];
             let refs = &l.part_refs[part];
             let ri = ri as usize;
             let start = if ri == 0 { 0 } else { l.runs[ri - 1].ends[part] as usize };
             let end = l.runs[ri].ends[part] as usize;
             for &r in &refs[start..end] {
-                let (chunk, off) = self.chunk(r);
+                let (chunk, off) = self.chunk(locals, r);
                 let hashvalue = chunk.read(off + 1) as u32;
                 debug_assert_eq!(partition_of(hashvalue), part);
                 let b = bucket_of(hashvalue, self.log2_nbuckets);
@@ -435,22 +439,15 @@ impl SealedBuild {
             }
         }
     }
+}
 
-    /// Publish (§4 finalize): freeze. O(1) — storage moves, run/ref
-    /// bookkeeping drops.
-    pub fn finish(self) -> FrozenJoinTable {
-        let mut chunk_lists: Vec<Box<[Chunk]>> = Vec::with_capacity(self.locals.len());
-        for l in self.locals {
-            chunk_lists.push(l.chunks.into_boxed_slice());
-        }
-        FrozenJoinTable {
-            buckets: self.buckets,
-            chunk_lists,
-            by_ordinal: self.by_ordinal,
-            log2_nbuckets: self.log2_nbuckets,
-            total_tuples: self.total_tuples,
-        }
-    }
+/// Publish (§4 finalize): freeze — adopt the Locals' chunk Arcs (dense
+/// order, matching `by_ordinal`) and the finished plan. The Locals then
+/// drop with the sink plumbing; the storage survives in the table.
+pub fn freeze(plan: Arc<CombinePlan>, locals: &[JoinBuildLocal]) -> FrozenJoinTable {
+    let chunk_lists: Vec<Box<[Arc<Chunk>]>> =
+        locals.iter().map(|l| l.chunks.clone().into_boxed_slice()).collect();
+    FrozenJoinTable { plan, chunk_lists }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,34 +455,33 @@ impl SealedBuild {
 // ---------------------------------------------------------------------------
 
 pub struct FrozenJoinTable {
-    buckets: Box<[AtomicU64]>,
-    chunk_lists: Vec<Box<[Chunk]>>,
-    by_ordinal: Box<[u16]>,
-    log2_nbuckets: u32,
-    total_tuples: u64,
+    plan: Arc<CombinePlan>,
+    /// Dense (by_ordinal order) adopted chunk storage.
+    chunk_lists: Vec<Box<[Arc<Chunk>]>>,
 }
 
 impl FrozenJoinTable {
     pub fn nbuckets(&self) -> usize {
-        self.buckets.len()
+        self.plan.buckets.len()
     }
 
     pub fn total_tuples(&self) -> u64 {
-        self.total_tuples
+        self.plan.total_tuples
     }
 
     #[inline]
     fn chunk(&self, r: u64) -> (&Chunk, usize) {
         let (ord, ci, off) = unpack_ref(r);
-        (&self.chunk_lists[self.by_ordinal[ord] as usize][ci], off)
+        (&self.chunk_lists[self.plan.by_ordinal[ord] as usize][ci], off)
     }
 
     /// The probe entry: the hash's bucket chain, tag-prefiltered (a tag
     /// miss returns an empty iterator after ONE bucket-word read).
-    /// Yields every chain tuple in serial-identical order; the caller
-    /// filters by hashvalue + quals (C's probe discipline).
+    /// Yields every chain tuple; the caller filters by hashvalue + quals
+    /// (C's probe discipline).
     pub fn chain(&self, hashvalue: u32) -> ChainIter<'_> {
-        let word = self.buckets[bucket_of(hashvalue, self.log2_nbuckets)].load(Ordering::Relaxed);
+        let word = self.plan.buckets[bucket_of(hashvalue, self.plan.log2_nbuckets)]
+            .load(Ordering::Relaxed);
         let head = if word & tag_bit(hashvalue) != 0 { word >> 16 } else { 0 };
         ChainIter { table: self, next_packed: head }
     }
@@ -494,13 +490,13 @@ impl FrozenJoinTable {
     pub fn bucket_chain(&self, bucket: usize) -> ChainIter<'_> {
         ChainIter {
             table: self,
-            next_packed: self.buckets[bucket].load(Ordering::Relaxed) >> 16,
+            next_packed: self.plan.buckets[bucket].load(Ordering::Relaxed) >> 16,
         }
     }
 
     /// Partition `part`'s exclusive bucket range (§4 layout).
     pub fn partition_buckets(&self, part: u64) -> Range<usize> {
-        let per = self.buckets.len() / PARTITIONS;
+        let per = self.plan.buckets.len() / PARTITIONS;
         let p = part as usize;
         p * per..(p + 1) * per
     }
@@ -655,7 +651,7 @@ mod tests {
         ds: &Dataset,
         schedule: &Schedule,
         budget: &Arc<JoinBudget>,
-    ) -> Result<SealedBuild, BudgetExceeded> {
+    ) -> Result<Vec<JoinBuildLocal>, BudgetExceeded> {
         let mut locals = Vec::new();
         for (w, claims) in schedule.iter().enumerate() {
             let mut l = JoinBuildLocal::new(w, Arc::clone(budget));
@@ -670,7 +666,7 @@ mod tests {
             }
             locals.push(l);
         }
-        SealedBuild::seal(locals, budget)
+        Ok(locals)
     }
 
     fn frozen_chains(t: &FrozenJoinTable) -> Vec<Vec<(u32, Vec<u8>)>> {
@@ -683,13 +679,13 @@ mod tests {
             .collect()
     }
 
-    fn combine_all_serial(s: &SealedBuild) {
+    fn combine_all_serial(plan: &CombinePlan, locals: &[JoinBuildLocal]) {
         for p in 0..PARTITIONS as u64 {
-            s.combine_partition(p);
+            plan.combine_partition(p, locals);
         }
     }
 
-    fn combine_all_parallel(s: &SealedBuild, threads: usize) {
+    fn combine_all_parallel(plan: &CombinePlan, locals: &[JoinBuildLocal], threads: usize) {
         let next = AtomicU64::new(0);
         std::thread::scope(|scope| {
             for _ in 0..threads {
@@ -698,22 +694,35 @@ mod tests {
                     if p >= PARTITIONS as u64 {
                         break;
                     }
-                    s.combine_partition(p);
+                    plan.combine_partition(p, locals);
                 });
             }
         });
     }
 
+    /// plan + combine (serial or parallel) + freeze, dropping the Locals —
+    /// the sink plumbing's exact lifecycle.
+    fn plan_combine_freeze(
+        locals: Vec<JoinBuildLocal>,
+        budget: &JoinBudget,
+        parallel: bool,
+    ) -> FrozenJoinTable {
+        let plan = Arc::new(CombinePlan::plan(&locals, budget).expect("plan within budget"));
+        if parallel {
+            combine_all_parallel(&plan, &locals, 8);
+        } else {
+            combine_all_serial(&plan, &locals);
+        }
+        let t = freeze(Arc::clone(&plan), &locals);
+        drop(locals); // storage must survive the Locals (Arc adoption)
+        t
+    }
+
     fn assert_serial_identical(ds: &Dataset, schedule: &Schedule, parallel_combine: bool) {
         let budget = JoinBudget::unlimited();
-        let sealed = build_from_schedule(ds, schedule, &budget).expect("unlimited budget");
-        if parallel_combine {
-            combine_all_parallel(&sealed, 8);
-        } else {
-            combine_all_serial(&sealed);
-        }
-        let l2 = sealed.log2_nbuckets;
-        let t = sealed.finish();
+        let locals = build_from_schedule(ds, schedule, &budget).expect("unlimited budget");
+        let t = plan_combine_freeze(locals, &budget, parallel_combine);
+        let l2 = (t.nbuckets() as u64).trailing_zeros();
         let expect = reference_chains(&ds.all_rows(), l2);
         let got = frozen_chains(&t);
         assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
@@ -829,9 +838,7 @@ mod tests {
     fn empty_build() {
         let budget = JoinBudget::unlimited();
         // No locals at all.
-        let sealed = SealedBuild::seal(Vec::new(), &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let t = plan_combine_freeze(Vec::new(), &budget, false);
         assert_eq!(t.total_tuples(), 0);
         assert!(frozen_chains(&t).iter().all(|c| c.is_empty()));
         assert_eq!(t.chain(0xDEAD_BEEF).count(), 0);
@@ -840,13 +847,8 @@ mod tests {
         let mut l = JoinBuildLocal::new(3, Arc::clone(&budget));
         l.begin_run(10);
         l.end_run();
-        let sealed = SealedBuild::seal(vec![l], &budget).unwrap();
-        combine_all_serial(&sealed);
-        assert_eq!(sealed_total(&sealed), 0);
-    }
-
-    fn sealed_total(s: &SealedBuild) -> u64 {
-        s.total_tuples()
+        let t = plan_combine_freeze(vec![l], &budget, false);
+        assert_eq!(t.total_tuples(), 0);
     }
 
     #[test]
@@ -865,10 +867,8 @@ mod tests {
             }
             with_empties.end_run();
         }
-        let sealed = SealedBuild::seal(vec![with_empties], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let l2 = sealed.log2_nbuckets;
-        let t = sealed.finish();
+        let t = plan_combine_freeze(vec![with_empties], &budget, false);
+        let l2 = (t.nbuckets() as u64).trailing_zeros();
         let rows: Vec<_> = (0..ds.granules)
             .filter(|g| g % 2 == 0)
             .flat_map(|g| ds.rows_of(g))
@@ -904,9 +904,7 @@ mod tests {
             a.push(h, &id.to_le_bytes()).unwrap();
         }
         a.end_run();
-        let sealed = SealedBuild::seal(vec![a, b], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let t = plan_combine_freeze(vec![a, b], &budget, false);
         let got: Vec<u64> = t
             .chain(h)
             .map(|tr| u64::from_le_bytes(tr.payload().try_into().unwrap()))
@@ -920,9 +918,8 @@ mod tests {
     fn payload_roundtrip_and_tag_no_false_negatives() {
         let ds = Dataset { granules: 16, rows_per_granule: 11, key_space: 1 << 30, seed: 7, force_partition: None };
         let budget = JoinBudget::unlimited();
-        let sealed = build_from_schedule(&ds, &vec![vec![0..16]], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let locals = build_from_schedule(&ds, &vec![vec![0..16]], &budget).unwrap();
+        let t = plan_combine_freeze(locals, &budget, false);
         for (h, p) in ds.all_rows() {
             // Tag filter must never hide a present hash.
             let found = t
@@ -946,9 +943,7 @@ mod tests {
         }
         l.end_run();
         assert!(l.chunks.len() > 1, "expected chunk growth");
-        let sealed = SealedBuild::seal(vec![l], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let t = plan_combine_freeze(vec![l], &budget, false);
         let mut seen = 0;
         for b in 0..t.nbuckets() {
             for tr in t.bucket_chain(b) {
@@ -966,9 +961,7 @@ mod tests {
         l.begin_run(0);
         l.push(0xFEED_F00D, &[]).unwrap();
         l.end_run();
-        let sealed = SealedBuild::seal(vec![l], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let t = plan_combine_freeze(vec![l], &budget, false);
         let tr = t.chain(0xFEED_F00D).next().expect("present");
         assert_eq!(tr.payload(), &[] as &[u8]);
     }
@@ -1002,7 +995,7 @@ mod tests {
             l.push(mix(i) as u32, &i.to_le_bytes()).unwrap();
         }
         l.end_run();
-        assert_eq!(SealedBuild::seal(vec![l], &budget).err(), Some(BudgetExceeded));
+        assert_eq!(CombinePlan::plan(&[l], &budget).err(), Some(BudgetExceeded));
     }
 
     // ---- match flags (§5; loom-adjacent stress — the real barrier is
@@ -1012,9 +1005,8 @@ mod tests {
     fn match_flags_concurrent_probe_then_fill_exact_set() {
         let ds = Dataset { granules: 32, rows_per_granule: 16, key_space: 64, seed: 99, force_partition: None };
         let budget = JoinBudget::unlimited();
-        let sealed = build_from_schedule(&ds, &deal(ranges_of_sizes(32, std::iter::repeat(3)), 4, 5), &budget).unwrap();
-        combine_all_parallel(&sealed, 4);
-        let t = sealed.finish();
+        let locals = build_from_schedule(&ds, &deal(ranges_of_sizes(32, std::iter::repeat(3)), 4, 5), &budget).unwrap();
+        let t = plan_combine_freeze(locals, &budget, true);
 
         // "Probe": 8 threads racily mark every tuple whose payload row
         // id is even (many threads hit the same tuples — idempotent).
@@ -1056,9 +1048,7 @@ mod tests {
         l.begin_run(0);
         l.push(0xC0FF_EE00, b"once").unwrap();
         l.end_run();
-        let sealed = SealedBuild::seal(vec![l], &budget).unwrap();
-        combine_all_serial(&sealed);
-        let t = sealed.finish();
+        let t = plan_combine_freeze(vec![l], &budget, false);
         let wins = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..8 {
