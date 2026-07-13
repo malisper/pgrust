@@ -8,5 +8,42 @@ name = "logicalworker"
 path = "src/lib.rs"
 
 [dependencies]
+datum = { path = "../../../../_support/types/datum" }
+elog = { path = "../../../utils/error/elog" }
+fmgr = { path = "../../../../_support/types/fmgr", package = "types_fmgr" }
+mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
+types_nodes = { path = "../../../../_support/types/nodes" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_scan = { path = "../../../../_support/types/types_scan" }
+types_slot = { path = "../../../../_support/types/types_slot" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
+bgworker = { path = "../../../postmaster/bgworker" }
+cache_syscache = { path = "../../../utils/cache/cache_syscache" }
+execindexing = { path = "../../../executor/execindexing" }
+execreplication = { path = "../../../executor/execreplication" }
+exectuples = { path = "../../../executor/exectuples" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+indexam = { path = "../../../access/index/indexam" }
+inval = { path = "../../../utils/cache/inval" }
+launcher = { path = "../../launcher" }
+logical_worker_seams = { path = "../../logical_worker_seams" }
+logicalproto = { path = "../proto" }
+logicalrelation = { path = "../relation" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+nodemodifytable = { path = "../../../executor/nodemodifytable" }
+origin = { path = "../../origin" }
+pg_subscription = { path = "../../../catalog/pg_subscription" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+snapmgr = { path = "../../../utils/time/snapmgr" }
+tableam_real = { path = "../../../access/table/tableam", package = "tableam" }
+tableam_vocab = { path = "../../../access/table/tableam_vocab" }
+timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
+transam_xlog = { path = "../../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+typcache = { path = "../../../utils/cache/typcache" }
+walreceiver = { path = "../../walreceiver" }
+xact = { path = "../../../access/transam/xact" }

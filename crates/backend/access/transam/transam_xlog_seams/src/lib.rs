@@ -97,6 +97,11 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // XactLastCommitEnd reader (worker.c store_flush_position).
+    pub fn xact_last_commit_end() -> XLogRecPtr
+);
+
+seam_core::seam!(
     pub fn xlog_set_async_xact_lsn(lsn: XLogRecPtr)
 );
 

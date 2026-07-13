@@ -473,6 +473,7 @@ pub fn init_seams() {
     s::xact_last_rec_end::set(XactLastRecEnd);
     s::set_xact_last_rec_end::set(|lsn| XACT_LAST_REC_END.set(lsn));
     s::set_xact_last_commit_end::set(|lsn| XACT_LAST_COMMIT_END.set(lsn));
+    s::xact_last_commit_end::set(|| XACT_LAST_COMMIT_END.get());
     s::xlog_set_async_xact_lsn::set(write::XLogSetAsyncXactLSN);
     s::startup_xlog::set(startup::StartupXLOG);
     s::shutdown_xlog::set(startup::shutdown_xlog_seam);

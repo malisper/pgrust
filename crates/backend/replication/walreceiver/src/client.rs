@@ -461,6 +461,12 @@ impl PgConn {
         Ok(QueryResult { status: last, nfields: result_nfields, rows: result_rows, err: String::new() })
     }
 
+    // libpqrcv_receive's wait arm: block until the socket is readable (or a
+    // latch interrupt); the caller then calls consume_input + get_copy_data.
+    pub fn wait_readable(&mut self) -> PgResult<()> {
+        wait_socket(self.fd, WL_SOCKET_READABLE, WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE)
+    }
+
     // PQgetCopyData(async=true).
     pub fn get_copy_data(&mut self) -> Result<CopyData, String> {
         loop {
