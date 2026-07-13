@@ -225,7 +225,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      touch another task's parking slot, and a parked thread's slot
     //      routes wakes correctly across session rebinds by construction
     //      (handles go stale by token, not by TLS swap).
-    assert_eq!(count_tree(crates), 464, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 465, re-pinned at m1-uring (M1 lane C): one new source —
+    //   4. executor/runtime/src/io.rs (WORKER_RT / PERMIT_HELD /
+    //      IN_IO_SECTION, one thread_local! block) — the pool worker
+    //      loop's §2.8/§2.9 bookkeeping: which Runtime this worker thread
+    //      serves and whether it currently holds an execution permit /
+    //      sits inside a declared blocking section (the io_permit seam
+    //      impls read it). Deliberately non-session TLS: runtime workers
+    //      are EXECUTORS, not sessions (redesign §2.1) — the state
+    //      belongs to the pool thread for the worker loop's lifetime,
+    //      carries no session or task identity, and is set/cleared only
+    //      by the loop itself (worker_enter/worker_exit); an envelope
+    //      bind/unbind must never touch another thread's permit
+    //      accounting.
+    assert_eq!(count_tree(crates), 465, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
