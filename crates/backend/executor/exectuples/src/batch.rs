@@ -124,6 +124,21 @@ pub struct SoaDictTable {
     /// Dict entries are byte-sorted (codes are rank order) — gates dict
     /// range predicates. False keeps the per-entry memo path.
     pub sorted: bool,
+    /// v7 GLOBAL STITCH (part-global dictionaries): local code ->
+    /// part-global byte-rank code, `ndict` entries; null when the part
+    /// carries no stitch for this column. Global codes are stable across
+    /// EVERY epoch of the scan (`gepoch` names that identity), strictly
+    /// byte-rank ordered part-wide, and dense in `0..gndv` over the part's
+    /// union dict. Consumers keying memos on `(gepoch, global_code)` never
+    /// reset at epoch rolls; value materialization still goes through
+    /// `dict[local_code]` (the current RG's dict covers every local code of
+    /// its windows).
+    pub stitch: *const u32,
+    /// Part-global dict size (valid iff `stitch` is non-null).
+    pub gndv: u32,
+    /// Scan-unique stitch identity: stable across every RG (and rescan) of
+    /// one pinned scan, distinct across scans. 0 iff `stitch` is null.
+    pub gepoch: u64,
 }
 
 impl SoaDictTable {
@@ -133,6 +148,22 @@ impl SoaDictTable {
     #[inline]
     pub fn same_identity(&self, other: &SoaDictTable) -> bool {
         self.epoch == other.epoch
+    }
+
+    /// Local code -> part-global code. Caller gates on `has_stitch()`;
+    /// bounds are the filler's contract (`code < ndict`).
+    #[inline]
+    pub fn global_code(&self, code: u32) -> u32 {
+        debug_assert!(!self.stitch.is_null() && code < self.ndict);
+        // SAFETY: filler contract — `stitch` spans `ndict` u32s (Part::stitch
+        // length-checked against the dict) and lives as long as the mmap'd
+        // part the scan pins.
+        unsafe { *self.stitch.add(code as usize) }
+    }
+
+    #[inline]
+    pub fn has_stitch(&self) -> bool {
+        !self.stitch.is_null()
     }
 
     /// Decode one code. Bounds are the filler's contract (`code < ndict`).

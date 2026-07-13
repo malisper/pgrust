@@ -3050,12 +3050,16 @@ fn try_arm_cb_dictgroup<'mcx>(
     true
 }
 
-/// Per-build dict-group state: the per-epoch direct-indexed code → global
-/// pergroup map (`slots`, `ndict`-sized, cleared at every epoch roll) plus
-/// the one-element hash scratch for the lazy per-code resolve.
+/// Per-build dict-group state: the direct-indexed code → global pergroup
+/// map (`slots`) plus the one-element hash scratch for the lazy per-code
+/// resolve. Two keying modes (the identity tuple is (is_global, id)):
+/// per-epoch (`ndict`-sized, cleared at every RG roll) or — when the part
+/// carries v7 stitch tables — part-global (`gndv`-sized, keyed on the
+/// scan-stable `gepoch`, cleared NEVER within one scan: every distinct
+/// string resolves through the tuplehash exactly once per query).
 #[derive(Default)]
 struct DictGroupScratch {
-    epoch: Option<u64>,
+    ident: Option<(bool, u64)>,
     slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
     hash1: Vec<u32>,
 }
@@ -3338,32 +3342,44 @@ fn scan_dictgroup_batch<'mcx>(
     lane: ::exectuples::SoaDictLane,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // Epoch roll (epoch = row-group index, stable per pinned scan): per-RG
-    // dictionaries are dense 0..ndict, so the map is a flat array — k
-    // entries per epoch, cleared once per RG change.
+    // Scratch identity roll. Per-RG dictionaries are dense 0..ndict, so the
+    // map is a flat array — k entries per epoch, cleared once per RG change.
+    // With a v7 stitch the map is indexed by PART-GLOBAL codes (dense
+    // 0..gndv over the part's union dict) and keyed on the scan-stable
+    // gepoch: it never clears across RGs, deleting the per-epoch
+    // re-resolution tax (the global-dict lane's grouping consumer).
     let ndict = lane.table.ndict as usize;
-    if dgs.epoch != Some(lane.table.epoch) {
-        dgs.epoch = Some(lane.table.epoch);
+    let global = lane.table.has_stitch();
+    let (ident, size) = if global {
+        ((true, lane.table.gepoch), lane.table.gndv as usize)
+    } else {
+        ((false, lane.table.epoch), ndict)
+    };
+    if dgs.ident != Some(ident) {
+        dgs.ident = Some(ident);
         dgs.slots.clear();
-        dgs.slots.resize(ndict, None);
+        dgs.slots.resize(size, None);
         trace_feed(&format!(
-            "dict-group epoch {} (ndict={ndict})",
-            lane.table.epoch
+            "dict-group {} {} (n={size})",
+            if global { "gepoch" } else { "epoch" },
+            ident.1
         ));
     }
-    debug_assert!(dgs.slots.len() >= ndict, "dict size is fixed per epoch");
+    debug_assert!(dgs.slots.len() >= size, "dict size is fixed per identity");
     idxs.clear();
     groups.clear();
     for &i in rows {
-        let code = lane.code(i as usize) as usize;
-        debug_assert!(code < ndict, "filler contract: code < ndict");
+        let local = lane.code(i as usize);
+        debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+        let code = if global { lane.table.global_code(local) as usize } else { local as usize };
+        debug_assert!(code < size, "stitch contract: global code < gndv");
         let pg = match dgs.slots[code] {
             Some(pg) => pg,
             None => {
-                // First surviving row of (epoch, code): materialize + probe
-                // once. The hash rides the same probe-kernel leg as the Raw
-                // path (bit-identical per the kernel contract).
-                let key = lane.table.datum(code as u32);
+                // First surviving row of (identity, code): materialize +
+                // probe once. The hash rides the same probe-kernel leg as
+                // the Raw path (bit-identical per the kernel contract).
+                let key = lane.table.datum(local);
                 ::nodeagg::agg_hash_hash_staged(agg, &[key], &[false], &mut dgs.hash1)?;
                 let hash = dgs.hash1[0];
                 match ::nodeagg::agg_hash_probe_staged(agg, estate, key, false, hash)? {
@@ -3586,7 +3602,10 @@ struct MkScratch {
     packbuf: Vec<u128>,
     keys1: Vec<i64>,
     keys2: Vec<[u64; 2]>,
-    epoch: Option<u64>,
+    // Identity of the code -> intern-id cache: (is_global, id). Per-epoch
+    // (RG index, cleared per roll) or — under a v7 stitch — part-global
+    // (scan-stable gepoch, never cleared within one scan).
+    epoch: Option<(bool, u64)>,
     code_ids: Vec<Option<u32>>,
 }
 
@@ -3775,25 +3794,41 @@ fn scan_mk_batch<'mcx>(
                     .and_then(|soa| soa.dict_lane(att));
                 match lane {
                     Some(lane) => {
-                        // Epoch roll (dictgroup's per-RG cache, retargeted
-                        // to intern ids — scan-stable, so the PACKED key is
-                        // epoch-free).
+                        // Cache identity roll (dictgroup's per-RG cache,
+                        // retargeted to intern ids — scan-stable, so the
+                        // PACKED key is epoch-free). Under a v7 stitch the
+                        // cache is indexed by PART-GLOBAL codes and keyed on
+                        // the scan-stable gepoch — no per-RG re-intern of
+                        // the dict entries.
                         let ndict = lane.table.ndict as usize;
-                        if *epoch != Some(lane.table.epoch) {
-                            *epoch = Some(lane.table.epoch);
+                        let global = lane.table.has_stitch();
+                        let (ident, size) = if global {
+                            ((true, lane.table.gepoch), lane.table.gndv as usize)
+                        } else {
+                            ((false, lane.table.epoch), ndict)
+                        };
+                        if *epoch != Some(ident) {
+                            *epoch = Some(ident);
                             code_ids.clear();
-                            code_ids.resize(ndict, None);
+                            code_ids.resize(size, None);
                         }
-                        debug_assert!(code_ids.len() >= ndict);
+                        debug_assert!(code_ids.len() >= size);
                         for (k, &i) in rows.iter().enumerate() {
-                            let code = lane.code(i as usize) as usize;
-                            debug_assert!(code < ndict, "filler contract: code < ndict");
+                            let local = lane.code(i as usize);
+                            debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+                            let code = if global {
+                                lane.table.global_code(local) as usize
+                            } else {
+                                local as usize
+                            };
+                            debug_assert!(code < size, "stitch contract: global code < gndv");
                             let id = match code_ids[code] {
                                 Some(id) => id,
                                 None => {
-                                    // First surviving row of (epoch, code):
-                                    // materialize dict[code] once, intern.
-                                    let d = lane.table.datum(code as u32);
+                                    // First surviving row of (identity,
+                                    // code): materialize dict[code] once,
+                                    // intern.
+                                    let d = lane.table.datum(local);
                                     // SAFETY: dict entries are live non-null
                                     // text varlenas for the staged window
                                     // (dict lane contract; kernel selection
