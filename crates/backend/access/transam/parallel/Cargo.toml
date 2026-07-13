@@ -35,6 +35,7 @@ bgworker = { path = "../../../postmaster/bgworker" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
 procsignal = { path = "../../../storage/ipc/procsignal" }
 latch = { path = "../../../storage/ipc/latch" }
+shm_mq = { path = "../../../storage/ipc/shm_mq" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
 pg_enum = { path = "../../../catalog/pg_enum" }
@@ -47,7 +48,6 @@ mcx = { path = "../../../../_support/mcx" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 waiteventset = { path = "../../../storage/ipc/waiteventset" }
 fd = { path = "../../../storage/file/fd" }
-shm_mq = { path = "../../../storage/ipc/shm_mq" }
 tqueue = { path = "../../../executor/tqueue" }
 instrument = { path = "../../../executor/instrument" }
 controldata_utils = { path = "../../../../common/controldata_utils" }
