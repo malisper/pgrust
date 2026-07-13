@@ -96,10 +96,11 @@ pub(super) struct RuntimeDistinctShared {
     /// A worker budget crossed mid-accept: NOT an error — the RG aborts and
     /// the leader falls back to the serial arm (m2-sinks.md R5 phase 1).
     crossed: AtomicBool,
-    /// Combine-phase retained bytes (merged bucket outputs, summed across
-    /// claims) — m2-integration R3 accounting for the merged RESULT,
-    /// checked against `worker_budget` (the merged set is one logical
-    /// table's worth of memory). Crossing = the same `crossed` fallback.
+    /// Combine-phase retained CONTENT bytes (merged bucket outputs, summed
+    /// across claims) — m2-integration R3 accounting for the merged RESULT,
+    /// checked against the ADMITTED envelope (forked Locals × worker_budget;
+    /// see the check site for why not one worker_budget). Crossing = the
+    /// same `crossed` fallback.
     merged_bytes: AtomicUsize,
     /// Combine output cells, one per group partition. Single writer each:
     /// partition p is claimed exactly once by the combine task set.
@@ -228,7 +229,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
                 // booked behavior). Crossing takes the same bounded fallback
                 // as an accept-phase crossing.
                 let b = m.mem_bytes();
-                let total = self.merged_bytes.fetch_add(b, Ordering::SeqCst) + b;
+                let total = self.merged_bytes.fetch_add(b, Ordering::Relaxed) + b;
                 if total > self.spec.worker_budget.saturating_mul(sealed.len().max(1)) {
                     self.cross();
                     return;
