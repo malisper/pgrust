@@ -1240,6 +1240,11 @@ unsafe impl Allocator for Mcx<'_> {
 
 pub const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
 
+/// C `MaxAllocHugeSize` (memutils.h): the ceiling for `MCXT_ALLOC_HUGE`
+/// requests (`MemoryContextAllocExtended`, `repalloc_huge`, simplehash's
+/// `SH_ALLOCATE`).
+pub const MAX_ALLOC_HUGE_SIZE: usize = usize::MAX / 2;
+
 #[cold]
 fn invalid_alloc_size(request: usize) -> alloc::boxed::Box<PgError> {
     PgError::error(alloc::format!("invalid memory alloc request size {request}")).into()
@@ -1440,6 +1445,25 @@ pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgV
     const { assert!(!core::mem::needs_drop::<T>()) };
     let request = cap.saturating_mul(core::mem::size_of::<T>());
     check_alloc_size(request)?;
+    let mut v = PgVec::new_in(mcx);
+    v.try_reserve_exact(cap).map_err(|_| mcx.oom(request))?;
+    Ok(v)
+}
+
+/// C `MemoryContextAllocExtended(.., MCXT_ALLOC_HUGE)` sizing rules: the
+/// request is checked against `MaxAllocHugeSize` (SIZE_MAX/2), not the 1GB
+/// `MaxAllocSize`. simplehash's default `SH_ALLOCATE` allocates its element
+/// array this way, so hash-table bucket arrays may legally exceed 1GB.
+#[inline]
+pub fn vec_with_capacity_huge_in<'mcx, T>(
+    mcx: Mcx<'mcx>,
+    cap: usize,
+) -> PgResult<PgVec<'mcx, T>> {
+    const { assert!(!core::mem::needs_drop::<T>()) };
+    let request = cap.saturating_mul(core::mem::size_of::<T>());
+    if request > MAX_ALLOC_HUGE_SIZE {
+        return Err(invalid_alloc_size(request));
+    }
     let mut v = PgVec::new_in(mcx);
     v.try_reserve_exact(cap).map_err(|_| mcx.oom(request))?;
     Ok(v)
