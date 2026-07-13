@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/backend/replication/origin",
+    "crates/backend/replication/logical/proto",
+    "crates/backend/replication/logical/relation",
+    "crates/backend/replication/logical/worker",
+    "crates/contrib/pgoutput",
     "crates/backend/backup/sink",
     "crates/backend/backup/sink_support",
     "crates/backend/backup/backup_copy",
