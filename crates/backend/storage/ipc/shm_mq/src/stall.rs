@@ -55,7 +55,10 @@ fn threshold_ms() -> i64 {
     })
 }
 
-fn recheck_ms() -> i64 {
+/// The process-wide blocked-wait recheck cadence (PGRUST_MQ_RECHECK_MS,
+/// default 1000 ms, <= 0 disables) — pub for latch-wait sites whose flag
+/// mix (WL_POSTMASTER_DEATH) cannot reuse wait_latch_reporting.
+pub fn recheck_ms() -> i64 {
     static RECHECK: OnceLock<i64> = OnceLock::new();
     *RECHECK.get_or_init(|| {
         std::env::var("PGRUST_MQ_RECHECK_MS")
