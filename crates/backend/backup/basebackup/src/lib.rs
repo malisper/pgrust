@@ -564,6 +564,11 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
         sink = throttle::bbsink_throttle_new(mcx, sink, opt.maxrate);
     }
 
+    // Set up progress reporting (basebackup.c:1051). Always wrapped, as in C;
+    // opt.progress only controls the (unported, inc-5 refusal-free) size
+    // estimate, so bytes_total stays invalid — equivalent to --no-estimate-size.
+    sink = sink_support::bbsink_progress_new(mcx, sink, opt.progress);
+
     let mut state = BbsinkState::default();
     // The DestRemoteSimple bridge needs the command mcx during the synchronous
     // result-set sends inside perform_base_backup.
@@ -611,6 +616,7 @@ fn perform_base_backup<'mcx>(
     transam_xlog::register_persistent_abort_backup_handler()?;
     let mut backup_state = xlogbackup::BackupState::default();
     let mut tablespace_map: Vec<u8> = Vec::new();
+    sink_support::basebackup_progress_wait_checkpoint();
     transam_xlog::do_pg_backup_start(
         &opt.label,
         opt.fastcheckpoint,
@@ -684,6 +690,7 @@ fn perform_base_backup<'mcx>(
             state.tablespace_num += 1;
         }
 
+        sink_support::basebackup_progress_wait_wal_archive(state);
         transam_xlog::do_pg_backup_stop(&mut backup_state, !opt.nowait)?;
         endptr = backup_state.stoppoint;
         endtli = backup_state.stoptli;
@@ -715,6 +722,8 @@ fn perform_base_backup<'mcx>(
     bbsink_end_backup(sink, state, endptr, endtli)?;
 
     FreeBackupManifest(&mut manifest);
+
+    sink_support::basebackup_progress_done();
     Ok(())
 }
 
