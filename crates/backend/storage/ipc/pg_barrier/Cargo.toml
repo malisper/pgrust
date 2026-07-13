@@ -12,3 +12,4 @@ path = "src/lib.rs"
 init_small = { path = "../../../utils/init/init_small" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 types_error = { path = "../../../../_support/types/types_error" }
+waiter = { path = "../waiter" }
