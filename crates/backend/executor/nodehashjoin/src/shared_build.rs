@@ -9,7 +9,16 @@
 //! (execmain/lanev2/runtime_hashjoin.rs), mirroring the m2-agg-sink
 //! split (nodeagg/src/sink.rs core vs execmain wiring).
 //!
-//! # Determinism (the §4 load-bearing claim)
+//! # Chain order: reproducible, NOT a correctness contract
+//!
+//! AMENDED per Michael's 2026-07-13 directive ("we shouldn't have to
+//! guarantee the same order", m3-joins.md §4): order-insensitive
+//! emission is the baseline join semantics and the gate oracle is
+//! tie-normalized comparison. The run-ordered walk below is retained
+//! only because it is free and makes failures reproducible; any future
+//! increment may replace it with naive per-Local insertion order, and
+//! no design (spill, skew, right-fill, probe) may depend on chain
+//! order. Mechanically:
 //!
 //! The serial build inserts inner rows in scan order, each at its
 //! bucket's CHAIN HEAD. Here every accepted morsel is recorded as a RUN
