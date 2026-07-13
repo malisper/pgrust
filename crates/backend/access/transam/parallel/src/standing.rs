@@ -567,7 +567,10 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             return;
         }
         in_procarray = true;
-        if let Err(e) = procsignal::ProcSignalInit(&[]) {
+        // No-callback variant: the connect-time init registered the exit
+        // callback once; re-registering per engagement would grow the
+        // exit-callback stack unboundedly.
+        if let Err(e) = procsignal::ProcSignalReinitStanding(&[]) {
             let _ = elog::elog(
                 WARNING,
                 format!("standing executor ProcSignal re-init failed: {}", e.message()),

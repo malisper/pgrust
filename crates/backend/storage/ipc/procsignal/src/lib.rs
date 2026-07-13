@@ -142,6 +142,22 @@ pub fn ProcSignalShmemResetAfterCrash() {
 }
 
 pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
+    proc_signal_init_internal(cancel_key, true)
+}
+
+/// M2 pool-binding: a STANDING runtime executor re-takes its slot per
+/// engagement WITHOUT re-registering the exit callback — its first
+/// (connect-time) ProcSignalInit registered once, the thread never
+/// proc_exits between engagements, and a per-call registration would grow
+/// the exit-callback stack unboundedly over the query stream. Every
+/// per-task backend keeps using `ProcSignalInit` (register per task; the
+/// task's proc_exit drain consumes it — the wpool retained-thread
+/// contract).
+pub fn ProcSignalReinitStanding(cancel_key: &[u8]) -> PgResult<()> {
+    proc_signal_init_internal(cancel_key, false)
+}
+
+fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgResult<()> {
     debug_assert!(cancel_key.len() <= MAX_CANCEL_KEY_LENGTH);
     let my_proc_number = g::MyProcNumber();
     if my_proc_number < 0 {
@@ -205,19 +221,10 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
             t.set(handlers);
         }
     });
-    // Once per thread: STANDING runtime executors (parallel::standing)
-    // release + re-init their slot per engagement without an intervening
-    // proc_exit, so a per-call registration would stack duplicates on the
-    // exit-callback stack.
-    if !CLEANUP_REGISTERED.get() {
+    if register_cleanup {
         ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
-        CLEANUP_REGISTERED.set(true);
     }
     Ok(())
-}
-
-thread_local! {
-    static CLEANUP_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// M2 pool-binding: a STANDING runtime executor releases its ProcSignal
