@@ -285,6 +285,7 @@ struct BasebackupOptions {
     maxrate: u32,
     sendtblspcmapfile: bool,
     send_to_client: bool,
+    target_handle: Option<basebackup_target::BaseBackupTargetHandle>,
     manifest: BackupManifestOption,
     manifest_checksum_type: PgChecksumType,
 }
@@ -301,6 +302,7 @@ impl Default for BasebackupOptions {
             maxrate: 0,
             sendtblspcmapfile: false,
             send_to_client: false,
+            target_handle: None,
             manifest: BackupManifestOption::No,
             manifest_checksum_type: CHECKSUM_TYPE_CRC32C,
         }
@@ -391,7 +393,9 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
     let (mut o_wal, mut o_incremental, mut o_maxrate, mut o_tsmap) = (false, false, false, false);
     let (mut o_noverify, mut o_manifest, mut o_manifest_cksums) = (false, false, false);
     let mut o_target = false;
+    let mut o_target_detail = false;
     let mut target_str: Option<String> = None;
+    let mut target_detail_str: Option<String> = None;
 
     for o in options {
         let name = o.name.as_str();
@@ -492,6 +496,11 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
                 target_str = Some(opt_string(o)?.to_string());
                 o_target = true;
             }
+            "target_detail" => {
+                if o_target_detail { dup_err(name)?; }
+                target_detail_str = Some(opt_string(o)?.to_string());
+                o_target_detail = true;
+            }
             "compression" | "compression_detail" => {
                 refuse("server-side compression")?;
             }
@@ -516,8 +525,28 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
     }
 
     match target_str.as_deref() {
-        None | Some("client") => opt.send_to_client = true,
-        Some(_) => refuse("non-client BASE_BACKUP target")?,
+        None => {
+            if target_detail_str.is_some() {
+                ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("target detail cannot be used without target")
+                    .finish(loc("parse_basebackup_options"))?;
+            }
+            opt.send_to_client = true;
+        }
+        Some("client") => {
+            if target_detail_str.is_some() {
+                ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("target \"client\" does not accept a target detail")
+                    .finish(loc("parse_basebackup_options"))?;
+            }
+            opt.send_to_client = true;
+        }
+        Some(target) => {
+            opt.target_handle = Some(basebackup_target::BaseBackupGetTargetHandle(
+                target,
+                target_detail_str.as_deref(),
+            )?);
+        }
     }
 
     if opt.incremental {
@@ -526,10 +555,6 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
             .finish(loc("parse_basebackup_options"))?;
     }
-    if opt.includewal {
-        refuse("BASE_BACKUP WAL inclusion (use -X stream)")?;
-    }
-
     Ok(opt)
 }
 
@@ -545,7 +570,7 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
             .finish(loc("SendBaseBackup"));
     }
 
-    let opt = parse_basebackup_options(&cmd.options)?;
+    let mut opt = parse_basebackup_options(&cmd.options)?;
 
     walsender::WalSndSetState(WalSndState::Backup);
 
@@ -557,9 +582,13 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
         ps_status_seams::set_ps_display::call(msg.as_str());
     }
 
-    // Client copy sink (+ optional throttle). Server targets and compression are
-    // refused in parse, so no other sink layers.
+    // Client copy sink; if the target is not 'client' the backup data goes
+    // wherever BaseBackupGetSink routes it instead. Server-side compression
+    // is refused in parse, so no compression sink layers.
     let mut sink: Box<Bbsink<'mcx>> = backup_copy::bbsink_copystream_new(mcx, opt.send_to_client);
+    if let Some(handle) = opt.target_handle.take() {
+        sink = basebackup_target::BaseBackupGetSink(mcx, handle, sink)?;
+    }
     if opt.maxrate > 0 {
         sink = throttle::bbsink_throttle_new(mcx, sink, opt.maxrate);
     }
@@ -676,19 +705,27 @@ fn perform_base_backup<'mcx>(
                             .finish(loc("perform_base_backup"));
                     }
                 };
-                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, &mut manifest)?;
+                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, &mut manifest)?;
             } else {
                 let archive_name = format!("{oid}.tar");
                 bbsink_begin_archive(sink, state, &archive_name)?;
                 sendTablespace(sink, state, path.as_deref().unwrap(), oid, &mut manifest)?;
             }
 
-            // Terminate the tarfile (includewal is refused, so always here).
-            zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
-            bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
-            // tablespace_num is advanced by the progress sink's end_archive
-            // (basebackup_progress.c:139), which is always in the chain.
-            bbsink_end_archive(sink, state)?;
+            // If we're including WAL, and this is the main data directory,
+            // don't treat this as the end of the tablespace: the xlog files
+            // are appended below and the archive terminated afterwards. Safe
+            // because the main data directory is always sent last.
+            if opt.includewal && is_pgdata {
+                debug_assert!(i == n - 1);
+            } else {
+                // Terminate the tarfile.
+                zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
+                bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
+                // tablespace_num is advanced by the progress sink's end_archive
+                // (basebackup_progress.c:139), which is always in the chain.
+                bbsink_end_archive(sink, state)?;
+            }
         }
 
         sink_support::basebackup_progress_wait_wal_archive(state);
@@ -705,6 +742,176 @@ fn perform_base_backup<'mcx>(
             let _ = transam_xlog::do_pg_abort_backup(false);
             return Err(e);
         }
+    }
+
+    if opt.includewal {
+        // We've left the last tar file "open", so we can now append the
+        // required WAL files to it (basebackup.c:409). Scan pg_wal and
+        // include all WAL files in the range between startptr and endptr,
+        // regardless of the timeline the file is stamped with.
+        sink_support::basebackup_progress_transfer_wal();
+
+        let wal_segsz = transam_xlog::wal_segment_size();
+        let startsegno = state.startptr / wal_segsz as u64; // XLByteToSeg
+        let firstoff = xlog_file_name(state.starttli, startsegno, wal_segsz);
+        let endsegno = (endptr - 1) / wal_segsz as u64; // XLByteToPrevSeg
+        let lastoff = xlog_file_name(endtli, endsegno, wal_segsz);
+
+        let mut wal_file_list: Vec<String> = Vec::new();
+        let mut history_file_list: Vec<String> = Vec::new();
+        for name in read_dir_names("pg_wal")? {
+            if is_xlog_file_name(&name)
+                && name[8..] >= firstoff[8..]
+                && name[8..] <= lastoff[8..]
+            {
+                wal_file_list.push(name);
+            } else if transam_xlog::IsTLHistoryFileName(&name) {
+                history_file_list.push(name);
+            }
+        }
+
+        // Check that none of the WAL segments we need were removed.
+        transam_xlog::CheckXLogRemoved(startsegno, state.starttli)?;
+
+        // Oldest to newest, to reduce the chance of recycling mid-send.
+        wal_file_list.sort_by(|a, b| a[8..].cmp(&b[8..]));
+
+        if wal_file_list.is_empty() {
+            return ereport(ERROR)
+                .errmsg("could not find any WAL files")
+                .finish(loc("perform_base_backup"));
+        }
+
+        // Sanity check: first and last segments cover startptr and endptr,
+        // with no gaps in between.
+        let (_, mut segno) = xlog_from_file_name(&wal_file_list[0], wal_segsz);
+        if segno != startsegno {
+            let startfname = xlog_file_name(state.starttli, startsegno, wal_segsz);
+            return ereport(ERROR)
+                .errmsg(format!("could not find WAL file \"{startfname}\""))
+                .finish(loc("perform_base_backup"));
+        }
+        for wal_file_name in &wal_file_list {
+            let currsegno = segno;
+            let nextsegno = segno + 1;
+            let (tli, s) = xlog_from_file_name(wal_file_name, wal_segsz);
+            segno = s;
+            if !(nextsegno == segno || currsegno == segno) {
+                let nextfname = xlog_file_name(tli, nextsegno, wal_segsz);
+                return ereport(ERROR)
+                    .errmsg(format!("could not find WAL file \"{nextfname}\""))
+                    .finish(loc("perform_base_backup"));
+            }
+        }
+        if segno != endsegno {
+            let endfname = xlog_file_name(endtli, endsegno, wal_segsz);
+            return ereport(ERROR)
+                .errmsg(format!("could not find WAL file \"{endfname}\""))
+                .finish(loc("perform_base_backup"));
+        }
+
+        // Ok, we have everything we need. Send the WAL files.
+        for wal_file_name in &wal_file_list {
+            let pathbuf = format!("pg_wal/{wal_file_name}");
+            let (tli, segno) = xlog_from_file_name(wal_file_name, wal_segsz);
+
+            let fd = match fd::OpenTransientFile(&pathbuf, O_RDONLY) {
+                Ok(fd) if fd >= 0 => fd,
+                _ => {
+                    // Most likely the file was already removed by a
+                    // checkpoint; check for a better error message.
+                    let e = std::io::Error::last_os_error();
+                    transam_xlog::CheckXLogRemoved(segno, tli)?;
+                    return ereport(ERROR)
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not open file \"{pathbuf}\": {e}"))
+                        .finish(loc("perform_base_backup"));
+                }
+            };
+            let statbuf = fstat_fd(fd, &pathbuf)?;
+            if statbuf.size != wal_segsz as i64 {
+                fd::CloseTransientFile(fd);
+                transam_xlog::CheckXLogRemoved(segno, tli)?;
+                return ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(format!("unexpected WAL file size \"{wal_file_name}\""))
+                    .finish(loc("perform_base_backup"));
+            }
+
+            // Send the WAL file itself. WAL segments are deliberately not
+            // added to the manifest (AddWALInfoToBackupManifest records the
+            // range instead).
+            _tarWriteHeader(sink, state, &pathbuf, None, &statbuf)?;
+
+            let mut len: i64 = 0;
+            loop {
+                let want = sink.buffer_length().min((wal_segsz as i64 - len) as usize);
+                // SAFETY: buf is a live writable slice; fd is an open file.
+                let cnt = {
+                    let buf = sink.buffer_slice_mut(want);
+                    unsafe {
+                        libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), len as libc::off_t)
+                    }
+                };
+                if cnt < 0 {
+                    fd::CloseTransientFile(fd);
+                    return ereport(ERROR)
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not read file \"{pathbuf}\""))
+                        .finish(loc("perform_base_backup"));
+                }
+                if cnt == 0 {
+                    break;
+                }
+                transam_xlog::CheckXLogRemoved(segno, tli)?;
+                bbsink_archive_contents(sink, state, cnt as usize)?;
+                len += cnt as i64;
+                if len == wal_segsz as i64 {
+                    break;
+                }
+            }
+            if len != wal_segsz as i64 {
+                transam_xlog::CheckXLogRemoved(segno, tli)?;
+                fd::CloseTransientFile(fd);
+                return ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(format!("unexpected WAL file size \"{wal_file_name}\""))
+                    .finish(loc("perform_base_backup"));
+            }
+
+            // wal_segment_size is a multiple of TAR_BLOCK_SIZE: no padding.
+            fd::CloseTransientFile(fd);
+
+            // Mark file as archived, otherwise files can get archived again
+            // after promotion of a new node.
+            let done_path = transam_xlog::StatusFilePath(wal_file_name, ".done");
+            sendFileWithContent(sink, state, &done_path, b"", &mut manifest)?;
+        }
+
+        // Send timeline history files too — small and highly useful for
+        // debugging, so include them all, always.
+        for fname in &history_file_list {
+            let pathbuf = format!("pg_wal/{fname}");
+            let statbuf = match lstat_file(&pathbuf)? {
+                Some(s) => s,
+                None => {
+                    return ereport(ERROR)
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not stat file \"{pathbuf}\""))
+                        .finish(loc("perform_base_backup"));
+                }
+            };
+            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, &mut manifest)?;
+
+            // Unconditionally mark file as archived.
+            let done_path = transam_xlog::StatusFilePath(fname, ".done");
+            sendFileWithContent(sink, state, &done_path, b"", &mut manifest)?;
+        }
+
+        // Properly terminate the tar file.
+        zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
+        bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
+        bbsink_end_archive(sink, state)?;
     }
 
     AddWALInfoToBackupManifest(mcx, &mut manifest, state.startptr, state.starttli, endptr, endtli)?;
@@ -730,6 +937,54 @@ fn perform_base_backup<'mcx>(
 
 fn zero_buffer(sink: &mut Bbsink<'_>, len: usize) {
     sink.buffer_slice_mut(len).fill(0);
+}
+
+// ---------------------------------------------------------------------------
+// WAL filename helpers (xlog_internal.h macros, inlined for the includewal
+// section; the transam_xlog copies are pub(crate)).
+// ---------------------------------------------------------------------------
+
+// IsXLogFileName: 24 upper-case hex characters.
+fn is_xlog_file_name(fname: &str) -> bool {
+    fname.len() == 24
+        && fname
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(&c))
+}
+
+// XLogFileName.
+fn xlog_file_name(tli: TimeLineID, seg_no: u64, wal_segsz: i32) -> String {
+    let per_id = 0x1_0000_0000u64 / wal_segsz as u64;
+    format!("{:08X}{:08X}{:08X}", tli, seg_no / per_id, seg_no % per_id)
+}
+
+// XLogFromFileName.
+fn xlog_from_file_name(fname: &str, wal_segsz: i32) -> (TimeLineID, u64) {
+    let per_id = 0x1_0000_0000u64 / wal_segsz as u64;
+    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap_or(0);
+    let log = u64::from_str_radix(&fname[8..16], 16).unwrap_or(0);
+    let seg = u64::from_str_radix(&fname[16..24], 16).unwrap_or(0);
+    (tli, log * per_id + seg)
+}
+
+fn fstat_fd(fd: i32, path: &str) -> PgResult<LstatInfo> {
+    // SAFETY: zeroed stat is POD; fd is an open file descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstat(fd, &mut st) };
+    if rc != 0 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{path}\""))
+            .finish(loc("fstat_fd"))
+            .map(|()| unreachable!());
+    }
+    Ok(LstatInfo {
+        size: st.st_size,
+        mode: st.st_mode as u32,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        mtime: st.st_mtime,
+    })
 }
 
 // ===========================================================================
@@ -806,8 +1061,25 @@ fn sendDir_spc(
     manifest: &mut BackupManifestInfo,
     spcoid: Oid,
 ) -> PgResult<i64> {
-    let _ = spcoid;
     let mut size: i64 = 0;
+
+    // Determine if the current path is a database directory that can contain
+    // relations (basebackup.c sendDir head): last path component all digits
+    // with parent "./base" or a tablespace version path, or "./global".
+    let (is_relation_dir, dboid): (bool, u32) = match path.rfind('/') {
+        Some(idx)
+            if idx + 1 < path.len()
+                && path[idx + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            let parent = &path[..idx];
+            if parent == "./base" || parent.ends_with(TABLESPACE_VERSION_DIRECTORY) {
+                (true, path[idx + 1..].parse::<u32>().unwrap_or(0))
+            } else {
+                (false, 0)
+            }
+        }
+        _ => (path == "./global", 0),
+    };
 
     for d_name in read_dir_names(path)? {
         if d_name == "." || d_name == ".." || d_name == ".DS_Store" {
@@ -834,6 +1106,35 @@ fn sendDir_spc(
             }
         }
         if excluded {
+            continue;
+        }
+
+        // If there could be non-temporary relation files in this directory,
+        // try to parse the filename.
+        let mut is_relation_file = false;
+        let mut relfilenumber: u32 = 0;
+        let mut rel_fork = types_core::ForkNumber::MAIN_FORKNUM;
+        if is_relation_dir {
+            if let Some((num, fork, _segno)) =
+                fd::reinit::parse_filename_for_nontemp_relation(&d_name)
+            {
+                is_relation_file = true;
+                relfilenumber = num;
+                rel_fork = fork;
+            }
+        }
+
+        // Exclude all forks for unlogged tables except the init fork: any
+        // other fork with a matching _init fork present is skipped.
+        if is_relation_file && rel_fork != types_core::ForkNumber::INIT_FORKNUM {
+            let init_fork_file = format!("{path}/{relfilenumber}_init");
+            if lstat_file(&init_fork_file)?.is_some() {
+                continue;
+            }
+        }
+
+        // Exclude temporary relations.
+        if dboid != 0 && fd::looks_like_temp_rel_name(&d_name) {
             continue;
         }
 
@@ -897,7 +1198,7 @@ fn sendDir_spc(
             }
         } else if S_ISREG(statbuf.mode) {
             let tarfilename = &pathbuf[basepathlen as usize + 1..];
-            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, manifest)?;
+            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, spcoid, manifest)?;
             if sent {
                 size += statbuf.size;
                 size += tar_padding_bytes_required(statbuf.size as usize) as i64;
@@ -920,6 +1221,7 @@ fn sendFile(
     tarfilename: &str,
     statbuf: &LstatInfo,
     missing_ok: bool,
+    spcoid: Oid,
     manifest: &mut BackupManifestInfo,
 ) -> PgResult<bool> {
     let mut ctx = checksum_init(manifest.checksum_type(), readfilename)?;
@@ -977,7 +1279,7 @@ fn sendFile(
     _tarWritePadding(sink, state, bytes_done as usize)?;
     fd::CloseTransientFile(fd);
 
-    AddFileToBackupManifest(manifest, INVALID_OID, tarfilename.as_bytes(), statbuf.size, statbuf.mtime, &mut ctx)?;
+    AddFileToBackupManifest(manifest, spcoid, tarfilename.as_bytes(), statbuf.size, statbuf.mtime, &mut ctx)?;
     Ok(true)
 }
 
