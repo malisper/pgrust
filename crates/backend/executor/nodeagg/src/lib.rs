@@ -57,6 +57,7 @@ pub mod pardistinct;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
+    batch_emit_row, batch_emit_scan_block, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
     agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_reduced,
@@ -3993,6 +3994,170 @@ pub fn agg_hash_retrieve_topn<'mcx>(
     cut: Option<TopnEmitCut<'_>>,
 ) -> PgResult<Option<ExecSlotId>> {
     agg_retrieve_hash_table(node, estate, cut)
+}
+
+// ===========================================================================
+// Lane-v2 batchemit: batched finalize+emit straight off the compact agg
+// table (the datekey lane's "batch-emit-from-compact" charter). The armed
+// agg→sort feed walks the compact table in blocks and, for every surviving
+// group, builds the OUTPUT ROW directly — no per-group fmgr finalize
+// round-trip, no transarray re-parse through a fresh fcinfo, no first_slot
+// scatter + projection interpretation, no per-group ExprContext reset (the
+// reset is block-granular; every finalized image is copied by the sort put
+// before the next block's reset). Admission is byte-identity-by-construction:
+//   * finalfn-none byval aggs emit the raw transvalue word (identical datum);
+//   * `int8_avg` / `numeric_poly_avg` / `numeric_poly_sum` route through the
+//     SAME test-pinned cores the fmgr finalfns call (`ops::int64_avg_div` /
+//     `int128_avg_div`, `aggregates::numeric_poly_*`) after the SAME
+//     transition-state validation — the NUMERIC images are byte-identical;
+//   * every other tlist entry is a bare grouping-key Var or a Const.
+// Anything else refuses (`batch_emit_resolve` → None) and the feed takes the
+// per-row retrieve path unchanged. Kill switch (lane side):
+// PGRUST_LANE_V2_BATCHEMIT=0.
+// ===========================================================================
+
+/// One output column of the batched compact-table emit, in tlist (resno)
+/// order.
+pub enum BatchEmitCol {
+    /// Grouping key component `j` (compact key order — the tlist Var's
+    /// input attno resolved against `hash_grp_col_idx_input`).
+    Key(u16),
+    /// Bare tlist Const (plan-lifetime datum; the sort put copies).
+    Const { value: Datum, isnull: bool },
+    /// Finalfn-none byval aggregate: the raw transvalue word IS the result
+    /// (count(*)/count(x)/sum(int2/int4)/min/max int families) — exactly the
+    /// per-row finalize's no-finalfn arm.
+    Trans(u32),
+    /// `avg(int2/int4)` (finalfn `int8_avg`, oid 1964): {count,sum} int8[2]
+    /// transarray → `ops::int64_avg_div` (the finalfn's exact core).
+    AvgInt8(u32),
+    /// `avg(int8)` (finalfn `numeric_poly_avg`, oid 3389): Int128AggState →
+    /// `aggregates::numeric_poly_avg` (the finalfn's exact core).
+    AvgInt128(u32),
+    /// `sum(int8)` (finalfn `numeric_poly_sum`, oid 3388): Int128AggState →
+    /// `aggregates::numeric_poly_sum` (the finalfn's exact core).
+    SumInt128(u32),
+}
+
+/// Resolved batched-emit program + block scratch (owned by the lane's feed
+/// driver; `idx` holds the current block's surviving compact row indices).
+pub struct BatchEmitPlan {
+    pub(crate) cols: Vec<BatchEmitCol>,
+    pub(crate) idx: Vec<u32>,
+    pub(crate) keyvals: Vec<(Datum, bool)>,
+    pub(crate) vals: Vec<(Datum, bool)>,
+}
+
+/// The finalfns whose batched kernels are byte-identical by construction:
+/// 1964 int8_avg, 3388 numeric_poly_sum, 3389 numeric_poly_avg.
+const BATCH_EMIT_FINALFNS: [Oid; 3] = [1964, 3388, 3389];
+/// `_int8` (int8 array) — int8_avg's declared transition type.
+const INT8ARRAYOID: Oid = 1016;
+/// INTERNAL — the pointer-datum transition type of the poly agg family.
+const INTERNALOID: Oid = 2281;
+
+/// Admission for the batched compact-table finalize+emit (invariant block
+/// above). `None` = not admitted; the feed runs the per-row retrieve path
+/// unchanged (never a lane refusal). Requires the compact table (so it runs
+/// strictly AFTER the agg build), a final single-set hashed agg with no
+/// HAVING qual / grouping sets / DISTINCT-ORDER transitions / subplans, and
+/// every tlist entry classifiable as a [`BatchEmitCol`].
+pub fn batch_emit_resolve(node: &AggStateData<'_>) -> Option<BatchEmitPlan> {
+    if node.skip_final || node.gsets.is_some() || node.qual.is_some() {
+        return None;
+    }
+    if !node.pertrans_sort.is_empty() || node.plan.aggstrategy != AGG_HASHED {
+        return None;
+    }
+    if node.proj.has_subplan() {
+        return None;
+    }
+    let ph = node.perhash.as_ref()?;
+    ph.compact.as_ref()?;
+    let mut cols: Vec<BatchEmitCol> = Vec::with_capacity(node.plan.plan.targetlist.len());
+    for te_node in &node.plan.plan.targetlist {
+        let te = te_node.as_target_entry()?;
+        // tlists are resno-ordered; anything else refuses (the slot write
+        // indexes by position).
+        if te.resno as usize != cols.len() + 1 {
+            return None;
+        }
+        match te.expr.node_tag() {
+            NodeTag::T_Var => {
+                let v = te.expr.as_var()?;
+                if v.varno != ::execexpr::OUTER_VAR || v.varlevelsup != 0 {
+                    return None;
+                }
+                let j = ph
+                    .hash_grp_col_idx_input
+                    .iter()
+                    .position(|&a| i32::from(a) == i32::from(v.varattno))?;
+                cols.push(BatchEmitCol::Key(j as u16));
+            }
+            NodeTag::T_Const => {
+                let c = te.expr.as_const()?;
+                cols.push(BatchEmitCol::Const { value: c.constvalue, isnull: c.constisnull });
+            }
+            NodeTag::T_Aggref => {
+                let aggref = te.expr.as_aggref().expect("tag-checked Aggref");
+                let aggno = aggref.aggno;
+                if aggno < 0 || aggno as usize >= node.peragg.len() {
+                    return None;
+                }
+                let pa = &node.peragg[aggno as usize];
+                let col = match pa.finalfn.as_ref() {
+                    None => {
+                        // Raw-transvalue emission requires a byval word (the
+                        // per-row arm's read-only marking never runs on
+                        // byval transtypes, so the datum is identical).
+                        let tt = &node.trans_typ[pa.transno as usize];
+                        if !tt.byval || pa.aggref.aggtranstype == INTERNALOID {
+                            return None;
+                        }
+                        BatchEmitCol::Trans(pa.transno)
+                    }
+                    Some(f) => match f.fn_oid {
+                        1964 if pa.aggref.aggtranstype == INT8ARRAYOID => {
+                            BatchEmitCol::AvgInt8(pa.transno)
+                        }
+                        3389 if pa.aggref.aggtranstype == INTERNALOID => {
+                            BatchEmitCol::AvgInt128(pa.transno)
+                        }
+                        3388 if pa.aggref.aggtranstype == INTERNALOID => {
+                            BatchEmitCol::SumInt128(pa.transno)
+                        }
+                        _ => return None,
+                    },
+                };
+                cols.push(col);
+            }
+            _ => return None,
+        }
+    }
+    // Whole-emit equivalence: every aggregate this node would finalize must
+    // be in the batched vocabulary (with no qual, peragg ⊆ tlist aggs — this
+    // sweep is the belt-and-braces mirror of topn_emit_resolve's).
+    for pa in node.peragg.iter() {
+        if !pa.direct_args.is_empty()
+            || !pa.aggref.aggorder.is_nil()
+            || !pa.aggref.aggdistinct.is_nil()
+        {
+            return None;
+        }
+        match pa.finalfn.as_ref() {
+            None => {
+                if !node.trans_typ[pa.transno as usize].byval {
+                    return None;
+                }
+            }
+            Some(f) => {
+                if !BATCH_EMIT_FINALFNS.contains(&f.fn_oid) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(BatchEmitPlan { cols, idx: Vec::new(), keyvals: Vec::new(), vals: Vec::new() })
 }
 
 /// Lane-v2 fold plan classified at init; None = the lane is off, the shape

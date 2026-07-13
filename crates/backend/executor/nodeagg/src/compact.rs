@@ -1420,3 +1420,322 @@ pub(crate) fn compact_retrieve_next<'mcx>(
 pub(crate) fn compact_reset(ph: &mut PerHashData<'_>) {
     ph.compact = None;
 }
+
+// ===========================================================================
+// Lane-v2 batchemit block machinery (see the invariant block at
+// `crate::batch_emit_resolve`): the block scan replaces the per-group
+// `compact_retrieve_next` cursor walk, and the row build replaces
+// finalize_aggregates + qual/projection for the admitted column vocabulary.
+// ===========================================================================
+
+/// Block granule of the batched compact emit: bounded per-tuple-context
+/// residency (every finalized NUMERIC image lives only until the block's
+/// sort puts copy it), and the boundary-cut hoist window (the topnemit
+/// boundary is re-read once per block — a staler i.e. LOOSER boundary only
+/// under-skips, and every under-skipped group is one the downstream bounded
+/// sort discards with no state change; boundaries only tighten as puts land).
+pub const BATCH_EMIT_BLOCK: usize = 1024;
+
+/// Fill `plan.idx` with the next block of surviving compact rows (row /
+/// insertion order — `compact_retrieve_next`'s exact walk), advancing
+/// `ph.hashiter`. `cut`: the lane's emit-side top-N boundary, applied per
+/// row exactly as the per-row retrieve applies it (same `skips` predicate,
+/// same skipped-group accounting). Returns (survivors, drained); `drained`
+/// also flips `agg_done`, the per-row retrieve's EOF contract. The
+/// block-granular ExprContext reset happens HERE — the previous block's
+/// finalized images were copied by its sort puts before this call.
+pub fn batch_emit_scan_block<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan: &mut crate::BatchEmitPlan,
+    mut cut: Option<crate::TopnEmitCut<'_>>,
+) -> PgResult<(u32, bool)> {
+    estate.reset_expr_context(node.ps_ExprContext);
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    let ch = ph.compact.as_ref().expect("batch emit requires the compact table");
+    let nrows = ch.table.nrows();
+    let mut row = ph.hashiter;
+    plan.idx.clear();
+    while row < nrows && plan.idx.len() < BATCH_EMIT_BLOCK {
+        // The per-group retrieve cadence (skipped and emitted alike).
+        ::postgres_seams::check_for_interrupts::call()?;
+        if let Some(c) = cut.as_mut() {
+            // SAFETY: the row's state block is the group's live AggPerGroup
+            // array; transno < its length (resolve checked this node).
+            let pg = unsafe {
+                &*ch.table.row_states(row).cast::<AggPerGroup>().add(c.spec.transno as usize)
+            };
+            if c.skips(pg) {
+                *c.skipped += 1;
+                row += 1;
+                continue;
+            }
+        }
+        plan.idx.push(row as u32);
+        row += 1;
+    }
+    ph.hashiter = row;
+    let drained = row >= nrows;
+    if drained {
+        node.agg_done = true;
+    }
+    Ok((plan.idx.len() as u32, drained))
+}
+
+#[cold]
+#[inline(never)]
+fn bad_int8_transarray() -> Box<::types_error::PgError> {
+    // int8_transarray's (numeric.c int8_avg family) exact error.
+    Box::new(::types_error::PgError::error("expected 2-element int8 array"))
+}
+
+/// `int8_avg`'s transarray read without the fmgr frame: the SAME image
+/// validation `adt_numeric::int8_transarray` performs (4B-U size == 24 + 16,
+/// no null bitmap; a tuple-queue-packed 1B short image validates at the
+/// packed size and reads unaligned), then the {count,sum} pair.
+///
+/// # Safety
+/// `d` is a non-null int8[2] transvalue datum (aggcontext-lived image).
+unsafe fn int8_avg_trans_read(d: Datum) -> PgResult<(i64, i64)> {
+    use ::types_tuple::varatt;
+    const ARR_OVERHEAD_NONULLS_1: usize = 24;
+    const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — live varlena image.
+    unsafe {
+        if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
+            // Tuple-packed short image: 1-byte header, then the 4B-U payload
+            // minus its 4-byte length word (ndim, dataoffset, elemtype, dim,
+            // lbound, data), unaligned.
+            let payload = varatt::varsize_1b(p) - 1;
+            let hasnull = core::ptr::read_unaligned(p.add(1 + 4).cast::<i32>()) != 0;
+            if hasnull || payload + 4 != INT8_TRANSARRAY_SIZE {
+                return Err(bad_int8_transarray());
+            }
+            let data = p.add(1 + ARR_OVERHEAD_NONULLS_1 - 4);
+            return Ok((
+                core::ptr::read_unaligned(data.cast::<i64>()),
+                core::ptr::read_unaligned(data.add(8).cast::<i64>()),
+            ));
+        }
+        if !varatt::varatt_is_4b_u(p) {
+            // int8_transarray's exact unreachable-arm behavior.
+            panic!("int8 transarray: toasted array datum (detoast unported)");
+        }
+        let size = varatt::varsize_4b(p);
+        let hasnull = p.add(8).cast::<i32>().read() != 0;
+        if hasnull || size != INT8_TRANSARRAY_SIZE {
+            return Err(bad_int8_transarray());
+        }
+        let data = p.add(ARR_OVERHEAD_NONULLS_1).cast::<i64>();
+        Ok((data.read(), data.add(1).read()))
+    }
+}
+
+#[cfg(test)]
+mod batch_emit_tests {
+    use super::*;
+
+    /// An 8-aligned 4B-U int8[2] {count,sum} transarray image — the exact
+    /// layout int4_avg_accum/int2_avg_accum build and int8_transarray reads.
+    #[repr(align(8))]
+    struct Aligned([u8; 40]);
+
+    fn transarray(count: i64, sum: i64) -> Aligned {
+        let mut buf = [0u8; 40];
+        buf[0..4]
+            .copy_from_slice(&::types_tuple::varatt::set_varsize_4b_word(40).to_ne_bytes());
+        buf[4..8].copy_from_slice(&1i32.to_ne_bytes()); // ndim
+        buf[8..12].copy_from_slice(&0i32.to_ne_bytes()); // dataoffset (no nulls)
+        buf[12..16].copy_from_slice(&20i32.to_ne_bytes()); // elemtype int8
+        buf[16..20].copy_from_slice(&2i32.to_ne_bytes()); // dim
+        buf[20..24].copy_from_slice(&1i32.to_ne_bytes()); // lbound
+        buf[24..32].copy_from_slice(&count.to_ne_bytes());
+        buf[32..40].copy_from_slice(&sum.to_ne_bytes());
+        Aligned(buf)
+    }
+
+    #[test]
+    fn transarray_read_matches_layout() {
+        for (c, s) in
+            [(0, 0), (1, 5), (7, -123456789), (i64::MAX, i64::MIN), (1234567, 42)]
+        {
+            let img = transarray(c, s);
+            let d = Datum::from_usize(img.0.as_ptr() as usize);
+            // SAFETY: live, aligned int8[2] image.
+            let got = unsafe { int8_avg_trans_read(d) }.expect("valid transarray");
+            assert_eq!(got, (c, s));
+        }
+    }
+
+    #[test]
+    fn transarray_read_packed_short_image() {
+        // Tuple-packed short form: 1-byte header + the 36-byte payload
+        // (everything after the 4-byte length word), misaligned on purpose.
+        let full = transarray(9, -42);
+        let mut buf = [0u8; 64];
+        let p = unsafe { buf.as_mut_ptr().add(3) };
+        // SAFETY: 37 bytes fit in buf past offset 3.
+        unsafe {
+            ::types_tuple::varatt::set_varsize_short(p, 37);
+            core::ptr::copy_nonoverlapping(full.0.as_ptr().add(4), p.add(1), 36);
+        }
+        // SAFETY: live short image.
+        let got = unsafe { int8_avg_trans_read(Datum::from_usize(p as usize)) }
+            .expect("valid packed transarray");
+        assert_eq!(got, (9, -42));
+    }
+
+    #[test]
+    fn transarray_read_rejects_bad_images() {
+        // Null bitmap present (dataoffset != 0) — int8_transarray's refuse.
+        let mut img = transarray(1, 2);
+        img.0[8..12].copy_from_slice(&24i32.to_ne_bytes());
+        // SAFETY: live image.
+        assert!(unsafe { int8_avg_trans_read(Datum::from_usize(img.0.as_ptr() as usize)) }
+            .is_err());
+        // Wrong size (not exactly 2 int8 elements).
+        #[repr(align(8))]
+        struct Big([u8; 48]);
+        let mut big = Big([0u8; 48]);
+        big.0[0..4]
+            .copy_from_slice(&::types_tuple::varatt::set_varsize_4b_word(48).to_ne_bytes());
+        // SAFETY: live image.
+        assert!(unsafe { int8_avg_trans_read(Datum::from_usize(big.0.as_ptr() as usize)) }
+            .is_err());
+    }
+
+    /// The batched avg kernel composition (reader → int64_avg_div) feeds the
+    /// SAME operands the fmgr finalfn parses, so the images are identical
+    /// (int64_avg_div itself is pinned against div_var by adt_numeric's
+    /// differential corpus).
+    #[test]
+    fn avg_int8_kernel_reader_operand_parity() {
+        for (c, s) in
+            [(1i64, 0i64), (3, 10), (7, -22), (9, i64::MAX / 2), (1_000_000, 999_999)]
+        {
+            let arr = transarray(c, s);
+            // SAFETY: live, aligned image.
+            let (rc, rs) =
+                unsafe { int8_avg_trans_read(Datum::from_usize(arr.0.as_ptr() as usize)) }
+                    .expect("valid transarray");
+            assert_eq!((rc, rs), (c, s));
+            let a = ::adt_numeric::ops::int64_avg_div(s, c).expect("avg image");
+            let b = ::adt_numeric::ops::int64_avg_div(rs, rc).expect("avg image");
+            assert_eq!(a.as_bytes(), b.as_bytes());
+        }
+    }
+}
+
+/// Build surviving block row `i` (a `plan.idx` position from the last
+/// `batch_emit_scan_block`) directly into the node's result slot: grouping
+/// keys through the SAME compact read-back legs the per-row retrieve uses
+/// (`compact_key_datum` / `compact_key_datums_mk` / `compact_key_datums_red`
+/// — interned text still materializes into the node-lifetime table context),
+/// aggregates through the batched finalize kernels (invariant block at
+/// `crate::batch_emit_resolve`). Returns the populated result slot id — the
+/// same slot `exec_project` would have filled, with byte-identical datums.
+pub fn batch_emit_row<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan: &mut crate::BatchEmitPlan,
+    i: u32,
+) -> PgResult<::executils::ExecSlotId> {
+    use crate::BatchEmitCol;
+    let row = plan.idx[i as usize] as usize;
+    let per_tuple = estate.ecxt(node.ps_ExprContext).per_tuple_mcx();
+    {
+        let crate::BatchEmitPlan { cols, keyvals, vals, .. } = &mut *plan;
+        let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+        let ch = ph.compact.as_ref().expect("batch emit requires the compact table");
+        match &ch.key {
+            CompactKeySpec::Single { width } => {
+                keyvals.clear();
+                keyvals.push(match compact_key_datum(ch, *width, row) {
+                    Some(d) => (d, false),
+                    None => (Datum::null(), true),
+                });
+            }
+            CompactKeySpec::Multi(shape) => {
+                compact_key_datums_mk(ch, shape, row, ph.table_ctx.mcx(), keyvals)?;
+            }
+            CompactKeySpec::Reduced(shape) => {
+                compact_key_datums_red(ch, shape, row, keyvals);
+            }
+        }
+        // SAFETY: the row's state block is the group's live AggPerGroup
+        // array; every referenced transno < its length (resolve checked).
+        let states = ch.table.row_states(row).cast::<AggPerGroup>();
+        let pg_at = |t: u32| unsafe { &*states.add(t as usize) };
+        vals.clear();
+        for col in cols.iter() {
+            let nd = match col {
+                BatchEmitCol::Key(j) => keyvals[*j as usize],
+                BatchEmitCol::Const { value, isnull } => (*value, *isnull),
+                // The per-row finalize's no-finalfn arm over a byval
+                // transtype: the raw transvalue word.
+                BatchEmitCol::Trans(t) => {
+                    let pg = pg_at(*t);
+                    (pg.trans_value, pg.trans_value_is_null)
+                }
+                // fc_int8_avg: strict (NULL trans → NULL), count == 0 →
+                // NULL, else the test-pinned int64_avg_div image.
+                BatchEmitCol::AvgInt8(t) => {
+                    let pg = pg_at(*t);
+                    if pg.trans_value_is_null {
+                        (Datum::null(), true)
+                    } else {
+                        // SAFETY: non-null int8[2] transvalue (admission).
+                        let (count, sum) = unsafe { int8_avg_trans_read(pg.trans_value)? };
+                        if count == 0 {
+                            (Datum::null(), true)
+                        } else {
+                            let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
+                            (::types_fmgr::byref_result(per_tuple, img.as_bytes())?, false)
+                        }
+                    }
+                }
+                // fc_numeric_poly_avg / fc_numeric_poly_sum: the fcs' exact
+                // cores over the aggcontext-lived Int128AggState (NULL trans
+                // → None → NULL, n == 0 → None → NULL).
+                BatchEmitCol::AvgInt128(t) | BatchEmitCol::SumInt128(t) => {
+                    let pg = pg_at(*t);
+                    // SAFETY: a non-null INTERNAL transvalue is the
+                    // aggcontext-lived Int128AggState (transfn contract);
+                    // sole reference during the call.
+                    let state = (!pg.trans_value_is_null).then(|| unsafe {
+                        &*(pg.trans_value.as_usize()
+                            as *const ::adt_numeric::aggregates::Int128AggState)
+                    });
+                    let img = match col {
+                        BatchEmitCol::AvgInt128(_) => {
+                            ::adt_numeric::aggregates::numeric_poly_avg(state)?
+                        }
+                        _ => ::adt_numeric::aggregates::numeric_poly_sum(state)?,
+                    };
+                    match img {
+                        Some(img) => {
+                            (::types_fmgr::byref_result(per_tuple, img.as_bytes())?, false)
+                        }
+                        None => (Datum::null(), true),
+                    }
+                }
+            };
+            vals.push(nd);
+        }
+    }
+    // The projection's slot discipline (exec_project_prearmed): clear, fill,
+    // store virtual.
+    let mcx = estate.es_query_cxt;
+    let slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    ::exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let base = slot.base_mut();
+        for (v, &(d, isnull)) in plan.vals.iter().enumerate() {
+            base.tts_values[v] = d;
+            base.tts_isnull[v] = isnull;
+        }
+    }
+    ::exectuples::exec_store_virtual_tuple(slot);
+    Ok(node.ps_ResultTupleSlot)
+}
