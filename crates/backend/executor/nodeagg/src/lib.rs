@@ -4113,29 +4113,31 @@ pub fn agg_plain_build_accept<'mcx>(
 }
 
 /// Direct staged-key feed admission (the lane distinct drives' batched arm):
-/// the node's ONE transition is a set-mode exact-DISTINCT over an integer
-/// key whose argument is exactly outer column 0 with no FILTER
-/// (`direct_col0`). For that shape the per-row transition program's entire
-/// effect is "park outer column 0 + flag" and the collect inserts it into
-/// the set — so feeding the staged scan key lane straight into the set
-/// (`agg_plain_distinct_insert_batch`) reproduces the per-row feed
-/// value-for-value (order within the set is replay-invisible; admission).
-/// Text keys stay per-row (no fixed-width staged lane).
+/// the node's ONE transition is a set-mode exact-DISTINCT whose argument is
+/// exactly outer column 0 with no FILTER (`direct_col0`). For that shape the
+/// per-row transition program's entire effect is "park outer column 0 +
+/// flag" and the collect inserts it into the set — so feeding the staged
+/// scan key lane straight into the set (`agg_plain_distinct_insert_batch`
+/// for integer keys, `agg_plain_distinct_insert_bytes_batch` /
+/// `agg_plain_distinct_insert_dict_batch` for text keys over the varlena
+/// key staging) reproduces the per-row feed value-for-value (order within
+/// the set is replay-invisible; admission).
 pub fn agg_plain_distinct_direct_shape(node: &AggStateData<'_>) -> bool {
     node.numtrans == 1 && node.pertrans_sort.len() == 1 && {
         let ps = &node.pertrans_sort[0];
         ps.set_active(node.force_distinct_set)
             && ps.num_inputs == 1
             && ps.direct_col0
-            && matches!(
-                ps.set_kind,
-                Some(
-                    distinctset::DistinctKeyKind::Int16
-                        | distinctset::DistinctKeyKind::Int32
-                        | distinctset::DistinctKeyKind::Int64
-                )
-            )
+            && ps.set_kind.is_some()
     }
+}
+
+/// Whether the direct-shape node's single set-mode key is text/varchar
+/// (`DistinctKeyKind::Bytes`) — the lane drives' dispatch between the
+/// fixed-width staged key feed and the varlena/dict-code key feed.
+pub fn agg_plain_distinct_key_is_bytes(node: &AggStateData<'_>) -> bool {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    node.pertrans_sort[0].set_kind == Some(distinctset::DistinctKeyKind::Bytes)
 }
 
 /// One staged batch of the direct-feed drive: `keys` are the batch's
@@ -4181,7 +4183,7 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
             ints.extend(keys.iter().map(|d| d.as_i64()));
         }
         distinctset::DistinctKeyKind::Bytes => {
-            unreachable!("direct feed admits integer keys only")
+            unreachable!("bytes keys take agg_plain_distinct_insert_bytes_batch")
         }
     }
     let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
@@ -4193,6 +4195,120 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
     if dset.over_budget(budget) {
         distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
     }
+    Ok(())
+}
+
+/// One staged batch of the direct-feed drive, TEXT keys (the varlena key
+/// staging): `keys` are the batch's NON-NULL key datums in row order — live
+/// text/varchar varlena pointers (in-page on heap, decoded images on
+/// cbstore). Each detoasts exactly as the per-row collect does
+/// (`datum_varlena_packed` into per-tuple memory — reset once per batch here
+/// instead of per row: a lifetime-only difference, the set retains its own
+/// canonical image) and inserts its content bytes. Same batch-granular
+/// budget-check/overflow contract as the integer feed; a degraded group
+/// keeps feeding its tuplesort (raw datums — the sort copies, its drain
+/// re-dedups).
+pub fn agg_plain_distinct_insert_bytes_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    keys: &[Datum],
+    saw_null: bool,
+) -> PgResult<()> {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    let tmp = node.tmpcontext;
+    let ps = &mut node.pertrans_sort[0];
+    debug_assert_eq!(ps.set_kind, Some(distinctset::DistinctKeyKind::Bytes));
+    if ps.dset_degraded {
+        let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
+        for &d in keys {
+            sort.putdatum(d, false)?;
+        }
+        if saw_null {
+            sort.putdatum(Datum::null(), true)?;
+        }
+        return Ok(());
+    }
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    for &d in keys {
+        // SAFETY: non-null live text/varchar varlena — the admission proved
+        // the argument type; detoast copies land in per-tuple memory.
+        let v = unsafe {
+            ::types_fmgr::datum_varlena_packed(d, estate.ecxt(tmp).per_tuple_mcx())
+        }?;
+        dset.insert_bytes(v.data());
+    }
+    if saw_null {
+        dset.seen_null = true;
+    }
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
+    }
+    estate.reset_expr_context(tmp);
+    Ok(())
+}
+
+/// One staged batch of the direct-feed drive, DICT-CODED text keys (the
+/// cbstore zero-decode dict lane): `codes` are the batch's per-row u32 codes
+/// into `dict` (the row group's decoded-Datum dictionary; NULL-free by the
+/// dict-lane contract), and `memo` is the caller's EPOCH-SCOPED per-code
+/// dedup bitmap (≥ dict.len() bits, cleared by the caller whenever the dict
+/// epoch changes). A memo hit means this code's value was already FED this
+/// scan-epoch — to the in-memory set, a spill tape, or the degraded
+/// tuplesort — all of which dedup exactly, so skipping the repeat insert is
+/// value-invisible: the distinct-value multiset each consumer sees is
+/// unchanged. The memo NEVER substitutes codes for set elements — the set
+/// stores the full content bytes (epoch-scoped ids are not stable across
+/// row groups, so ids-as-elements would break exactness; ids only serve as
+/// a per-epoch insert filter).
+pub fn agg_plain_distinct_insert_dict_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    codes: &[u32],
+    dict: &[Datum],
+    memo: &mut [u64],
+) -> PgResult<()> {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    debug_assert!(memo.len() * 64 >= dict.len());
+    let tmp = node.tmpcontext;
+    let ps = &mut node.pertrans_sort[0];
+    debug_assert_eq!(ps.set_kind, Some(distinctset::DistinctKeyKind::Bytes));
+    if ps.dset_degraded {
+        // Degraded group: feed each epoch-new value once (the sort's drain
+        // re-dedups; feeding one representative per value is the same
+        // distinct multiset the per-row feed produces).
+        let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
+        for &c in codes {
+            let (w, b) = (c as usize / 64, c as usize % 64);
+            if memo[w] >> b & 1 == 0 {
+                memo[w] |= 1 << b;
+                sort.putdatum(dict[c as usize], false)?;
+            }
+        }
+        return Ok(());
+    }
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    for &c in codes {
+        let (w, b) = (c as usize / 64, c as usize % 64);
+        if memo[w] >> b & 1 == 0 {
+            memo[w] |= 1 << b;
+            // SAFETY: dict entries are live decoded text varlena images
+            // (never external/compressed — the decode produced them); the
+            // packed read is a no-copy header decode.
+            let v = unsafe {
+                ::types_fmgr::datum_varlena_packed(
+                    dict[c as usize],
+                    estate.ecxt(tmp).per_tuple_mcx(),
+                )
+            }?;
+            dset.insert_bytes(v.data());
+        }
+    }
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
+    }
+    estate.reset_expr_context(tmp);
     Ok(())
 }
 
