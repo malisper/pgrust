@@ -11601,8 +11601,28 @@ version = "0.1.0"
 name = "pgoutput"
 version = "0.1.0"
 dependencies = [
+ "adt_bool",
+ "cache_syscache",
+ "datum",
+ "dfmgr",
+ "elog",
+ "inval",
+ "logical",
+ "logicalproto",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "pg_inherits",
+ "pg_publication",
+ "relcache",
+ "reorderbuffer",
  "types_core",
  "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
