@@ -555,6 +555,40 @@ pub fn GetSubscriptionRelations<'mcx>(
     Ok(res)
 }
 
+// The launcher's get_subscription_list (launcher.c:111) body: the caller
+// (launcher crate) wraps this in StartTransactionCommand/Commit. Only the
+// worker-start fields are filled. Rendering divergence: a plain full
+// systable scan of pg_subscription reading attrs off each tuple (C reads the
+// fixed-layout Form struct directly).
+pub struct SubscriptionListEntry {
+    pub oid: Oid,
+    pub dbid: Oid,
+    pub owner: Oid,
+    pub enabled: bool,
+    pub name: String,
+}
+
+pub fn GetSubscriptionList<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<SubscriptionListEntry>> {
+    let mut res = Vec::new();
+    let rel = table::table_open(mcx, SubscriptionRelationId, AccessShareLock)?;
+    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
+    let td = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let name_d = getattr(td, tup, Anum_pg_subscription_subname).0;
+        let name = name_from_datum(name_d);
+        res.push(SubscriptionListEntry {
+            oid: getattr(td, tup, Anum_pg_subscription_oid).0.as_oid(),
+            dbid: getattr(td, tup, Anum_pg_subscription_subdbid).0.as_oid(),
+            owner: getattr(td, tup, Anum_pg_subscription_subowner).0.as_oid(),
+            enabled: getattr(td, tup, Anum_pg_subscription_subenabled).0.as_bool(),
+            name: String::from_utf8_lossy(name.name_str()).into_owned(),
+        });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(res)
+}
+
 fn seam_lookup_pg_subscription_oid(dbid: Oid, subname: &str) -> PgResult<Oid> {
     GetSysCacheOid(
         SUBSCRIPTIONNAME,

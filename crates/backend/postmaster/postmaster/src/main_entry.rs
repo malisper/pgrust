@@ -346,6 +346,9 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
     // slot-pool init (plain statics, no shmem placement here).
     bgworker::BackgroundWorkerShmemInit();
+    if launcher_seams::apply_launcher_shmem_init::is_installed() {
+        launcher_seams::apply_launcher_shmem_init::call();
+    }
 
     let fastpath_groups = postinit::InitializeFastPathLocks();
 

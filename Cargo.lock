@@ -7661,9 +7661,28 @@ dependencies = [
 name = "launcher"
 version = "0.0.0"
 dependencies = [
+ "bgworker",
+ "elog",
+ "guc_file",
  "guc_tables",
  "init_small",
+ "interrupt",
+ "latch",
  "launcher_seams",
+ "libc",
+ "lmgr_proc",
+ "logical_worker_seams",
+ "mcx",
+ "pg_subscription",
+ "postgres",
+ "postgres_seams",
+ "procsignal",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "xact",
 ]
 
 [[package]]
@@ -15750,6 +15769,7 @@ dependencies = [
  "guc_tables",
  "heaptuple",
  "init_small",
+ "launcher",
  "lmgr",
  "lsyscache",
  "mcx",
@@ -18357,7 +18377,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "inval",
- "launcher",
+ "launcher_seams",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",

@@ -533,7 +533,9 @@ fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
     // AtEOXact_HashTables dissolves (crate docs).
     pgstat::xact::AtEOXact_PgStat(true, is_parallel_worker);
     snapmgr_seams::at_eoxact_snapshot::call(true, false)?;
-    launcher::AtEOXact_ApplyLauncher(true);
+    if launcher_seams::at_eoxact_apply_launcher::is_installed() {
+        launcher_seams::at_eoxact_apply_launcher::call(true);
+    }
     // on_commit_launcher_wakeup/workers list has no writer while logical rep is unported; guarded.
     if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
         logical_worker_seams::at_eoxact_logical_rep_workers::call(true);
@@ -735,7 +737,9 @@ fn PrepareTransaction(xp: XsPtr) -> PgResult<()> {
     }
     // AtEOXact_HashTables dissolves; no AtEOXact_PgStat (pgstat fixed above).
     snapmgr_seams::at_eoxact_snapshot::call(true, true)?;
-    launcher::AtEOXact_ApplyLauncher(false);
+    if launcher_seams::at_eoxact_apply_launcher::is_installed() {
+        launcher_seams::at_eoxact_apply_launcher::call(false);
+    }
     if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
         logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
     }
@@ -899,7 +903,9 @@ fn AbortTransaction(xp: XsPtr) -> PgResult<()> {
         }
         // AtEOXact_HashTables dissolves.
         pgstat::xact::AtEOXact_PgStat(false, is_parallel_worker);
-        launcher::AtEOXact_ApplyLauncher(false);
+        if launcher_seams::at_eoxact_apply_launcher::is_installed() {
+            launcher_seams::at_eoxact_apply_launcher::call(false);
+        }
         if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
             logical_worker_seams::at_eoxact_logical_rep_workers::call(false);
         }
