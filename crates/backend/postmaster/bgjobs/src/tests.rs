@@ -211,3 +211,50 @@ fn cycles_run_under_foreground_load() {
     );
     let _ = fg_waiter.wait();
 }
+
+/// Panic containment: a job whose cycle body panics is crash-retired
+/// (crashed() hook fires once) while the dispatcher survives and other
+/// jobs keep cycling.
+#[test]
+fn cycle_panic_crash_retires_job_dispatcher_survives() {
+    let (rt, _pool) = test_runtime();
+    let d = Dispatcher::spawn(Arc::clone(&rt));
+
+    struct PanicJob {
+        crashed: AtomicU64,
+    }
+    impl BgJob for PanicJob {
+        fn name(&self) -> &'static str {
+            "panicjob"
+        }
+        fn latch(&self) -> Option<&'static Latch> {
+            None
+        }
+        fn crashed(&self) {
+            self.crashed.fetch_add(1, Ordering::SeqCst);
+        }
+        fn run_cycle(&self, _reason: CycleReason) -> CycleOutcome {
+            panic!("synthetic cycle panic");
+        }
+    }
+    let bad = Arc::new(PanicJob { crashed: AtomicU64::new(0) });
+    let bad_id = d.register(Arc::clone(&bad) as Arc<dyn BgJob>);
+
+    let good = Arc::new(TickJob {
+        cadence: Duration::from_millis(10),
+        max_cycles: 3,
+        cycles: AtomicU64::new(0),
+        wakes: AtomicU64::new(0),
+        latch: None,
+    });
+    let good_id = d.register(Arc::clone(&good) as Arc<dyn BgJob>);
+
+    assert!(wait_until(Duration::from_secs(10), || d.is_exited(bad_id)));
+    assert_eq!(bad.crashed.load(Ordering::SeqCst), 1, "crashed() exactly once");
+    assert!(
+        wait_until(Duration::from_secs(10), || d.is_exited(good_id)),
+        "dispatcher must survive and keep cycling the good job (got {})",
+        good.cycles.load(Ordering::SeqCst)
+    );
+    assert_eq!(good.cycles.load(Ordering::SeqCst), 3);
+}
