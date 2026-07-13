@@ -115,8 +115,11 @@ fn replication_states() -> &'static [ReplicationState] {
     }
 }
 
+static MAX_ACTIVE_REPLICATION_ORIGINS: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(10);
+
 pub fn max_active_replication_origins() -> i32 {
-    guc_tables::vars::max_active_replication_origins.read()
+    MAX_ACTIVE_REPLICATION_ORIGINS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn origin_lock() -> &'static lwlock::LWLock {
@@ -1123,6 +1126,10 @@ pub(crate) fn show_status_rows() -> PgResult<Vec<(RepOriginId, XLogRecPtr, XLogR
 // ---------------------------------------------------------------------------
 
 pub fn init_seams() {
+    guc_tables::vars::max_active_replication_origins.install_if_absent(guc_tables::GucVarAccessors {
+        get: max_active_replication_origins,
+        set: |v| MAX_ACTIVE_REPLICATION_ORIGINS.store(v, std::sync::atomic::Ordering::Relaxed),
+    });
     origin_seams::replorigin_session_origin::set(replorigin_session_origin);
     origin_seams::replorigin_session_origin_lsn::set(replorigin_session_origin_lsn);
     origin_seams::replorigin_session_origin_timestamp::set(replorigin_session_origin_timestamp);
