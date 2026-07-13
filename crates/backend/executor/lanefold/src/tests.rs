@@ -2831,6 +2831,9 @@ impl LaneCols for DictTestCols {
                 ndict: self.ndict,
                 epoch: self.epoch,
                 sorted: self.sorted,
+                stitch: std::ptr::null(),
+                gndv: 0,
+                gepoch: 0,
             },
         })
     }

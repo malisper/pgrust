@@ -1029,14 +1029,15 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
         TableScanDesc::Cbstore(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
                     c.blocks_pruned,
                     c.granules_bound_skipped,
                     c.adaptive_probe_reverts,
-                    c.granules_meta
+                    c.granules_meta,
+                    c.granules_bloom_pruned
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
@@ -1286,18 +1287,19 @@ pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32>
     }
 }
 
-pub use ::cbstore::MetaAggScan;
+pub use ::cbstore::{MetaAggScan, MetaZeroQual};
 
 /// Metadata MIN/MAX/COUNT/SUM answer (cbstore zone maps + footer row counts
-/// + footer sums); None = the AM has no exact metadata answer for these
-/// columns.
+/// + footer sums; `zq` = the v7 zero-count qual arm); None = the AM has no
+/// exact metadata answer for these columns.
 pub fn table_scan_meta_agg(
     scan: &TableScanDesc<'_>,
     cols: &[u16],
     sum_cols: &[u16],
+    zq: Option<MetaZeroQual>,
 ) -> PgResult<Option<MetaAggScan>> {
     match scan {
-        TableScanDesc::Cbstore(c) => c.meta_agg_scan(cols, sum_cols),
+        TableScanDesc::Cbstore(c) => c.meta_agg_scan(cols, sum_cols, zq),
         TableScanDesc::Heap(_) => Ok(None),
     }
 }

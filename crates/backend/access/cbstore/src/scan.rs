@@ -209,6 +209,19 @@ pub struct MetaAggScan {
     pub sums: Vec<(u16, i128)>,
 }
 
+/// v7 zero-count metadata qual: the scan qual is EXACTLY one
+/// `col <> 0` / `col = 0` conjunct (stored-domain zero) over an int-family
+/// column. `keep_nonzero` = true for `<>`. The meta arm then answers
+/// COUNT as N - zeros (or zeros), and SUM/AVG over the SAME column from the
+/// unchanged footer sum S (excluded zero rows contribute exactly zero; for
+/// `= 0` the sum is identically 0) — the admission site enforces the
+/// same-column restriction and refuses MIN/MAX.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetaZeroQual {
+    pub col: u16,
+    pub keep_nonzero: bool,
+}
+
 // Zone-ordered adaptive traversal (docs/design/cbstore-zone-adaptive.md):
 // granules visited best-first by the sort-key column's zone bound, with a
 // consumer-fed stop bound (top-k heap floor / running MIN-MAX best). Armed
@@ -332,6 +345,10 @@ pub struct CbScanDescData<'mcx> {
     adaptive: Option<Box<AdaptiveOrder>>,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
+    // Subset of granules_pruned attributed to a bloom rejection (the granule
+    // survived every zone/block check but the Eq const hashed absent):
+    // the bloom-utilization observability channel.
+    pub granules_bloom_pruned: u64,
     pub granules_scanned: u64,
     pub blocks_pruned: u64,
     pub windows_staged: u64,
@@ -344,6 +361,15 @@ pub struct CbScanDescData<'mcx> {
     // pinned part's stitch content never changes under a live scan). 0 when
     // stitch publication is disabled (PGRUST_LANE_V2_GLOBALDICT=0).
     scan_uid: u64,
+}
+
+// Why granule_admit refused a granule: Zone covers the zone-map and
+// block-zone-map folds; Bloom is the per-granule filter's absent verdict
+// (counted separately so bloom utilization is observable end-to-end).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GranulePruneCause {
+    Zone,
+    Bloom,
 }
 
 fn env_off(name: &str) -> bool {
@@ -440,6 +466,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             row_cursor: 0,
             adaptive: None,
             granules_pruned: 0,
+            granules_bloom_pruned: 0,
             granules_scanned: 0,
             blocks_pruned: 0,
             windows_staged: 0,
@@ -703,6 +730,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         &self,
         cols: &[u16],
         sum_cols: &[u16],
+        zq: Option<MetaZeroQual>,
     ) -> PgResult<Option<MetaAggScan>> {
         if self.rs_base.rs_parallel.is_some() {
             return Ok(None);
@@ -719,19 +747,47 @@ impl<'mcx> CbScanDescData<'mcx> {
             sums: sum_cols.iter().map(|&c| (c, 0i128)).collect(),
         };
         let Some(part) = self.part.as_ref() else { return Ok(Some(out)) };
-        debug_assert!(self.zone_quals.is_empty());
+        // With a zero-count qual the cb zone quals are exactly that
+        // conjunct (advisory); the bare arm still requires none.
+        debug_assert!(zq.is_some() || self.zone_quals.is_empty());
+        // Per-granule visible-row count under the qual: grows - zeros for
+        // `<> 0`, zeros for `= 0`. Sums fold unchanged for `<> 0` (excluded
+        // zero rows contribute exactly 0 to S) and are identically 0 for
+        // `= 0` (fold_sums gates below). minmax stays the all-visible-rows
+        // fold — a superset of the qual rows' range, so the admission
+        // site's overflow-guard re-proof stays conservative-safe.
+        let gran_rows = |rg: usize, g: usize, grows: usize| -> u64 {
+            match zq {
+                None => grows as u64,
+                Some(z) => {
+                    let zc = part.granule_zerocnt(rg, g, z.col as usize) as u64;
+                    if z.keep_nonzero { grows as u64 - zc } else { zc }
+                }
+            }
+        };
+        let fold_sums = zq.map_or(true, |z| z.keep_nonzero);
         let mut scratch = (Vec::new(), Vec::new(), Vec::new());
         for rg in 0..part.rgs.len() {
             let rg_rows = part.rgs[rg].nrows;
             let ngranules = (rg_rows as usize).div_ceil(GRANULE_ROWS);
             if self.rg_wholly_visible(rg)? {
-                out.rows += rg_rows as u64;
+                // Feature detection: a qual answer needs exact zero counts
+                // on EVERY visible RG (v<=6-preserved RGs lack them) — the
+                // scan drive owns the query otherwise, byte-identically.
+                if zq.is_some() && !part.rg_has_zerocnt(rg) {
+                    return Ok(None);
+                }
+                for g in 0..ngranules {
+                    let grows = (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                    out.rows += gran_rows(rg, g, grows);
+                }
                 for e in out.minmax.iter_mut() {
                     let (_, min, max) = part.rgs[rg].chunks[e.0 as usize];
                     e.1 = e.1.min(min);
                     e.2 = e.2.max(max);
                 }
-                if part.rgs[rg].flags & RG_FLAG_SUMS != 0 {
+                if !fold_sums {
+                } else if part.rgs[rg].flags & RG_FLAG_SUMS != 0 {
                     for e in out.sums.iter_mut() {
                         e.1 += part.rg_sum(rg, e.0 as usize);
                     }
@@ -745,17 +801,27 @@ impl<'mcx> CbScanDescData<'mcx> {
             if !self.rg_visible(rg)? || !self.rg_zone_ok(rg) {
                 continue;
             }
+            if zq.is_some() && !part.rg_has_zerocnt(rg) {
+                return Ok(None);
+            }
             for g in 0..ngranules {
                 if !self.granule_zone_ok(rg, g) {
+                    // Zone-pruned granules are provably all-false under the
+                    // (single) qual the zone quals mirror: they contribute
+                    // no rows and no sum; skipping them shrinks minmax
+                    // toward the qual rows' range — still guard-safe.
                     continue;
                 }
-                out.rows += (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS) as u64;
+                let grows = (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                out.rows += gran_rows(rg, g, grows);
                 for e in out.minmax.iter_mut() {
                     let ge = part.chunk(rg, e.0 as usize).granule(g);
                     e.1 = e.1.min(ge.min);
                     e.2 = e.2.max(ge.max);
                 }
-                sum_granule(part, rg, g, &mut out.sums, &mut scratch);
+                if fold_sums {
+                    sum_granule(part, rg, g, &mut out.sums, &mut scratch);
+                }
             }
         }
         Ok(Some(out))
@@ -780,11 +846,17 @@ impl<'mcx> CbScanDescData<'mcx> {
         })
     }
 
-    // None = pruned (zone map, block zone maps, or bloom say no row can
-    // match). Some(mask) = admitted; bit b covers rows [b*BLOCK_ROWS,
+    // Err(cause) = pruned (zone map, block zone maps, or bloom say no row
+    // can match; cause attributes bloom rejections for the utilization
+    // counter). Ok(mask) = admitted; bit b covers rows [b*BLOCK_ROWS,
     // (b+1)*BLOCK_ROWS) of the granule. Bloom and block pruning are
     // advisory-only: admitted rows always get the ordinary qual evaluation.
-    fn granule_admit(&self, rg: usize, g: usize, granule_rows: usize) -> Option<u32> {
+    fn granule_admit(
+        &self,
+        rg: usize,
+        g: usize,
+        granule_rows: usize,
+    ) -> Result<u32, GranulePruneCause> {
         let part = self.part.as_ref().unwrap();
         let nblocks = granule_rows.div_ceil(BLOCK_ROWS);
         let mut mask: u32 = (1u32 << nblocks) - 1;
@@ -792,14 +864,14 @@ impl<'mcx> CbScanDescData<'mcx> {
             let chunk = part.chunk(rg, (q.attnum - 1) as usize);
             let ge = chunk.granule(g);
             if !zone_can_match(q, ge.min, ge.max) {
-                return None;
+                return Err(GranulePruneCause::Zone);
             }
             if matches!(q.op, ZoneCmp::Eq)
                 && self.bloom_enabled
                 && chunk.has_bloom()
                 && !chunk.bloom_may_contain(g, q.val)
             {
-                return None;
+                return Err(GranulePruneCause::Bloom);
             }
             if self.block_zm_enabled && chunk.has_block_zm() {
                 for b in 0..nblocks {
@@ -811,11 +883,11 @@ impl<'mcx> CbScanDescData<'mcx> {
                     }
                 }
                 if mask == 0 {
-                    return None;
+                    return Err(GranulePruneCause::Zone);
                 }
             }
         }
-        Some(mask)
+        Ok(mask)
     }
 
     /// Compressed-domain constant-fold of `q` against the currently staged
@@ -908,10 +980,16 @@ impl<'mcx> CbScanDescData<'mcx> {
             }
             if !self.decoded {
                 let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
-                let Some(mask) = self.granule_admit(self.rg, self.granule, grows) else {
-                    self.granules_pruned += 1;
-                    self.granule += 1;
-                    continue;
+                let mask = match self.granule_admit(self.rg, self.granule, grows) {
+                    Ok(mask) => mask,
+                    Err(cause) => {
+                        self.granules_pruned += 1;
+                        if cause == GranulePruneCause::Bloom {
+                            self.granules_bloom_pruned += 1;
+                        }
+                        self.granule += 1;
+                        continue;
+                    }
                 };
                 self.block_mask = mask;
                 self.decode_current_granule();
@@ -1140,9 +1218,15 @@ impl<'mcx> CbScanDescData<'mcx> {
             self.rg_claimed = true;
             let rg_rows = self.part.as_ref().unwrap().rgs[self.rg].nrows as usize;
             let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
-            let Some(mask) = self.granule_admit(self.rg, self.granule, grows) else {
-                self.granules_pruned += 1;
-                continue;
+            let mask = match self.granule_admit(self.rg, self.granule, grows) {
+                Ok(mask) => mask,
+                Err(cause) => {
+                    self.granules_pruned += 1;
+                    if cause == GranulePruneCause::Bloom {
+                        self.granules_bloom_pruned += 1;
+                    }
+                    continue;
+                }
             };
             self.block_mask = mask;
             self.decode_current_granule();
