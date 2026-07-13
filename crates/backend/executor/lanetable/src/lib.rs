@@ -55,6 +55,17 @@ pub const SALT_DISABLE_MAX_ENTRIES: usize = 8192;
 /// conservative engage point).
 pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 
+/// Fixed probe-prefetch look-ahead for the engaged batched drivers. The CH
+/// PrefetchingHelper MEASURES a look-ahead in [4, 32] per batch; at the
+/// executor's 1024-row batches that sampling left the first 100 rows of
+/// EVERY batch unprefetched (~10% of all probes) and paid two clock reads
+/// per batch — both visible in the in-situ Q16 profile (2026-07-15,
+/// serialgap2: vdso/clock_gettime/Timespec::now lines). Engaged probes are
+/// DRAM-bound (~60-120ns/iter vs ~100ns DRAM), so the solved look-ahead is
+/// always a handful; a fixed mid-clamp distance covers the whole batch with
+/// zero measurement overhead.
+pub const PREFETCH_LOOKAHEAD: usize = 8;
+
 const SALT_SHIFT: u32 = 48;
 const REF_MASK: u64 = (1 << SALT_SHIFT) - 1;
 /// Salt bits 32..48 of the hash — DISJOINT from the two-level bucket byte
@@ -478,6 +489,24 @@ impl LaneAggTable {
             }
         };
         let stride = key_words + state_bytes / 8;
+        // Honor the caller's group estimate THROUGH the two-level structure
+        // (CH sizes from its size-hint prealloc events; the C tuplehash sizes
+        // nbuckets from numGroups): a hint above the conversion threshold
+        // builds the 256-bucket table at birth, per-bucket presized with 2×
+        // headroom over the 0.5-fill minimum (planner ndistinct estimates
+        // run low; one ×4 bucket grow bounds any residual underestimate).
+        // The in-situ alternative — presize single-level, then THROW THE
+        // ARRAY AWAY at the 100K-member conversion and regrow 256 buckets
+        // from 1024 slots — cost Q16 ~12% in rehash walks (grow_set +
+        // convert_two_level + insert_int, serialgap2 profile).
+        let (single, buckets) = if capacity_hint > TWO_LEVEL_THRESHOLD {
+            let per_bucket = (capacity_hint.saturating_mul(4) / 256).next_power_of_two().max(64);
+            let bs =
+                (0..256).map(|_| EntrySet::with_capacity_pow2(per_bucket, slot_words)).collect();
+            (EntrySet::with_capacity_pow2(0, slot_words), Some(bs))
+        } else {
+            (EntrySet::with_capacity_pow2(capacity_hint.saturating_mul(2), slot_words), None)
+        };
         LaneAggTable {
             repr,
             hash,
@@ -486,8 +515,8 @@ impl LaneAggTable {
             key_words,
             rows: RowStore::new(stride),
             arena: Vec::new(),
-            single: EntrySet::with_capacity_pow2(capacity_hint.saturating_mul(2), slot_words),
-            buckets: None,
+            single,
+            buckets,
             null_row: None,
             total_members: 0,
         }
@@ -759,6 +788,120 @@ impl LaneAggTable {
         }
     }
 
+    /// Engaged-path fused driver: the [`Self::probe_fold_run`] hoisted-locals
+    /// probe loop over a PRE-HASHED batch, issuing the entry-slot prefetch
+    /// [`PREFETCH_LOOKAHEAD`] rows ahead. This replaces the engaged
+    /// per-row-`probe_int` shape (which reloaded the table's mask/base
+    /// pointers from memory every row — 41% of in-situ Q16) and the CH
+    /// per-batch look-ahead measurement (see [`PREFETCH_LOOKAHEAD`]).
+    fn probe_fold_hashed_run<const INLINE: bool>(
+        &mut self,
+        keys: &[i64],
+        hashes: &[u64],
+        fold: &mut impl FnMut(*mut u8, u32, bool),
+    ) {
+        debug_assert_eq!(keys.len(), hashes.len());
+        let kw = self.key_words;
+        let sw = if INLINE { 2 } else { 1 };
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            // Hoisted raw parts (re-derived after every insert — see
+            // probe_fold_run's rationale).
+            let bp: *mut EntrySet = match &mut self.buckets {
+                Some(bs) => bs.as_mut_ptr(),
+                None => core::ptr::null_mut(),
+            };
+            let (sp_entries, sp_mask) = {
+                let s = &mut self.single;
+                (s.entries.as_mut_ptr(), s.mask)
+            };
+            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_shift = self.rows.chunk_shift;
+            let rows_cmask = self.rows.chunk_mask;
+            let rows_stride = self.rows.stride_words;
+            let salt_on = !INLINE && self.total_members > SALT_DISABLE_MAX_ENTRIES;
+            while i < keys.len() {
+                let j = i + PREFETCH_LOOKAHEAD;
+                if j < keys.len() {
+                    // SAFETY: j < keys.len() == hashes.len().
+                    let h = unsafe { *hashes.get_unchecked(j) };
+                    let (e_ptr_j, mask_j) = if bp.is_null() {
+                        (sp_entries, sp_mask)
+                    } else {
+                        // SAFETY: two-level tables have exactly 256 buckets.
+                        let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                        (set.entries.as_mut_ptr(), set.mask)
+                    };
+                    // SAFETY: masked slot index × slot words (hint only).
+                    prefetch(unsafe { e_ptr_j.add(((h as usize) & mask_j) * sw) });
+                }
+                // SAFETY: i < keys.len() == hashes.len().
+                let key = unsafe { *keys.get_unchecked(i) };
+                let hash = unsafe { *hashes.get_unchecked(i) };
+                let (e_ptr, mask) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                let salted = if salt_on { salt_of(hash) } else { 0 };
+                let mut pos = (hash as usize) & mask;
+                let hit: Option<*mut u64> = loop {
+                    if INLINE {
+                        // SAFETY: masked slot index, 2 words per slot.
+                        let sp = unsafe { e_ptr.add(pos * 2) };
+                        // SAFETY: in-bounds slot words.
+                        let (k, r) = unsafe { (*sp, *sp.add(1)) };
+                        if r == 0 {
+                            break None;
+                        }
+                        if k as i64 == key {
+                            let row = (r - 1) as usize;
+                            // SAFETY: live row (parts stable since last insert).
+                            break Some(unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            });
+                        }
+                    } else {
+                        // SAFETY: masked entry index.
+                        let e = unsafe { *e_ptr.add(pos) };
+                        if e == 0 {
+                            break None;
+                        }
+                        if salted == 0 || (e & !REF_MASK) == salted {
+                            let row = ((e & REF_MASK) - 1) as usize;
+                            // SAFETY: live row.
+                            let p = unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            };
+                            // SAFETY: word 0 is the key word.
+                            if unsafe { *p } as i64 == key {
+                                break Some(p);
+                            }
+                        }
+                    }
+                    pos = (pos + 1) & mask;
+                };
+                match hit {
+                    Some(p) => {
+                        // SAFETY: states follow the key words.
+                        fold(unsafe { p.add(kw).cast() }, i as u32, false);
+                        i += 1;
+                    }
+                    None => {
+                        // Insert leg (cold; may grow/allocate) — fold, then
+                        // re-hoist every raw part.
+                        let pr = self.insert_int(key, hash, pos);
+                        fold(pr.states, i as u32, true);
+                        i += 1;
+                        continue 'rehoist;
+                    }
+                }
+            }
+        }
+    }
+
     #[inline(never)]
     fn insert_int(&mut self, key: i64, hash: u64, mut pos: usize) -> Probe {
         let sw = self.slot_words;
@@ -867,38 +1010,26 @@ impl LaneAggTable {
                 }
             }
             PrefetchMode::Adaptive => {
-                // CH PrefetchingHelper: time the first iterations, solve the
-                // look-ahead, clamp to [4, 32].
-                let sample = keys.len().min(100);
-                let t0 = std::time::Instant::now();
-                for i in 0..sample {
-                    let pr = self.probe_int(keys[i], hashes[i]);
-                    out.push(pr.states);
-                    if pr.is_new {
-                        new_out.push(i as u32);
-                    }
-                }
-                let lookahead = if sample == 0 {
-                    8
+                // Fused hoisted-locals probe over the pre-hashed batch with a
+                // fixed look-ahead prefetch (PREFETCH_LOOKAHEAD): full batch
+                // coverage, no per-batch clock reads, no per-row table-field
+                // reloads (the engaged per-row probe_int shape was 41% of
+                // in-situ Q16).
+                let hs: &[u64] = hashes;
+                if self.slot_words == 2 {
+                    self.probe_fold_hashed_run::<true>(keys, hs, &mut |states, i, is_new| {
+                        out.push(states);
+                        if is_new {
+                            new_out.push(i);
+                        }
+                    });
                 } else {
-                    // CH: lookahead ≈ 4 · (100ns / t_iter), clamped.
-                    let per_iter_ns = (t0.elapsed().as_nanos() as u64 / sample as u64).max(1);
-                    ((400 / per_iter_ns) as usize).clamp(4, 32)
-                };
-                for i in sample..keys.len() {
-                    let j = i + lookahead;
-                    if j < keys.len() {
-                        let h = hashes[j];
-                        let set = self.set_for(h);
-                        prefetch(unsafe {
-                            set.entries.as_ptr().add(((h as usize) & set.mask) * self.slot_words)
-                        });
-                    }
-                    let pr = self.probe_int(keys[i], hashes[i]);
-                    out.push(pr.states);
-                    if pr.is_new {
-                        new_out.push(i as u32);
-                    }
+                    self.probe_fold_hashed_run::<false>(keys, hs, &mut |states, i, is_new| {
+                        out.push(states);
+                        if is_new {
+                            new_out.push(i);
+                        }
+                    });
                 }
             }
         }
@@ -1026,6 +1157,95 @@ impl LaneAggTable {
         }
     }
 
+    /// [`Self::probe_fold_hashed_run`]'s Int128 twin (Salt8-only): fused
+    /// hoisted-locals probe over a pre-hashed 2-word-key batch with the fixed
+    /// look-ahead entry prefetch.
+    fn probe_fold_i128_hashed_run(
+        &mut self,
+        keys: &[[u64; 2]],
+        hashes: &[u64],
+        fold: &mut impl FnMut(*mut u8, u32, bool),
+    ) {
+        debug_assert_eq!(keys.len(), hashes.len());
+        let kw = self.key_words;
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            let bp: *mut EntrySet = match &mut self.buckets {
+                Some(bs) => bs.as_mut_ptr(),
+                None => core::ptr::null_mut(),
+            };
+            let (sp_entries, sp_mask) = {
+                let s = &mut self.single;
+                (s.entries.as_mut_ptr(), s.mask)
+            };
+            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_shift = self.rows.chunk_shift;
+            let rows_cmask = self.rows.chunk_mask;
+            let rows_stride = self.rows.stride_words;
+            let salt_on = self.total_members > SALT_DISABLE_MAX_ENTRIES;
+            while i < keys.len() {
+                let j = i + PREFETCH_LOOKAHEAD;
+                if j < keys.len() {
+                    // SAFETY: j < keys.len() == hashes.len().
+                    let h = unsafe { *hashes.get_unchecked(j) };
+                    let (e_ptr_j, mask_j) = if bp.is_null() {
+                        (sp_entries, sp_mask)
+                    } else {
+                        // SAFETY: two-level tables have exactly 256 buckets.
+                        let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                        (set.entries.as_mut_ptr(), set.mask)
+                    };
+                    // SAFETY: masked entry index (Salt8: 1 slot word) — hint.
+                    prefetch(unsafe { e_ptr_j.add((h as usize) & mask_j) });
+                }
+                // SAFETY: i < keys.len() == hashes.len().
+                let key = unsafe { *keys.get_unchecked(i) };
+                let hash = unsafe { *hashes.get_unchecked(i) };
+                let (e_ptr, mask) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                let salted = if salt_on { salt_of(hash) } else { 0 };
+                let mut pos = (hash as usize) & mask;
+                let hit: Option<*mut u64> = loop {
+                    // SAFETY: masked entry index.
+                    let e = unsafe { *e_ptr.add(pos) };
+                    if e == 0 {
+                        break None;
+                    }
+                    if salted == 0 || (e & !REF_MASK) == salted {
+                        let row = ((e & REF_MASK) - 1) as usize;
+                        // SAFETY: live row.
+                        let p = unsafe {
+                            row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                        };
+                        // SAFETY: words 0..2 are the key words.
+                        if unsafe { *p == key[0] && *p.add(1) == key[1] } {
+                            break Some(p);
+                        }
+                    }
+                    pos = (pos + 1) & mask;
+                };
+                match hit {
+                    Some(p) => {
+                        // SAFETY: states follow the key words.
+                        fold(unsafe { p.add(kw).cast() }, i as u32, false);
+                        i += 1;
+                    }
+                    None => {
+                        let pr = self.insert_i128(key, hash, pos);
+                        fold(pr.states, i as u32, true);
+                        i += 1;
+                        continue 'rehoist;
+                    }
+                }
+            }
+        }
+    }
+
     #[inline(never)]
     fn insert_i128(&mut self, key: [u64; 2], hash: u64, mut pos: usize) -> Probe {
         if self.grow_if_needed(hash) {
@@ -1111,37 +1331,15 @@ impl LaneAggTable {
                 }
             }
             PrefetchMode::Adaptive => {
-                // CH PrefetchingHelper (see probe_int_batch).
-                let sample = keys.len().min(100);
-                let t0 = std::time::Instant::now();
-                for i in 0..sample {
-                    let pr = self.probe_i128(keys[i], hashes[i]);
-                    out.push(pr.states);
-                    if pr.is_new {
-                        new_out.push(i as u32);
+                // Fused hoisted-locals probe over the pre-hashed batch with
+                // the fixed look-ahead prefetch (see probe_int_batch).
+                let hs: &[u64] = hashes;
+                self.probe_fold_i128_hashed_run(keys, hs, &mut |states, i, is_new| {
+                    out.push(states);
+                    if is_new {
+                        new_out.push(i);
                     }
-                }
-                let lookahead = if sample == 0 {
-                    8
-                } else {
-                    let per_iter_ns = (t0.elapsed().as_nanos() as u64 / sample as u64).max(1);
-                    ((400 / per_iter_ns) as usize).clamp(4, 32)
-                };
-                for i in sample..keys.len() {
-                    let j = i + lookahead;
-                    if j < keys.len() {
-                        let h = hashes[j];
-                        let set = self.set_for(h);
-                        prefetch(unsafe {
-                            set.entries.as_ptr().add((h as usize) & set.mask)
-                        });
-                    }
-                    let pr = self.probe_i128(keys[i], hashes[i]);
-                    out.push(pr.states);
-                    if pr.is_new {
-                        new_out.push(i as u32);
-                    }
-                }
+                });
             }
         }
     }
