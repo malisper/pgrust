@@ -66,6 +66,10 @@ pub enum LogicalRepWorkerType {
 }
 
 // LogicalRepWorker (worker_internal.h).
+// pg_subscription_rel.h srsubstate values (shared with pg_subscription).
+pub const SUBREL_STATE_SYNCWAIT: u8 = b'w';
+pub const SUBREL_STATE_CATCHUP: u8 = b'c';
+
 #[derive(Clone)]
 pub struct LogicalRepWorker {
     pub wtype: LogicalRepWorkerType,
@@ -529,6 +533,79 @@ fn logicalrep_worker_stop_internal(slot: usize, signo: i32) -> PgResult<()> {
             postgres_seams::check_for_interrupts::call()?;
         }
     }
+}
+
+// --- tablesync shared-state accessors (C: worker->relstate under relmutex;
+// the pool Mutex is the spinlock rendering) ---
+
+// My own slot's relstate write (tablesync worker side).
+pub fn my_worker_set_relstate(state: u8, lsn: XLogRecPtr) {
+    if let Some(slot) = my_worker_slot() {
+        with_ctx(|ctx| {
+            ctx.workers[slot].relstate = state;
+            ctx.workers[slot].relstate_lsn = lsn;
+        });
+    }
+}
+
+pub fn my_worker_relstate() -> (u8, XLogRecPtr) {
+    match my_worker_slot() {
+        Some(slot) => with_ctx(|ctx| (ctx.workers[slot].relstate, ctx.workers[slot].relstate_lsn)),
+        None => (0, InvalidXLogRecPtr),
+    }
+}
+
+// The apply side's SYNCWAIT->CATCHUP handshake (tablesync.c:507): read the
+// sync worker's state; if SYNCWAIT, promote to CATCHUP with
+// max(relstate_lsn, current_lsn) and wake it. Returns the state READ (pre-
+// promotion) + its lsn, None when no worker exists for (subid, relid).
+pub fn sync_worker_read_and_maybe_catchup(
+    subid: Oid,
+    relid: Oid,
+    current_lsn: XLogRecPtr,
+) -> Option<(u8, XLogRecPtr)> {
+    let (st, proc_no) = with_ctx_opt(None, |ctx| {
+        let i = find_locked(ctx, subid, relid, false)?;
+        let w = &mut ctx.workers[i];
+        let read = (w.relstate, w.relstate_lsn);
+        if w.relstate == SUBREL_STATE_SYNCWAIT {
+            w.relstate = SUBREL_STATE_CATCHUP;
+            w.relstate_lsn = w.relstate_lsn.max(current_lsn);
+        }
+        Some((read, w.proc_no))
+    })?;
+    if st.0 == SUBREL_STATE_SYNCWAIT {
+        if let Some(p) = proc_no {
+            latch::SetLatch(LatchHandle::proc(p));
+        }
+    }
+    Some(st)
+}
+
+// logicalrep_sync_worker_count (launcher.c:868).
+pub fn logicalrep_sync_worker_count(subid: Oid) -> usize {
+    with_ctx_opt(0, |ctx| {
+        ctx.workers
+            .iter()
+            .filter(|w| w.in_use && w.subid == subid && w.is_tablesync())
+            .count()
+    })
+}
+
+// Tablesync start-time throttle (tablesync.c last_start_times; the launcher
+// ctx HashMap doubles as C's worker-local HTAB — keyed per relid).
+pub fn tablesync_start_time_check_and_set(relid: Oid, now: TimestampTz, interval_ms: i32) -> bool {
+    with_ctx_opt(false, |ctx| {
+        let due = match ctx.last_start_times.get(&relid) {
+            // TimestampDifferenceExceeds: timestamps are microseconds.
+            Some(&last) => now.saturating_sub(last) >= interval_ms as i64 * 1000,
+            None => true,
+        };
+        if due {
+            ctx.last_start_times.insert(relid, now);
+        }
+        due
+    })
 }
 
 // logicalrep_worker_wakeup (launcher.c:686).
