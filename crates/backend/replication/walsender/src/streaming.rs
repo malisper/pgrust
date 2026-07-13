@@ -214,6 +214,16 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
     if crate::SEND_TIME_LINE_IS_HISTORIC.with(|c| c.get()) {
         crate::send_next_timeline_result_set(mcx)?;
     }
+
+    // Send CommandComplete (walsender.c:1029). The dispatch loop then sends
+    // its own "START_REPLICATION" completion — C keeps that dupe on purpose
+    // ("necessary per libpqrcv_endstreaming"): the first CommandComplete
+    // closes the timeline result set (or the plain copy), the second is the
+    // COMMAND_OK clients read after it (receivelog.c expects TUPLES_OK then
+    // COMMAND_OK on a historic-timeline stream; pg_basebackup/020 subtest 40
+    // catches its absence with "unexpected termination of replication
+    // stream").
+    tcop_dest::EndReplicationCommand(b"START_STREAMING")?;
     Ok(())
 }
 
