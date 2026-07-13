@@ -75,6 +75,78 @@ fn redkey_enabled() -> bool {
 
 const TEXTOID: ::types_core::Oid = 25;
 const VARCHAROID: ::types_core::Oid = 1043;
+const TIMESTAMPOID: ::types_core::Oid = 1114;
+
+/// pg_proc oid of `timestamp_trunc(text, timestamp)` — `date_trunc` over
+/// plain (tz-less) timestamp. The timestamptz variants (1217/1284) are NOT
+/// admitted: their truncation is timezone-dependent.
+const F_TIMESTAMP_TRUNC: ::types_core::Oid = 2020;
+
+/// The ts-trunc class recognizer: `date_trunc(<const unit>, ts_col)` over a
+/// plain TIMESTAMP column, for units whose C truncation is uniform
+/// microsecond floor arithmetic (`timestamp2tm` → zero the sub-unit fields →
+/// `tm2timestamp` ≡ `t - t.rem_euclid(unit_usecs)`: second/minute/hour
+/// boundaries are uniformly spaced on PG's tz-less, leap-second-free
+/// timeline, and day boundaries are 86400e6-aligned to the 2000-01-01 epoch).
+/// Returns the unit's microseconds. `None` = not this shape (byte-identical
+/// per-row fallback — including every unit alias/error C would raise, which
+/// the per-row fmgr path preserves verbatim).
+///
+/// Unit strings: exact lowercase matches of the canonical names + plurals
+/// only, compared after the same ASCII downcasing `downcase_ident` applies.
+/// Abbreviations ("min", "hr", …) deliberately refuse — the per-row path
+/// computes them correctly; admitting them here would duplicate C's
+/// deltatktbl alias table for no measured shape.
+fn ts_trunc_unit_usecs(
+    xk: &::execexpr::ScanProjExprKey,
+    keytype: ::types_core::Oid,
+    mcx: ::mcx::Mcx<'_>,
+) -> Option<i64> {
+    if xk.input_type != TIMESTAMPOID || keytype != TIMESTAMPOID || xk.ncalls != 1 {
+        return None;
+    }
+    let c = &xk.calls[0];
+    if c.fn_oid != F_TIMESTAMP_TRUNC || c.nargs != 2 || c.var_argno != 1 {
+        return None;
+    }
+    let unit = c.args[0];
+    if unit.isnull {
+        return None;
+    }
+    // SAFETY: a compile-time non-null text Const datum (census contract) is
+    // a live varlena for the statement's lifetime.
+    let packed = unsafe { ::types_fmgr::datum_varlena_packed(unit.value, mcx) }.ok()?;
+    let mut low = [0u8; 16];
+    let data = packed.data();
+    if data.is_empty() || data.len() > low.len() {
+        return None;
+    }
+    for (d, s) in low.iter_mut().zip(data) {
+        *d = s.to_ascii_lowercase();
+    }
+    Some(match &low[..data.len()] {
+        b"second" | b"seconds" => 1_000_000,
+        b"minute" | b"minutes" => 60_000_000,
+        b"hour" | b"hours" => 3_600_000_000,
+        b"day" | b"days" => 86_400_000_000,
+        _ => return None,
+    })
+}
+
+/// The ts-trunc kernel: C `timestamp_trunc` for the admitted units over a
+/// finite timestamp — microsecond floor to the unit boundary. ±infinity
+/// (`DT_NOBEGIN`/`DT_NOEND` = i64::MIN/MAX) passes through unchanged
+/// (C's `TIMESTAMP_NOT_FINITE` arm). Total for every storable timestamp:
+/// the minimum valid timestamp is day-aligned, so flooring never leaves the
+/// valid range (C's `tm2timestamp` range error is unreachable here).
+#[inline(always)]
+fn ts_trunc_apply(t: i64, unit: i64) -> i64 {
+    if t == i64::MIN || t == i64::MAX {
+        t
+    } else {
+        t - t.rem_euclid(unit)
+    }
+}
 
 /// Census→stitcher arith mapping (nodeseqscan's projstitch arm keeps its own
 /// private copy — the enums are 1:1 by construction).
@@ -149,6 +221,12 @@ pub enum ExprKeyKind {
         prog: Box<::laneexec::DictEvalProg>,
         gather_input: bool,
     },
+    /// `date_trunc(<const unit>, ts)` over a plain TIMESTAMP column for
+    /// uniform-microsecond units (see [`ts_trunc_unit_usecs`]): the key lane
+    /// derives by the non-erroring floor kernel [`ts_trunc_apply`] —
+    /// bit-identical to the fmgr `timestamp_trunc` for every storable input,
+    /// so there is no trap/replay leg at all.
+    TsTrunc { input_col: u16, unit: i64 },
     /// Packed multi-key over a projected scan (see [`MultiKeyChain`]).
     Multi(Box<MultiKeyChain>),
     /// Redundant grouping-key elimination (Q36 class): 2..N int grouping
@@ -329,48 +407,59 @@ pub(super) fn decide_exprkey<'mcx>(
         }
         ExprKeyKind::Arith { prog, ncols }
     } else if let Some(xk) = proj.pi_state.scan_proj_expr_key() {
-        // Dict class: cbstore text column, IMMUTABLE internal builtins
-        // (dicteval's fail-closed compile owns the catalog gate).
-        if xk.n as usize != natts
-            || xk.key_out != key_out
-            || !::nodeseqscan::seq_scan_is_cbstore(ss)
-            || !matches!(xk.input_type, TEXTOID | VARCHAROID)
-        {
+        if xk.n as usize != natts || xk.key_out != key_out {
             return refused();
         }
-        let mut calls = Vec::with_capacity(xk.ncalls as usize);
-        for c in &xk.calls[..xk.ncalls as usize] {
-            let Some(rettype) = ::laneexec::func_catalog_rettype(c.fn_oid) else {
-                return refused();
-            };
-            calls.push(::laneexec::DictCallSpec {
-                fn_oid: c.fn_oid,
-                collation: c.collation,
-                var_argno: c.var_argno as u16,
-                args: c.args[..c.nargs as usize].to_vec(),
-                rettype,
-            });
-        }
-        // The chain's result type must be the grouping key's column type
-        // (defense in depth — the tupledesc is plan authority).
+        // The computed chain's result type must be the grouping key's
+        // column type (defense in depth — the tupledesc is plan authority).
         let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
             [key_out as usize]
             .atttypid;
-        if calls.last().is_some_and(|c| c.rettype != keytype) {
-            return refused();
-        }
-        let spec = ::laneexec::DictExprSpec { col: xk.input_col, calls };
-        let prog = match ::laneexec::dicteval_compile_value(&spec) {
-            Ok(p) => p,
-            Err(reason) => {
-                ::laneexec::log_dicteval_refused(reason);
+        // Ts-trunc class first (Q43 class): `date_trunc(const, ts)` for
+        // uniform-microsecond units — a non-erroring arithmetic key lane,
+        // no fmgr, no dict requirement (any staged store).
+        if let Some(unit) = ts_trunc_unit_usecs(&xk, keytype, estate.es_query_cxt) {
+            for j in 0..natts {
+                map.push(xk.cols[j]);
+            }
+            ExprKeyKind::TsTrunc { input_col: xk.input_col, unit }
+        } else {
+            // Dict class: cbstore text column, IMMUTABLE internal builtins
+            // (dicteval's fail-closed compile owns the catalog gate).
+            if !::nodeseqscan::seq_scan_is_cbstore(ss)
+                || !matches!(xk.input_type, TEXTOID | VARCHAROID)
+            {
                 return refused();
             }
-        };
-        for j in 0..natts {
-            map.push(xk.cols[j]);
+            let mut calls = Vec::with_capacity(xk.ncalls as usize);
+            for c in &xk.calls[..xk.ncalls as usize] {
+                let Some(rettype) = ::laneexec::func_catalog_rettype(c.fn_oid) else {
+                    return refused();
+                };
+                calls.push(::laneexec::DictCallSpec {
+                    fn_oid: c.fn_oid,
+                    collation: c.collation,
+                    var_argno: c.var_argno as u16,
+                    args: c.args[..c.nargs as usize].to_vec(),
+                    rettype,
+                });
+            }
+            if calls.last().is_some_and(|c| c.rettype != keytype) {
+                return refused();
+            }
+            let spec = ::laneexec::DictExprSpec { col: xk.input_col, calls };
+            let prog = match ::laneexec::dicteval_compile_value(&spec) {
+                Ok(p) => p,
+                Err(reason) => {
+                    ::laneexec::log_dicteval_refused(reason);
+                    return refused();
+                }
+            };
+            for j in 0..natts {
+                map.push(xk.cols[j]);
+            }
+            ExprKeyKind::Dict { input_col: xk.input_col, prog, gather_input: false }
         }
-        ExprKeyKind::Dict { input_col: xk.input_col, prog, gather_input: false }
     } else {
         return refused();
     };
@@ -403,6 +492,7 @@ pub(super) fn decide_exprkey<'mcx>(
             unreachable!("the reduced kind decides in decide_reduced")
         }
         ExprKeyKind::Arith { ncols, .. } => prefix = prefix.max(*ncols as i32),
+        ExprKeyKind::TsTrunc { input_col, .. } => prefix = prefix.max(*input_col as i32 + 1),
         ExprKeyKind::Dict { input_col, .. } => {
             prefix = prefix.max(*input_col as i32 + 1);
             // Transitions/spill reading the key's own base column: each
@@ -438,9 +528,10 @@ pub(super) fn decide_exprkey<'mcx>(
         }
         let dict_key = match &kind {
             ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
-            ExprKeyKind::Arith { .. } | ExprKeyKind::Multi(_) | ExprKeyKind::Reduced { .. } => {
-                None
-            }
+            ExprKeyKind::Arith { .. }
+            | ExprKeyKind::TsTrunc { .. }
+            | ExprKeyKind::Multi(_)
+            | ExprKeyKind::Reduced { .. } => None,
         };
         ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_key)
     } else {
@@ -458,6 +549,7 @@ pub(super) fn decide_exprkey<'mcx>(
     };
     trace_feed(match &kind {
         ExprKeyKind::Arith { .. } => "agg-over-seqscan: expr-key feed armed (arith key)",
+        ExprKeyKind::TsTrunc { .. } => "agg-over-seqscan: expr-key feed armed (ts-trunc key)",
         ExprKeyKind::Dict { .. } => "agg-over-seqscan: expr-key feed armed (dict key)",
         ExprKeyKind::Multi(_) => unreachable!("multi-key shapes decide in decide_exprkey_mk"),
         ExprKeyKind::Reduced { .. } => {
@@ -939,7 +1031,9 @@ pub(super) fn exprkey_rearm<'mcx>(
         let dict_key = match &xk.kind {
             ExprKeyKind::Dict { input_col, .. } => Some(*input_col),
             ExprKeyKind::Multi(m) => m.dict_base,
-            ExprKeyKind::Arith { .. } | ExprKeyKind::Reduced { .. } => None,
+            ExprKeyKind::Arith { .. }
+            | ExprKeyKind::TsTrunc { .. }
+            | ExprKeyKind::Reduced { .. } => None,
         };
         ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, xk.prefix, dict_key)
     } else {
@@ -983,7 +1077,7 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         }
     };
     let compact = match &xk.kind {
-        ExprKeyKind::Arith { .. } if !has_resid => {
+        ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } if !has_resid => {
             tick_arm(::nodeagg::agg_hash_compact_try_arm(agg))
         }
         ExprKeyKind::Reduced { shape, .. } if !has_resid => {
@@ -1477,6 +1571,27 @@ fn exprkey_batch<'mcx>(
             mm.scratch.invalidate();
             per_row_batch(agg, ss, n, estate)
         };
+            }
+        }
+        ExprKeyKind::TsTrunc { input_col, unit } => {
+            let (col, unit) = (*input_col as usize, *unit);
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("expr-key batched route requires the armed SoA");
+            let vals = soa.col_values(col);
+            let nulls = soa.col_isnull(col);
+            xk.key_vals.clear();
+            xk.key_vals.resize(n as usize, ::datum::Datum::null());
+            xk.key_null.clear();
+            xk.key_null.resize(n as usize, true);
+            // Non-erroring floor kernel (strict: NULL in -> NULL out); no
+            // trap/replay leg — bit-identical to the fmgr for every input.
+            for &i in &xk.rows {
+                let i = i as usize;
+                if !nulls[i] {
+                    xk.key_vals[i] =
+                        ::datum::Datum::from_i64(ts_trunc_apply(vals[i].as_i64(), unit));
+                    xk.key_null[i] = false;
+                }
             }
         }
         ExprKeyKind::Dict { input_col, prog, gather_input } => {
@@ -2194,4 +2309,78 @@ fn spill_row<'mcx>(
 ) -> PgResult<()> {
     let slot_id = fill_stage_slot(agg, ss, xk, stage_slot, i, key, key_isnull, estate)?;
     ::nodeagg::agg_hash_spill_staged(agg, estate, slot_id, hash)
+}
+
+#[cfg(test)]
+mod ts_trunc_tests {
+    use super::ts_trunc_apply;
+
+    /// The ts-trunc kernel vs the C-ported `timestamp_trunc` oracle, over
+    /// every admitted unit: boundary cases (±infinity sentinels, the unit
+    /// boundaries around 0 = 2000-01-01, pre-2000 negatives) plus a
+    /// deterministic LCG sweep across the storable range. Any storable
+    /// value the oracle truncates, the kernel must match bit-for-bit; the
+    /// oracle erroring (out-of-range decode) on a value proves that value
+    /// is not storable, so the kernel's answer there is unreachable.
+    #[test]
+    fn ts_trunc_matches_timestamp_trunc() {
+        let units: [(&[u8], i64); 4] = [
+            (b"second", 1_000_000),
+            (b"minute", 60_000_000),
+            (b"hour", 3_600_000_000),
+            (b"day", 86_400_000_000),
+        ];
+        let mut cases: Vec<i64> = vec![
+            0,
+            1,
+            -1,
+            59_999_999,
+            60_000_000,
+            60_000_001,
+            -59_999_999,
+            -60_000_000,
+            -60_000_001,
+            86_399_999_999,
+            86_400_000_000,
+            -86_400_000_000,
+            -86_400_000_001,
+            // 2013-07-14-era ClickBench values (µs since 2000-01-01).
+            426_038_400_000_000 + 12 * 3_600_000_000 + 34 * 60_000_000 + 56_789_012,
+            i64::MIN, // DT_NOBEGIN: passes through
+            i64::MAX, // DT_NOEND: passes through
+        ];
+        // Deterministic LCG sweep over the full i64 space; out-of-range
+        // values are skipped when the oracle refuses them (not storable).
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..20_000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push(x as i64);
+            // Bias half the sweep into the valid timestamp band (±~9e15 µs
+            // covers 1715-2285 AD) so most samples exercise the kernel.
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push((x as i64) % 9_000_000_000_000_000);
+        }
+        for &(name, usecs) in &units {
+            for &t in &cases {
+                match ::adt_timestamp::timestamp_trunc(name, t) {
+                    Ok(oracle) => {
+                        assert_eq!(
+                            ts_trunc_apply(t, usecs),
+                            oracle,
+                            "unit={} t={}",
+                            String::from_utf8_lossy(name),
+                            t
+                        );
+                    }
+                    Err(_) => {
+                        // Out-of-range decode: not a storable timestamp.
+                        assert!(
+                            t != 0 && t != i64::MIN && t != i64::MAX,
+                            "oracle refused an in-range probe t={t}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
