@@ -399,6 +399,10 @@ pub fn postmaster_child_launch(
 
     let child_pid = reserve_child_pid();
     let inherited = Inherited::capture();
+    // Keep the process-wide BASE snapshot current with this (postmaster)
+    // thread's store: first launch publishes the boot base, later launches
+    // republish only if the postmaster's config changed (guc::layers).
+    guc::layers::ensure_base_current();
     let guc_snapshot = guc::store::capture_nondefault_variables();
 
     let spawned = std::thread::Builder::new()

@@ -7,6 +7,7 @@
 pub mod array;
 pub mod cnum;
 pub mod enum_lookup;
+pub mod layers;
 pub mod model;
 pub mod name;
 pub mod process_config;

@@ -25,6 +25,16 @@ thread_local! {
     // session bind. A pool thread must never claim a task with a live bind
     // (cross-session GUC leak, the session-clobber P1 class).
     static SESSION_BOUND: Cell<bool> = const { Cell::new(false) };
+    // Monotonic count of mutable store borrows: the layered-snapshot cache
+    // key (guc::layers). Conservative — any with_store_mut invalidates —
+    // and off the per-query hot path (a clean statement takes no mutable
+    // borrow: AtEOXact_GUC/report fast paths gate on the hint Cells above).
+    static STORE_MUTATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// This thread's store mutation counter (see STORE_MUTATIONS).
+pub fn store_mutation_count() -> u64 {
+    STORE_MUTATIONS.get()
 }
 
 #[inline]
@@ -174,6 +184,7 @@ fn initialize_guc_options_impl(publish: impl Fn(&str) -> bool) -> PgResult<()> {
         })?;
         reg.define(var)?;
     }
+    STORE_MUTATIONS.set(STORE_MUTATIONS.get().wrapping_add(1));
     GUC_STORE.with(|c| *c.borrow_mut() = Some(reg));
 
     crate::report::set_reporting_enabled(false);
@@ -348,6 +359,7 @@ pub fn with_store<R>(f: impl FnOnce(&GucRegistry) -> R) -> Option<R> {
 }
 
 pub fn with_store_mut<R>(f: impl FnOnce(&mut GucRegistry) -> R) -> Option<R> {
+    STORE_MUTATIONS.set(STORE_MUTATIONS.get().wrapping_add(1));
     GUC_STORE.with(|c| {
         let mut guard = c.borrow_mut();
         Some(f(guard.as_mut()?))
