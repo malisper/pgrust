@@ -106,8 +106,12 @@ pub const CB_FOOTER_MAGIC: u32 = 0x4342_4654; // "CBFT"
 
 pub const RG_ROWS: usize = 65_536;
 pub const GRANULE_ROWS: usize = 8_192;
-// v7 length-stats granule slots per RG (fixed — partial RGs zero-pad).
+// v7 length-stats / zero-count granule slots per RG (fixed — partial RGs
+// zero-pad).
 pub const GRANULES_PER_RG: usize = RG_ROWS / GRANULE_ROWS;
+// v7 zero-count entry: one u32 per (rg, granule slot, column). GRANULE_ROWS
+// = 2^13 bounds every count.
+pub const CB_ZEROCNT_ENTRY_LEN: usize = 4;
 // Executor window: divides GRANULE_ROWS exactly and fits SOA_MAX_ROWS (291).
 pub const WINDOW_ROWS: usize = 256;
 pub const WINDOWS_PER_GRANULE: usize = GRANULE_ROWS / WINDOW_ROWS;
@@ -131,6 +135,9 @@ pub const RG_FLAG_CLUSTERED: u32 = 4;
 // writer). Like RG_FLAG_SUMS, needed because every field of an entry can
 // legitimately be 0.
 pub const RG_FLAG_LENSTATS: u32 = 8;
+// v7: the RG's per-granule zero/empty counts are exact (sealed by a v7+
+// writer). Like RG_FLAG_SUMS, needed because 0 is a legitimate count.
+pub const RG_FLAG_ZEROCNT: u32 = 16;
 
 // Chunk sections between the granule directory and the payload, in this
 // order. Block zone maps: ngranules x BLOCKS_PER_GRANULE x (min i64, max

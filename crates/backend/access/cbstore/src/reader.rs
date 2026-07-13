@@ -102,6 +102,19 @@ impl FooterLayout {
             0
         }
     }
+    // Byte offset (footer-relative) of the v7 zero-count section
+    // (immediately after the stitch section).
+    pub(crate) fn zerocnt_off(&self, nrgs: usize, ncols: usize, nlencols: usize, version: u32) -> usize {
+        self.stitch_off(nrgs, ncols, nlencols) + self.stitch_len(nrgs, ncols, version)
+    }
+    // Byte length of the v7 zero-count section.
+    pub(crate) fn zerocnt_len(&self, nrgs: usize, ncols: usize, version: u32) -> usize {
+        if version >= CB_VERSION_V7 {
+            nrgs * GRANULES_PER_RG * ncols * CB_ZEROCNT_ENTRY_LEN
+        } else {
+            0
+        }
+    }
 }
 
 // want_sums materializes the v4 per-RG sums (and the v7 per-granule length
@@ -146,7 +159,9 @@ pub fn read_footer_rgs(
     } else {
         0
     };
-    let body_len = lay.stitch_off(nrgs, ncols, nlencols) + lay.stitch_len(nrgs, ncols, version) + 16;
+    let body_len = lay.zerocnt_off(nrgs, ncols, nlencols, version)
+        + lay.zerocnt_len(nrgs, ncols, version)
+        + 16;
     // Bounds-gate before the allocation and read: a torn/garbage footer word
     // must produce a clean error, not a huge alloc or a read past EOF.
     if body_len as u64 > total_len - footer_off {
@@ -192,6 +207,7 @@ pub fn parse_footer(
             chunks: Vec::with_capacity(ncols),
             sums: Vec::new(),
             lenstats: Vec::new(),
+            zerocnt: Vec::new(),
         });
         off += 24;
     }
@@ -248,7 +264,7 @@ pub fn parse_footer(
     // reopen re-emit (want_sums); readers consume it lazily off the mmap
     // (Part::granule_len_stats). Entries of RGs without RG_FLAG_LENSTATS are
     // zeros and stay unmaterialized. A lazy parse must still advance past
-    // the section or the stitch section reads skewed (the sums precedent).
+    // the section or the later v7 sections read skewed (the sums precedent).
     if version >= CB_VERSION_V7 && nlencols > 0 {
         if want_sums {
             for rg in rgs.iter_mut() {
@@ -284,6 +300,24 @@ pub fn parse_footer(
             off += CB_STITCH_DIR_ENTRY_LEN;
         }
     }
+    // v7 zero-count section (after stitch); pre-v7 parts read as
+    // no-zero-counts. Parsed into FooterRg only on the writer's full
+    // (want_sums) read — the scan side reads the section lazily off the
+    // mmap (Part::granule_zerocnt).
+    if version >= CB_VERSION_V7 {
+        if want_sums {
+            for rg in rgs.iter_mut() {
+                rg.zerocnt.reserve(GRANULES_PER_RG * ncols);
+                for _ in 0..GRANULES_PER_RG * ncols {
+                    rg.zerocnt.push(get_u32(buf, off));
+                    off += CB_ZEROCNT_ENTRY_LEN;
+                }
+            }
+        } else {
+            off += nrgs * GRANULES_PER_RG * ncols * CB_ZEROCNT_ENTRY_LEN;
+        }
+    }
+    let _ = off;
     Ok((rgs, ndv, sorted, cluster_key, lenflags, stitch))
 }
 
@@ -348,6 +382,9 @@ pub struct Part {
     // NDV + the per-(RG, col) stitch-blob directory; blobs stay on disk and
     // are read through the mmap on demand (Part::stitch).
     stitch: FooterStitch,
+    // File offset of the v7 per-granule zero-count section (0 = none):
+    // like sums, read lazily through the mmap (granule_zerocnt).
+    zerocnt_off: u64,
 }
 
 impl Part {
@@ -402,6 +439,11 @@ impl Part {
                 }
             })
             .collect();
+        let zerocnt_off = if version >= CB_VERSION_V7 {
+            footer_off + lay.zerocnt_off(rgs.len(), ncols, nlencols, version) as u64
+        } else {
+            0
+        };
         Ok(Some(Part {
             map,
             rgs,
@@ -414,6 +456,7 @@ impl Part {
             lenrank,
             nlencols,
             stitch,
+            zerocnt_off,
         }))
     }
 
@@ -480,6 +523,24 @@ impl Part {
                 * CB_LENSTATS_ENTRY_LEN;
         let b = self.bytes();
         Some((get_u64(b, e), get_u32(b, e + 8), get_u32(b, e + 12)))
+    }
+
+    /// The v7 zero/empty count for (rg, granule slot, col); caller gates on
+    /// `rg_has_zerocnt` (which only a v7+ writer sets, so zerocnt_off != 0
+    /// whenever the flag is present).
+    pub fn granule_zerocnt(&self, rg: usize, g: usize, col: usize) -> u32 {
+        debug_assert!(self.rg_has_zerocnt(rg));
+        get_u32(
+            self.bytes(),
+            self.zerocnt_off as usize
+                + ((rg * GRANULES_PER_RG + g) * self.ncols + col) * CB_ZEROCNT_ENTRY_LEN,
+        )
+    }
+
+    /// The RG carries exact v7 zero/empty counts (sealed by a v7+ writer;
+    /// RGs preserved from v<=6 footers read false).
+    pub fn rg_has_zerocnt(&self, rg: usize) -> bool {
+        self.zerocnt_off != 0 && self.rgs[rg].flags & RG_FLAG_ZEROCNT != 0
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -879,7 +940,14 @@ mod tests {
             f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         }
         if version >= CB_VERSION_V7 {
+            // Union v7 tail: empty length-stats (all-zero flags above),
+            // all-zero stitch section, all-zero zero-count section.
             f.resize(f.len() + ncols * 8 + rg_rows.len() * ncols * CB_STITCH_DIR_ENTRY_LEN, 0);
+            for _ in rg_rows {
+                for _ in 0..GRANULES_PER_RG * ncols {
+                    put_u32(&mut f, 0);
+                }
+            }
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -1032,12 +1100,18 @@ mod tests {
                 put_i128(&mut f, s);
             }
         }
-        // v5 sorted flags + v6 cluster-key sections (header stamps CB_VERSION).
+        // v5 sorted flags + v6 cluster-key + v7 zero-count sections (header
+        // stamps CB_VERSION). The RGs carry no RG_FLAG_ZEROCNT — a
+        // v<=6-preserved shape — so the zero entries are never consulted.
         f.extend_from_slice(&[0u8, 0u8]);
         f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         // v7 sections: length stats are empty (no flagged columns above);
-        // stitch = 2 x u64 gndv + 2 RGs x 2 cols x 12 B directory, all zero.
+        // stitch = 2 x u64 gndv + 2 RGs x 2 cols x 12 B directory, then the
+        // zero-count body (2 RGs x GRANULES_PER_RG x 2 cols u32) — all zero.
         f.resize(f.len() + 2 * 8 + 2 * 2 * CB_STITCH_DIR_ENTRY_LEN, 0);
+        for _ in 0..2 * GRANULES_PER_RG * 2 {
+            put_u32(&mut f, 0);
+        }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);

@@ -2314,6 +2314,35 @@ fn metaagg_enabled() -> bool {
     })
 }
 
+/// Zero-count qual arm kill switch (v7 footer zero/empty counts): default ON
+/// under the metaagg arm; `PGRUST_LANE_V2_ZEROCNT=0`/`off` disarms just the
+/// qual extension (byte-identity-safe A/B — refused shapes fall to the scan
+/// drive, which answers identically).
+fn zerocnt_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_ZEROCNT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Zero-count qual transition filter: under `col <> 0` / `col = 0` a
+/// transition is footer-answerable iff it is a COUNT (rows arrives
+/// qual-adjusted: N - zeros or zeros) or a SUM/AVG-family fold over the QUAL
+/// column itself (excluded zero rows contribute exactly zero to the footer
+/// sum S; the affine addend term scales by the qual-adjusted rows — the
+/// exec_agg_meta derivation is unchanged). MIN/MAX refuse: the zone
+/// extremes include the excluded rows.
+fn meta_trans_zero_ok(
+    metas: &[::lanefold::MetaTrans],
+    zq: ::tableam::MetaZeroQual,
+) -> bool {
+    metas.iter().all(|t| match t.kind {
+        ::lanefold::MetaKind::Count => true,
+        ::lanefold::MetaKind::Min | ::lanefold::MetaKind::Max => false,
+        k => k.needs_sum() && t.col == zq.col,
+    })
+}
+
 /// Structural admission for the metadata-answer arm, evaluated once per
 /// memoized per-node choice: a BARE cbstore scan (variant Plain — no qual,
 /// no projection — and no zone quals; v1 requires literally no qual) under
@@ -2335,13 +2364,25 @@ fn meta_agg_admissible<'mcx>(
         stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::EnvOff);
         return Ok(false);
     }
-    if ::nodeagg::agg_meta_plan(agg).is_none()
-        || !::nodeseqscan::seq_scan_meta_agg_ok(ss, estate)?
-    {
+    let Some(metas) = ::nodeagg::agg_meta_plan(agg) else {
         stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaShape);
         return Ok(false);
+    };
+    // Bare arm (v1): no qual at all.
+    if ::nodeseqscan::seq_scan_meta_agg_ok(ss, estate)? {
+        return Ok(true);
     }
-    Ok(true)
+    // Zero-count qual arm (v7): the whole qual is one `col <> 0` / `col = 0`
+    // conjunct and every transition is answerable under it.
+    if zerocnt_enabled() {
+        if let Some(zq) = ::nodeseqscan::seq_scan_meta_zero_qual(ss, estate)? {
+            if meta_trans_zero_ok(metas, zq) {
+                return Ok(true);
+            }
+        }
+    }
+    stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaShape);
+    Ok(false)
 }
 
 /// Per-call runtime half of the metadata-answer arm. `Ok(Some(_))` = the
@@ -2378,8 +2419,18 @@ fn try_meta_agg_answer<'mcx>(
         metas.iter().filter(|t| t.kind.needs_sum()).map(|t| t.col).collect();
     sum_cols.sort_unstable();
     sum_cols.dedup();
-    let Some(res) = ::nodeseqscan::seq_scan_meta_agg(ss, estate, &cols, &sum_cols)? else {
-        // AM declined: parallel scan desc or an uncovered column type.
+    // Zero-count qual arm: recompute the (deterministic, plan-derived) qual
+    // the admission site accepted; None on bare-admitted nodes. The
+    // admission filter already restricted the transitions to the shapes the
+    // qual-adjusted (rows, sums) answer exactly.
+    let zq = if zerocnt_enabled() {
+        ::nodeseqscan::seq_scan_meta_zero_qual(ss, estate)?
+    } else {
+        None
+    };
+    let Some(res) = ::nodeseqscan::seq_scan_meta_agg(ss, estate, &cols, &sum_cols, zq)? else {
+        // AM declined: parallel scan desc, an uncovered column type, or a
+        // zero-count qual over a part with v<=6-preserved RGs.
         stats::tick_refused(ShapeClass::MetaAgg, RefuseReason::MetaRuntime);
         return Ok(None);
     };
@@ -2402,7 +2453,11 @@ fn try_meta_agg_answer<'mcx>(
     }
     // One OWNED tick per metadata-answered execution event.
     stats::tick_owned(ShapeClass::MetaAgg);
-    lane_trace(&format!("metaagg: footer answer, rows={}", res.rows));
+    if zq.is_some() {
+        lane_trace(&format!("metaagg: zerocnt footer answer, rows={}", res.rows));
+    } else {
+        lane_trace(&format!("metaagg: footer answer, rows={}", res.rows));
+    }
     Ok(Some(::nodeagg::exec_agg_meta(agg, estate, res.rows, &res.minmax, &res.sums)?))
 }
 

@@ -20,7 +20,9 @@ use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
 
 pub use format::ColType;
-pub use scan::{CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, ZoneCmp, ZoneQual};
+pub use scan::{
+    CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, MetaZeroQual, ZoneCmp, ZoneQual,
+};
 pub use writer::{coltypes_of, finish_bulk_insert, multi_insert, tuple_insert};
 
 pub fn rel_main_path(rel: &::types_rel::Relation<'_>) -> String {
