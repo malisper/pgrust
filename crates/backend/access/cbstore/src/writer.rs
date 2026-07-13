@@ -254,6 +254,11 @@ pub struct FooterRg {
     // Per column i128 sums; meaningful only when flags & RG_FLAG_SUMS
     // (empty on RGs parsed from v<=3 footers).
     pub sums: Vec<i128>,
+    // v7 per-granule zero/empty counts, GRANULES_PER_RG x ncols
+    // (granule-major, then column ascending); meaningful only when
+    // flags & RG_FLAG_ZEROCNT (empty on RGs parsed from v<=6 footers —
+    // finish() then emits zeros without the flag).
+    pub zerocnt: Vec<u32>,
 }
 
 thread_local! {
@@ -522,6 +527,7 @@ impl CbWriter {
         let ngranules = nrows.div_ceil(GRANULE_ROWS) as u32;
         let flags = (if self.frozen { RG_FLAG_FROZEN } else { 0 })
             | RG_FLAG_SUMS
+            | RG_FLAG_ZEROCNT
             | (if self.draining_clustered { RG_FLAG_CLUSTERED } else { 0 });
         let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
         // rg_header placeholder; length patched at the end.
@@ -552,6 +558,26 @@ impl CbWriter {
             });
             let _ = c;
         }
+        // v7 per-granule zero/empty counts, off the same buffered values as
+        // the sums/minmax pass (no extra decode; ints count value == 0, text
+        // counts the empty string). Granule slots past the RG's last row
+        // stay zero (partial RGs zero-pad).
+        let mut zerocnt = vec![0u32; GRANULES_PER_RG * self.ncols];
+        for (c, b) in builders.iter().enumerate() {
+            for g in 0..nrows.div_ceil(GRANULE_ROWS) {
+                let lo = g * GRANULE_ROWS;
+                let hi = (lo + GRANULE_ROWS).min(nrows);
+                let zc = match b {
+                    ColBuilder::Int(ib) => {
+                        ib.vals[lo..hi].iter().filter(|&&v| v == 0).count()
+                    }
+                    ColBuilder::Text(tb) => {
+                        tb.offs[lo..hi].iter().filter(|&&(_, len)| len == 0).count()
+                    }
+                };
+                zerocnt[g * self.ncols + c] = zc as u32;
+            }
+        }
         // Patch total RG length.
         let total = align64(body.len() as u64);
         body[16..24].copy_from_slice(&total.to_le_bytes());
@@ -567,6 +593,7 @@ impl CbWriter {
             flags,
             chunks: chunk_meta,
             sums,
+            zerocnt,
         });
         self.reset_builders();
         Ok(())
@@ -635,6 +662,15 @@ impl CbWriter {
         for slot in 0..CB_CLUSTER_KEY_MAX_COLS {
             let c = self.opts.cluster_key.get(slot).map(|&(c, _)| c).unwrap_or(0);
             f.extend_from_slice(&c.to_le_bytes());
+        }
+        // v7 zero-count section; RGs preserved from a v<=6 footer write
+        // zeros and lack RG_FLAG_ZEROCNT.
+        for rg in &self.rgs {
+            for g in 0..GRANULES_PER_RG {
+                for c in 0..self.ncols {
+                    put_u32(&mut f, rg.zerocnt.get(g * self.ncols + c).copied().unwrap_or(0));
+                }
+            }
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -1310,6 +1346,46 @@ mod sorted_flag_tests {
             let vals = [Datum::from_i64(v), text_datum(texts[i], &mut keep)];
             w.append_row(&vals, &[false, false]).unwrap();
         }
+    }
+
+    #[test]
+    fn zerocnt_v7_roundtrip_partial_granule_and_reopen() {
+        let path = tmp("zc7");
+        let mut w = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        // Partial second granule; int zeros every 4th row, empty text every
+        // 3rd — exact per-granule expectations below.
+        let n = GRANULE_ROWS + 100;
+        let ints: Vec<i64> = (0..n as i64).map(|i| if i % 4 == 0 { 0 } else { i }).collect();
+        let texts: Vec<Vec<u8>> = (0..n)
+            .map(|i| if i % 3 == 0 { Vec::new() } else { format!("t{i}").into_bytes() })
+            .collect();
+        let trefs: Vec<&[u8]> = texts.iter().map(|t| t.as_slice()).collect();
+        put_rows(&mut w, &ints, &trefs);
+        w.finish().unwrap();
+        let expect = |lo: usize, hi: usize, m: usize| ((lo..hi).filter(|i| i % m == 0).count()) as u32;
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert!(part.rg_has_zerocnt(0));
+        assert_eq!(part.granule_zerocnt(0, 0, 0), expect(0, GRANULE_ROWS, 4));
+        assert_eq!(part.granule_zerocnt(0, 0, 1), expect(0, GRANULE_ROWS, 3));
+        assert_eq!(part.granule_zerocnt(0, 1, 0), expect(GRANULE_ROWS, n, 4));
+        assert_eq!(part.granule_zerocnt(0, 1, 1), expect(GRANULE_ROWS, n, 3));
+        // Slots past the RG's last granule stay zero.
+        assert_eq!(part.granule_zerocnt(0, 2, 0), 0);
+        drop(part);
+
+        // Reopen-append: the preserved RG keeps its exact counts and flag
+        // (read back through the writer's full footer parse), and the new
+        // RG gets its own.
+        let mut w2 = writer_at(&path, vec![ColType::I64, ColType::Text]);
+        put_rows(&mut w2, &[0, 5], &[b"", b"x"]);
+        w2.finish().unwrap();
+        let part = crate::reader::Part::open(&path, 2).unwrap().unwrap();
+        assert!(part.rg_has_zerocnt(0) && part.rg_has_zerocnt(1));
+        assert_eq!(part.granule_zerocnt(0, 0, 0), expect(0, GRANULE_ROWS, 4));
+        assert_eq!(part.granule_zerocnt(0, 1, 1), expect(GRANULE_ROWS, n, 3));
+        assert_eq!(part.granule_zerocnt(1, 0, 0), 1);
+        assert_eq!(part.granule_zerocnt(1, 0, 1), 1);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

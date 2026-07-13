@@ -43,7 +43,24 @@ pub const CB_VERSION_V5: u32 = 5;
 //    cluster key at write time (per-RG sortedness; whole-part order is the
 //    v5 sorted flags' business).
 pub const CB_VERSION_V6: u32 = 6;
-pub const CB_VERSION: u32 = 6;
+// v7 (this lane's section: per-granule zero/empty-value counts; the train-8
+// format-merge protocol in notes/lenfooter-lane.md applies — ONE merged
+// version carries every lane's additive section, and whichever lane lands
+// second renumbers its constant; nothing below keys on the literal 7):
+//  - After the v6 cluster-key section the footer appends the zero-count
+//    body: nrgs x GRANULES_PER_RG x ncols u32 (LE) entries, rg-major, then
+//    granule slot, then column ascending. An entry counts the granule's
+//    rows whose value is the column class's zero: int/date/timestamp
+//    chunks count stored value == 0; text chunks count octet_length == 0
+//    (the empty string; cbstore stores no NULLs). Granule slots past an
+//    RG's last row are zero. Every column gets an entry (no prelude flag
+//    bytes needed — the section length is derivable from nrgs/ncols
+//    alone, so read_footer_rgs sizes its body read unchanged).
+//  - Validity is per-RG via RG_FLAG_ZEROCNT (0 is a legitimate count, the
+//    RG_FLAG_SUMS precedent): RGs preserved from a v<=6 footer write zeros
+//    and lack the flag. v<=6 parts read as no-zero-counts entirely.
+pub const CB_VERSION_V7: u32 = 7;
+pub const CB_VERSION: u32 = 7;
 pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;
 pub const CB_CLUSTER_KEY_SECTION_LEN: usize = 2 + CB_CLUSTER_KEY_MAX_COLS * 2;
 pub const CB_HEADER_LEN: u64 = 64;
@@ -55,6 +72,11 @@ pub const CB_FOOTER_MAGIC: u32 = 0x4342_4654; // "CBFT"
 
 pub const RG_ROWS: usize = 65_536;
 pub const GRANULE_ROWS: usize = 8_192;
+// v7 zero-count granule slots per RG (fixed — partial RGs zero-pad).
+pub const GRANULES_PER_RG: usize = RG_ROWS / GRANULE_ROWS;
+// v7 zero-count entry: one u32 per (rg, granule slot, column). GRANULE_ROWS
+// = 2^13 bounds every count.
+pub const CB_ZEROCNT_ENTRY_LEN: usize = 4;
 // Executor window: divides GRANULE_ROWS exactly and fits SOA_MAX_ROWS (291).
 pub const WINDOW_ROWS: usize = 256;
 pub const WINDOWS_PER_GRANULE: usize = GRANULE_ROWS / WINDOW_ROWS;
@@ -74,6 +96,11 @@ pub const RG_FLAG_SUMS: u32 = 2;
 // (footer cluster-key section) using the writer's column-class order
 // (ints/date/timestamp: signed value; text: payload memcmp).
 pub const RG_FLAG_CLUSTERED: u32 = 4;
+// v7: the RG's per-granule zero/empty counts are exact (sealed by a v7+
+// writer). Like RG_FLAG_SUMS, needed because 0 is a legitimate count.
+// Bit 16, not 8: lane-v2-lenfooter's concurrent v7 section owns bit 8
+// (RG_FLAG_LENSTATS) — the train-8 merge unions both without renumbering.
+pub const RG_FLAG_ZEROCNT: u32 = 16;
 
 // Chunk sections between the granule directory and the payload, in this
 // order. Block zone maps: ngranules x BLOCKS_PER_GRANULE x (min i64, max

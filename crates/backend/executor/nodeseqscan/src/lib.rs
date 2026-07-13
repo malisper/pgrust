@@ -97,6 +97,12 @@ struct CbScanInfo {
     /// (advisory pruning only; the executor still evaluates the full qual
     /// on surviving rows).
     zone: Vec<::tableam::ZoneQual>,
+    /// v7 zero-count meta qual: Some iff the scan qual is EXACTLY one
+    /// conjunct and it lowers to `col <> 0` / `col = 0` in the stored
+    /// domain (cb_zone_conjunct's int/date/timestamp compare families).
+    /// Unlike `zone`, this is a SEMANTIC recognition — the metaagg arm
+    /// answers the whole node from it, so it must equal the full qual.
+    zero_qual: Option<::tableam::MetaZeroQual>,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -607,17 +613,46 @@ pub fn seq_scan_meta_agg_ok<'mcx>(
     ))
 }
 
+/// v7 zero-count meta-qual admission (the metaagg arm's qual extension):
+/// the scan is a qual-ONLY cbstore scan (variant WithQual — no projection)
+/// whose ENTIRE qual is the recognized `col <> 0` / `col = 0` conjunct
+/// (cb_scan_info's semantic single-conjunct recognition). Opens the scan
+/// desc; returns the qual for admission + the runtime meta call.
+pub fn seq_scan_meta_zero_qual<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<::tableam::MetaZeroQual>> {
+    let Some(zq) = node.cb_scan.as_deref().and_then(|cb| cb.zero_qual) else {
+        return Ok(None);
+    };
+    if node.variant != SeqScanVariant::WithQual {
+        return Ok(None);
+    }
+    node.ensure_scandesc(estate)?;
+    if !::tableam::table_scan_supports_meta_count(node.ss.ss_currentScanDesc.as_ref().unwrap())
+    {
+        return Ok(None);
+    }
+    Ok(Some(zq))
+}
+
 /// Metadata MIN/MAX/COUNT/SUM one-shot answer; None = the scan drive owns it
-/// (parallel scan, uncovered column type, or a heap AM). Consumes no scan
-/// position.
+/// (parallel scan, uncovered column type, a v<=6 part under a zero-count
+/// qual, or a heap AM). Consumes no scan position.
 pub fn seq_scan_meta_agg<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     cols: &[u16],
     sum_cols: &[u16],
+    zq: Option<::tableam::MetaZeroQual>,
 ) -> PgResult<Option<::tableam::MetaAggScan>> {
     node.ensure_scandesc(estate)?;
-    ::tableam::table_scan_meta_agg(node.ss.ss_currentScanDesc.as_ref().unwrap(), cols, sum_cols)
+    ::tableam::table_scan_meta_agg(
+        node.ss.ss_currentScanDesc.as_ref().unwrap(),
+        cols,
+        sum_cols,
+        zq,
+    )
 }
 
 /// Arm SoA batch deform of the `prefix`-column prefix for the fused drive;
@@ -2835,12 +2870,28 @@ fn cb_scan_info<'mcx>(
     }
 
     let mut zone: Vec<::tableam::ZoneQual> = Vec::new();
+    let mut nquals = 0usize;
     for n in node.scan.plan.qual.iter() {
+        nquals += 1;
         if let Some((attnum, op, val)) = cb_zone_conjunct(n, scanrelid) {
             zone.push(::tableam::ZoneQual { attnum, op, val });
         }
     }
-    Ok(CbScanInfo { needed: cx.needed, zone })
+    // v7 zero-count meta qual: the WHOLE qual is one conjunct and that
+    // conjunct lowered to an exact stored-domain zero equality test.
+    let zero_qual = match (nquals, zone.as_slice()) {
+        (1, [q]) if q.val == 0 => match q.op {
+            ::tableam::ZoneCmp::Ne => {
+                Some(::tableam::MetaZeroQual { col: q.attnum - 1, keep_nonzero: true })
+            }
+            ::tableam::ZoneCmp::Eq => {
+                Some(::tableam::MetaZeroQual { col: q.attnum - 1, keep_nonzero: false })
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok(CbScanInfo { needed: cx.needed, zone, zero_qual })
 }
 
 // Zone-mappable scan-qual conjunct: a top-level `Var CMP Const` OpExpr of
