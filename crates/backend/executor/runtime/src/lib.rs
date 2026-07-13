@@ -66,7 +66,10 @@ pub use rg::{
     CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
 pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
-pub use sink::{sink_tasksets, ParallelSink, SinkProbe, SinkTaskSets};
+pub use sink::{
+    sealed_sink_tasksets, sink_tasksets, ParallelSink, SealedParallelSink, SealedSinkTaskSets,
+    SinkProbe, SinkTaskSets,
+};
 pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_T_MIN_NS, EWMA_ALPHA};
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
@@ -317,6 +320,10 @@ impl Runtime {
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                // WFIN marker channel: the drive is over — flush any
+                // participation this driver still holds (a worker whose last
+                // task did not observe exhaustion emits here).
+                local.wfin_flush_all();
                 return outcome;
             }
             let epoch = self.park_epoch();

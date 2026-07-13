@@ -608,9 +608,9 @@ fn census_drain<'mcx>(
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
-struct CbstoreGranuleSource {
+pub(super) struct CbstoreGranuleSource {
     /// Row-group start prefix sums (len nrgs+1; last = total).
-    starts: Vec<u64>,
+    pub(super) starts: Vec<u64>,
 }
 
 impl runtime::MorselSource for CbstoreGranuleSource {
@@ -691,7 +691,7 @@ impl<'mcx> ::nodes_core::NodeWalker<'mcx> for SafetyCx {
     }
 }
 
-fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
+pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
     let mut cx = SafetyCx { safe: true };
     for n in nodes {
         use ::nodes_core::NodeWalker as _;
@@ -709,7 +709,7 @@ fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResul
 
 /// Env floor for engagement (granules): below it the serial fold wins
 /// outright and launching helpers is pure overhead.
-fn min_granules() -> u64 {
+pub(super) fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_SCAN_MIN_GRANULES")
