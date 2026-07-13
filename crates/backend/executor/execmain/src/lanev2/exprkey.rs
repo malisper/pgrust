@@ -407,58 +407,55 @@ pub(super) fn decide_exprkey<'mcx>(
         if xk.n as usize != natts || xk.key_out != key_out {
             return refused();
         }
+        // The computed chain's result type must be the grouping key's
+        // column type (defense in depth — the tupledesc is plan authority).
+        let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
+            [key_out as usize]
+            .atttypid;
         // Ts-trunc class first (Q43 class): `date_trunc(const, ts)` for
         // uniform-microsecond units — a non-erroring arithmetic key lane,
         // no fmgr, no dict requirement (any staged store).
-        let trunc_keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
-            [key_out as usize]
-            .atttypid;
-        if let Some(unit) = ts_trunc_unit_usecs(&xk, trunc_keytype, estate.es_query_cxt) {
+        if let Some(unit) = ts_trunc_unit_usecs(&xk, keytype, estate.es_query_cxt) {
             for j in 0..natts {
                 map.push(xk.cols[j]);
             }
             ExprKeyKind::TsTrunc { input_col: xk.input_col, unit }
         } else {
-        // Dict class: cbstore text column, IMMUTABLE internal builtins
-        // (dicteval's fail-closed compile owns the catalog gate).
-        if !::nodeseqscan::seq_scan_is_cbstore(ss)
-            || !matches!(xk.input_type, TEXTOID | VARCHAROID)
-        {
-            return refused();
-        }
-        let mut calls = Vec::with_capacity(xk.ncalls as usize);
-        for c in &xk.calls[..xk.ncalls as usize] {
-            let Some(rettype) = ::laneexec::func_catalog_rettype(c.fn_oid) else {
-                return refused();
-            };
-            calls.push(::laneexec::DictCallSpec {
-                fn_oid: c.fn_oid,
-                collation: c.collation,
-                var_argno: c.var_argno as u16,
-                args: c.args[..c.nargs as usize].to_vec(),
-                rettype,
-            });
-        }
-        // The chain's result type must be the grouping key's column type
-        // (defense in depth — the tupledesc is plan authority).
-        let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
-            [key_out as usize]
-            .atttypid;
-        if calls.last().is_some_and(|c| c.rettype != keytype) {
-            return refused();
-        }
-        let spec = ::laneexec::DictExprSpec { col: xk.input_col, calls };
-        let prog = match ::laneexec::dicteval_compile_value(&spec) {
-            Ok(p) => p,
-            Err(reason) => {
-                ::laneexec::log_dicteval_refused(reason);
+            // Dict class: cbstore text column, IMMUTABLE internal builtins
+            // (dicteval's fail-closed compile owns the catalog gate).
+            if !::nodeseqscan::seq_scan_is_cbstore(ss)
+                || !matches!(xk.input_type, TEXTOID | VARCHAROID)
+            {
                 return refused();
             }
-        };
-        for j in 0..natts {
-            map.push(xk.cols[j]);
-        }
-        ExprKeyKind::Dict { input_col: xk.input_col, prog, gather_input: false }
+            let mut calls = Vec::with_capacity(xk.ncalls as usize);
+            for c in &xk.calls[..xk.ncalls as usize] {
+                let Some(rettype) = ::laneexec::func_catalog_rettype(c.fn_oid) else {
+                    return refused();
+                };
+                calls.push(::laneexec::DictCallSpec {
+                    fn_oid: c.fn_oid,
+                    collation: c.collation,
+                    var_argno: c.var_argno as u16,
+                    args: c.args[..c.nargs as usize].to_vec(),
+                    rettype,
+                });
+            }
+            if calls.last().is_some_and(|c| c.rettype != keytype) {
+                return refused();
+            }
+            let spec = ::laneexec::DictExprSpec { col: xk.input_col, calls };
+            let prog = match ::laneexec::dicteval_compile_value(&spec) {
+                Ok(p) => p,
+                Err(reason) => {
+                    ::laneexec::log_dicteval_refused(reason);
+                    return refused();
+                }
+            };
+            for j in 0..natts {
+                map.push(xk.cols[j]);
+            }
+            ExprKeyKind::Dict { input_col: xk.input_col, prog, gather_input: false }
         }
     } else {
         return refused();
