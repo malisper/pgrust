@@ -753,44 +753,57 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
     let Some(rt) = runtime::global() else { return Ok(None) };
 
     // --- Plan shape gates (fail-closed).
+    let refuse = |why: &str| {
+        lane_trace(&format!("runtime-agg: refused ({why})"));
+    };
     if !::nodeagg::sink::agg_sink_plan_shape_ok(agg) {
+        refuse("plan shape");
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
+        refuse("instrumented/EPQ");
         return Ok(None);
     }
     if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        refuse("scan not fusible cbstore");
         return Ok(None);
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the
     // next cars); scan projection means the key is computed — refuse.
     if ss.ss.ps_ProjInfo.is_some() {
+        refuse("projected scan (exprkey car)");
         return Ok(None);
     }
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
+        refuse("fold plan guarded/varlena/residual");
         return Ok(None);
     }
     // The staging arm (idempotent — the serial fold feed re-arms the same
     // shape on fallback) + the K2 single-key decide.
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
     if super::scan_k2_shape(agg, ss, estate).is_none() {
+        refuse("K2 shape");
         return Ok(None);
     }
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
+        refuse("dict-group staging");
         return Ok(None);
     }
     let Some(width) = ::nodeagg::sink::agg_sink_key_width(agg) else {
+        refuse("key width");
         return Ok(None);
     };
     // Combine + identity-emit qualification (fail-closed; catalog access).
     let Some(combines) = sink_resolve_combines(agg)? else {
+        refuse("combine whitelist");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(None);
     };
     let key_spec = SinkKeySpec::Single { width };
     let Some(emit) = sink_build_emit_plan(agg, &key_spec) else {
+        refuse("identity emit");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(None);
     };
@@ -802,13 +815,16 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
     };
     // --- Session/binder gates (the M1 set, verbatim).
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refuse("in parallel mode");
         return Ok(None);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refuse("extern params");
         return Ok(None);
     }
     let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refuse("exec params");
         return Ok(None);
     }
     if !estate
@@ -824,13 +840,18 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
+        refuse("binder policy");
         return Ok(None);
     }
     // Worker plan root: the Agg subtree's Node in the leader plan tree.
     let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(agg_node) = find_agg_node(root, agg.plan) else { return Ok(None) };
+    let Some(agg_node) = find_agg_node(root, agg.plan) else {
+        refuse("agg node not in plan tree");
+        return Ok(None);
+    };
     // The Agg's scan child must be the SeqScan (no intermediate nodes).
     if agg.plan.plan.lefttree.map(Node::node_tag) != Some(NodeTag::T_SeqScan) {
+        refuse("scan child shape");
         return Ok(None);
     }
 
@@ -841,6 +862,7 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
         return Ok(None);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
+        refuse("granule floor");
         return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
