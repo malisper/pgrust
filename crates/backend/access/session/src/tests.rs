@@ -212,7 +212,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      Mutex) so each helper thread injects independently.
     //   2. parallel/tests/substrate_e2e.rs TEST_RECORD_REGISTRY — pure test
     //      harness state, not product session state.
-    assert_eq!(count_tree(crates), 463, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 464, re-pinned at m0-integration (the M0 lane merge): lane C's Waiter
+    // adds the ONE new source this tree carries —
+    //   3. storage/ipc/waiter/src/lib.rs CURRENT (global::WaiterGuard) — the
+    //      per-THREAD parking slot of the structured wait primitive
+    //      (parallelism-redesign §2.6). Deliberately non-session TLS: the
+    //      slot belongs to the OS thread for its lifetime (poison-on-owner-
+    //      death frees it at thread exit) and carries no session or task
+    //      state; task-identity hygiene is the waker-token reissue at the
+    //      wretain warm-claim boundary (reissue_current_token via the rekey
+    //      seam), NOT envelope capture/restore — an envelope must never
+    //      touch another task's parking slot, and a parked thread's slot
+    //      routes wakes correctly across session rebinds by construction
+    //      (handles go stale by token, not by TLS swap).
+    assert_eq!(count_tree(crates), 464, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
