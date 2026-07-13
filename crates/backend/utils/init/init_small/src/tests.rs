@@ -287,7 +287,12 @@ mod wretain_state {
         // Next claim is warm.
         wretain::begin_task(true);
         assert!(wretain::warm_claim());
+        wretain::refuse_park();
+        assert!(!wretain::candidate());
+        assert!(!wretain::warm_claim());
+        assert!(!wretain::parking());
 
+        wretain::begin_task(true);
         // Partial park (one arm missed): not parked; identity marks stay for
         // the release path (which ends with clear_identity).
         wretain::request_park(4);

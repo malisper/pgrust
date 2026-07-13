@@ -615,6 +615,10 @@ thread_local! {
         const { core::cell::Cell::new(types_resowner::ResourceOwner::NULL) };
 }
 
+pub fn ResourceOwnerBoundaryIssue() -> Option<&'static str> {
+    resowner::ResourceOwnerStateIssueAllowing(POOLED_TOP_OWNER.get())
+}
+
 pub(crate) fn AtStart_ResourceOwner(xp: XsPtr) -> PgResult<()> {
     xp.with(|s| {
         debug_assert!(!s.current().has_resource_owner);
