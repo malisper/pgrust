@@ -212,6 +212,15 @@ impl ProbeKernel {
                 (449, 63) => return ProbeKernel::Int2 { att },
                 (450, 65) => return ProbeKernel::Int4 { att },
                 (949, 467) => return ProbeKernel::Int8 { att },
+                // timestamp_hash / timestamp_eq | timestamptz_eq (i64
+                // microseconds; both families share the representation and
+                // the hash proc). timestamp_hash IS hashint8 — the same
+                // int64 fold + hash_bytes_uint32 (adt_timestamp
+                // fc_timestamp_hash vs hashint8_fold below) — and the eq
+                // pair is plain i64 equality, so the Int8 kernel is
+                // bit-identical to the fmgr pair (`group_key_kind`'s Int{8}
+                // classification of 2039/2052|1152 is the precedent).
+                (2039, 2052) | (2039, 1152) => return ProbeKernel::Int8 { att },
                 // hashtext / texteq (text and varchar keys), raw-bytes
                 // collations only. A determinism-probe error falls back to
                 // Expr, whose per-row program raises C's error at C's row.
