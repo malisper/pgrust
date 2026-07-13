@@ -4410,20 +4410,26 @@ fn sort_feed_if_needed<'mcx>(
             // winner-only gather; `None`/demote = the legacy wide feed below,
             // unchanged. The narrowed-comparator arm never composes (it
             // refused bounded sorts; refsort requires one).
-            let refsort =
-                if narrow.is_none() { refsort_arm(state, ss, &outer_desc) } else { None };
+            //
+            // Composition ruling (train-10): rule-2 rowref selection owns the
+            // relaxed default — its (key, rowref) bounded heap is selection-
+            // exact with NO demote, while the refsort narrow sort resolves
+            // full-key ties heap-arbitrarily and only has the tracked demote
+            // ladder (a dense boundary tie would re-feed the whole scan: the
+            // Q25@100M cliff class fix-100m-engagement retired). Refsort still
+            // owns adaptive-off and tracked feeds (its ratified e2e arms).
+            // Follow-up (landing note): extend the narrow comparator with the
+            // ref column to reclaim refsort under the relaxed default.
+            let refsort = if narrow.is_none() && tie != TieMode::Rowref {
+                refsort_arm(state, ss, &outer_desc)
+            } else {
+                None
+            };
             let mut fed = false;
             if let Some(spec) = &refsort {
                 lane_trace("refsort armed (bounded sort late materialization)");
                 if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
                     fed = true;
-                    // The refsort feed arms its own boundary-tie tracking on
-                    // the narrow (key, ref) sort — rule-2 rowref selection
-                    // does not apply there; route the post-feed ambiguity
-                    // check through the tracked ladder.
-                    if tie == TieMode::Rowref {
-                        tie = TieMode::Track;
-                    }
                 } else {
                     // Demoted before any output escaped: sticky-refuse the
                     // node, drop the narrow sort + winner buffer, disarm any
