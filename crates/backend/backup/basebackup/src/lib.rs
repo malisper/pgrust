@@ -686,8 +686,9 @@ fn perform_base_backup<'mcx>(
             // Terminate the tarfile (includewal is refused, so always here).
             zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
             bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
+            // tablespace_num is advanced by the progress sink's end_archive
+            // (basebackup_progress.c:139), which is always in the chain.
             bbsink_end_archive(sink, state)?;
-            state.tablespace_num += 1;
         }
 
         sink_support::basebackup_progress_wait_wal_archive(state);
