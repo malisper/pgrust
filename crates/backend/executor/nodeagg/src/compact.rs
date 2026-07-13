@@ -172,6 +172,28 @@ fn compact_split_divisor(aggsplit: ::types_pathnodes::AggSplit) -> Option<u64> {
     None
 }
 
+/// Spill-eligibility estimate at the compact table's HALF MARGIN, exported
+/// for feeds whose batching collapses aggcontext allocation sequences (the
+/// code-histogram build's str tie-copies, lane-v2-codehist): such a feed is
+/// output-byte-identical exactly while the hash build never spills, so it
+/// must refuse spill-eligible estimates the same way the compact table does.
+/// Conservative: false also for non-simple aggsplit shapes the divisor
+/// refuses.
+pub fn agg_hash_spill_unlikely(node: &mut AggStateData<'_>) -> bool {
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return false;
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    let Some(ph) = node.perhash.as_mut() else {
+        return false;
+    };
+    let additionalsize = ph.hashtable.additionalsize();
+    // Entry (8 B at <=0.5 fill -> 16), key word, states, transvalue slack —
+    // the compact arm's exact formula.
+    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
+    numgroups <= ph.hash_ngroups_limit / 2 && est_bytes <= ph.hash_mem_limit as u64 / 2
+}
+
 /// Decide + arm the compact table for this build. Caller (the lane's scan-K2
 /// feed) has already admitted the K2 shape; this adds the compact-specific
 /// gates (module doc). Idempotent per build: re-arming an armed node keeps

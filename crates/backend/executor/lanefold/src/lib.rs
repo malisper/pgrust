@@ -2330,3 +2330,174 @@ pub unsafe fn fold_rows_grouped_mm(
     }
     Ok(())
 }
+
+// ===========================================================================
+// Code-histogram grouped build (lane-v2-codehist): for shapes where ONE
+// dict-coded column feeds the group key AND every admitted transition, the
+// feed counts selected rows per (epoch, code) and advances each
+// (group, code) ONCE with multiplicity n instead of once per row.
+// Multiplicity legality per kind (vs n sequential per-row transitions):
+//   count(*)/count(col):   += n            (dict values are non-null — the
+//                                           feed's contract — so strict
+//                                           count(col) counts every row)
+//   sum/avg int lanes:     sum += n*v mod 2^64 — bit-equal to n wrapping
+//                          adds of the int4-proven per-row term v
+//   int8 avg/sum (i128):   n += n, sum_x += n*(v as i128) — n sequential
+//                          i128 adds cannot hit an intermediate the product
+//                          form misses (|v| < 2^63, n < 2^32)
+//   MIN/MAX (int + str):   idempotent under repetition on the VALUE; the
+//                          str kinds' last-tied-wins re-COPIES per tied row
+//                          in the per-row path, so the single advance
+//                          COLLAPSES aggcontext allocations — the feed must
+//                          therefore refuse spill-eligible builds
+//                          (agg_hash_spill_unlikely), where the allocation
+//                          sequence could steer spill decisions
+//   bit_and/bit_or:        idempotent (v OP v == v)
+// Everything else refuses at plan_code_hostable.
+// ===========================================================================
+
+/// Code-hostable plan shape: no residual transitions, no integer guard
+/// intervals, and every transition either reads no column (`CountStar`) or
+/// reads ONE common column with a multiplicity-legal kind (table above).
+/// Returns that common column (plan space; the caller maps it to the scan
+/// column and requires it to BE the dict key input). Plans of pure
+/// `CountStar` return None — nothing code-valued to host.
+pub fn plan_code_hostable(plan: &LanePlan<'_>) -> Option<u16> {
+    if !plan.resid.is_empty() || !plan.guards.is_empty() {
+        return None;
+    }
+    let mut col: Option<u16> = None;
+    for t in plan.trans.iter() {
+        if t.kind == LaneKind::CountStar {
+            continue;
+        }
+        match t.kind {
+            LaneKind::CountAny
+            | LaneKind::Sum
+            | LaneKind::AvgAccum
+            | LaneKind::Int128AvgAccum
+            | LaneKind::Min
+            | LaneKind::Max
+            | LaneKind::StrMin
+            | LaneKind::StrMax
+            | LaneKind::BitAnd
+            | LaneKind::BitOr => {}
+            _ => return None,
+        }
+        match col {
+            None => col = Some(t.col),
+            Some(c) if c == t.col => {}
+            Some(_) => return None,
+        }
+    }
+    col
+}
+
+/// Per-code data proof — the row-domain `check_guards` vguard/uguard checks
+/// applied to ONE dict value (values of selected rows ⊆ touched dict
+/// entries, so per-touched-code proofs cover exactly the selected value
+/// set). False = the feed must route the batch through the per-row program,
+/// which re-proves row-domain and demotes identically.
+///
+/// # Safety
+/// `d` is readable at its varlena header byte (a staged window's dict entry).
+pub unsafe fn datum_code_guards_ok(plan: &LanePlan<'_>, d: Datum) -> bool {
+    if !plan.vguards.is_empty() {
+        let p = d.as_usize() as *const u8;
+        // SAFETY: caller contract (header byte readable).
+        let inline = unsafe {
+            (::types_tuple::varatt::varatt_is_1b(p) && !::types_tuple::varatt::varatt_is_1b_e(p))
+                || ::types_tuple::varatt::varatt_is_4b_u(p)
+        };
+        if !inline {
+            return false;
+        }
+        if !plan.uguards.is_empty() {
+            // SAFETY: inline form proven above.
+            let s = unsafe { str_payload(d) };
+            if core::str::from_utf8(s).is_err() || s.contains(&0) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Per-code transition inputs, computed ONCE per (epoch, code) at first
+/// touch while the window's dict datum is valid: `out[ti]` = the transformed
+/// integer lane value for int-valued kinds (undefined/0 for count and str
+/// kinds). Pointer-free — safe to hold across windows for the epoch flush.
+///
+/// # Safety
+/// `d` passed `datum_code_guards_ok` for this plan (inline varlena; UTF-8
+/// proven when a chars-width lane reads it).
+pub unsafe fn code_trans_vals(plan: &LanePlan<'_>, d: Datum, out: &mut Vec<i64>) {
+    out.clear();
+    for t in plan.trans.iter() {
+        let v = match t.kind {
+            LaneKind::Sum
+            | LaneKind::AvgAccum
+            | LaneKind::Int128AvgAccum
+            | LaneKind::Min
+            | LaneKind::Max
+            | LaneKind::BitAnd
+            | LaneKind::BitOr => {
+                let one = [d];
+                xform(t, lane_value(&one, t.width, 0))
+            }
+            _ => 0,
+        };
+        out.push(v);
+    }
+}
+
+/// Advance every transition of `plan` for ONE (group, code) with
+/// multiplicity `n` (legality table in the section doc). `vals` is this
+/// code's `code_trans_vals`; `strd` is the code's varlena image (the feed's
+/// pointer-free scratch copy — byte-identical to the dict entry, so
+/// `agg_datum_copy` of it is byte-identical to a per-row copy).
+///
+/// # Safety
+/// As `fold_rows_grouped` for `pergroup_base`/`aggcxt`; `strd` is a live
+/// inline varlena when the plan carries str kinds; `n >= 1`.
+pub unsafe fn fold_code_group(
+    plan: &LanePlan<'_>,
+    vals: &[i64],
+    strd: Datum,
+    n: i64,
+    pergroup_base: NonNull<AggPerGroup>,
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
+    debug_assert!(n >= 1 && vals.len() == plan.trans.len());
+    for (ti, t) in plan.trans.iter().enumerate() {
+        // SAFETY: transno < pergroup length (caller contract).
+        let pg = unsafe { &mut *pergroup_base.as_ptr().add(t.transno as usize) };
+        match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => count_apply(pg, n),
+            LaneKind::Sum => sum_apply(pg, (n).wrapping_mul(vals[ti])),
+            LaneKind::AvgAccum => avg_apply(pg, n, (n).wrapping_mul(vals[ti])),
+            LaneKind::Int128AvgAccum => {
+                let st = int128_state(pg, aggcxt)?;
+                // SAFETY: aggcontext-lived state (int128_state / the per-row
+                // transfn chain); sole reference here.
+                unsafe {
+                    (*st).n += n;
+                    (*st).sum_x += vals[ti] as i128 * n as i128;
+                }
+            }
+            LaneKind::Min | LaneKind::Max => {
+                minmax_advance(t, pg, vals[ti], t.kind == LaneKind::Max);
+            }
+            LaneKind::BitAnd | LaneKind::BitOr => {
+                bit_advance(t, pg, vals[ti], t.kind == LaneKind::BitAnd);
+            }
+            LaneKind::StrMin | LaneKind::StrMax => {
+                // SAFETY: live inline varlena scratch image + live pergroup
+                // and aggcxt (caller contract).
+                unsafe { str_advance(t, pg, strd, aggcxt)? };
+            }
+            _ => unreachable!("plan_code_hostable admitted an unhostable kind"),
+        }
+    }
+    Ok(())
+}
