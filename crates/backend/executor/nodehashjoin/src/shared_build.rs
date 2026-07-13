@@ -983,11 +983,13 @@ mod tests {
 
     #[test]
     fn budget_crossing_refuses_at_seal() {
-        // Fits during accept, crossed by the bucket array at SEAL.
-        let budget = JoinBudget::new(CHUNK_MIN_WORDS * 8 + 16 * 1024);
+        // Fits during accept (one 64KB chunk + 700 ref-words ≈ 71.1KB
+        // against a 72KB limit), crossed by the 1024-bucket array (8KB)
+        // at SEAL.
+        let budget = JoinBudget::new(CHUNK_MIN_WORDS * 8 + 8 * 1024);
         let mut l = JoinBuildLocal::new(0, Arc::clone(&budget));
         l.begin_run(0);
-        for i in 0..1000u64 {
+        for i in 0..700u64 {
             l.push(mix(i) as u32, &i.to_le_bytes()).unwrap();
         }
         l.end_run();
