@@ -53,7 +53,7 @@ use crate::{
 // 1138 date_larger, 1139 date_smaller, 1377 time_larger, 1378 time_smaller,
 // 2036 timestamp_larger, 2035 timestamp_smaller, 1196/1195 the timestamptz
 // pg_proc rows over the same int64 comparison.
-const COMBINE_WHITELIST: &[Oid] = &[
+pub(crate) const COMBINE_WHITELIST: &[Oid] = &[
     176, 177, 463, 768, 769, 770, 771, 1236, 1237, 2515, 2516, 1138, 1139, 1377, 1378, 2036,
     2035, 1196, 1195,
 ];
