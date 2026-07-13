@@ -69,3 +69,46 @@ pub fn runtime_scan_pool_dop() -> i32 {
 pub fn runtime_scan_pool_armed() -> bool {
     runtime_scan_pool_dop() > 0
 }
+
+// ---------------------------------------------------------------------------
+// M2 aggregation-sink arming (m2-agg-sink lane): the FORCED/explicit knob
+// for executing serial-plan GROUP BY aggregations as a runtime ParallelSink
+// at DOP N. Same layering as the scan arm: PGRUST_RUNTIME=1 + the customized
+// option + the lane master switch; PGRUST_RUNTIME_AGG=0/off is this arm's
+// dedicated kill switch.
+// ---------------------------------------------------------------------------
+
+/// Kill switch + master gates for the runtime aggregation-sink arm.
+fn runtime_agg_env_ok() -> bool {
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let killed = *KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG").as_deref(), Ok("0") | Ok("off"))
+    });
+    !killed && crate::backing::pgrust_lane_executor()
+}
+
+/// The armed runtime aggregation-sink DOP: `pgrust.runtime_agg_pool` clamped
+/// to available cores, or 0 when unarmed. Callers additionally gate on
+/// `PGRUST_RUNTIME=1` + a started pool + the shape/binder admission.
+pub fn runtime_agg_pool_dop() -> i32 {
+    if !runtime_agg_env_ok() {
+        return 0;
+    }
+    if !guc_seams::get_config_option_missing_ok::is_installed() {
+        return 0;
+    }
+    let dop = guc_seams::get_config_option_missing_ok::call("pgrust.runtime_agg_pool")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    if dop <= 0 {
+        return 0;
+    }
+    dop.min(max_runtime_scan_workers())
+}
+
+/// Whether the runtime aggregation-sink arm is requested (nonzero DOP).
+pub fn runtime_agg_pool_armed() -> bool {
+    runtime_agg_pool_dop() > 0
+}

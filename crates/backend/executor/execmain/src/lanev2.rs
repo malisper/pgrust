@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod runtime_agg;
 mod runtime_distinct;
 mod runtime_scan;
 mod push;
@@ -3061,7 +3062,18 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
-    if ::nodeagg::agg_hash_table_filled(agg) {
+    if ::nodeagg::agg_hash_table_filled(agg) || ::nodeagg::sink::agg_sink_emitting(agg) {
+        return Ok(());
+    }
+    // M2 runtime aggregation sink (runtime_agg.rs): the forced/explicit
+    // parallel engagement, tried at the ONE build seam every drive chain
+    // shares (bare agg hook, Limit-over-agg, sort feed). Success adopts the
+    // published emit; every retrieve path drains it through
+    // agg_hash_retrieve's sink branch. Refusal falls through to the serial
+    // build byte-identically.
+    if c == AggLaneChoice::Fold
+        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), estate)?
+    {
         return Ok(());
     }
     // One OWNED tick per lane-owned hash-agg build event (the gate's
