@@ -1270,7 +1270,42 @@ pub fn DropSubscription<'mcx>(
         return rel.close(NoLock);
     }
 
-    panic!("unported: libpqwalreceiver connect (DROP SUBSCRIPTION replication slot drop)");
+    // Drop the slot(s) at the publisher (subscriptioncmds.c:1810). Connection
+    // failure with a slot to drop is an ERROR with C's hint.
+    let must_use_password = sub.passwordrequired && !superuser::superuser_arg(sub.owner)?;
+    let mut wrconn = match connect::connect(mcx, sub.conninfo.as_str(), must_use_password, subname)? {
+        Ok(conn) => conn,
+        Err(errmsg) => {
+            if slotname.is_none() {
+                // Only tablesync-origin cleanup was pending; C warns and returns.
+                elog::ereport(types_error::WARNING)
+                    .errmsg(format!("could not connect to publisher when attempting to drop replication slot: {errmsg}"))
+                    .finish(loc("DropSubscription"))?;
+                return rel.close(NoLock);
+            }
+            return Err(err(
+                format!("could not connect to publisher when attempting to drop replication slot \"{}\": {errmsg}", slotname.unwrap_or("")),
+                ERRCODE_CONNECTION_FAILURE,
+            )
+            .into());
+        }
+    };
+
+    let dropped = (|| -> PgResult<()> {
+        for rstate in &rstates {
+            // Tablesync slots would be dropped here; tablesync states other
+            // than READY are refused upstream (round-4 inc E).
+            let _ = rstate;
+        }
+        if let Some(slot) = slotname {
+            connect::drop_slot_at_pub_node(&mut wrconn, slot, false)?;
+        }
+        Ok(())
+    })();
+    drop(wrconn);
+    dropped?;
+
+    rel.close(NoLock)
 }
 
 fn AlterSubscriptionOwner_internal<'mcx>(
