@@ -277,26 +277,12 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             break;
         }
 
-        // Enough WAL available: done waiting.
-        if loc_ <= recent_flush {
-            break;
-        }
-
-        // Waiting for new WAL: by definition caught up.
-        crate::WAL_SND_CAUGHT_UP.with(|c| c.set(true));
-
-        // Streaming shut down mid-wait: bail so the loop can exit.
-        if crate::STREAMING_DONE_SENDING.with(|c| c.get())
-            && crate::STREAMING_DONE_RECEIVING.with(|c| c.get())
-        {
-            break;
-        }
-
         // We only send regular messages for full decoded transactions, but
-        // sync rep / shutdown may wait for a later location: before sleeping,
-        // ping with the flush location. An otherwise-idle receiver replies,
-        // and processing the reply updates MyWalSnd (walsender.c:1896) — this
-        // is also what lets pg_recvlogical --endpos return on a quiet slot.
+        // sync rep / walsender shutdown / a client endpos may wait for a
+        // later location: BEFORE the enough-WAL break, ping with the flush
+        // location (walsender.c:1896). An otherwise-idle receiver replies —
+        // and pg_recvlogical --endpos exits on walEnd >= endpos, which is how
+        // a rerun from the confirmed position returns nothing (006 test 8).
         let sent = crate::SENT_PTR.with(|c| c.get());
         if crate::my_flush() < sent
             && crate::my_write() < sent
@@ -305,8 +291,23 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             crate::streaming::WalSndKeepalive(false, InvalidXLogRecPtr)?;
         }
 
+        // Enough WAL available: done waiting.
+        if loc_ <= recent_flush {
+            break;
+        }
+
+        // Waiting for new WAL: by definition caught up.
+        crate::WAL_SND_CAUGHT_UP.with(|c| c.set(true));
+
         if pqcomm::pq_flush_if_writable()? != 0 {
             WalSndShutdown();
+        }
+
+        // Streaming shut down mid-wait: bail so the loop can exit.
+        if crate::STREAMING_DONE_SENDING.with(|c| c.get())
+            && crate::STREAMING_DONE_RECEIVING.with(|c| c.get())
+        {
+            break;
         }
 
         WalSndCheckTimeOut();
