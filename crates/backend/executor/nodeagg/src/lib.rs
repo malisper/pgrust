@@ -68,8 +68,8 @@ pub use compact::{
 pub use codedgroup::{
     agg_codedgroup_accept_batch, agg_codedgroup_admissible, agg_codedgroup_begin,
     agg_codedgroup_economical, agg_codedgroup_emit_next, agg_codedgroup_emitting,
-    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_next_replay,
-    agg_codedgroup_reset, CgAccept,
+    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_mode_global,
+    agg_codedgroup_next_replay, agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
     agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_adopt_merged,

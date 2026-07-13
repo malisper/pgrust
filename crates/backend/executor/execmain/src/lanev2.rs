@@ -6691,6 +6691,7 @@ fn codedgroup_drive<'mcx>(
 ) -> PgResult<HgBuild> {
     let mut rows: Vec<u32> = Vec::new();
     let mut degraded = false;
+    let mut mode_traced = false;
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
@@ -6773,6 +6774,14 @@ fn codedgroup_drive<'mcx>(
             let r = ::nodeagg::agg_codedgroup_accept_batch(agg, lane, &rows, argv, argn);
             (r.consumed, r.keep)
         };
+        // One-shot code-domain trace (engagement observability): global =
+        // part-global stitch codes, local = per-epoch codes + k-way merge.
+        if !mode_traced {
+            if let Some(g) = ::nodeagg::agg_codedgroup_mode_global(agg) {
+                trace_feed(if g { "codedgroup global codes" } else { "codedgroup local codes" });
+                mode_traced = true;
+            }
+        }
         if !keep {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;

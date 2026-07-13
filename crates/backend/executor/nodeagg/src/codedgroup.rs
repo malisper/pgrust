@@ -597,6 +597,13 @@ pub fn agg_codedgroup_finish_build(node: &mut AggStateData<'_>) {
     cg.phase = CgPhase::Emit;
 }
 
+/// Code-domain mode after at least one absorbed window: `Some(true)` =
+/// part-global stitch codes, `Some(false)` = per-epoch local codes, `None`
+/// = nothing absorbed yet. Observability for the drive's engagement trace.
+pub fn agg_codedgroup_mode_global(node: &AggStateData<'_>) -> Option<bool> {
+    node.codedgroup.as_deref().and_then(|cg| cg.mode_global)
+}
+
 /// Whether the arm is mid-emit (the drive resumes here BEFORE the dynamic
 /// gates — the scan is exhausted and the plan's Sort must never be fed).
 pub fn agg_codedgroup_emitting(node: &AggStateData<'_>) -> bool {
