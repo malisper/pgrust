@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod runtime_agg;
 mod runtime_scan;
 mod push;
 mod stats;
@@ -1570,10 +1571,25 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
+    // M2 runtime aggregation sink (runtime_agg.rs): mid-emit resume first
+    // (the leader adopted a published parallel result and is a pure
+    // emitter), then — before the serial build — the forced/explicit
+    // parallel engagement. Refusal falls through byte-identically.
+    if ::nodeagg::sink::agg_sink_emitting(agg) {
+        return Ok(Some(::nodeagg::sink::agg_sink_emit_next(agg, estate)?));
+    }
     // exec_agg's top-of-call guard: a drained agg stays drained (the hash
     // iterator is spent; re-iterating would replay groups).
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
+    }
+    if c == AggLaneChoice::Fold
+        && xk.is_none()
+        && !::nodeagg::agg_hash_table_filled(agg)
+    {
+        if let Some(row) = runtime_agg::try_own_hashagg_runtime(agg, ss, estate)? {
+            return Ok(Some(row));
+        }
     }
     agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline

@@ -662,6 +662,204 @@ pub fn sink_emit_rows(bufs: &[SinkEmitBuf]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Executor-coupled surface (the engagement's nodeagg seam).
+// ---------------------------------------------------------------------------
+
+/// The sink's plan-shape gate: a hashed, simple-split, non-grouping-sets
+/// Agg with at least one grouping key (leader admission + worker re-check).
+pub fn agg_sink_plan_shape_ok(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == ::types_pathnodes::AGG_HASHED
+        && node.plan.aggsplit == ::types_pathnodes::AGGSPLIT_SIMPLE
+        && node.plan.groupingSets.is_nil()
+        && node.plan.numCols >= 1
+        && node.gsets.is_none()
+}
+
+/// Arm SINK MODE on a worker build: the compact arms gate/size by `cap`
+/// (bounded Local discipline) and the runtime backstop fails closed instead
+/// of migrating. Must run BEFORE `agg_hash_compact_try_arm*`.
+pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
+    if let Some(ph) = node.perhash.as_mut() {
+        ph.sink_cap = Some(cap);
+    }
+}
+
+/// The node's per-participant hash memory budget (C
+/// `work_mem × hash_mem_multiplier` — `get_hash_memory_limit`), the R3
+/// per-Local envelope.
+pub fn agg_sink_hash_mem_limit(node: &AggStateData<'_>) -> Option<usize> {
+    node.perhash.as_ref().map(|ph| ph.hash_mem_limit)
+}
+
+/// The grouped state block size (`additionalsize` — numtrans pergroups).
+pub fn agg_sink_state_bytes(node: &AggStateData<'_>) -> Option<usize> {
+    node.perhash.as_ref().map(|ph| ph.hashtable.additionalsize())
+}
+
+/// The single staged int grouping key's width (2/4/8), when the shape is the
+/// K2 single-key class.
+pub fn agg_sink_key_width(node: &AggStateData<'_>) -> Option<u8> {
+    node.perhash.as_ref().and_then(|ph| ph.hashtable.staged_probe_int_width())
+}
+
+/// The ARMED compact table's sink key spec (worker-side shape re-check).
+/// `None` = not armed or a shape the phase-1 sink refuses (Multi / intern).
+pub fn agg_sink_key_spec(node: &AggStateData<'_>) -> Option<SinkKeySpec> {
+    let ch = node.perhash.as_ref()?.compact.as_ref()?;
+    if ch.intern.is_some() {
+        return None;
+    }
+    match &ch.key {
+        crate::compact::CompactKeySpec::Single { width } => {
+            Some(SinkKeySpec::Single { width: *width })
+        }
+        crate::compact::CompactKeySpec::Reduced(shape) => {
+            Some(SinkKeySpec::Reduced(shape.clone()))
+        }
+        crate::compact::CompactKeySpec::Multi(_) => None,
+    }
+}
+
+/// Owned worker table handle: the ENTIRE armed compact state, moved between
+/// the executor (`ph.compact`, during a morsel drain) and the sink Local
+/// (between morsels / at SEAL). Opaque outside nodeagg.
+pub struct SinkTableHandle(pub(crate) crate::compact::CompactHash);
+
+// SAFETY: the handle's only non-Send payload is the CompactHash batch
+// scratch (`states: Vec<*mut u8>` — per-batch probe outputs). The scratch is
+// cleared at the start of every batch probe and read only within that batch
+// on the probing thread; between morsels (the only time the handle crosses
+// threads) it is stale garbage that nothing dereferences. The table itself
+// is plain owned Vec storage, and under the sink's phase-1 admission every
+// state block is byval-POD (no interior pointers).
+unsafe impl Send for SinkTableHandle {}
+// SAFETY: combine tasks read `&SinkTableHandle` (the table's rows) from many
+// threads; the table is plain owned Vec storage with byval-POD state blocks
+// under the sink admission, and the batch scratch is never dereferenced
+// outside the owning worker's own morsel (see the Send justification).
+unsafe impl Sync for SinkTableHandle {}
+
+impl SinkTableHandle {
+    #[inline]
+    pub fn table(&self) -> &LaneAggTable {
+        &self.0.table
+    }
+
+    #[inline]
+    pub fn table_mut(&mut self) -> &mut LaneAggTable {
+        &mut self.0.table
+    }
+}
+
+/// Move the armed compact state OUT of the executor (end of a morsel drain:
+/// the Local owns it until the next morsel / SEAL). `None` = not armed.
+pub fn agg_sink_take_table(node: &mut AggStateData<'_>) -> Option<SinkTableHandle> {
+    node.perhash.as_mut()?.compact.take().map(SinkTableHandle)
+}
+
+/// Move the compact state back INTO the executor (start of a morsel drain).
+pub fn agg_sink_put_table(node: &mut AggStateData<'_>, h: SinkTableHandle) {
+    if let Some(ph) = node.perhash.as_mut() {
+        debug_assert!(ph.compact.is_none(), "sink put over a live compact table");
+        ph.compact = Some(h.0);
+    }
+}
+
+/// Flush the armed table into a run if it crossed `cap` (checked BEFORE a
+/// batch — no caller-held group pointer is ever invalidated mid-batch).
+pub fn agg_sink_flush_if_due(node: &mut AggStateData<'_>, cap: u32) -> Option<SinkRun> {
+    let ch = node.perhash.as_mut()?.compact.as_mut()?;
+    if ch.table.len() < cap as usize {
+        return None;
+    }
+    Some(sink_flush_table(&mut ch.table))
+}
+
+/// The armed table's current footprint (budget accounting).
+pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
+    node.perhash
+        .as_ref()
+        .and_then(|ph| ph.compact.as_ref())
+        .map_or(0, |ch| ch.table.mem_used())
+}
+
+// ---------------------------------------------------------------------------
+// Leader-side adopted emit (the published sink output as the Agg's source).
+// ---------------------------------------------------------------------------
+
+/// The leader's adopted parallel emit state: published per-bucket
+/// identity-projected rows, drained bucket 0..255 in insertion order.
+pub struct SinkEmitState {
+    pub bufs: Vec<SinkEmitBuf>,
+    pub natts: usize,
+    bucket: usize,
+    pos: usize,
+}
+
+/// Adopt the published emit set; subsequent [`agg_sink_emit_next`] calls
+/// drain it. The Agg becomes a pure Source (its build never ran).
+pub fn agg_sink_adopt_emit(node: &mut AggStateData<'_>, bufs: Vec<SinkEmitBuf>, natts: usize) {
+    debug_assert_eq!(bufs.len(), SINK_NBUCKETS);
+    node.sink_emit = Some(Box::new(SinkEmitState { bufs, natts, bucket: 0, pos: 0 }));
+}
+
+/// Mid-emit resume marker for the lane dispatch.
+pub fn agg_sink_emitting(node: &AggStateData<'_>) -> bool {
+    node.sink_emit.is_some()
+}
+
+/// One emitted row per call (the donor `agg_retrieve_emitted` shape: a datum
+/// memcpy into the result slot — no finalize, no projection interpreter, no
+/// per-row expr-context reset; byval datums only). `None` = drained
+/// (agg_done set; the state drops).
+pub fn agg_sink_emit_next<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut ::executils::EStateData<'mcx>,
+) -> PgResult<Option<::executils::ExecSlotId>> {
+    let mcx = estate.es_query_cxt;
+    let next = {
+        let st = node.sink_emit.as_mut().expect("sink emit state adopted");
+        loop {
+            if st.bucket >= SINK_NBUCKETS {
+                break None;
+            }
+            let b = &st.bufs[st.bucket];
+            if st.pos >= b.nrows {
+                st.bucket += 1;
+                st.pos = 0;
+                continue;
+            }
+            let row = st.pos;
+            st.pos += 1;
+            break Some((st.bucket, row));
+        }
+    };
+    let Some((bucket, row)) = next else {
+        node.sink_emit = None;
+        node.agg_done = true;
+        return Ok(None);
+    };
+    let st = node.sink_emit.as_ref().expect("sink emit state adopted");
+    let natts = st.natts;
+    let buf = &st.bufs[bucket];
+    let base = row * natts;
+    let slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    ::exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let sb = slot.base_mut();
+        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
+        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+    }
+    ::exectuples::exec_store_virtual_tuple(slot);
+    Ok(Some(node.ps_ResultTupleSlot))
+}
+
+/// Drop any adopted emit state (rescan / teardown safety).
+pub fn agg_sink_reset_emit(node: &mut AggStateData<'_>) {
+    node.sink_emit = None;
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests: pure kernels, no executor.
 // ---------------------------------------------------------------------------
 

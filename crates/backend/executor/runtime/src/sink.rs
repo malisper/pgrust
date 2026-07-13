@@ -97,6 +97,15 @@ pub trait ParallelSink: Send + Sync {
     /// rows/batches into `local` (see m2-sinks.md §2 layering note).
     fn accept_local(&self, local: &mut Self::Local, worker: usize, range: MorselRange);
 
+    /// SEAL-side per-Local preparation, called ONCE by the accept set's
+    /// last-worker-out finalizer on the collected generation-matching Locals
+    /// (worker-slot order), strictly before any combine task can observe
+    /// them. Single-threaded by the last-worker-out protocol. The M2 agg
+    /// sink partitions its remainder tables here (counting sort — O(total
+    /// remainder rows), a one-time cost the combine's bucket claims then
+    /// read immutably). Default: nothing.
+    fn seal(&self, _locals: &mut [Self::Local]) {}
+
     /// Number of combine partitions (the donors: 256 radix buckets over the
     /// top-8 hash bits; 64 element partitions per distinct set). Fixed for
     /// the sink's lifetime; this is the combine task set's morsel space.
@@ -107,7 +116,8 @@ pub trait ParallelSink: Send + Sync {
     /// partition's results in the same pass. Parallel across partitions;
     /// deterministic output requires the donor discipline: visit `locals`
     /// in slice order, first-seen insertion order within the partition.
-    fn combine(&self, part: u64, locals: &[Self::Local]);
+    /// `worker` is the claiming worker's index (observability — WFIN).
+    fn combine(&self, part: u64, worker: usize, locals: &[Self::Local]);
 
     /// Single-threaded epilogue under last-worker-out of the combine set.
     /// Every `combine` call has returned. Keep it MINIMAL.
@@ -207,6 +217,9 @@ impl<S: ParallelSink> TaskSetWork for SinkAccept<S> {
                 None => {}
             }
         }
+        // Sink-side SEAL preparation (single-threaded here by protocol);
+        // the Locals freeze immutable behind the Arc right after.
+        self.0.sink.seal(&mut sealed);
         *lock(&self.0.sealed) = Some((generation, Arc::new(sealed)));
     }
 }
@@ -236,7 +249,7 @@ impl<S: ParallelSink> TaskSetWork for SinkCombine<S> {
         *lock(&self.0.bound) = Some(generation);
     }
 
-    fn run_morsel(&self, _worker: usize, range: MorselRange) {
+    fn run_morsel(&self, worker: usize, range: MorselRange) {
         let generation = self.0.bound_generation();
         let Some(locals) = self.sealed_for(generation) else {
             // Fail-closed: no matching seal ⇒ combine nothing. Reachable
@@ -247,7 +260,7 @@ impl<S: ParallelSink> TaskSetWork for SinkCombine<S> {
             return;
         };
         for part in range {
-            self.0.sink.combine(part, &locals);
+            self.0.sink.combine(part, worker, &locals);
         }
     }
 
@@ -417,7 +430,7 @@ mod tests {
             self.parts
         }
 
-        fn combine(&self, part: u64, locals: &[ToyLocal]) {
+        fn combine(&self, part: u64, _worker: usize, locals: &[ToyLocal]) {
             let prev = self.combine_calls[part as usize].fetch_add(1, StdOrdering::SeqCst);
             assert_eq!(prev, 0, "partition {part} combined twice");
             let sum: u64 = locals.iter().map(|l| l.sums[part as usize]).sum();
@@ -610,7 +623,7 @@ mod tests {
             fn partitions(&self) -> u64 {
                 self.inner.partitions()
             }
-            fn combine(&self, _part: u64, _locals: &[ToyLocal]) {
+            fn combine(&self, _part: u64, _worker: usize, _locals: &[ToyLocal]) {
                 panic!("aborted sink must never combine");
             }
             fn finalize(&self, _locals: &[ToyLocal]) {
