@@ -9,6 +9,7 @@ name = "nodeagg"
 path = "src/lib.rs"
 
 [dependencies]
+stringhash = { path = "../../../common/stringhash" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 mcx = { path = "../../../_support/mcx" }
 mcxt_stats = { path = "../../utils/mmgr/mcxt_stats" }

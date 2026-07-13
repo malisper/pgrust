@@ -80,6 +80,21 @@ use ::types_error::PgResult;
 use ::types_slot::{SlotData, TupleSlotKind};
 
 use crate::distinctset::{DistinctKeyKind, DistinctSet};
+
+/// Kill switch for the stringhash single-text-key probe table (the
+/// length-bucketed CH-StringHashMap-class map, crates/common/stringhash;
+/// parity-proven vs CH's own table on the bench-stringhash branch). Default
+/// ON where admissible; PGRUST_LANE_V2_STRINGHASH=0/off reverts the arm to
+/// its generic span table.
+fn stringhash_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_STRINGHASH").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
 use crate::{agg_sorted_emit, AggStateData};
 
 /// One emit-order key: `key_idx` indexes the GROUP KEY WORDS (the admission
@@ -203,6 +218,13 @@ pub(crate) struct HashGroupedState<'mcx> {
     rep_slot: SlotData<'mcx>,
     /// Degrade-dump cursor (`next_rep`).
     rep_cursor: usize,
+    /// Single-text-key fast probe table (stringhash swap): engaged when the
+    /// key is exactly one text column and the kill switch is on. `arena`
+    /// stays the byte authority (emission comparator, spans, degrade); the
+    /// map's long bucket references it. NULL keys live in `null_group`
+    /// (outside the map), so map keys are exactly the non-NULL byte images.
+    smap: Option<::stringhash::ExtIdMap>,
+    null_group: Option<u32>,
     mcx: Mcx<'mcx>,
 }
 
@@ -214,7 +236,10 @@ impl HashGroupedState<'_> {
 
     #[inline]
     fn mem(&self) -> usize {
-        self.base_mem + self.total_set_mem + self.arena.capacity()
+        self.base_mem
+            + self.total_set_mem
+            + self.arena.capacity()
+            + self.smap.as_ref().map_or(0, |m| m.mem_bytes())
     }
 }
 
@@ -284,6 +309,33 @@ pub fn agg_hashgroup_text_key_count(node: &AggStateData<'_>) -> usize {
         .count()
 }
 
+/// Would `agg_hashgroup_begin` engage the stringhash table for this node?
+/// (single text/varchar group key + switch on — mirrors the begin-side
+/// engage condition so the economics tier prices the right probe machinery.)
+fn smap_shape(node: &AggStateData<'_>) -> bool {
+    if !stringhash_enabled() || node.plan.grpColIdx.len() != 1 {
+        return false;
+    }
+    let Some(ps) = node.persort.as_ref() else { return false };
+    let Some(desc) = ps.first_slot.base().tts_tupleDescriptor.as_ref() else { return false };
+    let col = node.plan.grpColIdx[0];
+    col >= 1
+        && (col as i32) <= desc.natts
+        && matches!(desc.attr((col - 1) as usize).atttypid, TEXTOID | VARCHAROID)
+}
+
+/// Density threshold for the stringhash shape. Default stays at the generic
+/// 8.0 until the Q14 crossover A/B lands a measured value.
+fn stringhash_min_rpg() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_STRINGHASH_MINRPG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8.0)
+    })
+}
+
 /// The arm's build budget: HALF the displaced tuplesort's work_mem allowance
 /// (`distinct_set_budget`) — the other half stays free for the emit phase's
 /// per-group replay (whose sets can themselves spill/degrade under the full
@@ -314,8 +366,13 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
     /// rows/group; Q14-class near-unique shapes refuse here. `input_rows`
     /// is the plan Sort's row estimate (0.0 = unknown: tier skipped).
     const MIN_ROWS_PER_GROUP: f64 = 8.0;
+    // The 8x tier was calibrated on the GENERIC span table's probe/create
+    // cost. The stringhash-admissible shape (single text key, switch on)
+    // reads its own threshold — re-priced by the Q14 A/B; the env override
+    // is the measurement channel (PGRUST_LANE_V2_STRINGHASH_MINRPG).
+    let min_rpg = if smap_shape(node) { stringhash_min_rpg() } else { MIN_ROWS_PER_GROUP };
     let est_groups = (node.plan.numGroups as f64).max(1.0);
-    if input_rows > 0.0 && input_rows < MIN_ROWS_PER_GROUP * est_groups {
+    if input_rows > 0.0 && input_rows < min_rpg * est_groups {
         return false;
     }
     let per_group =
@@ -399,6 +456,7 @@ pub fn agg_hashgroup_begin<'mcx>(
     let nkeys = key_atts.len();
     let rep_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
+    let engage_smap = nkeys == 1 && key_kinds[0] == HgKeyKind::Text && stringhash_enabled();
     node.hashgroup = Some(Box::new(HashGroupedState {
         phase: HgPhase::Building,
         key_atts,
@@ -427,6 +485,8 @@ pub fn agg_hashgroup_begin<'mcx>(
         budget: hashgroup_budget(),
         rep_slot,
         rep_cursor: 0,
+        smap: engage_smap.then(::stringhash::ExtIdMap::new),
+        null_group: None,
         mcx,
     }));
     // The build starts with NO group loaded; the node's own pergroup array
@@ -681,7 +741,13 @@ fn create_group<'mcx>(
     words: &mut [i64],
     nulls: u32,
     h: u64,
-    slot_idx: usize,
+    // None = stringhash mode: the map already indexes the group; the arm's
+    // generic table/hashes stay untouched (hashes still gets a placeholder —
+    // ngroups() is its len).
+    slot_idx: Option<usize>,
+    // Some((off, len)) = stringhash mode already appended the key bytes to
+    // the arena (single text key at word 0).
+    prestored_span: Option<(u32, u32)>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     // Group-init transvalues (initialize_aggregates' loop, retargeted at the
@@ -713,14 +779,20 @@ fn create_group<'mcx>(
     let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
     let rep_len = rep.t_len() as usize;
     // Text keys: land the staged bytes in the arena, pack the span (the
-    // packing's u32 bounds hold structurally — `pack_span` doc).
-    for i in 0..hg.nkeys {
-        if hg.key_kinds[i] == HgKeyKind::Text && nulls & (1 << i) == 0 {
-            let (poff, plen) = hg.probe_spans[i];
-            let off = hg.arena.len();
-            hg.arena
-                .extend_from_slice(&hg.probe_buf[poff as usize..(poff + plen) as usize]);
-            words[i] = pack_span(off, plen as usize);
+    // packing's u32 bounds hold structurally — `pack_span` doc). In
+    // stringhash mode the map's insert already appended the bytes.
+    if let Some((off, len)) = prestored_span {
+        debug_assert!(hg.nkeys == 1 && hg.key_kinds[0] == HgKeyKind::Text && nulls == 0);
+        words[0] = pack_span(off as usize, len as usize);
+    } else {
+        for i in 0..hg.nkeys {
+            if hg.key_kinds[i] == HgKeyKind::Text && nulls & (1 << i) == 0 {
+                let (poff, plen) = hg.probe_spans[i];
+                let off = hg.arena.len();
+                hg.arena
+                    .extend_from_slice(&hg.probe_buf[poff as usize..(poff + plen) as usize]);
+                words[i] = pack_span(off, plen as usize);
+            }
         }
     }
     hg.hashes.push(h);
@@ -734,14 +806,16 @@ fn create_group<'mcx>(
     hg.set_mem.push(0);
     hg.consumed.push(false);
     hg.remaining += 1;
-    hg.table[slot_idx] = hg.ngroups() as u32;
+    if let Some(slot_idx) = slot_idx {
+        hg.table[slot_idx] = hg.ngroups() as u32;
+    }
     hg.base_mem += hg.nkeys * 8
         + rep_len
         + hg.numtrans * core::mem::size_of::<AggPerGroup>()
         + hg.nsort * core::mem::size_of::<Option<DistinctSet<'_>>>()
         + GROUP_FIXED_COST;
-    // 7/8 load factor.
-    if (hg.ngroups() + 1) * 8 > hg.table.len() * 7 {
+    // 7/8 load factor (generic table only; the stringhash map self-grows).
+    if slot_idx.is_some() && (hg.ngroups() + 1) * 8 > hg.table.len() * 7 {
         hg.grow();
     }
     Ok(())
@@ -836,6 +910,58 @@ pub fn agg_hashgroup_accept<'mcx>(
             )
         };
         hg.stage_text_keys(estate, tmp, &text_datums[..nkeys], nulls)?;
+        if hg.smap.is_some() {
+            // stringhash mode: single text key. NULL rows key `null_group`;
+            // non-NULL rows insert-or-get on the map, which appends new key
+            // bytes to the arena and reports the span for the key word.
+            let HashGroupedState { smap, null_group, arena, probe_buf, probe_spans, .. } = hg;
+            let smap = smap.as_mut().expect("checked");
+            let (found, span) = if nulls != 0 {
+                (*null_group, None)
+            } else {
+                let (poff, plen) = probe_spans[0];
+                let bytes = &probe_buf[poff as usize..(poff + plen) as usize];
+                let (g, inserted, off) = smap.insert_or_get(bytes, arena);
+                if inserted {
+                    (None, Some((off, plen)))
+                } else {
+                    (Some(g), None)
+                }
+            };
+            match found {
+                Some(g) => {
+                    switch_to(node, g);
+                    run_row(node, estate, RowSlot::Estate(id))?;
+                    let sets: usize = node
+                        .pertrans_sort
+                        .iter()
+                        .map(|ps| ps.dset.as_ref().map_or(0, |d| d.mem_bytes()))
+                        .sum();
+                    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+                    let c = g as usize;
+                    hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
+                    hg.set_mem[c] = sets;
+                }
+                None => {
+                    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+                    if nulls != 0 {
+                        // The map ids and null_group share ONE dense space:
+                        // the null group takes the next creation slot and
+                        // the map skips it.
+                        let id = hg.smap.as_mut().expect("checked").reserve_id();
+                        debug_assert_eq!(id as usize, hg.ngroups());
+                        hg.null_group = Some(id);
+                    }
+                    create_group(node, estate, id, &mut words[..nkeys], nulls, 0, None, span)?;
+                    estate.reset_expr_context(tmp);
+                }
+            }
+            let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+            if hg.probe_buf.capacity() > (1 << 20) {
+                hg.probe_buf = Vec::new();
+            }
+            return Ok(hg.mem() <= hg.budget);
+        }
         let h = hg.key_hash(&words[..nkeys], nulls);
         let (found, slot_idx) = hg.probe(&words[..nkeys], nulls, h);
         (found, slot_idx, h, nulls, nkeys)
@@ -857,7 +983,7 @@ pub fn agg_hashgroup_accept<'mcx>(
             hg.set_mem[c] = sets;
         }
         None => {
-            create_group(node, estate, id, &mut words[..nkeys], nulls, h, slot_idx)?;
+            create_group(node, estate, id, &mut words[..nkeys], nulls, h, Some(slot_idx), None)?;
             // The existing-group arm resets per-tuple memory inside run_row;
             // the create arm defers the row (no run_row), so any text-key
             // detoast copies reset here instead.
@@ -1308,6 +1434,10 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         budget: hashgroup_budget(),
         rep_slot,
         rep_cursor: 0,
+        // Parallel merged adoption is int-key-only (key_kinds above); the
+        // stringhash table never engages here.
+        smap: None,
+        null_group: None,
         mcx,
     }));
     // The emit starts with NO group loaded; clear AND DROP leftover
@@ -1355,8 +1485,18 @@ pub(crate) fn residual_preload<'mcx>(
         // Detoast copies land in per-tuple memory (reset by the group's row
         // processing, exactly as the accept path's).
         hg.stage_text_keys(estate, tmp, &text_datums[..nkeys], nulls)?;
-        let h = hg.key_hash(&words[..nkeys], nulls);
-        let (found, _) = hg.probe(&words[..nkeys], nulls, h);
+        let found = if let Some(smap) = hg.smap.as_ref() {
+            if nulls != 0 {
+                hg.null_group
+            } else {
+                let (poff, plen) = hg.probe_spans[0];
+                let bytes = &hg.probe_buf[poff as usize..(poff + plen) as usize];
+                smap.find(bytes, &hg.arena)
+            }
+        } else {
+            let h = hg.key_hash(&words[..nkeys], nulls);
+            hg.probe(&words[..nkeys], nulls, h).0
+        };
         found.filter(|&g| !hg.consumed[g as usize])
     };
     if let Some(g) = hit {

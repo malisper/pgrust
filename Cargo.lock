@@ -8591,6 +8591,7 @@ dependencies = [
  "resowner",
  "resowner_seams",
  "sort_storage",
+ "stringhash",
  "syscache_seams",
  "tuplesort",
  "types_core",
@@ -15650,6 +15651,13 @@ name = "string_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+]
+
+[[package]]
+name = "stringhash"
+version = "0.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
