@@ -538,7 +538,14 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     if MyProc().is_some() {
         return Err(Box::new(PgError::new(ERROR, "you already exist")));
     }
-    if g::IsUnderPostmaster() {
+    // M2 pool-binding: STANDING runtime executors (launch_backend::rtgang)
+    // are postmaster-environment threads with NO postmaster child slot by
+    // design (registry-invisible: no dispatch, no reaper entry, no
+    // shutdown-count charge — the rtpool contract). The child-active
+    // PMChildFlags protocol is slot-keyed, so it only applies to slotted
+    // children; every C child has a slot, so this gate is vacuous for
+    // every pre-existing caller.
+    if g::IsUnderPostmaster() && g::MyPMChildSlot() != 0 {
         pmsignal_seams::register_postmaster_child_active::call();
     }
 
