@@ -69,6 +69,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // LogRecoveryConflict (standby.c); ProcSleep's InHotStandby
+    // log_recovery_conflict_waits reporting is the cyclic caller.
+    pub fn log_recovery_conflict<'a>(
+        reason: types_storage::storage::ProcSignalReason,
+        wait_start: types_core::TimestampTz,
+        now: types_core::TimestampTz,
+        wait_list: Option<&'a [types_storage::storage::VirtualTransactionId]>,
+        still_waiting: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     // CheckRecoveryConflictDeadlock() (standby.c); proc.c ProcSleep caller.
     pub fn check_recovery_conflict_deadlock() -> PgResult<()>
 );

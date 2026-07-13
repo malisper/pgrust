@@ -48,6 +48,13 @@ impl<'a> MsgReader<'a> {
         self.pos += 1;
         b
     }
+    fn get_int32(&mut self) -> u32 {
+        let mut a = [0u8; 4];
+        a.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
+        self.pos += 4;
+        u32::from_be_bytes(a)
+    }
+
     fn get_int64(&mut self) -> i64 {
         let mut a = [0u8; 8];
         a.copy_from_slice(&self.buf[self.pos..self.pos + 8]);
@@ -222,14 +229,118 @@ fn PhysicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     Ok(())
 }
 
-// static void ProcessStandbyHSFeedbackMessage(void). Received; the xmin holdback
-// it carries (PhysicalReplicationSlotNewXmin / MyProc->xmin) is the P4
-// hot_standby_feedback loop and not applied here.
+fn my_proc() -> &'static ::types_storage::storage::PGPROC {
+    lmgr_proc::GetPGProcByNumber(init_small::globals::MyProcNumber())
+}
+
+// PhysicalReplicationSlotNewXmin (walsender.c:2522): the new slot xmin
+// horizon from standby feedback.
+fn PhysicalReplicationSlotNewXmin(
+    feedback_xmin: types_core::TransactionId,
+    feedback_catalog_xmin: types_core::TransactionId,
+) -> PgResult<()> {
+    use types_core::xact::TransactionIdPrecedes;
+    use types_core::{InvalidTransactionId, FirstNormalTransactionId};
+
+    let slot = slot::MyReplicationSlot().expect("PhysicalReplicationSlotNewXmin: no slot");
+    let normal = |x: types_core::TransactionId| x >= FirstNormalTransactionId;
+    let changed = slot.with_mutex(|| {
+        my_proc().xmin.value.store(InvalidTransactionId, std::sync::atomic::Ordering::Relaxed);
+        let mut data = slot.data.get();
+        let mut changed = false;
+        // Physical replication doesn't need the xmin/effective_xmin
+        // interlock (missed increases only cost query cancellations):
+        // set both at once.
+        if !normal(data.xmin) || !normal(feedback_xmin)
+            || TransactionIdPrecedes(data.xmin, feedback_xmin)
+        {
+            changed = true;
+            data.xmin = feedback_xmin;
+            slot.effective_xmin.set(feedback_xmin);
+        }
+        if !normal(data.catalog_xmin) || !normal(feedback_catalog_xmin)
+            || TransactionIdPrecedes(data.catalog_xmin, feedback_catalog_xmin)
+        {
+            changed = true;
+            data.catalog_xmin = feedback_catalog_xmin;
+            slot.effective_catalog_xmin.set(feedback_catalog_xmin);
+        }
+        slot.data.set(data);
+        changed
+    });
+
+    if changed {
+        slot::ReplicationSlotMarkDirty();
+        slot::ReplicationSlotsComputeRequiredXmin(false)?;
+    }
+    Ok(())
+}
+
+// TransactionIdInRecentPast (walsender.c:2570): not in the future, not
+// already wrapped around.
+fn transaction_id_in_recent_past(xid: types_core::TransactionId, epoch: u32) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let next_full = types_core::FullTransactionId {
+        value: procarray::TransamVariables().nextXid.load(Relaxed),
+    };
+    let next_xid = next_full.xid();
+    let next_epoch = (next_full.value >> 32) as u32;
+
+    if xid <= next_xid {
+        if epoch != next_epoch {
+            return false;
+        }
+    } else if epoch.wrapping_add(1) != next_epoch {
+        return false;
+    }
+    types_core::xact::TransactionIdPrecedesOrEquals(xid, next_xid)
+}
+
+// static void ProcessStandbyHSFeedbackMessage(void) (walsender.c:2602).
 fn ProcessStandbyHSFeedbackMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
+    use std::sync::atomic::Ordering::Relaxed;
+    use types_core::{FirstNormalTransactionId, InvalidTransactionId};
+
     let reply_time: TimestampTz = r.get_int64();
-    let _feedback_xmin = r.get_int64(); // xmin + epoch (2x int32)
-    let _feedback_catalog = r.get_int64(); // catalog_xmin + epoch (2x int32)
+    let feedback_xmin = r.get_int32();
+    let feedback_epoch = r.get_int32();
+    let feedback_catalog_xmin = r.get_int32();
+    let feedback_catalog_epoch = r.get_int32();
 
     crate::my_set_reply_time(reply_time);
+
+    let normal = |x: types_core::TransactionId| x >= FirstNormalTransactionId;
+
+    // Invalid feedback values: the downstream turned hot_standby_feedback
+    // off — unset our xmins.
+    if !normal(feedback_xmin) && !normal(feedback_catalog_xmin) {
+        my_proc().xmin.value.store(InvalidTransactionId, Relaxed);
+        if slot::MyReplicationSlot().is_some() {
+            PhysicalReplicationSlotNewXmin(feedback_xmin, feedback_catalog_xmin)?;
+        }
+        return Ok(());
+    }
+
+    // Ignore insane xmin/epoch pairs (future, or wrapped around).
+    if normal(feedback_xmin) && !transaction_id_in_recent_past(feedback_xmin, feedback_epoch) {
+        return Ok(());
+    }
+    if normal(feedback_catalog_xmin)
+        && !transaction_id_in_recent_past(feedback_catalog_xmin, feedback_catalog_epoch)
+    {
+        return Ok(());
+    }
+
+    // Reserve the xmin via the slot when we have one, else via our PGPROC
+    // entry (which can only track one value: store the lesser).
+    if slot::MyReplicationSlot().is_some() {
+        PhysicalReplicationSlotNewXmin(feedback_xmin, feedback_catalog_xmin)?;
+    } else if normal(feedback_catalog_xmin)
+        && types_core::xact::TransactionIdPrecedes(feedback_catalog_xmin, feedback_xmin)
+    {
+        my_proc().xmin.value.store(feedback_catalog_xmin, Relaxed);
+    } else {
+        my_proc().xmin.value.store(feedback_xmin, Relaxed);
+    }
     Ok(())
 }

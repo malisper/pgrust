@@ -18103,6 +18103,7 @@ dependencies = [
  "latch",
  "latch_seams",
  "libc",
+ "lmgr_proc",
  "lwlock",
  "mcx",
  "pgstat",
