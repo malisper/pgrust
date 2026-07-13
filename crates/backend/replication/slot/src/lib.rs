@@ -1024,16 +1024,349 @@ pub fn ReplicationSlotReserveWal() -> PgResult<()> {
     Ok(())
 }
 
-pub fn InvalidateObsoleteReplicationSlots(
-    _possible_causes: u32,
-    _oldest_segno: XLogSegNo,
-    _dboid: Oid,
-    _snapshot_conflict_horizon: TransactionId,
+// CanInvalidateIdleSlot (slot.c:1722).
+fn CanInvalidateIdleSlot(s: &ReplicationSlot) -> bool {
+    idle_replication_slot_timeout_secs() != 0
+        && !XLogRecPtrIsInvalid(s.data.get().restart_lsn)
+        && s.inactive_since.get() > 0
+        && !(transam_xlog::RecoveryInProgress() && s.data.get().synced != 0)
+}
+
+// DetermineSlotInvalidationCause (slot.c:1740). Sequentially checks the
+// possible causes, returning the first the slot is eligible for.
+// (USE_INJECTION_POINTS slot-timeout-inval arm elided: substrate unported.)
+#[allow(clippy::too_many_arguments)]
+fn DetermineSlotInvalidationCause(
+    possible_causes: u32,
+    s: &ReplicationSlot,
+    oldest_lsn: XLogRecPtr,
+    dboid: Oid,
+    snapshot_conflict_horizon: TransactionId,
+    inactive_since: &mut TimestampTz,
+    now: TimestampTz,
+) -> ReplicationSlotInvalidationCause {
+    debug_assert!(possible_causes != RS_INVAL_NONE.0 as u32);
+
+    if possible_causes & RS_INVAL_WAL_REMOVED.0 as u32 != 0 {
+        let restart_lsn = s.data.get().restart_lsn;
+        if restart_lsn != InvalidXLogRecPtr && restart_lsn < oldest_lsn {
+            return RS_INVAL_WAL_REMOVED;
+        }
+    }
+
+    if possible_causes & RS_INVAL_HORIZON.0 as u32 != 0 {
+        // invalid DB oid signals a shared relation
+        if SlotIsLogical(s) && (dboid == InvalidOid || dboid == s.data.get().database) {
+            let effective_xmin = s.effective_xmin.get();
+            let catalog_effective_xmin = s.effective_catalog_xmin.get();
+            if TransactionIdIsValid(effective_xmin)
+                && types_core::TransactionIdPrecedesOrEquals(
+                    effective_xmin,
+                    snapshot_conflict_horizon,
+                )
+            {
+                return RS_INVAL_HORIZON;
+            } else if TransactionIdIsValid(catalog_effective_xmin)
+                && types_core::TransactionIdPrecedesOrEquals(
+                    catalog_effective_xmin,
+                    snapshot_conflict_horizon,
+                )
+            {
+                return RS_INVAL_HORIZON;
+            }
+        }
+    }
+
+    if possible_causes & RS_INVAL_WAL_LEVEL.0 as u32 != 0 && SlotIsLogical(s) {
+        return RS_INVAL_WAL_LEVEL;
+    }
+
+    if possible_causes & RS_INVAL_IDLE_TIMEOUT.0 as u32 != 0 {
+        debug_assert!(now > 0);
+        if CanInvalidateIdleSlot(s)
+            && adt_timestamp::TimestampDifferenceExceedsSeconds(
+                s.inactive_since.get(),
+                now,
+                idle_replication_slot_timeout_secs(),
+            )
+        {
+            *inactive_since = s.inactive_since.get();
+            return RS_INVAL_IDLE_TIMEOUT;
+        }
+    }
+
+    RS_INVAL_NONE
+}
+
+// ReportSlotInvalidation (slot.c:1642).
+#[allow(clippy::too_many_arguments)]
+fn ReportSlotInvalidation(
+    cause: ReplicationSlotInvalidationCause,
+    terminating: bool,
+    pid: i32,
+    slotname: &NameData,
+    restart_lsn: XLogRecPtr,
+    oldest_lsn: XLogRecPtr,
+    snapshot_conflict_horizon: TransactionId,
+    slot_idle_seconds: i64,
+) {
+    let lsn_fmt = |l: XLogRecPtr| format!("{:X}/{:X}", (l >> 32) as u32, l as u32);
+    let mut err_hint = String::new();
+    let err_detail = match cause {
+        RS_INVAL_WAL_REMOVED => {
+            let ex = oldest_lsn.wrapping_sub(restart_lsn);
+            err_hint = "You might need to increase \"max_slot_wal_keep_size\".".to_string();
+            format!(
+                "The slot's restart_lsn {} exceeds the limit by {} byte{}.",
+                lsn_fmt(restart_lsn),
+                ex,
+                if ex == 1 { "" } else { "s" }
+            )
+        }
+        RS_INVAL_HORIZON => format!(
+            "The slot conflicted with xid horizon {snapshot_conflict_horizon}."
+        ),
+        RS_INVAL_WAL_LEVEL => "Logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server.".to_string(),
+        RS_INVAL_IDLE_TIMEOUT => {
+            err_hint =
+                "You might need to increase \"idle_replication_slot_timeout\".".to_string();
+            format!(
+                "The slot's idle time of {slot_idle_seconds}s exceeds the configured \"idle_replication_slot_timeout\" duration of {}s.",
+                idle_replication_slot_timeout_secs()
+            )
+        }
+        _ => unreachable!("ReportSlotInvalidation with RS_INVAL_NONE"),
+    };
+
+    let msg = if terminating {
+        format!(
+            "terminating process {pid} to release replication slot \"{}\"",
+            name_string(slotname)
+        )
+    } else {
+        format!(
+            "invalidating obsolete replication slot \"{}\"",
+            name_string(slotname)
+        )
+    };
+    let mut rep = ereport(LOG).errmsg(msg).errdetail(err_detail);
+    if !err_hint.is_empty() {
+        rep = rep.errhint(err_hint);
+    }
+    let _ = rep.finish(loc("ReportSlotInvalidation"));
+}
+
+// InvalidatePossiblyObsoleteSlot (slot.c:1831): acquire the slot and mark it
+// invalid, if necessary and possible. Returns whether ControlLock was
+// released in the interim (caller restarts its scan in that case).
+fn InvalidatePossiblyObsoleteSlot(
+    possible_causes: u32,
+    s: &'static ReplicationSlot,
+    oldest_lsn: XLogRecPtr,
+    dboid: Oid,
+    snapshot_conflict_horizon: TransactionId,
+    invalidated: &mut bool,
 ) -> PgResult<bool> {
-    panic!(
-        "InvalidateObsoleteReplicationSlots not ported (slot invalidation; its C callers — WAL \
-         removal, recovery conflict, checkpointer idle-timeout sweep — are all unported)"
+    let mut last_signaled_pid = 0;
+    let mut released_lock = false;
+    let mut inactive_since: TimestampTz = 0;
+
+    loop {
+        if !s.in_use.get() {
+            if released_lock {
+                LWLockRelease(control_lock())?;
+            }
+            break;
+        }
+
+        // Current time up front: no syscall under the spinlock below.
+        let now = if possible_causes & RS_INVAL_IDLE_TIMEOUT.0 as u32 != 0 {
+            GetCurrentTimestamp()
+        } else {
+            0
+        };
+
+        let mut invalidation_cause = RS_INVAL_NONE;
+        let mut restart_lsn = InvalidXLogRecPtr;
+        let mut slotname = NameData::default();
+        let mut active_pid = 0;
+        s.with_mutex(|| {
+            restart_lsn = s.data.get().restart_lsn;
+
+            // we do nothing if the slot is already invalid
+            if s.data.get().invalidated == RS_INVAL_NONE {
+                invalidation_cause = DetermineSlotInvalidationCause(
+                    possible_causes,
+                    s,
+                    oldest_lsn,
+                    dboid,
+                    snapshot_conflict_horizon,
+                    &mut inactive_since,
+                    now,
+                );
+            }
+            if invalidation_cause == RS_INVAL_NONE {
+                return;
+            }
+
+            slotname = s.data.get().name;
+            active_pid = s.active_pid.get();
+
+            // If the slot can be acquired, do so and mark it invalidated
+            // immediately. Otherwise we'll signal the owning process, below,
+            // and retry.
+            if active_pid == 0 {
+                SetMyReplicationSlot(Some(s));
+                s.active_pid.set(g::MyProcPid());
+                let mut d = s.data.get();
+                d.invalidated = invalidation_cause;
+                if invalidation_cause == RS_INVAL_WAL_REMOVED {
+                    d.restart_lsn = InvalidXLogRecPtr;
+                    s.last_saved_restart_lsn.set(InvalidXLogRecPtr);
+                }
+                s.data.set(d);
+                *invalidated = true;
+            }
+        });
+
+        if invalidation_cause == RS_INVAL_NONE {
+            if released_lock {
+                LWLockRelease(control_lock())?;
+            }
+            break;
+        }
+
+        let slot_idle_secs = if invalidation_cause == RS_INVAL_IDLE_TIMEOUT {
+            adt_timestamp::TimestampDifference(inactive_since, now).0
+        } else {
+            0
+        };
+
+        if active_pid != 0 {
+            // Prepare the CV sleep before releasing the lock, closing the
+            // race with the slot being released before the sleep below.
+            ConditionVariablePrepareToSleep(&s.active_cv);
+            LWLockRelease(control_lock())?;
+            released_lock = true;
+
+            // Signal the owner, once per distinct PID (the only reason this
+            // routine loops; otherwise the caller's restart would do).
+            if last_signaled_pid != active_pid {
+                ReportSlotInvalidation(
+                    invalidation_cause,
+                    true,
+                    active_pid,
+                    &slotname,
+                    restart_lsn,
+                    oldest_lsn,
+                    snapshot_conflict_horizon,
+                    slot_idle_secs,
+                );
+                if miscinit::GetMyBackendType() == types_core::BackendType::Startup {
+                    let _ = procsignal_seams::send_proc_signal::call(
+                        active_pid,
+                        types_storage::storage::ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT,
+                        types_core::INVALID_PROC_NUMBER,
+                    );
+                } else {
+                    let _ = procsignal_seams::send_thread_signal::call(
+                        active_pid,
+                        libc::SIGTERM,
+                    );
+                }
+                last_signaled_pid = active_pid;
+            }
+
+            // Wait until the slot is released.
+            ConditionVariableSleep(&s.active_cv, WAIT_EVENT_REPLICATION_SLOT_DROP)?;
+
+            // Re-acquire the lock and start over; the slot may also have
+            // caught up in the interim, which resolves the conflict without
+            // invalidation.
+            lw(control_lock(), LW_SHARED)?;
+            continue;
+        } else {
+            // We hold the slot now and have already invalidated it; flush so
+            // the state persists. No ControlLock across filesystem ops.
+            LWLockRelease(control_lock())?;
+            released_lock = true;
+
+            ReplicationSlotMarkDirty();
+            ReplicationSlotSave()?;
+            ReplicationSlotRelease()?;
+
+            ReportSlotInvalidation(
+                invalidation_cause,
+                false,
+                active_pid,
+                &slotname,
+                restart_lsn,
+                oldest_lsn,
+                snapshot_conflict_horizon,
+                slot_idle_secs,
+            );
+            break;
+        }
+    }
+
+    Ok(released_lock)
+}
+
+// InvalidateObsoleteReplicationSlots (slot.c:2059): invalidate slots that
+// require resources about to be removed. `possible_causes` is an RS_INVAL_*
+// mask. Runs as part of checkpoint — avoid raising errors if possible.
+pub fn InvalidateObsoleteReplicationSlots(
+    possible_causes: u32,
+    oldest_segno: XLogSegNo,
+    dboid: Oid,
+    snapshot_conflict_horizon: TransactionId,
+) -> PgResult<bool> {
+    let mut invalidated = false;
+
+    debug_assert!(
+        possible_causes & RS_INVAL_HORIZON.0 as u32 == 0
+            || TransactionIdIsValid(snapshot_conflict_horizon)
     );
+    debug_assert!(possible_causes & RS_INVAL_WAL_REMOVED.0 as u32 == 0 || oldest_segno > 0);
+    debug_assert!(possible_causes != RS_INVAL_NONE.0 as u32);
+
+    if walsender_config::max_replication_slots() == 0 {
+        return Ok(invalidated);
+    }
+    let oldest_lsn =
+        transam_xlog::XLogSegNoOffsetToRecPtr(oldest_segno, 0, transam_xlog::wal_segment_size());
+
+    'restart: loop {
+        lw(control_lock(), LW_SHARED)?;
+        for s in ReplicationSlotCtl() {
+            if !s.in_use.get() {
+                continue;
+            }
+            // Prevent invalidation of logical slots during binary upgrade.
+            if SlotIsLogical(s) && g::IsBinaryUpgrade() {
+                continue;
+            }
+            if InvalidatePossiblyObsoleteSlot(
+                possible_causes,
+                s,
+                oldest_lsn,
+                dboid,
+                snapshot_conflict_horizon,
+                &mut invalidated,
+            )? {
+                // the lock was released: start from scratch
+                continue 'restart;
+            }
+        }
+        LWLockRelease(control_lock())?;
+        break;
+    }
+
+    if invalidated {
+        ReplicationSlotsComputeRequiredXmin(false)?;
+        ReplicationSlotsComputeRequiredLSN()?;
+    }
+    Ok(invalidated)
 }
 
 pub fn CheckPointReplicationSlots(is_shutdown: bool) -> PgResult<()> {
@@ -1738,6 +2071,7 @@ fn idle_timeout_set(v: i32) {
 
 pub fn init_seams() {
     slot_seams::replication_slot_initialize::set(ReplicationSlotInitialize);
+    slot_seams::invalidate_obsolete_replication_slots::set(InvalidateObsoleteReplicationSlots);
     slot_seams::startup_replication_slots::set(StartupReplicationSlots);
     slot_seams::check_point_replication_slots::set(CheckPointReplicationSlots);
     slot_seams::named_replication_slot_info::set(|name, need_lock| {
