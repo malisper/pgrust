@@ -7,6 +7,7 @@
 #![allow(non_snake_case)]
 
 pub mod bloom;
+pub mod condcache;
 pub mod format;
 pub mod hll;
 pub mod lz4dec;

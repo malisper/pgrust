@@ -209,6 +209,13 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
         let v = if matches!(env.as_str(), "0" | "off") { "off" } else { "on" };
         crate::SetConfigOption("pgrust.lane_executor", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
     }
+    // pgrust-only: pgrust.condition_cache's startup default, same contract
+    // as PGRUST_LANE_V2 above (the harness arm switch; the boot default
+    // stays OFF without the env var).
+    if let Ok(env) = std::env::var("PGRUST_CONDITION_CACHE") {
+        let v = if matches!(env.as_str(), "0" | "off") { "off" } else { "on" };
+        crate::SetConfigOption("pgrust.condition_cache", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
     Ok(())
 }
 

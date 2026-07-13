@@ -385,11 +385,21 @@ pub struct Part {
     // File offset of the v7 per-granule zero-count section (0 = none):
     // like sums, read lazily through the mmap (granule_zerocnt).
     zerocnt_off: u64,
+    // Immutable part identity for cross-query caches (condition cache): the
+    // part-cache staleness probe's exact vocabulary — (st_dev, st_ino,
+    // st_size, footer_off), stat'd BEFORE the footer read (a publish racing
+    // the open makes the identity stale-in-the-safe-direction: it names a
+    // superseded state, so the next open mints a fresh one; never the
+    // reverse). Sealed row groups never mutate; every publish grows
+    // len/footer_off and every recreate changes the inode, so equal
+    // identities imply byte-identical granule content.
+    pub identity: crate::condcache::PartIdent,
 }
 
 impl Part {
     // None: empty table (no committed footer yet).
     pub fn open(path: &str, ncols: usize) -> PgResult<Option<Part>> {
+        let ident_stat = std::fs::metadata(path).ok();
         let mut file = SegFile::open_rw(path)?;
         if file.total_len() < CB_HEADER_LEN {
             return Ok(None);
@@ -444,6 +454,20 @@ impl Part {
         } else {
             0
         };
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            match ident_stat {
+                Some(md) => crate::condcache::PartIdent {
+                    dev: md.dev(),
+                    ino: md.ino(),
+                    len: md.len(),
+                    footer_off,
+                },
+                // Unstat-able path (should be unreachable past open_rw):
+                // a null identity that the condition cache refuses to key on.
+                None => crate::condcache::PartIdent { dev: 0, ino: 0, len: 0, footer_off: 0 },
+            }
+        };
         Ok(Some(Part {
             map,
             rgs,
@@ -457,6 +481,7 @@ impl Part {
             nlencols,
             stitch,
             zerocnt_off,
+            identity,
         }))
     }
 

@@ -1289,6 +1289,10 @@ pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32>
 
 pub use ::cbstore::{MetaAggScan, MetaZeroQual};
 
+/// Condition-cache cumulative counters (hits, misses, insertions,
+/// evictions) — the lane stats dump's source.
+pub use ::cbstore::condcache::stats as condcache_stats;
+
 /// Metadata MIN/MAX/COUNT/SUM answer (cbstore zone maps + footer row counts
 /// + footer sums; `zq` = the v7 zero-count qual arm); None = the AM has no
 /// exact metadata answer for these columns.
@@ -1314,6 +1318,35 @@ pub fn table_scan_staged_granule_verdict(
     match scan {
         TableScanDesc::Heap(_) => ZoneVerdict::Mixed,
         TableScanDesc::Cbstore(c) => c.staged_granule_verdict(q),
+    }
+}
+
+/// Arm the cbstore condition cache (pgrust.condition_cache) on this scan:
+/// `fp` = the staged lane prefix's canonical fingerprint, `capacity` = the
+/// byte-budget GUC. Heap scans have no granule verdicts — always false.
+pub fn table_scan_condcache_arm(scan: &mut TableScanDesc<'_>, fp: u128, capacity: u64) -> bool {
+    match scan {
+        TableScanDesc::Heap(_) => false,
+        TableScanDesc::Cbstore(c) => c.condcache_arm(fp, capacity),
+    }
+}
+
+/// Condition-cache lookup for the currently staged cbstore window: true =
+/// hit, `sel` now holds the staged prefix's survivor bits and the qual's
+/// decode+eval legs are skipped. false = miss/unarmed (heap: always).
+pub fn table_scan_condcache_lookup(scan: &mut TableScanDesc<'_>, sel: &mut [u64]) -> bool {
+    match scan {
+        TableScanDesc::Heap(_) => false,
+        TableScanDesc::Cbstore(c) => c.condcache_lookup(sel),
+    }
+}
+
+/// Record the currently staged cbstore window's freshly evaluated survivor
+/// bits into the condition cache. No-op when unarmed or heap.
+pub fn table_scan_condcache_store(scan: &mut TableScanDesc<'_>, sel: &[u64]) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.condcache_store(sel),
     }
 }
 
