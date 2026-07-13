@@ -35,6 +35,13 @@ struct ColDecode {
     // (rg, granule) this column's buffers hold; granule content per key is
     // immutable, so a matching key is valid across rescans. NONE_KEY = none.
     gkey: (u32, u32),
+    // Per-dict-code length memo (length-lane fills over dict-encoded text
+    // chunks): lens[code] = the dict entry's octet or UTF-8 character
+    // length, computed ONCE per (row-group dictionary, kind) — every staged
+    // row then reads its length as one table gather, never touching string
+    // payload bytes per row. Keyed like `dict` (dict_rg) plus the kind.
+    len_memo: Vec<i64>,
+    len_memo_key: (usize, u8),
 }
 
 const NONE_KEY: (u32, u32) = (u32::MAX, u32::MAX);
@@ -98,6 +105,39 @@ fn new_col_decode() -> ColDecode {
         dict_sorted: false,
         contig_text: false,
         gkey: NONE_KEY,
+        len_memo: Vec::new(),
+        len_memo_key: (usize::MAX, 0),
+    }
+}
+
+// octet_length / length(text) of one decoded inline varlena image.
+// `chars` = the UTF-8 character count with C text_length's exact semantics:
+// the arming seam admits the chars kind only under a UTF-8 server encoding,
+// where C calls pg_mbstrlen_with_len — reused through its seam verbatim
+// (total over arbitrary bytes: NUL-stop and lead-byte jumps included), so
+// the lane value is C's answer BY CONSTRUCTION for any payload, valid UTF-8
+// or not (no countability proof needed).
+//
+// # Safety
+// `d` is a live inline varlena image (cbstore decode contract: 1B short or
+// plain 4B-U).
+#[inline]
+unsafe fn text_datum_len(d: Datum, chars: bool) -> i64 {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    let payload = unsafe {
+        if ::types_tuple::varatt::varatt_is_1b(p) {
+            core::slice::from_raw_parts(p.add(1), ::types_tuple::varatt::varsize_1b(p) - 1)
+        } else {
+            debug_assert!(::types_tuple::varatt::varatt_is_4b_u(p));
+            core::slice::from_raw_parts(p.add(4), ::types_tuple::varatt::varsize_4b(p) - 4)
+        }
+    };
+    if chars {
+        ::mbutils_seams::pg_mbstrlen_with_len::call(payload)
+            .expect("pg_mbstrlen_with_len is total over arbitrary bytes") as i64
+    } else {
+        payload.len() as i64
     }
 }
 
@@ -925,6 +965,19 @@ impl<'mcx> CbScanDescData<'mcx> {
         debug_assert!(self.needed[c]);
         let n = self.staged_rows;
         self.ensure_col(c);
+        // Length-lane fill (fold length admissions): the column's ONLY SoA
+        // consumer reads lengths, so the fill answers `Datum::from_i64(len)`
+        // per row — per-dict-code table gather on dict chunks (string bytes
+        // touched once per distinct value per RG), header-read/EXACT C walk
+        // on Raw chunks — and never materializes the datum lane. Dict-wanted
+        // columns (dict-tier qual coexist) keep the dict-lane answer for the
+        // qual; the post-qual gather converts them (`gather_len_lane_bytes`
+        // / `convert_lane_to_len_bytes` at the nodeseqscan fill).
+        let lw = soa.len_want(c);
+        if lw != 0 && !soa.dict_want(c) {
+            self.fill_len_col(c, lw == ::exectuples::LEN_WANT_CHARS, soa);
+            return;
+        }
         let cd = &self.cols[c];
         if cd.is_dict {
             let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
@@ -965,6 +1018,41 @@ impl<'mcx> CbScanDescData<'mcx> {
                 if let Some(span) = staged_text_span(self.staged_col(c)) {
                     soa.set_text_span(c, span);
                 }
+            }
+        }
+        soa.col_isnull_mut(c).fill(false);
+    }
+
+    /// Length-lane fill for one staged column window (see the
+    /// `batch_deform_col` length branch). `chars` = UTF-8 character length
+    /// (C `text_length` parity by seam reuse), else octet length.
+    fn fill_len_col(&mut self, c: usize, chars: bool, soa: &mut ::exectuples::SoaBatch<'_>) {
+        let n = self.staged_rows;
+        let lo = self.staged_lo;
+        let cd = &mut self.cols[c];
+        let out = &mut soa.col_values_mut(c)[..n];
+        if cd.is_dict {
+            // Per-code memo: one length per distinct value per (RG dict,
+            // kind); rebuilt only when the dictionary changes.
+            let key = (cd.dict_rg, chars as u8 + 1);
+            if cd.len_memo_key != key {
+                cd.len_memo.clear();
+                cd.len_memo.reserve(cd.dict.len());
+                for &d in &cd.dict {
+                    // SAFETY: dict entries are live inline varlena images
+                    // (decode contract).
+                    cd.len_memo.push(unsafe { text_datum_len(d, chars) });
+                }
+                cd.len_memo_key = key;
+            }
+            for (o, &code) in out.iter_mut().zip(&cd.codes[lo..lo + n]) {
+                *o = Datum::from_i64(cd.len_memo[code as usize]);
+            }
+        } else {
+            for (o, &d) in out.iter_mut().zip(&cd.datums[lo..lo + n]) {
+                // SAFETY: decoded window datums are live inline varlena
+                // images (decode contract).
+                *o = Datum::from_i64(unsafe { text_datum_len(d, chars) });
             }
         }
         soa.col_isnull_mut(c).fill(false);

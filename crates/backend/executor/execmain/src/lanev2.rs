@@ -2216,6 +2216,9 @@ fn agg_plain_fold_feed<'mcx>(
     // (count(*)-only plans were refused, so the fold always reads lane
     // columns). Re-preparing with the same shape is a no-op.
     arm_scan_staging(ss, estate, ScanFeedShape::FoldPrefix { agg })?;
+    // Fold length lanes (no grouping key, no spill, no staged replay on the
+    // plain feed — the staged lanes' only reader is the fold itself).
+    arm_fold_len_lanes(agg, ss);
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg)?;
@@ -4781,6 +4784,52 @@ fn sorted_key_datum_eq(a: ::datum::Datum, b: ::datum::Datum, attlen: i16) -> boo
     (a.as_u64() ^ b.as_u64()) & mask == 0
 }
 
+/// Arm fold LENGTH lanes (lane-v2-asciilen) on the staged batch: for every
+/// fold plan column whose transitions are ALL one length kind (VarLenBytes
+/// xor VarLenChars; CountAny rides along — it reads only isnull) and which
+/// is not a grouping column, ask the staging to answer the column as i64
+/// lengths (`seq_scan_batch_len_want` audits the datum-reading
+/// co-consumers). On dict-encoded cbstore chunks the fill then reads ONE
+/// per-code length table entry per row (string bytes touched once per
+/// distinct value per row group) — the fold never materializes or
+/// dereferences a per-row varlena datum; Raw chunks read the varlena header
+/// (bytes) or run C's exact mb walk (chars) at the fill. A refused arm
+/// keeps the datum-lane kernels byte-identically.
+fn arm_fold_len_lanes<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+) {
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return };
+    let group = ::nodeagg::agg_plan_group_cols(agg);
+    for &c in plan.cols.iter() {
+        let (mut bytes, mut chars, mut other) = (false, false, false);
+        for t in plan.trans.iter() {
+            if t.col != c
+                || matches!(t.kind, ::lanefold::LaneKind::CountAny | ::lanefold::LaneKind::CountStar)
+            {
+                continue;
+            }
+            match t.width {
+                ::lanefold::LaneWidth::VarLenBytes => bytes = true,
+                ::lanefold::LaneWidth::VarLenChars => chars = true,
+                _ => other = true,
+            }
+        }
+        if other || bytes == chars {
+            continue; // not a length column, or mixed kinds share the lane
+        }
+        if group.iter().any(|&a| a >= 1 && (a - 1) as u16 == c) {
+            continue;
+        }
+        if ::nodeseqscan::seq_scan_batch_len_want(ss, c, chars) {
+            lane_trace(&format!(
+                "fold length lane armed (col {c}, {})",
+                if chars { "chars" } else { "bytes" }
+            ));
+        }
+    }
+}
+
 /// The structural lane choice for the sorted-agg-over-SeqScan drive, decided
 /// once per node: Fold when the node passes the sorted-fold admission AND
 /// the group keys are lane-comparable AND the staging (PREWHERE for qualled
@@ -4814,6 +4863,7 @@ fn decide_sorted_agg_lane<'mcx>(
                 ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
             };
             if armed && ::nodeseqscan::seq_scan_batch_soa(ss).is_some() {
+                arm_fold_len_lanes(agg, ss);
                 trace_feed("sorted-agg fold drive armed (seqscan)");
                 return Ok(AggLaneChoice::Fold);
             }

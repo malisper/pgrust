@@ -975,8 +975,89 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
 #[inline]
 pub fn seq_scan_batch_gather_dict(node: &mut SeqScanState<'_>, c: usize) {
     if let Some(b) = node.batch_soa.as_deref_mut() {
-        b.soa.gather_dict_lane(c);
+        gather_or_len(&mut b.soa, c);
     }
+}
+
+/// Post-qual materialization of a dict-tier qual column: length-armed
+/// columns fill their SoA lane with byte lengths (per-code gather on
+/// dict-answered windows, in-place header-read conversion on Raw windows —
+/// the clause's fallback eval read the datums BEFORE this), everything else
+/// gathers `dict[code]` to Raw exactly as before. The len arm admits only
+/// the bytes kind on dict-tier qual columns (`seq_scan_batch_len_want`).
+#[inline]
+fn gather_or_len(soa: &mut ::exectuples::SoaBatch<'_>, c: usize) {
+    match soa.len_want(c) {
+        0 => soa.gather_dict_lane(c),
+        _ => {
+            if soa.dict_lane(c).is_some() {
+                soa.gather_len_lane_bytes(c);
+            } else {
+                // SAFETY: a Raw-answered cbstore text window filled every
+                // staged row's cell with a live inline varlena image
+                // (decode contract); the qual already consumed the datums
+                // and the len contract says no datum reader follows.
+                unsafe { soa.convert_lane_to_len_bytes(c) };
+            }
+        }
+    }
+}
+
+/// Arm column `c` of the staged batch as a fold LENGTH lane (lane-v2-
+/// asciilen): the cbstore fill answers the column's values cells as
+/// `Datum::from_i64(length)` — per-dict-code table on dict chunks, header
+/// read / C mb-walk on Raw chunks — instead of varlena datum pointers.
+/// `chars` = UTF-8 character length (the caller's classify admitted the
+/// encoding), else octet length.
+///
+/// Refuses (false) whenever any co-consumer reads the column's Datum cells
+/// as datums: kernel quals / contains / stitched tiers / projections own
+/// lanes (conservatively: any of them armed), the column is a varkey or a
+/// key/dict-group column, a lane-less qual owns the scan, the PREWHERE lane
+/// reads it raw, or a chars-kind ask on a dict-tier qual column (the
+/// post-qual gather converts bytes only). The fold and guard reads consult
+/// the SAME batch flag the fill honors, so a refusal (or a later batch
+/// rebuild) byte-safely keeps the datum-lane path.
+pub fn seq_scan_batch_len_want(node: &mut SeqScanState<'_>, c: u16, chars: bool) -> bool {
+    let has_qual = node.ss.qual.is_some();
+    let Some(b) = node.batch_soa.as_deref_mut() else {
+        return false;
+    };
+    let want = if chars {
+        ::exectuples::LEN_WANT_CHARS
+    } else {
+        ::exectuples::LEN_WANT_BYTES
+    };
+    match b.soa.len_want(c as usize) {
+        0 => {}
+        k => return k == want, // idempotent re-arm of the same ask only
+    }
+    if b.key_col.is_some()
+        || b.varkey.is_some()
+        || b.dict_group == Some(c)
+        || b.stitch.is_some()
+        || b.proj.is_some()
+        || b.contains.is_some()
+        || b.nquals != 0
+    {
+        return false;
+    }
+    match b.lane.as_deref() {
+        Some(lq) => {
+            if lq.reads_col_raw(c) {
+                return false;
+            }
+            if chars && lq.dict_cols().any(|dc| dc == c) {
+                return false;
+            }
+        }
+        // A qual not owned by the PREWHERE lane evaluates through paths this
+        // seam cannot audit — refuse (the datum path stays correct).
+        None if has_qual => return false,
+        None => {}
+    }
+    b.soa.set_len_want(c, want);
+    true
 }
 
 /// The registered dict-group consumer column, when the dict-group arm (or a
@@ -1449,7 +1530,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                         ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                b.soa.gather_dict_lane(c as usize);
+                                gather_or_len(&mut b.soa, c as usize);
                             }
                         }
                     }
@@ -1458,7 +1539,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                     ::laneexec::eval_lane_qual(lq, &b.soa, n, &mut b.sel)?;
                     for c in lq.dict_cols() {
                         if b.dict_group != Some(c) {
-                            b.soa.gather_dict_lane(c as usize);
+                            gather_or_len(&mut b.soa, c as usize);
                         }
                     }
                 }

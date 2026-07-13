@@ -221,6 +221,39 @@ pub struct SoaBatch<'mcx> {
     // (or left None = per-row) by the fill every window.
     text_spans: PgVec<'mcx, Option<SoaTextSpan>>,
     text_any: bool,
+    // Length-lane arming (fold length admissions over cbstore text columns):
+    // 0 = none, LEN_WANT_BYTES = octet length, LEN_WANT_CHARS = UTF-8
+    // character length. Armed once at feed arm (cbstore scans only); the
+    // AM's batch fill answers the column's values cells with
+    // `Datum::from_i64(length)` for every staged SELECTED row instead of
+    // varlena datum pointers (post-qual for dict-answered qual columns — the
+    // gather/convert step). Heap fills never see an armed column (the
+    // arming seam refuses non-cbstore scans).
+    len_want: PgVec<'mcx, u8>,
+    len_any: bool,
+}
+
+/// `len_want` kinds (see the field doc).
+pub const LEN_WANT_BYTES: u8 = 1;
+pub const LEN_WANT_CHARS: u8 = 2;
+
+// VARSIZE_ANY_EXHDR over a guaranteed-inline (1B short or plain 4B) varlena
+// image — the only forms a cbstore dict entry or decoded lane datum holds.
+//
+// # Safety
+// `d` is a live varlena datum pointer in one of the two inline forms.
+#[inline(always)]
+unsafe fn inline_varlena_len(d: Datum) -> i64 {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        if ::types_tuple::varatt::varatt_is_1b(p) {
+            (::types_tuple::varatt::varsize_1b(p) - 1) as i64
+        } else {
+            debug_assert!(::types_tuple::varatt::varatt_is_4b_u(p));
+            (::types_tuple::varatt::varsize_4b(p) - 4) as i64
+        }
+    }
 }
 
 impl<'mcx> SoaBatch<'mcx> {
@@ -244,6 +277,8 @@ impl<'mcx> SoaBatch<'mcx> {
             lane_read_any: false,
             text_spans: ::mcx::vec_from_elem_in(mcx, None, ncols as usize),
             text_any: false,
+            len_want: ::mcx::vec_from_elem_in(mcx, 0u8, ncols as usize),
+            len_any: false,
         }
     }
 
@@ -331,6 +366,65 @@ impl<'mcx> SoaBatch<'mcx> {
             *v = lane.datum(i);
         }
         self.dict_lanes[c] = None;
+    }
+
+    /// Length-lane arm (once, at fold-feed arm): column `c`'s values cells
+    /// carry `Datum::from_i64(length)` for staged selected rows (see the
+    /// field doc). `kind` is `LEN_WANT_BYTES`/`LEN_WANT_CHARS`.
+    pub fn set_len_want(&mut self, c: u16, kind: u8) {
+        debug_assert!(matches!(kind, LEN_WANT_BYTES | LEN_WANT_CHARS));
+        self.len_want[c as usize] = kind;
+        self.len_any = true;
+    }
+
+    #[inline]
+    pub fn len_want(&self, c: usize) -> u8 {
+        if !self.len_any {
+            return 0;
+        }
+        self.len_want[c]
+    }
+
+    #[inline]
+    pub fn len_any(&self) -> bool {
+        self.len_any
+    }
+
+    /// Materialize a dict-answered length column: `lens[codes[i]]` where the
+    /// per-code length is the dict entry's byte count (octet_length), and
+    /// clear the lane. The bytes-kind counterpart of `gather_dict_lane` for
+    /// `len_want` columns (chars-kind asks never coexist with a dict-answered
+    /// qual column — the arming seam refuses them).
+    pub fn gather_len_lane_bytes(&mut self, c: usize) {
+        let Some(lane) = self.dict_lane(c) else { return };
+        let n = self.nrows as usize;
+        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        let isnull = &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        isnull.fill(false);
+        for (i, v) in values.iter_mut().enumerate() {
+            // SAFETY: dict entries are live inline varlena images for the
+            // life of the staged window (dict-lane filler contract).
+            *v = Datum::from_i64(unsafe { inline_varlena_len(lane.datum(i)) });
+        }
+        self.dict_lanes[c] = None;
+    }
+
+    /// Convert a Raw-filled text column's datum lane to byte lengths in
+    /// place (the Raw-window counterpart of `gather_len_lane_bytes`: a
+    /// dict-tier qual column whose window decoded Raw filled datums for the
+    /// clause's fallback eval; the fill converts once, post-qual).
+    ///
+    /// # Safety
+    /// Every staged row's value cell holds a live inline varlena datum
+    /// pointer (the cbstore Raw fill's contract), and no consumer reads the
+    /// column as datums after this call.
+    pub unsafe fn convert_lane_to_len_bytes(&mut self, c: usize) {
+        let n = self.nrows as usize;
+        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        for v in values.iter_mut() {
+            // SAFETY: forwarded caller contract.
+            *v = Datum::from_i64(unsafe { inline_varlena_len(*v) });
+        }
     }
 
     /// Lane arm: column `c` is read by the lane program from the SoA batch.
@@ -733,5 +827,5 @@ mcx::forget_safe_nodrop!(SoaTextSpan);
 // jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs; jit },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any, len_want, len_any },
 );
