@@ -97,6 +97,22 @@ impl LaneQualProg {
             .chain(self.dict.iter().map(|c| c.col))
     }
 
+    /// True when the lane program reads column `c`'s Raw Datum cells as live
+    /// datums for its verdicts (the int clause lanes: the whole-prefix
+    /// program's lane loads and the staged Int clauses). Dict-tier clauses
+    /// are deliberately excluded — their Raw-window fallback reads datums
+    /// only BEFORE the post-qual gather, so a post-qual length-lane
+    /// conversion of the column is safe for them.
+    pub fn reads_col_raw(&self, c: u16) -> bool {
+        self.prog.steps.iter().any(|s| match *s {
+            BStep::LoadLane { col, .. } | BStep::InListAnyConst { col, .. } => col == c,
+            _ => false,
+        }) || self
+            .staged
+            .iter()
+            .any(|sc| matches!(sc.kind, StagedKind::Int { .. }) && sc.cols.contains(&c))
+    }
+
     /// Prewhere staged evaluation: number of independently evaluable prefix
     /// clauses, in ascending estimated-cost order.
     pub fn nstaged(&self) -> usize {

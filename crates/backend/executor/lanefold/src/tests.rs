@@ -2603,3 +2603,142 @@ fn fold_rows_grouped_strlen_parity() {
     assert_parity(&plan, &pg_a, &want_a);
     assert_parity(&plan, &pg_b, &want_b);
 }
+
+// ---- length-staged lanes (lane-v2-asciilen) ----
+
+// LaneCols whose column 0 is LENGTH-STAGED: the lane holds i64 lengths (the
+// feed's fill answers), NOT varlena pointers. col_len_staged proves the
+// guard skips: the i64 bit patterns would demote (or UB) the vguard walk if
+// it ran.
+struct LenStagedCols {
+    values: Vec<Datum>,
+    isnull: Vec<bool>,
+}
+
+impl LaneCols for LenStagedCols {
+    fn col_values(&self, _c: usize) -> &[Datum] {
+        &self.values
+    }
+
+    fn col_isnull(&self, _c: usize) -> &[bool] {
+        &self.isnull
+    }
+
+    fn col_len_staged(&self, c: usize) -> bool {
+        c == 0
+    }
+}
+
+// C pg_mbstrlen_with_len under UTF-8 (pg_utf_mblen jumps + NUL stop): the
+// INDEPENDENT oracle for what a length-staged fill must have produced for
+// arbitrary bytes — including invalid UTF-8 and embedded NUL, which the
+// datum-lane path can only demote on.
+fn oracle_c_walk_charlen(p: &[u8]) -> i64 {
+    let (mut n, mut i) = (0i64, 0usize);
+    while i < p.len() && p[i] != 0 {
+        let b = p[i];
+        i += if b & 0x80 == 0 {
+            1
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else if b & 0xF8 == 0xF0 {
+            4
+        } else {
+            1
+        };
+        n += 1;
+    }
+    n
+}
+
+#[test]
+fn len_staged_lane_folds_i64_and_skips_guards() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    // Length inputs incl. C-walk answers for payloads the datum-lane path
+    // must demote on (invalid UTF-8, embedded NUL) — the staged fill
+    // computes C's answer, so the fold takes them WITHOUT a demote.
+    let payloads: Vec<Option<Vec<u8>>> = vec![
+        Some(b"http://a.example/x?q=1".to_vec()),
+        Some("héllo".as_bytes().to_vec()),
+        None,
+        Some("日本語のページ".as_bytes().to_vec()),
+        Some(b"".to_vec()),
+        Some(vec![0xE9, b'x', b'y']),        // lone lead byte (invalid UTF-8)
+        Some(vec![b'a', 0x00, b'b']),        // embedded NUL (C NUL-stops)
+        Some(vec![0x80, 0x80]),              // bare continuations
+        Some(b"plain".to_vec()),
+    ];
+    for (charlen, avg_fn, mm_fn) in [(true, 1963u32, 768u32), (false, 1963, 769)] {
+        let fnoid = if charlen { F_TEXTLEN_T } else { F_OCTETLEN_T };
+        let a1 = arg_list(mcx, mk_len_fn(mcx, fnoid, mk_var(mcx, 1, TEXTV)));
+        let a2 = arg_list(mcx, mk_len_fn(mcx, fnoid, mk_var(mcx, 1, TEXTV)));
+        let specs = [mk_spec(avg_fn, false, &a1), mk_spec(mm_fn, true, &a2)];
+        let plan = classify(mcx, &specs).expect("admits");
+        assert!(plan.guarded, "length plans carry the vguard obligation");
+        assert_eq!(plan.uguards.is_empty(), !charlen);
+        let lens: Vec<Option<i64>> = payloads
+            .iter()
+            .map(|p| {
+                p.as_ref().map(|p| {
+                    if charlen {
+                        oracle_c_walk_charlen(p)
+                    } else {
+                        p.len() as i64
+                    }
+                })
+            })
+            .collect();
+        let cols = LenStagedCols {
+            values: lens.iter().map(|l| l.map_or(Datum::null(), Datum::from_i64)).collect(),
+            isnull: lens.iter().map(|l| l.is_none()).collect(),
+        };
+        let sel = |i: usize| i != 8; // exercise the selection mask too
+        let rows = selmask(payloads.len(), sel);
+        // Guard skips: i64 lanes never demote and never deref — data stays
+        // false (no guard walked).
+        // SAFETY: len-staged lanes carry no datum pointers; the skip IS the
+        // contract under test.
+        let gc = unsafe { check_guards(&plan, &cols, &rows, |_| None) };
+        assert_eq!(gc, GuardCheck::Pass { zone: false, data: false });
+        let mut pgs = pergroups_for(mcx, &plan, specs.len());
+        // SAFETY: pgs covers every transno; the staged lane covers every row.
+        unsafe {
+            fold_batch(
+                &plan,
+                &cols,
+                &rows,
+                payloads.len(),
+                NonNull::new(pgs.as_mut_ptr()).unwrap(),
+                mcx,
+            )
+            .expect("fold");
+        }
+        let lens_rows: Vec<Vec<Option<i64>>> = lens.iter().map(|l| vec![*l]).collect();
+        let want = reference_fold(mcx, &plan, &lens_rows, sel, specs.len());
+        assert_parity(&plan, &pgs, &want);
+
+        // Grouped path (fold_rows_grouped) reads the staged widths too.
+        let mut pg_a = pergroups_for(mcx, &plan, specs.len());
+        let mut pg_b = pergroups_for(mcx, &plan, specs.len());
+        let live: Vec<u32> =
+            (0..payloads.len() as u32).filter(|&i| !cols.isnull[i as usize]).collect();
+        let groups: Vec<NonNull<AggPerGroup>> = live
+            .iter()
+            .map(|&i| {
+                NonNull::new(if i % 2 == 0 { pg_a.as_mut_ptr() } else { pg_b.as_mut_ptr() })
+                    .unwrap()
+            })
+            .collect();
+        // SAFETY: as above; groups snapshot per staged row.
+        unsafe { fold_rows_grouped(&plan, &cols, &live, &groups, mcx).expect("fold") };
+        let want_a =
+            reference_fold(mcx, &plan, &lens_rows, |i| !cols.isnull[i] && i % 2 == 0, specs.len());
+        let want_b =
+            reference_fold(mcx, &plan, &lens_rows, |i| !cols.isnull[i] && i % 2 == 1, specs.len());
+        assert_parity(&plan, &pg_a, &want_a);
+        assert_parity(&plan, &pg_b, &want_b);
+    }
+}
