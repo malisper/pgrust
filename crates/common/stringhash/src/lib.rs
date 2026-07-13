@@ -420,6 +420,26 @@ macro_rules! inline_table {
                 }
             }
 
+            /// Find-only probe (no insert) — the residual-replay path.
+            #[inline(always)]
+            fn find(&self, key: $keyty, hash: u64) -> Option<GroupId> {
+                if self.cells.cap == 0 {
+                    return None;
+                }
+                let mut pos = (hash as usize) & self.mask;
+                loop {
+                    // SAFETY: pos is masked to capacity.
+                    let c = unsafe { self.cells.get(pos) };
+                    if c.key == key {
+                        return Some(c.v);
+                    }
+                    if Self::key_last(&c.key) == 0 {
+                        return None;
+                    }
+                    pos = (pos + 1) & self.mask;
+                }
+            }
+
             /// CH's HashTable::resize: extend in place (realloc), then move
             /// only the cells whose home chain changed; the wrapped tail of
             /// any collision chain that crossed the old buffer end is
@@ -738,6 +758,282 @@ impl StringHashMap {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// External-arena variant (executor wiring)
+// ---------------------------------------------------------------------------
+//
+// Same length-bucketed design, but the long-tail bucket references key bytes
+// in a CALLER-owned arena (`Vec<u8>`) instead of an internal one: the
+// hash-grouped arm's `arena` stays the single byte authority (its emission
+// comparator, spans, and degrade paths read it), and every insert appends
+// the key there and reports the offset for the caller's span bookkeeping.
+
+/// Long-tail bucket over an external arena: cells hold (saved hash, off,
+/// len) into the caller's arena. `len == 0` marks empty (the empty string
+/// is handled at the map level).
+#[derive(Clone, Copy)]
+struct CellX {
+    hash: u64,
+    off: u32,
+    len: u32,
+    v: GroupId,
+}
+
+struct TabX {
+    cells: RawCells<CellX>,
+    mask: usize,
+    len: usize,
+}
+
+impl TabX {
+    fn new() -> Self {
+        TabX { cells: RawCells::new(), mask: 0, len: 0 }
+    }
+
+    #[inline(always)]
+    fn insert(
+        &mut self,
+        key: &[u8],
+        hash: u64,
+        arena: &mut Vec<u8>,
+        next_id: &mut GroupId,
+    ) -> (GroupId, bool, u32) {
+        if self.cells.cap == 0 {
+            self.cells.alloc_zeroed(1 << INITIAL_DEGREE);
+            self.mask = self.cells.cap - 1;
+        }
+        debug_assert!(!key.is_empty());
+        let mut pos = (hash as usize) & self.mask;
+        loop {
+            let c = unsafe { *self.cells.get(pos) };
+            if c.len == 0 {
+                let off = arena.len();
+                assert!(
+                    off + key.len() <= u32::MAX as usize,
+                    "stringhash: external arena exceeds 4 GiB"
+                );
+                arena.extend_from_slice(key);
+                let id = *next_id;
+                *next_id += 1;
+                unsafe {
+                    *self.cells.get_mut(pos) =
+                        CellX { hash, off: off as u32, len: key.len() as u32, v: id };
+                }
+                self.len += 1;
+                if self.len * 2 > self.cells.cap {
+                    self.grow();
+                }
+                return (id, true, off as u32);
+            }
+            if c.hash == hash && c.len as usize == key.len() && unsafe {
+                eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
+            } {
+                return (c.v, false, c.off);
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    #[inline(always)]
+    fn find(&self, key: &[u8], hash: u64, arena: &[u8]) -> Option<GroupId> {
+        if self.cells.cap == 0 {
+            return None;
+        }
+        let mut pos = (hash as usize) & self.mask;
+        loop {
+            let c = unsafe { *self.cells.get(pos) };
+            if c.len == 0 {
+                return None;
+            }
+            if c.hash == hash && c.len as usize == key.len() && unsafe {
+                eq_bytes(arena.as_ptr().add(c.off as usize), key.as_ptr(), key.len())
+            } {
+                return Some(c.v);
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    #[cold]
+    fn grow(&mut self) {
+        let old_n = self.cells.cap;
+        self.cells.grow_double();
+        self.mask = self.cells.cap - 1;
+        unsafe {
+            for i in 0..old_n {
+                if self.cells.get(i).len != 0 {
+                    self.reinsert(i);
+                }
+            }
+            let mut i = old_n;
+            while i < self.cells.cap && self.cells.get(i).len != 0 {
+                self.reinsert(i);
+                i += 1;
+            }
+        }
+    }
+
+    #[inline]
+    unsafe fn reinsert(&mut self, i: usize) {
+        let c = *self.cells.get(i);
+        let home = (c.hash as usize) & self.mask;
+        if home == i {
+            return;
+        }
+        let mut pos = home;
+        loop {
+            if pos == i {
+                return;
+            }
+            let slot = self.cells.get_mut(pos);
+            if slot.len == 0 {
+                *slot = c;
+                self.cells.get_mut(i).len = 0;
+                return;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    fn mem_bytes(&self) -> usize {
+        self.cells.cap * std::mem::size_of::<CellX>()
+    }
+}
+
+/// Insert-or-get map over an external byte arena (see module section doc).
+/// Returned ids are dense, 0-based, in first-appearance order; every INSERT
+/// appends the key bytes to `arena` and reports their offset (hits report
+/// the ORIGINAL offset).
+pub struct ExtIdMap {
+    empty: GroupId, // GroupId::MAX = unset; off recorded alongside
+    empty_off: u32,
+    t8: Tab8,
+    t16: Tab16,
+    t24: Tab24,
+    tx: TabX,
+    next_id: GroupId,
+}
+
+impl Default for ExtIdMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtIdMap {
+    pub fn new() -> Self {
+        ExtIdMap {
+            empty: GroupId::MAX,
+            empty_off: 0,
+            t8: Tab8::new(),
+            t16: Tab16::new(),
+            t24: Tab24::new(),
+            tx: TabX::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Returns (dense id, inserted, offset of the key bytes in `arena`).
+    #[inline(always)]
+    pub fn insert_or_get(&mut self, key: &[u8], arena: &mut Vec<u8>) -> (GroupId, bool, u32) {
+        let sz = key.len();
+        if sz == 0 {
+            if self.empty == GroupId::MAX {
+                self.empty = self.next_id;
+                self.next_id += 1;
+                self.empty_off = arena.len() as u32;
+                return (self.empty, true, self.empty_off);
+            }
+            return (self.empty, false, self.empty_off);
+        }
+        if key[sz - 1] == 0 {
+            return self.tx.insert(key, hash_long(key), arena, &mut self.next_id);
+        }
+        match (sz - 1) >> 3 {
+            0 => {
+                let k = pack8(key);
+                let (id, ins) = self.t8.insert(k, hash8(k), &mut self.next_id);
+                (id, ins, Self::append_if(ins, key, arena))
+            }
+            1 => {
+                let (a, b) = pack16(key);
+                let (id, ins) = self.t16.insert([a, b], hash16(a, b), &mut self.next_id);
+                (id, ins, Self::append_if(ins, key, arena))
+            }
+            2 => {
+                let (a, b, c) = pack24(key);
+                let (id, ins) = self.t24.insert([a, b, c], hash24(a, b, c), &mut self.next_id);
+                (id, ins, Self::append_if(ins, key, arena))
+            }
+            _ => self.tx.insert(key, hash_long(key), arena, &mut self.next_id),
+        }
+    }
+
+    #[inline(always)]
+    fn append_if(inserted: bool, key: &[u8], arena: &mut Vec<u8>) -> u32 {
+        if inserted {
+            let off = arena.len();
+            assert!(
+                off + key.len() <= u32::MAX as usize,
+                "stringhash: external arena exceeds 4 GiB"
+            );
+            arena.extend_from_slice(key);
+            off as u32
+        } else {
+            u32::MAX // hits in the inline buckets do not track the offset
+        }
+    }
+
+    /// Find-only probe (residual replay): no insert, no arena append.
+    #[inline(always)]
+    pub fn find(&self, key: &[u8], arena: &[u8]) -> Option<GroupId> {
+        let sz = key.len();
+        if sz == 0 {
+            return (self.empty != GroupId::MAX).then_some(self.empty);
+        }
+        if key[sz - 1] == 0 {
+            return self.tx.find(key, hash_long(key), arena);
+        }
+        match (sz - 1) >> 3 {
+            0 => {
+                let k = pack8(key);
+                self.t8.find(k, hash8(k))
+            }
+            1 => {
+                let (a, b) = pack16(key);
+                self.t16.find([a, b], hash16(a, b))
+            }
+            2 => {
+                let (a, b, c) = pack24(key);
+                self.t24.find([a, b, c], hash24(a, b, c))
+            }
+            _ => self.tx.find(key, hash_long(key), arena),
+        }
+    }
+
+    /// Reserve one dense id for an out-of-band group (the caller's NULL
+    /// slot) so map-assigned ids and caller-side groups share one space.
+    pub fn reserve_id(&mut self) -> GroupId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    pub fn len(&self) -> usize {
+        self.next_id as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.next_id == 0
+    }
+
+    /// Table-buffer footprint (the key bytes live in the caller's arena).
+    pub fn mem_bytes(&self) -> usize {
+        self.t8.mem_bytes() + self.t16.mem_bytes() + self.t24.mem_bytes() + self.tx.mem_bytes()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -815,6 +1111,56 @@ mod tests {
             keys.push(k); // and its trailing-NUL sibling
         }
         check_against_reference(&keys);
+    }
+
+    #[test]
+    fn ext_map_matches_reference_and_offsets() {
+        use std::collections::HashMap;
+        let mut s = 0x0123_4567_89AB_CDEFu64;
+        let mut lcg = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s
+        };
+        let mut keys: Vec<Vec<u8>> = vec![vec![]];
+        for _ in 0..30000 {
+            let len = (lcg() % 40) as usize;
+            let mut k: Vec<u8> = (0..len).map(|_| (lcg() % 256) as u8).collect();
+            if let Some(last) = k.last_mut() {
+                if lcg() % 4 == 0 {
+                    *last = 0; // trailing-NUL class
+                }
+            }
+            keys.push(k);
+        }
+        let dup = keys.clone();
+        keys.extend(dup);
+        let mut ours = ExtIdMap::new();
+        let mut arena: Vec<u8> = Vec::new();
+        let mut reference: HashMap<Vec<u8>, (u32, u32)> = HashMap::new(); // key -> (id, off)
+        let mut next = 0u32;
+        for k in &keys {
+            let (id, inserted, off) = ours.insert_or_get(k, &mut arena);
+            match reference.get(k) {
+                Some(&(rid, roff)) => {
+                    assert_eq!((id, inserted), (rid, false), "hit {k:?}");
+                    // long-bucket hits report the original offset
+                    if k.len() > 24 || k.last() == Some(&0) {
+                        assert_eq!(off, roff);
+                    }
+                    assert_eq!(ours.find(k, &arena), Some(rid));
+                }
+                None => {
+                    assert!(inserted);
+                    assert_eq!(id, next);
+                    assert_eq!(&arena[off as usize..off as usize + k.len()], &k[..]);
+                    reference.insert(k.clone(), (id, off));
+                    next += 1;
+                }
+            }
+        }
+        assert_eq!(ours.len(), reference.len());
+        // find() misses
+        assert_eq!(ours.find(b"definitely-not-present-key-xyzzy-0123456789", &arena), None);
     }
 
     #[test]

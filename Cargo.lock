@@ -8591,6 +8591,7 @@ dependencies = [
  "resowner",
  "resowner_seams",
  "sort_storage",
+ "stringhash",
  "syscache_seams",
  "tuplesort",
  "types_core",
