@@ -257,49 +257,98 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
     debug_assert_eq!(awaited_lock().map(|(t, _)| t), Some(*localtag));
     debug_assert!(!lwlock::LWLockHeldByMe(partition_lock));
 
-    if transam_xlog_seams::recovery_in_progress::call() {
-        panic!("lock waits during recovery: standby.c integration not ported (phase 2)");
-    }
+    // InHotStandby (only the startup process takes lock waits during
+    // recovery): delegate the wait to standby.c's
+    // ResolveRecoveryConflictWithLock, with the deadlock_timeout-based
+    // "recovery still waiting" reporting when log_recovery_conflict_waits.
+    let in_hot_standby = transam_xlog_seams::recovery_in_progress::call();
+    let standby_wait_start: i64 = if in_hot_standby {
+        if guc_tables::vars::log_recovery_conflict_waits.installed()
+            && guc_tables::vars::log_recovery_conflict_waits.read()
+        {
+            timestamp_seams::get_current_timestamp::call()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let mut logged_recovery_conflict = false;
 
     lmgr_proc::ResetDeadlockWaitState();
 
     let lock_timeout = lmgr_proc::globals::LockTimeout();
-    if lock_timeout > 0 {
-        timeout_seams::enable_timeouts::call(&[
-            timeout_seams::EnableTimeoutAfterParams {
-                id: timeout_seams::DEADLOCK_TIMEOUT,
-                delay_ms: lmgr_proc::globals::DeadlockTimeout(),
-            },
-            timeout_seams::EnableTimeoutAfterParams {
-                id: timeout_seams::LOCK_TIMEOUT,
-                delay_ms: lock_timeout,
-            },
-        ])?;
-    } else {
-        timeout_seams::enable_timeout_after::call(
-            timeout_seams::DEADLOCK_TIMEOUT,
-            lmgr_proc::globals::DeadlockTimeout(),
-        )?;
+    if !in_hot_standby {
+        if lock_timeout > 0 {
+            timeout_seams::enable_timeouts::call(&[
+                timeout_seams::EnableTimeoutAfterParams {
+                    id: timeout_seams::DEADLOCK_TIMEOUT,
+                    delay_ms: lmgr_proc::globals::DeadlockTimeout(),
+                },
+                timeout_seams::EnableTimeoutAfterParams {
+                    id: timeout_seams::LOCK_TIMEOUT,
+                    delay_ms: lock_timeout,
+                },
+            ])?;
+        } else {
+            timeout_seams::enable_timeout_after::call(
+                timeout_seams::DEADLOCK_TIMEOUT,
+                lmgr_proc::globals::DeadlockTimeout(),
+            )?;
+        }
+        // Reuse the timer's start time as waitStart; written without the
+        // partition lock (pg_locks may transiently see null waitstart).
+        proc.waitStart
+            .write(timeout_seams::get_timeout_start_time::call(
+                timeout_seams::DEADLOCK_TIMEOUT,
+            ) as u64);
     }
-    // Reuse the timer's start time as waitStart; written without the
-    // partition lock (pg_locks may transiently see null waitstart).
-    proc.waitStart
-        .write(timeout_seams::get_timeout_start_time::call(
-            timeout_seams::DEADLOCK_TIMEOUT,
-        ) as u64);
 
     let my_wait_status = loop {
-        latch_seams::wait_latch_my_latch::call(
-            WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
-            0,
-            PG_WAIT_LOCK | localtag.lock.locktag_type as u32,
-        );
-        latch_seams::reset_latch_my_latch::call();
-        if lmgr_proc::GotDeadlockTimeout() {
-            CheckDeadLock()?;
-            lmgr_proc::ResetGotDeadlockTimeout();
+        if in_hot_standby {
+            let maybe_log_conflict = standby_wait_start != 0 && !logged_recovery_conflict;
+
+            // Set a timer and wait for that or for the lock to be granted.
+            standby_seams::resolve_recovery_conflict_with_lock::call(
+                localtag.lock,
+                maybe_log_conflict,
+            )?;
+
+            // Log if the startup process has waited longer than
+            // deadlock_timeout for a recovery conflict on lock.
+            if maybe_log_conflict {
+                let now = timestamp_seams::get_current_timestamp::call();
+                let deadlock_timeout = lmgr_proc::globals::DeadlockTimeout() as i64;
+                if now - standby_wait_start >= deadlock_timeout * 1000 {
+                    let cx = ::mcx::MemoryContext::new("ProcSleep/lock-conflicts");
+                    let vxids = crate::acquire::GetLockConflicts(
+                        cx.mcx(),
+                        &localtag.lock,
+                        ::types_storage::lock::AccessExclusiveLock,
+                    )?;
+                    standby_seams::log_recovery_conflict::call(
+                        types_storage::storage::ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOCK,
+                        standby_wait_start,
+                        now,
+                        if vxids.is_empty() { None } else { Some(&vxids) },
+                        true,
+                    )?;
+                    logged_recovery_conflict = true;
+                }
+            }
+        } else {
+            latch_seams::wait_latch_my_latch::call(
+                WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
+                0,
+                PG_WAIT_LOCK | localtag.lock.locktag_type as u32,
+            );
+            latch_seams::reset_latch_my_latch::call();
+            if lmgr_proc::GotDeadlockTimeout() {
+                CheckDeadLock()?;
+                lmgr_proc::ResetGotDeadlockTimeout();
+            }
+            postgres_seams::check_for_interrupts::call()?;
         }
-        postgres_seams::check_for_interrupts::call()?;
 
         let my_wait_status = proc.waitStatus.load(Acquire);
 
@@ -324,19 +373,33 @@ pub fn ProcSleep(localtag: &LOCALLOCKTAG) -> PgResult<ProcWaitStatus> {
 
     // Preserve the LOCK_TIMEOUT indicator so a timeout-driven cancel is
     // reported as a lock timeout, not a user cancel.
-    if lock_timeout > 0 {
-        timeout_seams::disable_timeouts::call(&[
-            timeout_seams::DisableTimeoutParams {
-                id: timeout_seams::DEADLOCK_TIMEOUT,
-                keep_indicator: false,
-            },
-            timeout_seams::DisableTimeoutParams {
-                id: timeout_seams::LOCK_TIMEOUT,
-                keep_indicator: true,
-            },
-        ]);
-    } else {
-        timeout_seams::disable_timeout::call(timeout_seams::DEADLOCK_TIMEOUT, false)?;
+    if !in_hot_standby {
+        if lock_timeout > 0 {
+            timeout_seams::disable_timeouts::call(&[
+                timeout_seams::DisableTimeoutParams {
+                    id: timeout_seams::DEADLOCK_TIMEOUT,
+                    keep_indicator: false,
+                },
+                timeout_seams::DisableTimeoutParams {
+                    id: timeout_seams::LOCK_TIMEOUT,
+                    keep_indicator: true,
+                },
+            ]);
+        } else {
+            timeout_seams::disable_timeout::call(timeout_seams::DEADLOCK_TIMEOUT, false)?;
+        }
+    }
+
+    // Recovery conflict on lock resolved, but the startup process waited
+    // longer than deadlock_timeout for it: close out the log pair.
+    if in_hot_standby && logged_recovery_conflict {
+        standby_seams::log_recovery_conflict::call(
+            types_storage::storage::ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOCK,
+            standby_wait_start,
+            timestamp_seams::get_current_timestamp::call(),
+            None,
+            false,
+        )?;
     }
 
     // The awaker did all lock-table updates; caller updates the locallock.

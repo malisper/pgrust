@@ -283,6 +283,7 @@ pub fn init_seams() {
     );
     standby_seams::standby_acquire_access_exclusive_lock::set(StandbyAcquireAccessExclusiveLock);
     standby_seams::resolve_recovery_conflict_with_lock::set(ResolveRecoveryConflictWithLock);
+    standby_seams::log_recovery_conflict::set(recovery::LogRecoveryConflict);
     standby_seams::resolve_recovery_conflict_with_buffer_pin::set(
         ResolveRecoveryConflictWithBufferPin,
     );
