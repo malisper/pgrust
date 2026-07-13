@@ -6,7 +6,8 @@
 #![allow(non_snake_case)]
 
 pub mod replies;
-pub mod streaming;
+pub mod logical_stream;
+mod streaming;
 pub mod wakeup;
 
 use std::cell::{Cell, RefCell};
@@ -490,12 +491,12 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
         ReplCommand::StartReplication(c) => {
             // C dispatches physical/logical here, both closing with
             // EndReplicationCommand("START_STREAMING").
+            let cmdtag = "START_REPLICATION";
+            ps_status_seams::set_ps_display::call(cmdtag);
             if c.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
-                let cmdtag = "START_REPLICATION";
-                ps_status_seams::set_ps_display::call(cmdtag);
                 streaming::StartReplication(mcx, &c)?;
             } else {
-                unported("START_REPLICATION ... LOGICAL", 6);
+                logical_stream::StartLogicalReplication(&c)?;
             }
             tcop_dest::EndReplicationCommand(b"START_STREAMING")?;
         }
@@ -745,12 +746,56 @@ fn def_get_boolean(name: &str, arg: &Option<ReplOptionArg>, func: &'static str) 
     }
 }
 
-// parseCreateReplSlotOptions (walsender.c:1114). Returns reserve_wal. The
-// logical-only options (snapshot/two_phase/failover) are recognized so that
-// supplying them on a PHYSICAL slot raises C's "conflicting or redundant
-// options" error; their values are consumed by the (unported) logical path.
-fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bool> {
-    let mut reserve_wal = false;
+// defGetString (define.c), the arms replication options use.
+fn def_get_string(
+    name: &str,
+    arg: &Option<ReplOptionArg>,
+    func: &'static str,
+) -> PgResult<String> {
+    match arg {
+        Some(ReplOptionArg::Str(s)) => Ok(s.clone()),
+        Some(ReplOptionArg::Int(i)) => Ok(i.to_string()),
+        Some(ReplOptionArg::Bool(b)) => Ok(if *b { "true" } else { "false" }.to_string()),
+        None => {
+            ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("{name} requires a parameter"))
+                .finish(loc(0, func))?;
+            unreachable!()
+        }
+    }
+}
+
+// parseCreateReplSlotOptions (walsender.c:1114).
+// CRSSnapshotAction (walsender.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CrsSnapshotAction {
+    ExportSnapshot,
+    NoExportSnapshot,
+    UseSnapshot,
+}
+
+pub(crate) struct CreateReplSlotOptions {
+    pub reserve_wal: bool,
+    pub snapshot_action: CrsSnapshotAction,
+    pub two_phase: bool,
+    pub failover: bool,
+}
+
+fn parse_create_repl_slot_options(
+    cmd: &CreateReplicationSlotCmd,
+) -> PgResult<CreateReplSlotOptions> {
+    let mut opts = CreateReplSlotOptions {
+        reserve_wal: false,
+        // Default when no SNAPSHOT option is given (walsender.c:1147).
+        snapshot_action: if cmd.kind == ReplicationKind::REPLICATION_KIND_LOGICAL {
+            CrsSnapshotAction::ExportSnapshot
+        } else {
+            CrsSnapshotAction::NoExportSnapshot
+        },
+        two_phase: false,
+        failover: false,
+    };
     let mut reserve_wal_given = false;
     let mut snapshot_action_given = false;
     let mut two_phase_given = false;
@@ -762,26 +807,40 @@ fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bo
                 if snapshot_action_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1136)?;
                 }
+                let action = def_get_string("snapshot", &defel.arg, "parseCreateReplSlotOptions")?;
                 snapshot_action_given = true;
+                opts.snapshot_action = match action.as_str() {
+                    "export" => CrsSnapshotAction::ExportSnapshot,
+                    "nothing" => CrsSnapshotAction::NoExportSnapshot,
+                    "use" => CrsSnapshotAction::UseSnapshot,
+                    other => {
+                        ereport(ERROR)
+                            .errmsg(format!("unrecognized value for CREATE_REPLICATION_SLOT option \"snapshot\": \"{other}\""))
+                            .finish(loc(1152, "parseCreateReplSlotOptions"))?;
+                        unreachable!()
+                    }
+                };
             }
             "reserve_wal" => {
                 if reserve_wal_given || cmd.kind != ReplicationKind::REPLICATION_KIND_PHYSICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1158)?;
                 }
                 reserve_wal_given = true;
-                reserve_wal = def_get_boolean("reserve_wal", &defel.arg, "parseCreateReplSlotOptions")?;
+                opts.reserve_wal = def_get_boolean("reserve_wal", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             "two_phase" => {
                 if two_phase_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1168)?;
                 }
                 two_phase_given = true;
+                opts.two_phase = def_get_boolean("two_phase", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             "failover" => {
                 if failover_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1177)?;
                 }
                 failover_given = true;
+                opts.failover = def_get_boolean("failover", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             other => {
                 ereport(ERROR)
@@ -792,21 +851,23 @@ fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bo
         }
     }
 
-    Ok(reserve_wal)
+    Ok(opts)
 }
 
 // CreateReplicationSlot (walsender.c:1191). Physical path fully ported (this is
-// pg_basebackup / pg_receivewal --create-slot). Logical path — decoding-context
-// + snapshot builder — is a contained panic tagged increment 6.
+// pg_basebackup / pg_receivewal --create-slot). Logical path: SNAPSHOT
+// 'nothing' (pg_recvlogical) and USE_SNAPSHOT-less flows are ported; snapshot
+// export/use remain contained refusals (snapbuild export unported).
 fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> PgResult<()> {
-    let reserve_wal = parse_create_repl_slot_options(&cmd)?;
+    let opts = parse_create_repl_slot_options(&cmd)?;
     let slotname = cmd.slotname.as_deref().unwrap_or("");
+    let mut snapshot_name: Option<String> = None;
 
     if cmd.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
         let persistency = if cmd.temporary { slot::RS_TEMPORARY } else { slot::RS_PERSISTENT };
         slot::ReplicationSlotCreate(slotname, false, persistency, false, false, false)?;
 
-        if reserve_wal {
+        if opts.reserve_wal {
             slot::ReplicationSlotReserveWal()?;
             slot::ReplicationSlotMarkDirty();
             // Write this slot to disk if it's a permanent one.
@@ -815,10 +876,57 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
             }
         }
     } else {
-        panic!(
-            "walsender: CREATE_REPLICATION_SLOT ... LOGICAL unported \
-             (CreateInitDecodingContext; replication-p1 increment 6)"
-        );
+        logical::CheckLogicalDecodingRequirements()?;
+
+        match opts.snapshot_action {
+            CrsSnapshotAction::UseSnapshot => {
+                // C validates txn state then SnapBuildInitialSnapshot —
+                // subscription tablesync territory; snapbuild export unported.
+                panic!(
+                    "walsender: CREATE_REPLICATION_SLOT ... LOGICAL USE_SNAPSHOT unported \
+                     (SnapBuildInitialSnapshot)"
+                );
+            }
+            CrsSnapshotAction::ExportSnapshot => {
+                panic!(
+                    "walsender: CREATE_REPLICATION_SLOT ... LOGICAL EXPORT_SNAPSHOT unported \
+                     (SnapBuildExportSnapshot; use SNAPSHOT 'nothing')"
+                );
+            }
+            CrsSnapshotAction::NoExportSnapshot => {}
+        }
+
+        slot::ReplicationSlotCreate(
+            slotname,
+            true,
+            if cmd.temporary { slot::RS_TEMPORARY } else { slot::RS_EPHEMERAL },
+            opts.two_phase,
+            opts.failover,
+            false,
+        )?;
+
+        // Build the initial decoding context and find the decoding start
+        // point (the reported consistent_point). No output writer: nothing is
+        // sent to the client during slot creation (walsender.c:1285 passes
+        // WalSndPrepareWrite/WriteData, but FindStartpoint runs fast_forward
+        // -- the SQL path (slotfuncs.c) passes NULLs the same way here).
+        let mut ctx = logical::CreateInitDecodingContext(
+            cmd.plugin.as_deref().unwrap_or(""),
+            Vec::new(),
+            false,
+            types_core::InvalidXLogRecPtr,
+            None,
+            None,
+            None,
+        )?;
+
+        logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
+        ctx.free()?;
+
+        if !cmd.temporary {
+            slot::ReplicationSlotPersist()?;
+        }
+        let _ = &mut snapshot_name; // stays None for SNAPSHOT 'nothing'
     }
 
     let slot_ref = slot::MyReplicationSlot().expect("CreateReplicationSlot: no slot acquired");
@@ -843,10 +951,20 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
     let mut nulls = [false; 4];
     values[0] = Datum::from_usize(name_v.as_bytes().as_ptr() as usize);
     values[1] = Datum::from_usize(xloc_v.as_bytes().as_ptr() as usize);
-    // snapshot_name — always NULL on the physical path (no exported snapshot).
-    nulls[2] = true;
-    // output_plugin — always NULL on the physical path (cmd.plugin is None).
-    nulls[3] = true;
+    let snap_v;
+    if let Some(sn) = snapshot_name.as_deref() {
+        snap_v = varlena::cstring_to_text(mcx, sn.as_bytes())?;
+        values[2] = Datum::from_usize(snap_v.as_bytes().as_ptr() as usize);
+    } else {
+        nulls[2] = true;
+    }
+    let plugin_v;
+    if let Some(pl) = cmd.plugin.as_deref() {
+        plugin_v = varlena::cstring_to_text(mcx, pl.as_bytes())?;
+        values[3] = Datum::from_usize(plugin_v.as_bytes().as_ptr() as usize);
+    } else {
+        nulls[3] = true;
+    }
 
     exectuples_output::do_tup_output(&mut tstate, mcx, &values, &nulls)?;
     exectuples_output::end_tup_output(tstate)?;

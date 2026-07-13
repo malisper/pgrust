@@ -216,8 +216,9 @@ fn StartupDecodingContext(
     }
 
     if !xact::IsTransactionOrTransactionBlock() {
-        // C marks MyProc PROC_IN_LOGICAL_DECODING here (walsender path).
-        unported("StartupDecodingContext outside a transaction (walsender)");
+        // Walsender path (logical.c:199): the slot enforces our xmin, so
+        // announce this backend as skippable for horizon computation.
+        procarray::ProcSetStatusFlagInLogicalDecoding()?;
     }
 
     let reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;

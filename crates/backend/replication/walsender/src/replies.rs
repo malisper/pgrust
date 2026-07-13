@@ -193,12 +193,10 @@ fn ProcessStandbyReplyMessage(r: &mut MsgReader<'_>) -> PgResult<()> {
     if let Some(s) = slot::MyReplicationSlot() {
         if flush_ptr != InvalidXLogRecPtr {
             if slot::SlotIsLogical(s) {
-                panic!(
-                    "walsender: LogicalConfirmReceivedLocation unported \
-                     (replication-p1 increment 6)"
-                );
+                logical::LogicalConfirmReceivedLocation(flush_ptr)?;
+            } else {
+                PhysicalConfirmReceivedLocation(flush_ptr)?;
             }
-            PhysicalConfirmReceivedLocation(flush_ptr)?;
         }
     }
     Ok(())

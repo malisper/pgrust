@@ -192,7 +192,7 @@ pub fn StartReplication(mcx: mcx::Mcx<'_>, cmd: &StartReplicationCmd) -> PgResul
         crate::REPLICATION_ACTIVE.with(|c| c.set(true));
 
         let mut reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
-        let r = WalSndLoop(&mut reader);
+        let r = WalSndLoop(&mut |()| XLogSendPhysical(&mut reader));
 
         crate::REPLICATION_ACTIVE.with(|c| c.set(false));
         r?;
@@ -415,9 +415,10 @@ fn wal_read_raise_error() -> PgResult<()> {
         .finish(ErrorLocation::new("xlogreader.c", 0, "WALReadRaiseError"))
 }
 
-// static void WalSndLoop(WalSndSendDataCallback send_data). Only physical is
-// ported, so the send callback is XLogSendPhysical directly (no fn pointer).
-pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+// static void WalSndLoop(WalSndSendDataCallback send_data): shared by the
+// physical (XLogSendPhysical) and logical (XLogSendLogical) walsenders; the
+// C function pointer is a closure here.
+pub(crate) fn WalSndLoop(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
     // WALSENDER_STATS_FLUSH_INTERVAL (walsender.c:100), ms.
     const WALSENDER_STATS_FLUSH_INTERVAL: i64 = 1000;
 
@@ -446,7 +447,7 @@ pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
         }
 
         if !pqcomm::pq_is_send_pending() {
-            XLogSendPhysical(reader)?;
+            send_data(())?;
         } else {
             set_caught_up(false);
         }
@@ -461,7 +462,7 @@ pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
             }
             // On SIGUSR2, drain up to the shutdown checkpoint and exit.
             if got_sigusr2() {
-                WalSndDone(reader)?;
+                WalSndDone(send_data)?;
             }
         }
 
@@ -505,9 +506,9 @@ pub fn WalSndLoop(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
 }
 
 // static void WalSndDone(WalSndSendDataCallback send_data).
-fn WalSndDone(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
+fn WalSndDone(send_data: &mut dyn FnMut(()) -> PgResult<()>) -> PgResult<()> {
     // Let's be real sure we're caught up.
-    XLogSendPhysical(reader)?;
+    send_data(())?;
 
     let replicated: XLogRecPtr = if crate::my_flush() == InvalidXLogRecPtr {
         crate::my_write()
@@ -526,7 +527,7 @@ fn WalSndDone(reader: &mut XLogReaderState<'_>) -> PgResult<()> {
 }
 
 // static long WalSndComputeSleeptime(TimestampTz now).
-fn WalSndComputeSleeptime(now: TimestampTz) -> c_long {
+pub(crate) fn WalSndComputeSleeptime(now: TimestampTz) -> c_long {
     let mut sleeptime: c_long = 10000; // 10 s
     let timeout = guc_tables::vars::wal_sender_timeout.read();
     let last_reply = last_reply_timestamp();
@@ -543,7 +544,7 @@ fn WalSndComputeSleeptime(now: TimestampTz) -> c_long {
 }
 
 // static void WalSndCheckTimeOut(void).
-fn WalSndCheckTimeOut() {
+pub(crate) fn WalSndCheckTimeOut() {
     let timeout_guc = guc_tables::vars::wal_sender_timeout.read();
     let last_reply = last_reply_timestamp();
 
@@ -561,7 +562,7 @@ fn WalSndCheckTimeOut() {
 }
 
 // static void WalSndWait(uint32 socket_events, long timeout, uint32 wait_event).
-fn WalSndWait(socket_events: u32, timeout: c_long, wait_event: u32) -> PgResult<()> {
+pub(crate) fn WalSndWait(socket_events: u32, timeout: c_long, wait_event: u32) -> PgResult<()> {
     // ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, socket_events, NULL).
     pqcomm::pq_modify_fe_be_wait_set_socket(socket_events)?;
 
@@ -607,7 +608,7 @@ pub(crate) fn WalSndKeepalive(request_reply: bool, write_ptr: XLogRecPtr) -> PgR
 }
 
 // static void WalSndKeepaliveIfNecessary(void).
-fn WalSndKeepaliveIfNecessary() -> PgResult<()> {
+pub(crate) fn WalSndKeepaliveIfNecessary() -> PgResult<()> {
     let timeout = guc_tables::vars::wal_sender_timeout.read();
     let last_reply = last_reply_timestamp();
 
@@ -628,7 +629,7 @@ fn WalSndKeepaliveIfNecessary() -> PgResult<()> {
     Ok(())
 }
 
-fn reset_my_latch() {
+pub(crate) fn reset_my_latch() {
     if let Some(l) = init_small::globals::MyLatch() {
         latch::ResetLatch(l);
     }

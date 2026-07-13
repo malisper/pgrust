@@ -1,0 +1,436 @@
+// The logical walsender (walsender.c): StartLogicalReplication, XLogSendLogical,
+// the WalSndPrepareWrite/WalSndWriteData/WalSndUpdateProgress output-plugin
+// writer callbacks, WalSndWaitForWal, and the walsender's logical WAL page
+// reader. The decode engine underneath (decode.c / reorderbuffer / snapbuild /
+// output plugins) is the same one the SQL interface uses.
+//
+// Out of scope, refused loudly downstream: two-phase decoding, in-progress
+// streaming, snapshot export (all stubbed in their owning crates), and the
+// synchronized_standby_slots wait (NeedToWaitForStandbys) — the GUC-off path
+// is the ported one.
+#![allow(non_snake_case)]
+
+use core::ffi::c_long;
+use std::cell::Cell;
+
+use elog::ereport;
+use logical::{LogicalDecodingContext, OutputPluginContext, PluginOption};
+use repl_gram::{ReplOptionArg, StartReplicationCmd};
+use types_core::{InvalidXLogRecPtr, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use types_error::{ErrorLocation, PgResult, ERROR};
+use types_storage::waiteventset::{WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
+use xlogreader_seams::XLogReaderState as ReaderView;
+use xlogreader::{XLogReaderRoutine, XLogSegmentRoutine};
+
+use crate::streaming::{
+    proc_exit, reset_my_latch, WalSndCheckTimeOut, WalSndComputeSleeptime,
+    WalSndKeepaliveIfNecessary, WalSndLoop, WalSndShutdown, WalSndWait,
+};
+use crate::WalSndState;
+
+// WAIT_EVENT_WAL_SENDER_WAIT_FOR_WAL / _WRITE_DATA (wait_event_types.h, Client section).
+const WAIT_EVENT_WAL_SENDER_WAIT_WAL: u32 = 0x0600_0000 | 6;
+const WAIT_EVENT_WAL_SENDER_WRITE_DATA: u32 = 0x0600_0000 | 7;
+
+fn get_ts() -> TimestampTz {
+    timestamp_seams::get_current_timestamp::call()
+}
+
+thread_local! {
+    // WalSndPrepareWrite's framing header state, consumed by WalSndWriteData
+    // (C writes the 'w' header into ctx->out; out is textual here, so the
+    // header rides beside it).
+    static PENDING_WRITE_LSN: Cell<XLogRecPtr> = const { Cell::new(0) };
+    // XLogSendLogical's cached flushPtr (C function-static).
+    static LOGICAL_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+    // WalSndWaitForWal's RecentFlushPtr (C function-static).
+    static RECENT_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+}
+
+// StartLogicalReplication (walsender.c:1447).
+pub(crate) fn StartLogicalReplication(cmd: &StartReplicationCmd) -> PgResult<()> {
+    logical::CheckLogicalDecodingRequirements()?;
+
+    debug_assert!(slot::MyReplicationSlot().is_none());
+    slot::ReplicationSlotAcquire(cmd.slotname.as_deref().unwrap_or(""), true, true)?;
+
+    // am_cascading_walsender && !RecoveryInProgress() (post-promotion
+    // disconnect): logical decoding on standby is refused upstream, so a
+    // logical walsender is never cascading here.
+
+    // Create our decoding context, starting from the previously ack'ed
+    // position. Before CopyBothResponse so errors are reported early.
+    // DefElem plugin options -> (name, value) pairs (defGetString rendering).
+    let options: Vec<PluginOption> = cmd
+        .options
+        .iter()
+        .map(|o| {
+            let val = o.arg.as_ref().map(|a| match a {
+                ReplOptionArg::Str(v) => v.clone(),
+                ReplOptionArg::Int(i) => i.to_string(),
+                ReplOptionArg::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            });
+            (o.name.clone(), val)
+        })
+        .collect();
+    let mut ctx = logical::CreateDecodingContext(
+        cmd.startpoint,
+        options,
+        false,
+        Some(WalSndPrepareWrite),
+        Some(WalSndWriteData),
+        Some(WalSndUpdateProgress),
+    )?;
+
+    crate::WalSndSetState(WalSndState::Catchup);
+
+    // CopyBothResponse ('W'): overall format textual, no columns.
+    pqcomm::pq_putmessage(b'W', &[0u8, 0, 0])?;
+    pqcomm::pq_flush()?;
+
+    // Start reading WAL from the oldest required WAL.
+    let restart_lsn = ctx.slot.data.get().restart_lsn;
+    ctx.reader.XLogBeginRead(restart_lsn);
+
+    // Report the location after which we'll send out further commits as the
+    // current sentPtr; shared memory gets the restart position.
+    crate::SENT_PTR.with(|c| c.set(ctx.slot.data.get().confirmed_flush));
+    crate::my_set_sentptr(restart_lsn);
+
+    crate::REPLICATION_ACTIVE.with(|c| c.set(true));
+
+    if syncrep_seams::sync_rep_init_config::is_installed() {
+        syncrep_seams::sync_rep_init_config::call()?;
+    }
+
+    let mut routine = LogicalWalSndPageRead;
+    let r = WalSndLoop(&mut |()| XLogSendLogical(&mut ctx, &mut routine));
+
+    let free_r = ctx.free();
+    let rel_r = slot::ReplicationSlotRelease();
+    crate::REPLICATION_ACTIVE.with(|c| c.set(false));
+    r?;
+    free_r?;
+    rel_r?;
+
+    if crate::GOT_STOPPING.with(|c| c.get()) {
+        proc_exit(0);
+    }
+    crate::WalSndSetState(WalSndState::Startup);
+
+    // Get out of COPY mode (CommandComplete "COPY 0"); the dispatch loop adds
+    // the START_STREAMING completion, as in C.
+    tcop_dest::EndReplicationCommand(b"COPY 0")?;
+    Ok(())
+}
+
+// XLogSendLogical (walsender.c:3419).
+fn XLogSendLogical(
+    ctx: &mut LogicalDecodingContext,
+    routine: &mut LogicalWalSndPageRead,
+) -> PgResult<()> {
+    // We'll set WalSndCaughtUp in WalSndWaitForWal if we actually wait, or
+    // below when EndRecPtr passes the flush pointer.
+    crate::WAL_SND_CAUGHT_UP.with(|c| c.set(false));
+
+    let record = ctx.reader.XLogReadRecord(routine)?;
+
+    if record.is_none() {
+        if let Some(errm) = ctx.reader.errormsg() {
+            let msg = errm.to_string();
+            return elog::elog(
+                ERROR,
+                format!("could not find record while sending logically-decoded data: {msg}"),
+            );
+        }
+    } else {
+        // Lag tracking rides WalSndUpdateProgress via the plugin write API (C
+        // comment); pg_stat_replication lag is deferred like the physical path.
+        logical_decode::LogicalDecodingProcessRecord(ctx)?;
+        crate::SENT_PTR.with(|c| c.set(ctx.reader.v.EndRecPtr));
+    }
+
+    // Initialize/advance the cached flush pointer.
+    let end = ctx.reader.v.EndRecPtr;
+    let mut flush_ptr = LOGICAL_FLUSH_PTR.with(Cell::get);
+    if flush_ptr == InvalidXLogRecPtr || end >= flush_ptr {
+        // Cascading (standby) logical walsenders would use the replay LSN.
+        flush_ptr = transam_xlog::GetFlushRecPtr(None);
+        LOGICAL_FLUSH_PTR.with(|c| c.set(flush_ptr));
+    }
+
+    if end >= flush_ptr {
+        crate::WAL_SND_CAUGHT_UP.with(|c| c.set(true));
+    }
+
+    // Caught up + asked to stop: shut down in an orderly manner.
+    if crate::WAL_SND_CAUGHT_UP.with(|c| c.get()) && crate::GOT_STOPPING.with(|c| c.get()) {
+        crate::GOT_SIGUSR2.with(|c| c.set(true));
+    }
+
+    crate::my_set_sentptr(crate::SENT_PTR.with(|c| c.get()));
+    Ok(())
+}
+
+// The walsender's logical WAL page reader: logical_read_xlog_page
+// (walsender.c:1041) — wait for the WAL to be flushed (processing client
+// replies meanwhile), then read it locally.
+struct LogicalWalSndPageRead;
+
+impl XLogSegmentRoutine for LogicalWalSndPageRead {
+    fn segment_open(
+        &mut self,
+        v: &mut ReaderView,
+        next_seg_no: XLogSegNo,
+        tli: &mut TimeLineID,
+    ) -> PgResult<()> {
+        xlogutils::wal_segment_open(v, next_seg_no, tli)
+    }
+    fn segment_close(&mut self, v: &mut ReaderView) {
+        xlogutils::wal_segment_close(v);
+    }
+}
+
+impl XLogReaderRoutine for LogicalWalSndPageRead {
+    fn page_read(
+        &mut self,
+        v: &mut ReaderView,
+        target_page_ptr: XLogRecPtr,
+        req_len: i32,
+        _target_rec_ptr: XLogRecPtr,
+        cur_page: &mut [u8],
+    ) -> PgResult<i32> {
+        let flushptr = WalSndWaitForWal(target_page_ptr + req_len as u64)?;
+
+        // Fail if not enough WAL (implies we are going to shut down).
+        if flushptr < target_page_ptr + req_len as u64 {
+            return Ok(-1);
+        }
+
+        // Non-cascading: the current insertion timeline. (Logical decoding on
+        // standby is refused upstream.)
+        let curr_tli = transam_xlog::ctl::GetWALInsertionTimeLine();
+        xlogutils::XLogReadDetermineTimeline(v, target_page_ptr, req_len as u32, curr_tli)?;
+
+        let count: i32 = if target_page_ptr + transam_xlog::XLOG_BLCKSZ as u64 <= flushptr {
+            transam_xlog::XLOG_BLCKSZ as i32
+        } else {
+            (flushptr - target_page_ptr) as i32
+        };
+
+        if let Err(_errinfo) = xlogreader_seams::wal_read::call(
+            v,
+            &mut cur_page[..count as usize],
+            target_page_ptr,
+            count as usize,
+            curr_tli,
+        )? {
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg("could not read from WAL: requested WAL segment slice is unavailable")
+                .finish(ErrorLocation::new("xlogreader.c", 0, "WALReadRaiseError"))?;
+        }
+
+        // The segment might have been recycled while we read it.
+        let segsize = transam_xlog::wal_segment_size() as u64;
+        transam_xlog::CheckXLogRemoved(target_page_ptr / segsize, v.seg.ws_tli)?;
+
+        Ok(count)
+    }
+}
+
+// WalSndWaitForWal (walsender.c:1813): wait for loc to be flushed, processing
+// client replies and keepalives while waiting. The synchronized_standby_slots
+// wait (NeedToWaitForStandbys) is out of scope — GUC-off path.
+fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
+    // Fast path: enough WAL already known to be flushed.
+    let recent = RECENT_FLUSH_PTR.with(Cell::get);
+    if recent != InvalidXLogRecPtr && loc_ <= recent {
+        return Ok(recent);
+    }
+
+    loop {
+        reset_my_latch();
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+            if syncrep_seams::sync_rep_init_config::is_installed() {
+                syncrep_seams::sync_rep_init_config::call()?;
+            }
+        }
+
+        crate::replies::ProcessRepliesIfAny()?;
+
+        // If we're shutting down, trigger pending WAL to be written out so we
+        // don't wait for WAL the walwriter will never write.
+        if crate::GOT_STOPPING.with(|c| c.get()) {
+            transam_xlog::XLogBackgroundFlush()?;
+        }
+
+        let recent_flush = transam_xlog::GetFlushRecPtr(None);
+        RECENT_FLUSH_PTR.with(|c| c.set(recent_flush));
+
+        // If postmaster asked us to stop, don't wait anymore.
+        if crate::GOT_STOPPING.with(|c| c.get()) {
+            break;
+        }
+
+        // Enough WAL available: done waiting.
+        if loc_ <= recent_flush {
+            break;
+        }
+
+        // Waiting for new WAL: by definition caught up.
+        crate::WAL_SND_CAUGHT_UP.with(|c| c.set(true));
+
+        // Streaming shut down mid-wait: bail so the loop can exit.
+        if crate::STREAMING_DONE_SENDING.with(|c| c.get())
+            && crate::STREAMING_DONE_RECEIVING.with(|c| c.get())
+        {
+            break;
+        }
+
+        // We only send regular messages for full decoded transactions; ping
+        // with the flush location so an otherwise-idle receiver replies.
+        WalSndKeepaliveIfNecessary()?;
+
+        WalSndCheckTimeOut();
+
+        if pqcomm::pq_flush_if_writable()? != 0 {
+            WalSndShutdown();
+        }
+
+        let now = get_ts();
+        let sleeptime: c_long = WalSndComputeSleeptime(now);
+
+        let mut wake_events: u32 = 0;
+        if !crate::STREAMING_DONE_RECEIVING.with(|c| c.get()) {
+            wake_events |= WL_SOCKET_READABLE;
+        }
+        if pqcomm::pq_is_send_pending() {
+            wake_events |= WL_SOCKET_WRITEABLE;
+        }
+
+        WalSndWait(wake_events, sleeptime, WAIT_EVENT_WAL_SENDER_WAIT_WAL)?;
+    }
+
+    // Reactivate the latch so WalSndLoop knows to continue.
+    if let Some(l) = init_small::globals::MyLatch() {
+        latch::SetLatch(l);
+    }
+    Ok(RECENT_FLUSH_PTR.with(Cell::get))
+}
+
+// WalSndPrepareWrite (walsender.c:1540): stage the 'w' header fields. The
+// payload body accumulates in ctx.out; the header is prepended in
+// WalSndWriteData ('w' dataStart walEnd sendtime payload).
+fn WalSndPrepareWrite(
+    opc: &mut OutputPluginContext,
+    lsn: XLogRecPtr,
+    _xid: TransactionId,
+    last_write: bool,
+) -> PgResult<()> {
+    // Don't confuse sync rep by sending the same LSN several times.
+    let lsn = if last_write { lsn } else { InvalidXLogRecPtr };
+    PENDING_WRITE_LSN.with(|c| c.set(lsn));
+    opc.out.clear();
+    Ok(())
+}
+
+// WalSndWriteData (walsender.c:1567): frame + send the prepared data,
+// processing replies and timeouts if the send backs up.
+fn WalSndWriteData(
+    opc: &mut OutputPluginContext,
+    _lsn: XLogRecPtr,
+    _xid: TransactionId,
+    _last_write: bool,
+) -> PgResult<()> {
+    let hdr_lsn = PENDING_WRITE_LSN.with(Cell::get);
+    let now = get_ts();
+
+    crate::OUTPUT_MESSAGE.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.push(b'w');
+        b.extend_from_slice(&hdr_lsn.to_be_bytes()); // dataStart
+        b.extend_from_slice(&hdr_lsn.to_be_bytes()); // walEnd
+        b.extend_from_slice(&(now as i64).to_be_bytes()); // sendtime (taken late)
+        b.extend_from_slice(opc.out.as_bytes());
+    });
+    crate::OUTPUT_MESSAGE.with(|b| pqcomm::pq_putmessage_noblock(b'd', &b.borrow()))?;
+
+    postgres_seams::check_for_interrupts::call()?;
+
+    if pqcomm::pq_flush_if_writable()? != 0 {
+        WalSndShutdown();
+    }
+
+    // Fast path unless we're close to the walsender timeout with output pending.
+    let last_reply = crate::LAST_REPLY_TIMESTAMP.with(|c| c.get());
+    let wal_sender_timeout = guc_tables::vars::wal_sender_timeout.read() as i64;
+    if now < last_reply + (wal_sender_timeout / 2) * 1000 && !pqcomm::pq_is_send_pending() {
+        return Ok(());
+    }
+
+    ProcessPendingWrites()
+}
+
+// ProcessPendingWrites (walsender.c:1607): wait until there is no pending
+// write, processing replies and timeouts meanwhile.
+fn ProcessPendingWrites() -> PgResult<()> {
+    loop {
+        crate::replies::ProcessRepliesIfAny()?;
+        WalSndCheckTimeOut();
+        WalSndKeepaliveIfNecessary()?;
+
+        if !pqcomm::pq_is_send_pending() {
+            break;
+        }
+
+        let sleeptime = WalSndComputeSleeptime(get_ts());
+        WalSndWait(
+            WL_SOCKET_WRITEABLE | WL_SOCKET_READABLE,
+            sleeptime,
+            WAIT_EVENT_WAL_SENDER_WRITE_DATA,
+        )?;
+
+        reset_my_latch();
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+            if syncrep_seams::sync_rep_init_config::is_installed() {
+                syncrep_seams::sync_rep_init_config::call()?;
+            }
+        }
+
+        if pqcomm::pq_flush_if_writable()? != 0 {
+            WalSndShutdown();
+        }
+    }
+
+    // Reactivate the latch so WalSndLoop knows to continue.
+    if let Some(l) = init_small::globals::MyLatch() {
+        latch::SetLatch(l);
+    }
+    Ok(())
+}
+
+// WalSndUpdateProgress (walsender.c:1663): lag tracking is deferred (as on the
+// physical path); keep the skipped-transaction keepalive behavior so an idle
+// downstream still acks progress.
+fn WalSndUpdateProgress(
+    _opc: &mut OutputPluginContext,
+    _lsn: XLogRecPtr,
+    _xid: TransactionId,
+    _skipped_xact: bool,
+) -> PgResult<()> {
+    WalSndKeepaliveIfNecessary()?;
+    if pqcomm::pq_is_send_pending() {
+        ProcessPendingWrites()?;
+    }
+    Ok(())
+}
