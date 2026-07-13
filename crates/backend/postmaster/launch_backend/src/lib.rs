@@ -386,7 +386,7 @@ pub fn postmaster_child_launch(
     // of a thread. Default OFF (PGRUST_RUNTIME_BGJOBS); everything the
     // caller observes (pid, PmChild bookkeeping, signal fanout, exit
     // announces) is shape-identical.
-    if let Some(pid) = rtpool::try_launch_job(child_type) {
+    if let Some(pid) = rtpool::try_launch_job(child_type, child_slot) {
         return pid;
     }
 
@@ -935,12 +935,22 @@ pub mod rtpool {
         body: Box<dyn FnOnce() + Send>,
     ) -> std::io::Result<std::thread::JoinHandle<()>> {
         let inherited = super::Inherited::capture();
+        // The dispatcher hosts job GUC state (overlay capture + SIGHUP
+        // ProcessConfigFile), so it gets the full child GUC prelude — the
+        // fork-inherited nondefault values (command-line -c and config
+        // file), exactly as postmaster_child_launch's thread body.
+        let guc_snapshot = guc::store::capture_nondefault_variables();
         std::thread::Builder::new()
             .name("pg-bgjobs-dispatcher".into())
             .stack_size(super::child_thread_stack_size())
             .spawn(move || {
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                guc::store::initialize_guc_options_for_child(&guc_snapshot)
+                    .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                    .unwrap_or_else(|e| {
+                        panic!("bgjobs dispatcher GUC prelude failed: {e:?}")
+                    });
                 body();
             })
     }
@@ -954,7 +964,7 @@ pub mod rtpool {
     /// LaunchMissingBackgroundProcesses restart logic are all untouched.
     /// The exit announce comes from the job's teardown; the reaper's join
     /// is a CHILD_THREADS lookup miss. Postmaster thread only.
-    pub fn try_launch_job(child_type: types_core::BackendType) -> Option<pid_t> {
+    pub fn try_launch_job(child_type: types_core::BackendType, child_slot: i32) -> Option<pid_t> {
         if child_type != types_core::BackendType::BgWriter || !bgjobs::bgjobs_enabled() {
             return None;
         }
@@ -964,7 +974,8 @@ pub mod rtpool {
         let rt = start_if_enabled()?;
         let dispatcher = bgjobs::start_if_enabled(rt, spawn_dispatcher)?;
         let pid: pid_t = super::reserve_child_pid();
-        dispatcher.register(std::sync::Arc::new(bgwriter::job::BgWriterJob::new(pid)));
+        dispatcher
+            .register(std::sync::Arc::new(bgwriter::job::BgWriterJob::new(pid, child_slot)));
         Some(pid)
     }
 }
