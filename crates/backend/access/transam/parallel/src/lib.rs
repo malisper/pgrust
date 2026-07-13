@@ -19,6 +19,8 @@ use types_storage::RelFileLocator;
 
 mod query_task_guard;
 
+pub use query_task_guard::QueryTaskBindingGuard;
+
 #[cfg(debug_assertions)]
 pub use query_task_guard::{
     set_query_task_fault, QueryTaskFaultAction, QueryTaskFaultPoint,
