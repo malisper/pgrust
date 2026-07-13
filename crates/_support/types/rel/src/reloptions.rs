@@ -147,7 +147,11 @@ pub struct CbstoreOptions {
 impl Default for CbstoreOptions {
     fn default() -> CbstoreOptions {
         CbstoreOptions {
-            codec: CbstoreCodec::Auto,
+            // Ingest default flipped Auto -> Lz4 (train #8): decode-hot
+            // scans want LZ4's decompression speed; ZSTD stays opt-in via
+            // WITH (codec = 'zstd'). New ingests only — existing chunks
+            // carry their codec in the chunk header.
+            codec: CbstoreCodec::Lz4,
             zstd_level: 3,
             parallel_workers: -1,
             cluster_key_len: 0,
