@@ -1581,8 +1581,20 @@ fn decide_agg_lane<'mcx>(
             return Ok(AggLaneChoice::Fold);
         }
     }
+    // Decide-phase skip traces (Q22 serial audit, 2026-07-14 follow-up): a
+    // non-Fold decide that does NOT hit the economics refuse below is
+    // otherwise invisible in trace capture (PerRow ticks nothing here), so
+    // name the failed gate once per memoized decision.
     let fold_ready = match ::nodeagg::agg_lanefold_plan(agg) {
-        Some(plan) if ss.ss.ps_ProjInfo.is_none() => {
+        None => {
+            lane_trace("agg fold skipped: no lanefold plan (classify refused)");
+            false
+        }
+        Some(_) if ss.ss.ps_ProjInfo.is_some() => {
+            lane_trace("agg fold skipped: projected scan (exprkey refused)");
+            false
+        }
+        Some(plan) => {
             if !plan.vguards.is_empty() {
                 // Varlena (str MIN/MAX) lanes: feedable only when the plan
                 // reads EXACTLY the one varlena column (the varkey pass
@@ -1592,11 +1604,23 @@ fn decide_agg_lane<'mcx>(
                 // today (the varlena read sits inside the prefix).
                 match lanefold_varlane_col(plan) {
                     Some(vcol) => {
-                        ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(ss, estate, vcol)
+                        let armed = ::nodeseqscan::seq_scan_batch_soa_prepare_varlane(
+                            ss, estate, vcol,
+                        );
+                        if !armed {
+                            lane_trace("agg fold skipped: varlane staging unarmable");
+                        }
+                        armed
                     }
                     // Multi-varlena (Q23-class): cbstore's virtual-prefix
                     // staging hosts it (lane-v2-dictminmax); heap refuses.
-                    None => try_arm_cb_multivar(agg, ss, estate)?,
+                    None => {
+                        let armed = try_arm_cb_multivar(agg, ss, estate)?;
+                        if !armed {
+                            lane_trace("agg fold skipped: mixed fixed+varlena lane set");
+                        }
+                        armed
+                    }
                 }
             } else if plan.cols.is_empty() {
                 true
@@ -1606,12 +1630,15 @@ fn decide_agg_lane<'mcx>(
                 // cbstore scan whose prefix refuses only on varlena columns
                 // gets the dict-group columnar arm (§2.1) — the text grouping
                 // key stages as dict codes, everything else as decoded Datums.
-                probe_arm_fold_prefix(agg, ss, estate)?
+                let armed = probe_arm_fold_prefix(agg, ss, estate)?
                     || try_arm_cb_dictgroup(agg, ss, estate)
-                    || try_arm_cb_multikey_dict(agg, ss, estate)
+                    || try_arm_cb_multikey_dict(agg, ss, estate);
+                if !armed {
+                    lane_trace("agg fold skipped: prefix/dictgroup/multikey probes refused");
+                }
+                armed
             }
         }
-        _ => false,
     };
     if fold_ready {
         return Ok(AggLaneChoice::Fold);
