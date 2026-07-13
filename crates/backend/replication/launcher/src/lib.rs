@@ -557,6 +557,12 @@ pub fn logicalrep_worker_attach(slot: usize) -> PgResult<()> {
     match attached {
         Ok(()) => {
             MY_WORKER_SLOT.with(|c| c.set(Some(slot)));
+            // logicalrep_worker_onexit (launcher.c:825, via before_shmem_exit
+            // at attach): the slot must clear on EVERY exit path — a SIGTERM
+            // FATAL tears the worker thread down without unwinding through
+            // ApplyWorkerMain's normal-return detach, and a stuck slot makes
+            // logicalrep_worker_stop (DROP SUBSCRIPTION) wait forever.
+            ipc::on_shmem_exit(logicalrep_worker_onexit, 0);
             Ok(())
         }
         Err(kind) => ereport(ERROR)
@@ -576,8 +582,14 @@ pub fn my_worker_slot() -> Option<usize> {
     MY_WORKER_SLOT.with(|c| c.get())
 }
 
+// logicalrep_worker_onexit (launcher.c:825): shmem-exit callback form.
+fn logicalrep_worker_onexit(_code: i32, _arg: usize) {
+    logicalrep_worker_detach();
+}
+
 // logicalrep_worker_detach + onexit's launcher wakeup (launcher.c:754/825).
-// The worker port calls this from its exit path.
+// Runs from the worker's normal exit path AND the shmem-exit callback; the
+// MY_WORKER_SLOT take() makes it idempotent.
 pub fn logicalrep_worker_detach() {
     if let Some(slot) = my_worker_slot() {
         with_ctx(|ctx| logicalrep_worker_cleanup_locked(&mut ctx.workers[slot]));

@@ -7668,6 +7668,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "interrupt",
+ "ipc",
  "latch",
  "launcher_seams",
  "libc",
