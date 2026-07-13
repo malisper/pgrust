@@ -1140,12 +1140,16 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // xlog.c:7383: invalidate slots whose reserved WAL is about to go away
     // (max_slot_wal_keep_size) or that idled past the timeout; on any
     // invalidation, recompute the old-segment horizon from RedoRecPtr.
-    if slot_seams::invalidate_obsolete_replication_slots::call(
-        (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
-        log_seg_no,
-        types_core::InvalidOid,
-        types_core::InvalidTransactionId,
-    )? {
+    // Uninstalled seam (substrate test binaries): no slot machinery exists,
+    // so no slot can hold WAL — skipping is provably the C no-op.
+    if slot_seams::invalidate_obsolete_replication_slots::is_installed()
+        && slot_seams::invalidate_obsolete_replication_slots::call(
+            (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
+            log_seg_no,
+            types_core::InvalidOid,
+            types_core::InvalidTransactionId,
+        )?
+    {
         log_seg_no = XLByteToSeg(check_point.redo, wal_segment_size());
         let _ = crate::removal::KeepLogSeg(recptr, &mut log_seg_no)?;
     }
@@ -1289,12 +1293,14 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
     let _ = crate::removal::KeepLogSeg(endptr, &mut log_seg_no)?;
     // xlog.c:7841 (CreateRestartPoint): same sweep + horizon recompute.
-    if slot_seams::invalidate_obsolete_replication_slots::call(
-        (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
-        log_seg_no,
-        types_core::InvalidOid,
-        types_core::InvalidTransactionId,
-    )? {
+    if slot_seams::invalidate_obsolete_replication_slots::is_installed()
+        && slot_seams::invalidate_obsolete_replication_slots::call(
+            (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
+            log_seg_no,
+            types_core::InvalidOid,
+            types_core::InvalidTransactionId,
+        )?
+    {
         log_seg_no = XLByteToSeg(redo_rec_ptr, wal_segment_size());
         let _ = crate::removal::KeepLogSeg(endptr, &mut log_seg_no)?;
     }
