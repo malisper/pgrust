@@ -588,13 +588,17 @@ mod tests {
         }
         handle.abort();
         assert_eq!(waiter.wait(), RgOutcome::Aborted);
+        // Join workers first (their slot caches hold TaskSetRt→RG Arcs),
+        // then release our RG handles: the aborted RG's task-set specs are
+        // the last owners of the plumbing's SinkShared, whose Local slots
+        // still hold the un-sealed (never-consumed) partials.
         pool.shutdown();
+        drop(handle);
+        drop(waiter);
         drop(sink);
 
         // No combine/finalize ran (the panics above would have fired), and
-        // every forked Local was dropped un-consumed. The Locals live in the
-        // plumbing's shared state, which dies with the specs we just
-        // dropped.
+        // every forked Local was dropped un-consumed.
         let forks = inner.forks.load(StdOrdering::SeqCst);
         assert!(forks >= 1);
         assert_eq!(inner.drops.load(StdOrdering::SeqCst), forks);
