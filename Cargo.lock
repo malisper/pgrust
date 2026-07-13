@@ -8006,8 +8006,19 @@ dependencies = [
 name = "logicalproto"
 version = "0.1.0"
 dependencies = [
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "lsyscache",
+ "mcx",
+ "relcache_seams",
+ "syscache_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
 ]
 
 [[package]]
