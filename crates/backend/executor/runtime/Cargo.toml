@@ -1,0 +1,30 @@
+[package]
+name = "runtime"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "runtime"
+path = "src/lib.rs"
+
+# Deliberately dependency-free (std only): the scheduler core must stay
+# loom-modelable and fast to test in isolation. The launch_backend glue
+# (spawn path, synthetic pids) lives in launch_backend::rtpool, which
+# depends on this crate — never the other way around.
+[dependencies]
+
+# First loom use in the repo (docs/design/parallelism-redesign-2026-07.md §4:
+# "M0 writes these models fresh"). Loom is cfg-gated, not feature-gated, so
+# release binaries can never link it: build the models with
+#   RUSTFLAGS="--cfg loom" cargo test -p runtime --test loom --release
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(loom)",
+    # m0-harvest lane reconciliation gate: when that lane lands its
+    # lifecycle.rs, the shim in this crate compiles out under this cfg.
+    "cfg(m0_harvest_lifecycle)",
+] }
