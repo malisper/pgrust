@@ -5531,6 +5531,19 @@ fn refsort_arm<'mcx>(
     if !refsort_enabled() || ::nodesort::sort_lane_refsort_refused(state) {
         return None;
     }
+    // Parallel-worker refusal (measured 2026-07-13, Q24 sorted-v2-10m bank,
+    // cb-explain warm x3: parallel lane-on 0.068s refsort-off vs 0.097s
+    // refsort-on, ~+45%): under Gather Merge every worker gathers its own
+    // `bound` winners — N_workers x bound full-granule decodes through
+    // `gather_row` for the ~bound rows that survive the leader's merge, while
+    // the per-worker survivor stream (the narrow-put saving) is ~1/N of the
+    // serial one. Serial measured -20% pod-normalized on the same shape.
+    // Leader-side gather across the Gather Merge (workers emit (key, ref),
+    // the leader gathers the final bound) is the v2 design — a plan-visible
+    // tuple-format change, not an admission tweak.
+    if ::parallel::IsParallelWorker() {
+        return None;
+    }
     if !state.bounded || state.bound <= 0 || state.bound > REFSORT_MAX_BOUND {
         return None;
     }
