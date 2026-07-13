@@ -14,6 +14,7 @@ elog = { path = "../../../utils/error/elog" }
 init_small = { path = "../../../utils/init/init_small" }
 latch = { path = "../latch" }
 libc = "0.2"
+waiter = { path = "../waiter" }
 lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }

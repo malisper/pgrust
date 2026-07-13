@@ -731,12 +731,7 @@ impl PGPROC {
             links: SyncCell::new(proclist_node::detached()),
             procgloballist: SyncCell::new(None),
             waitStatus: AtomicU32::new(PROC_WAIT_STATUS_OK),
-            procLatch: Latch {
-                is_set: AtomicI32::new(0),
-                maybe_sleeping: AtomicI32::new(0),
-                is_shared: AtomicBool::new(false),
-                owner_pid: AtomicI32::new(0),
-            },
+            procLatch: Latch::new(false, 0),
             xid: pg_atomic_uint32::new(0),
             xmin: pg_atomic_uint32::new(0),
             pid: AtomicI32::new(0),

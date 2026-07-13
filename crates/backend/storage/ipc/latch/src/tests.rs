@@ -15,8 +15,6 @@ enum Call {
     Modify { set: usize, pos: i32, events: u32, latch: Option<LatchHandle> },
     Wait { set: usize, timeout: i64, wait_event_info: u32 },
     Free { set: usize },
-    WakeupMyProc,
-    WakeupOtherProc { pid: i32 },
 }
 
 struct MockState {
@@ -83,10 +81,6 @@ fn install_mock() {
         });
         wes::free_wait_event_set::set(|set| {
             with_mock(|m| m.calls.push(Call::Free { set: set.as_usize() }));
-        });
-        wes::wakeup_my_proc::set(|| with_mock(|m| m.calls.push(Call::WakeupMyProc)));
-        wes::wakeup_other_proc::set(|pid| {
-            with_mock(|m| m.calls.push(Call::WakeupOtherProc { pid }));
         });
         init_seams();
     });
@@ -179,38 +173,36 @@ fn set_latch_quick_exit_when_already_set() {
     assert!(calls().is_empty());
 }
 
+/// True if this thread's waiter has a latched (or delivered) notification.
+fn my_waiter_notified() -> bool {
+    matches!(
+        waiter::park_timeout(core::time::Duration::from_millis(0)),
+        waiter::ParkResult::Notified
+    )
+}
+
 #[test]
-fn set_latch_wakes_own_proc() {
+fn set_latch_unparks_published_waker() {
     let _g = TEST_LOCK.lock().unwrap();
     install_mock();
     SetMyProcPid(42);
 
     let h = fresh_latch();
     InitLatch(h);
-    latch_ref(h).maybe_sleeping.store(1, SeqCst);
-
-    SetLatch(h);
-    assert_eq!(calls(), vec![Call::WakeupMyProc]);
-}
-
-#[test]
-fn set_latch_wakes_other_proc() {
-    let _g = TEST_LOCK.lock().unwrap();
-    install_mock();
-    SetMyProcPid(42);
-
-    let h = fresh_latch();
-    InitSharedLatch(h);
     let l = latch_ref(h);
-    l.owner_pid.store(7, SeqCst);
+    // What wait_latch_on_waiter publishes before arming maybe_sleeping.
+    l.waker.store(waiter::current_handle().as_u64(), SeqCst);
     l.maybe_sleeping.store(1, SeqCst);
 
     SetLatch(h);
-    assert_eq!(calls(), vec![Call::WakeupOtherProc { pid: 7 }]);
+    assert_eq!(l.is_set.load(SeqCst), 1);
+    assert!(my_waiter_notified());
 }
 
 #[test]
-fn set_latch_no_wake_when_unowned() {
+fn set_latch_no_wake_without_published_waker() {
+    // A latch whose owner never armed a wait (waker = 0) sets is_set only —
+    // the old "unowned" skip, now keyed on the route not the pid.
     let _g = TEST_LOCK.lock().unwrap();
     install_mock();
     SetMyProcPid(42);
@@ -221,7 +213,7 @@ fn set_latch_no_wake_when_unowned() {
 
     SetLatch(h);
     assert_eq!(latch_ref(h).is_set.load(SeqCst), 1);
-    assert!(calls().is_empty());
+    assert!(!my_waiter_notified());
 }
 
 #[test]
@@ -233,7 +225,9 @@ fn set_latch_from_other_thread_wakes_owner() {
     let h = fresh_latch();
     InitSharedLatch(h);
     OwnLatch(h).unwrap();
-    latch_ref(h).maybe_sleeping.store(1, SeqCst);
+    let l = latch_ref(h);
+    l.waker.store(waiter::current_handle().as_u64(), SeqCst);
+    l.maybe_sleeping.store(1, SeqCst);
 
     std::thread::spawn(move || {
         SetMyProcPid(7);
@@ -242,9 +236,33 @@ fn set_latch_from_other_thread_wakes_owner() {
     .join()
     .unwrap();
 
-    assert_eq!(latch_ref(h).is_set.load(SeqCst), 1);
-    assert_eq!(calls(), vec![Call::WakeupOtherProc { pid: 42 }]);
+    assert_eq!(l.is_set.load(SeqCst), 1);
+    assert!(my_waiter_notified());
     DisownLatch(h);
+    // Disown clears the route.
+    assert_eq!(l.waker.load(SeqCst), 0);
+}
+
+#[test]
+fn wait_latch_parks_until_cross_thread_set_latch() {
+    // End-to-end over the REAL waiter (no mocks on this path): a parked
+    // WaitLatch is woken by a cross-thread SetLatch.
+    let _g = TEST_LOCK.lock().unwrap();
+    install_mock();
+    SetMyProcPid(42);
+    SetIsUnderPostmaster(false);
+
+    let h = fresh_latch();
+    InitLatch(h);
+
+    let setter = std::thread::spawn(move || {
+        std::thread::sleep(core::time::Duration::from_millis(30));
+        SetLatch(h);
+    });
+    let rc = WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap();
+    assert_eq!(rc, WL_LATCH_SET);
+    setter.join().unwrap();
+    ResetLatch(h);
 }
 
 #[test]
@@ -282,41 +300,20 @@ fn initialize_latch_wait_set_and_wait_latch() {
         ]
     );
 
-    with_mock(|m| {
-        m.calls.clear();
-        m.wait_result = Ok(Some(WaitEvent {
-            pos: 0,
-            events: WL_LATCH_SET,
-            fd: PGINVALID_SOCKET,
-            user_data: None,
-        }));
-    });
+    with_mock(|m| m.calls.clear());
 
+    // WaitLatch parks on the Waiter now — no WaitEventSet traffic at all.
+    // A pre-set latch returns immediately.
+    latch_ref(h).is_set.store(1, SeqCst);
     let rc = WaitLatch(Some(h), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 123, 99).unwrap();
     assert_eq!(rc, WL_LATCH_SET);
-    assert_eq!(
-        calls(),
-        vec![
-            Call::Modify { set: 1, pos: 0, events: WL_LATCH_SET, latch: Some(h) },
-            Call::Modify { set: 1, pos: 1, events: WL_EXIT_ON_PM_DEATH, latch: None },
-            // no WL_TIMEOUT => timeout forced to -1
-            Call::Wait { set: 1, timeout: -1, wait_event_info: 99 },
-        ]
-    );
-
-    with_mock(|m| {
-        m.calls.clear();
-        m.wait_result = Ok(None);
-    });
+    assert!(calls().is_empty());
+    ResetLatch(h);
 
     // No WL_LATCH_SET => latch stripped; WL_TIMEOUT honored; timeout return.
     let rc = WaitLatch(Some(h), WL_EXIT_ON_PM_DEATH | WL_TIMEOUT, 10, 99).unwrap();
     assert_eq!(rc, WL_TIMEOUT);
-    assert_eq!(
-        calls()[0],
-        Call::Modify { set: 1, pos: 0, events: WL_LATCH_SET, latch: None }
-    );
-    assert_eq!(calls()[2], Call::Wait { set: 1, timeout: 10, wait_event_info: 99 });
+    assert!(calls().is_empty());
 
     SetIsUnderPostmaster(false);
     SetMyLatch(None);
@@ -484,14 +481,8 @@ fn wait_latch_runs_thread_signal_drain() {
     SetMyLatch(Some(h));
     InitializeLatchWaitSet().unwrap();
 
-    with_mock(|m| {
-        m.wait_result = Ok(Some(WaitEvent {
-            pos: 0,
-            events: WL_LATCH_SET,
-            fd: PGINVALID_SOCKET,
-            user_data: None,
-        }));
-    });
+    // Pre-set latch: WaitLatch returns immediately, then runs the drain.
+    latch_ref(h).is_set.store(1, SeqCst);
     let before = DRAINS.load(SeqCst);
     assert_eq!(WaitLatch(Some(h), WL_LATCH_SET, 0, 0).unwrap(), WL_LATCH_SET);
     assert_eq!(DRAINS.load(SeqCst), before + 1);
