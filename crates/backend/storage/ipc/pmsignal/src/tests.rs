@@ -17,7 +17,7 @@ fn setup() {
         shmem_seams::mul_size::set(|a, b| Ok(a.checked_mul(b).expect("mul_size overflow")));
         shmem_seams::add_size::set(|a, b| Ok(a.checked_add(b).expect("add_size overflow")));
         ipc_seams::on_shmem_exit::set(|f, arg| EXIT_CALLBACKS.lock().unwrap().push((f, arg)));
-        waiteventset_seams::wakeup_other_proc::set(|pid| WAKEUPS.lock().unwrap().push(pid));
+        waiteventset_seams::wakeup_postmaster::set(|| WAKEUPS.lock().unwrap().push(0));
         PMSignalShmemInit(MAX_LIVE_CHILDREN);
         init_seams();
     });
@@ -45,7 +45,9 @@ fn send_and_check_postmaster_signal() {
 
     WAKEUPS.lock().unwrap().clear();
     SendPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_WORKER);
-    assert_eq!(*WAKEUPS.lock().unwrap(), vec![4321]);
+    // The wake seam is pid-less now (the postmaster is the one well-known
+    // route); the assertion is that exactly one PM kick was delivered.
+    assert_eq!(WAKEUPS.lock().unwrap().len(), 1);
     assert!(CheckPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_WORKER));
     assert!(!CheckPostmasterSignal(PMSignalReason::PMSIGNAL_START_AUTOVAC_WORKER));
     assert!(!CheckPostmasterSignal(PMSignalReason::PMSIGNAL_ROTATE_LOGFILE));

@@ -39,7 +39,12 @@ pub fn perform_spin_delay(status: &mut SpinDelayStatus) {
         }
 
         waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_SPIN_DELAY);
-        std::thread::sleep(std::time::Duration::from_micros(status.cur_delay as u64));
+        // Waiter-based backoff (M0 lane C): rides the DST clock hook instead
+        // of a raw thread::sleep. A pending unpark aimed at this thread ends
+        // the delay early — harmless for a backoff (the latch protocol
+        // re-tests is_set before parking, so a consumed notify is never a
+        // lost wake).
+        waiter::sleep(std::time::Duration::from_micros(status.cur_delay as u64));
         waitevent_seams::pgstat_report_wait_end::call();
 
         let frac = pg_prng::global_prng(|p| p.next_f64());

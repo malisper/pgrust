@@ -9,6 +9,7 @@ name = "s_lock"
 path = "src/lib.rs"
 
 [dependencies]
+waiter = { path = "../../ipc/waiter" }
 pg_prng = { path = "../../../../common/pg_prng" }
 s_lock_seams = { path = "../s_lock_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
