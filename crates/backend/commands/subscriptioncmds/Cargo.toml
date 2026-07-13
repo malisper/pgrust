@@ -15,6 +15,7 @@ types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 walreceiver = { path = "../../replication/walreceiver" }
+origin = { path = "../../replication/origin" }
 catalog_namespace = { path = "../../catalog/catalog_namespace" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 rel_vocab = { path = "../../../_support/types/rel_vocab" }

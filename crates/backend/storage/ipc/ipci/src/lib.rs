@@ -149,6 +149,7 @@ pub fn CreateOrAttachShmemStructs(cfg: &ProcGlobalConfig) -> PgResult<()> {
     procsignal::ProcSignalShmemInit();
     checkpointer::CheckpointerShmemInit(g::NBuffers());
     slot::ReplicationSlotsShmemInit();
+    origin::ReplicationOriginShmemInit();
     walsummarizer::WalSummarizerShmemInit();
     walreceiverfuncs::WalRcvShmemInit();
     pgarch::PgArchShmemInit();
@@ -198,6 +199,7 @@ pub fn ResetShmemAfterCrash() -> PgResult<()> {
     procsignal::ProcSignalShmemResetAfterCrash();
     checkpointer::CheckpointerShmemResetAfterCrash();
     slot::ReplicationSlotsShmemResetAfterCrash();
+    origin::ReplicationOriginShmemResetAfterCrash();
     walsummarizer::WalSummarizerShmemResetAfterCrash();
     walreceiverfuncs::WalRcvShmemResetAfterCrash();
     pgarch::PgArchShmemResetAfterCrash();

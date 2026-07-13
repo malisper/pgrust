@@ -38,6 +38,7 @@ pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
 slot = { path = "../../../replication/slot" }
+origin = { path = "../../../replication/origin" }
 pgarch = { path = "../../../postmaster/pgarch" }
 walsummarizer = { path = "../../../postmaster/walsummarizer" }
 walreceiverfuncs = { path = "../../../replication/walreceiverfuncs" }

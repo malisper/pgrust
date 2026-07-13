@@ -279,6 +279,7 @@ slot = { path = "../../backend/replication/slot" }
 reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
 snapbuild = { path = "../../backend/replication/logical/snapbuild" }
 logical = { path = "../../backend/replication/logical/logical" }
+origin = { path = "../../backend/replication/origin" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 test_decoding = { path = "../../contrib/test_decoding" }
