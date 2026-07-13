@@ -245,10 +245,23 @@ pub struct CbScanDescData<'mcx> {
     adaptive: Option<Box<AdaptiveOrder>>,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
+    // Subset of granules_pruned attributed to a bloom rejection (the granule
+    // survived every zone/block check but the Eq const hashed absent):
+    // the bloom-utilization observability channel.
+    pub granules_bloom_pruned: u64,
     pub granules_scanned: u64,
     pub blocks_pruned: u64,
     pub windows_staged: u64,
     pub granules_bound_skipped: u64,
+}
+
+// Why granule_admit refused a granule: Zone covers the zone-map and
+// block-zone-map folds; Bloom is the per-granule filter's absent verdict
+// (counted separately so bloom utilization is observable end-to-end).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GranulePruneCause {
+    Zone,
+    Bloom,
 }
 
 fn env_off(name: &str) -> bool {
@@ -330,6 +343,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             row_cursor: 0,
             adaptive: None,
             granules_pruned: 0,
+            granules_bloom_pruned: 0,
             granules_scanned: 0,
             blocks_pruned: 0,
             windows_staged: 0,
@@ -641,11 +655,17 @@ impl<'mcx> CbScanDescData<'mcx> {
         })
     }
 
-    // None = pruned (zone map, block zone maps, or bloom say no row can
-    // match). Some(mask) = admitted; bit b covers rows [b*BLOCK_ROWS,
+    // Err(cause) = pruned (zone map, block zone maps, or bloom say no row
+    // can match; cause attributes bloom rejections for the utilization
+    // counter). Ok(mask) = admitted; bit b covers rows [b*BLOCK_ROWS,
     // (b+1)*BLOCK_ROWS) of the granule. Bloom and block pruning are
     // advisory-only: admitted rows always get the ordinary qual evaluation.
-    fn granule_admit(&self, rg: usize, g: usize, granule_rows: usize) -> Option<u32> {
+    fn granule_admit(
+        &self,
+        rg: usize,
+        g: usize,
+        granule_rows: usize,
+    ) -> Result<u32, GranulePruneCause> {
         let part = self.part.as_ref().unwrap();
         let nblocks = granule_rows.div_ceil(BLOCK_ROWS);
         let mut mask: u32 = (1u32 << nblocks) - 1;
@@ -653,14 +673,14 @@ impl<'mcx> CbScanDescData<'mcx> {
             let chunk = part.chunk(rg, (q.attnum - 1) as usize);
             let ge = chunk.granule(g);
             if !zone_can_match(q, ge.min, ge.max) {
-                return None;
+                return Err(GranulePruneCause::Zone);
             }
             if matches!(q.op, ZoneCmp::Eq)
                 && self.bloom_enabled
                 && chunk.has_bloom()
                 && !chunk.bloom_may_contain(g, q.val)
             {
-                return None;
+                return Err(GranulePruneCause::Bloom);
             }
             if self.block_zm_enabled && chunk.has_block_zm() {
                 for b in 0..nblocks {
@@ -672,11 +692,11 @@ impl<'mcx> CbScanDescData<'mcx> {
                     }
                 }
                 if mask == 0 {
-                    return None;
+                    return Err(GranulePruneCause::Zone);
                 }
             }
         }
-        Some(mask)
+        Ok(mask)
     }
 
     /// Compressed-domain constant-fold of `q` against the currently staged
@@ -769,10 +789,16 @@ impl<'mcx> CbScanDescData<'mcx> {
             }
             if !self.decoded {
                 let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
-                let Some(mask) = self.granule_admit(self.rg, self.granule, grows) else {
-                    self.granules_pruned += 1;
-                    self.granule += 1;
-                    continue;
+                let mask = match self.granule_admit(self.rg, self.granule, grows) {
+                    Ok(mask) => mask,
+                    Err(cause) => {
+                        self.granules_pruned += 1;
+                        if cause == GranulePruneCause::Bloom {
+                            self.granules_bloom_pruned += 1;
+                        }
+                        self.granule += 1;
+                        continue;
+                    }
                 };
                 self.block_mask = mask;
                 self.decode_current_granule();
@@ -856,9 +882,15 @@ impl<'mcx> CbScanDescData<'mcx> {
             self.rg_claimed = true;
             let rg_rows = self.part.as_ref().unwrap().rgs[self.rg].nrows as usize;
             let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
-            let Some(mask) = self.granule_admit(self.rg, self.granule, grows) else {
-                self.granules_pruned += 1;
-                continue;
+            let mask = match self.granule_admit(self.rg, self.granule, grows) {
+                Ok(mask) => mask,
+                Err(cause) => {
+                    self.granules_pruned += 1;
+                    if cause == GranulePruneCause::Bloom {
+                        self.granules_bloom_pruned += 1;
+                    }
+                    continue;
+                }
             };
             self.block_mask = mask;
             self.decode_current_granule();
