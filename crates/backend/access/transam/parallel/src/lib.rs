@@ -65,9 +65,13 @@ pub struct ParallelShared {
     // fresh-process InvalidateSystemCaches.
     leader_pending_invals: bool,
     guc_state: Vec<guc::store::NondefaultGuc>,
-    // §3.4 P-guc: typed leader capture; when session_guc_bind_enabled() this
-    // carries the GUC transfer and guc_state stays empty (and vice versa).
-    guc_bind: Vec<guc::store::CapturedGuc>,
+    // §3.4 P-guc via the layered-snapshot query pin (guc::layers): the
+    // leader's per-statement composed capture, shared by Arc — one capture
+    // per statement window regardless of worker count, and the worker adopts
+    // the leader's base (started-with parity). When session_guc_bind_enabled()
+    // this carries the GUC transfer and guc_state stays empty (and vice
+    // versa: PGRUST_NO_GUC_BIND reverts to the string restore path).
+    guc_pin: Option<Arc<guc::layers::GucQuerySnapshot>>,
     tstate: Vec<u8>,
     combocid: Arc<[(CommandId, CommandId)]>,
     pending_syncs: Vec<(RelFileLocator, bool)>,
@@ -331,10 +335,10 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         } else {
             guc::store::capture_nondefault_variables()
         },
-        guc_bind: if guc::store::session_guc_bind_enabled() {
-            guc::store::capture_session_gucs()
+        guc_pin: if guc::store::session_guc_bind_enabled() {
+            Some(guc::layers::current_query_pin())
         } else {
-            Vec::new()
+            None
         },
         tstate,
         combocid: combocid::SerializeComboCIDState(),
@@ -1077,8 +1081,11 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     if init_small::wretain::warm_claim() {
         guc::ResetAllOptions();
     }
-    let _guc_binding = if guc::store::session_guc_bind_enabled() {
-        Some(guc::store::bind_session_gucs(&shared.guc_bind)?)
+    let _guc_binding = if let Some(pin) = shared.guc_pin.as_ref() {
+        // Pin bind: leader-validated values + extras, assign hooks fire,
+        // check hooks don't; also adopts the leader's base (started-with
+        // parity across the whole parallel query).
+        Some(guc::layers::bind_query_pin(pin)?)
     } else {
         guc::store::restore_nondefault_variables(&shared.guc_state)?;
         None
