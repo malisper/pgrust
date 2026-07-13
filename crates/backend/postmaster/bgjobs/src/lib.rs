@@ -130,6 +130,11 @@ struct JobEntry {
     /// True until the first cycle dispatches — maps the first
     /// deadline-shaped dispatch to [`CycleReason::Startup`].
     never_ran: bool,
+    /// Sticky manual wake (poke): survives arriving while a cycle is in
+    /// flight — consumed by the next Idle evaluation. (The latch edge needs
+    /// no analog: the latch word itself is sticky until the cycle resets
+    /// it.)
+    wake_pending: bool,
 }
 
 struct Shared {
@@ -192,6 +197,7 @@ impl Dispatcher {
                 // Due immediately; the dispatcher submits the Startup cycle.
                 phase: Phase::Idle { due: Instant::now() },
                 never_ran: true,
+                wake_pending: false,
             });
             jobs.len() - 1
         };
@@ -205,9 +211,7 @@ impl Dispatcher {
         {
             let mut jobs = self.shared.jobs.lock().unwrap();
             if let Some(e) = jobs.get_mut(id) {
-                if let Phase::Idle { due } = &mut e.phase {
-                    *due = Instant::now();
-                }
+                e.wake_pending = true;
             }
         }
         self.shared.unpark_dispatcher();
@@ -248,7 +252,12 @@ impl TaskSetWork for CycleWork {
     }
 
     fn finalize(&self) {
-        self.shared.unpark_dispatcher();
+        // Deliberately empty: the dispatcher's wake rides the RG COMPLETION
+        // (CompletionWaiter::register_waker_word at submit). finalize runs
+        // BEFORE completion is posted in the runtime's last-out protocol, so
+        // an unpark here can be consumed by a pass that still observes
+        // try_wait()==None — the lost-wake this replaced (found by the
+        // deadline-cycles flake, 2026-07-16).
     }
 }
 
@@ -268,6 +277,13 @@ fn submit_cycle(shared: &Arc<Shared>, id: JobId, job: Arc<dyn BgJob>, reason: Cy
             deps: vec![],
         }],
     });
+    // Completion wake: registered on the RG's completion word (posted AFTER
+    // finalize in last-out — registering there is the only race-free edge).
+    // Already-complete => no wake will follow; self-unpark so the next park
+    // falls through to the harvest.
+    if waiter.register_waker_word(shared.waker.load(Ordering::Acquire)) {
+        shared.unpark_dispatcher();
+    }
     Phase::InFlight {
         submitted: Instant::now(),
         handle,
@@ -336,7 +352,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 // Latch wake: an is_set latch dispatches NOW.
                 if job.latch().is_some_and(|l| l.is_set()) {
                     Act::Dispatch(CycleReason::Wake)
-                } else if *due <= now {
+                } else if *due <= now || jobs[id].wake_pending {
                     Act::Dispatch(CycleReason::Deadline)
                 } else {
                     // Stay idle: (re-)publish our waker as the latch's wake
@@ -384,6 +400,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                     reason
                 };
                 jobs[id].never_ran = false;
+                jobs[id].wake_pending = false;
                 jobs[id].phase = submit_cycle(shared, id, job, reason);
                 // In-flight: watchdog bounds the park.
                 nearest = Some(nearest.map_or(wd, |n| n.min(wd)));

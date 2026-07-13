@@ -156,6 +156,24 @@ impl Completion {
     fn try_wait(&self) -> Option<RgOutcome> {
         lock(&self.state).outcome
     }
+
+    /// Register a waker word to be unparked at completion WITHOUT parking
+    /// this thread (M4 bgjobs dispatcher: single thread observing many
+    /// RGs). Returns true ⇔ the RG is already complete — no wake will
+    /// follow; the caller consumes `try_wait()` instead. Same lock-ordered
+    /// no-lost-wake argument as `wait()`: complete() either sees the word
+    /// (and unparks it) or this registration sees the outcome.
+    #[cfg(not(loom))]
+    fn register_waker_word(&self, word: u64) -> bool {
+        let mut g = lock(&self.state);
+        if g.outcome.is_some() {
+            return true;
+        }
+        if !g.wakers.contains(&word) {
+            g.wakers.push(word);
+        }
+        false
+    }
 }
 
 /// The runtime scheduler's [`ParticipantOwner`] — the "dispatcher-owned
@@ -323,6 +341,14 @@ impl CompletionWaiter {
 
     pub fn try_wait(&self) -> Option<RgOutcome> {
         self.rg.completion.try_wait()
+    }
+
+    /// Register a packed waiter::WakerHandle word to be unparked when the
+    /// RG completes, without parking. Returns true ⇔ already complete (no
+    /// wake follows — consume `try_wait()`).
+    #[cfg(not(loom))]
+    pub fn register_waker_word(&self, word: u64) -> bool {
+        self.rg.completion.register_waker_word(word)
     }
 }
 
