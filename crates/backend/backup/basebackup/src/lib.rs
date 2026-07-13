@@ -394,8 +394,11 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
     let (mut o_noverify, mut o_manifest, mut o_manifest_cksums) = (false, false, false);
     let mut o_target = false;
     let mut o_target_detail = false;
+    let mut o_compression = false;
+    let mut o_compression_detail = false;
     let mut target_str: Option<String> = None;
     let mut target_detail_str: Option<String> = None;
+    let mut compression_detail_str: Option<String> = None;
 
     for o in options {
         let name = o.name.as_str();
@@ -501,8 +504,27 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
                 target_detail_str = Some(opt_string(o)?.to_string());
                 o_target_detail = true;
             }
-            "compression" | "compression_detail" => {
-                refuse("server-side compression")?;
+            "compression" => {
+                if o_compression { dup_err(name)?; }
+                let v = opt_string(o)?.to_string();
+                // parse_compress_algorithm subset: only "none" runs without a
+                // compression sink; real algorithms stay a loud refusal.
+                if strcasecmp(&v, "none") {
+                    // PG_COMPRESSION_NONE: no compression sink layer.
+                } else if strcasecmp(&v, "gzip") || strcasecmp(&v, "lz4") || strcasecmp(&v, "zstd")
+                {
+                    refuse("server-side compression")?;
+                } else {
+                    ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg(format!("unrecognized compression algorithm: \"{v}\""))
+                        .finish(loc("parse_basebackup_options"))?;
+                }
+                o_compression = true;
+            }
+            "compression_detail" => {
+                if o_compression_detail { dup_err(name)?; }
+                compression_detail_str = Some(opt_string(o)?.to_string());
+                o_compression_detail = true;
             }
             _ => {
                 ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
@@ -547,6 +569,21 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
                 target_detail_str.as_deref(),
             )?);
         }
+    }
+
+    if o_compression_detail && !o_compression {
+        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("compression detail cannot be specified unless compression is enabled")
+            .finish(loc("parse_basebackup_options"))?;
+    }
+    if o_compression_detail {
+        // Only "none" reaches here; none accepts no detail options
+        // (validate_compress_specification wording).
+        let detail = compression_detail_str.as_deref().unwrap_or("");
+        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("invalid compression specification: compression algorithm \"none\" does not accept a compression level"))
+            .errdetail(format!("Compression detail was \"{detail}\"."))
+            .finish(loc("parse_basebackup_options"))?;
     }
 
     if opt.incremental {

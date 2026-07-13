@@ -35,6 +35,25 @@ macro_rules! scalar_global {
     };
 }
 
+// C `int data_directory_mode` (globals.c): set once by checkDataDir() in the
+// postmaster before any children exist, constant afterwards, fork-inherited.
+// PROCESS-GLOBAL here — a thread-local (even one copied at child launch) can
+// go stale for worker-pool threads spawned before checkDataDir ran, leaving
+// `SHOW data_directory_mode` at 0700 on a group-access (0750) cluster
+// (pg_basebackup/010 group-permission leg).
+static DATA_DIRECTORY_MODE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(PG_DIR_MODE_OWNER as i32);
+
+#[inline]
+pub fn data_directory_mode() -> i32 {
+    DATA_DIRECTORY_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_data_directory_mode(mode: i32) {
+    DATA_DIRECTORY_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+}
+
 scalar_global! {
     FRONTEND_PROTOCOL, FrontendProtocol, SetFrontendProtocol, ProtocolVersion, 0;
 
@@ -71,8 +90,6 @@ scalar_global! {
         [0; MAX_CANCEL_KEY_LENGTH];
     MY_CANCEL_KEY_LENGTH, MyCancelKeyLength, SetMyCancelKeyLength, i32, 0;
     MY_PM_CHILD_SLOT, MyPMChildSlot, SetMyPMChildSlot, i32, 0;
-
-    DATA_DIRECTORY_MODE, data_directory_mode, set_data_directory_mode, i32, PG_DIR_MODE_OWNER;
 
     OUTPUT_FILE_NAME, OutputFileName, SetOutputFileName, [u8; MAXPGPATH], [0; MAXPGPATH];
     MY_EXEC_PATH, my_exec_path, set_my_exec_path, [u8; MAXPGPATH], [0; MAXPGPATH];

@@ -189,7 +189,9 @@ inherited! {
     is_postmaster_environment: bool = IsPostmasterEnvironment / SetIsPostmasterEnvironment;
     is_binary_upgrade: bool = IsBinaryUpgrade / SetIsBinaryUpgrade;
     postmaster_pid: pid_t = PostmasterPid / SetPostmasterPid;
-    data_directory_mode: i32 = data_directory_mode / set_data_directory_mode;
+    // data_directory_mode is process-global (set once by checkDataDir); it is
+    // deliberately NOT in this list — a stale captured copy applied by a
+    // pooled standby thread would reset the fixed value.
     output_file_name: [u8; types_core::MAXPGPATH] = OutputFileName / SetOutputFileName;
     my_exec_path: [u8; types_core::MAXPGPATH] = my_exec_path / set_my_exec_path;
     pkglib_path: [u8; types_core::MAXPGPATH] = pkglib_path / set_pkglib_path;
