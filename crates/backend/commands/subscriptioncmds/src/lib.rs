@@ -5,6 +5,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod connect;
 mod conninfo;
 mod origin;
 pub use origin::{fc_pg_replication_origin_create, ORIGIN_BUILTINS};
@@ -663,7 +664,8 @@ pub fn CreateSubscription<'mcx>(
     origin::replorigin_create(mcx, &originname)?;
 
     if opts.connect {
-        match conninfo::walrcv_connect(mcx, conninfo) {
+        let must_use_password = opts.passwordrequired && !superuser::superuser_arg(owner)?;
+        let mut wrconn = match connect::connect(mcx, conninfo, must_use_password, subname)? {
             Err(errmsg) => {
                 return Err(err(
                     format!(
@@ -672,8 +674,80 @@ pub fn CreateSubscription<'mcx>(
                     ERRCODE_CONNECTION_FAILURE,
                 ));
             }
-            Ok(()) => unreachable!("walrcv_connect panics on any connectable conninfo"),
-        }
+            Ok(conn) => conn,
+        };
+
+        // C wraps this in PG_TRY with walrcv_disconnect in the cleanup; the
+        // connection drops (closing the socket) on both paths here.
+        let pubname_strs: Vec<&str> = pubnames.iter().copied().collect();
+        let connected = (|| -> PgResult<()> {
+            connect::check_publications(&mut wrconn, &pubname_strs)?;
+            connect::check_publications_origin(
+                &mut wrconn,
+                &pubname_strs,
+                opts.copy_data,
+                Some(opts.origin),
+                subname,
+            )?;
+
+            // Set sync state based on whether we were asked to copy data.
+            let table_state = if opts.copy_data {
+                pg_subscription::SUBREL_STATE_INIT
+            } else {
+                pg_subscription::SUBREL_STATE_READY
+            };
+
+            // Get the table list from the publisher; build local status info.
+            let tables = connect::fetch_table_list(&mut wrconn, &pubname_strs)?;
+            let ntables = tables.len();
+            for (nspname, relname) in tables {
+                let rv = rel_vocab::RangeVar {
+                    catalogname: None,
+                    schemaname: Some(nspname.as_str()),
+                    relname: relname.as_str(),
+                    inh: true,
+                    relpersistence: b'p',
+                    location: -1,
+                };
+                let relid = catalog_namespace::RangeVarGetRelid(
+                    &rv,
+                    types_rel::AccessShareLock,
+                    false,
+                )?;
+                CheckSubscriptionRelkind(
+                    lsyscache::get_rel_relkind(relid)? as u8,
+                    &nspname,
+                    &relname,
+                )?;
+                pg_subscription::AddSubscriptionRelState(
+                    mcx,
+                    subid,
+                    relid,
+                    table_state,
+                    InvalidXLogRecPtr,
+                    true,
+                )?;
+            }
+
+            // If requested, create the permanent slot for the subscription
+            // (never with an exported snapshot). two_phase is enabled up
+            // front only when it is safe (see the C comment).
+            if opts.create_slot {
+                let slot = slot_name.expect("create_slot implies slot_name");
+                let twophase_enabled = opts.twophase && !opts.copy_data && ntables > 0;
+                connect::walrcv_create_slot(&mut wrconn, slot, twophase_enabled, opts.failover)?;
+                if twophase_enabled {
+                    panic!("unported: UpdateTwoPhaseState (two-phase subscription)");
+                }
+                let _ = elog::elog(
+                    types_error::NOTICE,
+                    format!("created replication slot \"{slot}\" on publisher"),
+                );
+            }
+            Ok(())
+        })();
+        drop(wrconn);
+        connected?;
     } else {
         elog::ereport(WARNING)
             .errmsg("subscription was created, but is not connected")
@@ -1309,4 +1383,17 @@ pub fn AlterSubscriptionOwner_oid<'mcx>(
 
 pub fn init_seams() {
     pg_shdepend::alter_subscription_owner_oid::set(AlterSubscriptionOwner_oid);
+}
+
+// CheckSubscriptionRelkind (catalog/pg_subscription.c): logical replication
+// targets must be plain or partitioned tables.
+fn CheckSubscriptionRelkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
+    // RELKIND_RELATION 'r' / RELKIND_PARTITIONED_TABLE 'p'.
+    if relkind != b'r' && relkind != b'p' {
+        return Err(err(
+            format!("cannot use relation \"{nspname}.{relname}\" as logical replication target"),
+            types_error::ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    Ok(())
 }
