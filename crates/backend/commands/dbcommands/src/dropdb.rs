@@ -217,8 +217,11 @@ pub fn dropdb(mcx: Mcx<'_>, dbname: &str, missing_ok: bool, force: bool) -> PgRe
     drop_setting(mcx, db_id)?;
     pg_shdepend::dropDatabaseDependencies(mcx, db_id)?;
 
-    // pgstat_drop_database: the cumulative-stats subsystem is unported; there
-    // is no per-database stats entry to forget.
+    // Tell the cumulative stats system to forget it immediately, too
+    // (dbcommands.c:1816). Registered transactionally: the commit record's
+    // stats item is what drops the entry (and, via the dboid cascade, every
+    // entry of the database) on standbys (030_stats_cleanup_replica).
+    pgstat::database::pgstat_drop_database(db_id);
 
     set_database_invalid(mcx, &pgdbrel, dbname, db_id)?;
 

@@ -4463,6 +4463,7 @@ dependencies = [
  "pg_depend",
  "pg_locale",
  "pg_shdepend",
+ "pgstat",
  "postgres_seams",
  "postmaster_seams",
  "procarray",
