@@ -6874,7 +6874,6 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                 a == b
             };
         if !plain_admissible && !ok {
-            trace_feed("sorted-agg narrow admission refused (set-capable/prefix gates)");
             stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
             return Ok(None);
         }
