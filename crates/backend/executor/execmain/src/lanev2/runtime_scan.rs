@@ -139,9 +139,10 @@ enum DriveMode {
     Fold,
     /// Count-only census shape (fold plan reads NO columns; the serial
     /// decider refuses it because the footer is the serial lever): the
-    /// per-row drain — PREWHERE bitmap + the full per-row transition
-    /// program, no SoA-lane expectations.
-    PerRow,
+    /// census drain — kernel-qual selection bitmap counted whole-word via
+    /// `fold_batch` (CountStar reads no lanes), fallback/scalar-qual rows
+    /// through the per-row program. Graceful when no SoA/bitmap staged.
+    Census,
 }
 
 struct WorkerExec {
@@ -231,17 +232,7 @@ impl RuntimeScanShared {
                         DriveMode::Fold => {
                             super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
                         }
-                        DriveMode::PerRow => {
-                            let mut sink =
-                                super::PlainAggBuildSink { agg: &mut aps.agg };
-                            super::push::drain_pipeline(
-                                ss,
-                                &mut super::SeqScanSource,
-                                &mut super::SeqScanFilterProject,
-                                &mut sink,
-                                estate,
-                            )?
-                        }
+                        DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
                     }
                     // Cumulative partial export (overwrite): the worker's
                     // LAST morsel's export — which precedes its settle, and
@@ -410,9 +401,10 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                             )?;
                             super::arm_fold_len_lanes(&aps.agg, ss);
                         }
-                        DriveMode::PerRow => {
-                            // Census shape: per-row staging (PREWHERE /
-                            // kernel bitmap when the qual has kernel shape).
+                        DriveMode::Census => {
+                            // Census shape: row-feed staging (kernel-qual
+                            // selection bitmap / PREWHERE when the qual has
+                            // kernel shape; stitched tiers on).
                             super::arm_scan_staging(
                                 ss,
                                 estate,
@@ -497,9 +489,101 @@ fn ensure_hooks_registered() {
 /// the classified plan, so leader and workers always agree.
 fn drive_mode(agg: &::nodeagg::AggStateData<'_>) -> DriveMode {
     match ::nodeagg::agg_lanefold_plan(agg) {
-        Some(plan) if plan.cols.is_empty() => DriveMode::PerRow,
+        Some(plan) if plan.cols.is_empty() => DriveMode::Census,
         _ => DriveMode::Fold,
     }
+}
+
+/// The census morsel drain: the fold drain's structure specialized to
+/// count-only plans (no residuals, no guards, no lane reads, no str-mm
+/// memos) with a graceful no-SoA/no-bitmap fallback. Byte-identity: the
+/// same rows pass the same qual — the staged bitmap IS the kernel qual's
+/// verdict (fallback rows re-check per row through `seq_scan_batch_emit`,
+/// exactly the fold drain's discipline) — and a CountStar transition's
+/// whole effect is one increment per surviving row, which `fold_batch`
+/// applies as a popcount over the same selection.
+fn census_drain<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(::nodeagg::agg_lanefold_plan(agg)
+        .is_some_and(|p| p.cols.is_empty() && p.resid.is_empty() && !p.guarded));
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of claim: drop the scan slot's pin (fold drain parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let nwords = (n as usize).div_ceil(64);
+        let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+        let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
+        let fast = {
+            let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+            let bitmap_qual = sel.is_some();
+            match ::nodeseqscan::seq_scan_batch_soa(ss) {
+                Some(soa) if bitmap_qual || ss.ss.qual.is_none() => {
+                    let fb = soa.fallback_words();
+                    for w in 0..nwords {
+                        rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
+                        fallback[w] = fb[w];
+                    }
+                    if n % 64 != 0 {
+                        rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                        fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        };
+        if fast {
+            // Fallback rows: full per-row program off the stored tuple
+            // (qual re-checked inside emit).
+            for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
+                while bits != 0 {
+                    let i = (w as u32) * 64 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                    }
+                }
+            }
+            if rows[..nwords].iter().any(|w| *w != 0) {
+                let aggcx = ::nodeagg::agg_aggcontext(agg);
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("checked above: SoA staged");
+                let plan =
+                    ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
+                // SAFETY: pergroup_base is the node's once-allocated
+                // single-group pergroup array covering every transno;
+                // CountStar kernels read no lane columns, so the col
+                // contract is vacuous; the plan is unguarded (asserted).
+                unsafe {
+                    ::lanefold::fold_batch(
+                        plan,
+                        soa,
+                        &rows[..nwords],
+                        n as usize,
+                        ::nodeagg::agg_plain_pergroup_base(agg),
+                        aggcx,
+                    )?;
+                }
+            }
+        } else {
+            // No staged bitmap/SoA (scalar qual, unstaged batch): the full
+            // per-row path for every row.
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
