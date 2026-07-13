@@ -15652,6 +15652,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stringhash"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "stringinfo"
 version = "0.1.0"
 dependencies = [
