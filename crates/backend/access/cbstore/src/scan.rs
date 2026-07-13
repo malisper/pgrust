@@ -1590,6 +1590,23 @@ impl<'mcx> CbScanDescData<'mcx> {
         })
     }
 
+    /// Physical rowref base of the CURRENT staged window (tie-ordering rule
+    /// 2: rowref = `(row_group << 32) | rg-global-row`, monotone in physical
+    /// position): staged row `i`'s rowref is `base + i` — windows never
+    /// cross a granule, let alone a row group, so the low word never carries
+    /// into the rg bits. `None` when nothing is staged or the part exceeds
+    /// the consumer's 48-bit envelope (>= 2^16 row groups — never on the CB
+    /// banks; the consumer then keeps its demote backstop).
+    #[inline]
+    pub fn staged_rowref_base(&self) -> Option<u64> {
+        if self.staged_rows == 0 || !self.rg_claimed || self.rg > u16::MAX as usize {
+            return None;
+        }
+        let row = self.granule * GRANULE_ROWS + self.staged_lo;
+        debug_assert!(row + self.staged_rows <= u32::MAX as usize + 1);
+        Some(((self.rg as u64) << 32) | row as u64)
+    }
+
     /// `staged_dict_lane` repackaged as the batch-currency `SoaDictLane`
     /// (raw pointers; the same window-lifetime contract as the dict-lane
     /// answers `batch_deform_col` publishes) — the str MIN/MAX dict-code

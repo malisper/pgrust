@@ -431,6 +431,8 @@ static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
 /// arrival-order-sensitive tie at the LIMIT cut and re-fed physical-order.
 static ADAPTIVE_TOPK_DEMOTED: AtomicU64 = AtomicU64::new(0);
 static ADAPTIVE_TOPK_TIE_RELAXED: AtomicU64 = AtomicU64::new(0);
+/// Rule-2 rowref-selection adaptive feeds that finished exact (no demote).
+static ADAPTIVE_TOPK_ROWREF_EXACT: AtomicU64 = AtomicU64::new(0);
 
 /// Group-level emit-side top-N boundary effect counters (lane-v2 topnemit;
 /// informational `counter` dump lines). `SEEN` counts groups walked by an
@@ -532,6 +534,18 @@ pub(super) fn tick_refsort_demoted() {
         return;
     }
     REFSORT_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one rule-2 rowref-selection adaptive top-N feed that finished
+/// exact (no demotion; survivor selection pinned to the physical feed's by
+/// the (key, rowref) bounded-heap total order).
+#[inline]
+pub(super) fn tick_adaptive_topk_rowref_exact() {
+    if stats_dir().is_none() {
+        return;
+    }
+    ADAPTIVE_TOPK_ROWREF_EXACT.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -641,6 +655,10 @@ fn dump() {
     out.push_str(&format!(
         "counter\tadaptivetopk-tie-relaxed\t{}\n",
         ADAPTIVE_TOPK_TIE_RELAXED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tadaptivetopk-rowref-exact\t{}\n",
+        ADAPTIVE_TOPK_ROWREF_EXACT.load(Relaxed)
     ));
     out.push_str(&format!(
         "counter\ttopnemit-groups-seen\t{}\n",
