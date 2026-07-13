@@ -1241,19 +1241,42 @@ mod numeric_key_tests {
 /// Read-back: the next compact group as (populated `first_slot`, pergroup).
 /// Row (insertion) order; no spill refill (compact builds never spill).
 /// `None` = drained. Cursor rides `ph.hashiter` (reset by the same sites the
-/// C iterator's reset rides).
+/// C iterator's reset rides). `cut`: the lane's armed emit-side top-N
+/// boundary (lane-v2 topnemit) — rows strictly worse than the downstream
+/// bounded sort's k-th boundary are skipped HERE, before any key
+/// reconstruction / intern materialization (admission proved the skipped
+/// emit body observation-free).
 pub(crate) fn compact_retrieve_next<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
+    cut: Option<&mut crate::TopnEmitCut<'_>>,
 ) -> PgResult<Option<NonNull<AggPerGroup>>> {
     let mcx = estate.es_query_cxt;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-    let row = ph.hashiter;
+    let mut row = ph.hashiter;
     let nrows = ph.compact.as_ref().expect("compact retrieve requires the table").table.nrows();
+    if let Some(c) = cut {
+        let table = &ph.compact.as_ref().expect("compact retrieve requires the table").table;
+        while row < nrows {
+            // SAFETY: the row's state block is the group's live AggPerGroup
+            // array; transno < its length (resolve checked this node).
+            let pg = unsafe {
+                &*table.row_states(row).cast::<AggPerGroup>().add(c.spec.transno as usize)
+            };
+            if !c.skips(pg) {
+                break;
+            }
+            *c.skipped += 1;
+            row += 1;
+            // The elided sort put's per-row cadence.
+            ::postgres_seams::check_for_interrupts::call()?;
+        }
+    }
     if row >= nrows {
+        ph.hashiter = row;
         return Ok(None);
     }
-    ph.hashiter += 1;
+    ph.hashiter = row + 1;
     ::exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
     let ch = ph.compact.as_ref().expect("compact retrieve requires the table");
     match &ch.key {

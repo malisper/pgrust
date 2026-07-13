@@ -3420,7 +3420,7 @@ where
         if node.merge.as_ref().is_some_and(|m| m.has_run()) {
             return merge::agg_retrieve_merged(node, estate);
         }
-        return agg_retrieve_hash_table(node, estate);
+        return agg_retrieve_hash_table(node, estate, None);
     }
     if node.plan.aggstrategy == AGG_SORTED {
         return agg_retrieve_sorted(node, estate, &mut fetch_outer);
@@ -3536,7 +3536,7 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
         if !node.perhash.as_ref().expect("hashed Agg has perhash").table_filled {
             agg_fill_hash_table_batched(node, estate, &mut src)?;
         }
-        return agg_retrieve_hash_table(node, estate);
+        return agg_retrieve_hash_table(node, estate, None);
     }
     initialize_aggregates(node)?;
 
@@ -3724,7 +3724,150 @@ pub fn agg_hash_retrieve<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
-    agg_retrieve_hash_table(node, estate)
+    agg_retrieve_hash_table(node, estate, None)
+}
+
+/// Emit-side top-N boundary spec (lane-v2 topnemit): the resolved pergroup
+/// index of the sort's leading-key aggregate, whose RAW int8 transvalue IS
+/// its finalized output datum (`topn_emit_resolve` proved finalfn-none +
+/// int8 + a bare-Aggref tlist entry), and the keep direction of the sort's
+/// leading order operator.
+#[derive(Clone, Copy)]
+pub struct TopnEmitSpec {
+    /// Pergroup index (the planner transno) of the ORDER BY leading-key agg.
+    pub transno: u32,
+    /// true = descending leading key (keep transvalues >= boundary);
+    /// false = ascending (keep <= boundary).
+    pub desc: bool,
+}
+
+/// One retrieve call's live boundary cut (lane-v2 topnemit): skip groups
+/// whose leading-key transvalue is STRICTLY worse than `bound` — exactly the
+/// groups the downstream bounded tuplesort would compare-and-discard with no
+/// state change, hoisted in front of key reconstruction, finalize,
+/// qual/projection and the sort put. See the invariant block at the lane's
+/// `sort_feed_agg_topn`.
+pub struct TopnEmitCut<'a> {
+    pub spec: TopnEmitSpec,
+    /// The tuplesort's current k-th boundary leading-key datum (non-null,
+    /// int8; read from the FULL bounded heap's root).
+    pub bound: i64,
+    /// Cumulative count of boundary-skipped groups (stats evidence).
+    pub skipped: &'a mut u64,
+}
+
+impl TopnEmitCut<'_> {
+    /// Skip verdict for one group's leading-key pergroup state: `true` iff
+    /// the transvalue is present, non-null, and STRICTLY worse than the
+    /// boundary. NULL / pending transvalues always pass (their rank depends
+    /// on NULLS placement; the tuplesort's comparator stays the authority).
+    #[inline]
+    fn skips(&self, pg: &AggPerGroup) -> bool {
+        if pg.trans_value_is_null || pg.no_trans_value {
+            return false;
+        }
+        let v = pg.trans_value.as_i64();
+        if self.spec.desc {
+            v < self.bound
+        } else {
+            v > self.bound
+        }
+    }
+}
+
+/// Finalfns whose evaluation is skippable for a boundary-rejected group:
+/// pure arithmetic finalizations (no side effects, no reachable error paths,
+/// no direct args) over int8/Int128/NumericAggState transition states. A
+/// skipped group elides exactly these calls plus the projection of bare
+/// Var/Const/Aggref tlist entries — nothing C could observably do.
+///   1964 int8_avg (avg int2/int4)   3389 numeric_poly_avg (avg int8)
+///   3388 numeric_poly_sum (sum int8) 1837 numeric_avg   3178 numeric_sum
+///   3572 int2int4_sum (sum int2/int4 window final)
+const TOPN_SKIPPABLE_FINALFNS: [Oid; 6] = [1837, 1964, 3178, 3388, 3389, 3572];
+
+/// Admission for the lane's emit-side top-N boundary cut: resolve the sort's
+/// leading input column `resno` (1-based over this Agg's output tlist) to the
+/// pergroup transno it finalizes from, iff skipping a boundary-rejected
+/// group's whole emit body is observation-free. Requires:
+///   * final (not partial) single-set hashed agg, no HAVING qual (a skipped
+///     qual evaluation — including its possible error — must not be elided);
+///   * the resno's tlist entry is a BARE Aggref with NO finalfn whose result
+///     and transition type are both int8-byval (count(*)/count(x)/sum-int
+///     family): the emitted datum is the raw transvalue word, so the
+///     pre-finalize compare equals the sort comparator's post-finalize one;
+///   * every peragg's finalfn is absent or in `TOPN_SKIPPABLE_FINALFNS`,
+///     with no direct args and no DISTINCT/ORDER BY qualifiers;
+///   * every other tlist entry is a bare Var or Const (projection of a
+///     skipped group evaluates nothing that could error).
+pub fn topn_emit_resolve(node: &AggStateData<'_>, resno: i16) -> Option<u32> {
+    if node.skip_final || node.gsets.is_some() || node.qual.is_some() {
+        return None;
+    }
+    if node.plan.aggstrategy != AGG_HASHED {
+        return None;
+    }
+    let mut key_transno: Option<u32> = None;
+    for te_node in &node.plan.plan.targetlist {
+        let te = te_node.as_target_entry()?;
+        match te.expr.node_tag() {
+            NodeTag::T_Var | NodeTag::T_Const => {
+                if te.resno == resno {
+                    // The sort key is a grouping column, not an aggregate.
+                    return None;
+                }
+            }
+            NodeTag::T_Aggref => {
+                let aggref = te.expr.as_aggref().expect("tag-checked Aggref");
+                if te.resno == resno {
+                    let aggno = aggref.aggno;
+                    if aggno < 0 || aggno as usize >= node.peragg.len() {
+                        return None;
+                    }
+                    let pa = &node.peragg[aggno as usize];
+                    let tt = &node.trans_typ[pa.transno as usize];
+                    // Raw-transvalue-is-the-output family only: finalfn-none,
+                    // int8 result over an int8 byval transition word.
+                    if pa.finalfn.is_some()
+                        || aggref.aggtype != ::types_core::catalog::INT8OID
+                        || !tt.byval
+                        || tt.len != 8
+                    {
+                        return None;
+                    }
+                    key_transno = Some(pa.transno);
+                }
+            }
+            _ => return None,
+        }
+    }
+    // Whole-emit observation-freedom: every aggregate this node finalizes
+    // must be skippable (the tlist walk above already covers every OUTPUT
+    // expr; peragg covers qual/tlist aggs uniformly).
+    for pa in node.peragg.iter() {
+        if !pa.direct_args.is_empty()
+            || !pa.aggref.aggorder.is_nil()
+            || !pa.aggref.aggdistinct.is_nil()
+        {
+            return None;
+        }
+        if let Some(f) = pa.finalfn.as_ref() {
+            if !TOPN_SKIPPABLE_FINALFNS.contains(&f.fn_oid) {
+                return None;
+            }
+        }
+    }
+    key_transno
+}
+
+/// Breaker `Source::produce` with the lane's armed top-N boundary cut:
+/// `agg_retrieve_hash_table` skipping groups strictly worse than the
+/// downstream bounded sort's current k-th boundary (lane-v2 topnemit).
+pub fn agg_hash_retrieve_topn<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    cut: Option<TopnEmitCut<'_>>,
+) -> PgResult<Option<ExecSlotId>> {
+    agg_retrieve_hash_table(node, estate, cut)
 }
 
 /// Lane-v2 fold plan classified at init; None = the lane is off, the shape
@@ -5228,9 +5371,14 @@ fn lookup_hash_entry<'mcx>(
 
 // agg_retrieve_hash_table(_in_memory) (nodeAgg.c): one qual-passing group per
 // call, the representative tuple rebuilt into the outer-format first_slot.
+// `cut`: the lane's armed emit-side top-N boundary (lane-v2 topnemit) — skip
+// groups strictly worse than the downstream bounded sort's k-th boundary
+// BEFORE key reconstruction / finalize / projection (admission proved the
+// skipped body observation-free; `None` = C's retrieve verbatim).
 fn agg_retrieve_hash_table<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
+    mut cut: Option<TopnEmitCut<'_>>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
     loop {
@@ -5242,7 +5390,7 @@ fn agg_retrieve_hash_table<'mcx>(
         // key, exactly the copy the C arm below performs from the stored
         // tuple; the shared finalize/qual/project tail runs unchanged.
         let pergroup = if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
-            match compact::compact_retrieve_next(node, estate)? {
+            match compact::compact_retrieve_next(node, estate, cut.as_mut())? {
                 Some(pg) => pg,
                 None => {
                     node.agg_done = true;
@@ -5261,6 +5409,24 @@ fn agg_retrieve_hash_table<'mcx>(
             }
             continue;
         };
+        // Top-N boundary cut, hoisted in front of the entry-tuple store and
+        // the grouping-key copy: the group's pergroup state is reachable
+        // without either.
+        if let Some(c) = cut.as_mut() {
+            let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+            if let Some(p) = ph.hashtable.entry_additional(ix) {
+                // SAFETY: transno < the entry's once-allocated pergroup
+                // array length (resolve checked it against this node).
+                let pg =
+                    unsafe { &*p.cast::<AggPerGroup>().as_ptr().add(c.spec.transno as usize) };
+                if c.skips(pg) {
+                    *c.skipped += 1;
+                    // The elided sort put's per-row cadence.
+                    postgres_seams::check_for_interrupts::call()?;
+                    continue;
+                }
+            }
+        }
         {
             let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
 
