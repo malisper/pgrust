@@ -233,6 +233,11 @@ pub fn dropdb(mcx: Mcx<'_>, dbname: &str, missing_ok: bool, force: bool) -> PgRe
     catalog_indexing::CatalogTupleDelete(&pgdbrel, &tup.t_self)?;
     genam::systable_endscan(mcx, scan)?;
 
+    // Drop db-specific replication slots (dbcommands.c:1852).
+    if slot_seams::replication_slots_drop_db_slots::is_installed() {
+        slot_seams::replication_slots_drop_db_slots::call(db_id)?;
+    }
+
     bufmgr::DropDatabaseBuffers(db_id)?;
     smgr::ForgetDatabaseSyncRequests(db_id)?;
 

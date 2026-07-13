@@ -2072,6 +2072,7 @@ fn idle_timeout_set(v: i32) {
 pub fn init_seams() {
     slot_seams::replication_slot_initialize::set(ReplicationSlotInitialize);
     slot_seams::invalidate_obsolete_replication_slots::set(InvalidateObsoleteReplicationSlots);
+    slot_seams::replication_slots_drop_db_slots::set(ReplicationSlotsDropDBSlots);
     slot_seams::startup_replication_slots::set(StartupReplicationSlots);
     slot_seams::check_point_replication_slots::set(CheckPointReplicationSlots);
     slot_seams::named_replication_slot_info::set(|name, need_lock| {
