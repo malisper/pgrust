@@ -215,6 +215,26 @@ pub(super) trait BatchEmit<'mcx> {
     fn key_dict_lane(&self) -> Option<::exectuples::SoaDictLane> {
         None
     }
+
+    /// Staged-window base for ref-carrying sinks (the refsort feed): (row
+    /// group, rg-global row index of staged row 0); the ref of staged row
+    /// `i` is `base + i`. Default `None` = no ref mode (heap batches, non-
+    /// scan emits) — a ref-carrying sink must demote to the legacy feed.
+    fn window_ref(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// The refsort fast leg's batch view for scan column `col`:
+    /// `(key_values, key_isnull, fallback_words, sel_words)` — see
+    /// `nodeseqscan::seq_scan_refsort_key_batch` for the soundness contract.
+    /// Default `None` = every row takes the per-row `emit` path.
+    fn refsort_key_batch(
+        &self,
+        _col: u16,
+        _n: u32,
+    ) -> Option<(&[::datum::Datum], &[bool], &[u64], Option<&[u64]>)> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3

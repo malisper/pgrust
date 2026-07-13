@@ -885,6 +885,20 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn key_dict_lane(&self) -> Option<::exectuples::SoaDictLane> {
         ::nodeseqscan::seq_scan_batch_key_dict_lane(self.node)
     }
+
+    #[inline]
+    fn window_ref(&self) -> Option<(u32, u32)> {
+        ::nodeseqscan::seq_scan_batch_window_ref(self.node)
+    }
+
+    #[inline]
+    fn refsort_key_batch(
+        &self,
+        col: u16,
+        n: u32,
+    ) -> Option<(&[::datum::Datum], &[bool], &[u64], Option<&[u64]>)> {
+        ::nodeseqscan::seq_scan_refsort_key_batch(self.node, col, n)
+    }
 }
 
 // ===========================================================================
@@ -4365,23 +4379,55 @@ fn sort_feed_if_needed<'mcx>(
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
             let adaptive = adaptive_topk_arm(state, &outer_desc, ss)?;
-            let tracked = adaptive.is_some_and(|a| a.tracked);
+            let mut tracked = adaptive.is_some_and(|a| a.tracked);
             // Streaming top-k cutoff (bounded sorts over an admitted
             // qual-less seqscan; None = feed unfiltered, exactly as before).
             // Composes with the direct-key put: the keep-mask filters first,
             // then the direct-key arm reads only surviving rows.
             let topk = topk_cut_arm(state, ss, estate);
-            sort_feed(
-                state,
-                ss,
-                SeqScanSource,
-                SeqScanFilterProject,
-                outer_desc.clone(),
-                narrow,
-                estate,
-                topk,
-                tracked,
-            )?;
+            // Refsort (late-materialization top-N): narrow (key, ref) feed +
+            // winner-only gather; `None`/demote = the legacy wide feed below,
+            // unchanged. The narrowed-comparator arm never composes (it
+            // refused bounded sorts; refsort requires one).
+            let refsort =
+                if narrow.is_none() { refsort_arm(state, ss, &outer_desc) } else { None };
+            let mut fed = false;
+            if let Some(spec) = &refsort {
+                lane_trace("refsort armed (bounded sort late materialization)");
+                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
+                    fed = true;
+                } else {
+                    // Demoted before any output escaped: sticky-refuse the
+                    // node, drop the narrow sort + winner buffer, disarm any
+                    // adaptive order and rescan the child — then the legacy
+                    // physical-order feed below reproduces the never-armed
+                    // feed byte-for-byte (the adaptive demote pattern).
+                    ::nodesort::sort_lane_refsort_refuse(state);
+                    ::nodesort::sort_lane_reset_for_refeed(state);
+                    ::nodeseqscan::seq_scan_adaptive_disarm_rescan(ss, estate)?;
+                    tracked = false;
+                }
+            }
+            if !fed {
+                let topk = if refsort.is_some() {
+                    // The demote rescan restaged the scan; re-arm the cutoff
+                    // against the fresh staging (the adaptive demote pattern).
+                    topk_cut_arm(state, ss, estate)
+                } else {
+                    topk
+                };
+                sort_feed(
+                    state,
+                    ss,
+                    SeqScanSource,
+                    SeqScanFilterProject,
+                    outer_desc.clone(),
+                    narrow,
+                    estate,
+                    topk,
+                    tracked,
+                )?;
+            }
             // Tracked adaptive feed: an arrival-order-sensitive tie at the
             // LIMIT cut demotes — fresh tuplesort, adaptive disarmed, full
             // physical-order re-feed, reproducing the never-adaptive feed
@@ -5254,6 +5300,45 @@ impl TopkCutState {
     fn new(cut: TopkCut) -> TopkCutState {
         TopkCutState { cut, skip: 0, fails: 0 }
     }
+
+    /// Compute this batch's keep mask (rows `pos..n`), honoring the zero-cut
+    /// exponential back-off. `None` = feed the batch unfiltered (not engaged,
+    /// backed off, boundary unavailable, or nothing cuttable at the current
+    /// boundary). Shared by the wide sort-breaker sink and the refsort sink —
+    /// identical engagement, accounting, and interrupt cadence (the skipped
+    /// rows' per-row CFIs are elided; one check per engaged staged batch is
+    /// the lane's page-batch cadence floor).
+    fn batch_mask<'mcx, E: BatchEmit<'mcx>>(
+        &mut self,
+        sort: &::nodesort::SortState<'mcx>,
+        emit: &E,
+        pos: u32,
+        n: u32,
+    ) -> PgResult<Option<[u64; ::exectuples::SOA_BM_WORDS]>> {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return Ok(None);
+        }
+        let Some(sel) = topk_keep_mask(self.cut, sort, emit, n) else {
+            return Ok(None);
+        };
+        ::postgres_seams::check_for_interrupts::call()?;
+        let kept: u32 =
+            (pos..n).map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32).sum();
+        let cut_rows = n - pos - kept;
+        if cut_rows == 0 {
+            // Nothing cuttable at the current boundary: back off. The caller
+            // feeds unfiltered — an all-set mask would be a dead bit test.
+            self.fails = (self.fails + 1).min(TopkCutState::MAX_BACKOFF_SHIFT);
+            self.skip = 1u32 << self.fails;
+            return Ok(None);
+        }
+        self.fails = 0;
+        if stats::armed() {
+            stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
+        }
+        Ok(Some(sel))
+    }
 }
 
 impl<'mcx> Sink<'mcx> for SortBreakerSink<'_, 'mcx> {
@@ -5330,32 +5415,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         // (including the direct-key arm when q9triage's probe armed it).
         let mut filtered = None;
         if let Some(tk) = self.topk.as_mut() {
-            if tk.skip > 0 {
-                tk.skip -= 1;
-            } else if let Some(sel) = topk_keep_mask(tk.cut, self.sort, &*emit, n) {
-                // The skipped rows' per-row CFIs (emit-side and the
-                // tuplesort discard's) are elided; keep the lane's
-                // page-batch cadence floor of one check per staged batch.
-                ::postgres_seams::check_for_interrupts::call()?;
-                let kept: u32 = (pos..n)
-                    .map(|i| ((sel[(i / 64) as usize] >> (i % 64)) & 1) as u32)
-                    .sum();
-                let cut_rows = n - pos - kept;
-                if cut_rows == 0 {
-                    // Nothing cuttable at the current boundary: back off.
-                    tk.fails = (tk.fails + 1).min(TopkCutState::MAX_BACKOFF_SHIFT);
-                    tk.skip = 1u32 << tk.fails;
-                    // All bits set over pos..n — the put loop below would be
-                    // the unfiltered feed with a dead bit test; fall through
-                    // to the plain path instead.
-                } else {
-                    tk.fails = 0;
-                    if stats::armed() {
-                        stats::tick_topkcut_rows((n - pos) as u64, cut_rows as u64);
-                    }
-                    filtered = Some(sel);
-                }
-            }
+            filtered = tk.batch_mask(self.sort, &*emit, pos, n)?;
         }
         match filtered {
             Some(sel) => ::nodesort::sort_lane_put_batch(
@@ -5386,6 +5446,414 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         }
         Ok(())
     }
+}
+
+// ===========================================================================
+// Refsort — late-materialization top-N on the cbstore-fed bounded sort
+// breaker (notes/latemat-lane.md, Phase B conversion 1). For `... WHERE
+// <qual> ORDER BY key LIMIT n` over a lane-armed cbstore scan with a
+// Var-only child tlist, the legacy feed projects EVERY survivor to a full
+// slot and puts a full minimal tuple into the bounded tuplesort — of which
+// only <= n winners ever emerge. The refsort feed instead puts NARROW
+// (key, ref) rows (ref = the survivor's cbstore (rg, row) address) into a
+// synthetic 2-col tuplesort built with the plan's leading-key comparator,
+// then AFTER performsort gathers only the <= bound winners' full rows via
+// `gather_row` and buffers the projected outer tuples on the node
+// (`refsort_out`), which the emit face serves in sorted order.
+//
+// CORRECTNESS (the design note's invariants):
+//   * Winner selection/order: same comparator (plan key-0 operator/
+//     collation/nullsFirst over the same key datums), same put order
+//     (ascending staged rows, survivors only), same ALLOWBOUNDED discard
+//     and tie retention => the winner SET and their output ORDER are
+//     byte-identical to the legacy feed's, by construction.
+//   * Key currency: clean exact-bitmap rows read the key from the staged
+//     SoA column — the same cells the legacy emit's projection copies.
+//     Requal/fallback rows (and batches without an exact bitmap or a ready
+//     key lane) run `seq_scan_batch_emit` per row — the exact per-row qual
+//     (C detoast semantics, C's errors on C's row) — and read the key from
+//     the projected slot cell. Same rows survive, same order.
+//   * Deferred projection is Var-only by admission (physical tlist or the
+//     all-Var census): a Var copy cannot err, so eliding per-survivor
+//     projection and materializing only winners elides nothing C could
+//     observe. gather_row re-decodes from the pinned Part under the CURRENT
+//     needed set (tlist Vars are in the scan's needed set by construction;
+//     the gather-time null guard demotes if not — before any output).
+//   * Demote discipline: any batch without a window ref, and any gather
+//     failure, demotes to the legacy feed BEFORE any output escapes (the
+//     winners buffer is node-internal until the emit face pops it):
+//     fresh tuplesort + child rescan + physical re-feed, the adaptive-topk
+//     demote pattern. Demotion is sticky per node.
+//   * Views/refs never cross a rescan: every rescan/reset path clears the
+//     narrow tuplesort, the marker, and the winner buffer.
+// Composes with topk_cut (the keep mask filters the same rows the bounded
+// heap would discard — shared `TopkCutState::batch_mask`) and with the
+// zone-adaptive traversal (refs are rg-global, order-independent; the tie
+// demote machinery runs on the narrow sort's identical leading-key ties).
+// Kill switch: PGRUST_LANE_REFSORT=0|off. Never a lane refusal —
+// non-admission runs the legacy feed unchanged.
+// ===========================================================================
+
+/// `PGRUST_LANE_REFSORT` kill switch (default ON inside the lane).
+fn refsort_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_REFSORT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Bound cap (matches the adaptive walk's): past this the top-N is
+/// scan-shaped anyway and the winner gather stops being "a handful of rows".
+const REFSORT_MAX_BOUND: i64 = 1 << 16;
+
+/// Armed refsort feed spec (all columns 0-based).
+struct RefSortSpec {
+    /// The leading sort key's scan column (the SoA fast-leg read).
+    key_attno_scan: u16,
+    /// The key's position in the outer (child output) desc — the fallback
+    /// leg reads the key from this projected slot cell.
+    key_resno_outer: usize,
+    /// Outer resno -> scan attno (the deferred Var-only winner projection).
+    tlist_map: Vec<u16>,
+}
+
+/// Admission for the refsort feed (never a lane refusal — `None` runs the
+/// legacy feed). Bounded sort with a sane bound; heap (multi-column) sort
+/// with exactly ONE plan sort key (v1); cbstore child scan (window refs
+/// exist for staged batches); EVERY outer tlist entry a plain Var of the
+/// scan relation (no projection = the physical tlist, or the all-Var
+/// scan-projection census); sticky-refused nodes never re-arm.
+fn refsort_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+) -> Option<RefSortSpec> {
+    if !refsort_enabled() || ::nodesort::sort_lane_refsort_refused(state) {
+        return None;
+    }
+    if !state.bounded || state.bound <= 0 || state.bound > REFSORT_MAX_BOUND {
+        return None;
+    }
+    // Single-column output sorts bare datums already — nothing to narrow.
+    if ::nodesort::sort_lane_is_datum(state) {
+        return None;
+    }
+    let plan = state.plan;
+    if plan.numCols != 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    // Window refs only exist for cbstore staged batches (the heap AM answers
+    // `window_ref` with None — every batch would demote).
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return None;
+    }
+    let natts = outer_desc.natts as usize;
+    let tlist_map: Vec<u16> = match ss.ss.ps_ProjInfo.as_ref() {
+        // No projection: the scan's output IS the scan tuple (physical
+        // tlist) — outer resno j is scan attno j.
+        None => (0..natts as u16).collect(),
+        // Projected scans admit only the pure Var-copy census (no arith —
+        // a computing column deferred to winners could elide C's error).
+        Some(p) => {
+            let cols = p.pi_state.scan_proj_cols()?;
+            if cols.any_arith() || cols.n as usize != natts {
+                return None;
+            }
+            cols.cols[..natts]
+                .iter()
+                .map(|c| match *c {
+                    ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                    _ => None,
+                })
+                .collect::<Option<Vec<u16>>>()?
+        }
+    };
+    let oc = plan.sortColIdx[0];
+    if oc < 1 || oc as usize > natts {
+        return None;
+    }
+    let key_resno_outer = (oc - 1) as usize;
+    Some(RefSortSpec {
+        key_attno_scan: tlist_map[key_resno_outer],
+        key_resno_outer,
+        tlist_map,
+    })
+}
+
+/// Build (or reuse) the synthetic 2-col (key, ref) desc: col 1 copies the
+/// outer key attribute verbatim (type/typmod/collation/len/byval/align —
+/// the comparator identity), col 2 is a plain int8. Memoized on the node —
+/// one desc-context allocation per node, reused across rescan re-feeds.
+fn refsort_key_desc<'mcx>(
+    state: &mut ::nodesort::SortState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    key_resno_outer: usize,
+) -> std::rc::Rc<::types_tuple::TupleDescData<'static>> {
+    if let Some(d) = ::nodesort::sort_lane_refsort_key_desc(state) {
+        return d;
+    }
+    use ::types_tuple::{CompactAttribute, FormData_pg_attribute};
+    let mcx = crate::desc_mcx();
+    let mut key = *outer_desc.attr(key_resno_outer);
+    key.attnum = 1;
+    let refatt = FormData_pg_attribute {
+        attnum: 2,
+        atttypid: ::types_core::catalog::INT8OID,
+        atttypmod: -1,
+        attlen: 8,
+        attbyval: true,
+        attalign: ::types_tuple::TYPALIGN_DOUBLE,
+        attstorage: ::types_tuple::TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let mut attrs = ::mcx::PgVec::new_in(mcx);
+    let mut compact = ::mcx::PgVec::new_in(mcx);
+    for att in [key, refatt] {
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    std::rc::Rc::new(::types_tuple::TupleDescData {
+        natts: 2,
+        tdtypeid: 2249, // RECORDOID
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+/// The refsort feed's `Sink`/`BatchSink` face: narrow (key, ref) puts in the
+/// legacy feed's exact survivor order. `demoted` = a batch arrived without a
+/// window ref (or a row arrived at the per-row face) — the remaining feed is
+/// drained without effect and the caller runs the byte-safe legacy re-feed.
+struct RefSortSink<'a, 'mcx> {
+    sort: &'a mut ::nodesort::SortState<'mcx>,
+    key_col: u16,
+    key_resno: usize,
+    /// Armed streaming top-k cutoff (shared spec/back-off with the wide
+    /// breaker sink); `None` = feed unfiltered.
+    topk: Option<TopkCutState>,
+    demoted: bool,
+}
+
+impl<'mcx> Sink<'mcx> for RefSortSink<'_, 'mcx> {
+    fn accept(
+        &mut self,
+        _tuple: ExecSlotId,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        // Row-granular arrival = no staged window ref to pair the row with.
+        // Never reached from the seqscan drain (its operator overrides
+        // `consume_batch`); defensive demote, byte-safe (nothing was put for
+        // this row and the caller re-feeds from a rescan).
+        self.demoted = true;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.demoted {
+            // The caller resets the narrow tuplesort wholesale; skipping
+            // performsort keeps `sort_Done` false for the re-feed.
+            return Ok(());
+        }
+        ::nodesort::sort_lane_finish(self.sort, estate)
+    }
+}
+
+impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if self.demoted {
+            // Already demoting: drain the rest of the feed without effect
+            // (the legacy re-feed rescans from row zero).
+            return Ok(());
+        }
+        let Some((rg, row0)) = emit.window_ref() else {
+            stats::tick_refsort_demoted();
+            lane_trace("refsort demoted: staged batch without a window ref");
+            self.demoted = true;
+            return Ok(());
+        };
+        // Interrupt cadence floor: one check per staged batch (the fast
+        // leg's rows have no per-row seam call, like the direct-key feed;
+        // emit-path rows keep their per-row check inside `emit`).
+        ::postgres_seams::check_for_interrupts::call()?;
+        // Streaming top-k cutoff (shared mask + back-off — see the wide
+        // sink): cut rows are exactly rows the bounded heap would discard.
+        let mut cutmask = None;
+        if let Some(tk) = self.topk.as_mut() {
+            cutmask = tk.batch_mask(self.sort, &*emit, pos, n)?;
+        }
+        let keep = |sel: &Option<[u64; ::exectuples::SOA_BM_WORDS]>, i: u32| match sel {
+            Some(m) => m[(i / 64) as usize] & (1u64 << (i % 64)) != 0,
+            None => true,
+        };
+        // Fast leg availability for THIS batch: exact whole-qual selection
+        // (or no qual) + the key column's staged datum cells ready. The
+        // bitmap words are snapshotted locally (they are per-batch-stable;
+        // the key slices are re-borrowed per fast row) so the per-row emit
+        // can take its `&mut` on the fallback rows in between.
+        let fast = emit.refsort_key_batch(self.key_col, n).map(|(_, _, fallback, sel)| {
+            let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
+            fb[..fallback.len()].copy_from_slice(fallback);
+            let selw = sel.map(|s| {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                w[..s.len()].copy_from_slice(s);
+                w
+            });
+            (fb, selw)
+        });
+        for i in pos..n {
+            if !keep(&cutmask, i) {
+                continue;
+            }
+            if let Some((fb, selw)) = &fast {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
+                if let Some(selw) = selw {
+                    if selw[w] & bit == 0 {
+                        continue; // qual-filtered (exact whole-qual verdict)
+                    }
+                }
+                if fb[w] & bit == 0 {
+                    // Clean staged row: key straight from the SoA column —
+                    // value/null identical to the emit + slot read below.
+                    let (key, isnull) = {
+                        let (kvals, knulls, _, _) = emit
+                            .refsort_key_batch(self.key_col, n)
+                            .expect("refsort key batch stable within a staged batch");
+                        (kvals[i as usize], knulls[i as usize])
+                    };
+                    ::nodesort::sort_lane_put_refsort(
+                        self.sort,
+                        key,
+                        isnull,
+                        ::nodesort::refsort_encode(rg, row0 + i),
+                    )?;
+                    continue;
+                }
+                // Forced-fallback row (stale cells / kernel-undecidable):
+                // fall through to the exact per-row emit.
+            }
+            // Per-row emit leg: the exact qual (C detoast semantics, C's
+            // errors on C's row) + the Var projection; key from the
+            // projected output slot cell.
+            let Some(id) = emit.emit(i, estate)? else { continue };
+            let (key, isnull) = {
+                let slot = estate.slot_mut(id);
+                ::exectuples::slot_getsomeattrs(slot, self.key_resno as i32 + 1);
+                let base = slot.base();
+                (base.tts_values[self.key_resno], base.tts_isnull[self.key_resno])
+            };
+            ::nodesort::sort_lane_put_refsort(
+                self.sort,
+                key,
+                isnull,
+                ::nodesort::refsort_encode(rg, row0 + i),
+            )?;
+        }
+        // Zone-adaptive bound feedback (identical to the wide sink's tail).
+        if let Some((bkey, false)) = ::nodesort::sort_lane_topk_boundary(self.sort) {
+            emit.push_topk_bound(bkey);
+        }
+        Ok(())
+    }
+}
+
+/// The refsort feed: `sort_feed`'s frame (begin / forward-forced drain /
+/// finish) over the narrow sink, then the winner gather while the scan is
+/// still borrowed. `Ok(false)` = demoted (mid-feed or at gather) — NO output
+/// escaped and the tuplesort/refsort state is the caller's to reset before
+/// the byte-safe legacy re-feed.
+fn sort_feed_refsort<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    spec: &RefSortSpec,
+    topk: Option<TopkCut>,
+    tie_track: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let key_desc = refsort_key_desc(sort, outer_desc, spec.key_resno_outer);
+    ::nodesort::sort_lane_begin_refsort(sort, key_desc)?;
+    if tie_track {
+        ::nodesort::sort_lane_topk_tie_track_arm(sort);
+    }
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let mut sink = RefSortSink {
+        sort,
+        key_col: spec.key_attno_scan,
+        key_resno: spec.key_resno_outer,
+        topk: topk.map(TopkCutState::new),
+        demoted: false,
+    };
+    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    let demoted = sink.demoted;
+    estate.es_direction = dir;
+    if demoted {
+        return Ok(false);
+    }
+    // Winner gather (the late materialization): read the <= bound narrow
+    // tuples in sorted order, materialize each ref's full row under the
+    // scan's needed set, project Var-only into outer format, and buffer an
+    // owned minimal tuple. The winners' by-ref payloads are copied by the
+    // minimal-tuple form BEFORE the next gather reuses the scratch.
+    let natts = outer_desc.natts as usize;
+    let mut values = vec![::datum::Datum::null(); natts];
+    let mut isnull = vec![true; natts];
+    let mcx = estate.es_query_cxt;
+    // Cap the read-back at `bound`: a bounded tuplesort ERRORS past bound
+    // ("retrieved too many tuples in a bounded sort"), and C's puller (the
+    // Limit that installed the bound) never reads past it either — the
+    // buffered winners are exactly the rows any legal pull sequence sees.
+    let mut left = sort.bound;
+    loop {
+        if left == 0 {
+            break;
+        }
+        left -= 1;
+        let Some((rg, row)) = ::nodesort::sort_lane_refsort_next_ref(sort)? else {
+            break;
+        };
+        if !::nodeseqscan::seq_scan_gather_row(ss, estate, rg, row) {
+            stats::tick_refsort_demoted();
+            lane_trace("refsort demoted: winner gather failed");
+            return Ok(false);
+        }
+        {
+            let slot = estate.slot_mut(ss.ss.ss_ScanTupleSlot);
+            let base = slot.base();
+            for (j, &c) in spec.tlist_map.iter().enumerate() {
+                values[j] = base.tts_values[c as usize];
+                isnull[j] = base.tts_isnull[c as usize];
+                // Needed-set guard: gather_row nulls only unneeded cells
+                // (cbstore stores no NULLs), so a null projected cell means
+                // the column was not in the scan's needed set — demote
+                // before any output escapes (spurious-demote-safe: the
+                // legacy re-feed is byte-identical regardless).
+                if isnull[j] {
+                    stats::tick_refsort_demoted();
+                    lane_trace("refsort demoted: gathered cell outside the needed set");
+                    return Ok(false);
+                }
+            }
+        }
+        ::nodesort::sort_lane_refsort_push_winner(sort, mcx, &values, &isnull)?;
+    }
+    stats::tick_refsort_owned();
+    lane_trace(&format!(
+        "refsort feed done: {} winner(s) gathered (bound {})",
+        ::nodesort::sort_lane_refsort_winners(sort),
+        sort.bound
+    ));
+    Ok(true)
 }
 
 /// The breaker's `Source` face (pipeline N+1): each produce streams the next
