@@ -1123,6 +1123,16 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
 
     if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
         latch::OwnLatch(targets::recovery_wakeup_latch())?;
+        // C's startup signal handlers all call WakeupRecovery() at delivery;
+        // the thread rendering runs dispositions only at drain points, so a
+        // delivered signal must also set this latch or an infinite sleep on
+        // it (WaitForWALToBecomeAvailable's idle stream wait) never wakes to
+        // notice SIGHUP/SIGTERM/SIGQUIT (048 reload; 030/032/033 shutdown).
+        if procsignal_seams::set_thread_signal_extra_wake_latch::is_installed() {
+            procsignal_seams::set_thread_signal_extra_wake_latch::call(Some(
+                targets::recovery_wakeup_latch().as_usize(),
+            ));
+        }
     }
 
     let context: &'static mcx::MemoryContext =
@@ -1996,6 +2006,9 @@ pub fn ShutdownWalRecovery() -> PgResult<()> {
     if ARCHIVE_RECOVERY_REQUESTED.load(Relaxed) {
         let _ = std::fs::remove_file(data_path(&format!("{XLOGDIR}/RECOVERYXLOG")));
         let _ = std::fs::remove_file(data_path(&format!("{XLOGDIR}/RECOVERYHISTORY")));
+        if procsignal_seams::set_thread_signal_extra_wake_latch::is_installed() {
+            procsignal_seams::set_thread_signal_extra_wake_latch::call(None);
+        }
         latch::DisownLatch(targets::recovery_wakeup_latch());
     }
     // The reader's leaked "wal recovery" context stays allocated: a one-shot

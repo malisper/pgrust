@@ -42,6 +42,7 @@ slot = { path = "../../../replication/slot" }
 xlogarchive = { path = "../xlogarchive" }
 checkpointer_seams = { path = "../../../postmaster/checkpointer_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
+procsignal_seams = { path = "../../../storage/ipc/procsignal_seams" }
 walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
 ipc = { path = "../../../storage/ipc/ipc" }
 libc = "0.2"
