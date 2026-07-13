@@ -925,6 +925,10 @@ pub mod rtpool {
             // Process-lifetime pool: the handles are never joined; leak the
             // pool handle so its Drop (if any ever grows one) can't fire.
             std::mem::forget(pool);
+            // Publish the process-global handle (M1: the executor's runtime
+            // scan arm reaches the runtime through `runtime::global()`,
+            // avoiding an execmain -> launch_backend dependency).
+            runtime::install_global(Arc::clone(&rt));
             rt
         })
     }

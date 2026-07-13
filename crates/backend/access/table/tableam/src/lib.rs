@@ -1167,6 +1167,34 @@ pub fn table_scan_cb_total_rows(scan: &TableScanDesc<'_>) -> Option<u64> {
     }
 }
 
+/// Part-global granule geometry of a cbstore scan (runtime morsel source,
+/// M1 scan pipelines): (total granules, row-group-start prefix sums = the
+/// hard morsel boundaries). None = heap or empty part.
+pub fn table_scan_cb_granule_geometry(scan: &TableScanDesc<'_>) -> Option<(u64, Vec<u64>)> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => c.granule_geometry(),
+    }
+}
+
+/// Position a cbstore scan on the absolute-granule morsel claim [g0, g1)
+/// (must lie inside one row group -- the runtime clamps claims to the
+/// boundaries `table_scan_cb_granule_geometry` reports). false = heap scan
+/// (no granule address space).
+pub fn table_scan_cb_set_granule_range(
+    scan: &mut TableScanDesc<'_>,
+    g0: u64,
+    g1: u64,
+) -> PgResult<bool> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(false),
+        TableScanDesc::Cbstore(c) => {
+            c.set_granule_range(g0, g1)?;
+            Ok(true)
+        }
+    }
+}
+
 /// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {
