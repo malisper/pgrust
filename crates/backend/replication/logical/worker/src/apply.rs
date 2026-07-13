@@ -482,7 +482,10 @@ fn find_repl_tuple_by_index<'mcx>(
     let keys = build_replindex_scan_key(&idxrel, rel, searchslot)?;
 
     let found = loop {
-        let snap = snapmgr::GetLatestSnapshot()?;
+        // The scan snapshot must be registered (heapam visibility asserts
+        // regd_count/active_count; C's index_beginscan requires the same).
+        let snap = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
+            .expect("registered snapshot");
         let mut scan =
             indexam::index_beginscan(mcx, rel, &idxrel, snap.clone(), keys.len() as i32, 0)?;
         let mut kv = mcx::PgVec::new_in(mcx);
@@ -515,15 +518,18 @@ fn find_repl_tuple_by_index<'mcx>(
             match lockres? {
                 LockOutcome::Ok => {
                     indexam::index_endscan(scan)?;
+                    snapmgr::UnregisterSnapshot(Some(&snap));
                     break true;
                 }
                 LockOutcome::Retry => {
                     indexam::index_endscan(scan)?;
+                    snapmgr::UnregisterSnapshot(Some(&snap));
                     continue;
                 }
             }
         }
         indexam::index_endscan(scan)?;
+        snapmgr::UnregisterSnapshot(Some(&snap));
         break false;
     };
 
@@ -585,7 +591,9 @@ fn find_repl_tuple_seq<'mcx>(
     outslot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let found = loop {
-        let snap = snapmgr::GetLatestSnapshot()?;
+        // Registered for the scan's lifetime (see the by-index variant).
+        let snap = snapmgr::RegisterSnapshot(Some(&snapmgr::GetLatestSnapshot()?))?
+            .expect("registered snapshot");
         let mut scan =
             tableam_real::table_beginscan(mcx, rel, Some(snap.clone()), 0, mcx::PgVec::new_in(mcx))?;
         let mut scanslot = tableam_real::table_slot_create(mcx, rel)?;
@@ -629,12 +637,14 @@ fn find_repl_tuple_seq<'mcx>(
             let lockres = tableam::table_tuple_lock_for_repl(mcx, rel, &tid, outslot);
             snapmgr::PopActiveSnapshot()?;
             tableam_real::table_endscan(scan)?;
+            snapmgr::UnregisterSnapshot(Some(&snap));
             match lockres? {
                 LockOutcome::Ok => break true,
                 LockOutcome::Retry => continue,
             }
         }
         tableam_real::table_endscan(scan)?;
+        snapmgr::UnregisterSnapshot(Some(&snap));
         break false;
     };
     Ok(found)
