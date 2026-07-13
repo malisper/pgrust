@@ -73,7 +73,8 @@ pub(crate) fn footer_layout(version: u32, nrgs: usize, ncols: usize) -> FooterLa
 }
 
 impl FooterLayout {
-    // Byte offset (footer-relative) of the v7 length-stats section.
+    // Byte offset (footer-relative) of the v7 length-stats section (the
+    // first post-cluster-key v7 section; see format.rs section order).
     pub(crate) fn lenstats_off(&self, nrgs: usize, ncols: usize) -> usize {
         self.pre_len
             + nrgs * 24
@@ -83,19 +84,46 @@ impl FooterLayout {
             + self.sorted_len
             + self.ckey_len
     }
+    // Byte length of the v7 length-stats section given the prelude's
+    // flagged-column count.
+    pub(crate) fn lenstats_len(&self, nrgs: usize, nlencols: usize) -> usize {
+        nrgs * GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN
+    }
+    // Byte offset (footer-relative) of the v7 stitch section (immediately
+    // after the length-stats section).
+    pub(crate) fn stitch_off(&self, nrgs: usize, ncols: usize, nlencols: usize) -> usize {
+        self.lenstats_off(nrgs, ncols) + self.lenstats_len(nrgs, nlencols)
+    }
+    // Byte length of the v7 stitch section (gndv array + blob directory).
+    pub(crate) fn stitch_len(&self, nrgs: usize, ncols: usize, version: u32) -> usize {
+        if version >= CB_VERSION_V7 {
+            ncols * 8 + nrgs * ncols * CB_STITCH_DIR_ENTRY_LEN
+        } else {
+            0
+        }
+    }
 }
 
 // want_sums materializes the v4 per-RG sums (and the v7 per-granule length
 // stats) into FooterRg for the writer's reopen-append re-emit; readers leave
 // both on disk and consume lazily via Part::rg_sum / Part::granule_len_stats.
 // The CRC always covers the whole footer body.
+/// v7 stitch metadata parsed from the footer: per-column global NDV (0 = no
+/// stitch) and the per-(RG, column) stitch-blob directory (file_off, count).
+/// Empty vectors on pre-v7 parts.
+#[derive(Default)]
+pub struct FooterStitch {
+    pub gndv: Vec<u64>,
+    pub dir: Vec<(u64, u32)>,
+}
+
 pub fn read_footer_rgs(
     file: &mut SegFile,
     footer_off: u64,
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>)> {
+) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
     let total_len = file.total_len();
     let pre_len = if version >= CB_VERSION_V7 { 8 + ncols } else { 8 };
     if footer_off < CB_HEADER_LEN
@@ -118,8 +146,7 @@ pub fn read_footer_rgs(
     } else {
         0
     };
-    let lenstats_len = nrgs * GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
-    let body_len = lay.lenstats_off(nrgs, ncols) + lenstats_len + 16;
+    let body_len = lay.stitch_off(nrgs, ncols, nlencols) + lay.stitch_len(nrgs, ncols, version) + 16;
     // Bounds-gate before the allocation and read: a torn/garbage footer word
     // must produce a clean error, not a huge alloc or a read past EOF.
     if body_len as u64 > total_len - footer_off {
@@ -129,8 +156,8 @@ pub fn read_footer_rgs(
     }
     let mut buf = vec![0u8; body_len];
     file.read_exact_at(&mut buf, footer_off)?;
-    parse_footer(&buf, nrgs, ncols, version, want_sums).map(|(rgs, ndv, sorted, ckey, lenflags)| {
-        (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags)
+    parse_footer(&buf, nrgs, ncols, version, want_sums).map(|(rgs, ndv, sorted, ckey, lenflags, stitch)| {
+        (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags, stitch)
     })
 }
 
@@ -140,7 +167,7 @@ pub fn parse_footer(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>)> {
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
     let tail = buf.len() - 16;
     if get_u32(buf, tail + 12) != CB_FOOTER_MAGIC
         || get_u64(buf, tail) != buf.len() as u64
@@ -220,21 +247,44 @@ pub fn parse_footer(
     // v7 per-granule length-stats section: materialized only for the writer's
     // reopen re-emit (want_sums); readers consume it lazily off the mmap
     // (Part::granule_len_stats). Entries of RGs without RG_FLAG_LENSTATS are
-    // zeros and stay unmaterialized.
-    if version >= CB_VERSION_V7 && nlencols > 0 && want_sums {
-        for rg in rgs.iter_mut() {
-            if rg.flags & RG_FLAG_LENSTATS != 0 {
-                let nslots = GRANULES_PER_RG * nlencols;
-                rg.lenstats.reserve(nslots);
-                for s in 0..nslots {
-                    let e = off + s * CB_LENSTATS_ENTRY_LEN;
-                    rg.lenstats.push((get_u64(buf, e), get_u32(buf, e + 8), get_u32(buf, e + 12)));
+    // zeros and stay unmaterialized. A lazy parse must still advance past
+    // the section or the stitch section reads skewed (the sums precedent).
+    if version >= CB_VERSION_V7 && nlencols > 0 {
+        if want_sums {
+            for rg in rgs.iter_mut() {
+                if rg.flags & RG_FLAG_LENSTATS != 0 {
+                    let nslots = GRANULES_PER_RG * nlencols;
+                    rg.lenstats.reserve(nslots);
+                    for s in 0..nslots {
+                        let e = off + s * CB_LENSTATS_ENTRY_LEN;
+                        rg.lenstats.push((
+                            get_u64(buf, e),
+                            get_u32(buf, e + 8),
+                            get_u32(buf, e + 12),
+                        ));
+                    }
                 }
+                off += GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
             }
-            off += GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
+        } else {
+            off += nrgs * GRANULES_PER_RG * nlencols * CB_LENSTATS_ENTRY_LEN;
         }
     }
-    Ok((rgs, ndv, sorted, cluster_key, lenflags))
+    // v7 stitch section (after length stats); pre-v7 parts read as no-stitch.
+    let mut stitch = FooterStitch::default();
+    if version >= CB_VERSION_V7 {
+        stitch.gndv.reserve(ncols);
+        for _ in 0..ncols {
+            stitch.gndv.push(get_u64(buf, off));
+            off += 8;
+        }
+        stitch.dir.reserve(nrgs * ncols);
+        for _ in 0..nrgs * ncols {
+            stitch.dir.push((get_u64(buf, off), get_u32(buf, off + 8)));
+            off += CB_STITCH_DIR_ENTRY_LEN;
+        }
+    }
+    Ok((rgs, ndv, sorted, cluster_key, lenflags, stitch))
 }
 
 // Planner sizing: header + footer reads only (no SegMap mmap of the data
@@ -250,7 +300,7 @@ pub fn part_footer_rows(path: &str, ncols: usize) -> PgResult<Option<u64>> {
     if footer_off == 0 {
         return Ok(None);
     }
-    let (rgs, _, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (rgs, _, _, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(rgs.iter().map(|rg| rg.nrows as u64).sum()))
 }
 
@@ -267,7 +317,7 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
     if footer_off == 0 || version < CB_VERSION_V2 {
         return Ok(None);
     }
-    let (_, _, ndv, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (_, _, ndv, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(ndv))
 }
 
@@ -294,6 +344,10 @@ pub struct Part {
     lenstats_off: u64,
     lenrank: Vec<i16>,
     nlencols: usize,
+    // v7 stitch metadata (empty/zero on pre-v7 parts): per-column global
+    // NDV + the per-(RG, col) stitch-blob directory; blobs stay on disk and
+    // are read through the mmap on demand (Part::stitch).
+    stitch: FooterStitch,
 }
 
 impl Part {
@@ -309,7 +363,7 @@ impl Part {
         if footer_off == 0 {
             return Ok(None);
         }
-        let (rgs, _footer_end, _ndv, sorted, cluster_key, lenflags) =
+        let (rgs, _footer_end, _ndv, sorted, cluster_key, lenflags, stitch) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         let Some(map) = SegMap::open(path)? else { return Ok(None) };
@@ -359,7 +413,39 @@ impl Part {
             lenstats_off,
             lenrank,
             nlencols,
+            stitch,
         }))
+    }
+
+    /// v7 part-global dict size for a column (0 = no stitch: pre-v7 part,
+    /// non-text/never-dict column, or invalidated by append).
+    pub fn stitch_gndv(&self, col: usize) -> u64 {
+        self.stitch.gndv.get(col).copied().unwrap_or(0)
+    }
+
+    /// The (rg, col) stitch table: local dict code -> part-global byte-rank
+    /// code (length = the RG chunk's local NDV). None when absent. Torn
+    /// directory entries (out of bounds / misaligned) also read as None —
+    /// stitch consumers fail open to the per-epoch paths.
+    pub fn stitch(&self, rg: usize, col: usize) -> Option<&[u32]> {
+        if self.stitch_gndv(col) == 0 {
+            return None;
+        }
+        let &(off, count) = self.stitch.dir.get(rg * self.ncols + col)?;
+        if count == 0 {
+            return None;
+        }
+        let bytes = self.bytes();
+        let end = off.checked_add(count as u64 * 4)?;
+        if off % 4 != 0 || end > bytes.len() as u64 {
+            debug_assert!(false, "cbstore: torn stitch directory entry");
+            return None;
+        }
+        // SAFETY: bounds and 4-alignment checked above; the mmap base is
+        // page-aligned and outlives &self.
+        Some(unsafe {
+            std::slice::from_raw_parts(bytes.as_ptr().add(off as usize).cast::<u32>(), count as usize)
+        })
     }
 
     // Footer sum for (rg, col); caller gates on RG_FLAG_SUMS (which only a
@@ -792,6 +878,9 @@ mod tests {
         if version >= CB_VERSION_V6 {
             f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         }
+        if version >= CB_VERSION_V7 {
+            f.resize(f.len() + ncols * 8 + rg_rows.len() * ncols * CB_STITCH_DIR_ENTRY_LEN, 0);
+        }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -904,7 +993,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _, _, _) =
+        let (rgs, _, _, _, _, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 2, CB_VERSION_V4, true).unwrap();
         assert_eq!(rgs[0].flags & RG_FLAG_SUMS, RG_FLAG_SUMS);
         assert_eq!(rgs[0].sums, vec![-(1i128 << 70), 42]);
@@ -946,6 +1035,9 @@ mod tests {
         // v5 sorted flags + v6 cluster-key sections (header stamps CB_VERSION).
         f.extend_from_slice(&[0u8, 0u8]);
         f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
+        // v7 sections: length stats are empty (no flagged columns above);
+        // stitch = 2 x u64 gndv + 2 RGs x 2 cols x 12 B directory, all zero.
+        f.resize(f.len() + 2 * 8 + 2 * 2 * CB_STITCH_DIR_ENTRY_LEN, 0);
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -977,7 +1069,7 @@ mod tests {
         let path = tmp("sums3");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V3, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, sorted, _, _) =
+        let (rgs, _, _, sorted, _, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V3, true).unwrap();
         assert_eq!(sorted, vec![0, 0, 0]);
         for rg in &rgs {
@@ -994,7 +1086,7 @@ mod tests {
         let path = tmp("lens6");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V6, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _, _, lenflags) =
+        let (rgs, _, _, _, _, lenflags, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V6, true).unwrap();
         assert_eq!(lenflags, vec![0, 0, 0]);
         for rg in &rgs {

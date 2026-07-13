@@ -943,7 +943,7 @@ fn dict_lane_negotiation_round_trip() {
     // stale by contract, every other column is unaffected.
     let codes: [u32; 4] = [1, 0, 2, 1];
     let dict: [Datum; 3] = [Datum::from_i64(10), Datum::from_i64(20), Datum::from_i64(30)];
-    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 3, epoch: 7, sorted: true };
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 3, epoch: 7, sorted: true, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
     soa.begin(codes.len() as u32);
     soa.set_dict_lane(1, SoaDictLane { codes: codes.as_ptr(), table });
     let lane = soa.dict_lane(1).expect("answered");
@@ -983,7 +983,7 @@ fn dict_gather_matches_full_decode_raw() {
         Datum::from_i64(42),
     ];
     let codes: [u32; 6] = [3, 3, 0, 2, 1, 0];
-    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 4, epoch: 0, sorted: false };
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 4, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
 
     soa.begin(codes.len() as u32);
     // Poison the target cells: garbage values, isnull = true. The gather
@@ -1012,9 +1012,9 @@ fn dict_gather_matches_full_decode_raw() {
 #[test]
 fn dict_table_epoch_identity() {
     let dict: [Datum; 2] = [Datum::from_i64(1), Datum::from_i64(2)];
-    let rg0 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false };
-    let rg0b = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false };
-    let rg1 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 1, sorted: false };
+    let rg0 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
+    let rg0b = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
+    let rg1 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 1, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
     assert!(rg0.same_identity(&rg0b));
     assert!(!rg0.same_identity(&rg1), "same arena address, new row group: memo must clear");
     assert_eq!(rg1.datum(0).as_i64(), 1);

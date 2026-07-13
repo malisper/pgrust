@@ -43,24 +43,54 @@ pub const CB_VERSION_V5: u32 = 5;
 //    cluster key at write time (per-RG sortedness; whole-part order is the
 //    v5 sorted flags' business).
 pub const CB_VERSION_V6: u32 = 6;
-// v7 (per-granule string-length statistics, the ORC StringStatistics.sum
-// precedent):
+// v7 — the train-9 format-group union (one version bump carrying three
+// additive extensions; per-lane v7 layouts never shipped):
+//
+// (a) Per-granule string-length statistics (the ORC StringStatistics.sum
+//     precedent):
 //  - The footer prelude grows from 8 to 8 + ncols bytes: after nrgs/ncols,
 //    ncols u8 flags mark the columns carrying length-stats entries (the
 //    writer flags every text column). Fixed-position because read_footer_rgs
 //    sizes the body read before it parses anything, and ncols is known from
 //    the caller — one read still covers the prelude.
-//  - After the v6 cluster-key section the footer appends the length-stats
-//    body: nrgs x GRANULES_PER_RG x nlencols entries of
-//    CB_LENSTATS_ENTRY_LEN bytes (sum(octet_length) u64 | non-null count
-//    u32 | empty-string count u32, LE), rg-major, then granule slot, then
-//    flagged column in ascending column order. Granule slots past an RG's
-//    last row are zero. nlencols = number of set flag bytes.
 //  - Validity is per-RG via RG_FLAG_LENSTATS (0 is a valid sum, the
 //    RG_FLAG_SUMS precedent): RGs preserved from a v<=6 footer write zeros
 //    and lack the flag. v<=6 parts read as no-length-stats entirely.
+//
+// (b) Global stitched dictionaries: a stitch blob is a per-RG per-column u32
+//     array mapping the RG's LOCAL dict codes to PART-GLOBAL codes; global
+//     codes are byte-rank over the union of every RG's dict entries, so
+//     global-code order == byte order (the CHUNK_FLAG_DICT_SORTED property
+//     lifted to part scope). Blobs live in the file body between the last RG
+//     and the footer (64-aligned; dead on append-refinalize, the
+//     footer-chain precedent). A column gets a stitch only when EVERY RG's
+//     chunk is Dict/Lz4Dict with sorted codes; append onto committed RGs
+//     invalidates to none (the NDV/sorted precedent). v<=6 parts read as
+//     no-stitch.
+//
+// (c) Per-granule zero/empty counts: int/date/timestamp columns count
+//     stored value == 0, text columns count empty strings. Validity is
+//     per-RG via RG_FLAG_ZEROCNT; preserved v<=6 RGs write zeros flagless.
+//     v<=6 parts read as no-zerocnt entirely.
+//
+// Footer sections AFTER the v6 cluster-key section, in this order (parse
+// order == write order; every length closed-form in (nrgs, ncols, prelude
+// lenstats flags) so read_footer_rgs can size the body read before parsing):
+//  1. length-stats body: nrgs x GRANULES_PER_RG x nlencols entries of
+//     CB_LENSTATS_ENTRY_LEN bytes (sum(octet_length) u64 | non-null count
+//     u32 | empty-string count u32, LE), rg-major, then granule slot, then
+//     flagged column in ascending column order. Granule slots past an RG's
+//     last row are zero. nlencols = number of set prelude flag bytes.
+//  2. stitch section: ncols x u64 global NDV (0 = no stitch for the
+//     column), then nrgs x ncols x (u64 file_off | u32 count) stitch-blob
+//     directory (all-zero where absent).
+//  3. zero-count body: nrgs x GRANULES_PER_RG x ncols u32 entries, rg-major,
+//     then granule slot, then column ascending; slots past an RG's last row
+//     are zero.
 pub const CB_VERSION_V7: u32 = 7;
 pub const CB_VERSION: u32 = 7;
+// Stitch directory entry: u64 file_off | u32 count.
+pub const CB_STITCH_DIR_ENTRY_LEN: usize = 12;
 pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;
 pub const CB_CLUSTER_KEY_SECTION_LEN: usize = 2 + CB_CLUSTER_KEY_MAX_COLS * 2;
 // v7 length-stats entry: sum u64 | nonnull u32 | empty u32. A granule sum is
