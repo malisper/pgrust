@@ -546,6 +546,9 @@ impl PageSource {
                 }
                 XLogSource::Stream => {
                     debug_assert!(StandbyMode());
+                    if self.pending_walrcv_restart {
+                        let _ = elog(DEBUG1, "startup: pending walrcv restart observed".to_string());
+                    }
                     if self.pending_walrcv_restart && !start_walreceiver {
                         xlog_shutdown_wal_rcv();
                         if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest {
