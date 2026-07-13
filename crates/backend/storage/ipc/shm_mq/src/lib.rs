@@ -708,6 +708,9 @@ fn wait_internal(
     my_latch: Option<LatchHandle>,
     handle: Option<(i32, u64)>,
 ) -> PgResult<bool> {
+    // Stall self-report + recheck cadence for the counterparty-attach wait
+    // (the worker-death recheck above also depends on wakes arriving).
+    let mut stall = stall::StallDetector::new();
     loop {
         mq.spin_acquire();
         let attached = match target {
@@ -728,7 +731,12 @@ fn wait_internal(
             }
         }
 
-        wait_on_my_latch(my_latch, WAIT_EVENT_MQ_INTERNAL)?;
+        stall::wait_on_my_latch_reporting(
+            my_latch,
+            WAIT_EVENT_MQ_INTERNAL,
+            &mut stall,
+            &mut |waited_ms| stall::report_queue_stall(mq, "attach", 0, waited_ms),
+        )?;
     }
 }
 
