@@ -309,6 +309,33 @@ pub fn agg_hashgroup_text_key_count(node: &AggStateData<'_>) -> usize {
         .count()
 }
 
+/// Would `agg_hashgroup_begin` engage the stringhash table for this node?
+/// (single text/varchar group key + switch on — mirrors the begin-side
+/// engage condition so the economics tier prices the right probe machinery.)
+fn smap_shape(node: &AggStateData<'_>) -> bool {
+    if !stringhash_enabled() || node.plan.grpColIdx.len() != 1 {
+        return false;
+    }
+    let Some(ps) = node.persort.as_ref() else { return false };
+    let Some(desc) = ps.first_slot.base().tts_tupleDescriptor.as_ref() else { return false };
+    let col = node.plan.grpColIdx[0];
+    col >= 1
+        && (col as i32) <= desc.natts
+        && matches!(desc.attr((col - 1) as usize).atttypid, TEXTOID | VARCHAROID)
+}
+
+/// Density threshold for the stringhash shape. Default stays at the generic
+/// 8.0 until the Q14 crossover A/B lands a measured value.
+fn stringhash_min_rpg() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_STRINGHASH_MINRPG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8.0)
+    })
+}
+
 /// The arm's build budget: HALF the displaced tuplesort's work_mem allowance
 /// (`distinct_set_budget`) — the other half stays free for the emit phase's
 /// per-group replay (whose sets can themselves spill/degrade under the full
@@ -339,8 +366,13 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
     /// rows/group; Q14-class near-unique shapes refuse here. `input_rows`
     /// is the plan Sort's row estimate (0.0 = unknown: tier skipped).
     const MIN_ROWS_PER_GROUP: f64 = 8.0;
+    // The 8x tier was calibrated on the GENERIC span table's probe/create
+    // cost. The stringhash-admissible shape (single text key, switch on)
+    // reads its own threshold — re-priced by the Q14 A/B; the env override
+    // is the measurement channel (PGRUST_LANE_V2_STRINGHASH_MINRPG).
+    let min_rpg = if smap_shape(node) { stringhash_min_rpg() } else { MIN_ROWS_PER_GROUP };
     let est_groups = (node.plan.numGroups as f64).max(1.0);
-    if input_rows > 0.0 && input_rows < MIN_ROWS_PER_GROUP * est_groups {
+    if input_rows > 0.0 && input_rows < min_rpg * est_groups {
         return false;
     }
     let per_group =
