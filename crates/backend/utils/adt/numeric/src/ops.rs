@@ -833,29 +833,38 @@ pub fn numeric_avg_div(sum: Num<'_>, count: i64) -> PgResult<NumericImage> {
 
 /// `avg(int2/int4)` finalize core (`sum / count` over the int8 transarray):
 /// `numeric_avg_div`'s exact result — same `select_div_scale`, same
-/// round-half-away `div_var`, byte-identical image by construction — minus
-/// the two intermediate `NumericImage` materializations (`int64_to_numeric`
-/// of sum and count) it pays per group. The hashed-agg emit's finalize hot
-/// path (ClickBench Q32-class: `avg(int)` over millions of groups).
+/// round-half-away division, byte-identical image (differential tests pin
+/// it against the materializing composition) — minus the two intermediate
+/// `NumericImage` materializations (`int64_to_numeric` of sum and count)
+/// AND (in the common range) the digit-loop `div_var` machinery: the
+/// quotient computes as one i128 division. The hashed-agg emit's finalize
+/// hot path (ClickBench Q32-class: `avg(int)` over millions of groups).
 pub fn int64_avg_div(sum: i64, count: i64) -> PgResult<NumericImage> {
     let mut v1 = NumericVar::new();
     set_var_from_int64(sum, &mut v1);
-    int_var_avg_div(&v1, count)
+    int_var_avg_div(&v1, sum as i128, count)
 }
 
 /// `avg(int8)` finalize core (Int128AggState sum): as [`int64_avg_div`].
 pub fn int128_avg_div(sum: i128, count: i64) -> PgResult<NumericImage> {
     let mut v1 = NumericVar::new();
     crate::var::int128_to_var(sum, &mut v1);
-    int_var_avg_div(&v1, count)
+    int_var_avg_div(&v1, sum, count)
 }
 
-/// The shared division tail: `numeric_div_into`'s finite arm verbatim (both
-/// operands are integers — the special-value arms are unreachable).
-fn int_var_avg_div(v1: &NumericVar, count: i64) -> PgResult<NumericImage> {
+/// The shared division tail: `select_div_scale` on stack vars (C's exact
+/// result-scale rule), then the integer fast quotient when `sum × 10^rscale`
+/// fits i128, else `numeric_div_into`'s finite arm verbatim (both operands
+/// are integers — the special-value arms are unreachable).
+fn int_var_avg_div(v1: &NumericVar, sum: i128, count: i64) -> PgResult<NumericImage> {
     let mut v2 = NumericVar::new();
     set_var_from_int64(count, &mut v2);
     let rscale = select_div_scale(v1.view(), v2.view());
+    if count != 0 {
+        if let Some(r) = int_quotient_image(sum, count, rscale) {
+            return r;
+        }
+    }
     let mut result = NumericVar::new();
     div_var(v1.view(), v2.view(), &mut result, rscale, true, true)?;
     let mut out = NumericImage::empty();
@@ -863,6 +872,48 @@ fn int_var_avg_div(v1: &NumericVar, count: i64) -> PgResult<NumericImage> {
         return Err(crate::numeric_overflow_error().into());
     }
     Ok(out)
+}
+
+/// Integer division producing `div_var`'s exact image: the round-half-away
+/// (C `round_var`) quotient `q = sum × 10^rscale / count` computes in i128,
+/// and the image constructs the `int64_div_fast_to_numeric` way (pad the
+/// mantissa into base-10000 alignment, shift the weight, display at rscale)
+/// followed by `strip()` — the digit canonicalization `div_var`'s integer
+/// tails apply, so the stored digit form is identical. `None` = the scaled
+/// numerator leaves i128 (or an extreme rscale): the caller falls back to
+/// the digit-loop division, byte-identically.
+fn int_quotient_image(sum: i128, count: i64, rscale: i32) -> Option<PgResult<NumericImage>> {
+    debug_assert!(count != 0);
+    if !(0..=37).contains(&rscale) {
+        return None;
+    }
+    let scaled = sum.checked_mul(10i128.checked_pow(rscale as u32)?)?;
+    let den = count as i128;
+    let mut q = scaled / den;
+    // Round half away from zero (C round_var's carry rule on the quotient).
+    if (scaled % den).unsigned_abs() * 2 >= den.unsigned_abs() {
+        q = q.checked_add(if (sum < 0) == (count < 0) { 1 } else { -1 })?;
+    }
+    // value = q × 10^-rscale displayed at rscale.
+    let mut w = rscale / DEC_DIGITS;
+    let m = rscale % DEC_DIGITS;
+    let qv = if m > 0 {
+        w += 1;
+        q.checked_mul(10i128.pow((DEC_DIGITS - m) as u32))?
+    } else {
+        q
+    };
+    let mut var = NumericVar::new();
+    crate::var::int128_to_var(qv, &mut var);
+    var.weight -= w;
+    var.dscale = rscale;
+    var.strip();
+    let mut out = NumericImage::empty();
+    Some(if make_result_into(var.view(), &mut out) {
+        Ok(out)
+    } else {
+        Err(crate::numeric_overflow_error().into())
+    })
 }
 
 macro_rules! unported {

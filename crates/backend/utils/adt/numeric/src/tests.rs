@@ -466,17 +466,52 @@ fn int_avg_div_matches_numeric_avg_div_bytes() {
             assert_eq!(fast.as_bytes(), i128_slow(s, c).as_bytes(), "i128 sum={s} count={c}");
         }
     }
-    // Deterministic LCG sweep.
+    // Rounding-tie and near-tie corners (the integer quotient's half-away
+    // carry vs round_var's), incl. exact halves, thirds, and carry-9999
+    // propagation shapes.
+    for &(s, c) in &[
+        (1i64, 2i64),
+        (-1, 2),
+        (1, 3),
+        (2, 3),
+        (-2, 3),
+        (1, 6),
+        (5, 4),
+        (-5, 4),
+        (1, 7),
+        (999999, 7),
+        (49999, 10000),
+        (50001, 10000),
+        (9_999_999_999_999_999, 2),
+        (-9_999_999_999_999_999, 2),
+        (1, 20_000_000_000_000_000),
+        (3, 20_000_000_000_000_000),
+        (1, 3_000_000_000),
+        (7, 9_999_999_999),
+    ] {
+        let slow = numeric_avg_div(int64_to_numeric(s).num(), c).unwrap();
+        let fast = int64_avg_div(s, c).unwrap();
+        assert_eq!(fast.as_bytes(), slow.as_bytes(), "tie sum={s} count={c}");
+    }
+    // Deterministic LCG sweep, biased toward realistic small counts half the
+    // time (avg-of-groups shapes) and full-range the other half.
     let mut x: u64 = 0x9e3779b97f4a7c15;
-    for _ in 0..2000 {
+    for i in 0..20_000u32 {
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let s = x as i64;
+        let s = if i % 4 < 2 { (x as i64) % 2_000_000 } else { x as i64 };
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let c = ((x | 1) >> 1) as i64; // positive odd-ish count >= 0, never 0
-        let c = c.max(1);
+        let c = if i % 2 == 0 {
+            ((x % 1000) as i64).max(1)
+        } else {
+            (((x | 1) >> 1) as i64).max(1)
+        };
         let slow = numeric_avg_div(int64_to_numeric(s).num(), c).unwrap();
         let fast = int64_avg_div(s, c).unwrap();
         assert_eq!(fast.as_bytes(), slow.as_bytes(), "sum={s} count={c}");
+        // The i128 leg through the same pairs plus a widened sum.
+        let s128 = (s as i128) * ((x as i8) as i128).max(1);
+        let fast128 = int128_avg_div(s128, c).unwrap();
+        assert_eq!(fast128.as_bytes(), i128_slow(s128, c).as_bytes(), "i128 sum={s128} count={c}");
     }
 }
 
