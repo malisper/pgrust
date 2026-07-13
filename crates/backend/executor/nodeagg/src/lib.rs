@@ -5866,6 +5866,12 @@ fn agg_retrieve_hash_table<'mcx>(
     estate: &mut EStateData<'mcx>,
     mut cut: Option<TopnEmitCut<'_>>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // M2 sink (sink.rs): an adopted parallel result is the node's source —
+    // finished, fully-projected rows (no pergroups; the topn cut is a skip
+    // optimization over transvalues and simply does not apply).
+    if node.sink_emit.is_some() {
+        return sink::agg_sink_emit_next(node, estate);
+    }
     let mcx = estate.es_query_cxt;
     loop {
         estate.reset_expr_context(node.ps_ExprContext);

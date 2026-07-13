@@ -44,7 +44,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_partition_remainder,
     sink_resolve_combines, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
@@ -736,21 +736,21 @@ fn find_agg_node<'mcx>(
     None
 }
 
-/// The runtime aggregation-sink arm. `None` = not engaged (caller falls
+/// The runtime aggregation-sink arm. `false` = not engaged (caller falls
 /// through to the serial build, byte-identically — nothing was consumed).
-/// `Some(row)` = the node's first emitted row (subsequent calls drain
-/// through the `agg_sink_emitting` resume).
-pub(super) fn try_own_hashagg_runtime<'mcx>(
+/// `true` = the published parallel result was adopted; every retrieve path
+/// drains it through `agg_hash_retrieve`'s sink branch.
+pub(super) fn try_engage_hashagg_runtime<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<Option<ExecSlotId>>> {
+) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
     let dop = ::guc_tables::runtime_pool::runtime_agg_pool_dop();
     if dop <= 0 || !runtime::runtime_enabled() {
-        return Ok(None);
+        return Ok(false);
     }
-    let Some(rt) = runtime::global() else { return Ok(None) };
+    let Some(rt) = runtime::global() else { return Ok(false) };
 
     // --- Plan shape gates (fail-closed).
     let refuse = |why: &str| {
@@ -758,81 +758,81 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
     };
     if !::nodeagg::sink::agg_sink_plan_shape_ok(agg) {
         refuse("plan shape");
-        return Ok(None);
+        return Ok(false);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
         refuse("instrumented/EPQ");
-        return Ok(None);
+        return Ok(false);
     }
     if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
         refuse("scan not fusible cbstore");
-        return Ok(None);
+        return Ok(false);
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the
     // next cars); scan projection means the key is computed — refuse.
     if ss.ss.ps_ProjInfo.is_some() {
         refuse("projected scan (exprkey car)");
-        return Ok(None);
+        return Ok(false);
     }
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         refuse("fold plan guarded/varlena/residual");
-        return Ok(None);
+        return Ok(false);
     }
     // The staging arm (idempotent — the serial fold feed re-arms the same
     // shape on fallback) + the K2 single-key decide.
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
     if super::scan_k2_shape(agg, ss, estate).is_none() {
         refuse("K2 shape");
-        return Ok(None);
+        return Ok(false);
     }
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
         refuse("dict-group staging");
-        return Ok(None);
+        return Ok(false);
     }
     let Some(width) = ::nodeagg::sink::agg_sink_key_width(agg) else {
         refuse("key width");
-        return Ok(None);
+        return Ok(false);
     };
     // Combine + identity-emit qualification (fail-closed; catalog access).
     let Some(combines) = sink_resolve_combines(agg)? else {
         refuse("combine whitelist");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-        return Ok(None);
+        return Ok(false);
     };
     let key_spec = SinkKeySpec::Single { width };
     let Some(emit) = sink_build_emit_plan(agg, &key_spec) else {
         refuse("identity emit");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-        return Ok(None);
+        return Ok(false);
     };
     let Some(state_bytes) = ::nodeagg::sink::agg_sink_state_bytes(agg) else {
-        return Ok(None);
+        return Ok(false);
     };
     let Some(budget) = ::nodeagg::sink::agg_sink_hash_mem_limit(agg) else {
-        return Ok(None);
+        return Ok(false);
     };
     // --- Session/binder gates (the M1 set, verbatim).
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
         refuse("in parallel mode");
-        return Ok(None);
+        return Ok(false);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         refuse("extern params");
-        return Ok(None);
+        return Ok(false);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         refuse("exec params");
-        return Ok(None);
+        return Ok(false);
     }
     if !estate
         .es_snapshot
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
-        return Ok(None);
+        return Ok(false);
     }
     let policy = parallel::query_task_policy_probe();
     if policy.has_params
@@ -841,32 +841,29 @@ pub(super) fn try_own_hashagg_runtime<'mcx>(
         || policy.pending_invalidations
     {
         refuse("binder policy");
-        return Ok(None);
+        return Ok(false);
     }
     // Worker plan root: the Agg subtree's Node in the leader plan tree.
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root) = leader_pstmt.planTree else { return Ok(false) };
     let Some(agg_node) = find_agg_node(root, agg.plan) else {
         refuse("agg node not in plan tree");
-        return Ok(None);
+        return Ok(false);
     };
     // The Agg's scan child must be the SeqScan (no intermediate nodes).
     if agg.plan.plan.lefttree.map(Node::node_tag) != Some(NodeTag::T_SeqScan) {
         refuse("scan child shape");
-        return Ok(None);
+        return Ok(false);
     }
 
     // --- Geometry.
     let Some((total_granules, starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
-        return Ok(None);
+        return Ok(false);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
         refuse("granule floor");
-        return Ok(None);
-    }
-    if ::nodeagg::agg_is_done(agg) {
-        return Ok(Some(None));
+        return Ok(false);
     }
 
     // --- Engage.
@@ -901,7 +898,7 @@ fn engage<'mcx>(
     starts: Vec<u64>,
     agg_node: Node<'mcx>,
     sink: Arc<AggSink>,
-) -> PgResult<Option<Option<ExecSlotId>>> {
+) -> PgResult<bool> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
 
@@ -941,14 +938,14 @@ enum EngageOutcome {
 #[allow(clippy::too_many_arguments)]
 fn engage_ceremony<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    estate: &mut EStateData<'mcx>,
+    _estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
     starts: Vec<u64>,
     payload: &Arc<RuntimeAggShared>,
     sink: &Arc<AggSink>,
-) -> PgResult<Option<Option<ExecSlotId>>> {
+) -> PgResult<bool> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_agg_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
 
@@ -1052,7 +1049,7 @@ fn engage_ceremony<'mcx>(
     match outcome {
         EngageOutcome::Fallback => {
             lane_trace("runtime-agg: fallback to serial arm");
-            Ok(None)
+            Ok(false)
         }
         EngageOutcome::Completed => {
             let bufs = sink
@@ -1065,10 +1062,9 @@ fn engage_ceremony<'mcx>(
                 })?;
             let natts = sink.emit.cols.len();
             let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
-            stats::tick_owned(ShapeClass::AggBuild);
             lane_trace(&format!("runtime-agg: complete, groups={rows}"));
             ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
-            Ok(Some(::nodeagg::sink::agg_sink_emit_next(agg, estate)?))
+            Ok(true)
         }
     }
 }
