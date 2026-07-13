@@ -5025,6 +5025,7 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
+ "adt_numeric",
  "adt_timestamp",
  "aio_seams",
  "arrayfuncs",
