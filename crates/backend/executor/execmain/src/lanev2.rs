@@ -2190,10 +2190,13 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     }
     // M1 runtime scan arm (the Meta arm preempts above — footer answers
     // beat any parallel scan): FORCED engagement under PGRUST_RUNTIME=1 +
-    // pgrust.runtime_scan_pool, serial plan surface unchanged. Owns the
-    // Fold shapes AND the cbstore count-only census shape (a qualed
-    // count(*) — serial-refused because the footer is the serial lever,
-    // but a parallel PREWHERE scan is exactly M1's LIKE-count target).
+    // pgrust.runtime_scan_pool, serial plan surface unchanged; the morsel
+    // source dispatches on the table AM (cbstore granules / heap block
+    // ranges). Owns the Fold shapes AND the qualed count-only census shape
+    // (serial-refused on cbstore because the footer is the serial lever,
+    // and on heap for admission economics — but a parallel qual-bitmap
+    // scan is exactly M1's LIKE-count target). Heap Refuse shapes that are
+    // neither fold-prefix-armable nor census fall through inside the arm.
     // None = not engaged/refused — fall through byte-identically (nothing
     // was consumed).
     if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
