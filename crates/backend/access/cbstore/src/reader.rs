@@ -398,6 +398,9 @@ pub struct Part {
     // len/footer_off and every recreate changes the inode, so equal
     // identities imply byte-identical granule content.
     pub identity: crate::condcache::PartIdent,
+    // Lazy absolute-granule prefix sums (see granule_starts). OnceLock so a
+    // part-cache-shared Part builds it once under any thread.
+    granule_starts: std::sync::OnceLock<Vec<u64>>,
 }
 
 impl Part {
@@ -498,6 +501,7 @@ impl Part {
             zerocnt_off,
             data_end,
             identity,
+            granule_starts: std::sync::OnceLock::new(),
         }))
     }
 
@@ -590,6 +594,61 @@ impl Part {
 
     pub fn total_rows(&self) -> u64 {
         self.rgs.iter().map(|rg| rg.nrows as u64).sum()
+    }
+
+    /// Part-global granule geometry (the runtime morsel address space — M1
+    /// scan pipelines). Granule indexes are ABSOLUTE over the part, in
+    /// row-group order; interior RGs can be short (reopen-append seals a
+    /// partial trailing RG that later ingests do not refill), so the map is
+    /// a real prefix sum over per-RG granule counts, never `rg * 8 + g`.
+    /// Entry `rg` = first absolute granule of row group `rg`; entry `nrgs`
+    /// = total granule count. Built lazily, immutable thereafter (sealed
+    /// RGs never mutate and a Part instance's footer is pinned at open).
+    pub fn granule_starts(&self) -> &[u64] {
+        self.granule_starts.get_or_init(|| {
+            let mut acc = 0u64;
+            let mut starts = Vec::with_capacity(self.rgs.len() + 1);
+            starts.push(0);
+            for rg in &self.rgs {
+                acc += (rg.nrows as u64).div_ceil(GRANULE_ROWS as u64);
+                starts.push(acc);
+            }
+            starts
+        })
+    }
+
+    /// Total granules in the part (absolute granule address-space bound).
+    pub fn total_granules(&self) -> u64 {
+        self.granule_starts().last().copied().unwrap_or(0)
+    }
+
+    /// First absolute granule of the row group strictly after the one
+    /// containing `granule` — the hard morsel boundary (row-group edges are
+    /// exactly the dictionary-epoch edges: each RG chunk carries its own
+    /// local dictionary, so every per-epoch memo keys on the RG index).
+    /// Contract mirror of the runtime's `MorselSource::next_boundary_after`:
+    /// requires `granule < total_granules()` and returns a bound in
+    /// `(granule, total_granules()]`.
+    pub fn granule_next_boundary(&self, granule: u64) -> u64 {
+        let starts = self.granule_starts();
+        match starts.binary_search(&granule) {
+            // `granule` IS an RG start: the boundary is the next entry.
+            Ok(i) => starts.get(i + 1).copied().unwrap_or_else(|| self.total_granules()),
+            // Insertion point names the first entry > granule.
+            Err(i) => starts.get(i).copied().unwrap_or_else(|| self.total_granules()),
+        }
+    }
+
+    /// Locate absolute granule `granule` as (row group, granule-in-rg).
+    /// Caller contract: `granule < total_granules()`.
+    pub fn locate_granule(&self, granule: u64) -> (usize, usize) {
+        let starts = self.granule_starts();
+        debug_assert!(granule < self.total_granules());
+        let rg = match starts.binary_search(&granule) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        (rg, (granule - starts[rg]) as usize)
     }
 
     pub fn chunk(&self, rg: usize, col: usize) -> ChunkView<'_> {
