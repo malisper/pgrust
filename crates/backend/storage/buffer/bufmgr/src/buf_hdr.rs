@@ -336,6 +336,14 @@ pub(crate) fn WaitBufHdrUnlocked(desc: &BufferDesc) -> u32 {
 
 // C escalates to a random usleep via s_lock.c; bounded ISB spin + yield keeps
 // the uncontended path identical and the contended path OS-fair.
+//
+// DELIBERATELY NOT a Waiter site (M0 lane C decision): the buffer-header
+// lock is held for nanoseconds-to-microseconds and has no wake edge to
+// route — parking machinery (slot mutex, handle publication) would cost
+// more than the wait it replaces. This is the wrong tool boundary for the
+// structured wait primitive; the migrated raw waits (s_lock backoff,
+// pg_barrier poll, pg_sema block, latch waits) all had ms-scale sleeps or
+// real wake edges.
 #[inline]
 fn spin_delay(spins: &mut u32) {
     *spins += 1;
