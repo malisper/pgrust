@@ -911,7 +911,14 @@ mod tests {
                 Ok(())
             });
             smgr_seams::smgr_start_buffer_read::set(|rlb, _f, blocknum, buffer| {
-                assert_eq!(rlb.locator.relNumber, URING_REL);
+                // URING_REL is the M0 suite's shared relation; the M1
+                // tests take fresh relnumbers above it (same file bytes,
+                // fresh buffer tags — cold by construction).
+                assert!(
+                    (URING_REL..URING_REL + 100).contains(&rlb.locator.relNumber),
+                    "unexpected test relation {}",
+                    rlb.locator.relNumber
+                );
                 Ok(aio_seams::uring_buf_read::call(
                     uring_file_fd(),
                     blocknum as i64 * BLCKSZ as i64,
@@ -956,10 +963,44 @@ mod tests {
     }
 
     fn uring_smgr() -> RelFileLocatorBackend {
+        rel_smgr(URING_REL)
+    }
+
+    fn rel_smgr(rel: u32) -> RelFileLocatorBackend {
         RelFileLocatorBackend {
-            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: URING_REL },
+            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel },
             backend: INVALID_PROC_NUMBER,
         }
+    }
+
+    /// A relation nobody has touched: fresh buffer tags over the SAME test
+    /// file bytes — every block is cold by construction, so the M1 tests
+    /// can assert `Issued` regardless of suite order.
+    fn fresh_rel() -> u32 {
+        static NEXT: AtomicI32 = AtomicI32::new(1);
+        URING_REL + NEXT.fetch_add(1, Ordering::Relaxed) as u32
+    }
+
+    fn uring_start_rel(rel: u32, blk: u32) -> Option<PrefetchOutcome> {
+        bufmgr::uring_start_read(
+            rel_smgr(rel),
+            RELPERSISTENCE_PERMANENT,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+        )
+        .unwrap()
+    }
+
+    fn read_blk_rel(rel: u32, blk: u32) -> Buffer {
+        ReadBufferWithoutRelcache(
+            rel_smgr(rel).locator,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+            ReadBufferMode::Normal,
+            None,
+            true,
+        )
+        .unwrap()
     }
 
     fn uring_start(blk: u32) -> Option<PrefetchOutcome> {
@@ -1137,12 +1178,13 @@ mod tests {
         let before_sync = SYNC_READS.load(Ordering::Relaxed);
         let before_permits = permit_counts();
 
+        let rel = fresh_rel();
         let blk = 1u32;
-        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
 
         let foreign = std::thread::spawn(move || {
             become_backend();
-            let b = read_blk(blk);
+            let b = read_blk_rel(rel, blk);
             let field = page_block_field(b);
             ReleaseBuffer(b).unwrap();
             field
@@ -1158,7 +1200,7 @@ mod tests {
 
         // Boundary reaps must have collected the issuer pin.
         aio_seams::uring_boundary_reap::call();
-        let b = read_blk(blk);
+        let b = read_blk_rel(rel, blk);
         assert_eq!(GetPrivateRefCount(b), 1, "issuer prefetch pin must be collected");
         ReleaseBuffer(b).unwrap();
         AtEOXact_Buffers(true);
@@ -1175,14 +1217,15 @@ mod tests {
         if !uring_here() {
             return;
         }
+        let rel = fresh_rel();
         let blk = 2u32;
-        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
         // Ample time for the µs-scale DMA to land its CQE (unreaped).
         std::thread::sleep(std::time::Duration::from_millis(100));
         let before_permits = permit_counts();
         let t = std::thread::spawn(move || {
             become_backend();
-            let b = read_blk(blk);
+            let b = read_blk_rel(rel, blk);
             let field = page_block_field(b);
             ReleaseBuffer(b).unwrap();
             field
@@ -1223,12 +1266,13 @@ mod tests {
         assert!(ring >= 0);
         let before_sync = SYNC_READS.load(Ordering::Relaxed);
         let before_permits = permit_counts();
+        let rel = fresh_rel();
         let blk = 3u32;
-        assert_eq!(uring_start(blk), Some(PrefetchOutcome::Issued));
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
 
         let foreign = std::thread::spawn(move || {
             become_backend();
-            let b = read_blk(blk);
+            let b = read_blk_rel(rel, blk);
             let field = page_block_field(b);
             ReleaseBuffer(b).unwrap();
             field
@@ -1251,6 +1295,83 @@ mod tests {
         AtEOXact_Buffers(true);
     }
 
+    /// The targeted M1 e2e at unit altitude: a COLD scan (fresh buffers, all
+    /// reads via uring DMA) at DOP — one boundary-reaping issuer ring (the
+    /// pool-worker shape) racing several foreign arrival threads over every
+    /// block, byte-parity against the known page images, permit pairing
+    /// intact, zero sync fallbacks. (The server-level cold heap scan at DOP
+    /// through runtime scan TaskSets lands with M1 lane A — this exercises
+    /// the full ring/reap/IoToken/IoGuard stack under real concurrency.)
+    #[test]
+    fn cold_scan_at_dop_byte_parity() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        // Fresh relation: every block cold by construction.
+        let rel = fresh_rel();
+        let ring = aio_seams::uring_worker_ring_init::call();
+        assert!(ring >= 0);
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        let before_permits = permit_counts();
+
+        // Issue the whole file's reads from the issuer (readahead shape).
+        for blk in 0..FILE_PAGES {
+            assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued), "block {blk}");
+        }
+        // DOP arrival threads, each scanning EVERY block (max contention on
+        // the WaitIO/token paths), asserting byte parity per page.
+        const DOP: usize = 4;
+        let workers: Vec<_> = (0..DOP)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    become_backend();
+                    for step in 0..FILE_PAGES {
+                        // Stagger start blocks so threads collide on
+                        // different in-flight IOs.
+                        let blk = (step + w as u32 * 2) % FILE_PAGES;
+                        let b = read_blk_rel(rel, blk);
+                        assert_eq!(
+                            page_block_field(b),
+                            blk + 100,
+                            "worker {w}: page {blk} must arrive via uring DMA"
+                        );
+                        ReleaseBuffer(b).unwrap();
+                    }
+                })
+            })
+            .collect();
+        // The issuer's boundary-reap cadence runs the whole time; finished
+        // workers are JOINED so their assertion panics surface here.
+        let mut pending = workers;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !pending.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "cold DOP scan wedged");
+            aio_seams::uring_boundary_reap::call();
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            let (done, rest): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|h| h.is_finished());
+            for h in done {
+                h.join().unwrap();
+            }
+            pending = rest;
+        }
+        assert_eq!(
+            SYNC_READS.load(Ordering::Relaxed),
+            before_sync,
+            "cold scan must be served entirely by uring DMA"
+        );
+        assert_permit_pairing(before_permits);
+        // Every issuer pin collected; nothing stranded.
+        aio_seams::uring_boundary_reap::call();
+        for blk in 0..FILE_PAGES {
+            let b = read_blk_rel(rel, blk);
+            assert_eq!(GetPrivateRefCount(b), 1, "block {blk}: stranded issuer pin");
+            ReleaseBuffer(b).unwrap();
+        }
+        AtEOXact_Buffers(true);
+    }
+
     /// Worker-ring teardown at pool exit: in-flight DMA is waited out
     /// (tokens complete), the ring dies, and later reads fall back cleanly.
     #[test]
@@ -1260,21 +1381,13 @@ mod tests {
             return;
         }
         // A dedicated "pool worker" thread with its own ring (TLS-keyed).
+        let rel = fresh_rel();
         let worker = std::thread::spawn(move || {
             become_backend();
             let ring = aio_seams::uring_worker_ring_init::call();
             assert!(ring >= 0);
             let blk = 4u32;
-            assert_eq!(
-                bufmgr::uring_start_read(
-                    uring_smgr(),
-                    RELPERSISTENCE_PERMANENT,
-                    ForkNumber::MAIN_FORKNUM,
-                    blk,
-                )
-                .unwrap(),
-                Some(PrefetchOutcome::Issued)
-            );
+            assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
             // Exit with the IO in flight: teardown must wait it out, run
             // its completion (BM_VALID or BM_IO_ERROR — never a torn page)
             // and collect the slot pin before the ring dies.
@@ -1285,7 +1398,7 @@ mod tests {
         // Arrival on this thread: the completed page (or a clean sync
         // re-read on BM_IO_ERROR) — content must be correct either way.
         let before_permits = permit_counts();
-        let b = read_blk(blk);
+        let b = read_blk_rel(rel, blk);
         let field = page_block_field(b);
         assert!(field == blk + 100 || field == blk, "torn/foreign page after teardown");
         ReleaseBuffer(b).unwrap();
