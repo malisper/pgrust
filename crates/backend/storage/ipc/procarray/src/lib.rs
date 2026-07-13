@@ -163,6 +163,21 @@ pub fn ProcSetStatusFlagAffectsAllHorizons() -> PgResult<()> {
     Ok(())
 }
 
+/// StartupDecodingContext's walsender arm (logical.c:199): outside a
+/// transaction, announce this backend as a logical-decoding one — its xmin is
+/// enforced via the replication slot, so horizon computation may skip it.
+pub fn ProcSetStatusFlagInLogicalDecoding() -> PgResult<()> {
+    let my_procno = MyProc().expect("ProcSetStatusFlagInLogicalDecoding without MyProc");
+    let me = GetPGProcByNumber(my_procno);
+
+    LWLockAcquire(ProcArrayLock(), LW_EXCLUSIVE, my_procno)?;
+    let flags = me.statusFlags.load(Relaxed) | PROC_IN_LOGICAL_DECODING;
+    me.statusFlags.store(flags, Relaxed);
+    ProcGlobal().statusFlags[me.pgxactoff.load(Relaxed) as usize].store(flags, Relaxed);
+    LWLockRelease(ProcArrayLock())?;
+    Ok(())
+}
+
 /// ProcArrayInstallRestoredXmin (procarray.c): parallel workers pin their xmin
 /// under the leader's; PROC_XMIN_FLAGS propagate so vacuum's horizon reads the
 /// value the same way. False = source xact no longer running.

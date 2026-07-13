@@ -18109,6 +18109,8 @@ dependencies = [
  "latch_seams",
  "libc",
  "lmgr_proc",
+ "logical",
+ "logical_decode",
  "lwlock",
  "mcx",
  "pgstat",
@@ -18142,6 +18144,7 @@ dependencies = [
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery_seams",
+ "xlogutils",
 ]
 
 [[package]]

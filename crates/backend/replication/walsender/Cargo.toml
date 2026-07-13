@@ -23,6 +23,7 @@ timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 types_guc = { path = "../../../_support/types/types_guc" }
 xlogreader = { path = "../../access/transam/xlogreader" }
 xlogreader_seams = { path = "../../access/transam/xlogreader_seams" }
+xlogutils = { path = "../../access/transam/xlogutils" }
 datum = { path = "../../../_support/types/datum" }
 dbcommands_seams = { path = "../../commands/dbcommands_seams" }
 elog = { path = "../../utils/error/elog" }
@@ -43,6 +44,8 @@ ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
 repl_gram = { path = "../repl_gram" }
 resowner = { path = "../../utils/resowner/resowner" }
 slot = { path = "../slot" }
+logical = { path = "../logical/logical" }
+logical_decode = { path = "../logical/logical_decode" }
 syncrep_seams = { path = "../syncrep_seams" }
 snapbuild = { path = "../logical/snapbuild" }
 tcop_dest = { path = "../../tcop/dest" }
