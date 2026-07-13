@@ -628,6 +628,11 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // harness / kill-switch path. The session backing cell IS the gate the
     // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
     GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.regex_pattern_program: the anchored pattern-program regex fast
+    // tier under the auto RE2 dispatch (regexp_alt::program). Hidden like
+    // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
+    // the four-engine differential's fourth arm and the escape hatch.
+    GucBoolSetting { name: "pgrust.regex_pattern_program", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Enables the anchored pattern-program fast tier for RE2-dispatched regexps."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_regex_pattern_program, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pg_stat_statements custom GUCs (statically defined; see vars.rs note).
     GucBoolSetting { name: "pg_stat_statements.track_utility", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether utility commands are tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_utility, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "pg_stat_statements.track_planning", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects whether planning duration is tracked by pg_stat_statements."), long_desc: None, flags: 0, variable: &vars::pgss_track_planning, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },

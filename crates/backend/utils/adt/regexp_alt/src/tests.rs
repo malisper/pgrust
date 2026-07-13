@@ -192,6 +192,141 @@ fn dispatch_decision_is_cached() {
     assert!(dispatch(br"\d", REG_ADVANCED, b"x").unwrap().is_none());
 }
 
+// Pattern-program tier differential: for every subset pattern, program-on
+// exec must agree with program-off (pure RE2) exec — return value AND every
+// group span — across subjects incl. multibyte hosts and give-back shapes.
+#[test]
+fn pattern_program_vs_re2_differential() {
+    setup();
+    if !re2_available() {
+        return;
+    }
+    set_regex_engine(REGEX_ENGINE_AUTO);
+
+    let patterns: &[&str] = &[
+        Q29_PAT,
+        "^",
+        "^$",
+        "^abc",
+        "^abc$",
+        "^a?b",
+        "^https?://",
+        r"^(?:www\.)?([^/]+)$",
+        "^([a-z]+)z$",
+        "^([a-z]+)bc$",
+        "^([^a]+)y$",
+        "^([^a]+)[^b]+X$",
+        "^[0-9]{4}-[0-9]{2}$",
+        "^x*y+z?",
+        "^a.*",
+        "^a.+$",
+        "^([0-9]{2,4})x",
+        r"^\.\*",
+        "^é?x",
+        "^[^,]*,",
+    ];
+    let subjects: &[&str] = &[
+        "",
+        "http://www.example.com/path/x?y=1",
+        "https://sub.host.ru/",
+        "http://hostonly.com",
+        "https://пример.рф/страница",
+        "http://www/",
+        "not-a-url",
+        "abc",
+        "abcz",
+        "abcdef",
+        "xéy",
+        "xéX",
+        "éxé",
+        "www.x",
+        "www",
+        "1234-56",
+        "0123x",
+        "xxyyzz",
+        "a",
+        "ab",
+        ".*x",
+        ",,a,,b,,",
+        "line one\nline two\n",
+        "café instrument",
+    ];
+
+    for p in patterns {
+        let re = dispatch(p.as_bytes(), REG_ADVANCED, b"clean").unwrap().unwrap_or_else(|| {
+            panic!("pattern {p:?} should dispatch to re2");
+        });
+        assert!(
+            program::compile(p.as_bytes()).is_some(),
+            "pattern {p:?} should be in the program subset"
+        );
+        for s in subjects {
+            for nout in [0usize, 1, 2, 10] {
+                let mut prog_out = [(-7i64, -7i64); 10];
+                let mut re2_out = [(-7i64, -7i64); 10];
+                set_regex_pattern_program(true);
+                let prog_m = re.exec(s.as_bytes(), 0, &mut prog_out[..nout]);
+                set_regex_pattern_program(false);
+                let re2_m = re.exec(s.as_bytes(), 0, &mut re2_out[..nout]);
+                set_regex_pattern_program(true);
+                assert_eq!(prog_m, re2_m, "match verdict diverges: {p:?} on {s:?}");
+                if prog_m {
+                    assert_eq!(
+                        prog_out[..nout],
+                        re2_out[..nout],
+                        "group spans diverge: {p:?} on {s:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// Pathological backtracking: the step budget must refuse (fall back inside
+// exec to RE2, same answer), never wrong-answer or hang. The public exec
+// must therefore agree with program-off exec even on budget-tripping input.
+#[test]
+fn pattern_program_budget_fallback() {
+    setup();
+    if !re2_available() {
+        return;
+    }
+    set_regex_engine(REGEX_ENGINE_AUTO);
+    let p = "^[ab]*[ab]*[ab]*[ab]*[ab]*[ab]*[ab]*[ab]*c$";
+    let re = dispatch(p.as_bytes(), REG_ADVANCED, b"clean").unwrap().unwrap();
+    assert!(program::compile(p.as_bytes()).is_some());
+    let hay = "ab".repeat(64);
+    // The raw program refuses (budget) …
+    assert_eq!(program::compile(p.as_bytes()).unwrap().exec(hay.as_bytes(), &mut []), None);
+    // … and the public exec still answers via RE2, matching program-off.
+    set_regex_pattern_program(true);
+    let on = re.exec(hay.as_bytes(), 0, &mut []);
+    set_regex_pattern_program(false);
+    let off = re.exec(hay.as_bytes(), 0, &mut []);
+    set_regex_pattern_program(true);
+    assert_eq!(on, off);
+    assert!(!on);
+}
+
+// The tier engages for Q29's exact pattern under auto dispatch, and the
+// GUC turns it off without recompiling.
+#[test]
+fn pattern_program_attaches_for_q29() {
+    setup();
+    if !re2_available() {
+        return;
+    }
+    set_regex_engine(REGEX_ENGINE_AUTO);
+    let re = dispatch(Q29_PAT.as_bytes(), REG_ADVANCED, b"clean").unwrap().unwrap();
+    assert!(re.has_program(), "Q29's pattern must compile to a pattern program");
+    // Whole-match-tier and alternation patterns must NOT get a program.
+    for p in ["^(foo|bar)$", "(a)+", "a|ab"] {
+        if let Some(re) = dispatch(p.as_bytes(), REG_ADVANCED, b"clean").unwrap() {
+            assert!(!re.has_program(), "{p:?} must not get a program");
+        }
+    }
+}
+
 #[test]
 fn guc_backing_is_session_scoped() {
     set_regex_engine(REGEX_ENGINE_SPENCER);
