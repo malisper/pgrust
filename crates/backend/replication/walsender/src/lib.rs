@@ -540,8 +540,10 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
         ReplCommand::StartReplication(c) => {
-            // C dispatches physical/logical here, both closing with
-            // EndReplicationCommand("START_STREAMING").
+            // Physical closes with its own "START_STREAMING" completion
+            // (walsender.c:1029), logical with "COPY 0"; the dispatch then
+            // sends this "START_REPLICATION" completion — C's deliberate
+            // dupe ("necessary per libpqrcv_endstreaming", walsender.c:2182).
             let cmdtag = "START_REPLICATION";
             ps_status_seams::set_ps_display::call(cmdtag);
             if c.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
@@ -549,7 +551,7 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             } else {
                 logical_stream::StartLogicalReplication(&c)?;
             }
-            tcop_dest::EndReplicationCommand(b"START_STREAMING")?;
+            tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
         ReplCommand::BaseBackup(c) => {
             let cmdtag = "BASE_BACKUP";
