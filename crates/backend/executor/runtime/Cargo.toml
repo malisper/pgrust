@@ -21,9 +21,13 @@ init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 
 [target.'cfg(not(loom))'.dependencies]
-# The query-task binder re-export (pinned M0 interface QueryTaskGuard) is
-# production-only: loom models drive the lifecycle directly.
+# The query-task binder re-export (pinned M0 interface QueryTaskGuard) and
+# the Waiter the CompletionWaiter parks on (§2.5 submit-and-park re-homed
+# onto lane C's primitive) are production-only: loom models drive the
+# lifecycle directly and observe completion via try_wait, and the waiter
+# crate's global slot surface is itself cfg(not(loom)).
 parallel = { path = "../../access/transam/parallel" }
+waiter = { path = "../../storage/ipc/waiter" }
 
 # Loom is cfg-gated, not feature-gated, so release binaries can never link
 # it: build the models with

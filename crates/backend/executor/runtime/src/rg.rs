@@ -15,7 +15,7 @@ use crate::lifecycle::{Generation, ParticipantOwner, QueryTaskLifecycle, TaskHan
 use crate::morsel::{MorselRange, MorselSource};
 use crate::stats::RgStats;
 use crate::sync::atomic::{AtomicU32, AtomicU64};
-use crate::sync::{lock, Condvar, Mutex};
+use crate::sync::{lock, Mutex};
 
 use types_error::{PgError, ERROR};
 
@@ -62,36 +62,85 @@ pub(crate) struct RgProgress {
     pub(crate) aborted: bool,
 }
 
+/// RG completion state the submitting leader parks on (§2.5: submit-and-
+/// park is the leader's ONLY interaction).
+///
+/// RE-HOMED onto the real Waiter (M0 lane C, replacing this struct's
+/// interim Mutex+Condvar): a waiting leader registers its thread's
+/// WakerHandle under the same lock that guards the outcome — complete()
+/// either sees the handle (and unparks it) or the waiter sees the outcome,
+/// so a wake cannot be lost — then parks on its own slot. Multiple
+/// CompletionWaiter clones may wait; every registered handle is unparked.
+/// Spurious/stale wakes and the Waiter's recheck cadence backstop re-test
+/// the predicate by looping. Under cfg(loom) the wake side is inert (the
+/// waiter crate's global slot surface is production-only); the loom models
+/// deliberately poll try_wait, as production shutdown does.
 pub(crate) struct Completion {
-    state: Mutex<Option<RgOutcome>>,
-    cv: Condvar,
+    state: Mutex<CompletionInner>,
+}
+
+struct CompletionInner {
+    outcome: Option<RgOutcome>,
+    /// Registered leader waker handles (waiter::WakerHandle as u64).
+    /// Unused under cfg(loom) — nothing parks there.
+    wakers: Vec<u64>,
 }
 
 impl Completion {
     fn new() -> Self {
-        Completion { state: Mutex::new(None), cv: Condvar::new() }
+        Completion {
+            state: Mutex::new(CompletionInner { outcome: None, wakers: Vec::new() }),
+        }
     }
 
     pub(crate) fn complete(&self, outcome: RgOutcome) {
         let mut g = lock(&self.state);
-        debug_assert!(g.is_none(), "resource group completed twice");
-        *g = Some(outcome);
+        debug_assert!(g.outcome.is_none(), "resource group completed twice");
+        g.outcome = Some(outcome);
+        let wakers = std::mem::take(&mut g.wakers);
         drop(g);
-        self.cv.notify_all();
+        #[cfg(not(loom))]
+        for w in wakers {
+            let _ = waiter::unpark_word(w);
+        }
+        #[cfg(loom)]
+        debug_assert!(wakers.is_empty(), "loom models must poll try_wait, not park");
     }
 
+    #[cfg(not(loom))]
     fn wait(&self) -> RgOutcome {
-        let mut g = lock(&self.state);
         loop {
-            if let Some(outcome) = *g {
+            {
+                let mut g = lock(&self.state);
+                if let Some(outcome) = g.outcome {
+                    return outcome;
+                }
+                let h = waiter::current_handle().as_u64();
+                if !g.wakers.contains(&h) {
+                    g.wakers.push(h);
+                }
+            }
+            // Notified (real wake), Recheck (cadence backstop), or a
+            // spurious wake aimed at a previous registration: loop and
+            // re-test the outcome either way.
+            let _ = waiter::park();
+        }
+    }
+
+    /// cfg(loom): nothing exercises a parked leader in the models (they
+    /// poll try_wait); keep wait() compiling for API parity.
+    #[cfg(loom)]
+    fn wait(&self) -> RgOutcome {
+        loop {
+            if let Some(outcome) = self.try_wait() {
                 return outcome;
             }
-            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            loom::thread::yield_now();
         }
     }
 
     fn try_wait(&self) -> Option<RgOutcome> {
-        *lock(&self.state)
+        lock(&self.state).outcome
     }
 }
 
