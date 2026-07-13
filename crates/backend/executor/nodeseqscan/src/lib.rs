@@ -3152,6 +3152,37 @@ pub fn seq_scan_cb_total_rows<'mcx>(
     Ok(::tableam::table_scan_cb_total_rows(node.ss.ss_currentScanDesc.as_ref().unwrap()))
 }
 
+/// Part-global granule geometry of a cbstore scan (runtime morsel source,
+/// M1 scan pipelines): (total granules, row-group-start prefix sums = the
+/// hard morsel boundaries). None = heap or empty part. Opens the scan
+/// descriptor if needed, exactly as the drive would.
+pub fn seq_scan_cb_granule_geometry<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<(u64, Vec<u64>)>> {
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_cb_granule_geometry(
+        node.ss.ss_currentScanDesc.as_ref().unwrap(),
+    ))
+}
+
+/// Position a cbstore scan on the absolute-granule morsel claim [g0, g1)
+/// (whole granules within one row group -- the runtime's boundary-clamped
+/// claim contract). false = not a cbstore scan.
+pub fn seq_scan_cb_set_granule_range<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    g0: u64,
+    g1: u64,
+) -> PgResult<bool> {
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_cb_set_granule_range(
+        node.ss.ss_currentScanDesc.as_mut().unwrap(),
+        g0,
+        g1,
+    )
+}
+
 // Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
 fn cb_scan_info<'mcx>(
     node: &SeqScan<'mcx>,
