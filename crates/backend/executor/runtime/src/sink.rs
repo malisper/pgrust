@@ -57,6 +57,7 @@ use std::sync::Arc;
 use crate::lifecycle::Generation;
 use crate::morsel::{MorselRange, MorselSource};
 use crate::rg::{TaskSetSpec, TaskSetWork};
+use crate::sched::MAX_EXTERNAL_LANES;
 use crate::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::{lock, Mutex};
 
@@ -309,9 +310,14 @@ pub struct SinkTaskSets {
 }
 
 /// Build the accept + combine task sets for `sink` over `source`.
-/// `nthreads` sizes the worker-indexed Local slots — the RUNTIME'S total
-/// thread count ([`crate::Runtime::nthreads`]), not the permit count: a
-/// standby thread absorbing a permit is a first-class worker index.
+/// `nthreads` is the RUNTIME'S total thread count
+/// ([`crate::Runtime::nthreads`]), not the permit count: a standby thread
+/// absorbing a permit is a first-class worker index. The Local slot array is
+/// sized `nthreads + MAX_EXTERNAL_LANES` — external pinned participants
+/// (M1 bound helpers, worker index = nthreads + lane ordinal) are
+/// first-class sink workers too, and under the pinned-engagement regime
+/// they are the ONLY touchers, so forks ≤ launched helpers = the R3
+/// per-launched-worker memory envelope (docs/design/m2-sinks.md §8-R3(a)).
 pub fn sink_tasksets<S: ParallelSink + 'static>(
     sink: Arc<S>,
     source: Arc<dyn MorselSource>,
@@ -325,7 +331,7 @@ pub fn sink_tasksets<S: ParallelSink + 'static>(
     let shared = Arc::new(SinkShared {
         sink,
         bound: Mutex::new(None),
-        locals: (0..nthreads).map(|_| Mutex::new(None)).collect(),
+        locals: (0..nthreads + MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
         sealed: Mutex::new(None),
         probe: Arc::clone(&probe),
     });
@@ -528,6 +534,58 @@ mod tests {
         assert_eq!(sink.forks.load(StdOrdering::SeqCst), 0);
         assert_eq!(sink.result.load(StdOrdering::SeqCst), 0);
         assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+    }
+
+    /// Pinned-engagement leg (M2 phase 1, R3(a)): EXTERNAL participants —
+    /// worker indexes above nthreads, the M1 bound-helper shape — drive a
+    /// pinned RG's sink task sets end to end. Verifies the Local slot array
+    /// covers external pin-board lanes, forks ≤ participants, and the full
+    /// accept→seal→combine→finalize protocol under drive_pinned.
+    #[test]
+    fn toy_sink_pinned_external_participants() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 1,
+            slots: 8,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let sink = ToySink::new(16);
+        let total = 100_000u64;
+        let nthreads = rt.nthreads();
+        let SinkTaskSets { accept, combine, probe } = sink_tasksets(
+            Arc::clone(&sink),
+            Arc::new(SyntheticMorselSource::new(total)),
+            nthreads,
+            0,
+        );
+        let (handle, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 43,
+            tasksets: vec![accept, combine],
+        });
+        let helpers = 3usize;
+        std::thread::scope(|scope| {
+            for _ in 0..helpers {
+                let rt = Arc::clone(&rt);
+                let handle = handle.clone();
+                scope.spawn(move || {
+                    let lane = rt.acquire_external_lane().expect("external lane");
+                    let mut local = lane.local();
+                    let outcome = rt.drive_pinned(&mut local, &handle);
+                    assert_eq!(outcome, RgOutcome::Completed);
+                });
+            }
+        });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+
+        assert_eq!(sink.result.load(StdOrdering::SeqCst), expected_sum(total));
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+        let forks = sink.forks.load(StdOrdering::SeqCst);
+        assert!(forks >= 1 && forks <= helpers as u64, "forks={forks}");
+        assert_eq!(sink.locals_seen_at_finalize.load(StdOrdering::SeqCst), forks);
+        assert_eq!(sink.drops.load(StdOrdering::SeqCst), forks);
+        assert_eq!(probe.stale_locals_dropped(), 0);
+        assert_eq!(probe.combine_refusals(), 0);
     }
 
     /// H1 leg 1: an aborted RG never combines and never finalizes; every
