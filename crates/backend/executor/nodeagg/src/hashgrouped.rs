@@ -297,7 +297,7 @@ fn hashgroup_budget() -> usize {
 /// per-group cost. Refusal falls back to the narrow-sort arm, which handles
 /// any group count spill-safely. `force` (the e2e harness override) skips
 /// the estimate check — the runtime degrade still bounds memory.
-pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool) -> bool {
+pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows: f64) -> bool {
     if force {
         return true;
     }
@@ -305,7 +305,19 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool) -> bool {
     /// Extra per-group estimate per TEXT key column (arena content bytes;
     /// conservative mean — the runtime degrade bounds the real usage).
     const PER_TEXT_KEY_EST: f64 = 64.0;
+    /// DENSITY tier: the arm's win is collapsing many rows into few group
+    /// states; near-unique group keys (CB Q14: ~1.35M input rows over ~690k
+    /// estimated SearchPhrase groups) make the per-row group switch/create
+    /// machinery COST vs the narrowed sort's adjacent dedup — measured
+    /// 2.0s vs 1.44s serial with engage-then-degrade every rep (fleet
+    /// 2026-07-12, 10M bank, work_mem=1GB). Q9-Q12 sit at 200x-100000x
+    /// rows/group; Q14-class near-unique shapes refuse here. `input_rows`
+    /// is the plan Sort's row estimate (0.0 = unknown: tier skipped).
+    const MIN_ROWS_PER_GROUP: f64 = 8.0;
     let est_groups = (node.plan.numGroups as f64).max(1.0);
+    if input_rows > 0.0 && input_rows < MIN_ROWS_PER_GROUP * est_groups {
+        return false;
+    }
     let per_group =
         PER_GROUP_EST + PER_TEXT_KEY_EST * agg_hashgroup_text_key_count(node) as f64;
     est_groups * per_group * 2.0 <= hashgroup_budget() as f64

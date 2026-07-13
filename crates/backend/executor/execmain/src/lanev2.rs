@@ -4762,7 +4762,13 @@ fn try_hashgroup_build<'mcx>(
         return Ok(HgBuild::Refused);
     };
     if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical(agg, distincthash_force())
+        // Density/memory economics: the Sort's row estimate is the arm's
+        // input cardinality (the sort passes every input row through).
+        || !::nodeagg::agg_hashgroup_economical(
+            agg,
+            distincthash_force(),
+            sort.plan.plan.plan_rows,
+        )
     {
         return Ok(HgBuild::Refused);
     }
