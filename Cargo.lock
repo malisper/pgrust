@@ -14834,6 +14834,7 @@ dependencies = [
  "miscinit_seams",
  "pgstat",
  "procarray",
+ "procsignal_seams",
  "s_lock_seams",
  "slot_seams",
  "standby_seams",
@@ -14854,6 +14855,7 @@ name = "slot_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
 ]
 

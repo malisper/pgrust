@@ -108,6 +108,11 @@ fn dir_is_empty(rel: &str) -> bool {
     }
 }
 
+// RS_INVAL_* mask bits (replication/slot.h) for the checkpoint slot sweep;
+// the seam takes a plain u32 mask so transam_xlog needs no slot dependency.
+const RS_INVAL_WAL_REMOVED: i32 = 1 << 0;
+const RS_INVAL_IDLE_TIMEOUT: i32 = 1 << 3;
+
 // Unported-unit guard: no-op only when provably no-op, loud panic otherwise.
 fn require_empty_or_seam(rel: &str, installed: bool, what: &str) {
     if !installed && !dir_is_empty(rel) {
@@ -1131,15 +1136,18 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     }
 
     let mut log_seg_no = XLByteToSeg(check_point.redo, wal_segment_size());
-    // InvalidateObsoleteReplicationSlots is unported: it only matters when a
-    // slot's horizon is pushed forward by max_slot_wal_keep_size — removing
-    // that WAL without invalidating the slot breaks the slot contract, so
-    // that combination must be loud, never a silent removal.
-    if crate::removal::KeepLogSeg(recptr, &mut log_seg_no)? {
-        panic!(
-            "max_slot_wal_keep_size would invalidate a replication slot: \
-             InvalidateObsoleteReplicationSlots not ported"
-        );
+    let _ = crate::removal::KeepLogSeg(recptr, &mut log_seg_no)?;
+    // xlog.c:7383: invalidate slots whose reserved WAL is about to go away
+    // (max_slot_wal_keep_size) or that idled past the timeout; on any
+    // invalidation, recompute the old-segment horizon from RedoRecPtr.
+    if slot_seams::invalidate_obsolete_replication_slots::call(
+        (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
+        log_seg_no,
+        types_core::InvalidOid,
+        types_core::InvalidTransactionId,
+    )? {
+        log_seg_no = XLByteToSeg(check_point.redo, wal_segment_size());
+        let _ = crate::removal::KeepLogSeg(recptr, &mut log_seg_no)?;
     }
     log_seg_no -= 1;
     crate::removal::RemoveOldXlogFiles(
@@ -1279,13 +1287,16 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     };
     let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
     let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
-    // Same InvalidateObsoleteReplicationSlots gating as CreateCheckPoint:
-    // removing slot-protected WAL without invalidating the slot must be loud.
-    if crate::removal::KeepLogSeg(endptr, &mut log_seg_no)? {
-        panic!(
-            "max_slot_wal_keep_size would invalidate a replication slot: \
-             InvalidateObsoleteReplicationSlots not ported"
-        );
+    let _ = crate::removal::KeepLogSeg(endptr, &mut log_seg_no)?;
+    // xlog.c:7841 (CreateRestartPoint): same sweep + horizon recompute.
+    if slot_seams::invalidate_obsolete_replication_slots::call(
+        (RS_INVAL_WAL_REMOVED | RS_INVAL_IDLE_TIMEOUT) as u32,
+        log_seg_no,
+        types_core::InvalidOid,
+        types_core::InvalidTransactionId,
+    )? {
+        log_seg_no = XLByteToSeg(redo_rec_ptr, wal_segment_size());
+        let _ = crate::removal::KeepLogSeg(endptr, &mut log_seg_no)?;
     }
     log_seg_no -= 1;
 

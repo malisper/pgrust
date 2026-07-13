@@ -23,6 +23,7 @@ walsender_config = { path = "../walsender_config" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 standby_seams = { path = "../../storage/ipc/standby_seams" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 condition_variable = { path = "../../storage/lmgr/condition_variable" }
 s_lock_seams = { path = "../../storage/lmgr/s_lock_seams" }
