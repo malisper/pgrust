@@ -8062,6 +8062,7 @@ dependencies = [
  "inval",
  "latch",
  "launcher",
+ "lmgr",
  "logical_worker_seams",
  "logicalproto",
  "logicalrelation",
