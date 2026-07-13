@@ -96,6 +96,11 @@ pub(super) struct RuntimeDistinctShared {
     /// A worker budget crossed mid-accept: NOT an error — the RG aborts and
     /// the leader falls back to the serial arm (m2-sinks.md R5 phase 1).
     crossed: AtomicBool,
+    /// Combine-phase retained bytes (merged bucket outputs, summed across
+    /// claims) — m2-integration R3 accounting for the merged RESULT,
+    /// checked against `worker_budget` (the merged set is one logical
+    /// table's worth of memory). Crossing = the same `crossed` fallback.
+    merged_bytes: AtomicUsize,
     /// Combine output cells, one per group partition. Single writer each:
     /// partition p is claimed exactly once by the combine task set.
     out: Vec<UnsafeCell<Option<PdMerged<'static>>>>,
@@ -212,6 +217,22 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         }));
         match r {
             Ok(m) => {
+                // R3 accounting (m2-integration audit): the merged bucket is
+                // RETAINED until the leader adopts — meter it against the
+                // ADMITTED engagement envelope (forked Locals x per-Local
+                // budget: the merged union is bounded by the sum of the
+                // sealed tables' content, so this trips only on real
+                // overhead/accounting surprises — fail-closed, visible).
+                // NOT one worker_budget: the union legitimately exceeds a
+                // single Local's budget (the q9@100M rt1-crosses/rt2-fits
+                // booked behavior). Crossing takes the same bounded fallback
+                // as an accept-phase crossing.
+                let b = m.mem_bytes();
+                let total = self.merged_bytes.fetch_add(b, Ordering::SeqCst) + b;
+                if total > self.spec.worker_budget.saturating_mul(sealed.len().max(1)) {
+                    self.cross();
+                    return;
+                }
                 // SAFETY: partition `part` is handed to this claimer alone
                 // (sink contract); finalize reads happen-after every combine.
                 unsafe { *self.out[part as usize].get() = Some(m) };
@@ -753,6 +774,7 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         crossed: AtomicBool::new(false),
+        merged_bytes: AtomicUsize::new(0),
         out: (0..PD_SINK_GROUP_PARTS as usize).map(|_| UnsafeCell::new(None)).collect(),
         merged: Mutex::new(None),
     });

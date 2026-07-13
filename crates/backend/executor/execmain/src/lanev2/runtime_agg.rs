@@ -128,6 +128,12 @@ struct AggSink {
     /// A Local crossed its memory budget: not an error — the leader falls
     /// back to the serial arm (R5 whole-attempt rerun).
     budget_refused: AtomicBool,
+    /// Combine-phase retained bytes (the per-bucket emit buffers, summed
+    /// across claims) — the m2-integration R3 accounting for the merged
+    /// RESULT, checked against the same `budget` (the merged output is one
+    /// logical hash-table's worth of memory, C's hash_mem_limit law).
+    /// Crossing = budget refusal, exactly the Local discipline.
+    combined_bytes: AtomicUsize,
     /// WFIN accounting, indexed by worker slot (pin-board lane).
     wfin: Vec<[WfinPipe; 2]>,
 }
@@ -207,6 +213,18 @@ impl runtime::ParallelSink for AggSink {
         }
         for l in locals.iter_mut() {
             l.part = l.table.as_ref().map(|t| sink_partition_remainder(t.table()));
+            // R3 accounting (m2-integration audit): the SEAL index is
+            // per-Local retained memory that lives through the whole combine
+            // phase — charge it like a run. Crossing = budget refusal (R5
+            // whole-attempt rerun), never an error.
+            if let Some(p) = &l.part {
+                l.run_bytes += p.bytes();
+                let table_mem = l.table.as_ref().map_or(0, |t| t.table().mem_used());
+                if l.run_bytes + table_mem > self.budget {
+                    self.refuse_budget();
+                    return;
+                }
+            }
         }
     }
 
@@ -220,6 +238,11 @@ impl runtime::ParallelSink for AggSink {
         }
         let t0 = std::time::Instant::now();
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
+            // Std-collections audit note: this views Vec is a per-claim
+            // allocation, but the combine morsel space is a FIXED 256
+            // partitions x dop-sized views — bounded per engagement,
+            // independent of data volume (accepted; a borrowed view cannot
+            // be retained across claims without lifetime erasure).
             let views: Vec<SinkLocalView<'_>> = locals
                 .iter()
                 .map(|l| SinkLocalView {
@@ -238,6 +261,17 @@ impl runtime::ParallelSink for AggSink {
                 &self.combines,
             )?;
             let buf = sink_emit_bucket(&self.emit, &merged);
+            // R3 accounting (m2-integration audit): the emit buffers are the
+            // RETAINED merged result (held until the leader drains) — meter
+            // them against the budget; crossing = budget refusal (R5 rerun).
+            // The transient per-bucket merge table is bounded by <= dop
+            // concurrent claims of bucket-sized tables and drops here.
+            let retained = buf.bytes();
+            let total = self.combined_bytes.fetch_add(retained, Ordering::SeqCst) + retained;
+            if total > self.budget {
+                self.refuse_budget();
+                return Ok(());
+            }
             // SAFETY: partition `part` is claimed exactly once (runtime
             // contract); this is its single writer.
             unsafe { *self.out_emit[part as usize].get() = buf };
@@ -1025,6 +1059,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
+        combined_bytes: AtomicUsize::new(0),
         wfin: (0..rt.nthreads() + runtime::MAX_EXTERNAL_LANES)
             .map(|_| [WfinPipe::default(), WfinPipe::default()])
             .collect(),

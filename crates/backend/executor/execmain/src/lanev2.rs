@@ -6923,9 +6923,11 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
             // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
             // M2 runtime DISTINCT sink first (armed only under
-            // PGRUST_RUNTIME=1 + pgrust.runtime_scan_pool > 0 — absent, one
-            // GUC read and fall through). Owns the node on engagement;
-            // refusal/fallback keeps every serial arm below byte-identical.
+            // PGRUST_RUNTIME=1 + pgrust.runtime_distinct_pool > 0, falling
+            // back to pgrust.runtime_scan_pool — absent, two placeholder GUC
+            // lookups (alloc-free when never SET) and fall through). Owns
+            // the node on engagement; refusal/fallback keeps every serial
+            // arm below byte-identical.
             match runtime_distinct::try_own_sorted_distinct_runtime(
                 agg, state, &mut **outer, outer_desc, rd_shape_refused, k, estate,
             )? {

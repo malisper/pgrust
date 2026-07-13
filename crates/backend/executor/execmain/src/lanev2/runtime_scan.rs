@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodeagg::runtime_partial::{
-    agg_runtime_combine, agg_runtime_export_partial, agg_runtime_partial_admissible,
+    agg_runtime_combine, agg_runtime_export_partial_into, agg_runtime_partial_admissible,
     exec_agg_runtime_partials, RuntimePartial,
 };
 use ::types_error::{PgError, PgResult, ERROR};
@@ -234,13 +234,19 @@ impl RuntimeScanShared {
                         }
                         DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
                     }
-                    // Cumulative partial export (overwrite): the worker's
+                    // Cumulative partial export (in place): the worker's
                     // LAST morsel's export — which precedes its settle, and
                     // therefore RG completion — is the one the leader reads.
-                    let partial = agg_runtime_export_partial(&aps.agg)?;
+                    // The slot's partial is reused across morsels (retained
+                    // capacity; a fresh Vec per morsel was a malloc+free
+                    // pair on the engaged path — m2-integration audit).
                     let slot = worker - self.pins_base;
-                    *self.partials[slot].lock().unwrap_or_else(|p| p.into_inner()) =
-                        Some(partial);
+                    let mut g =
+                        self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                    agg_runtime_export_partial_into(
+                        &aps.agg,
+                        g.get_or_insert_with(Default::default),
+                    )?;
                     Ok(())
                 })
             })

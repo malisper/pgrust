@@ -130,10 +130,26 @@ unsafe fn int8_transarray_elems(datum: Datum) -> PgResult<*mut i64> {
 /// partial. Must run before the worker's executor is torn down (the by-ref
 /// states live in its aggcontext).
 pub fn agg_runtime_export_partial(node: &AggStateData<'_>) -> PgResult<RuntimePartial> {
+    let mut out = RuntimePartial::default();
+    agg_runtime_export_partial_into(node, &mut out)?;
+    Ok(out)
+}
+
+/// As [`agg_runtime_export_partial`], writing into a caller-retained
+/// partial (capacity reused across morsels — the export runs once per
+/// morsel per worker, and a fresh Vec each time was a malloc+free pair on
+/// the engaged data path; m2-integration std-collections audit, AGENTS.md
+/// rule 7).
+pub fn agg_runtime_export_partial_into(
+    node: &AggStateData<'_>,
+    partial: &mut RuntimePartial,
+) -> PgResult<()> {
     let plan = crate::agg_lanefold_plan(node)
         .ok_or_else(|| PgError::error("runtime partial export without a fold plan".to_string()))?;
     let base = crate::agg_plain_pergroup_base(node);
-    let mut out = Vec::with_capacity(plan.trans.len());
+    let out = &mut partial.trans;
+    out.clear();
+    out.reserve(plan.trans.len());
     for t in plan.trans.iter() {
         // SAFETY: transno indexes the node's once-allocated pergroup array
         // (fold plan transnos come from its spec list).
@@ -195,7 +211,7 @@ pub fn agg_runtime_export_partial(node: &AggStateData<'_>) -> PgResult<RuntimePa
         };
         out.push((t.transno, p));
     }
-    Ok(RuntimePartial { trans: out })
+    Ok(())
 }
 
 fn combine_two(kind: LaneKind, a: RuntimePartialTrans, b: RuntimePartialTrans) -> RuntimePartialTrans {
