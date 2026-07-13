@@ -780,7 +780,7 @@ fn logicalrep_read_attrs(
     let mut atttyps = Vec::with_capacity(natts);
     let mut attkeys = vec![false; natts];
 
-    for (i, key) in attkeys.iter_mut().enumerate().take(natts) {
+    for key in attkeys.iter_mut() {
         let flags = r.get_byte()?;
         if flags & LOGICALREP_IS_REPLICA_IDENTITY != 0 {
             *key = true;
@@ -788,7 +788,6 @@ fn logicalrep_read_attrs(
         attnames.push(r.get_string()?);
         atttyps.push(r.get_int32()?);
         let _attypmod = r.get_int32()?; // ignored, as in C
-        let _ = i;
     }
     Ok((natts, attnames, atttyps, attkeys))
 }
