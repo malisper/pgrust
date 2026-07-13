@@ -98,6 +98,10 @@ pub struct WorkerLocal {
     /// Per-slot WFIN accumulation (marker contract; see [`markers_enabled`]).
     /// Untouched (empty vec) when markers are off.
     wfin: Vec<Option<WfinStat>>,
+    /// Pinned-drive fast path: the last (slot, seq) this local drove for its
+    /// pinned RG. Revalidated by one slot-word read per step; the membership
+    /// lock is touched only when it goes stale (publish/finalize events).
+    pinned_slot: Option<(usize, u64)>,
     /// INERT until M5: thread-local stride state (SIGMOD'21 §2.3 — each
     /// worker runs stride scheduling locally over the same slot set).
     #[allow(dead_code)]
@@ -286,6 +290,7 @@ impl Scheduler {
             } else {
                 Vec::new()
             },
+            pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
@@ -303,6 +308,7 @@ impl Scheduler {
             } else {
                 Vec::new()
             },
+            pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
@@ -475,11 +481,27 @@ impl Scheduler {
         local: &mut WorkerLocal,
         rg: &Arc<ResourceGroup>,
     ) -> Step {
-        let slot = {
-            let m = lock(&self.membership);
-            m.owned
-                .iter()
-                .position(|e| e.as_ref().is_some_and(|e| Arc::ptr_eq(&e.ts.rg, rg)))
+        // Fast path: the cached (slot, seq) revalidated by one slot-word
+        // read — the membership lock is a publish/finalize-event cost, not a
+        // per-step cost (the sched-probe decision-cost budget).
+        let slot = match local.pinned_slot {
+            Some((slot, seq))
+                if self.slots[slot].word.load(Ordering::SeqCst) == (seq << 1) | 1 =>
+            {
+                Some(slot)
+            }
+            _ => {
+                let found = {
+                    let m = lock(&self.membership);
+                    m.owned.iter().enumerate().find_map(|(i, e)| {
+                        e.as_ref()
+                            .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                            .map(|e| (i, e.seq))
+                    })
+                };
+                local.pinned_slot = found;
+                found.map(|(slot, _)| slot)
+            }
         };
         let Some(slot) = slot else {
             // Queued behind other RGs, or completed: the caller re-tests
