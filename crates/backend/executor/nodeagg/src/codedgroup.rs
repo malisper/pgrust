@@ -678,14 +678,17 @@ pub fn agg_codedgroup_emit_next<'mcx>(
     estate.reset_expr_context(node.ps_ExprContext);
     let mcx = estate.es_query_cxt;
     {
-        // Collect the group's values (all merged states' contiguous runs —
-        // finish_build's counting sort) into the emit scratch.
+        // Multi-state groups (the same phrase across epochs) collect their
+        // runs into the emit scratch; the common single-state group reads
+        // its `vals_flat` run in place (no copy) below.
         let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
         cg.vals.clear();
-        for gi in 0..cg.gstates.len() {
-            let s = cg.gstates[gi] as usize;
-            let (a, b) = (cg.state_off[s] as usize, cg.state_off[s + 1] as usize);
-            cg.vals.extend_from_slice(&cg.vals_flat[a..b]);
+        if cg.gstates.len() > 1 {
+            for gi in 0..cg.gstates.len() {
+                let s = cg.gstates[gi] as usize;
+                let (a, b) = (cg.state_off[s] as usize, cg.state_off[s + 1] as usize);
+                cg.vals.extend_from_slice(&cg.vals_flat[a..b]);
+            }
         }
     }
     // Group-init transition state (initialize_aggregates' one-transition
@@ -717,6 +720,14 @@ pub fn agg_codedgroup_emit_next<'mcx>(
         let AggStateData { codedgroup, pertrans_sort, .. } = node;
         let cg = codedgroup.as_deref_mut().expect("codedgroup state");
         let pt = &mut pertrans_sort[0];
+        // Single-state groups read their run in place; merged groups read
+        // the scratch the collect above filled.
+        let vals: &[i64] = if cg.gstates.len() == 1 {
+            let s = cg.gstates[0] as usize;
+            &cg.vals_flat[cg.state_off[s] as usize..cg.state_off[s + 1] as usize]
+        } else {
+            &cg.vals
+        };
         // SAFETY: transno 0 of the once-allocated pergroup array, just
         // initialized above.
         let pg = base.as_ptr();
@@ -724,20 +735,20 @@ pub fn agg_codedgroup_emit_next<'mcx>(
             && pt.set_count_transfn
             && crate::distinctfin_enabled()
             && !pt.dset_degraded
-            && cg.vals.len() <= cgemit_small_max()
+            && vals.len() <= cgemit_small_max()
             // SAFETY: as `pg` above — the drain's own state guards.
             && unsafe { !(*pg).no_trans_value && !(*pg).trans_value_is_null };
         if fast {
             // SAFETY: `pg` as above; non-null by-val i64 count state per the
             // guard read.
-            unsafe { crate::count_distinct_apply(pg, count_distinct_small(&cg.vals))? };
+            unsafe { crate::count_distinct_apply(pg, count_distinct_small(vals))? };
         } else {
             let mut set = pt.dset.take().unwrap_or_else(DistinctSet::new);
             debug_assert!(set.len() == 0 && !set.seen_null, "replay returns the set cleared");
             if cgemit_enabled() {
-                set.insert_i64_batch(&cg.vals, &mut cg.val_hashes);
+                set.insert_i64_batch(vals, &mut cg.val_hashes);
             } else {
-                for &v in &cg.vals {
+                for &v in vals {
                     set.insert_i64(v);
                 }
             }
