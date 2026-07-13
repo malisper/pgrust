@@ -9,6 +9,8 @@ path = "src/lib.rs"
 
 [dependencies]
 parallel = { path = "../../access/transam/parallel" }
+runtime = { path = "../runtime" }
+nodes_core = { path = "../../nodes/nodes_core" }
 tqueue = { path = "../tqueue" }
 shm_mq = { path = "../../storage/ipc/shm_mq" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
