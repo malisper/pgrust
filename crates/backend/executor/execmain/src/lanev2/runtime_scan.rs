@@ -1254,9 +1254,18 @@ fn standing_wait(
             parallel::standing::close_and_await(&entry);
             return Ok(StandingWait::Fallback);
         }
-        // Gang dead/busy: nothing claimed within the deadline. The RG is
-        // untouched; the launched path takes over.
-        if claimed == 0 && t0.elapsed() > standing_claim_deadline() {
+        // Nothing driving and nothing pending within the deadline: gang
+        // dead/busy (claimed==0) OR a smaller-than-tickets gang whose every
+        // claimant exited pre-drive without reaching the refusal counters'
+        // tickets floor above (started==0, detached>=claimed>0). Either
+        // way no granule was consumed; the launched path takes over. A
+        // straggler that claims right as we close simply drives the same
+        // RG (morsel claims are atomic; its partial combines like any
+        // participant's) — close_and_await bounds on its drive.
+        if started == 0
+            && entry.detached() >= claimed
+            && t0.elapsed() > standing_claim_deadline()
+        {
             lane_trace("runtime-scan: standing claim deadline — launched fallback");
             take_slot();
             parallel::standing::close_and_await(&entry);
