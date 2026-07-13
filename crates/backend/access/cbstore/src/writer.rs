@@ -45,7 +45,8 @@ impl CbWriterOpts {
     pub fn plain(ncols: usize) -> CbWriterOpts {
         CbWriterOpts {
             cluster_key: Vec::new(),
-            codec: vec![CodecChoice::Auto; ncols],
+            // Train #8 ingest default: LZ4 (matches CbstoreOptions::default).
+            codec: vec![CodecChoice::Lz4; ncols],
             zstd_level: ZSTD_LEVEL_DEFAULT,
         }
     }
