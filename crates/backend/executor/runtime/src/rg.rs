@@ -175,6 +175,14 @@ fn abort_error() -> Box<PgError> {
 pub struct ResourceGroup {
     pub(crate) rg_id: u64,
     pub(crate) query_id: u64,
+    /// M1 pinned submission (`Runtime::submit_pinned`): the RG's task sets
+    /// are executed ONLY by external participant threads driving
+    /// `Runtime::drive_pinned` — publication never sets the global active
+    /// bit, so pool workers (which cannot bind the query's session state
+    /// yet; §2.3 db-pinning is M2+) never claim from it. All other protocol
+    /// machinery (cursor, sizing, pin board, last-worker-out finalization,
+    /// abort drain) is identical.
+    pub(crate) pinned: bool,
     /// Query-owned generation machinery (H1 structural fix): every task the
     /// runtime carves for this RG carries (query_id, generation) and enters
     /// shared state only through the generation's fail-closed armed join
@@ -197,7 +205,7 @@ pub struct ResourceGroup {
 }
 
 impl ResourceGroup {
-    pub(crate) fn new(rg_id: u64, spec: QuerySpec) -> Arc<ResourceGroup> {
+    pub(crate) fn new(rg_id: u64, spec: QuerySpec, pinned: bool) -> Arc<ResourceGroup> {
         let n = spec.tasksets.len();
         for (i, ts) in spec.tasksets.iter().enumerate() {
             for &d in &ts.deps {
@@ -209,6 +217,7 @@ impl ResourceGroup {
         Arc::new(ResourceGroup {
             rg_id,
             query_id: spec.query_id,
+            pinned,
             task,
             handle,
             tasksets: spec.tasksets,
@@ -300,7 +309,33 @@ pub struct RgHandle {
     pub(crate) rg: Arc<ResourceGroup>,
 }
 
+/// Weak RG handle: breaks the `work → RG → tasksets → work` Arc cycle when
+/// a TaskSetWork implementation needs an abort path back into its own RG
+/// (M1 scan pipelines: the work records its first error and aborts). An
+/// upgrade fails only after the submitting leader dropped its handles —
+/// at which point nothing executes the work anymore.
+#[derive(Clone)]
+pub struct WeakRgHandle {
+    pub(crate) rg: std::sync::Weak<ResourceGroup>,
+}
+
+impl WeakRgHandle {
+    pub fn upgrade(&self) -> Option<RgHandle> {
+        self.rg.upgrade().map(|rg| RgHandle { rg })
+    }
+}
+
 impl RgHandle {
+    pub fn downgrade(&self) -> WeakRgHandle {
+        WeakRgHandle { rg: Arc::downgrade(&self.rg) }
+    }
+
+    /// Non-blocking completion probe (the external pinned driver's loop
+    /// condition; the submitting leader keeps the CompletionWaiter).
+    pub fn try_outcome(&self) -> Option<RgOutcome> {
+        self.rg.completion.try_wait()
+    }
+
     /// Abort the RG's generation: cancel closes the lifecycle word, so no
     /// new task may consume it (the fail-closed join refuses — unconsumable
     /// by construction); in-flight morsels drain at their next boundary and

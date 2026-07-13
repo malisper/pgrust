@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod runtime_scan;
 mod push;
 mod stats;
 
@@ -2195,6 +2196,16 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
+    // M1 runtime scan arm (fold shapes only; the Meta arm preempts above —
+    // footer answers beat any parallel scan): FORCED engagement under
+    // PGRUST_RUNTIME=1 + pgrust.runtime_scan_pool, serial plan surface
+    // unchanged. None = not engaged/refused — fall through to the serial
+    // feeds byte-identically (nothing was consumed).
+    if c == AggLaneChoice::Fold {
+        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+            return Ok(Some(r));
+        }
+    }
     // One OWNED tick per lane-owned plain-agg build event (the gate's
     // aggbuild floor counts builds, not calls; a plain node builds once per
     // (re)scan — this drive runs the whole feed inside one call).
@@ -2547,6 +2558,20 @@ fn agg_plain_fold_feed<'mcx>(
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    agg_plain_fold_drain(agg, ss, estate)
+}
+
+/// The fold feed's drain half (split out for the runtime morsel drive,
+/// which arms staging + build_begin ONCE per worker and then re-enters this
+/// loop per claimed granule range): drives `seq_scan_next_pagebatch` to
+/// exhaustion — the whole scan on the serial feed; exactly the positioned
+/// claim on a granule-ranged scan — folding into the CURRENT pergroups.
+/// Byte-path-identical to the pre-split body (pure extraction).
+fn agg_plain_fold_drain<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
     // Str MIN/MAX dict-code side channel (lane-v2-dictminmax; identity plan→
