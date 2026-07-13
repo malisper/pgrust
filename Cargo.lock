@@ -15520,6 +15520,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "spillset"
+version = "0.0.0"
+dependencies = [
+ "aio_seams",
+ "elog",
+ "fd",
+ "guc_tables",
+ "ipc_seams",
+ "libc",
+ "mcx",
+ "pgstat_seams",
+ "postgres_seams",
+ "resowner",
+ "resowner_seams",
+ "runtime",
+ "types_error",
+ "types_resowner",
+ "waitevent_seams",
+ "xact_seams",
+]
+
+[[package]]
 name = "sql_functions"
 version = "0.1.0"
 dependencies = [

@@ -450,3 +450,97 @@ fn standby_absorption() {
         assert_eq!(rt.execution_permits().available(), 1);
     });
 }
+
+/// Model 5 (M3.5 §6.1): model 4 driven through the SPILL FACADE instead of
+/// a direct io_section — the pool-loop emulation REGISTERS each thread
+/// (PermitThreadReg), the task body calls `blocking_io_section()` with no
+/// runtime reference (the spill-substrate call shape), and the armed
+/// section donates/reacquires the permit under every interleaving. The
+/// facade's TLS gate must never confuse the permit count or the
+/// last-worker-out protocol.
+#[test]
+fn facade_standby_absorption() {
+    struct FacadeIoWork {
+        inner: Arc<ModelWork>,
+        io_taken: AtomicUsize,
+    }
+    impl TaskSetWork for FacadeIoWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if self.io_taken.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Declared blocking spill I/O on the FIRST morsel, through
+                // the facade: armed because the driving thread registered.
+                let io = runtime::blocking_io_section();
+                thread::yield_now(); // let the standby absorb the permit
+                self.inner.run_morsel(worker, range);
+                drop(io);
+            } else {
+                self.inner.run_morsel(worker, range);
+            }
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    /// Pool-loop emulation with the real permit + park discipline AND the
+    /// facade registration (mirrors pool.rs worker_loop).
+    fn drive_registered(rt: &Runtime, worker: usize, waiter: &CompletionWaiter) {
+        // SAFETY: the runtime outlives this drive; the permit is held
+        // across worker_step, where the facade is called.
+        let _reg = unsafe { runtime::PermitThreadReg::new(rt.execution_permits()) };
+        let mut local = rt.worker_local(worker);
+        loop {
+            if waiter.try_wait().is_some() {
+                break;
+            }
+            let epoch = rt.park_epoch();
+            rt.execution_permits().acquire();
+            let step = rt.worker_step(&mut local);
+            rt.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => thread::yield_now(),
+                Step::Idle => {
+                    if waiter.try_wait().is_some() {
+                        break;
+                    }
+                    rt.park(epoch);
+                }
+                Step::Stop => break,
+            }
+        }
+        rt.request_stop();
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        // workers=1 ⇒ ONE execution permit; standbys=1 ⇒ two pool threads.
+        let rt = small_runtime(1, 1);
+        let inner = ModelWork::new(2, None);
+        let work = Arc::new(FacadeIoWork {
+            inner: Arc::clone(&inner),
+            io_taken: AtomicUsize::new(0),
+        });
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 5,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let standby = thread::spawn(move || drive_registered(&rt1, 1, &waiter1));
+        drive_registered(&rt, 0, &waiter);
+        standby.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        inner.assert_complete();
+        assert_eq!(rt.stats().finalize_events, 1);
+        // Every facade-donated permit came back: full capacity restored.
+        assert_eq!(rt.execution_permits().available(), 1);
+    });
+}
