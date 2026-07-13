@@ -589,9 +589,17 @@ pub(crate) fn ReadBuffer_batched(
     }
     let seg_left = (types_storage::smgr::RELSEG_SIZE - (blkno % types_storage::smgr::RELSEG_SIZE))
         as usize;
+    // The extra blocks each hold a pin until the readv completes: cap the run
+    // by the backend's remaining fair share (read_stream.c:316 caps its
+    // pinned-buffer budget with GetAdditionalPinLimit(), which may be zero).
+    // Without this, a seqscan on a tiny pool pins it whole and any concurrent
+    // (or own) allocation dies with "no unpinned buffers available" (016's
+    // shared_buffers=128kB primary).
+    let pin_room = 1 + crate::extend::GetAdditionalPinLimit() as usize;
     let cap = (crate::gucs::io_combine_limit().clamp(1, MAX_READ_BATCH as i32) as usize)
         .min(nblocks_hint.max(1) as usize)
-        .min(seg_left);
+        .min(seg_left)
+        .min(pin_room);
     let mut bufs: [Buffer; MAX_READ_BATCH] = [InvalidBuffer; MAX_READ_BATCH];
     bufs[0] = buffer;
     let mut n = 1usize;
