@@ -93,6 +93,15 @@ static SIGNAL_FILE_RECOVERY: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static DO_REQUEST_WALRCV_REPLY: Cell<bool> = const { Cell::new(false) };
     static RECOVERY: RefCell<Option<Recovery>> = const { RefCell::new(None) };
+    // pendingWalRcvRestart + the walreceiver's started-with parameters
+    // (xlogrecovery.c file statics). NOT fields of Recovery: PerformWalRecovery
+    // takes the struct out of RECOVERY for the whole redo loop, so the SIGHUP
+    // seam (ProcessStartupProcInterrupts -> StartupRereadWalRcvConfig ->
+    // StartupRequestWalReceiverRestart) must reach them without it — all on
+    // the startup thread.
+    static PENDING_WALRCV_RESTART: Cell<bool> = const { Cell::new(false) };
+    static WALRCV_STARTED_WITH: RefCell<Option<(String, String, bool)>> =
+        const { RefCell::new(None) };
 }
 
 pub fn ArchiveRecoveryRequested() -> bool {
@@ -199,16 +208,6 @@ struct PageSource {
     cur_source: XLogSource,
     cur_file_tli: TimeLineID,
     last_source_failed: bool,
-    pending_walrcv_restart: bool,
-    // The (conninfo, slotname, create_temp_slot) the running walreceiver was
-    // started with. C's StartupRereadConfig diffs the startup process's
-    // private GUC copies across its reload; string GUC backings here are
-    // process-shared (guc_tables backing.rs string_var), so the postmaster's
-    // reload is already visible before the startup rereads — the C diff can
-    // never fire. Diffing against the started-with values is the same
-    // predicate: in C the startup's pre-reload copy always equals what the
-    // walreceiver was launched with.
-    walrcv_started_with: Option<(String, String, bool)>,
     expected_tles: Vec<Tle>,
     emode: ErrorLevel,
     fetching_ckpt: bool,
@@ -240,8 +239,6 @@ impl PageSource {
             cur_source: XLogSource::Any,
             cur_file_tli: 0,
             last_source_failed: false,
-            pending_walrcv_restart: false,
-            walrcv_started_with: None,
             expected_tles: Vec::new(),
             emode: LOG,
             fetching_ckpt: false,
@@ -556,14 +553,14 @@ impl PageSource {
                 }
                 XLogSource::Stream => {
                     debug_assert!(StandbyMode());
-                    if self.pending_walrcv_restart && !start_walreceiver {
+                    if PENDING_WALRCV_RESTART.with(Cell::get) && !start_walreceiver {
                         xlog_shutdown_wal_rcv();
                         if targets::timeline_goal() == RecoveryTargetTimeLineGoal::Latest {
                             self.rescan_latest_timeline(self.replay_tli, replay_lsn)?;
                         }
                         start_walreceiver = true;
                     }
-                    self.pending_walrcv_restart = false;
+                    PENDING_WALRCV_RESTART.with(|c| c.set(false));
 
                     let conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
                     if start_walreceiver && !conninfo.is_empty() {
@@ -595,8 +592,10 @@ impl PageSource {
                             &slotname,
                             create_temp_slot,
                         )?;
-                        self.walrcv_started_with =
-                            Some((conninfo.clone(), slotname.clone(), create_temp_slot));
+                        WALRCV_STARTED_WITH.with(|c| {
+                            *c.borrow_mut() =
+                                Some((conninfo.clone(), slotname.clone(), create_temp_slot));
+                        });
                         self.flushed_upto = 0;
                     }
 
@@ -2036,9 +2035,7 @@ pub fn StartupRereadWalRcvConfig() {
     let read_str = |v: &guc_tables::GucStringVar| -> String {
         if v.installed() { v.read().unwrap_or_default() } else { String::new() }
     };
-    let started = RECOVERY.with(|cell| {
-        cell.borrow().as_ref().and_then(|rec| rec.src.walrcv_started_with.clone())
-    });
+    let started = WALRCV_STARTED_WITH.with(|c| c.borrow().clone());
     let Some((conninfo, slotname, temp_slot)) = started else {
         return;
     };
@@ -2055,19 +2052,19 @@ pub fn StartupRereadWalRcvConfig() {
     }
 }
 
-// StartupRequestWalReceiverRestart (xlogrecovery.c:4417).
+// StartupRequestWalReceiverRestart (xlogrecovery.c:4417). C also checks
+// currentSource == XLOG_FROM_STREAM; the Recovery struct holding cur_source
+// is moved out of RECOVERY during the redo loop, so the running-walreceiver
+// check stands alone (recorded divergence: a transient non-stream source with
+// a live walreceiver requests a restart C would skip — the pending flag is
+// consumed and cleared by the next stream attempt either way).
 pub fn StartupRequestWalReceiverRestart() {
-    RECOVERY.with(|cell| {
-        if let Some(rec) = cell.borrow_mut().as_mut() {
-            if rec.src.cur_source == XLogSource::Stream
-                && walreceiverfuncs_seams::wal_rcv_running::is_installed()
-                && walreceiverfuncs_seams::wal_rcv_running::call()
-            {
-                let _ = elog(LOG, "WAL receiver process shutdown requested".to_string());
-                rec.src.pending_walrcv_restart = true;
-            }
-        }
-    });
+    if walreceiverfuncs_seams::wal_rcv_running::is_installed()
+        && walreceiverfuncs_seams::wal_rcv_running::call()
+    {
+        let _ = elog(LOG, "WAL receiver process shutdown requested".to_string());
+        PENDING_WALRCV_RESTART.with(|c| c.set(true));
+    }
 }
 
 pub fn GetXLogReceiptTime() -> (TimestampTz, bool) {
