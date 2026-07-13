@@ -90,6 +90,16 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 Ok(bytesread)
             }
             CopySrc::Frontend { .. } => self.copy_get_data_frontend(at, minread, maxread),
+            CopySrc::Callback { .. } => {
+                // Split borrows: the callback writes straight into raw_buf.
+                let CopyFromState { src, raw_buf, raw_reached_eof, .. } = self;
+                let CopySrc::Callback { cb } = src else { unreachable!() };
+                let n = cb(&mut raw_buf[at..at + maxread], minread)?;
+                if n == 0 {
+                    *raw_reached_eof = true;
+                }
+                Ok(n)
+            }
         }
     }
 
@@ -107,7 +117,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             loop {
                 let msgbuf = match &self.src {
                     CopySrc::Frontend { msgbuf } => msgbuf,
-                    CopySrc::File { .. } => unreachable!(),
+                    CopySrc::File { .. } | CopySrc::Callback { .. } => unreachable!(),
                 };
                 if msgbuf.cursor < msgbuf.len() {
                     break;
@@ -140,7 +150,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 };
                 let msgbuf = match &mut self.src {
                     CopySrc::Frontend { msgbuf } => msgbuf,
-                    CopySrc::File { .. } => unreachable!(),
+                    CopySrc::File { .. } | CopySrc::Callback { .. } => unreachable!(),
                 };
                 if pqcomm::pq_getmessage(msgbuf, maxmsglen)? != 0 {
                     return Err(unexpected_eof());
@@ -165,7 +175,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             }
             let msgbuf = match &mut self.src {
                 CopySrc::Frontend { msgbuf } => msgbuf,
-                CopySrc::File { .. } => unreachable!(),
+                CopySrc::File { .. } | CopySrc::Callback { .. } => unreachable!(),
             };
             let avail = (msgbuf.len() - msgbuf.cursor).min(maxread);
             let (from, cursor) = (msgbuf.as_bytes().as_ptr(), msgbuf.cursor);
