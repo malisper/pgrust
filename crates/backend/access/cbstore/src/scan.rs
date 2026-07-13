@@ -356,6 +356,12 @@ pub struct CbScanDescData<'mcx> {
     // Condition cache (pgrust.condition_cache): armed by the PREWHERE driver
     // with the staged prefix's canonical fingerprint. None = unarmed.
     cond: Option<Box<CondState>>,
+    // Claim-time readahead env gate (PGRUST_CBSTORE_READAHEAD; default on),
+    // read once per scan. STRUCTURAL SCOPE GUARD: the flag is only ever
+    // consulted inside claim_next_rg's PARALLEL arm — serial scans never
+    // advise regardless of the env (arm A serial-vs-CH-mt1 stays
+    // prefetch-free per Michael's standing directive).
+    readahead: bool,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
     // Subset of granules_pruned attributed to a bloom rejection (the granule
@@ -367,6 +373,9 @@ pub struct CbScanDescData<'mcx> {
     pub windows_staged: u64,
     pub granules_bound_skipped: u64,
     pub adaptive_probe_reverts: u64,
+    // Row groups whose chunk extents were advised (claim-time readahead).
+    // Test/observability channel: a serial scan must always read 0 here.
+    pub rgs_readahead: u64,
     // Granules answered wholesale from v7 footer length stats (never decoded).
     pub granules_meta: u64,
     // v7 stitch identity for this scan's dict lanes (SoaDictTable::gepoch):
@@ -387,6 +396,16 @@ enum GranulePruneCause {
 
 fn env_off(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("on"))
+}
+
+// Claim-time readahead gate: default ON; PGRUST_CBSTORE_READAHEAD=0/off is
+// the kill switch. Parallel scans only — the serial guard is structural
+// (claim_next_rg's serial arm never consults this).
+fn env_readahead_on() -> bool {
+    !matches!(
+        std::env::var("PGRUST_CBSTORE_READAHEAD").as_deref(),
+        Ok("0") | Ok("off") | Ok("OFF"),
+    )
 }
 
 // v7 stitch identity source: nonzero, process-unique per scan instance.
@@ -479,6 +498,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             row_cursor: 0,
             adaptive: None,
             cond: None,
+            readahead: env_readahead_on(),
             granules_pruned: 0,
             granules_bloom_pruned: 0,
             granules_scanned: 0,
@@ -486,6 +506,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             windows_staged: 0,
             granules_bound_skipped: 0,
             adaptive_probe_reverts: 0,
+            rgs_readahead: 0,
             granules_meta: 0,
             scan_uid: next_scan_uid(),
         }
@@ -627,13 +648,38 @@ impl<'mcx> CbScanDescData<'mcx> {
     fn claim_next_rg(&mut self) -> usize {
         match self.rs_base.rs_parallel {
             Some(p) => {
-                unsafe { p.as_ref() }.phs_nallocated.fetch_add(1, Ordering::SeqCst) as usize
+                let r = unsafe { p.as_ref() }.phs_nallocated.fetch_add(1, Ordering::SeqCst)
+                    as usize;
+                // Claim-time readahead (parallelism-redesign §2.8): while
+                // this worker computes row group `r`, hint the kernel at the
+                // NEXT unclaimed row group's chunk extents (needed columns
+                // only) so its pages stream in behind the compute. PARALLEL
+                // ARM ONLY — the serial arm below never advises (arm A
+                // serial-vs-CH-mt1 stays prefetch-free, structurally).
+                if self.readahead {
+                    self.advise_rg(r + 1);
+                }
+                r
             }
             None => {
                 let r = self.serial_next;
                 self.serial_next += 1;
                 r
             }
+        }
+    }
+
+    // madvise(WILLNEED) row group `rg`'s needed-column chunk extents.
+    // Advisory only: no scan state beyond the counter changes, no mapped
+    // byte is touched (extents come from footer metadata), and RGs the scan
+    // would prune wholesale (zone-refused) are skipped rather than fetched.
+    fn advise_rg(&mut self, rg: usize) {
+        let Some(part) = self.part.as_ref() else { return };
+        if rg >= part.rgs.len() || self.needed_idx.is_empty() || !self.rg_zone_ok(rg) {
+            return;
+        }
+        if part.advise_willneed(rg, &self.needed_idx) {
+            self.rgs_readahead += 1;
         }
     }
 
