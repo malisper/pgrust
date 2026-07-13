@@ -342,6 +342,251 @@ pub fn sink_tasksets<S: ParallelSink + 'static>(
     SinkTaskSets { accept, combine, probe }
 }
 
+// ===========================================================================
+// Sealed variant (M2 distinct sink; proposed shared extension — flagged for
+// reconciliation with the agg-sink lane).
+//
+// Some sinks' per-worker partial state is not combinable in place: it must
+// first be FROZEN into a partitioned wire form (pardistinct's
+// `PdBuilder::freeze` → `PdHandedTable`; donor A's exchange flush is the
+// same move). Freezing is O(partial data) — running it single-threaded
+// inside the accept set's SEAL would serialize a data-sized pass (the
+// donors freeze per worker, in parallel). The runtime gives no per-worker
+// "your participation ended" event (a worker's last morsel is only known
+// in hindsight), so the parallel freeze becomes its own TASK SET:
+//
+//   ACCEPT  (source = data morsels)      fork + accept_local; finalize = no-op
+//   SEALCVT (source = one granule per Local slot, deps=[accept])
+//           run_morsel = seal(worker slot) in parallel, one slot per claim;
+//           finalize   = SEAL (collect Sealed in slot order)
+//   COMBINE (source = partition space, deps=[sealcvt])  as the base contract
+//
+// Generation keying, fail-closed combine, and the probe counters are
+// identical to the two-set plumbing above.
+// ===========================================================================
+
+/// A [`ParallelSink`] whose Locals need a per-worker parallel freeze before
+/// the combine can read them. Same threading rules as [`ParallelSink`], plus:
+/// - `seal` — parallel across Local slots, exactly once per forked Local
+///   (its task set claims each slot index once);
+/// - `combine`/`finalize` see `&[Sealed]` in worker-slot order.
+pub trait SealedParallelSink: Send + Sync {
+    /// Per-worker partial build state. `Send` only: exactly one thread
+    /// touches a Local at a time (accept by its worker, seal by its claimer).
+    type Local: Send;
+    /// The frozen, combine-readable form.
+    type Sealed: Send + Sync;
+
+    fn fork(&self, worker: usize) -> Self::Local;
+    fn accept_local(&self, local: &mut Self::Local, worker: usize, range: MorselRange);
+    /// Freeze one worker's Local. Parallel across slots; infallible by
+    /// contract (operator-side errors are recorded out of band and abort
+    /// the RG — the M1 run_morsel discipline).
+    fn seal(&self, worker: usize, local: Self::Local) -> Self::Sealed;
+    fn partitions(&self) -> u64;
+    fn combine(&self, part: u64, sealed: &[Self::Sealed]);
+    fn finalize(&self, sealed: &[Self::Sealed]);
+}
+
+struct SealedShared<S: SealedParallelSink> {
+    sink: Arc<S>,
+    bound: Mutex<Option<Generation>>,
+    locals: Box<[Mutex<Option<(Generation, S::Local)>>]>,
+    /// Per-slot sealed output (written by the seal task set, one claimer per
+    /// slot), collected into `sealed` at that set's last-worker-out.
+    sealed_slots: Box<[Mutex<Option<(Generation, S::Sealed)>>]>,
+    sealed: Mutex<Option<(Generation, Arc<Vec<S::Sealed>>)>>,
+    probe: Arc<SinkProbe>,
+}
+
+impl<S: SealedParallelSink> SealedShared<S> {
+    fn bound_generation(&self) -> Generation {
+        lock(&self.bound).expect(
+            "sink task set ran before bind_generation — scheduler publish contract violated",
+        )
+    }
+}
+
+/// ACCEPT: fork-on-first-touch + accept_local (as the base plumbing); the
+/// set's finalize is a no-op — sealing belongs to the seal task set.
+struct SealedAccept<S: SealedParallelSink>(Arc<SealedShared<S>>);
+
+impl<S: SealedParallelSink> TaskSetWork for SealedAccept<S> {
+    fn bind_generation(&self, generation: Generation) {
+        *lock(&self.0.bound) = Some(generation);
+    }
+
+    fn run_morsel(&self, worker: usize, range: MorselRange) {
+        let generation = self.0.bound_generation();
+        let mut slot = lock(&self.0.locals[worker]);
+        match &*slot {
+            Some((g, _)) if *g == generation => {}
+            Some(_) => {
+                self.0.probe.stale_dropped.fetch_add(1, Ordering::SeqCst);
+                *slot = Some((generation, self.0.sink.fork(worker)));
+            }
+            None => {
+                *slot = Some((generation, self.0.sink.fork(worker)));
+            }
+        }
+        let (_, local) = slot.as_mut().expect("just forked");
+        self.0.sink.accept_local(local, worker, range);
+    }
+
+    fn finalize(&self) {}
+}
+
+/// The seal task set: one granule per Local slot; each claim freezes that
+/// slot's Local (if any) in parallel. Finalize = SEAL: collect the sealed
+/// values in slot order for the combine set.
+struct SealedFreeze<S: SealedParallelSink>(Arc<SealedShared<S>>);
+
+impl<S: SealedParallelSink> TaskSetWork for SealedFreeze<S> {
+    fn bind_generation(&self, generation: Generation) {
+        *lock(&self.0.bound) = Some(generation);
+    }
+
+    fn run_morsel(&self, _worker: usize, range: MorselRange) {
+        let generation = self.0.bound_generation();
+        for i in range {
+            let i = i as usize;
+            let taken = lock(&self.0.locals[i]).take();
+            match taken {
+                Some((g, local)) if g == generation => {
+                    let sealed = self.0.sink.seal(i, local);
+                    *lock(&self.0.sealed_slots[i]) = Some((generation, sealed));
+                }
+                Some(_) => {
+                    self.0.probe.stale_dropped.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn finalize(&self) {
+        let generation = self.0.bound_generation();
+        let mut sealed = Vec::new();
+        for slot in self.0.sealed_slots.iter() {
+            match lock(slot).take() {
+                Some((g, s)) if g == generation => sealed.push(s),
+                Some(_) => {
+                    self.0.probe.stale_dropped.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
+            }
+        }
+        *lock(&self.0.sealed) = Some((generation, Arc::new(sealed)));
+    }
+}
+
+/// COMBINE + finalize: identical protocol to the base plumbing's
+/// [`SinkCombine`], reading `Sealed` instead of `Local`.
+struct SealedCombine<S: SealedParallelSink>(Arc<SealedShared<S>>);
+
+impl<S: SealedParallelSink> SealedCombine<S> {
+    fn sealed_for(&self, generation: Generation) -> Option<Arc<Vec<S::Sealed>>> {
+        let g = lock(&self.0.sealed);
+        match &*g {
+            Some((sg, sealed)) if *sg == generation => Some(Arc::clone(sealed)),
+            _ => None,
+        }
+    }
+}
+
+impl<S: SealedParallelSink> TaskSetWork for SealedCombine<S> {
+    fn bind_generation(&self, generation: Generation) {
+        *lock(&self.0.bound) = Some(generation);
+    }
+
+    fn run_morsel(&self, _worker: usize, range: MorselRange) {
+        let generation = self.0.bound_generation();
+        let Some(sealed) = self.sealed_for(generation) else {
+            self.0.probe.combine_refusals.fetch_add(1, Ordering::SeqCst);
+            return;
+        };
+        for part in range {
+            self.0.sink.combine(part, &sealed);
+        }
+    }
+
+    fn finalize(&self) {
+        let generation = self.0.bound_generation();
+        let taken = {
+            let mut g = lock(&self.0.sealed);
+            match g.take() {
+                Some((sg, sealed)) if sg == generation => Some(sealed),
+                other => {
+                    *g = other;
+                    None
+                }
+            }
+        };
+        let Some(sealed) = taken else {
+            self.0.probe.combine_refusals.fetch_add(1, Ordering::SeqCst);
+            return;
+        };
+        self.0.sink.finalize(&sealed);
+        debug_assert_eq!(
+            Arc::strong_count(&sealed),
+            1,
+            "combine task outlived finalize"
+        );
+    }
+}
+
+/// The three task-set specs of one sealed sink. The caller places them
+/// CONSECUTIVELY in its [`crate::rg::QuerySpec`] starting at `accept_index`
+/// (freeze at `accept_index + 1`, combine at `accept_index + 2`); the dep
+/// wiring assumes that layout.
+pub struct SealedSinkTaskSets {
+    pub accept: TaskSetSpec,
+    pub freeze: TaskSetSpec,
+    pub combine: TaskSetSpec,
+    pub probe: Arc<SinkProbe>,
+}
+
+/// Build accept + freeze + combine task sets for a [`SealedParallelSink`].
+/// `nslots` sizes the worker-indexed Local slots; callers whose participants
+/// are EXTERNAL pinned-drive lanes (M1 helpers) must pass
+/// `nthreads + MAX_EXTERNAL_LANES` — external worker indices start at
+/// `nthreads` ([`crate::Runtime::external_local`]).
+pub fn sealed_sink_tasksets<S: SealedParallelSink + 'static>(
+    sink: Arc<S>,
+    source: Arc<dyn MorselSource>,
+    nslots: usize,
+    accept_index: usize,
+) -> SealedSinkTaskSets {
+    assert!(nslots > 0);
+    let parts = sink.partitions();
+    assert!(parts > 0, "a SealedParallelSink must expose at least one partition");
+    let probe = Arc::new(SinkProbe::default());
+    let shared = Arc::new(SealedShared {
+        sink,
+        bound: Mutex::new(None),
+        locals: (0..nslots).map(|_| Mutex::new(None)).collect(),
+        sealed_slots: (0..nslots).map(|_| Mutex::new(None)).collect(),
+        sealed: Mutex::new(None),
+        probe: Arc::clone(&probe),
+    });
+    let accept = TaskSetSpec {
+        source,
+        work: Arc::new(SealedAccept(Arc::clone(&shared))),
+        deps: Vec::new(),
+    };
+    let freeze = TaskSetSpec {
+        source: Arc::new(PartitionSource { parts: nslots as u64 }),
+        work: Arc::new(SealedFreeze(Arc::clone(&shared))),
+        deps: vec![accept_index],
+    };
+    let combine = TaskSetSpec {
+        source: Arc::new(PartitionSource { parts }),
+        work: Arc::new(SealedCombine(Arc::clone(&shared))),
+        deps: vec![accept_index + 1],
+    };
+    SealedSinkTaskSets { accept, freeze, combine, probe }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
@@ -672,6 +917,234 @@ mod tests {
         combine.finalize();
         assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 0);
         assert!(lock(&shared.sealed).is_some(), "mismatched seal must be left in place");
+        assert_eq!(probe.combine_refusals(), 2);
+    }
+
+    // ---- sealed (three-set) variant ---------------------------------------
+
+    /// Toy sealed grouped-sum sink: as [`ToySink`] but the Local must be
+    /// FROZEN (sums copied into a `Sealed` wire vec) before combine may read
+    /// it. Verifies fork/accept/seal-exactly-once-per-local/combine-exactly-
+    /// once-per-partition/finalize-once sequencing and the drop census.
+    struct ToySealedSink {
+        parts: u64,
+        forks: StdAtomicU64,
+        seals: StdAtomicU64,
+        drops: Arc<StdAtomicU64>,
+        combined: Vec<StdAtomicU64>,
+        combine_calls: Vec<StdAtomicU64>,
+        finalizes: StdAtomicU64,
+        result: StdAtomicU64,
+        sealed_seen_at_finalize: StdAtomicU64,
+    }
+
+    struct ToySealed {
+        sums: Vec<u64>,
+    }
+
+    impl ToySealedSink {
+        fn new(parts: u64) -> Arc<ToySealedSink> {
+            Arc::new(ToySealedSink {
+                parts,
+                forks: StdAtomicU64::new(0),
+                seals: StdAtomicU64::new(0),
+                drops: Arc::new(StdAtomicU64::new(0)),
+                combined: (0..parts).map(|_| StdAtomicU64::new(0)).collect(),
+                combine_calls: (0..parts).map(|_| StdAtomicU64::new(0)).collect(),
+                finalizes: StdAtomicU64::new(0),
+                result: StdAtomicU64::new(0),
+                sealed_seen_at_finalize: StdAtomicU64::new(0),
+            })
+        }
+    }
+
+    impl SealedParallelSink for ToySealedSink {
+        type Local = ToyLocal;
+        type Sealed = ToySealed;
+
+        fn fork(&self, _worker: usize) -> ToyLocal {
+            self.forks.fetch_add(1, StdOrdering::SeqCst);
+            ToyLocal { sums: vec![0; self.parts as usize], drops: Arc::clone(&self.drops) }
+        }
+
+        fn accept_local(&self, local: &mut ToyLocal, _worker: usize, range: MorselRange) {
+            for g in range {
+                local.sums[(g % self.parts) as usize] += g + 1;
+            }
+        }
+
+        fn seal(&self, _worker: usize, local: ToyLocal) -> ToySealed {
+            self.seals.fetch_add(1, StdOrdering::SeqCst);
+            ToySealed { sums: local.sums.clone() }
+        }
+
+        fn partitions(&self) -> u64 {
+            self.parts
+        }
+
+        fn combine(&self, part: u64, sealed: &[ToySealed]) {
+            let prev = self.combine_calls[part as usize].fetch_add(1, StdOrdering::SeqCst);
+            assert_eq!(prev, 0, "partition {part} combined twice");
+            let sum: u64 = sealed.iter().map(|s| s.sums[part as usize]).sum();
+            self.combined[part as usize].store(sum, StdOrdering::SeqCst);
+        }
+
+        fn finalize(&self, sealed: &[ToySealed]) {
+            for (p, calls) in self.combine_calls.iter().enumerate() {
+                assert_eq!(
+                    calls.load(StdOrdering::SeqCst),
+                    1,
+                    "partition {p} not combined exactly once before finalize"
+                );
+            }
+            self.sealed_seen_at_finalize.store(sealed.len() as u64, StdOrdering::SeqCst);
+            let total: u64 = self.combined.iter().map(|c| c.load(StdOrdering::SeqCst)).sum();
+            self.result.store(total, StdOrdering::SeqCst);
+            self.finalizes.fetch_add(1, StdOrdering::SeqCst);
+        }
+    }
+
+    fn toy_sealed_spec(
+        sink: &Arc<ToySealedSink>,
+        total: u64,
+        nslots: usize,
+    ) -> (QuerySpec, Arc<SinkProbe>) {
+        let SealedSinkTaskSets { accept, freeze, combine, probe } = sealed_sink_tasksets(
+            Arc::clone(sink),
+            Arc::new(SyntheticMorselSource::new(total)),
+            nslots,
+            0,
+        );
+        let spec = QuerySpec { query_id: 43, tasksets: vec![accept, freeze, combine] };
+        (spec, probe)
+    }
+
+    #[test]
+    fn sealed_sink_end_to_end_multiworker() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 1,
+            slots: 8,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let sink = ToySealedSink::new(16);
+        let total = 100_000u64;
+        let nslots = rt.nthreads();
+        let (spec, probe) = toy_sealed_spec(&sink, total, nslots);
+        let (_h, waiter) = rt.submit(spec);
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+
+        assert_eq!(sink.result.load(StdOrdering::SeqCst), expected_sum(total));
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+        let forks = sink.forks.load(StdOrdering::SeqCst);
+        assert!(forks >= 1 && forks <= nslots as u64, "forks={forks}");
+        assert_eq!(sink.seals.load(StdOrdering::SeqCst), forks, "seal once per forked Local");
+        assert_eq!(sink.sealed_seen_at_finalize.load(StdOrdering::SeqCst), forks);
+        // Every Local dropped exactly once (consumed by seal).
+        assert_eq!(sink.drops.load(StdOrdering::SeqCst), forks);
+        assert_eq!(probe.stale_locals_dropped(), 0);
+        assert_eq!(probe.combine_refusals(), 0);
+    }
+
+    #[test]
+    fn sealed_sink_single_worker_deterministic() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let sink = ToySealedSink::new(8);
+        let total = 4096u64;
+        let (spec, probe) = toy_sealed_spec(&sink, total, rt.nthreads());
+        let (_h, waiter) = rt.submit(spec);
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        assert_eq!(sink.result.load(StdOrdering::SeqCst), expected_sum(total));
+        assert_eq!(sink.forks.load(StdOrdering::SeqCst), 1);
+        assert_eq!(sink.seals.load(StdOrdering::SeqCst), 1);
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+        assert_eq!(probe.stale_locals_dropped(), 0);
+        assert_eq!(probe.combine_refusals(), 0);
+    }
+
+    /// Zero-granule input: no forks, no seals; combine over an empty sealed
+    /// vec; finalize exactly once.
+    #[test]
+    fn sealed_sink_empty_input() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let sink = ToySealedSink::new(4);
+        let (spec, _probe) = toy_sealed_spec(&sink, 0, rt.nthreads());
+        let (_h, waiter) = rt.submit(spec);
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        assert_eq!(sink.forks.load(StdOrdering::SeqCst), 0);
+        assert_eq!(sink.seals.load(StdOrdering::SeqCst), 0);
+        assert_eq!(sink.result.load(StdOrdering::SeqCst), 0);
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 1);
+    }
+
+    /// H1 for the sealed plumbing, driven directly: stale-generation Locals
+    /// are dropped un-sealed by the freeze set; SEAL collects only matching
+    /// generations; the combine set fail-closes on a mismatched seal.
+    #[test]
+    fn sealed_stale_generation_unconsumable() {
+        let sink = ToySealedSink::new(4);
+        let probe = Arc::new(SinkProbe::default());
+        let shared = Arc::new(SealedShared {
+            sink: Arc::clone(&sink),
+            bound: Mutex::new(None),
+            locals: (0..2).map(|_| Mutex::new(None)).collect(),
+            sealed_slots: (0..2).map(|_| Mutex::new(None)).collect(),
+            sealed: Mutex::new(None),
+            probe: Arc::clone(&probe),
+        });
+        let accept = SealedAccept(Arc::clone(&shared));
+        let freeze = SealedFreeze(Arc::clone(&shared));
+
+        accept.bind_generation(Generation(1));
+        accept.run_morsel(0, 0..8);
+        assert_eq!(sink.forks.load(StdOrdering::SeqCst), 1);
+
+        // Re-publish under generation 2; the freeze set must drop the stale
+        // Local un-sealed.
+        freeze.bind_generation(Generation(2));
+        freeze.run_morsel(0, 0..2);
+        assert_eq!(sink.seals.load(StdOrdering::SeqCst), 0, "stale Local must not seal");
+        assert_eq!(probe.stale_locals_dropped(), 1);
+        freeze.finalize();
+        {
+            let sealed = lock(&shared.sealed);
+            let (g, v) = sealed.as_ref().expect("sealed");
+            assert_eq!(*g, Generation(2));
+            assert!(v.is_empty());
+        }
+
+        // A combine bound to a third generation refuses the seal.
+        let combine = SealedCombine(Arc::clone(&shared));
+        combine.bind_generation(Generation(3));
+        combine.run_morsel(0, 0..4);
+        for c in &sink.combine_calls {
+            assert_eq!(c.load(StdOrdering::SeqCst), 0);
+        }
+        combine.finalize();
+        assert_eq!(sink.finalizes.load(StdOrdering::SeqCst), 0);
         assert_eq!(probe.combine_refusals(), 2);
     }
 }

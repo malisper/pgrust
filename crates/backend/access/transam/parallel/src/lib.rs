@@ -64,16 +64,34 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // anything a worker could still be parked on. Inert unless registered; on
 // this tree only the binder substrate e2e registers them (the runtime
 // pool/scheduler lane owns the production park).
-static POST_TASK_PARK: std::sync::OnceLock<fn(&ParallelShared)> = std::sync::OnceLock::new();
-static PRIVATE_SHUTDOWN: std::sync::OnceLock<fn(&(dyn Any + Send + Sync))> =
-    std::sync::OnceLock::new();
+// MULTI-REGISTRANT (M2 sinks): several runtime arms coexist (M1 runtime-scan,
+// the M2 sink arms), each with its own private-payload type; every hook
+// downcasts the payload and no-ops on foreign types, so ALL registered hooks
+// run. Registration is append-only and idempotent (fn-pointer dedup); the
+// lists are tiny, written once per arm per process, read per worker task.
+static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
-    let _ = POST_TASK_PARK.set(f);
+    let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.contains(&f) {
+        v.push(f);
+    }
 }
 
 pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
-    let _ = PRIVATE_SHUTDOWN.set(f);
+    let mut v = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.contains(&f) {
+        v.push(f);
+    }
+}
+
+fn post_task_park_hooks() -> Vec<fn(&ParallelShared)> {
+    POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn private_shutdown_hooks() -> Vec<fn(&(dyn Any + Send + Sync))> {
+    PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 pub enum WorkerMessage {
@@ -805,9 +823,10 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
 
-    // Release parked helpers BEFORE waiting for worker exit below.
-    if let Some(f) = PRIVATE_SHUTDOWN.get() {
-        if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+    // Release parked helpers BEFORE waiting for worker exit below. Every
+    // registered hook runs; each no-ops on foreign payload types.
+    if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+        for f in private_shutdown_hooks() {
             f(&*p);
         }
     }
@@ -1127,7 +1146,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     // releases it (DestroyParallelContext at the latest). A hook panic must
     // not corrupt the already-sent outcome.
     if outcome.is_ok() {
-        if let Some(f) = POST_TASK_PARK.get() {
+        for f in post_task_park_hooks() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
         }
     }
