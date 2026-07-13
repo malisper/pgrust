@@ -54,28 +54,33 @@ guc_tables::session_guc_bool!(
 );
 
 fn setup_seams() {
-    guc_tables::init_seams();
-    elog::init_seams();
-    guc::init_seams();
-    xact_seams::is_in_parallel_mode::set(|| false);
-    scalar_seams::parse_bool::set(|value| match value {
-        "true" | "on" | "yes" | "1" => Some(true),
-        "false" | "off" | "no" | "0" => Some(false),
-        _ => None,
+    // Process-wide installs exactly once: several tests share this binary and
+    // init_seams()' slot installs panic on a second call (slots.rs:50).
+    static SEAMS: std::sync::Once = std::sync::Once::new();
+    SEAMS.call_once(|| {
+        guc_tables::init_seams();
+        elog::init_seams();
+        guc::init_seams();
+        xact_seams::is_in_parallel_mode::set(|| false);
+        scalar_seams::parse_bool::set(|value| match value {
+            "true" | "on" | "yes" | "1" => Some(true),
+            "false" | "off" | "no" | "0" => Some(false),
+            _ => None,
+        });
+        aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
+        mbutils_seams::get_database_encoding::set(|| 6);
+        timestamp_seams::get_current_timestamp::set(|| 0);
+        guc_tables::vars::XLogArchiveLibrary.install_if_absent(GucVarAccessors {
+            get: archive_library_global,
+            set: set_archive_library_global,
+        });
+        guc_tables::vars::enable_incremental_sort.install_if_absent(GucVarAccessors {
+            get: enable_incremental_sort,
+            set: set_enable_incremental_sort,
+        });
     });
-    aclchk_seams::pg_parameter_aclcheck_set::set(|_, _| Ok(true));
-    mbutils_seams::get_database_encoding::set(|| 6);
-    timestamp_seams::get_current_timestamp::set(|| 0);
-    guc_tables::vars::XLogArchiveLibrary.install_if_absent(GucVarAccessors {
-        get: archive_library_global,
-        set: set_archive_library_global,
-    });
-    guc_tables::vars::enable_incremental_sort.install_if_absent(GucVarAccessors {
-        get: enable_incremental_sort,
-        set: set_enable_incremental_sort,
-    });
-    // SetConfigOption derives srole via GetUserId (real backends run
-    // InitPostgres).
+    // Per-thread: SetConfigOption derives srole via GetUserId (real backends
+    // run InitPostgres).
     miscinit::SetUserIdAndSecContext(10, 0);
 }
 
