@@ -47,7 +47,7 @@ use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_fmgr::{LocalFcinfo, PGFunction};
 
-use crate::compact::{RedDerived, RedShape};
+use crate::compact::{MkCompKind, MkShape, RedDerived, RedShape};
 use crate::AggStateData;
 
 /// Combine partition count — the donors' 256-bucket radix space (top 8 hash
@@ -484,20 +484,29 @@ pub fn sink_combine_bucket(
 // Identity emit (paremit).
 // ---------------------------------------------------------------------------
 
-/// The sink's single-word key spec, snapshotted at admission (leader side —
+/// The sink's compact key spec, snapshotted at admission (leader side —
 /// the same decide the worker arms run).
 #[derive(Clone, Debug)]
 pub enum SinkKeySpec {
     Single { width: u8 },
     Reduced(RedShape),
+    /// Packed multi-int composite (Mk car): the canonical key words ARE the
+    /// packed image, merged across workers verbatim (value-derived — no
+    /// per-worker state like intern ids can appear; admission enforces
+    /// all-Int non-nullable components).
+    Multi(MkShape),
 }
 
 impl SinkKeySpec {
+    /// The single-word key width (Single/Reduced emit's `Key`/`Derived`
+    /// datum width). Multi shapes never emit those columns — their per-
+    /// component widths ride [`SinkEmitCol::MultiComp`].
     #[inline]
     pub fn width(&self) -> u8 {
         match self {
             SinkKeySpec::Single { width } => *width,
             SinkKeySpec::Reduced(s) => s.width,
+            SinkKeySpec::Multi(_) => 8,
         }
     }
 }
@@ -509,6 +518,10 @@ pub enum SinkEmitCol {
     Key,
     /// A reconstructed redundant key (Reduced shapes; NULL for NULL group).
     Derived(RedDerived),
+    /// One packed multi-key Int component: `width` bytes at byte `off` of
+    /// the row's key image, sign-extended (`compact_key_datums_mk`'s Int
+    /// arm, exactly). Multi tables have no NULL group row.
+    MultiComp { off: u8, width: u8 },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
 }
@@ -561,6 +574,19 @@ pub fn sink_build_emit_plan(
                     None => cols.push(SinkEmitCol::Key),
                     Some(d) => cols.push(SinkEmitCol::Derived(*d)),
                 },
+                SinkKeySpec::Multi(shape) => {
+                    // Int components only (the Mk car's admission); Intern
+                    // ids are per-worker and Numeric is the phase-2 class —
+                    // both refuse upstream, re-checked here fail-closed.
+                    let comp = shape.comps.get(j)?;
+                    let MkCompKind::Int { width } = comp.kind else {
+                        return None;
+                    };
+                    if shape.nullable {
+                        return None;
+                    }
+                    cols.push(SinkEmitCol::MultiComp { off: comp.off, width });
+                }
             }
             continue;
         }
@@ -609,7 +635,12 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
     let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
     let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
     for row in 0..n {
-        let key = t.row_key_int(row);
+        // Single/Reduced tables: kw[0] IS the canonical i64 key (Int repr);
+        // Multi tables: kw is the packed key image (1 or 2 words). None =
+        // the out-of-band NULL group (single-word shapes only — Multi
+        // tables never probe it).
+        let kw = row_key_words(t, row);
+        let key = kw.map(|w| w[0] as i64);
         let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
         for c in &plan.cols {
             match *c {
@@ -632,6 +663,25 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
                         nulls.push(false);
                     }
                     None => {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    }
+                },
+                SinkEmitCol::MultiComp { off, width } => match kw {
+                    // compact_key_datums_mk's Int arm: width bytes at off,
+                    // sign-extended, datum at the component's width.
+                    Some(w) => {
+                        let image = (w[0] as u128) | ((w[1] as u128) << 64);
+                        let bits = (image >> (off as u32 * 8)) as u64;
+                        let sh = 64 - width as u32 * 8;
+                        let v =
+                            if sh == 0 { bits as i64 } else { ((bits << sh) as i64) >> sh };
+                        values.push(key_datum(width, v));
+                        nulls.push(false);
+                    }
+                    None => {
+                        // Unreachable for Multi tables (no NULL group row);
+                        // fail-soft as SQL NULL rather than asserting.
                         values.push(Datum::null());
                         nulls.push(true);
                     }
@@ -684,6 +734,16 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
     }
 }
 
+/// Disarm SINK MODE (leader-side cap-aware admission probes): the leader's
+/// own executor may still run the SERIAL build (engagement refusal / budget
+/// fallback / rescan), which must never see sink mode — under a live cap the
+/// compact backstop fails closed instead of migrating.
+pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
+    if let Some(ph) = node.perhash.as_mut() {
+        ph.sink_cap = None;
+    }
+}
+
 /// The node's per-participant hash memory budget (C
 /// `work_mem × hash_mem_multiplier` — `get_hash_memory_limit`), the R3
 /// per-Local envelope.
@@ -703,7 +763,9 @@ pub fn agg_sink_key_width(node: &AggStateData<'_>) -> Option<u8> {
 }
 
 /// The ARMED compact table's sink key spec (worker-side shape re-check).
-/// `None` = not armed or a shape the phase-1 sink refuses (Multi / intern).
+/// `None` = not armed or a shape the sink refuses: intern tables (per-worker
+/// ids — never canonical across Locals), nullable Multi images (heap
+/// sources), or non-Int Multi components (Numeric = phase 2, Intern = C2).
 pub fn agg_sink_key_spec(node: &AggStateData<'_>) -> Option<SinkKeySpec> {
     let ch = node.perhash.as_ref()?.compact.as_ref()?;
     if ch.intern.is_some() {
@@ -716,7 +778,17 @@ pub fn agg_sink_key_spec(node: &AggStateData<'_>) -> Option<SinkKeySpec> {
         crate::compact::CompactKeySpec::Reduced(shape) => {
             Some(SinkKeySpec::Reduced(shape.clone()))
         }
-        crate::compact::CompactKeySpec::Multi(_) => None,
+        crate::compact::CompactKeySpec::Multi(shape) => {
+            if shape.nullable
+                || shape
+                    .comps
+                    .iter()
+                    .any(|c| !matches!(c.kind, MkCompKind::Int { .. }))
+            {
+                return None;
+            }
+            Some(SinkKeySpec::Multi(shape.clone()))
+        }
     }
 }
 
@@ -1094,6 +1166,67 @@ mod tests {
         assert!(buf.nulls[4] && buf.nulls[5]);
         assert_eq!(buf.values[6].as_i64(), 2);
         assert_eq!(buf.values[7].as_i64(), 1);
+    }
+
+    #[test]
+    fn emit_bucket_multi_components() {
+        // One-word packed image: int4 at off 0, int2 at off 4 (q42 class).
+        let mut t = mk_table(8);
+        let img: u64 = ((-7i32 as u32) as u64) | ((300u16 as u64) << 32);
+        bump(&mut t, Some(img as i64), 5, 9);
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::MultiComp { off: 0, width: 4 },
+                SinkEmitCol::MultiComp { off: 4, width: 2 },
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        let buf = sink_emit_bucket(&plan, &t);
+        assert_eq!(buf.nrows, 1);
+        assert_eq!(buf.values[0].as_i32(), -7);
+        assert_eq!(buf.values[1].as_i16(), 300);
+        assert_eq!(buf.values[2].as_i64(), 5);
+        assert!(!buf.nulls[0] && !buf.nulls[1] && !buf.nulls[2]);
+
+        // Two-word packed image: int8 at off 0, int4 at off 8 (q41 class —
+        // the component at off 8 lives entirely in the high key word).
+        let mut t2 = LaneAggTable::with_config(
+            KeyRepr::Int128,
+            STATE_BYTES,
+            8,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        let w0 = (-123456789i64) as u64;
+        let w1 = (54321u32 as u64) & 0xFFFF_FFFF;
+        let pr = t2.probe_i128([w0, w1], t2.hash_key_i128([w0, w1]));
+        let pg = pr.states.cast::<AggPerGroup>();
+        unsafe {
+            pg.write(AggPerGroup {
+                trans_value: Datum::from_i64(2),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            });
+            pg.add(1).write(AggPerGroup {
+                trans_value: Datum::from_i64(0),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            });
+        }
+        let plan2 = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::MultiComp { off: 0, width: 8 },
+                SinkEmitCol::MultiComp { off: 8, width: 4 },
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        let buf2 = sink_emit_bucket(&plan2, &t2);
+        assert_eq!(buf2.nrows, 1);
+        assert_eq!(buf2.values[0].as_i64(), -123456789);
+        assert_eq!(buf2.values[1].as_i32(), 54321);
+        assert_eq!(buf2.values[2].as_i64(), 2);
     }
 
     #[test]
