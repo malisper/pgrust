@@ -199,6 +199,10 @@ struct BatchSoa<'mcx> {
     // dict-code consumer PREWHERE v1 said didn't exist yet). None = every
     // dict-answered qual lane gathers back to Raw as before.
     dict_group: Option<u16>,
+    // Condition cache armed (pgrust.condition_cache): the scan desc carries
+    // the fingerprint+entry state; this flag gates the pagebatch drive's
+    // lookup/store calls and the end-of-scan stats line.
+    cond_armed: bool,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -744,6 +748,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 lane: None,
                 lane_requal: false,
                 dict_group: None,
+                cond_armed: false,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -875,6 +880,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
                         lane: None,
                         lane_requal: false,
                         dict_group: None,
+                        cond_armed: false,
                         sel: [0; ::exectuples::SOA_BM_WORDS],
                         nwords: 0,
                         cur_word: 0,
@@ -900,12 +906,30 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
             if lq.ndict() > 0 {
                 ::laneexec::log_dict_clauses(lq.ndict());
             }
+            let cond_fp = lq.fingerprint;
             b.lane = Some(lq);
             // Post-qual materialization: granule decode per column on
             // demand — undeformed clauses' columns never decode, store_slot
             // completes the needed set on the first surviving row.
             let sd = node.ss.ss_currentScanDesc.as_mut().unwrap();
             ::tableam::table_scan_set_lazy_decode(sd, true);
+            // Condition cache (pgrust.condition_cache, default OFF): arm the
+            // scan with the staged prefix's canonical fingerprint so hot
+            // re-executions serve window verdicts from memory. Requires a
+            // cacheable prefix (fingerprint Some: deterministic and
+            // non-erroring per clause — volatile/param/subplan quals never
+            // translate, regex dict clauses refuse).
+            if ::guc_tables::backing::pgrust_condition_cache() {
+                if let Some(fp) = cond_fp {
+                    let cap =
+                        ::guc_tables::backing::pgrust_condition_cache_size().max(0) as u64 * 1024;
+                    b.cond_armed = ::tableam::table_scan_condcache_arm(sd, fp, cap);
+                    if b.cond_armed {
+                        ::laneexec::log_condcache_armed();
+                        lane_trace("cbstore condition cache armed");
+                    }
+                }
+            }
             lane_trace("cbstore prewhere armed");
             Ok(true)
         }
@@ -999,6 +1023,7 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
             lane: None,
             lane_requal: false,
             dict_group: dict_key,
+            cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1218,6 +1243,7 @@ fn arm_key_soa<'mcx>(
             lane: None,
             lane_requal: false,
                 dict_group: None,
+            cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1368,6 +1394,7 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             lane: None,
             lane_requal: false,
             dict_group: None,
+            cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1432,6 +1459,7 @@ pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
             lane: None,
             lane_requal: false,
                 dict_group: None,
+            cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1729,7 +1757,29 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 if n % 64 != 0 {
                     b.sel[nwords - 1] = (1u64 << (n % 64)) - 1;
                 }
-                if lq.nstaged() >= 2 {
+                // Condition cache hit (pgrust.condition_cache): the staged
+                // window's prefix verdicts served from memory — the qual's
+                // decode + evaluation legs are skipped wholesale. Surviving
+                // windows complete the FULL deform exactly as the miss
+                // path's survivor branch does (dict-answered lanes gather
+                // back to Raw, dict-group codes stay); an all-fail window
+                // matches the miss path's zone-AllFail state (begun batch,
+                // no fills — nothing downstream reads an empty selection).
+                // The requal tail is untouched: it re-runs the full original
+                // qual per surviving row at fetch on hit and miss alike.
+                let cond_hit = b.cond_armed
+                    && ::tableam::table_scan_condcache_lookup(scandesc, &mut b.sel);
+                if cond_hit {
+                    b.soa.begin(n);
+                    if b.sel[..nwords].iter().any(|&w| w != 0) {
+                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        for c in lq.dict_cols() {
+                            if b.dict_group != Some(c) {
+                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                            }
+                        }
+                    }
+                } else if lq.nstaged() >= 2 {
                     lq.log_staged_once();
                     b.soa.begin(n);
                     for k in 0..lq.nstaged() {
@@ -1784,6 +1834,12 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                             gather_or_len(scandesc, &mut b.soa, c as usize);
                         }
                     }
+                }
+                // Condition cache miss: record the freshly evaluated prefix
+                // verdicts (pure qual bits — BEFORE the fallback OR below,
+                // though cbstore stages no fallback rows).
+                if b.cond_armed && !cond_hit {
+                    ::tableam::table_scan_condcache_store(scandesc, &b.sel);
                 }
                 // cbstore stages no fallback rows; keep the OR for the
                 // contract with `seq_scan_batch_fetch` anyway.
@@ -3182,6 +3238,7 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
     node.cb_scan = None;
     stitch_trace_summary(node);
+    condcache_stats_summary(node);
     // Releases the plan's deform-JIT kernel Rc and the stitched body's code
     // block (forget-exempt in batch.rs / here).
     node.batch_soa = None;
@@ -3190,6 +3247,15 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     }
     node.parallel = None;
     Ok(())
+}
+
+// Condition-cache stats line at scan shutdown (armed scans only): the
+// cumulative process counters, DEBUG1 like every lane stats line.
+fn condcache_stats_summary(node: &SeqScanState<'_>) {
+    if node.batch_soa.as_deref().is_some_and(|b| b.cond_armed) {
+        let (h, m, i, e) = ::tableam::condcache_stats();
+        ::laneexec::log_condcache_stats(h, m, i, e);
+    }
 }
 
 /// Executor-skeleton park gate: EPQ and parallel scans never park.
@@ -3203,6 +3269,7 @@ pub fn skeleton_parkable(node: &SeqScanState<'_>) -> bool {
 pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
     stitch_trace_summary(node);
+    condcache_stats_summary(node);
     node.batch_soa = None;
     node.scan_batch = ScanBatchMode::Unknown;
     node.lane_pos = 0;
@@ -3320,7 +3387,7 @@ mcx::forget_safe_struct!(
     // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, lane_requal, dict_group, contains, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
+        nquals, lane_requal, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

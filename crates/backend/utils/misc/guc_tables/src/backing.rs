@@ -37,6 +37,15 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // (2026-07-14); PGRUST_LANE_V2=0|off at boot flips the startup default
     // (PGC_S_ENV_VAR, initialize_guc_options_from_environment).
     (pgrust_lane_executor_cell, bool, pgrust_lane_executor, set_pgrust_lane_executor, true),
+    // pgrust.condition_cache (pgrust-only): the cbstore per-granule
+    // qual-verdict cache (ClickHouse QueryConditionCache counterpart).
+    // Default OFF — the benchmark arms enable it explicitly and record it in
+    // manifests. The PREWHERE arm reads the cell at qual-arm time.
+    (pgrust_condition_cache_cell, bool, pgrust_condition_cache, set_pgrust_condition_cache, false),
+    // pgrust.condition_cache_size: the cache's byte budget in KB (work_mem
+    // unit idiom); default 102400 KB = 100 MB, ClickHouse's
+    // query_condition_cache_size default. LRU-evicted at that bound.
+    (pgrust_condition_cache_size_cell, i32, pgrust_condition_cache_size, set_pgrust_condition_cache_size, 102400),
     (check_function_bodies_cell, bool, check_function_bodies, set_check_function_bodies, true),
     (default_with_oids_cell, bool, default_with_oids, set_default_with_oids, false),
     (current_role_is_superuser_cell, bool, current_role_is_superuser, set_current_role_is_superuser, false),

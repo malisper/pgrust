@@ -70,6 +70,17 @@ pub struct LaneQualProg {
     /// because every prefix clause is non-erroring by admission.
     dict: Vec<crate::dict::DictClause>,
     staged_logged: bool,
+    /// Canonical 128-bit fingerprint of the vectorizable PREFIX (original
+    /// clause order; operator fn oid, commutation, collation, column, and
+    /// constant VALUE BYTES all included) — the condition-cache key
+    /// component. None = the prefix is not cacheable: a clause whose
+    /// evaluation is not provably deterministic-and-non-erroring per row
+    /// (the dict regex tier preserves error identity by evaluating exactly
+    /// the per-row drive's row set, so serving its bits from a cache could
+    /// skip an error a miss run raises). The requal tail never contributes:
+    /// cached bits are prefix verdicts only and the tail re-runs per
+    /// surviving row at fetch either way.
+    pub fingerprint: Option<u128>,
 }
 
 impl LaneQualProg {
@@ -351,6 +362,7 @@ pub fn translate_scan_qual(
     debug_assert_eq!(dict_i, dict.len());
     sort_staged(&mut staged);
     let plan = compile_qual(&prog);
+    let fingerprint = fingerprint_prefix(prefix, &dict);
     Ok(Box::new(LaneQualProg {
         prog,
         plan,
@@ -360,7 +372,139 @@ pub fn translate_scan_qual(
         requal,
         dict,
         staged_logged: false,
+        fingerprint,
     }))
+}
+
+// ===========================================================================
+// Condition-cache fingerprint (pgrust.condition_cache): canonical hash of
+// the vectorizable prefix in ORIGINAL clause order. The cached value is the
+// prefix's survivor bitmap, so the fingerprint must pin everything that
+// determines it: clause kind, column identity, comparator fn oid,
+// commutation, collation, and the constant's VALUE (word bits for the byval
+// int/float/date/ts/oid families; payload bytes for text consts). Staged
+// evaluation ORDER deliberately excluded — every prefix clause is
+// non-erroring and the bitmap is an AND, so order cannot change the bits.
+// None = refuse caching (fail closed): a prefix clause whose per-row
+// evaluation is not provably deterministic-and-non-erroring (dict regex
+// tier), or a const the hasher cannot canonicalize.
+// ===========================================================================
+
+struct Fp {
+    a: std::collections::hash_map::DefaultHasher,
+    b: std::collections::hash_map::DefaultHasher,
+}
+
+impl Fp {
+    fn new() -> Fp {
+        use std::hash::Hasher;
+        let mut a = std::collections::hash_map::DefaultHasher::new();
+        let mut b = std::collections::hash_map::DefaultHasher::new();
+        // Distinct stream salts (incl. a format version to invalidate every
+        // key if the hashed vocabulary ever changes shape).
+        a.write_u64(0x7067_636f_6e64_0001);
+        b.write_u64(0xcc5a_17ab_9e3d_0001);
+        Fp { a, b }
+    }
+    fn u64(&mut self, v: u64) {
+        use std::hash::Hasher;
+        self.a.write_u64(v);
+        self.b.write_u64(v);
+    }
+    fn bytes(&mut self, v: &[u8]) {
+        use std::hash::Hasher;
+        self.a.write(v);
+        self.b.write(v);
+        // Length is hashed explicitly so concatenations can't collide.
+        self.u64(v.len() as u64);
+    }
+    fn finish(self) -> u128 {
+        use std::hash::Hasher;
+        (self.a.finish() as u128) << 64 | self.b.finish() as u128
+    }
+}
+
+fn fingerprint_prefix(
+    prefix: &[LaneClause],
+    dict: &[crate::dict::DictClause],
+) -> Option<u128> {
+    let mut h = Fp::new();
+    let mut dict_i = 0usize;
+    h.u64(prefix.len() as u64);
+    for cl in prefix {
+        match cl {
+            LaneClause::Cmp(c) => {
+                if lane_cmp_for_fn_oid(c.fn_oid, c.commuted).is_some() {
+                    h.u64(1);
+                    h.u64(c.col as u64);
+                    h.u64(c.fn_oid as u64);
+                    h.u64(c.commuted as u64);
+                    h.u64(c.collation as u64);
+                    match c.rhs {
+                        LaneCmpRhs::Const(k) => {
+                            h.u64(10);
+                            // Byval word: the whitelist families are all
+                            // word-carried (int/date/ts sign-extended, oid
+                            // zero-extended, float bit patterns) — the word
+                            // IS the value.
+                            h.u64(k.as_i64() as u64);
+                        }
+                        LaneCmpRhs::Col(c2) => {
+                            h.u64(11);
+                            h.u64(c2 as u64);
+                        }
+                    }
+                } else {
+                    // Dict-admitted text clause (translate kept prefix/dict
+                    // in lockstep). Regex ops refuse: their lazy tri-memo
+                    // evaluates exactly the per-row drive's row set to keep
+                    // error identity — a cache hit would skip those rows.
+                    let dc = dict.get(dict_i)?;
+                    dict_i += 1;
+                    if !dc.cache_safe() {
+                        return None;
+                    }
+                    let LaneCmpRhs::Const(k) = c.rhs else { return None };
+                    h.u64(2);
+                    h.u64(c.col as u64);
+                    h.u64(c.fn_oid as u64);
+                    h.u64(c.commuted as u64);
+                    h.u64(c.collation as u64);
+                    h.bytes(crate::dict::inline_varlena_payload(k)?);
+                }
+            }
+            LaneClause::NullTest { col, want_null } => {
+                h.u64(3);
+                h.u64(*col as u64);
+                h.u64(*want_null as u64);
+            }
+            LaneClause::BoolVar { col } => {
+                h.u64(4);
+                h.u64(*col as u64);
+            }
+            LaneClause::BoolTest { col, kind } => {
+                h.u64(5);
+                h.u64(*col as u64);
+                h.u64(match kind {
+                    crate::shape::LaneBoolTest::IsTrue => 0,
+                    crate::shape::LaneBoolTest::IsNotTrue => 1,
+                    crate::shape::LaneBoolTest::IsFalse => 2,
+                    crate::shape::LaneBoolTest::IsNotFalse => 3,
+                });
+            }
+            LaneClause::InList { col, fn_oid, elems } => {
+                h.u64(6);
+                h.u64(*col as u64);
+                h.u64(*fn_oid as u64);
+                h.u64(elems.len() as u64);
+                for e in elems {
+                    h.u64(e.isnull as u64);
+                    h.u64(if e.isnull { 0 } else { e.value.as_i64() as u64 });
+                }
+            }
+        }
+    }
+    Some(h.finish())
 }
 
 // Sentinel class: a Cmp clause the dict tier admitted (no lane op).

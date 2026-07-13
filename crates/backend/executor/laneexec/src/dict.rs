@@ -247,6 +247,16 @@ impl DictClause {
         matches!(self.op, DictPredOp::Ne) && self.konst.is_empty()
     }
 
+    /// Condition-cache admission: true iff this clause's per-row evaluation
+    /// is deterministic AND non-erroring for every row (the admission
+    /// proofs: like_pattern_safe / ilike_infallible / collation_usable).
+    /// Regex ops refuse — their lazy tri-memo preserves error identity by
+    /// evaluating exactly the per-row drive's row set, which a cache hit
+    /// would skip.
+    pub(crate) fn cache_safe(&self) -> bool {
+        !self.op.is_regex()
+    }
+
     // Prewhere static cost classes (translate.rs StagedClause contract):
     // dict eq/ne = 4, dict LIKE = 5.
     pub(crate) fn cost_class(&self) -> u8 {

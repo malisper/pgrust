@@ -294,6 +294,16 @@ pub enum CbGranuleMetaStep {
     Meta { rows: u32 },
 }
 
+// Condition-cache scan arm (pgrust.condition_cache): the staged-qual
+// fingerprint plus the current row group's shared RgEntry, refreshed once
+// per RG (the global cache lock is per-RG, window lookups/stores are
+// lock-free through the Arc).
+struct CondState {
+    fp: u128,
+    cur_rg: u32,
+    entry: Option<std::sync::Arc<crate::condcache::RgEntry>>,
+}
+
 pub struct CbScanDescData<'mcx> {
     pub rs_base: TableScanDescData<'mcx>,
     part: Option<std::rc::Rc<Part>>,
@@ -343,6 +353,9 @@ pub struct CbScanDescData<'mcx> {
     // Per-row drive cursor within the staged window.
     row_cursor: usize,
     adaptive: Option<Box<AdaptiveOrder>>,
+    // Condition cache (pgrust.condition_cache): armed by the PREWHERE driver
+    // with the staged prefix's canonical fingerprint. None = unarmed.
+    cond: Option<Box<CondState>>,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
     // Subset of granules_pruned attributed to a bloom rejection (the granule
@@ -465,6 +478,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             staged_rows: 0,
             row_cursor: 0,
             adaptive: None,
+            cond: None,
             granules_pruned: 0,
             granules_bloom_pruned: 0,
             granules_scanned: 0,
@@ -900,6 +914,78 @@ impl<'mcx> CbScanDescData<'mcx> {
         let Some(part) = self.part.as_ref() else { return ZoneVerdict::Mixed };
         let ge = part.chunk(self.rg, (q.attnum - 1) as usize).granule(self.granule);
         zone_verdict(q, ge.min, ge.max)
+    }
+
+    /// Arm the condition cache for this scan (pgrust.condition_cache): `fp`
+    /// = the staged prefix's canonical fingerprint (laneexec), `capacity` =
+    /// the byte budget GUC. false = no part (empty relation) — nothing to
+    /// cache. Parallel workers arm independently and share entries through
+    /// the global cache (identical plan => identical fingerprint).
+    pub fn condcache_arm(&mut self, fp: u128, capacity: u64) -> bool {
+        if self.part.is_none() {
+            return false;
+        }
+        crate::condcache::set_capacity(capacity);
+        self.cond = Some(Box::new(CondState { fp, cur_rg: u32::MAX, entry: None }));
+        true
+    }
+
+    // The currently staged window's cache coordinates: (RgEntry, slot).
+    // None = unarmed, nothing staged, or a non-canonical window (the
+    // count-only whole-granule staging; lane quals never produce it, belt
+    // anyway). Fetches the RG entry once per row group.
+    fn cond_slot(&mut self) -> Option<(&crate::condcache::RgEntry, u32)> {
+        if self.cond.is_none() {
+            return None;
+        }
+        if !(self.rg_claimed && self.decoded && self.staged_rows > 0) {
+            return None;
+        }
+        if self.staged_rows > self.window_rows || self.staged_lo % self.window_rows != 0 {
+            return None;
+        }
+        let part = self.part.as_ref()?;
+        let rg = self.rg as u32;
+        let window_rows = self.window_rows as u32;
+        let cond = self.cond.as_deref_mut()?;
+        if cond.cur_rg != rg || cond.entry.is_none() {
+            cond.entry = Some(crate::condcache::get_or_insert(
+                part.identity,
+                cond.fp,
+                rg,
+                window_rows,
+                part.rgs[rg as usize].nrows,
+            ));
+            cond.cur_rg = rg;
+        }
+        let slot = ((self.granule * GRANULE_ROWS + self.staged_lo) / self.window_rows) as u32;
+        Some((cond.entry.as_deref().expect("entry set above"), slot))
+    }
+
+    /// Condition-cache lookup for the CURRENT staged window: on a hit the
+    /// staged prefix's survivor bits are written into `sel` (whole words;
+    /// live width = staged_rows) and the caller skips the qual's decode+eval
+    /// legs entirely. false = miss (or unarmed): evaluate as always, then
+    /// `condcache_store` the bits.
+    pub fn condcache_lookup(&mut self, sel: &mut [u64]) -> bool {
+        let Some((entry, slot)) = self.cond_slot() else { return false };
+        if entry.lookup(slot, sel) {
+            crate::condcache::count_hit();
+            true
+        } else {
+            crate::condcache::count_miss();
+            false
+        }
+    }
+
+    /// Record the CURRENT staged window's freshly evaluated survivor bits.
+    /// `sel`'s live width is staged_rows (bits past it are zero by the
+    /// driver's bitmap-init contract).
+    pub fn condcache_store(&mut self, sel: &[u64]) {
+        let nwords = self.staged_rows.div_ceil(64);
+        if let Some((entry, slot)) = self.cond_slot() {
+            entry.store(slot, sel, nwords);
+        }
     }
 
     fn decode_current_granule(&mut self) {
