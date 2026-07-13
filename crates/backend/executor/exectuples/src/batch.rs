@@ -237,24 +237,6 @@ pub struct SoaBatch<'mcx> {
 pub const LEN_WANT_BYTES: u8 = 1;
 pub const LEN_WANT_CHARS: u8 = 2;
 
-// VARSIZE_ANY_EXHDR over a guaranteed-inline (1B short or plain 4B) varlena
-// image — the only forms a cbstore dict entry or decoded lane datum holds.
-//
-// # Safety
-// `d` is a live varlena datum pointer in one of the two inline forms.
-#[inline(always)]
-unsafe fn inline_varlena_len(d: Datum) -> i64 {
-    let p = d.as_usize() as *const u8;
-    // SAFETY: forwarded caller contract.
-    unsafe {
-        if ::types_tuple::varatt::varatt_is_1b(p) {
-            (::types_tuple::varatt::varsize_1b(p) - 1) as i64
-        } else {
-            debug_assert!(::types_tuple::varatt::varatt_is_4b_u(p));
-            (::types_tuple::varatt::varsize_4b(p) - 4) as i64
-        }
-    }
-}
 
 impl<'mcx> SoaBatch<'mcx> {
     pub fn new_in(mcx: Mcx<'mcx>, ncols: u16) -> SoaBatch<'mcx> {
@@ -390,41 +372,13 @@ impl<'mcx> SoaBatch<'mcx> {
         self.len_any
     }
 
-    /// Materialize a dict-answered length column: `lens[codes[i]]` where the
-    /// per-code length is the dict entry's byte count (octet_length), and
-    /// clear the lane. The bytes-kind counterpart of `gather_dict_lane` for
-    /// `len_want` columns (chars-kind asks never coexist with a dict-answered
-    /// qual column — the arming seam refuses them).
-    pub fn gather_len_lane_bytes(&mut self, c: usize) {
-        let Some(lane) = self.dict_lane(c) else { return };
-        let n = self.nrows as usize;
-        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
-        let isnull = &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
-        isnull.fill(false);
-        for (i, v) in values.iter_mut().enumerate() {
-            // SAFETY: dict entries are live inline varlena images for the
-            // life of the staged window (dict-lane filler contract).
-            *v = Datum::from_i64(unsafe { inline_varlena_len(lane.datum(i)) });
-        }
+    /// Drop a dict-lane answer WITHOUT gathering (the length-lane gather:
+    /// the AM's `batch_fill_len_col` re-answered the values cells as i64
+    /// lengths off the scan-side decode state, so `col_datum_ready` must
+    /// flip back on without the `dict[code]` datum gather).
+    #[inline]
+    pub fn clear_dict_lane(&mut self, c: usize) {
         self.dict_lanes[c] = None;
-    }
-
-    /// Convert a Raw-filled text column's datum lane to byte lengths in
-    /// place (the Raw-window counterpart of `gather_len_lane_bytes`: a
-    /// dict-tier qual column whose window decoded Raw filled datums for the
-    /// clause's fallback eval; the fill converts once, post-qual).
-    ///
-    /// # Safety
-    /// Every staged row's value cell holds a live inline varlena datum
-    /// pointer (the cbstore Raw fill's contract), and no consumer reads the
-    /// column as datums after this call.
-    pub unsafe fn convert_lane_to_len_bytes(&mut self, c: usize) {
-        let n = self.nrows as usize;
-        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
-        for v in values.iter_mut() {
-            // SAFETY: forwarded caller contract.
-            *v = Datum::from_i64(unsafe { inline_varlena_len(*v) });
-        }
     }
 
     /// Lane arm: column `c` is read by the lane program from the SoA batch.

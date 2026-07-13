@@ -1023,6 +1023,22 @@ impl<'mcx> CbScanDescData<'mcx> {
         soa.col_isnull_mut(c).fill(false);
     }
 
+    /// Length-lane fill of one staged column window, callable at ANY point
+    /// after the window stages (the post-qual gather path for dict-tier qual
+    /// columns re-answers the lane as lengths through here): reads the
+    /// scan-side decode state (codes/datums per staged window), never the
+    /// SoA cells, so it is safe whether the column currently holds a dict
+    /// lane answer, Raw datums, or stale cells.
+    pub fn batch_fill_len_col(
+        &mut self,
+        c: usize,
+        chars: bool,
+        soa: &mut ::exectuples::SoaBatch<'_>,
+    ) {
+        self.ensure_col(c);
+        self.fill_len_col(c, chars, soa);
+    }
+
     /// Length-lane fill for one staged column window (see the
     /// `batch_deform_col` length branch). `chars` = UTF-8 character length
     /// (C `text_length` parity by seam reuse), else octet length.
