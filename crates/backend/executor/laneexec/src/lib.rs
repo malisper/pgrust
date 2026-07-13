@@ -118,6 +118,12 @@ pub(crate) fn log_blob_kernel(col: u16) {
     log(format!("lane_executor: blob contains kernel engaged (col {col})"));
 }
 
+// First-engagement marker: the per-epoch dict memo was filled by ONE
+// arena-wide contains sweep instead of per-entry finder calls (q22fix2).
+pub(crate) fn log_dict_sweep(col: u16, ndict: u32) {
+    log(format!("lane_executor: dict arena sweep engaged (col {col}, {ndict} entries)"));
+}
+
 // Arm-time marker: DictEval progs admitted onto a surface (dict-pushdown §7).
 pub fn log_dicteval_armed(surface: &str, n: u32, nfallible: u32) {
     log(format!("lane_executor: dicteval armed ({surface}, {n} progs, {nfallible} lazy-fallible)"));

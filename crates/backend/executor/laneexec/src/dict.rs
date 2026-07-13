@@ -235,6 +235,8 @@ pub struct DictClause {
     memo_tri: Vec<u8>,
     // First-engagement trace flag for the blob-wide contains path.
     blob_logged: bool,
+    // First-engagement trace flag for the dict-arena sweep memo fill.
+    sweep_logged: bool,
 }
 
 impl DictClause {
@@ -358,6 +360,7 @@ pub(crate) fn dict_clause_for(cl: &LaneCmpClause) -> Option<DictClause> {
         range: None,
         memo_tri: Vec::new(),
         blob_logged: false,
+        sweep_logged: false,
     })
 }
 
@@ -569,18 +572,37 @@ fn eval_dict_lane(
                 crate::log_dict_memo(cl.col, lane.table.ndict);
             }
             cl.memo.clear();
-            cl.memo.reserve(dict.len());
-            for &d in dict {
-                let s = inline_varlena_payload(d).ok_or_else(non_inline_lane_datum)?;
-                cl.memo.push(eval_pred(
-                    cl.op,
-                    cl.kernel.as_ref(),
-                    cl.arena.as_ref(),
-                    &mut cl.ic,
-                    s,
-                    &cl.konst,
-                    cl.collation,
-                )?);
+            // Contains-kernel fast fill (q22fix2): ONE memmem sweep over the
+            // dict arena replaces the per-entry finder calls below, when the
+            // dict's images prove ascending-contiguous and all-inline. A
+            // false return leaves the memo cleared and the per-entry loop
+            // (identical verdicts, identical first error) runs instead.
+            let swept = match &cl.kernel {
+                Some(LikeKernel::Contains(f)) => {
+                    fill_memo_contains_sweep(f, dict, cl.op.negated(), &mut cl.memo)
+                }
+                _ => false,
+            };
+            if swept {
+                if !cl.sweep_logged {
+                    cl.sweep_logged = true;
+                    crate::log_dict_sweep(cl.col, lane.table.ndict);
+                }
+            } else {
+                cl.memo.clear();
+                cl.memo.reserve(dict.len());
+                for &d in dict {
+                    let s = inline_varlena_payload(d).ok_or_else(non_inline_lane_datum)?;
+                    cl.memo.push(eval_pred(
+                        cl.op,
+                        cl.kernel.as_ref(),
+                        cl.arena.as_ref(),
+                        &mut cl.ic,
+                        s,
+                        &cl.konst,
+                        cl.collation,
+                    )?);
+                }
             }
         }
         cl.memo_epoch = Some(lane.table.epoch);
@@ -653,6 +675,78 @@ fn eval_dict_lane_lazy(
         }
     }
     Ok(())
+}
+
+/// Contains-kernel memo fill by ONE memmem sweep over the dictionary arena
+/// (q22fix2; the `eval_contains_blob` shape over dict entries instead of row
+/// values). Engages only when the dict's images prove (a) strictly ascending
+/// pointers — one arena, writer layout order — and (b) all inline (1B-short /
+/// 4B-U): the per-entry loop raises `non_inline_lane_datum` on ANY non-inline
+/// entry (eager fill), so the sweep must refuse whenever one exists anywhere,
+/// not only when it owns a hit. Under (a)+(b) the span between consecutive
+/// image starts is readable (same allocation) and the hit→entry mapping is
+/// the blob pass's: a hit fully inside entry e's payload marks e and resumes
+/// at entry e+1's image start; header/padding/straddle hits resume one byte
+/// later. An entry is marked iff its payload contains the needle — exactly
+/// the per-entry kernel verdict — and `memo[e] = matched != negated` matches
+/// `eval_pred`'s kernel arm. True = memo fully written (len == dict.len());
+/// false = memo untouched beyond a possible resize, caller must clear + run
+/// the per-entry loop.
+fn fill_memo_contains_sweep(
+    f: &SubstrFinder,
+    dict: &[Datum],
+    negated: bool,
+    memo: &mut Vec<bool>,
+) -> bool {
+    let n = dict.len();
+    if n == 0 {
+        return false;
+    }
+    // Ascending + all-inline proof pass (pointer compares + one header byte
+    // per entry; refusal keeps the per-entry loop byte-identical, including
+    // its first-non-inline error).
+    let base = dict[0].as_usize();
+    let mut prev = 0usize;
+    for d in dict {
+        let p = d.as_usize();
+        if p < base + prev || inline_varlena_payload(*d).is_none() {
+            return false;
+        }
+        prev = p - base + 1;
+    }
+    // Span end: the last (highest) image's payload end.
+    let last = inline_varlena_payload(dict[n - 1]).expect("proven inline above");
+    let len = last.as_ptr() as usize + last.len() - base;
+    // SAFETY: proven above — ascending images inside one live arena
+    // allocation; [base, base+len) is readable for the dict's lifetime.
+    let hay = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+    let nlen = f.needle_len();
+    memo.clear();
+    memo.resize(n, negated);
+    let mut e = 0usize;
+    let mut pos = 0usize;
+    while pos < hay.len() {
+        let Some(h) = f.find_pos(&hay[pos..]) else { break };
+        let h = pos + h;
+        // Owning entry: the last entry whose image starts at or before the hit.
+        while e + 1 < n && dict[e + 1].as_usize() - base <= h {
+            e += 1;
+        }
+        let payload = inline_varlena_payload(dict[e]).expect("proven inline above");
+        let pstart = payload.as_ptr() as usize - base;
+        let pend = pstart + payload.len();
+        if h >= pstart && h + nlen <= pend {
+            memo[e] = !negated;
+            e += 1;
+            if e >= n {
+                break;
+            }
+            pos = dict[e].as_usize() - base;
+        } else {
+            pos = h + 1;
+        }
+    }
+    true
 }
 
 // Sorted-dict prefix range: matching entries are the contiguous rank run
@@ -853,6 +947,85 @@ mod tests {
         let mut sv = SelVec::all(n);
         assert!(eval_contains_blob(&f, span, &values, &isnull, negated, n, &mut sv));
         (0..n).map(|i| sv.contains(i)).collect()
+    }
+
+    fn run_dict_sweep(entries: &[&[u8]], needle: &[u8], negated: bool) -> Option<Vec<bool>> {
+        let (blob, offs) = blob_of(entries);
+        let dict: Vec<Datum> =
+            offs.iter().map(|&o| Datum::from_usize(blob.as_ptr() as usize + o)).collect();
+        let f = SubstrFinder::new(needle.to_vec());
+        let mut memo = Vec::new();
+        fill_memo_contains_sweep(&f, &dict, negated, &mut memo).then_some(memo)
+    }
+
+    #[test]
+    fn dict_sweep_matches_per_entry_fill() {
+        let entries: &[&[u8]] =
+            &[b"hello world", b"", b"worldly", b"say hell", b"w", b"aworld", b"world"];
+        for negated in [false, true] {
+            let memo = run_dict_sweep(entries, b"world", negated).expect("contiguous dict sweeps");
+            let expect: Vec<bool> = entries
+                .iter()
+                .map(|e| {
+                    LikeKernel::Contains(SubstrFinder::new(b"world".to_vec())).matches(e)
+                        != negated
+                })
+                .collect();
+            assert_eq!(memo, expect);
+        }
+    }
+
+    #[test]
+    fn dict_sweep_rejects_boundary_straddle() {
+        // Same construction as blob_rejects_boundary_straddle: the needle
+        // occurs across entry 0's tail + entry 1's header byte, inside no
+        // entry's payload.
+        let e1 = [b'z'; 21];
+        let entries: &[&[u8]] = &[b"xxab", &e1];
+        assert_eq!(run_dict_sweep(entries, b"ab\x64", false).unwrap(), [false, false]);
+        assert_eq!(run_dict_sweep(entries, b"ab", false).unwrap(), [true, false]);
+    }
+
+    #[test]
+    fn dict_sweep_refuses_non_ascending() {
+        let (blob, offs) = blob_of(&[b"aaa", b"bbb"]);
+        let mut dict: Vec<Datum> =
+            offs.iter().map(|&o| Datum::from_usize(blob.as_ptr() as usize + o)).collect();
+        dict.swap(0, 1);
+        let f = SubstrFinder::new(b"a".to_vec());
+        let mut memo = Vec::new();
+        assert!(!fill_memo_contains_sweep(&f, &dict, false, &mut memo));
+    }
+
+    #[test]
+    fn dict_sweep_differential_vs_per_entry() {
+        // Deterministic pseudo-random dicts: sweep memo must equal the
+        // per-entry kernel fill for every entry, needle, and polarity.
+        let mut seed = 0xdeadbeefcafef00du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let alphabet = b"abcd";
+        for _case in 0..200 {
+            let n = (next() % 17) as usize + 1;
+            let entries: Vec<Vec<u8>> = (0..n)
+                .map(|_| {
+                    let len = (next() % 24) as usize;
+                    (0..len).map(|_| alphabet[(next() % 4) as usize]).collect()
+                })
+                .collect();
+            let nlen = (next() % 5) as usize + 1;
+            let needle: Vec<u8> = (0..nlen).map(|_| alphabet[(next() % 4) as usize]).collect();
+            let refs: Vec<&[u8]> = entries.iter().map(|r| r.as_slice()).collect();
+            let negated = next() % 2 == 0;
+            let memo = run_dict_sweep(&refs, &needle, negated).expect("sweeps");
+            let k = LikeKernel::Contains(SubstrFinder::new(needle.clone()));
+            let expect: Vec<bool> = refs.iter().map(|e| k.matches(e) != negated).collect();
+            assert_eq!(memo, expect, "needle {needle:?} entries {entries:?}");
+        }
     }
 
     #[test]
