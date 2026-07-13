@@ -416,6 +416,106 @@ fn int64_div_fast() {
 }
 
 #[test]
+fn int_avg_div_matches_numeric_avg_div_bytes() {
+    // The finalize fast entries must be byte-identical to the materializing
+    // composition they replace, across the dscale ladder (select_div_scale's
+    // qweight steps), signs, exact/inexact quotients, and the i64/i128
+    // boundaries — the fast path shares the division tail, so this pins the
+    // operand-decomposition equivalence.
+    let i128_slow = |s: i128, c: i64| -> NumericImage {
+        let mut v = crate::var::NumericVar::new();
+        crate::var::int128_to_var(s, &mut v);
+        numeric_avg_div(crate::var::make_result(v.view()).unwrap().num(), c).unwrap()
+    };
+    let sums: &[i64] = &[
+        0,
+        1,
+        -1,
+        7,
+        -7,
+        59,
+        100,
+        -100,
+        9999,
+        10000,
+        123456789,
+        -123456789,
+        1366120260,
+        i64::MAX,
+        i64::MIN,
+        i64::MIN + 1,
+    ];
+    let counts: &[i64] = &[1, 2, 3, 7, 10, 59, 1000, 9999, 1_366_120, i64::MAX];
+    for &s in sums {
+        for &c in counts {
+            let slow = numeric_avg_div(int64_to_numeric(s).num(), c).unwrap();
+            let fast = int64_avg_div(s, c).unwrap();
+            assert_eq!(fast.as_bytes(), slow.as_bytes(), "sum={s} count={c}");
+            let fast128 = int128_avg_div(s as i128, c).unwrap();
+            assert_eq!(
+                fast128.as_bytes(),
+                i128_slow(s as i128, c).as_bytes(),
+                "i128 sum={s} count={c}"
+            );
+        }
+    }
+    // Beyond-i64 int128 sums (avg(int8) accumulations).
+    for &s in &[i64::MAX as i128 * 37, i64::MIN as i128 * 1000 - 1, 10i128.pow(30)] {
+        for &c in &[1i64, 3, 1_000_000_007] {
+            let fast = int128_avg_div(s, c).unwrap();
+            assert_eq!(fast.as_bytes(), i128_slow(s, c).as_bytes(), "i128 sum={s} count={c}");
+        }
+    }
+    // Rounding-tie and near-tie corners (the integer quotient's half-away
+    // carry vs round_var's), incl. exact halves, thirds, and carry-9999
+    // propagation shapes.
+    for &(s, c) in &[
+        (1i64, 2i64),
+        (-1, 2),
+        (1, 3),
+        (2, 3),
+        (-2, 3),
+        (1, 6),
+        (5, 4),
+        (-5, 4),
+        (1, 7),
+        (999999, 7),
+        (49999, 10000),
+        (50001, 10000),
+        (9_999_999_999_999_999, 2),
+        (-9_999_999_999_999_999, 2),
+        (1, 20_000_000_000_000_000),
+        (3, 20_000_000_000_000_000),
+        (1, 3_000_000_000),
+        (7, 9_999_999_999),
+    ] {
+        let slow = numeric_avg_div(int64_to_numeric(s).num(), c).unwrap();
+        let fast = int64_avg_div(s, c).unwrap();
+        assert_eq!(fast.as_bytes(), slow.as_bytes(), "tie sum={s} count={c}");
+    }
+    // Deterministic LCG sweep, biased toward realistic small counts half the
+    // time (avg-of-groups shapes) and full-range the other half.
+    let mut x: u64 = 0x9e3779b97f4a7c15;
+    for i in 0..20_000u32 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let s = if i % 4 < 2 { (x as i64) % 2_000_000 } else { x as i64 };
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let c = if i % 2 == 0 {
+            ((x % 1000) as i64).max(1)
+        } else {
+            (((x | 1) >> 1) as i64).max(1)
+        };
+        let slow = numeric_avg_div(int64_to_numeric(s).num(), c).unwrap();
+        let fast = int64_avg_div(s, c).unwrap();
+        assert_eq!(fast.as_bytes(), slow.as_bytes(), "sum={s} count={c}");
+        // The i128 leg through the same pairs plus a widened sum.
+        let s128 = (s as i128) * ((x as i8) as i128).max(1);
+        let fast128 = int128_avg_div(s128, c).unwrap();
+        assert_eq!(fast128.as_bytes(), i128_slow(s128, c).as_bytes(), "i128 sum={s128} count={c}");
+    }
+}
+
+#[test]
 fn sqrt_family() {
     assert_eq!(out(&numeric_sqrt(n("2").num()).unwrap()), "1.414213562373095");
     assert_eq!(out(&numeric_sqrt(n("0").num()).unwrap()), "0.000000000000000");

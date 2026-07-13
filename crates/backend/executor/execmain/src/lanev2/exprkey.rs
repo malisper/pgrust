@@ -148,6 +148,80 @@ fn ts_trunc_apply(t: i64, unit: i64) -> i64 {
     }
 }
 
+const NUMERICOID: ::types_core::Oid = 1700;
+
+/// pg_proc oid of `extract(text, timestamp)` — the NUMERIC-returning
+/// EXTRACT over plain (tz-less) timestamp. `date_part` (2021, float8
+/// result — a different output surface) and the timestamptz variant
+/// (tz-dependent) are NOT admitted.
+const F_EXTRACT_TIMESTAMP: ::types_core::Oid = 6202;
+
+/// extract()-class fields the fast multi-key kernel hosts (Q19 class).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TsPartField {
+    Minute,
+    Hour,
+}
+
+/// The ts-extract recognizer: `extract(<const field> FROM ts_col)` over a
+/// plain TIMESTAMP column producing a NUMERIC grouping key, for fields whose
+/// C value (`timestamp2tm` → `tm.tm_min`/`tm.tm_hour`) is uniform
+/// microsecond arithmetic on PG's tz-less, leap-second-free timeline:
+/// minute-of-hour and hour-of-day boundaries are uniformly spaced, so the
+/// field derives from the µs remainder without the tm decomposition (oracle
+/// sweep vs `timestamp_part_common` in the unit tests), and the NUMERIC
+/// result is `int64_to_numeric(field)` — dscale 0, constructible as packed
+/// key bits directly (`nodeagg::mk_numeric_i64_bits`). `None` = not this
+/// shape; the production fmgr chain keeps the key, byte-identically (that
+/// covers calendar-dependent fields — day, month, dow, … — and `second`,
+/// whose dscale-6 result is unpackable and demotes the packed feed anyway).
+fn ts_extract_field(
+    xk: &::execexpr::ScanProjExprKey,
+    keytype: ::types_core::Oid,
+    mcx: ::mcx::Mcx<'_>,
+) -> Option<TsPartField> {
+    if xk.input_type != TIMESTAMPOID || keytype != NUMERICOID || xk.ncalls != 1 {
+        return None;
+    }
+    let c = &xk.calls[0];
+    if c.fn_oid != F_EXTRACT_TIMESTAMP || c.nargs != 2 || c.var_argno != 1 {
+        return None;
+    }
+    let unit = c.args[0];
+    if unit.isnull {
+        return None;
+    }
+    // SAFETY: a compile-time non-null text Const datum (census contract) is
+    // a live varlena for the statement's lifetime.
+    let packed = unsafe { ::types_fmgr::datum_varlena_packed(unit.value, mcx) }.ok()?;
+    let mut low = [0u8; 16];
+    let data = packed.data();
+    if data.is_empty() || data.len() > low.len() {
+        return None;
+    }
+    for (d, s) in low.iter_mut().zip(data) {
+        *d = s.to_ascii_lowercase();
+    }
+    Some(match &low[..data.len()] {
+        b"minute" | b"minutes" => TsPartField::Minute,
+        b"hour" | b"hours" => TsPartField::Hour,
+        _ => return None,
+    })
+}
+
+/// C `timestamp_part_common` for the admitted fields over a FINITE tz-less
+/// timestamp — total and non-erroring for every storable value (the tm
+/// decomposition of a storable timestamp cannot fail). ±infinity never
+/// reaches here: C returns NULL for oscillating fields of a non-finite
+/// input, which is the caller's NULL-key demote arm.
+#[inline(always)]
+fn ts_extract_apply(t: i64, f: TsPartField) -> i64 {
+    match f {
+        TsPartField::Minute => t.rem_euclid(3_600_000_000) / 60_000_000,
+        TsPartField::Hour => t.rem_euclid(86_400_000_000) / 3_600_000_000,
+    }
+}
+
 /// Census→stitcher arith mapping (nodeseqscan's projstitch arm keeps its own
 /// private copy — the enums are 1:1 by construction).
 fn proj_arith(op: ::execexpr::ProjArithOp) -> ::lanestitch::ArithOp {
@@ -194,6 +268,13 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
 pub(super) struct MultiKeyChain {
     /// The computed key's chain (production fmgr entry points).
     pub(super) chain: ::laneexec::ValueChain,
+    /// Recognized ts-extract fast kernel (see [`ts_extract_field`]): the
+    /// derived key computes as int64 field arithmetic per survivor and packs
+    /// via `mk_numeric_i64_bits` — no per-row fmgr, no NUMERIC datum. `None`
+    /// = the production chain derives (byte-identical, colder). Non-finite
+    /// inputs take the chain's exact NULL-key demote (C extracts NULL from
+    /// ±infinity for these fields).
+    pub(super) fast: Option<TsPartField>,
     /// Base scan colno feeding the chain.
     pub(super) input_base: u16,
     /// The TextRaw component's tlist attno (agg-input space), when one
@@ -700,6 +781,9 @@ fn decide_exprkey_mk<'mcx>(
         Ok(c) => c,
         Err(_) => return refused(),
     };
+    // Fast ts-extract kernel (Q19 class): recognized ON TOP of the compiled
+    // chain — a non-recognized shape keeps the chain, byte-identically.
+    let fast = ts_extract_field(&xk, keytype, estate.es_query_cxt);
     // Coordinate map + the fold/spill bare-Var rules (the single-key
     // decide's exact checks).
     let mut map: Vec<Option<u16>> = Vec::with_capacity(natts);
@@ -745,7 +829,11 @@ fn decide_exprkey_mk<'mcx>(
     if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_base) {
         return refused();
     }
-    trace_feed("agg-over-seqscan: expr-key feed armed (multi-key packed)");
+    trace_feed(if fast.is_some() {
+        "agg-over-seqscan: expr-key feed armed (multi-key packed, ts-extract kernel)"
+    } else {
+        "agg-over-seqscan: expr-key feed armed (multi-key packed)"
+    });
     Some(Box::new(ExprKeyState {
         natts,
         map,
@@ -753,6 +841,7 @@ fn decide_exprkey_mk<'mcx>(
         prefix,
         kind: ExprKeyKind::Multi(Box::new(MultiKeyChain {
             chain,
+            fast,
             input_base: xk.input_col,
             dict_input_att,
             dict_base,
@@ -1902,21 +1991,40 @@ fn exprkey_mk_batch<'mcx>(
             .expect("expr-key batched route requires the armed SoA");
         let col = m.input_base as usize;
         let (values, isnull) = (soa.col_values(col), soa.col_isnull(col));
-        for &i in rows.iter() {
-            let i = i as usize;
-            let input = ::datum::NullableDatum { value: values[i], isnull: isnull[i] };
-            match m.chain.eval(input) {
-                Ok(nd) => {
-                    key_vals[i] = nd.value;
-                    key_null[i] = nd.isnull;
-                    null_key |= nd.isnull;
+        if let Some(field) = m.fast {
+            // Fast ts-extract kernel: non-erroring int64 field arithmetic
+            // per survivor — `key_vals` carries RAW i64 field values (the
+            // pack arm below reads them through `mk_numeric_i64_bits`, and
+            // a demoted batch never reads them at all). Strict NULL and the
+            // ±infinity sentinels take the chain's exact NULL-key arm (C
+            // extracts NULL from a non-finite timestamp for these fields).
+            for &i in rows.iter() {
+                let i = i as usize;
+                let t = values[i].as_i64();
+                if isnull[i] || t == i64::MIN || t == i64::MAX {
+                    null_key = true;
+                } else {
+                    key_vals[i] = ::datum::Datum::from_i64(ts_extract_apply(t, field));
+                    key_null[i] = false;
                 }
-                Err(_) => {
-                    // Discard the error: NO probe or transition ran; the
-                    // per-row replay's exec_project raises C's exact error
-                    // on C's exact row.
-                    derive_err = true;
-                    break;
+            }
+        } else {
+            for &i in rows.iter() {
+                let i = i as usize;
+                let input = ::datum::NullableDatum { value: values[i], isnull: isnull[i] };
+                match m.chain.eval(input) {
+                    Ok(nd) => {
+                        key_vals[i] = nd.value;
+                        key_null[i] = nd.isnull;
+                        null_key |= nd.isnull;
+                    }
+                    Err(_) => {
+                        // Discard the error: NO probe or transition ran; the
+                        // per-row replay's exec_project raises C's exact
+                        // error on C's exact row.
+                        derive_err = true;
+                        break;
+                    }
                 }
             }
         }
@@ -1948,9 +2056,18 @@ fn exprkey_mk_batch<'mcx>(
             match comp.kind {
                 ::nodeagg::MkCompKind::Numeric { width } if att == *key_out => {
                     // The derived key lane. Unpackable values demote —
-                    // never a lossy pack (read-back byte-identity).
+                    // never a lossy pack (read-back byte-identity). Fast
+                    // ts-extract batches carry RAW i64 field values: the
+                    // integer pack produces the datum path's exact bits
+                    // (`mk_numeric_i64_bits` ≡ pack of `int64_to_numeric`).
+                    let fast = m.fast.is_some();
                     for (k, &i) in rows.iter().enumerate() {
-                        match ::nodeagg::mk_numeric_datum_bits(key_vals[i as usize], width) {
+                        let bits = if fast {
+                            ::nodeagg::mk_numeric_i64_bits(key_vals[i as usize].as_i64(), width)
+                        } else {
+                            ::nodeagg::mk_numeric_datum_bits(key_vals[i as usize], width)
+                        };
+                        match bits {
                             Some(bits) => packbuf[k] |= (bits as u128) << off_bits,
                             None => {
                                 unpackable = true;
@@ -2380,6 +2497,101 @@ mod ts_trunc_tests {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ts_extract_tests {
+    use super::{ts_extract_apply, TsPartField};
+
+    /// The ts-extract kernel vs the C-ported `timestamp_part_common` oracle
+    /// (retnumeric = the EXTRACT surface), over both admitted fields:
+    /// boundary cases around 0 = 2000-01-01 (pre-2000 negatives exercise the
+    /// euclidean remainder), the ±infinity sentinels (oracle: NULL — the
+    /// feed's NULL-key demote arm, kernel never called), plus a
+    /// deterministic LCG sweep. The oracle's NUMERIC must equal
+    /// `int64_to_numeric(kernel(t))` BYTE-identically — that is exactly the
+    /// datum the read-back leg reconstructs from the packed bits
+    /// (`mk_numeric_i64_bits` ≡ datum-pack of `int64_to_numeric`, proven in
+    /// nodeagg's compact tests).
+    #[test]
+    fn ts_extract_matches_timestamp_part() {
+        let fields: [(&[u8], TsPartField); 2] =
+            [(b"minute", TsPartField::Minute), (b"hour", TsPartField::Hour)];
+        let mut cases: Vec<i64> = vec![
+            0,
+            1,
+            -1,
+            59_999_999,
+            60_000_000,
+            60_000_001,
+            -59_999_999,
+            -60_000_000,
+            -60_000_001,
+            3_599_999_999,
+            3_600_000_000,
+            -3_600_000_000,
+            -3_600_000_001,
+            86_399_999_999,
+            86_400_000_000,
+            -86_400_000_000,
+            -86_400_000_001,
+            // 2013-07-14-era ClickBench values (µs since 2000-01-01).
+            426_038_400_000_000 + 12 * 3_600_000_000 + 34 * 60_000_000 + 56_789_012,
+        ];
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..20_000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push(x as i64);
+            // Bias half the sweep into the valid timestamp band.
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            cases.push((x as i64) % 9_000_000_000_000_000);
+        }
+        for &(name, field) in &fields {
+            for &t in &cases {
+                match ::adt_timestamp::timestamp_part_common(name, t, true) {
+                    Ok(::adt_timestamp::PartValue::Numeric(img)) => {
+                        let ours = ::adt_numeric::int64_to_numeric(ts_extract_apply(t, field));
+                        assert_eq!(
+                            ours.as_bytes(),
+                            img.as_bytes(),
+                            "field={} t={}",
+                            String::from_utf8_lossy(name),
+                            t
+                        );
+                    }
+                    Ok(::adt_timestamp::PartValue::Null) => {
+                        // C's non-finite arm: the feed demotes NULL keys
+                        // per-row BEFORE the kernel runs; assert the arm is
+                        // exactly the sentinels the derive loop tests for.
+                        assert!(
+                            t == i64::MIN || t == i64::MAX,
+                            "oracle returned NULL for a finite probe t={t}"
+                        );
+                    }
+                    Ok(::adt_timestamp::PartValue::Float(_)) => {
+                        panic!("retnumeric oracle returned a float (t={t})")
+                    }
+                    Err(_) => {
+                        // Out-of-range decode: not a storable timestamp, the
+                        // kernel's answer there is unreachable.
+                        assert!(
+                            t != 0 && t != i64::MIN && t != i64::MAX,
+                            "oracle refused an in-range probe t={t}"
+                        );
+                    }
+                }
+            }
+        }
+        // Sentinels are the NULL arm.
+        for t in [i64::MIN, i64::MAX] {
+            for &(name, _) in &fields {
+                assert!(matches!(
+                    ::adt_timestamp::timestamp_part_common(name, t, true),
+                    Ok(::adt_timestamp::PartValue::Null)
+                ));
             }
         }
     }
