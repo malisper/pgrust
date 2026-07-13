@@ -267,13 +267,17 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
         return CompactArm::SpillRisk;
     }
-    // Entry layout by planner group estimate (pod A/B, tableresidual note):
-    // Inline16 single-load entries win 14-25% on the two-phase production
-    // shape at ≤1e6 groups but lose ~6-9% at the 8.4M-group band (2x entry
-    // bytes turn DRAM-bound), so big estimates keep Salt8. Underestimates
-    // are bounded by the runtime migration backstop (half hash_mem), which
-    // caps how large an Inline16 table can actually grow.
-    let layout = if numgroups <= (1 << 20) {
+    // Entry layout by planner group estimate. Inline16 resolves hits from
+    // the entry line alone (key inline; the probe never touches the payload
+    // row) — ONE serialized miss per hit instead of Salt8's entry→row
+    // two-load chain, with the row/states miss overlapped by the probe-time
+    // states prefetch + the separate fold pass. The in-situ Q16 A/B
+    // (2026-07-15) showed the 1.5-4M DRAM-bound band is chain-latency bound
+    // (eliminating instruction overhead alone moved nothing), so Inline16's
+    // band is 4M (was 1M); the old pod A/B's 8.4M-band loss (2x entry
+    // bytes) keeps Salt8 above. Underestimates are bounded by the runtime
+    // migration backstop (half hash_mem).
+    let layout = if numgroups <= (1 << 22) {
         ::lanetable::EntryLayout::Inline16
     } else {
         ::lanetable::EntryLayout::Salt8
@@ -404,7 +408,7 @@ pub fn agg_hash_compact_try_arm_mk(
     let (repr, layout) = if two_words {
         // Int128 is Salt8-only (2 key words cannot inline into a 16-B slot).
         (::lanetable::KeyRepr::Int128, ::lanetable::EntryLayout::Salt8)
-    } else if numgroups <= (1 << 20) {
+    } else if numgroups <= (1 << 22) {
         (::lanetable::KeyRepr::Int, ::lanetable::EntryLayout::Inline16)
     } else {
         (::lanetable::KeyRepr::Int, ::lanetable::EntryLayout::Salt8)
@@ -498,7 +502,7 @@ pub fn agg_hash_compact_try_arm_reduced(
     debug_assert!(matches!(shape.width, 2 | 4 | 8));
     let additionalsize = ph.hashtable.additionalsize();
     // Same layout policy as compact v1 (single-word key).
-    let layout = if numgroups <= (1 << 20) {
+    let layout = if numgroups <= (1 << 22) {
         ::lanetable::EntryLayout::Inline16
     } else {
         ::lanetable::EntryLayout::Salt8
