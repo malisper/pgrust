@@ -14163,6 +14163,7 @@ dependencies = [
  "parallel",
  "postgres_seams",
  "types_error",
+ "waiter",
 ]
 
 [[package]]
