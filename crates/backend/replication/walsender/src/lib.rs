@@ -1164,7 +1164,60 @@ fn SendTimeLineHistory(mcx: mcx::Mcx<'_>, cmd: TimeLineHistoryCmd) -> PgResult<(
     Ok(())
 }
 
+// WaitForStandbyConfirmation's wait loop (slot.c:2843, hosted here because
+// WalSndCtl->wal_confirm_rcv_cv lives in this crate; slot.c's early exits run
+// in the slot crate before the seam call).
+fn wait_for_standby_confirmation_loop(wait_for_lsn: types_core::XLogRecPtr) -> PgResult<()> {
+    const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = 0x0900_0000 | 12; // IPC section
+
+    condition_variable::ConditionVariablePrepareToSleep(&WalSndCtl().wal_confirm_rcv_cv);
+
+    loop {
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+        }
+
+        // Exit if done waiting for every slot.
+        if slot::StandbySlotsHaveCaughtup(wait_for_lsn, types_error::WARNING)? {
+            break;
+        }
+
+        // 1s timeout so a changed synchronized_standby_slots is noticed.
+        condition_variable::ConditionVariableTimedSleep(
+            &WalSndCtl().wal_confirm_rcv_cv,
+            1000,
+            WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION,
+        )?;
+    }
+
+    condition_variable::ConditionVariableCancelSleep();
+    Ok(())
+}
+
+/// PhysicalWakeupLogicalWalSnd (walsender.c:1728): wake logical walsenders
+/// with failover slots when the acquired physical slot is listed in
+/// synchronized_standby_slots.
+pub(crate) fn PhysicalWakeupLogicalWalSnd() {
+    let s = slot::MyReplicationSlot().expect("PhysicalWakeupLogicalWalSnd: no slot");
+    debug_assert!(slot::SlotIsPhysical(s));
+
+    // On a standby there are no walsenders waiting for standbys (no syncing
+    // to cascading standbys).
+    if transam_xlog::RecoveryInProgress() {
+        return;
+    }
+
+    let name = String::from_utf8_lossy(s.data.get().name.name_str()).into_owned();
+    if slot::SlotExistsInSyncStandbySlots(&name) {
+        condition_variable::ConditionVariableBroadcast(&WalSndCtl().wal_confirm_rcv_cv);
+    }
+}
+
 pub fn init_seams() {
+    walsender_seams::wait_for_standby_confirmation::set(wait_for_standby_confirmation_loop);
     guc_tables::vars::log_replication_commands.install(guc_tables::GucVarAccessors {
         get: || LOG_REPLICATION_COMMANDS.get(),
         set: |v| LOG_REPLICATION_COMMANDS.set(v),

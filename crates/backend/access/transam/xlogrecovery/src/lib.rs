@@ -1954,7 +1954,12 @@ pub fn FinishWalRecovery() -> PgResult<EndOfWalRecoveryInfo> {
         let rec = guard.as_mut().expect("FinishWalRecovery before InitWalRecovery");
 
         xlog_shutdown_wal_rcv();
-        // ShutDownSlotSync: slot-sync worker unported; nothing to stop.
+
+        // Shutdown the slot sync machinery: drops its temporary slots and
+        // stops it fetching failover slots ('synced' stays true, as in C).
+        if xlogrecovery_seams::shut_down_slot_sync::is_installed() {
+            xlogrecovery_seams::shut_down_slot_sync::call()?;
+        }
 
         debug_assert!(!wal_rcv_streaming());
         STANDBY_MODE.store(false, Relaxed);

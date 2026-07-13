@@ -241,6 +241,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(adt_tsvector_stat::TS_STAT_BUILTINS);
     fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
+    slotfuncs::init_seams();
+    slotsync::init_seams();
     fmgr_core::register_late_builtins(waitevent::funcs::WAITEVENT_BUILTINS);
     fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);

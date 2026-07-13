@@ -96,3 +96,11 @@ seam_core::seam!(
     // WalSndWaitStopping (walsender.c:3822): wait for stopping/exit of all walsenders.
     pub fn wal_snd_wait_stopping() -> ()
 );
+
+seam_core::seam!(
+    // WaitForStandbyConfirmation's wait loop (slot.c:2843): sleeps on
+    // WalSndCtl->wal_confirm_rcv_cv until StandbySlotsHaveCaughtup; the CV
+    // lives in the walsender crate, so slot.c's caller reaches it through
+    // this seam. Installed by walsender.
+    pub fn wait_for_standby_confirmation(wait_for_lsn: u64) -> types_error::PgResult<()>
+);

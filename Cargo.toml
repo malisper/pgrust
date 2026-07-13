@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/backend/replication/origin",
+    "crates/backend/replication/slotsync",
     "crates/backend/replication/logical/proto",
     "crates/backend/replication/logical/relation",
     "crates/backend/replication/logical/worker",
