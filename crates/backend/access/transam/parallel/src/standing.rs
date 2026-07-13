@@ -400,9 +400,79 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
             }
             Wake::Engage(entry) => match entry.try_claim() {
                 Some(ticket) => serve_ticket(&entry, ticket),
-                None => park_until_board_changes(&entry),
+                None => {
+                    // Claim-race loser: if still unconnected, WARM UP
+                    // against the engagement's database anyway — otherwise
+                    // a lower-DOP engagement stream keeps hitting cold
+                    // InitPostgres on whichever unconnected worker wins a
+                    // later claim race (the connect cost lands INSIDE a
+                    // measured query). Cold connects then all happen on
+                    // the gang's first engagement, any DOP.
+                    warm_connect(&entry);
+                    park_until_board_changes(&entry);
+                }
             },
             Wake::Blocked(entry) => park_until_board_changes(&entry),
+        }
+    }
+}
+
+/// Ticketless warm-up: connect an unconnected worker to the engagement's
+/// database (procarray bracket included — connected-but-parked workers
+/// stay invisible to CountOtherDBBackends). Failures are non-fatal here:
+/// the worker just stays cold (a later ticket retries and counts its
+/// refusal); exit-committed unwinds keep unwinding to the glue.
+fn warm_connect(entry: &Arc<StandingEngagement>) {
+    if init_small::globals::MyDatabaseId() != InvalidOid
+        || entry.shared.database_id == InvalidOid
+    {
+        return;
+    }
+    super::gtrace("g.warmconn.begin");
+    let connected = catch_unwind(AssertUnwindSafe(|| {
+        bgworker::BackgroundWorkerInitializeConnectionByOid(
+            entry.shared.database_id,
+            entry.shared.authenticated_user_id,
+            bgworker::BGWORKER_BYPASS_ALLOWCONN | bgworker::BGWORKER_BYPASS_ROLELOGINCHECK,
+        )
+        .and_then(|()| {
+            mbutils::SetClientEncoding(mbutils::GetDatabaseEncoding()).map(|_| ())
+        })
+    }));
+    super::gtrace("g.warmconn.end");
+    match connected {
+        Ok(Ok(())) => {
+            // Park-invisibility: InitPostgres added us to the procarray
+            // and took a ProcSignal slot; release both until the next
+            // claimed ticket re-adds them.
+            if let Err(e) = procarray_seams::proc_array_remove::call(
+                init_small::globals::MyProcNumber(),
+                types_core::InvalidTransactionId,
+            ) {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "standing executor warm-up procarray remove failed: {}",
+                        e.message()
+                    ),
+                );
+            }
+            procsignal::ProcSignalRelease();
+        }
+        Ok(Err(e)) => {
+            let _ = elog::elog(
+                WARNING,
+                format!("standing executor warm-up connect failed: {}", e.message()),
+            );
+        }
+        Err(payload) => {
+            if is_exit_unwind(&*payload) {
+                resume_unwind(payload);
+            }
+            let _ = elog::elog(
+                WARNING,
+                "standing executor warm-up connect panicked".to_string(),
+            );
         }
     }
 }
@@ -484,7 +554,8 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     } else {
         // Re-engagement on a connected worker: rejoin the procarray
         // BEFORE any snapshot state exists (the binder's snapshot restore
-        // publishes xmin, which only counts while visible).
+        // publishes xmin, which only counts while visible), and retake a
+        // ProcSignal slot (released at every park — see the tail).
         if let Err(e) = procarray_seams::proc_array_add::call(
             init_small::globals::MyProcNumber(),
         ) {
@@ -496,6 +567,12 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             return;
         }
         in_procarray = true;
+        if let Err(e) = procsignal::ProcSignalInit(&[]) {
+            let _ = elog::elog(
+                WARNING,
+                format!("standing executor ProcSignal re-init failed: {}", e.message()),
+            );
+        }
     }
     debug_assert_eq!(init_small::globals::MyDatabaseId(), shared.database_id);
 
@@ -541,9 +618,12 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
     }
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(-1));
-    // Leave the procarray for the park (see the fn doc: parked workers
-    // must be invisible to CountOtherDBBackends). Unwind paths above
-    // skip this deliberately — the thread-exit callback removes then.
+    // Park invisibility (see the fn doc): leave the procarray (parked
+    // workers must be invisible to CountOtherDBBackends) AND release the
+    // ProcSignal slot (a live slot whose owner never drains signals
+    // wedges WaitForProcSignalBarrier — dropdb's SMGRRELEASE barrier).
+    // Unwind paths above skip both deliberately — the thread-exit
+    // callbacks handle them then.
     if in_procarray {
         if let Err(e) = procarray_seams::proc_array_remove::call(
             init_small::globals::MyProcNumber(),
@@ -554,5 +634,6 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
                 format!("standing executor procarray remove failed: {}", e.message()),
             );
         }
+        procsignal::ProcSignalRelease();
     }
 }
