@@ -248,6 +248,27 @@ fn arm_scan_staging<'mcx>(
             if vcol.is_some() {
                 lane_trace("cbstore prewhere+varlane dual arm engaged");
             }
+            // Dict-group co-arm on the PREWHERE-owned batch (§2.1 under
+            // PREWHERE — Q13/Q15-class `... WHERE SearchPhrase <> '' GROUP BY
+            // <dict text key>`): count(*)-only fold plans take decide's
+            // `plan.cols.is_empty()` shortcut, so no decide-phase probe ever
+            // registered the grouping key as a dict lane, and the early
+            // return here used to skip the dict-group arms entirely — the
+            // K2 feed then hashed materialized strings (single key) and the
+            // multi-key feed refused (`MultiKeyShape`: no dict registration).
+            // `seq_scan_cb_columnar_arm` registers the consumer ON the live
+            // lane batch (its forced full prefix covers the feed's ask by
+            // construction: `ask` >= the fused prefix); the fill answers the
+            // key as codes+dict from the next window on, and the
+            // gather-to-Raw skip keeps the codes up past the qual. Refusal
+            // falls through to the Raw/per-row key paths, byte-identically.
+            if let ScanFeedShape::HashAggFold { agg } = &shape {
+                if try_arm_cb_dictgroup(agg, ss, estate) {
+                    lane_trace("cbstore dict-group co-armed on prewhere lane");
+                } else if try_arm_cb_multikey_dict(agg, ss, estate) {
+                    lane_trace("cbstore multikey co-armed on prewhere lane");
+                }
+            }
             return Ok(());
         }
     }
