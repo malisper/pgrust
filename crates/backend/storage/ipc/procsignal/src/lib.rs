@@ -205,8 +205,31 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
             t.set(handlers);
         }
     });
-    ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
+    // Once per thread: STANDING runtime executors (parallel::standing)
+    // release + re-init their slot per engagement without an intervening
+    // proc_exit, so a per-call registration would stack duplicates on the
+    // exit-callback stack.
+    if !CLEANUP_REGISTERED.get() {
+        ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
+        CLEANUP_REGISTERED.set(true);
+    }
     Ok(())
+}
+
+thread_local! {
+    static CLEANUP_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// M2 pool-binding: a STANDING runtime executor releases its ProcSignal
+/// slot while PARKED (re-initing per engagement): a live slot whose owner
+/// never drains signals wedges every WaitForProcSignalBarrier — e.g. the
+/// SMGRRELEASE barrier early in DROP DATABASE. A released slot reads as
+/// absorbed-of-everything (pss_barrierGeneration = u64::MAX). No-op
+/// without a slot.
+pub fn ProcSignalRelease() {
+    if MY_PROC_SIGNAL_SLOT.get().is_some() {
+        CleanupProcSignalState(0, 0);
+    }
 }
 
 pub const NUM_THREAD_SIGNALS: usize = 32;
@@ -336,9 +359,12 @@ pub fn DrainThreadSignals() -> PgResult<()> {
 
 fn CleanupProcSignalState(_code: i32, _arg: usize) {
     // Clear first so a signal arriving after this point ignores the slot.
-    let slot_index = MY_PROC_SIGNAL_SLOT
-        .get()
-        .expect("CleanupProcSignalState called without a ProcSignal slot");
+    // Tolerate an already-released slot: a standing runtime executor
+    // (parallel::standing) releases at every park, so its thread-exit
+    // callback usually finds nothing to do.
+    let Some(slot_index) = MY_PROC_SIGNAL_SLOT.get() else {
+        return;
+    };
     MY_PROC_SIGNAL_SLOT.set(None);
     let slot = &proc_signal().psh_slot[slot_index];
     let my_pid = g::MyProcPid();
