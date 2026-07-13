@@ -551,6 +551,13 @@ fn runtime_distinct_enabled() -> bool {
 // Leader-side engagement.
 // ---------------------------------------------------------------------------
 
+/// Refusal diagnosis trace (PGRUST_LANE_V2_TRACE only; emitted only once the
+/// arm is ARMED — dop set + runtime on — so unarmed sessions stay silent).
+#[cold]
+fn refused(reason: &str) {
+    lane_trace(&format!("runtime-distinct: refused ({reason})"));
+}
+
 /// The runtime distinct-sink arm, probed from the sorted-agg narrow branch
 /// (set-mode already armed by the caller — the last-refusal ordering law is
 /// satisfied there). `None` = refused or fell back (nothing consumed; the
@@ -573,17 +580,21 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
 
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
     let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
+        refused("outer not SeqScan");
         return Ok(None);
     };
     if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        refused("scan not fusible/cbstore");
         return Ok(None);
     }
     // Instrumented runs refuse the sink (EXPLAIN ANALYZE stays C-exact) —
     // the caller's seam does not gate instrumentation for the serial arms.
     if estate.es_instrument != 0 || estate.es_epq_active {
+        refused("instrumented/epq");
         return Ok(None);
     }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refused("already in parallel machinery");
         return Ok(None);
     }
     // Agg-side admission: the hash-grouped arm's integer-key/exact-set
@@ -597,48 +608,64 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
             sort.plan.plan.plan_rows,
         )
     {
+        refused("hashgroup admission/economics");
         return Ok(None);
     }
     let Some(order) = super::hashgroup_order_spec(agg, sort.plan, k) else {
+        refused("order spec");
         return Ok(None);
     };
-    let Some(desc) = outer_desc.as_ref() else { return Ok(None) };
+    let Some(desc) = outer_desc.as_ref() else {
+        refused("no outer desc");
+        return Ok(None);
+    };
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc) else {
+        refused("spec derivation");
         return Ok(None);
     };
     if spec.max_att > desc.natts {
+        refused("att bound");
         return Ok(None);
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refused("extern params");
         return Ok(None);
     }
     let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refused("exec params");
         return Ok(None);
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt), with exactly this Sort → SeqScan below it.
     let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else { return Ok(None) };
+    let Some(root_agg) = root.as_agg() else {
+        refused("plan root not Agg");
+        return Ok(None);
+    };
     if !std::ptr::eq(root_agg, agg.plan) {
+        refused("agg not the plan root");
         return Ok(None);
     }
     let Some(sort_node) = agg.plan.plan.lefttree else { return Ok(None) };
     if sort_node.node_tag() != NodeTag::T_Sort {
+        refused("agg child not Sort");
         return Ok(None);
     }
     let Some(scan_node) = sort_node.as_sort().expect("Sort tag").plan.lefttree else {
         return Ok(None);
     };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
+        refused("sort child not SeqScan");
         return Ok(None);
     }
     let scan_plan = scan_node.as_seq_scan().expect("SeqScan tag");
     if !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.qual.iter())?
         || !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
     {
+        refused("parallel-unsafe scan exprs");
         return Ok(None);
     }
     if !estate
@@ -646,6 +673,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
+        refused("non-MVCC snapshot");
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
@@ -654,6 +682,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
+        refused("binder policy sources");
         return Ok(None);
     }
 
@@ -664,6 +693,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     };
     if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
+        refused("granule floor");
         return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
@@ -813,6 +843,10 @@ fn engage_ceremony<'mcx>(
         };
 
         if let Some(e) = payload.take_error() {
+            lane_trace(&format!(
+                "runtime-distinct: worker-phase error: {}",
+                e.message()
+            ));
             return Err(e);
         }
         if outcome == runtime::RgOutcome::Aborted {
