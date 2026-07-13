@@ -283,6 +283,7 @@ origin = { path = "../../backend/replication/origin" }
 logicalworker = { path = "../../backend/replication/logical/worker" }
 logicalrelation = { path = "../../backend/replication/logical/relation" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
+slotsync = { path = "../../backend/replication/slotsync" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 pgoutput = { path = "../../contrib/pgoutput" }
 test_decoding = { path = "../../contrib/test_decoding" }

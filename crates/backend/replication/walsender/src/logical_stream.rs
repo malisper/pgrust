@@ -254,8 +254,27 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
 }
 
 // WalSndWaitForWal (walsender.c:1813): wait for loc to be flushed, processing
-// client replies and keepalives while waiting. The synchronized_standby_slots
-// wait (NeedToWaitForStandbys) is out of scope — GUC-off path.
+// client replies and keepalives while waiting; with a logical failover slot,
+// also wait for the synchronized_standby_slots standbys to confirm receipt
+// (NeedToWaitForStandbys).
+
+// NeedToWaitForStandbys (walsender.c:1753): true when the acquired slot is a
+// logical failover slot mid-streaming and the listed standbys have not caught
+// up to flushed_lsn. After a shutdown signal, dropped/invalidated/inactive
+// slots raise ERROR instead of WARNING so the walsender cannot wait forever.
+fn need_to_wait_for_standbys(flushed_lsn: XLogRecPtr) -> PgResult<bool> {
+    let elevel = if crate::GOT_STOPPING.with(|c| c.get()) {
+        types_error::ERROR
+    } else {
+        types_error::WARNING
+    };
+    let failover_slot = crate::REPLICATION_ACTIVE.with(|c| c.get())
+        && slot::MyReplicationSlot().is_some_and(|s| s.data.get().failover);
+    if failover_slot && !slot::StandbySlotsHaveCaughtup(flushed_lsn, elevel)? {
+        return Ok(true);
+    }
+    Ok(false)
+}
 fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
     // Fast path: enough WAL already known to be flushed.
     let recent = RECENT_FLUSH_PTR.with(Cell::get);
@@ -286,9 +305,15 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
         let recent_flush = transam_xlog::GetFlushRecPtr(None);
         RECENT_FLUSH_PTR.with(|c| c.set(recent_flush));
 
-        // If postmaster asked us to stop, don't wait anymore.
+        // If postmaster asked us to stop and the standby slots have caught
+        // up to the flushed position, don't wait anymore (walsender.c:1893).
+        let mut wait_for_standby_at_stop = false;
         if crate::GOT_STOPPING.with(|c| c.get()) {
-            break;
+            if need_to_wait_for_standbys(recent_flush)? {
+                wait_for_standby_at_stop = true;
+            } else {
+                break;
+            }
         }
 
         // We only send regular messages for full decoded transactions, but
@@ -305,8 +330,12 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             crate::streaming::WalSndKeepalive(false, InvalidXLogRecPtr)?;
         }
 
-        // Enough WAL available: done waiting.
-        if loc_ <= recent_flush {
+        // Exit if already caught up and not waiting for standby slots
+        // (NeedToWaitForWal, walsender.c:1926).
+        if !wait_for_standby_at_stop
+            && loc_ <= recent_flush
+            && !need_to_wait_for_standbys(recent_flush)?
+        {
             break;
         }
 

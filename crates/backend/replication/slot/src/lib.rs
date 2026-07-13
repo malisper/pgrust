@@ -146,6 +146,22 @@ pub fn MyReplicationSlot() -> Option<&'static ReplicationSlot> {
     MY_REPLICATION_SLOT.get()
 }
 
+thread_local! {
+    // slotsync.c's `syncing_slots` (thread = process here). STORAGE lives in
+    // this crate so ReplicationSlotCreate can consult it without a dependency
+    // on slotsync; slotsync owns all writes.
+    static SYNCING_REPLICATION_SLOTS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// IsSyncingReplicationSlots() for this thread (see slotsync).
+pub fn syncing_replication_slots() -> bool {
+    SYNCING_REPLICATION_SLOTS.get()
+}
+
+pub fn set_syncing_replication_slots(v: bool) {
+    SYNCING_REPLICATION_SLOTS.set(v);
+}
+
 pub fn SetMyReplicationSlot(slot: Option<&'static ReplicationSlot>) {
     MY_REPLICATION_SLOT.set(slot);
 }
@@ -310,8 +326,9 @@ pub fn ReplicationSlotCreate(
     ReplicationSlotValidateName(name, ERROR)?;
 
     if failover {
-        // IsSyncingReplicationSlots() == false: slotsync.c unported.
-        if transam_xlog::RecoveryInProgress() {
+        // C: failover on a standby is only allowed for the slot sync
+        // machinery itself (IsSyncingReplicationSlots()).
+        if transam_xlog::RecoveryInProgress() && !syncing_replication_slots() {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot enable failover for a replication slot created on the standby")
@@ -2041,11 +2058,13 @@ pub fn WaitForStandbyConfirmation(wait_for_lsn: XLogRecPtr) -> PgResult<()> {
     if !failover || !has_config {
         return Ok(());
     }
-    let _ = wait_for_lsn;
-    panic!(
-        "WaitForStandbyConfirmation not ported past its early exits \
-         (WalSndCtl->wal_confirm_rcv_cv; walsender unported)"
-    );
+    if !walsender_seams::wait_for_standby_confirmation::is_installed() {
+        panic!(
+            "WaitForStandbyConfirmation past its early exits requires the \
+             walsender crate (WalSndCtl->wal_confirm_rcv_cv)"
+        );
+    }
+    walsender_seams::wait_for_standby_confirmation::call(wait_for_lsn)
 }
 
 pub fn ReplicationSlotNameForTablesync(suboid: Oid, relid: Oid) -> String {
@@ -2110,3 +2129,26 @@ pub fn init_seams() {
 
 static SYNC_REPLICATION_SLOTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
+// Scoped lock helpers for slotsync.c (which takes these locks around its own
+// slot-field manipulation, unlike everything above which is self-contained).
+// ---------------------------------------------------------------------------
+
+/// Run `f` holding ReplicationSlotAllocationLock exclusively
+/// (slotsync.c reserve_wal_for_local_slot).
+pub fn with_allocation_lock_exclusive<R>(f: impl FnOnce() -> PgResult<R>) -> PgResult<R> {
+    lw(allocation_lock(), LW_EXCLUSIVE)?;
+    let r = f();
+    LWLockRelease(allocation_lock())?;
+    r
+}
+
+/// Run `f` holding ReplicationSlotControlLock exclusively
+/// (slotsync.c synchronize_one_slot xmin_horizon computation).
+pub fn with_control_lock_exclusive<R>(f: impl FnOnce() -> PgResult<R>) -> PgResult<R> {
+    lw(control_lock(), LW_EXCLUSIVE)?;
+    let r = f();
+    LWLockRelease(control_lock())?;
+    r
+}

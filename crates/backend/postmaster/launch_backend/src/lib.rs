@@ -68,7 +68,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     ChildProcessKind { name: "wal sender", main_fn: Main::None, shmem_attach: true },
     ChildProcessKind {
         name: "slot sync worker",
-        main_fn: Main::Unported("ReplSlotSyncWorkerMain (backend-replication-slotsync)"),
+        main_fn: Main::Ported(slotsync::ReplSlotSyncWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind { name: "standalone backend", main_fn: Main::None, shmem_attach: false },

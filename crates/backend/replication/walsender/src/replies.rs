@@ -221,7 +221,7 @@ fn PhysicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     if changed {
         slot::ReplicationSlotMarkDirty();
         slot::ReplicationSlotsComputeRequiredLSN()?;
-        // PhysicalWakeupLogicalWalSnd(): failover / standby_slot_names wakeup is P4.
+        crate::PhysicalWakeupLogicalWalSnd();
     }
     // The slot need not be saved to disk here (see the C comment).
     Ok(())

@@ -383,6 +383,8 @@ pub fn LaunchMissingBackgroundProcesses() {
     if with_pm(|pm| pm.slotsync_worker.is_none() && pm.pm_state == PMState::PM_HOT_STANDBY)
         && with_pm(|pm| pm.shutdown <= crate::SmartShutdown)
         && guc_tables::vars::sync_replication_slots.read()
+        && slotsync::ValidateSlotSyncParams(false).unwrap_or(false)
+        && slotsync::SlotSyncWorkerCanRestart()
     {
         let c = StartChildProcess(BackendType::SlotsyncWorker);
         with_pm(|pm| pm.slotsync_worker = c);

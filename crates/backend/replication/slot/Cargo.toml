@@ -20,6 +20,7 @@ crc32c = { path = "../../../port/crc32c" }
 slot_seams = { path = "../slot_seams" }
 pgstat = { path = "../../utils/activity/pgstat" }
 walsender_config = { path = "../walsender_config" }
+walsender_seams = { path = "../walsender_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 procarray = { path = "../../storage/ipc/procarray" }
 standby_seams = { path = "../../storage/ipc/standby_seams" }

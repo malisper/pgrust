@@ -163,3 +163,10 @@ seam_core::seam!(
     // and requests the restart itself.
     pub fn startup_reread_walrcv_config() -> ()
 );
+
+seam_core::seam!(
+    // ShutDownSlotSync (slotsync.c:1586), installed by the slotsync crate:
+    // the startup process shuts the slot sync machinery down during
+    // promotion (xlogrecovery.c:1505 FinishWalRecovery).
+    pub fn shut_down_slot_sync() -> types_error::PgResult<()>
+);
