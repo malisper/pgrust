@@ -241,7 +241,7 @@ impl runtime::ParallelSink for AggSink {
             // The transient per-bucket merge table is bounded by <= dop
             // concurrent claims of bucket-sized tables and drops here.
             let retained = buf.bytes();
-            let total = self.combined_bytes.fetch_add(retained, Ordering::SeqCst) + retained;
+            let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
             if total > self.budget {
                 self.refuse_budget();
                 return Ok(());

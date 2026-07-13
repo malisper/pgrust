@@ -802,13 +802,20 @@ pub struct PdMerged<'mcx> {
 }
 
 impl PdMerged<'_> {
-    /// Retained footprint of one merged bucket (R3 accounting for the
+    /// Retained CONTENT bytes of one merged bucket (R3 accounting for the
     /// combine phase — the merged result is held until the leader adopts).
+    /// Deliberately len-based, matching `PdHandedTable::mem_bytes`'s
+    /// convention: the envelope check compares against the sum of the
+    /// sealed tables' CONTENT, and capacity-based counting (Vec doubling +
+    /// probe-table roundup on freshly rebuilt sets, ~2-4x slack) would
+    /// spuriously cross it for legitimately near-budget merges (review
+    /// finding R1). DistinctSet::mem_bytes is the builder's own metering,
+    /// shared with the accept-phase budget.
     pub fn mem_bytes(&self) -> usize {
-        self.keys.capacity() * 8
-            + self.keynulls.capacity() * 4
-            + self.states.capacity() * 8
-            + self.dsets.capacity() * core::mem::size_of::<Option<DistinctSet<'_>>>()
+        self.keys.len() * 8
+            + self.keynulls.len() * 4
+            + self.states.len() * 8
+            + self.dsets.len() * core::mem::size_of::<Option<DistinctSet<'_>>>()
             + self.dsets.iter().flatten().map(|d| d.mem_bytes()).sum::<usize>()
     }
 }

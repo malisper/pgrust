@@ -126,20 +126,19 @@ unsafe fn int8_transarray_elems(datum: Datum) -> PgResult<*mut i64> {
     Ok(arr.add(::lanefold::ARR_OVERHEAD_NONULLS_1).cast::<i64>())
 }
 
-/// WORKER side: read the node's plain pergroups into a self-contained
-/// partial. Must run before the worker's executor is torn down (the by-ref
-/// states live in its aggcontext).
-pub fn agg_runtime_export_partial(node: &AggStateData<'_>) -> PgResult<RuntimePartial> {
-    let mut out = RuntimePartial::default();
-    agg_runtime_export_partial_into(node, &mut out)?;
-    Ok(out)
-}
-
-/// As [`agg_runtime_export_partial`], writing into a caller-retained
-/// partial (capacity reused across morsels — the export runs once per
-/// morsel per worker, and a fresh Vec each time was a malloc+free pair on
-/// the engaged data path; m2-integration std-collections audit, AGENTS.md
-/// rule 7).
+/// WORKER side helper for the export below. Must run before the worker's
+/// executor is torn down (the by-ref states live in its aggcontext).
+/// Export the node's plain pergroups into a caller-retained partial
+/// (capacity reused across morsels — the export runs once per morsel per
+/// worker, and a fresh Vec each time was a malloc+free pair on the engaged
+/// data path; m2-integration std-collections audit, AGENTS.md rule 7).
+///
+/// ERROR-PATH INVARIANT (leader side must uphold): the partial is cleared
+/// BEFORE the fallible fill, so on Err the slot holds a TRUNCATED partial.
+/// This is safe because every worker error marks the drive self-errored and
+/// the leader combines partials only on a clean Completed outcome
+/// (runtime_scan's take_error discipline) — never adopt a slot from an
+/// errored engagement.
 pub fn agg_runtime_export_partial_into(
     node: &AggStateData<'_>,
     partial: &mut RuntimePartial,
