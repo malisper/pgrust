@@ -270,6 +270,17 @@ struct AdaptiveEntry {
     bound: i64,
 }
 
+/// `granule_meta_peek` verdict (v7 length-stats granule metadata arm).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CbGranuleMetaStep {
+    /// Scan exhausted (next_window would return 0).
+    Exhausted,
+    /// Not at a metadata-answerable fresh granule; stage windows normally.
+    NotMeta,
+    /// The upcoming granule, wholly visible, described by footer metadata.
+    Meta { rows: u32 },
+}
+
 pub struct CbScanDescData<'mcx> {
     pub rs_base: TableScanDescData<'mcx>,
     part: Option<std::rc::Rc<Part>>,
@@ -326,6 +337,8 @@ pub struct CbScanDescData<'mcx> {
     pub windows_staged: u64,
     pub granules_bound_skipped: u64,
     pub adaptive_probe_reverts: u64,
+    // Granules answered wholesale from v7 footer length stats (never decoded).
+    pub granules_meta: u64,
 }
 
 fn env_off(name: &str) -> bool {
@@ -412,6 +425,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             windows_staged: 0,
             granules_bound_skipped: 0,
             adaptive_probe_reverts: 0,
+            granules_meta: 0,
         }
     }
 
@@ -913,6 +927,124 @@ impl<'mcx> CbScanDescData<'mcx> {
             self.win += 1;
             return Ok(self.staged_rows as u32);
         }
+    }
+
+    /// v7 granule length-stats metadata peek (the sorted-fold granule meta
+    /// arm): when the NEXT `next_window` call would decode a fresh granule,
+    /// describe that granule from footer metadata alone — row count, exact
+    /// zone (min, max) per requested key column, and (sum(octet_length),
+    /// non-null, empty) per requested text column. The caller either consumes
+    /// it (`granule_meta_consume` — the granule is never decoded) or declines
+    /// (state untouched beyond RG claiming, which `next_window`'s own loop
+    /// head performs identically — the staged row stream is unchanged).
+    ///
+    /// NotMeta whenever any gate fails: parallel/adaptive scans, zone quals
+    /// (their pruning must keep next_window's exact skip accounting),
+    /// mid-granule position, an RG without RG_FLAG_LENSTATS or not wholly
+    /// visible, a key chunk without exact zone entries, or a column without
+    /// stats. Exhausted mirrors next_window's 0.
+    pub fn granule_meta_peek(
+        &mut self,
+        key_cols: &[u16],
+        len_cols: &[u16],
+        key_mm: &mut [(i64, i64)],
+        len_stats: &mut [(u64, u32, u32)],
+    ) -> PgResult<CbGranuleMetaStep> {
+        debug_assert_eq!(key_cols.len(), key_mm.len());
+        debug_assert_eq!(len_cols.len(), len_stats.len());
+        if self.adaptive.is_some()
+            || self.rs_base.rs_parallel.is_some()
+            || !self.zone_quals.is_empty()
+        {
+            return Ok(CbGranuleMetaStep::NotMeta);
+        }
+        let Some(part) = self.part.clone() else { return Ok(CbGranuleMetaStep::Exhausted) };
+        if len_cols.iter().any(|&c| !part.has_len_stats(c as usize)) {
+            return Ok(CbGranuleMetaStep::NotMeta);
+        }
+        let nrgs = part.rgs.len();
+        loop {
+            if !self.rg_claimed {
+                self.rg = self.claim_next_rg();
+                self.rg_claimed = true;
+                self.granule = 0;
+                self.win = 0;
+                self.rg_checked = false;
+                self.decoded = false;
+            }
+            if self.rg >= nrgs {
+                return Ok(CbGranuleMetaStep::Exhausted);
+            }
+            let rg_rows = part.rgs[self.rg].nrows as usize;
+            let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
+            if !self.rg_checked {
+                // Zone quals are empty here; the visibility gate and prune
+                // accounting are next_window's verbatim.
+                if !self.rg_visible(self.rg)? {
+                    self.granules_pruned += ngranules as u64;
+                    self.rg_claimed = false;
+                    continue;
+                }
+                self.rg_checked = true;
+            }
+            if self.granule >= ngranules {
+                self.rg_claimed = false;
+                continue;
+            }
+            if self.decoded {
+                if self.win * self.window_rows < self.granule_rows {
+                    // Mid-granule: staged windows pending.
+                    return Ok(CbGranuleMetaStep::NotMeta);
+                }
+                // Decoded granule fully consumed: advance exactly as
+                // next_window's own loop head would.
+                self.granule += 1;
+                self.decoded = false;
+                continue;
+            }
+            // Fresh granule. Metadata answer requires exact per-granule
+            // stats and a wholly-visible RG (footer counts stand in for the
+            // rows; own-transaction RGs demote — the next_meta_count
+            // precedent).
+            let m = &part.rgs[self.rg];
+            if m.flags & RG_FLAG_LENSTATS == 0 || !self.rg_wholly_visible(self.rg)? {
+                return Ok(CbGranuleMetaStep::NotMeta);
+            }
+            let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
+            for (k, &c) in key_cols.iter().enumerate() {
+                let chunk = part.chunk(self.rg, c as usize);
+                // Exact decoded-value zone entries only (the
+                // staged_window_value_minmax gate).
+                match chunk.hdr.encoding {
+                    Encoding::Raw | Encoding::For | Encoding::Const => {}
+                    _ => return Ok(CbGranuleMetaStep::NotMeta),
+                }
+                let ge = chunk.granule(self.granule);
+                key_mm[k] = (ge.min, ge.max);
+            }
+            for (k, &c) in len_cols.iter().enumerate() {
+                let Some(st) = part.granule_len_stats(self.rg, self.granule, c as usize)
+                else {
+                    return Ok(CbGranuleMetaStep::NotMeta);
+                };
+                // cbstore stores no NULLs; a mismatch means foreign/corrupt
+                // stats — refuse rather than answer.
+                if st.1 != grows as u32 {
+                    return Ok(CbGranuleMetaStep::NotMeta);
+                }
+                len_stats[k] = st;
+            }
+            return Ok(CbGranuleMetaStep::Meta { rows: grows as u32 });
+        }
+    }
+
+    /// Consume the granule `granule_meta_peek` just answered: advance past it
+    /// without decoding. Only legal immediately after a `Meta` verdict.
+    pub fn granule_meta_consume(&mut self) {
+        debug_assert!(self.rg_claimed && !self.decoded);
+        self.granules_meta += 1;
+        self.granule += 1;
+        self.win = 0;
     }
 
     // Adaptive drive: one bound-ordered granule per claim; window/block

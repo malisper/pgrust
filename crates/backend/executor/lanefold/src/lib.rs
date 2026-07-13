@@ -1323,6 +1323,71 @@ fn cse_delta(t: &LaneTrans, c: i64, s: i64) -> i64 {
     s.wrapping_add(c.wrapping_mul(t.addend as i64))
 }
 
+/// Granule-metadata fold admissibility (v7 cbstore footer length stats):
+/// `Some(cols)` iff EVERY admitted transition is answerable from the pair
+/// (passing row count, per-column Σ octet_length over passing rows) —
+/// CountStar/CountAny (equal on cbstore, which stores no NULLs) and PLAIN
+/// Sum/AvgAccum over VarLenBytes lanes (byte lengths are what the footer
+/// sums carry; VarLenChars refuses). `cols` = the deduped length columns
+/// whose footer sums the fold consumes. Integer-guarded plans refuse
+/// (an integer Guard implies an OpExpr transform lane this fold cannot
+/// host); vguards/uguards are staging proofs over lane READS and do not
+/// apply — the metadata fold reads no lane.
+pub fn granule_meta_len_cols(plan: &LanePlan<'_>) -> Option<Vec<u16>> {
+    if !plan.resid.is_empty() || !plan.guards.is_empty() {
+        return None;
+    }
+    let mut cols: Vec<u16> = Vec::new();
+    for t in plan.trans.iter() {
+        match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => {}
+            LaneKind::Sum | LaneKind::AvgAccum
+                if t.width == LaneWidth::VarLenBytes
+                    && (t.addend, t.mulk, t.divk) == (0, 1, 1) =>
+            {
+                if !cols.contains(&t.col) {
+                    cols.push(t.col);
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(cols)
+}
+
+/// Apply the plan's transitions for a metadata-answered granule: `passing`
+/// selected rows (none NULL — cbstore), `sum_of(col)` = Σ octet_length over
+/// exactly those rows (footer arithmetic). Bit-equal to `fold_batch` over
+/// the same selection: count_apply/sum_apply/avg_apply are the identical
+/// state mutations, integer sums are order-free (mod-2^64 ring), and the
+/// CSE schedule is only a compute-sharing plan — per-transition application
+/// yields the same increments. Caller proved the plan via
+/// `granule_meta_len_cols` and `passing > 0` (zero passing rows apply
+/// nothing, exactly as the per-row program would).
+///
+/// # Safety
+/// `pergroup_base` follows fold_batch's contract (once-allocated pergroup
+/// array covering every transno; AvgAccum pergroups hold a live
+/// `new_int8_transarray`-shaped transvalue).
+pub unsafe fn fold_granule_meta(
+    plan: &LanePlan<'_>,
+    passing: i64,
+    sum_of: impl Fn(u16) -> i64,
+    pergroup_base: NonNull<AggPerGroup>,
+) {
+    debug_assert!(passing > 0);
+    for t in plan.trans.iter() {
+        // SAFETY: transno < pergroup length (caller contract).
+        let pg = unsafe { &mut *pergroup_base.as_ptr().add(t.transno as usize) };
+        match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => count_apply(pg, passing),
+            LaneKind::Sum => sum_apply(pg, sum_of(t.col)),
+            LaneKind::AvgAccum => avg_apply(pg, passing, sum_of(t.col)),
+            _ => unreachable!("granule_meta_len_cols admitted the plan"),
+        }
+    }
+}
+
 /// Whole-batch ungrouped fold: apply every admitted transition over the
 /// selected rows of the staged batch, CSE groups first, then the ungrouped
 /// per-trans kernels. `aggcxt` is the agg (transvalue) memory context — where

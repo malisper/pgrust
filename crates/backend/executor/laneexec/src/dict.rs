@@ -238,6 +238,15 @@ pub struct DictClause {
 }
 
 impl DictClause {
+    /// `col <> ''` (textne against the empty string). Its verdict is a pure
+    /// length predicate — TRUE iff the payload is non-empty — because the
+    /// dict tier only admits deterministic collations (collation_usable), so
+    /// a granule length-stats consumer can fold it arithmetically: rejected
+    /// rows are exactly the empty-string rows.
+    pub(crate) fn is_ne_empty(&self) -> bool {
+        matches!(self.op, DictPredOp::Ne) && self.konst.is_empty()
+    }
+
     // Prewhere static cost classes (translate.rs StagedClause contract):
     // dict eq/ne = 4, dict LIKE = 5.
     pub(crate) fn cost_class(&self) -> u8 {
