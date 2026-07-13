@@ -47,7 +47,6 @@ pub fn StartupProcTriggerHandler() {
 
 /// SIGHUP handler body.
 pub fn StartupProcSigHupHandler() {
-    let _ = elog::elog(types_error::DEBUG1, "startup: SIGHUP disposition ran".to_string());
     GOT_SIGHUP.store(true, Relaxed);
     WakeupRecovery();
 }
@@ -61,41 +60,19 @@ pub fn StartupProcShutdownHandler() {
     WakeupRecovery();
 }
 
-// StartupRereadConfig (startup.c:157): diff the streaming-replication GUCs
-// across the reload; a change forces a walreceiver restart so the new
+// StartupRereadConfig (startup.c:157): a walreceiver-parameter change
+// across the reload forces a walreceiver restart so the new
 // primary_conninfo/slot takes effect (048_vacuum_horizon_floor relies on the
-// walreceiver dying when primary_conninfo goes invalid).
+// walreceiver dying when primary_conninfo goes invalid). The C diff of this
+// process's private pre/post-reload GUC copies is impossible here — string
+// GUC backings are process-shared, the postmaster's reload is visible before
+// ours runs — so xlogrecovery diffs against the walreceiver's started-with
+// values instead.
 fn StartupRereadConfig() -> PgResult<()> {
-    let read_str = |v: &guc_tables::GucStringVar| -> String {
-        if v.installed() { v.read().unwrap_or_default() } else { String::new() }
-    };
-    let conninfo = read_str(&guc_tables::vars::PrimaryConnInfo);
-    let slotname = read_str(&guc_tables::vars::PrimarySlotName);
-    let temp_slot = guc_tables::vars::wal_receiver_create_temp_slot.installed()
-        && guc_tables::vars::wal_receiver_create_temp_slot.read();
-
     guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
 
-    let conninfo_changed = conninfo != read_str(&guc_tables::vars::PrimaryConnInfo);
-    let _ = elog::elog(
-        types_error::DEBUG1,
-        format!(
-            "startup: reread config, conninfo [{}] -> [{}]",
-            conninfo,
-            read_str(&guc_tables::vars::PrimaryConnInfo)
-        ),
-    );
-    let slotname_changed = slotname != read_str(&guc_tables::vars::PrimarySlotName);
-    // wal_receiver_create_temp_slot only matters with no slot configured.
-    let temp_slot_changed = !slotname_changed
-        && slotname.is_empty()
-        && guc_tables::vars::wal_receiver_create_temp_slot.installed()
-        && temp_slot != guc_tables::vars::wal_receiver_create_temp_slot.read();
-
-    if (conninfo_changed || slotname_changed || temp_slot_changed)
-        && xlogrecovery_seams::startup_request_wal_receiver_restart::is_installed()
-    {
-        xlogrecovery_seams::startup_request_wal_receiver_restart::call();
+    if xlogrecovery_seams::startup_reread_walrcv_config::is_installed() {
+        xlogrecovery_seams::startup_reread_walrcv_config::call();
     }
     Ok(())
 }

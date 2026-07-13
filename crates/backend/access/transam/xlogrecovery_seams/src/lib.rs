@@ -154,3 +154,12 @@ seam_core::seam!(
     // StartupRequestWalReceiverRestart() (xlogrecovery.c).
     pub fn startup_request_wal_receiver_restart()
 );
+
+seam_core::seam!(
+    // StartupRereadConfig's walreceiver-parameter diff (startup.c:157): with
+    // process-shared string GUC backings the startup process cannot diff its
+    // own pre/post-reload copies as C does; xlogrecovery compares the
+    // reloaded values against what the running walreceiver was started with
+    // and requests the restart itself.
+    pub fn startup_reread_walrcv_config() -> ()
+);
