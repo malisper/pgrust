@@ -93,7 +93,21 @@ fn mono_us() -> u64 {
     BASE.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
 }
 
+/// Which worker drain feeds the sink build.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SinkDrain {
+    /// Unprojected scan, K2 single-int-key batch probe.
+    K2,
+    /// Projected scan, expr-key feed (Arith/TsTrunc/Reduced kinds) —
+    /// `exprkey_sink_batch` per staged batch, fail-closed off-compact.
+    ExprKey,
+}
+
 struct AggSink {
+    drain: SinkDrain,
+    /// Reduced-key shape (worker arm re-derives and must match; the emit
+    /// plan's Derived columns came from it). None = single-key.
+    red: Option<::nodeagg::RedShape>,
     cap: u32,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
@@ -303,6 +317,10 @@ struct WorkerExec {
     k2s: ScanK2Scratch,
     idxs: Vec<u32>,
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    /// ExprKey drain state (SinkDrain::ExprKey only): the worker's own
+    /// decide + the spill-replay stage slot.
+    xk: Option<Box<super::ExprKeyState>>,
+    stage_slot: Option<::executils::ExecSlotId>,
 }
 
 thread_local! {
@@ -334,8 +352,9 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, idxs, groups, .. } = ex;
+        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, .. } = ex;
         let (k2s, idxs, groups) = (&mut *k2s, &mut *idxs, &mut *groups);
+        let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         crate::querydesc::with_qd(*qd, |q| {
             let x = q.exec.as_mut().expect("runtime agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
@@ -370,8 +389,9 @@ fn accept_morsel_body(
                 if let Some(t) = local.table.take() {
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
-                let drained =
-                    sink_drain_range(sink, local, &mut aps.agg, ss, k2s, idxs, groups, estate);
+                let drained = sink_drain_range(
+                    sink, local, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot, estate,
+                );
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
@@ -395,13 +415,18 @@ fn sink_drain_range<'mcx>(
     k2s: &mut ScanK2Scratch,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    xk: &mut Option<Box<super::ExprKeyState>>,
+    stage_slot: &mut Option<::executils::ExecSlotId>,
     estate: &mut EStateData<'mcx>,
 ) -> Result<(), AcceptFail> {
-    let key_col = ::nodeagg::agg_hash_staged_probe_col(agg).ok_or_else(|| {
-        AcceptFail::Error(::nodeagg::sink::sink_shape_error(
-            "worker build lost its staged key column",
-        ))
-    })? as usize;
+    let key_col = match sink.drain {
+        SinkDrain::ExprKey => 0, // unused; the expr-key feed derives keys
+        SinkDrain::K2 => ::nodeagg::agg_hash_staged_probe_col(agg).ok_or_else(|| {
+            AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "worker build lost its staged key column",
+            ))
+        })? as usize,
+    };
     loop {
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
         // held across this point), budget-check table + runs.
@@ -421,6 +446,19 @@ fn sink_drain_range<'mcx>(
             return Ok(());
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        if sink.drain == SinkDrain::ExprKey {
+            // Expr-key feed: keys derived per batch; fail-closed inside the
+            // adapter (range guard / per-row route / compact disarm).
+            let xk = xk.as_deref_mut().ok_or_else(|| {
+                AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "expr-key drain without a worker decide",
+                ))
+            })?;
+            super::exprkey::exprkey_sink_batch(
+                agg, ss, xk, stage_slot, idxs, groups, n, estate,
+            )?;
+            continue;
+        }
         // Fail-closed: a fallback row has no staged key — the sink cannot
         // route it (no C-table leg exists here).
         let all_lane = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -562,11 +600,11 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             ::types_portal::QueryEnvHandle::NULL,
             0,
         )?;
-        let armed = (|| -> PgResult<()> {
+        let armed = (|| -> PgResult<Option<Box<super::ExprKeyState>>> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("runtime agg worker ExecutorStart");
-                x.with_mut(|d| -> PgResult<()> {
+                x.with_mut(|d| -> PgResult<Option<Box<super::ExprKeyState>>> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
                     else {
@@ -587,13 +625,15 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             })
         })();
         match armed {
-            Ok(()) => {
+            Ok(xk) => {
                 *cell.borrow_mut() = Some(WorkerExec {
                     qd,
                     errored: std::cell::Cell::new(false),
                     k2s: ScanK2Scratch::default(),
                     idxs: Vec::new(),
                     groups: Vec::new(),
+                    xk,
+                    stage_slot: None,
                 });
                 Ok(())
             }
@@ -605,20 +645,64 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
     })
 }
 
-/// The worker's sink-build arm: the serial lane's own staging + K2 + compact
-/// arm sequence, under the sink cap, with every admission the leader proved
-/// re-checked (divergence = error).
+/// The worker's sink-build arm: the serial lane's own staging + key-shape +
+/// compact arm sequence, under the sink cap, with every admission the leader
+/// proved re-checked (divergence = error). Returns the ExprKey drain's
+/// worker decide (None for the K2 drain).
 fn arm_sink_build<'mcx>(
     sink: &AggSink,
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<Option<Box<super::ExprKeyState>>> {
     let shape_err = ::nodeagg::sink::sink_shape_error;
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         return Err(shape_err("worker fold plan diverged from the leader's"));
+    }
+    if sink.drain == SinkDrain::ExprKey {
+        // The worker's own decide (same plan tree — same census result).
+        let Some(xk) = super::exprkey::decide_exprkey(agg, ss, estate) else {
+            return Err(shape_err("worker expr-key decide diverged from the leader's"));
+        };
+        if xk.sink_refused() {
+            return Err(shape_err("worker expr-key decide starts refused"));
+        }
+        let kind = xk.sink_key_kind();
+        ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
+        match (&sink.red, kind) {
+            (None, Some(None)) => {
+                if ::nodeagg::agg_hash_compact_try_arm(agg) != ::nodeagg::CompactArm::Armed {
+                    return Err(shape_err("worker compact arm refused under the sink cap"));
+                }
+            }
+            (Some(shape), Some(Some(wshape))) => {
+                if wshape.width != shape.width || wshape.keys.len() != shape.keys.len() {
+                    return Err(shape_err("worker reduced shape diverged from the leader's"));
+                }
+                if ::nodeagg::agg_hash_compact_try_arm_reduced(agg, wshape)
+                    != ::nodeagg::CompactArm::Armed
+                {
+                    return Err(shape_err("worker reduced arm refused under the sink cap"));
+                }
+            }
+            _ => return Err(shape_err("worker expr-key kind diverged from the leader's")),
+        }
+        let spec_ok = match ::nodeagg::sink::agg_sink_key_spec(agg) {
+            Some(SinkKeySpec::Single { width }) => sink.red.is_none() && width == sink.width,
+            Some(SinkKeySpec::Reduced(sh)) => {
+                sink.red.as_ref().is_some_and(|r| r.width == sh.width) && sh.width == sink.width
+            }
+            None => false,
+        };
+        if !spec_ok {
+            return Err(shape_err("worker key spec diverged from the leader's"));
+        }
+        if ::nodeagg::sink::agg_sink_state_bytes(agg) != Some(sink.state_bytes) {
+            return Err(shape_err("worker state layout diverged from the leader's"));
+        }
+        return Ok(Some(xk));
     }
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
     if super::scan_k2_shape(agg, ss, estate).is_none() {
@@ -638,7 +722,7 @@ fn arm_sink_build<'mcx>(
     if ::nodeagg::sink::agg_sink_state_bytes(agg) != Some(sink.state_bytes) {
         return Err(shape_err("worker state layout diverged from the leader's"));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
@@ -743,6 +827,7 @@ fn find_agg_node<'mcx>(
 pub(super) fn try_engage_hashagg_runtime<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: Option<&super::ExprKeyState>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -770,38 +855,74 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the
     // next cars); scan projection means the key is computed — refuse.
-    if ss.ss.ps_ProjInfo.is_some() {
-        refuse("projected scan (exprkey car)");
-        return Ok(false);
-    }
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         refuse("fold plan guarded/varlena/residual");
         return Ok(false);
     }
-    // The staging arm (idempotent — the serial fold feed re-arms the same
-    // shape on fallback) + the K2 single-key decide.
-    super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
-    if super::scan_k2_shape(agg, ss, estate).is_none() {
-        refuse("K2 shape");
-        return Ok(false);
+    // Drain mode: projected scans take the expr-key feed (Arith/TsTrunc/
+    // Reduced kinds — the lane's decide already ran and is memoized in
+    // `xk`); unprojected scans take the K2 single-int-key batch probe.
+    let (drain, red, width);
+    if ss.ss.ps_ProjInfo.is_some() {
+        let Some(xk) = xk else {
+            refuse("projected scan without an expr-key decide");
+            return Ok(false);
+        };
+        if xk.sink_refused() {
+            refuse("expr-key decide refused");
+            return Ok(false);
+        }
+        let Some(kind) = xk.sink_key_kind() else {
+            refuse("expr-key kind (dict/multi cars)");
+            return Ok(false);
+        };
+        drain = SinkDrain::ExprKey;
+        match kind {
+            None => {
+                let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
+                    refuse("key width");
+                    return Ok(false);
+                };
+                red = None;
+                width = w;
+            }
+            Some(shape) => {
+                width = shape.width;
+                red = Some(shape);
+            }
+        }
+    } else {
+        // The staging arm (idempotent — the serial fold feed re-arms the
+        // same shape on fallback) + the K2 single-key decide.
+        super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
+        if super::scan_k2_shape(agg, ss, estate).is_none() {
+            refuse("K2 shape");
+            return Ok(false);
+        }
+        if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
+            refuse("dict-group staging");
+            return Ok(false);
+        }
+        let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
+            refuse("key width");
+            return Ok(false);
+        };
+        drain = SinkDrain::K2;
+        red = None;
+        width = w;
     }
-    if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-        refuse("dict-group staging");
-        return Ok(false);
-    }
-    let Some(width) = ::nodeagg::sink::agg_sink_key_width(agg) else {
-        refuse("key width");
-        return Ok(false);
-    };
     // Combine + identity-emit qualification (fail-closed; catalog access).
     let Some(combines) = sink_resolve_combines(agg)? else {
         refuse("combine whitelist");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
-    let key_spec = SinkKeySpec::Single { width };
+    let key_spec = match &red {
+        Some(shape) => SinkKeySpec::Reduced(shape.clone()),
+        None => SinkKeySpec::Single { width },
+    };
     let Some(emit) = sink_build_emit_plan(agg, &key_spec) else {
         refuse("identity emit");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
@@ -868,6 +989,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
 
     // --- Engage.
     let sink = Arc::new(AggSink {
+        drain,
+        red,
         cap: sink_cap(),
         budget,
         key_words: 1,

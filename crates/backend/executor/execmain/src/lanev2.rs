@@ -3068,8 +3068,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
     // build byte-identically.
     if c == AggLaneChoice::Fold
-        && xk.is_none()
-        && runtime_agg::try_engage_hashagg_runtime(agg, ss, estate)?
+        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), estate)?
     {
         return Ok(());
     }
