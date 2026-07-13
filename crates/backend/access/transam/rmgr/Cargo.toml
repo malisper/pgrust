@@ -9,6 +9,7 @@ name = "rmgr"
 path = "src/lib.rs"
 
 [dependencies]
+origin_seams = { path = "../../../replication/origin_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 mcx = { path = "../../../../_support/mcx" }

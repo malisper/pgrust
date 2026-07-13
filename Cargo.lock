@@ -9814,8 +9814,43 @@ dependencies = [
 name = "origin"
 version = "0.1.0"
 dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "condition_variable",
+ "crc32c",
+ "datum",
+ "detoast",
+ "elog",
+ "fd",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "ipc",
+ "libc",
+ "lmgr",
+ "lwlock",
+ "mcx",
+ "origin_seams",
+ "postgres_seams",
+ "table",
+ "transam_xlog",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "xact",
+ "xloginsert",
+ "xlogreader_seams",
 ]
 
 [[package]]
@@ -9825,6 +9860,7 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "xlogreader_seams",
 ]
 
 [[package]]
@@ -13996,6 +14032,7 @@ dependencies = [
  "mcx",
  "multixact",
  "nbtree_xlog",
+ "origin_seams",
  "relmapper",
  "rmgrdesc",
  "sequence_xlog",
