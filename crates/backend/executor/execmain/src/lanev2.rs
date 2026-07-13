@@ -5541,7 +5541,14 @@ fn refsort_arm<'mcx>(
     // Leader-side gather across the Gather Merge (workers emit (key, ref),
     // the leader gathers the final bound) is the v2 design — a plan-visible
     // tuple-format change, not an admission tweak.
-    if ::parallel::IsParallelWorker() {
+    //
+    // v1.2: the gate is the SCAN's parallelism, not the process role — with
+    // leader participation the leader runs the same partial Sort with
+    // IsParallelWorker()==false, and its bound-winner gathers alone kept the
+    // Q24 parallel leg at +50% (v1.1 A/B: lane-on 0.106s vs 0.070s with only
+    // the worker-side refusal). A parallel-aware scan means this Sort is a
+    // per-participant partial sort whose winners mostly die at the merge.
+    if ::parallel::IsParallelWorker() || ss.is_parallel() {
         return None;
     }
     if !state.bounded || state.bound <= 0 || state.bound > REFSORT_MAX_BOUND {
