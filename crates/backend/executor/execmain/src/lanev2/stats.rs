@@ -444,6 +444,13 @@ static TOPNEMIT_GROUPS_CUT: AtomicU64 = AtomicU64::new(0);
 /// first_slot scatter); `FEEDS` counts armed feeds.
 static BATCHEMIT_GROUPS: AtomicU64 = AtomicU64::new(0);
 static BATCHEMIT_FEEDS: AtomicU64 = AtomicU64::new(0);
+/// Refsort (late-materialization top-N) engagement counters (informational
+/// `counter` dump lines): `OWNED` = feeds the refsort arm completed (narrow
+/// puts + winner gather); `DEMOTED` = armed feeds that demoted back to the
+/// legacy wide feed (mid-feed ref loss or a gather failure -- always before
+/// any output escaped).
+static REFSORT_OWNED: AtomicU64 = AtomicU64::new(0);
+static REFSORT_DEMOTED: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -504,6 +511,27 @@ pub(super) fn tick_adaptive_topk_tie_relaxed() {
         return;
     }
     ADAPTIVE_TOPK_TIE_RELAXED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one completed refsort (late-materialization top-N) feed.
+#[inline]
+pub(super) fn tick_refsort_owned() {
+    if stats_dir().is_none() {
+        return;
+    }
+    REFSORT_OWNED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one refsort demotion (armed feed fell back to the legacy wide
+/// feed before any output escaped).
+#[inline]
+pub(super) fn tick_refsort_demoted() {
+    if stats_dir().is_none() {
+        return;
+    }
+    REFSORT_DEMOTED.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -629,6 +657,14 @@ fn dump() {
     out.push_str(&format!(
         "counter\tbatchemit-feeds\t{}\n",
         BATCHEMIT_FEEDS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\trefsort-owned\t{}\n",
+        REFSORT_OWNED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\trefsort-demoted\t{}\n",
+        REFSORT_DEMOTED.load(Relaxed)
     ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));

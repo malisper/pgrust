@@ -40,6 +40,18 @@ pub struct SortState<'mcx> {
     bound_Done: i64,
     datumSort: bool,
     tuplesortstate: Option<Tuplesort>,
+    // Lane refsort (late-materialization top-N) state: when `refsort` is
+    // set, `tuplesortstate` holds the NARROW synthetic (key, ref) sort and
+    // must never be read back as node output — the emit face serves the
+    // gathered winners from `refsort_out` instead (sorted order, <= bound
+    // rows). Cleared with the tuplesort on every reset/rescan/end path.
+    refsort: bool,
+    refsort_out: std::collections::VecDeque<::heaptuple::MinimalTuple<'mcx>>,
+    // Sticky per-node refsort refusal (a demoted feed never re-arms).
+    refsort_refused: bool,
+    // Memoized synthetic 2-col (key, ref) desc — one build per node, reused
+    // across rescan re-feeds.
+    refsort_desc: Option<Rc<TupleDescData<'static>>>,
 }
 
 /// `ExecInitSort` minus child linkage: the caller (execProcnode's T_Sort arm)
@@ -67,6 +79,10 @@ pub fn exec_init_sort<'mcx>(
         bound_Done: 0,
         datumSort: outer_desc.natts == 1,
         tuplesortstate: None,
+        refsort: false,
+        refsort_out: std::collections::VecDeque::new(),
+        refsort_refused: false,
+        refsort_desc: None,
     })
 }
 
@@ -226,6 +242,13 @@ pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
         node.tuplesortstate = Some(ts);
     }
 
+    // Lane refsort: the tuplesort is the narrow (key, ref) sort — the node's
+    // output is the gathered-winner buffer (a lane feed built it; a fallback
+    // to this drain leg at a later call boundary must stay byte-safe).
+    if node.refsort {
+        debug_assert!(ScanDirectionIsForward(dir), "refsort never arms with randomAccess");
+        return Ok(refsort_pop(node, estate));
+    }
     let ts = node.tuplesortstate.as_mut().expect("sort_Done without tuplesortstate");
     let slot_id = node.ps_ResultTupleSlot;
     let slot = estate.slot_mut(slot_id);
@@ -341,6 +364,11 @@ where
         node.tuplesortstate = Some(ts);
     }
 
+    // Lane refsort fallback drain (see `exec_sort_batched`'s twin arm).
+    if node.refsort {
+        debug_assert!(ScanDirectionIsForward(dir), "refsort never arms with randomAccess");
+        return Ok(refsort_pop(node, estate));
+    }
     let ts = node.tuplesortstate.as_mut().expect("sort_Done without tuplesortstate");
     let slot_id = node.ps_ResultTupleSlot;
     let slot = estate.slot_mut(slot_id);
@@ -446,6 +474,159 @@ pub fn sort_lane_begin_narrowed<'mcx>(
     )?;
     node.tuplesortstate = Some(ts);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Lane refsort (late-materialization top-N; notes/latemat-lane.md Phase B
+// conversion 1). The feed puts NARROW (key, ref) rows into a synthetic 2-col
+// tuplesort built with the plan's leading-key comparator (same operator/
+// collation/nullsFirst, same bounded discard, same put order => the winner
+// SET and ORDER are byte-identical to the legacy wide feed); after
+// performsort the caller gathers each winner's full row from the ref and
+// buffers the projected outer tuples here, in sorted order. The emit face
+// then serves `refsort_out` and never reads the narrow tuplesort as output.
+// ---------------------------------------------------------------------------
+
+/// Pack a cbstore row ref: (row group, rg-global row index) -> i64.
+#[inline(always)]
+pub fn refsort_encode(rg: u32, row: u32) -> i64 {
+    (((rg as u64) << 32) | row as u64) as i64
+}
+
+/// Unpack a [`refsort_encode`]d ref.
+#[inline(always)]
+pub fn refsort_decode(r: i64) -> (u32, u32) {
+    ((r as u64 >> 32) as u32, r as u32)
+}
+
+/// Sticky per-node refsort refusal (set on demote; a demoted node never
+/// re-arms — the legacy feed owns it for the node's life).
+#[inline]
+pub fn sort_lane_refsort_refused(node: &SortState<'_>) -> bool {
+    node.refsort_refused
+}
+
+pub fn sort_lane_refsort_refuse(node: &mut SortState<'_>) {
+    node.refsort_refused = true;
+}
+
+/// Memoized synthetic (key, ref) desc for this node; `None` until the first
+/// `sort_lane_begin_refsort` stored one.
+pub fn sort_lane_refsort_key_desc(node: &SortState<'_>) -> Option<Rc<TupleDescData<'static>>> {
+    node.refsort_desc.clone()
+}
+
+/// Build leg of the refsort feed: a bounded heap tuplesort over the caller's
+/// synthetic 2-col desc (col 1 = the outer leading sort key's type, col 2 =
+/// int8 ref), sorted on column 1 with the plan's key-0 operator/collation/
+/// nullsFirst — the SAME comparator `sort_lane_begin` would install for the
+/// leading key, over the same bound (ALLOWBOUNDED + set_bound, `exec_sort`'s
+/// construction). Marks the node `refsort` so the emit face serves the
+/// gathered-winner buffer.
+pub fn sort_lane_begin_refsort<'mcx>(
+    node: &mut SortState<'mcx>,
+    key_desc: Rc<TupleDescData<'static>>,
+) -> PgResult<()> {
+    debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
+    debug_assert!(node.bounded && node.bound > 0 && !node.randomAccess);
+    debug_assert!(!node.datumSort, "single-column output is already narrow");
+    debug_assert!(key_desc.natts == 2);
+    let work_mem = init_small::globals::work_mem();
+    let mut ts = Tuplesort::begin_heap(
+        key_desc.clone(),
+        &[1],
+        &node.plan.sortOperators[..1],
+        &node.plan.collations[..1],
+        &node.plan.nullsFirst[..1],
+        work_mem,
+        TUPLESORT_ALLOWBOUNDED,
+    )?;
+    ts.set_bound(node.bound);
+    node.tuplesortstate = Some(ts);
+    node.refsort = true;
+    node.refsort_out.clear();
+    node.refsort_desc = Some(key_desc);
+    Ok(())
+}
+
+/// Feed leg: put one narrow (key, ref) row. One `puttuple_common` per row,
+/// exactly the legacy feed's per-row put accounting.
+#[inline]
+pub fn sort_lane_put_refsort(
+    node: &mut SortState<'_>,
+    key: Datum,
+    isnull: bool,
+    refval: i64,
+) -> PgResult<()> {
+    debug_assert!(node.refsort);
+    let ts =
+        node.tuplesortstate.as_mut().expect("sort_lane_put_refsort before begin");
+    ts.putvalues(&[key, Datum::from_i64(refval)], &[isnull, false])
+}
+
+/// Winner-ref read-back (after `sort_lane_finish`): the next narrow tuple's
+/// decoded (rg, row) ref in sorted output order; `None` = drained.
+pub fn sort_lane_refsort_next_ref(node: &mut SortState<'_>) -> PgResult<Option<(u32, u32)>> {
+    debug_assert!(node.refsort && node.sort_Done);
+    let ts =
+        node.tuplesortstate.as_mut().expect("refsort ref read before finish");
+    let mut values = [Datum::null(); 2];
+    let mut isnull = [false; 2];
+    if !ts.getvalues(true, &mut values, &mut isnull)? {
+        return Ok(None);
+    }
+    debug_assert!(!isnull[1], "refsort ref column is never null");
+    Ok(Some(refsort_decode(values[1].as_i64())))
+}
+
+/// Buffer one gathered winner (outer-format values/isnull, in sorted order):
+/// forms an owned minimal tuple in `mcx` (the query context — outlives the
+/// narrow tuplesort) under the node's result desc.
+pub fn sort_lane_refsort_push_winner<'mcx>(
+    node: &mut SortState<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<()> {
+    debug_assert!(node.refsort);
+    let desc = node.ps_ResultTupleDesc.as_ref().expect("Sort already ended");
+    let mtup = ::heaptuple::heap_form_minimal_tuple(mcx, desc, values, isnull, 0)?;
+    node.refsort_out.push_back(mtup);
+    Ok(())
+}
+
+/// Buffered winner count (trace/verification aid).
+pub fn sort_lane_refsort_winners(node: &SortState<'_>) -> usize {
+    node.refsort_out.len()
+}
+
+/// Refsort emit face: pop the next gathered winner into `ps_ResultTupleSlot`
+/// (owned store — the slot frees it on the next store/clear). `None` = EOF
+/// (buffer drained; clears the slot like the tuplesort drain leg does).
+fn refsort_pop<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<ExecSlotId> {
+    let mcx = estate.es_query_cxt;
+    let slot_id = node.ps_ResultTupleSlot;
+    match node.refsort_out.pop_front() {
+        Some(mtup) => {
+            exectuples::exec_store_minimal_tuple_owned(estate.slot_mut(slot_id), mcx, mtup);
+            Some(slot_id)
+        }
+        None => {
+            exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
+            None
+        }
+    }
+}
+
+/// Drop all refsort state (demote/reset/rescan/end): the narrow tuplesort is
+/// the caller's to clear (`sort_lane_reset_for_refeed` / the rescan paths do
+/// it alongside this).
+fn refsort_clear(node: &mut SortState<'_>) {
+    node.refsort = false;
+    node.refsort_out.clear();
 }
 
 /// Feed leg (breaker `Sink::accept`): put one outer tuple. Datum sorts take
@@ -626,6 +807,7 @@ pub fn sort_lane_reset_for_refeed(node: &mut SortState<'_>) {
     node.tuplesortstate = None;
     node.sort_Done = false;
     node.bounded_Done = false;
+    refsort_clear(node);
 }
 
 /// Finalize leg (breaker `Sink::finish`): `performsort` + the EXPLAIN sort
@@ -660,6 +842,11 @@ pub fn sort_lane_next<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     debug_assert!(node.sort_Done);
+    // Lane refsort: the narrow (key, ref) tuplesort is NEVER node output —
+    // serve the gathered winners, in sorted order, from the buffer.
+    if node.refsort {
+        return Ok(refsort_pop(node, estate));
+    }
     let mcx = estate.es_query_cxt;
     let ts = node.tuplesortstate.as_mut().expect("sort_lane_next before sort_lane_finish");
     let slot_id = node.ps_ResultTupleSlot;
@@ -686,6 +873,8 @@ pub fn sort_lane_next<'mcx>(
 pub fn exec_end_sort(node: &mut SortState<'_>) {
     node.tuplesortstate = None;
     node.ps_ResultTupleDesc = None;
+    refsort_clear(node);
+    node.refsort_desc = None;
 }
 
 /// `ExecSortMarkPos`.
@@ -718,6 +907,7 @@ pub fn exec_rescan_sort_chg<'mcx>(
     }
     node.sort_Done = false;
     node.tuplesortstate = None;
+    refsort_clear(node);
 }
 
 pub fn exec_rescan_sort<'mcx>(
@@ -734,6 +924,9 @@ pub fn exec_rescan_sort<'mcx>(
     {
         node.sort_Done = false;
         node.tuplesortstate = None;
+        // Refsort never arms with randomAccess, so a refsort-fed node always
+        // takes this reset arm: refs/winners never cross a rescan.
+        refsort_clear(node);
         Ok(true)
     } else {
         node.tuplesortstate.as_mut().unwrap().rescan()?;
@@ -759,6 +952,6 @@ pub fn sort_result_type(node: &SortState<'_>) -> Rc<TupleDescData<'static>> {
 // Exempt: released in exec_end_sort.
 mcx::forget_safe_struct!(
     SortState<'_> { plan, ps_ResultTupleSlot, randomAccess, bounded, bound,
-        sort_Done, bounded_Done, bound_Done, datumSort;
-        ps_ResultTupleDesc, tuplesortstate },
+        sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused;
+        ps_ResultTupleDesc, tuplesortstate, refsort_out, refsort_desc },
 );
