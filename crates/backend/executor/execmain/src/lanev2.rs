@@ -899,6 +899,11 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     ) -> Option<(&[::datum::Datum], &[bool], &[u64], Option<&[u64]>)> {
         ::nodeseqscan::seq_scan_refsort_key_batch(self.node, col, n)
     }
+
+    #[inline]
+    fn rowref_base(&self) -> Option<u64> {
+        ::nodeseqscan::seq_scan_batch_rowref_base(self.node)
+    }
 }
 
 // ===========================================================================
@@ -4363,7 +4368,7 @@ fn sort_feed_if_needed<'mcx>(
                 None,
                 estate,
                 None,
-                false,
+                TieMode::Off,
             )?,
         }
         return Ok(true);
@@ -4379,7 +4384,23 @@ fn sort_feed_if_needed<'mcx>(
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
             let adaptive = adaptive_topk_arm(state, &outer_desc, ss)?;
-            let mut tracked = adaptive.is_some_and(|a| a.tracked);
+            let tracked = adaptive.is_some_and(|a| a.tracked);
+            // Payload-visible adaptive feeds, relaxed default: rule-2 rowref
+            // selection (docs/conformance/tie-ordering.md) — the bounded
+            // heap runs the (key, rowref) total order, pinning survivor
+            // selection to the physical feed's first-arrived set by
+            // construction, so no boundary tie can demote (the 100M Q25
+            // cliff: at high per-key densities the LIMIT boundary always
+            // ties and the old cut-selection demote re-fed the whole scan).
+            // `=tracked` keeps the tie-tracking demote ladder (byte-exact
+            // A/B channel).
+            let mut tie = if !tracked {
+                TieMode::Off
+            } else if adaptive_topk_mode() == AdaptiveTopkMode::Relaxed {
+                TieMode::Rowref
+            } else {
+                TieMode::Track
+            };
             // Streaming top-k cutoff (bounded sorts over an admitted
             // qual-less seqscan; None = feed unfiltered, exactly as before).
             // Composes with the direct-key put: the keep-mask filters first,
@@ -4396,6 +4417,13 @@ fn sort_feed_if_needed<'mcx>(
                 lane_trace("refsort armed (bounded sort late materialization)");
                 if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
                     fed = true;
+                    // The refsort feed arms its own boundary-tie tracking on
+                    // the narrow (key, ref) sort — rule-2 rowref selection
+                    // does not apply there; route the post-feed ambiguity
+                    // check through the tracked ladder.
+                    if tie == TieMode::Rowref {
+                        tie = TieMode::Track;
+                    }
                 } else {
                     // Demoted before any output escaped: sticky-refuse the
                     // node, drop the narrow sort + winner buffer, disarm any
@@ -4405,7 +4433,7 @@ fn sort_feed_if_needed<'mcx>(
                     ::nodesort::sort_lane_refsort_refuse(state);
                     ::nodesort::sort_lane_reset_for_refeed(state);
                     ::nodeseqscan::seq_scan_adaptive_disarm_rescan(ss, estate)?;
-                    tracked = false;
+                    tie = TieMode::Off;
                 }
             }
             if !fed {
@@ -4425,18 +4453,17 @@ fn sort_feed_if_needed<'mcx>(
                     narrow,
                     estate,
                     topk,
-                    tracked,
+                    tie,
                 )?;
             }
             // Tracked adaptive feed: an arrival-order-sensitive tie at the
             // LIMIT cut demotes — fresh tuplesort, adaptive disarmed, full
             // physical-order re-feed, reproducing the never-adaptive feed
-            // byte-for-byte. Under the default relaxed mode only
-            // CUT-SELECTION ambiguity demotes (which rows are returned must
-            // stay exact); retained-tie emit order is the ratified
-            // relaxation surface (docs/conformance/tie-ordering.md rule 3)
-            // and is accepted as produced.
-            let ambiguity = if tracked {
+            // byte-for-byte. Under the rowref mode only a rowref contract
+            // break (reported as CutSelection) demotes; retained-tie emit
+            // order is physical there and the ratified relaxation surface
+            // (rule 3) covers it.
+            let ambiguity = if tie != TieMode::Off {
                 ::nodesort::sort_lane_topk_tie_ambiguity(state)
             } else {
                 None
@@ -4451,6 +4478,10 @@ fn sort_feed_if_needed<'mcx>(
                 }
                 other => other,
             };
+            if tie == TieMode::Rowref && ambiguity.is_none() {
+                stats::tick_adaptive_topk_rowref_exact();
+                lane_trace("adaptive topk rowref selection exact (rule 2)");
+            }
             if let Some(kind) = ambiguity {
                 stats::tick_adaptive_topk_demoted();
                 lane_trace(match kind {
@@ -4473,7 +4504,7 @@ fn sort_feed_if_needed<'mcx>(
                     narrow,
                     estate,
                     topk,
-                    false,
+                    TieMode::Off,
                 )?;
             }
         }
@@ -4486,7 +4517,7 @@ fn sort_feed_if_needed<'mcx>(
             narrow,
             estate,
             None,
-            false,
+            TieMode::Off,
         )?,
         crate::procnode::PlanStateNode::IndexOnlyScan(ios) => sort_feed(
             state,
@@ -4497,7 +4528,7 @@ fn sort_feed_if_needed<'mcx>(
             narrow,
             estate,
             None,
-            false,
+            TieMode::Off,
         )?,
         crate::procnode::PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
@@ -4515,7 +4546,7 @@ fn sort_feed_if_needed<'mcx>(
                 narrow,
                 estate,
                 None,
-                false,
+                TieMode::Off,
             )?
         }
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
@@ -4607,7 +4638,7 @@ fn sort_feed<'mcx, S, O>(
     narrow_keys: Option<usize>,
     estate: &mut EStateData<'mcx>,
     topk: Option<TopkCut>,
-    tie_track: bool,
+    tie: TieMode,
 ) -> PgResult<()>
 where
     S: Source<'mcx>,
@@ -4617,10 +4648,15 @@ where
         Some(k) => ::nodesort::sort_lane_begin_narrowed(sort, outer_desc, k)?,
         None => ::nodesort::sort_lane_begin(sort, outer_desc)?,
     }
-    // Zone-adaptive tracked mode: record boundary-tie events so the caller
-    // can demote before any output escapes (see the adaptive block above).
-    if tie_track {
-        ::nodesort::sort_lane_topk_tie_track_arm(sort);
+    match tie {
+        // Zone-adaptive tracked mode: record boundary-tie events so the
+        // caller can demote before any output escapes (see the adaptive
+        // block above).
+        TieMode::Track => ::nodesort::sort_lane_topk_tie_track_arm(sort),
+        // Rule-2 rowref selection: (key, rowref) bounded-heap total order;
+        // the feed threads per-row physical rowrefs to the puts below.
+        TieMode::Rowref => ::nodesort::sort_lane_topk_rowref_arm(sort),
+        TieMode::Off => {}
     }
     // Direct sort-key feed (`exec_sort_batched`'s `key_direct` probe,
     // mirrored): probed once per feed, BEFORE the first `produce` (arming
@@ -4629,10 +4665,32 @@ where
     let key_direct = ::nodesort::sort_lane_is_datum(sort) && op.arm_sort_key(scan, estate);
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = SortBreakerSink { sort, key_direct, topk: topk.map(TopkCutState::new) };
+    let mut sink = SortBreakerSink {
+        sort,
+        key_direct,
+        topk: topk.map(TopkCutState::new),
+        rowref: tie == TieMode::Rowref,
+    };
     drain_pipeline(scan, &mut src, &mut op, &mut sink, estate)?;
     estate.es_direction = dir;
     Ok(())
+}
+
+/// Boundary-tie handling for the lane's bounded sort feed (zone-adaptive
+/// arrival orders only; `Off` for physical-order and ties-invisible feeds).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TieMode {
+    /// Nothing to arm: physical-order feed, or every visible byte is a
+    /// byte-equality sort key (ties invisible).
+    Off,
+    /// Boundary-tie tracking; the caller demotes on an observed trigger
+    /// (the byte-exact `tracked` channel).
+    Track,
+    /// Rule-2 rowref selection (docs/conformance/tie-ordering.md): the
+    /// bounded heap runs the (key, rowref) total order, so survivor
+    /// selection equals the physical feed's by construction and retained
+    /// ties emit in physical order; only a rowref contract break demotes.
+    Rowref,
 }
 
 // ===========================================================================
@@ -4935,7 +4993,7 @@ fn adaptive_topk_arm<'mcx>(
     lane_trace(match (tracked, mode) {
         (false, _) => "adaptive topk armed (sort feed, ties invisible)",
         (true, AdaptiveTopkMode::Relaxed) => {
-            "adaptive topk armed (sort feed, relaxed tie order)"
+            "adaptive topk armed (sort feed, rowref selection + relaxed tie order)"
         }
         (true, _) => "adaptive topk armed (sort feed, tie-tracked)",
     });
@@ -5276,6 +5334,10 @@ struct SortBreakerSink<'a, 'mcx> {
     /// Armed streaming top-k cutoff (see the invariant block above); `None`
     /// = feed unfiltered.
     topk: Option<TopkCutState>,
+    /// Rule-2 rowref selection armed (`TieMode::Rowref`): each batch fetches
+    /// the emit face's rowref base and threads per-row physical rowrefs to
+    /// the tuplesort puts. Off = never consult the base (no stamping cost).
+    rowref: bool,
 }
 
 /// Per-feed pre-filter state: the armed spec + the zero-cut back-off. On the
@@ -5376,6 +5438,11 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
             /// with None (which routes them through `emit`, filtering them) —
             /// mask first, then the direct-key put on survivors.
             sel: Option<&'e [u64; ::exectuples::SOA_BM_WORDS]>,
+            /// Rule-2 rowref base for this staged batch (rowref-armed feeds
+            /// only): staged row `i`'s rowref is `base + i`. `None` = bare
+            /// puts (a rowref-armed tuplesort then records the contract
+            /// break and the caller demotes).
+            rrbase: Option<u64>,
         }
         impl<'e, E> Feed<'e, E> {
             #[inline(always)]
@@ -5406,6 +5473,10 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
                 }
                 self.emit.emit_key(i)
             }
+            #[inline(always)]
+            fn emit_rowref(&self, i: u32) -> Option<u64> {
+                self.rrbase.map(|b| b + i as u64)
+            }
         }
         // Streaming top-k cutoff: once the bounded heap is full, discard the
         // batch's cannot-make-top-k rows (strictly worse than the k-th
@@ -5413,6 +5484,9 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         // The mask computation completes before the put loop (the lane
         // borrow ends), and survivors take the EXACT unfiltered put path
         // (including the direct-key arm when q9triage's probe armed it).
+        // Rule-2 rowref base, fetched once per staged batch (armed feeds
+        // only — unarmed feeds never consult the seam).
+        let rrbase = if self.rowref { emit.rowref_base() } else { None };
         let mut filtered = None;
         if let Some(tk) = self.topk.as_mut() {
             filtered = tk.batch_mask(self.sort, &*emit, pos, n)?;
@@ -5424,7 +5498,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
                 pos,
                 n,
                 self.key_direct,
-                &mut Feed { emit, sel: Some(&sel) },
+                &mut Feed { emit, sel: Some(&sel), rrbase },
             )?,
             None => ::nodesort::sort_lane_put_batch(
                 self.sort,
@@ -5432,7 +5506,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
                 pos,
                 n,
                 self.key_direct,
-                &mut Feed { emit, sel: None },
+                &mut Feed { emit, sel: None, rrbase },
             )?,
         }
         // Zone-adaptive bound feedback: hand the (possibly just-tightened)
