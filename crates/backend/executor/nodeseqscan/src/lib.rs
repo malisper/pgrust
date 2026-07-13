@@ -1407,6 +1407,39 @@ pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
     true
 }
 
+/// Arm the dict-code answer on an already-armed varlena direct key feed
+/// (`seq_scan_sortkey_direct` with the varkey pass): the consumer opts into
+/// reading the key as codes+dict per staged window
+/// (`seq_scan_batch_key_dict_lane`), and the columnar fill answers with a
+/// zero-gather dict lane where the chunk is dict-encoded (Raw windows — and
+/// every heap batch — keep the per-row datum lane; consumers must treat a
+/// missing lane as "this window is Raw"). False = no varkey staging armed
+/// (fixed-width key or no batch SoA); nothing changes.
+pub fn seq_scan_key_dict_arm(node: &mut SeqScanState<'_>) -> bool {
+    let Some(b) = node.batch_soa.as_deref_mut() else { return false };
+    if b.varkey.is_none() {
+        return false;
+    }
+    b.soa.set_dict_want(0);
+    true
+}
+
+/// The staged window's dict-code lane for the varkey direct key feed, when
+/// the fill answered one (see `seq_scan_key_dict_arm`). While a lane is up,
+/// the key column's datum/isnull cells are STALE — the caller must consume
+/// codes+dict for the whole window and never call `seq_scan_batch_key` on
+/// it.
+#[inline]
+pub fn seq_scan_batch_key_dict_lane(
+    node: &SeqScanState<'_>,
+) -> Option<::exectuples::SoaDictLane> {
+    let b = node.batch_soa.as_deref()?;
+    if b.varkey.is_none() {
+        return None;
+    }
+    b.soa.dict_lane(0)
+}
+
 /// Direct key read for staged row `i`; None = fallback row (narrow tuple),
 /// the caller must take the full emit path.
 #[inline(always)]

@@ -849,6 +849,11 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn push_topk_bound(&mut self, key: ::datum::Datum) {
         ::nodeseqscan::seq_scan_adaptive_push_bound(self.node, key);
     }
+
+    #[inline]
+    fn key_dict_lane(&self) -> Option<::exectuples::SoaDictLane> {
+        ::nodeseqscan::seq_scan_batch_key_dict_lane(self.node)
+    }
 }
 
 // ===========================================================================
@@ -2157,7 +2162,7 @@ fn agg_plain_perrow_feed<'mcx>(
     )?;
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let mut sink = PlainAggBuildSink { agg };
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)
 }
@@ -2409,7 +2414,7 @@ fn agg_plain_fold_feed<'mcx>(
     arm_fold_len_lanes(agg, ss);
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
     // Str MIN/MAX dict-code side channel (lane-v2-dictminmax; identity plan→
@@ -2605,19 +2610,36 @@ fn agg_plain_fold_feed<'mcx>(
 struct PlainDistinctAggBuildSink<'a, 'mcx> {
     agg: &'a mut ::nodeagg::AggStateData<'mcx>,
     key_direct: bool,
+    /// Direct key is text (`DistinctKeyKind::Bytes`): staged keys route
+    /// through the bytes/dict batch inserts instead of the integer feed.
+    key_bytes: bool,
     keys: Vec<::datum::Datum>,
     ints: Vec<i64>,
     hashes: Vec<u64>,
+    /// Dict-code insert memo, EPOCH-SCOPED (cleared whenever the staged dict
+    /// lane's epoch changes): bit = this code's value was already fed this
+    /// epoch. Never carries across epochs — epoch-scoped ids are not stable
+    /// value identities (the set stores full bytes; the memo only filters
+    /// repeat inserts, which every downstream consumer dedups anyway).
+    dict_memo: Vec<u64>,
+    dict_epoch: Option<u64>,
 }
 
 impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
-    fn new(agg: &'a mut ::nodeagg::AggStateData<'mcx>, key_direct: bool) -> Self {
+    fn new(
+        agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+        key_direct: bool,
+        key_bytes: bool,
+    ) -> Self {
         PlainDistinctAggBuildSink {
             agg,
             key_direct,
+            key_bytes,
             keys: Vec::new(),
             ints: Vec::new(),
             hashes: Vec::new(),
+            dict_memo: Vec::new(),
+            dict_epoch: None,
         }
     }
 }
@@ -2654,6 +2676,37 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
             }
             return Ok(());
         }
+        // Dict-coded text window (the cbstore zero-decode lane): consume
+        // codes+dict for the whole window — the key's datum cells are stale
+        // while a lane is up, so `emit_key` must not run. The memo dedups
+        // per epoch (row group); a repeat code's value was already fed and
+        // every downstream consumer dedups exactly.
+        if self.key_bytes {
+            if let Some(lane) = emit.key_dict_lane() {
+                let t = lane.table;
+                if self.dict_epoch != Some(t.epoch) {
+                    self.dict_memo.clear();
+                    self.dict_memo.resize((t.ndict as usize).div_ceil(64), 0);
+                    self.dict_epoch = Some(t.epoch);
+                }
+                // SAFETY: the lane covers the staged window's `n` rows and
+                // `ndict` dict entries (the fill's contract); consumed
+                // before the next window stages.
+                let (codes, dict) = unsafe {
+                    (
+                        core::slice::from_raw_parts(lane.codes, n as usize),
+                        core::slice::from_raw_parts(t.dict, t.ndict as usize),
+                    )
+                };
+                return ::nodeagg::agg_plain_distinct_insert_dict_batch(
+                    self.agg,
+                    estate,
+                    &codes[pos as usize..],
+                    dict,
+                    &mut self.dict_memo,
+                );
+            }
+        }
         // Direct staged-key feed (page-level CFI in the staging fetch —
         // the sort breaker's emit_key cadence).
         self.keys.clear();
@@ -2669,6 +2722,14 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                     }
                 }
             }
+        }
+        if self.key_bytes {
+            return ::nodeagg::agg_plain_distinct_insert_bytes_batch(
+                self.agg,
+                estate,
+                &self.keys,
+                saw_null,
+            );
         }
         ::nodeagg::agg_plain_distinct_insert_batch(
             self.agg,
@@ -2706,13 +2767,18 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     // one call).
     stats::tick_owned(ShapeClass::AggBuild);
     trace_feed("plain-agg distinct-set drive engaged");
-    // v2 batched-insert arm: single integer set-mode DISTINCT over exactly
-    // outer column 0 with the scan's direct key staging (no qual, covered
-    // column — the sort breaker's own matcher). Probed BEFORE the first
-    // produce, exactly as `sort_feed` probes: arming decides staging.
+    // v2 batched-insert arm: single set-mode DISTINCT over exactly outer
+    // column 0 with the scan's direct key staging (no qual, covered column —
+    // the sort breaker's own matcher; integer keys stage fixed-width, text
+    // keys stage varlena pointers, dict-encoded cbstore text windows answer
+    // codes+dict). Probed BEFORE the first produce, exactly as `sort_feed`
+    // probes: arming decides staging.
     let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
         && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
-    if key_direct {
+    let key_bytes = key_direct && ::nodeagg::agg_plain_distinct_key_is_bytes(agg);
+    if key_bytes && ::nodeseqscan::seq_scan_key_dict_arm(ss) {
+        trace_feed("distinct-set direct text key feed armed (dict-capable)");
+    } else if key_direct {
         trace_feed("distinct-set direct key feed armed");
     } else {
         // Kernel-shaped quals vectorize via the staged selection bitmap; the
@@ -2722,8 +2788,8 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     }
     // initialize_aggregates (delegated): fresh initval pergroups + cleared
     // sets; a rescan re-enters here with agg_done cleared.
-    ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct, key_bytes);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     // Retrieve (delegated): set replay + finalize + HAVING + project — one
     // row (or none, when the var-free HAVING rejects it), setting agg_done.
@@ -2803,14 +2869,17 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     // proves is one covered scan Var with no qual).
     let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
         && ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
-    if key_direct {
+    let key_bytes = key_direct && ::nodeagg::agg_plain_distinct_key_is_bytes(agg);
+    if key_bytes && ::nodeseqscan::seq_scan_key_dict_arm(ss) {
+        trace_feed("distinct-set direct text key feed armed (dict-capable)");
+    } else if key_direct {
         trace_feed("distinct-set direct key feed armed");
     } else {
         arm_seq_scan_qual_bitmap(ss, estate, "agg distinct-set skip-sort feed", true);
         ::nodeseqscan::seq_scan_stitch_arm(ss);
     }
-    ::nodeagg::agg_plain_build_begin(agg)?;
-    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct);
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    let mut sink = PlainDistinctAggBuildSink::new(agg, key_direct, key_bytes);
     drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
@@ -5273,6 +5342,20 @@ fn distincthash_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_TEXT` kill switch (default ON): text group
+/// keys for the hash-grouped arm (the Q11/Q12/Q14 shape). Off, text-keyed
+/// nodes fall to the narrow-sort arm exactly as before this lane — the A/B
+/// attribution channel for the text-key delta.
+fn distincthash_text_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXT").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -5287,16 +5370,25 @@ fn distincthash_force() -> bool {
 }
 
 /// Map the plan Sort's k-key prefix onto the grouping columns as the arm's
-/// group-emit order. `None` refuses (an operator outside the integer
-/// asc/desc vocabulary — bool/text group keys keep the narrow-sort arm).
-/// The multiset equality of prefix and group columns was already proven by
-/// the narrow admission; `used` disambiguates duplicated columns.
+/// group-emit order. `None` refuses (an operator outside the integer/text
+/// asc/desc vocabulary — bool group keys keep the narrow-sort arm). Text
+/// keys carry the plan Sort's collation for the group-order comparator
+/// (`varstr_cmp`'s authority) and require it valid + DETERMINISTIC (the
+/// no-ties total-order invariant; nondeterministic collations keep the C
+/// sort path per the textsets rule — the equality-side admission refuses
+/// them independently). The multiset equality of prefix and group columns
+/// was already proven by the narrow admission; `used` disambiguates
+/// duplicated columns.
 fn hashgroup_order_spec(
     agg: &::nodeagg::AggStateData<'_>,
     sp: &::types_nodes::plannodes::Sort<'_>,
     k: usize,
 ) -> Option<Vec<::nodeagg::HashGroupOrderKey>> {
     use ::execexpr::CmpOp;
+    /// pg_proc text_lt / text_gt — the btree text opclass's `<` / `>`
+    /// support (varchar sorts through the same text operators).
+    const F_TEXT_LT: ::types_core::Oid = 740;
+    const F_TEXT_GT: ::types_core::Oid = 742;
     let group_cols = ::nodeagg::agg_plan_group_cols(agg);
     debug_assert_eq!(group_cols.len(), k);
     let mut used = vec![false; k];
@@ -5306,17 +5398,30 @@ fn hashgroup_order_spec(
         let j = (0..k).find(|&j| !used[j] && group_cols[j] == col)?;
         used[j] = true;
         // Sort operator -> its comparison-kernel image -> ASC/DESC (the
-        // top-k cutoff's resolution path; int families only).
+        // top-k cutoff's resolution path), or the text operator pair.
         let opfn = ::lsyscache::get_opcode(sp.sortOperators[i]).ok()?;
-        let desc = match CmpOp::for_fn_oid(opfn)? {
-            CmpOp::Int2Lt | CmpOp::Int4Lt | CmpOp::Int8Lt => false,
-            CmpOp::Int2Gt | CmpOp::Int4Gt | CmpOp::Int8Gt => true,
-            _ => return None,
+        let (desc, collation) = match opfn {
+            F_TEXT_LT | F_TEXT_GT => {
+                let coll = sp.collations[i];
+                if coll == 0 || !::lsyscache::get_collation_isdeterministic(coll).ok()? {
+                    return None;
+                }
+                (opfn == F_TEXT_GT, coll)
+            }
+            _ => {
+                let desc = match CmpOp::for_fn_oid(opfn)? {
+                    CmpOp::Int2Lt | CmpOp::Int4Lt | CmpOp::Int8Lt => false,
+                    CmpOp::Int2Gt | CmpOp::Int4Gt | CmpOp::Int8Gt => true,
+                    _ => return None,
+                };
+                (desc, 0)
+            }
         };
         out.push(::nodeagg::HashGroupOrderKey {
             key_idx: j,
             desc,
             nulls_first: sp.nullsFirst[i],
+            collation,
         });
     }
     Some(out)
@@ -5411,8 +5516,18 @@ fn try_hashgroup_build<'mcx>(
         return Ok(HgBuild::Refused);
     };
     if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical(agg, distincthash_force())
+        // Density/memory economics: the Sort's row estimate is the arm's
+        // input cardinality (the sort passes every input row through).
+        || !::nodeagg::agg_hashgroup_economical(
+            agg,
+            distincthash_force(),
+            sort.plan.plan.plan_rows,
+        )
     {
+        return Ok(HgBuild::Refused);
+    }
+    let text_keys = ::nodeagg::agg_hashgroup_text_key_count(agg);
+    if text_keys > 0 && !distincthash_text_enabled() {
         return Ok(HgBuild::Refused);
     }
     let Some(order) = hashgroup_order_spec(agg, sort.plan, k) else {
@@ -5420,6 +5535,9 @@ fn try_hashgroup_build<'mcx>(
     };
     ::nodeagg::agg_hashgroup_begin(agg, estate, order)?;
     trace_feed("sorted-agg hash-grouped distinct drive engaged");
+    if text_keys > 0 {
+        trace_feed("hash-grouped distinct arm: text group keys armed");
+    }
     arm_scan_staging(
         ss,
         estate,
@@ -9822,7 +9940,10 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
         }
     }
     if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical(agg, pardistinct_force())
+        // Density/memory economics: the parallel Sort's row estimate is
+        // per-worker (conservative for the density tier — a refusal falls
+        // back to the byte-identical per-tuple gather-merge path).
+        || !::nodeagg::agg_hashgroup_economical(agg, pardistinct_force(), sp.plan.plan_rows)
     {
         return Ok(None);
     }
