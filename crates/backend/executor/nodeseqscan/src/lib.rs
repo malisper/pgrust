@@ -1157,6 +1157,18 @@ pub fn seq_scan_batch_dict_codes(
     ::tableam::table_scan_batch_dict_codes(sd, c as u16)
 }
 
+/// Physical rowref base of the CURRENT staged batch (tie-ordering rule 2,
+/// the zone-adaptive rowref-selection sort feed): staged row `i`'s rowref is
+/// `base + i` — the SoA batch stages exactly the scan's current staged
+/// window, so batch indices ARE window row offsets. `None` for heap scans or
+/// when nothing is staged; the rowref-armed consumer then demotes.
+#[inline]
+pub fn seq_scan_batch_rowref_base(node: &SeqScanState<'_>) -> Option<u64> {
+    let sd = node.ss.ss_currentScanDesc.as_ref()?;
+    node.batch_soa.as_deref()?;
+    ::tableam::table_scan_batch_rowref_base(sd)
+}
+
 /// The registered dict-group consumer column, when the dict-group arm (or a
 /// PREWHERE co-arm) holds. The agg feed re-checks this per build — a rebuilt
 /// batch (a later consumer re-armed the staging) drops the registration and

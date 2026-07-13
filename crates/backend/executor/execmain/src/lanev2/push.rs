@@ -235,6 +235,14 @@ pub(super) trait BatchEmit<'mcx> {
     ) -> Option<(&[::datum::Datum], &[bool], &[u64], Option<&[u64]>)> {
         None
     }
+
+    /// Physical rowref base of the CURRENT staged batch (tie-ordering rule
+    /// 2, the zone-adaptive rowref-selection sort feed): staged row `i`'s
+    /// rowref is `base + i`. Default: never serves (only the cbstore-backed
+    /// seqscan emit face carries physical rowrefs).
+    fn rowref_base(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3

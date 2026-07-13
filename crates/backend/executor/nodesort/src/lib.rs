@@ -691,6 +691,14 @@ pub trait SortLaneBatchFeed<'mcx> {
     fn emit_key(&mut self, _i: u32) -> Option<(Datum, bool)> {
         None
     }
+    /// Physical rowref of staged row `i` (rowref mode, tie-ordering rule 2:
+    /// `(row_group << 32) | rg-global-row`); `None` = the feed carries no
+    /// rowrefs (the default) and the put takes the bare path, which a
+    /// rowref-armed tuplesort records as a contract break (the caller then
+    /// demotes). Consulted on the heap-tuple put leg only.
+    fn emit_rowref(&self, _i: u32) -> Option<u64> {
+        None
+    }
 }
 
 /// Batch-granular feed leg (breaker `BatchSink::accept_batch`): put every
@@ -761,7 +769,10 @@ where
     } else {
         for i in pos..n {
             let Some(id) = feed.emit(i, estate)? else { continue };
-            ts.puttupleslot(estate.slot_mut(id), mcx)?;
+            match feed.emit_rowref(i) {
+                Some(rr) => ts.puttupleslot_rowref(estate.slot_mut(id), mcx, rr)?,
+                None => ts.puttupleslot(estate.slot_mut(id), mcx)?,
+            }
         }
     }
     Ok(())
@@ -786,6 +797,20 @@ pub fn sort_lane_topk_tie_track_arm(node: &mut SortState<'_>) {
         .as_mut()
         .expect("tie track armed before sort_lane_begin")
         .arm_topk_tie_track();
+}
+
+/// Arm the top-k rowref total order (tie-ordering rule 2) on the just-begun
+/// tuplesort: the bounded heap resolves full-key ties by physical rowref, so
+/// survivor selection is the physical-order feed's by construction and the
+/// zone-adaptive feed needs no tie-selection demotion (only a rowref
+/// contract break demotes, via `sort_lane_topk_tie_ambiguity`). Heap sorts
+/// only; call between `sort_lane_begin` and the first put.
+pub fn sort_lane_topk_rowref_arm(node: &mut SortState<'_>) {
+    debug_assert!(!node.datumSort);
+    node.tuplesortstate
+        .as_mut()
+        .expect("rowref mode armed before sort_lane_begin")
+        .arm_topk_rowref();
 }
 
 /// After `sort_lane_finish`, with tracking armed: could the selection or

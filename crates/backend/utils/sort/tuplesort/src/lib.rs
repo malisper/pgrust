@@ -273,6 +273,20 @@ pub struct TuplesortData<'m> {
     // put paths are untouched.
     tie_track: bool,
     tie_dirty: bool,
+    // Top-k rowref total order (tie-ordering rule 2, lane zone-adaptive sort
+    // feeds; armed via `arm_topk_rowref`, mutually exclusive with
+    // `tie_track`): the bounded-heap and bounded-heapsort comparisons extend
+    // full-key ties with the 48-bit physical rowref `puttupleslot_rowref`
+    // stamped into the minimal tuple's `mt_padding`. Survivor selection at
+    // the LIMIT cut becomes exact under the (key, rowref-ascending) total
+    // order — precisely the physical-order feed's first-arrived survivors,
+    // independent of arrival order — and retained ties emit in rowref
+    // (physical) order. `rowref_missing` records a put that carried no
+    // rowref while armed (contract violation; `topk_tie_ambiguity` then
+    // reports `CutSelection` so the consumer demotes). Off (false/false)
+    // every put/compare path is untouched.
+    rowref_mode: bool,
+    rowref_missing: bool,
     variant: SortVariant,
     // Unique violation recorded mid-sort, surfaced by performsort.
     unique_violation: Cell<Option<Box<PgError>>>,
@@ -1098,6 +1112,8 @@ impl Tuplesort {
                 free_typlen,
                 tie_track: false,
                 tie_dirty: false,
+                rowref_mode: false,
+                rowref_missing: false,
                 variant,
                 unique_violation: Cell::new(None),
             })
@@ -1206,14 +1222,42 @@ impl Tuplesort {
         self.topk_tie_ambiguity().is_some()
     }
 
+    /// Arm the top-k rowref total order (tie-ordering rule 2; see the
+    /// `rowref_mode` field). Heap-variant bounded sorts only; every put must
+    /// then go through `puttupleslot_rowref`. Must be armed before the first
+    /// put; mutually exclusive with `arm_topk_tie_track`.
+    pub fn arm_topk_rowref(&mut self) {
+        self.0.with_mut(|st| {
+            debug_assert!(st.status == TupSortStatus::Initial && st.memtuples.is_empty());
+            debug_assert!(!st.tie_track);
+            debug_assert!(matches!(st.variant, SortVariant::Heap { .. }));
+            st.rowref_mode = true;
+            st.rowref_missing = false;
+        })
+    }
+
     /// `topk_tie_ambiguous` with the trigger distinguished: `CutSelection` =
     /// which rows made the LIMIT cut is arrival-dependent (demotion is the
     /// only byte-exact answer); `RetainedOrder` = the cut set is exact but
     /// equal-full-key rows inside the output can emit in arrival-dependent
     /// order (the surface the ratified tie-order relaxation covers).
     /// `CutSelection` dominates when both hold.
+    ///
+    /// Rowref mode (rule 2): the (key, rowref) total order has no ties, so
+    /// selection AND retained order are exact by construction — `None` —
+    /// unless the contract broke: a put carried no rowref, the sort left
+    /// memory (rowrefs are not honored by the tape merge), or the bounded
+    /// transition never ran while more rows than the bound survived (the
+    /// cut would then be taken by the consumer over an unwrapped in-memory
+    /// sort). All three report `CutSelection` so the consumer demotes.
     pub fn topk_tie_ambiguity(&self) -> Option<TopkTieAmbiguity> {
         self.0.with(|st| {
+            if st.rowref_mode {
+                let exact = !st.rowref_missing
+                    && st.status == TupSortStatus::SortedInMem
+                    && (st.bound_used || st.memtuples.len() <= st.bound as usize);
+                return if exact { None } else { Some(TopkTieAmbiguity::CutSelection) };
+            }
             if !st.tie_track {
                 return None;
             }
@@ -1274,6 +1318,8 @@ impl Tuplesort {
             st.avail_mem = st.allowed_mem;
             st.tie_track = false;
             st.tie_dirty = false;
+            st.rowref_mode = false;
+            st.rowref_missing = false;
             st.abbrev_next = 10;
             st.recompute_put_watermark();
         })
@@ -1284,6 +1330,31 @@ impl Tuplesort {
         &mut self,
         slot: &mut SlotData<'q>,
         slot_mcx: Mcx<'q>,
+    ) -> PgResult<()> {
+        self.puttupleslot_inner(slot, slot_mcx, None)
+    }
+
+    /// `puttupleslot` carrying the row's 48-bit physical rowref (rowref mode,
+    /// tie-ordering rule 2): the rowref is stamped into the copied minimal
+    /// tuple's `mt_padding` (bytes 4..10 of the image — pure padding in C and
+    /// in the port; never read by deform, never part of the data bytes), from
+    /// where the bounded-heap tie-break comparisons read it.
+    #[inline]
+    pub fn puttupleslot_rowref<'q>(
+        &mut self,
+        slot: &mut SlotData<'q>,
+        slot_mcx: Mcx<'q>,
+        rowref: u64,
+    ) -> PgResult<()> {
+        self.puttupleslot_inner(slot, slot_mcx, Some(rowref))
+    }
+
+    #[inline]
+    fn puttupleslot_inner<'q>(
+        &mut self,
+        slot: &mut SlotData<'q>,
+        slot_mcx: Mcx<'q>,
+        rowref: Option<u64>,
     ) -> PgResult<()> {
         self.0.with_mut(|st| {
             let mtup = exectuples::exec_copy_slot_minimal_tuple(
@@ -1297,6 +1368,23 @@ impl Tuplesort {
             // Ownership moves to tuplecontext (bulk-freed at end); the wrapper
             // must not run its deallocating Drop.
             mem::forget(mtup);
+
+            match rowref {
+                Some(rr) => {
+                    debug_assert!(rr >> 48 == 0, "rowref exceeds the 48-bit padding");
+                    // SAFETY: fresh live image, >= the 15-byte minimal-tuple
+                    // header; bytes 4..10 are mt_padding (see MinimalTupleData).
+                    unsafe {
+                        let p = tuple.cast::<u8>();
+                        p.add(4).cast::<u32>().write_unaligned(rr as u32);
+                        p.add(8).cast::<u16>().write_unaligned((rr >> 32) as u16);
+                    }
+                }
+                // Rowref-armed sorts require every put to carry one; a bare
+                // put leaves garbage padding, so record the contract break
+                // (the consumer demotes on `topk_tie_ambiguity`).
+                None => st.rowref_missing |= st.rowref_mode,
+            }
 
             let SortVariant::Heap { tup_desc } = &st.variant else {
                 panic!("tuplesort_puttupleslot on a non-heap tuplesort")
@@ -1329,6 +1417,9 @@ impl Tuplesort {
             let tuple = mtup.as_ptr().cast_mut().cast::<MinimalTupleData>();
             // Ownership moves to tuplecontext (bulk-freed at end).
             mem::forget(mtup);
+            // Rowref-armed sorts require rowref-carrying puts (see
+            // `puttupleslot_inner`); this seam never carries one.
+            st.rowref_missing |= st.rowref_mode;
             let mut isnull1 = false;
             // SAFETY: fresh live image formed under tup_desc just above.
             let datum1 = unsafe {
@@ -2215,6 +2306,14 @@ impl<'m> TuplesortData<'m> {
         } else {
             self.bounded_cmp_generic(&tuple, &heap_top)
         };
+        // Rowref mode (rule 2): a full-key tie against the boundary resolves
+        // by rowref — reversed domain, so the incoming tuple wins (replaces
+        // the root) iff its rowref is SMALLER (physically earlier).
+        let compare = if compare == 0 && self.rowref_mode {
+            stup_rowref(&heap_top).cmp(&stup_rowref(&tuple)) as i32
+        } else {
+            compare
+        };
         if compare <= 0 {
             // Tie tracking: an incoming full-key tie against the boundary is
             // discarded here — which equal-key rows survive is now
@@ -2244,21 +2343,28 @@ impl<'m> TuplesortData<'m> {
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let count = tuples.len();
         let mut tie = false;
+        let rowref_mode = self.rowref_mode;
         let result = {
             let ctx = ctx!(self);
             dispatch_cmp!(ctx, |cmp| {
-                let r = heap_replace_top(cmp, &mut tuples, count, tuple);
-                if self.tie_track {
-                    // Evicted boundary member vs the NEW boundary: equal =
-                    // an equal-key member remains (tie selection happened);
-                    // strictly improved = every earlier tie event was at a
-                    // key the boundary now strictly beats — clear. The
-                    // evicted tuple's free is deferred below so the compare
-                    // reads live bytes (accounting order is invisible;
-                    // nothing allocates in between).
-                    tie = cmp(&top, &tuples[0]) == 0;
+                if rowref_mode {
+                    // Rule 2: sift under the (key, rowref) total order so
+                    // equal-key heap members keep their rowref rank.
+                    heap_replace_top(rowref_cmp(cmp), &mut tuples, count, tuple)
+                } else {
+                    let r = heap_replace_top(cmp, &mut tuples, count, tuple);
+                    if self.tie_track {
+                        // Evicted boundary member vs the NEW boundary: equal =
+                        // an equal-key member remains (tie selection happened);
+                        // strictly improved = every earlier tie event was at a
+                        // key the boundary now strictly beats — clear. The
+                        // evicted tuple's free is deferred below so the compare
+                        // reads live bytes (accounting order is invisible;
+                        // nothing allocates in between).
+                        tie = cmp(&top, &tuples[0]) == 0;
+                    }
+                    r
                 }
-                r
             })
         };
         self.memtuples = tuples;
@@ -2490,43 +2596,37 @@ impl<'m> TuplesortData<'m> {
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
         let free_typlen = self.free_typlen;
         let tie_track = self.tie_track;
+        let rowref_mode = self.rowref_mode;
         let mut tie_dirty = false;
         let mut freed: i64 = 0;
         let result = (|| {
             let ctx = ctx!(self);
             dispatch_cmp!(ctx, |cmp| {
-                let mut count = 0usize;
-                for i in 0..tupcount {
-                    if count < bound {
-                        let stup = tuples[i];
-                        heap_insert(cmp, &mut tuples, &mut count, stup)?;
-                    } else {
-                        let c = cmp(&tuples[i], &tuples[0]);
-                        if c <= 0 {
-                            // Tie tracking: same discard/evict rules as
-                            // puttuple_bounded / puttuple_bounded_replace
-                            // (this loop is the same bounded put over the
-                            // pre-transition backlog). freed_space is
-                            // size accounting only, so the evicted root's
-                            // bytes stay live for the post-replace compare.
-                            if c == 0 && tie_track {
-                                tie_dirty = true;
-                            }
-                            freed += freed_space(free_typlen, &tuples[i]);
-                            cfi()?;
-                        } else {
-                            let stup = tuples[i];
-                            let top = tuples[0];
-                            freed += freed_space(free_typlen, &top);
-                            heap_replace_top(cmp, &mut tuples, count, stup)?;
-                            if tie_track {
-                                tie_dirty = cmp(&top, &tuples[0]) == 0;
-                            }
-                        }
-                    }
+                if rowref_mode {
+                    // Rule 2: the whole backlog transition runs under the
+                    // (key, rowref) total order (ties never track).
+                    bounded_backlog(
+                        rowref_cmp(cmp),
+                        &mut tuples,
+                        tupcount,
+                        bound,
+                        false,
+                        free_typlen,
+                        &mut tie_dirty,
+                        &mut freed,
+                    )
+                } else {
+                    bounded_backlog(
+                        cmp,
+                        &mut tuples,
+                        tupcount,
+                        bound,
+                        tie_track,
+                        free_typlen,
+                        &mut tie_dirty,
+                        &mut freed,
+                    )
                 }
-                debug_assert!(count == bound);
-                Ok(())
             })
         })();
         tuples.truncate(bound);
@@ -2545,17 +2645,20 @@ impl<'m> TuplesortData<'m> {
         debug_assert!(self.bounded && tupcount == self.bound as usize);
 
         let mut tuples = mem::replace(&mut self.memtuples, PgVec::new_in(self.mcx));
+        let rowref_mode = self.rowref_mode;
         let result = {
             let ctx = ctx!(self);
             let mut count = tupcount;
-            dispatch_cmp!(ctx, |cmp| (|| {
-                while count > 1 {
-                    let stup = tuples[0];
-                    heap_delete_top(cmp, &mut tuples, &mut count)?;
-                    tuples[count] = stup;
+            dispatch_cmp!(ctx, |cmp| {
+                if rowref_mode {
+                    // Rule 2: pop under the (key, rowref) total order — the
+                    // emitted ascending run is rowref-ascending within
+                    // full-key ties (physical order).
+                    heapsort_bounded(rowref_cmp(cmp), &mut tuples, &mut count)
+                } else {
+                    heapsort_bounded(cmp, &mut tuples, &mut count)
                 }
-                Ok(())
-            })())
+            })
         };
         self.memtuples = tuples;
         self.reversedirection();
@@ -2675,6 +2778,108 @@ fn heap_delete_top(
     }
     let tuple = heap[*count];
     heap_replace_top_n(cmp, heap, *count, tuple)
+}
+
+/// 48-bit physical rowref stamped in a Heap-variant minimal tuple's
+/// `mt_padding` (bytes 4..10 of the image) by `puttupleslot_rowref` (rowref
+/// mode, tie-ordering rule 2): `(row_group << 32) | rg-global-row`, monotone
+/// in physical position.
+#[inline(always)]
+fn stup_rowref(t: &SortTuple) -> u64 {
+    // SAFETY: rowref mode is armed only on Heap-variant sorts (tuple is a
+    // live sort-owned minimal-tuple image >= the 15-byte header) whose puts
+    // stamped these bytes.
+    unsafe {
+        let p = t.tuple.cast::<u8>();
+        let row = p.add(4).cast::<u32>().read_unaligned() as u64;
+        let rg = p.add(8).cast::<u16>().read_unaligned() as u64;
+        (rg << 32) | row
+    }
+}
+
+/// Rowref tie-break wrapper for the REVERSED-direction bounded-heap
+/// comparators (tie-ordering rule 2): under the reversed key order, full-key
+/// ties rank LARGER rowrefs first (worse — evicted first), so the retained
+/// set is the physically-earliest members and the final ascending output is
+/// rowref-ascending within ties.
+#[inline(always)]
+fn rowref_cmp(
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+) -> impl Fn(&SortTuple, &SortTuple) -> i32 + Copy {
+    move |a, b| {
+        let c = cmp(a, b);
+        if c != 0 {
+            c
+        } else {
+            stup_rowref(b).cmp(&stup_rowref(a)) as i32
+        }
+    }
+}
+
+/// `make_bounded_heap`'s backlog transition body (extracted so the rowref
+/// mode can run it under the rule-2 wrapped comparator): heapify the first
+/// `bound` tuples, then feed the remainder through the bounded put rules
+/// (discard on `<= 0`, else replace-top), with `tie_track`'s dirty
+/// maintenance exactly as `puttuple_bounded`/`puttuple_bounded_replace`.
+#[allow(clippy::too_many_arguments)]
+fn bounded_backlog(
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+    tuples: &mut [SortTuple],
+    tupcount: usize,
+    bound: usize,
+    tie_track: bool,
+    free_typlen: i16,
+    tie_dirty: &mut bool,
+    freed: &mut i64,
+) -> PgResult<()> {
+    let mut count = 0usize;
+    for i in 0..tupcount {
+        if count < bound {
+            let stup = tuples[i];
+            heap_insert(cmp, tuples, &mut count, stup)?;
+        } else {
+            let c = cmp(&tuples[i], &tuples[0]);
+            if c <= 0 {
+                // Tie tracking: same discard/evict rules as
+                // puttuple_bounded / puttuple_bounded_replace
+                // (this loop is the same bounded put over the
+                // pre-transition backlog). freed_space is
+                // size accounting only, so the evicted root's
+                // bytes stay live for the post-replace compare.
+                if c == 0 && tie_track {
+                    *tie_dirty = true;
+                }
+                *freed += freed_space(free_typlen, &tuples[i]);
+                cfi()?;
+            } else {
+                let stup = tuples[i];
+                let top = tuples[0];
+                *freed += freed_space(free_typlen, &top);
+                heap_replace_top(cmp, tuples, count, stup)?;
+                if tie_track {
+                    *tie_dirty = cmp(&top, &tuples[0]) == 0;
+                }
+            }
+        }
+    }
+    debug_assert!(count == bound);
+    Ok(())
+}
+
+/// `sort_bounded_heap`'s pop loop (extracted for the rule-2 wrapped
+/// comparator): repeatedly move the reversed-order root behind the shrinking
+/// heap, leaving the array in forward sorted order.
+fn heapsort_bounded(
+    cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+    tuples: &mut [SortTuple],
+    count: &mut usize,
+) -> PgResult<()> {
+    while *count > 1 {
+        let stup = tuples[0];
+        heap_delete_top(cmp, tuples, count)?;
+        tuples[*count] = stup;
+    }
+    Ok(())
 }
 
 /// `tuplesort_heap_replace_top` (Knuth 5.2.3H sift-up).

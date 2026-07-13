@@ -1405,6 +1405,17 @@ pub fn table_scan_batch_dict_codes<'mcx>(
     }
 }
 
+/// Physical rowref base of the CURRENT staged cbstore window (tie-ordering
+/// rule 2): staged row `i`'s rowref is `base + i`. Heap scans carry no
+/// rowrefs — always `None` (the rowref-armed consumer demotes).
+#[inline]
+pub fn table_scan_batch_rowref_base<'mcx>(scan: &TableScanDesc<'mcx>) -> Option<u64> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(cb) => cb.staged_rowref_base(),
+    }
+}
+
 pub fn table_scan_batch_deform_col<'mcx>(
     scan: &mut TableScanDesc<'mcx>,
     c: u16,
