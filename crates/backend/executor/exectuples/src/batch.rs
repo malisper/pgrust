@@ -221,7 +221,22 @@ pub struct SoaBatch<'mcx> {
     // (or left None = per-row) by the fill every window.
     text_spans: PgVec<'mcx, Option<SoaTextSpan>>,
     text_any: bool,
+    // Length-lane arming (fold length admissions over cbstore text columns):
+    // 0 = none, LEN_WANT_BYTES = octet length, LEN_WANT_CHARS = UTF-8
+    // character length. Armed once at feed arm (cbstore scans only); the
+    // AM's batch fill answers the column's values cells with
+    // `Datum::from_i64(length)` for every staged SELECTED row instead of
+    // varlena datum pointers (post-qual for dict-answered qual columns — the
+    // gather/convert step). Heap fills never see an armed column (the
+    // arming seam refuses non-cbstore scans).
+    len_want: PgVec<'mcx, u8>,
+    len_any: bool,
 }
+
+/// `len_want` kinds (see the field doc).
+pub const LEN_WANT_BYTES: u8 = 1;
+pub const LEN_WANT_CHARS: u8 = 2;
+
 
 impl<'mcx> SoaBatch<'mcx> {
     pub fn new_in(mcx: Mcx<'mcx>, ncols: u16) -> SoaBatch<'mcx> {
@@ -244,6 +259,8 @@ impl<'mcx> SoaBatch<'mcx> {
             lane_read_any: false,
             text_spans: ::mcx::vec_from_elem_in(mcx, None, ncols as usize),
             text_any: false,
+            len_want: ::mcx::vec_from_elem_in(mcx, 0u8, ncols as usize),
+            len_any: false,
         }
     }
 
@@ -330,6 +347,37 @@ impl<'mcx> SoaBatch<'mcx> {
         for (i, v) in values.iter_mut().enumerate() {
             *v = lane.datum(i);
         }
+        self.dict_lanes[c] = None;
+    }
+
+    /// Length-lane arm (once, at fold-feed arm): column `c`'s values cells
+    /// carry `Datum::from_i64(length)` for staged selected rows (see the
+    /// field doc). `kind` is `LEN_WANT_BYTES`/`LEN_WANT_CHARS`.
+    pub fn set_len_want(&mut self, c: u16, kind: u8) {
+        debug_assert!(matches!(kind, LEN_WANT_BYTES | LEN_WANT_CHARS));
+        self.len_want[c as usize] = kind;
+        self.len_any = true;
+    }
+
+    #[inline]
+    pub fn len_want(&self, c: usize) -> u8 {
+        if !self.len_any {
+            return 0;
+        }
+        self.len_want[c]
+    }
+
+    #[inline]
+    pub fn len_any(&self) -> bool {
+        self.len_any
+    }
+
+    /// Drop a dict-lane answer WITHOUT gathering (the length-lane gather:
+    /// the AM's `batch_fill_len_col` re-answered the values cells as i64
+    /// lengths off the scan-side decode state, so `col_datum_ready` must
+    /// flip back on without the `dict[code]` datum gather).
+    #[inline]
+    pub fn clear_dict_lane(&mut self, c: usize) {
         self.dict_lanes[c] = None;
     }
 
@@ -733,5 +781,5 @@ mcx::forget_safe_nodrop!(SoaTextSpan);
 // jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
     SoaDeformPlan<'_> { ncols, end_off, offs; jit },
-    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any },
+    SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any, len_want, len_any },
 );

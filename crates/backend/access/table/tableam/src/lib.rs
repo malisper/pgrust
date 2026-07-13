@@ -1312,6 +1312,22 @@ pub fn table_scan_batch_deform<'mcx>(
 /// Prewhere staged deform: fill (or dict-answer) one staged column of the
 /// cbstore window. Callable only on cbstore scans (the staged qual drive is
 /// cbstore-shaped); the caller owns soa.begin and the needed-set contract.
+/// Length-lane re-fill of one staged cbstore column (post-qual gather for
+/// dict-tier qual columns armed as length lanes). Heap scans never arm
+/// length lanes (`seq_scan_batch_len_want` is cbstore-batch-scoped), so the
+/// heap arm is unreachable.
+pub fn table_scan_batch_fill_len<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    c: u16,
+    chars: bool,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+) {
+    match scan {
+        TableScanDesc::Cbstore(cb) => cb.batch_fill_len_col(c as usize, chars, soa),
+        _ => unreachable!("length lanes arm on cbstore batches only"),
+    }
+}
+
 pub fn table_scan_batch_deform_col<'mcx>(
     scan: &mut TableScanDesc<'mcx>,
     c: u16,
