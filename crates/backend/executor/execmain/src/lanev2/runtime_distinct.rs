@@ -351,26 +351,16 @@ impl RuntimeDistinctShared {
     }
 }
 
-/// Navigate the worker plan tree: Agg root → Sort → SeqScan.
+/// The worker plan tree is the SCAN SUBTREE alone (workers never run the
+/// Agg or the Sort — accept_local drives scan → PREWHERE → project into the
+/// PdBuilder; the worker pstmt's planTree is the SeqScan node).
 fn distinct_worker_scan<'a, 'mcx>(
     planstate: Option<&'a mut crate::procnode::PlanStateNode<'mcx>>,
 ) -> PgResult<&'a mut ::nodeseqscan::SeqScanState<'mcx>> {
-    let Some(crate::procnode::PlanStateNode::Agg(aps)) = planstate else {
+    let Some(crate::procnode::PlanStateNode::SeqScan(ss)) = planstate else {
         return Err(Box::new(PgError::new(
             ERROR,
-            "runtime distinct worker plan is not an Agg root",
-        )));
-    };
-    let crate::procnode::PlanStateNode::Sort(s) = &mut aps.outer else {
-        return Err(Box::new(PgError::new(
-            ERROR,
-            "runtime distinct worker outer node is not a Sort",
-        )));
-    };
-    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
-        return Err(Box::new(PgError::new(
-            ERROR,
-            "runtime distinct worker scan node is not a SeqScan",
+            "runtime distinct worker plan is not a SeqScan root",
         )));
     };
     Ok(ss)
@@ -639,25 +629,18 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused("exec params");
         return Ok(None);
     }
-    // The Agg must be the plan root (workers ExecutorStart the whole worker
-    // pstmt), with exactly this Sort → SeqScan below it.
-    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else {
-        refused("plan root not Agg");
-        return Ok(None);
-    };
-    if !std::ptr::eq(root_agg, agg.plan) {
-        refused("agg not the plan root");
-        return Ok(None);
-    }
+    // Plan shape below the Agg: exactly THIS Sort → SeqScan (the workers
+    // receive the SCAN SUBTREE as their pstmt — the Agg need not be the
+    // plan root, so ORDER BY/LIMIT above it, the real CB q9/q10 shape,
+    // stays engageable).
     let Some(sort_node) = agg.plan.plan.lefttree else { return Ok(None) };
-    if sort_node.node_tag() != NodeTag::T_Sort {
-        refused("agg child not Sort");
+    if sort_node.node_tag() != NodeTag::T_Sort
+        || !std::ptr::eq(sort_node.as_sort().expect("Sort tag"), sort.plan)
+    {
+        refused("agg child not this Sort");
         return Ok(None);
     }
-    let Some(scan_node) = sort_node.as_sort().expect("Sort tag").plan.lefttree else {
-        return Ok(None);
-    };
+    let Some(scan_node) = sort.plan.plan.lefttree else { return Ok(None) };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
         refused("sort child not SeqScan");
         return Ok(None);
@@ -702,7 +685,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, order)
+    engage(agg, estate, rt, dop, total_granules, starts, spec, order, scan_node)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -715,12 +698,15 @@ fn engage<'mcx>(
     starts: Vec<u64>,
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
+    scan_node: ::types_nodes::node_tree::Node<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
 
-    let agg_node = estate.es_plannedstmt.and_then(|p| p.planTree).expect("gated above");
-    let pstmt = crate::execparallel::build_worker_pstmt(estate, agg_node)?;
+    // The worker pstmt carries ONLY the scan subtree (ExecSerializePlan's
+    // fragment-transfer shape; the helpers drive scan → PREWHERE → project
+    // into their PdBuilder Locals — no Agg, no Sort).
+    let pstmt = crate::execparallel::build_worker_pstmt(estate, scan_node)?;
 
     let payload = Arc::new(RuntimeDistinctShared {
         rt,
