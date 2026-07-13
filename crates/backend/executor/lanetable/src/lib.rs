@@ -859,9 +859,15 @@ impl LaneAggTable {
                         if k as i64 == key {
                             let row = (r - 1) as usize;
                             // SAFETY: live row (parts stable since last insert).
-                            break Some(unsafe {
+                            let p = unsafe {
                                 row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
-                            });
+                            };
+                            // Inline16 resolved the hit WITHOUT touching the
+                            // payload row — prefetch its states line so the
+                            // caller's separate fold pass streams these
+                            // misses instead of taking them serialized.
+                            prefetch(p);
+                            break Some(p);
                         }
                     } else {
                         // SAFETY: masked entry index.
