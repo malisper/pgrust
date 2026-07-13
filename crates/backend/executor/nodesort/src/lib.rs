@@ -28,6 +28,12 @@ fn cfi() -> PgResult<()> {
 #[cfg(test)]
 mod tests;
 
+// M3 top-N sink kernels (docs/design/m3-sort.md §3): the POD bounded
+// (key, rowref) heap on the rule-2 total order + the winner merge. Pure
+// data structures — the runtime SealedParallelSink impl over them lives at
+// the engagement seam (execmain lanev2/runtime_sort.rs, inc-2).
+pub mod sink;
+
 pub struct SortState<'mcx> {
     pub plan: &'mcx Sort<'mcx>,
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
