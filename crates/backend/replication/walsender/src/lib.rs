@@ -880,12 +880,32 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
 
         match opts.snapshot_action {
             CrsSnapshotAction::UseSnapshot => {
-                // C validates txn state then SnapBuildInitialSnapshot —
-                // subscription tablesync territory; snapbuild export unported.
-                panic!(
-                    "walsender: CREATE_REPLICATION_SLOT ... LOGICAL USE_SNAPSHOT unported \
-                     (SnapBuildInitialSnapshot)"
-                );
+                // walsender.c:1262: USE_SNAPSHOT preconditions.
+                if !xact::IsTransactionBlock() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called inside a transaction")
+                        .finish(loc(1266, "CreateReplicationSlot"));
+                }
+                if xact::XactIsoLevel() != guc_tables::consts::XACT_REPEATABLE_READ {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called in REPEATABLE READ isolation mode transaction")
+                        .finish(loc(1271, "CreateReplicationSlot"));
+                }
+                if !xact::XactReadOnly() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called in a read-only transaction")
+                        .finish(loc(1276, "CreateReplicationSlot"));
+                }
+                if snapmgr::FirstSnapshotSet() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called before any query")
+                        .finish(loc(1281, "CreateReplicationSlot"));
+                }
+                if xact::IsSubTransaction() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must not be called in a subtransaction")
+                        .finish(loc(1286, "CreateReplicationSlot"));
+                }
             }
             CrsSnapshotAction::ExportSnapshot => {
                 panic!(
@@ -910,10 +930,12 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
         // sent to the client during slot creation (walsender.c:1285 passes
         // WalSndPrepareWrite/WriteData, but FindStartpoint runs fast_forward
         // -- the SQL path (slotfuncs.c) passes NULLs the same way here).
+        // USE_SNAPSHOT (and EXPORT) build a full snapshot (walsender.c:1310).
+        let need_full_snapshot = opts.snapshot_action == CrsSnapshotAction::UseSnapshot;
         let mut ctx = logical::CreateInitDecodingContext(
             cmd.plugin.as_deref().unwrap_or(""),
             Vec::new(),
-            false,
+            need_full_snapshot,
             types_core::InvalidXLogRecPtr,
             None,
             None,
@@ -921,6 +943,17 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
         )?;
 
         logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
+
+        if opts.snapshot_action == CrsSnapshotAction::UseSnapshot {
+            // Make the initial snapshot the surrounding transaction's
+            // snapshot (walsender.c:1326: SnapBuildInitialSnapshot +
+            // RestoreTransactionSnapshot against our own proc).
+            let snap = ctx.snapshot_builder.initial_snapshot()?;
+            let my_procno =
+                lmgr_proc::MyProc().expect("walsender has a PGPROC");
+            snapmgr::RestoreTransactionSnapshot(&snap, my_procno)?;
+        }
+
         ctx.free()?;
 
         if !cmd.temporary {
