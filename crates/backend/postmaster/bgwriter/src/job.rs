@@ -88,6 +88,9 @@ struct JobState {
 
 pub struct BgWriterJob {
     pid: pid_t,
+    /// The pmchild slot StartChildProcess assigned (register_postmaster_
+    /// child_active keys on it during InitAuxiliaryProcess).
+    child_slot: i32,
     /// Set by startup() (aux PGPROC acquisition); INVALID before.
     procno: AtomicI32,
     state: Mutex<JobState>,
@@ -95,9 +98,10 @@ pub struct BgWriterJob {
 }
 
 impl BgWriterJob {
-    pub fn new(pid: pid_t) -> BgWriterJob {
+    pub fn new(pid: pid_t, child_slot: i32) -> BgWriterJob {
         BgWriterJob {
             pid,
+            child_slot,
             procno: AtomicI32::new(INVALID_PROC_NUMBER),
             state: Mutex::new(JobState {
                 inner: BgWriterState::new(),
@@ -201,7 +205,27 @@ impl BgJob for BgWriterJob {
     /// pid bound (the dispatcher keeps this identity — it is the job's
     /// session thread that never runs the loop).
     fn startup(&self) -> Result<(), Box<PgError>> {
-        g::SetMyProcPid(self.pid);
+        // The dispatcher thread is process-lifetime and hosts SUCCESSIVE
+        // job lifecycles (normal-exit relaunch; crash-abandon relaunch) —
+        // reset the per-lifecycle thread state a C child gets fresh from
+        // fork, then run the once-per-thread child half exactly once (the
+        // wretain warm-claim split: launch_backend run_child_task).
+        thread_local! {
+            static CHILD_INITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        ipc::on_exit_reset();
+        miscinit::SetProcessingMode(types_core::ProcessingMode::InitProcessing);
+        let init = if CHILD_INITED.get() {
+            miscinit::InitProcessGlobals(self.pid);
+            Ok(())
+        } else {
+            miscinit::InitPostmasterChild(self.pid).map(|()| CHILD_INITED.set(true))
+        };
+        if let Err(e) = init {
+            self.announce(1 << 8);
+            return Err(e);
+        }
+        g::SetMyPMChildSlot(self.child_slot);
         miscinit::SetMyBackendType(types_core::BackendType::BgWriter);
         if let Err(e) = auxprocess::AuxiliaryProcessMainCommon() {
             self.announce(1 << 8); // C fatal_exit: proc_exit(1)
@@ -244,7 +268,10 @@ impl BgJob for BgWriterJob {
     fn control(&self) -> Control {
         let _ = procsignal::DrainThreadSignals();
         if CRASH_PENDING.swap(false, Ordering::SeqCst) {
-            // KilledBySignal announce shape: raw signo (WTERMSIG).
+            // KilledBySignal announce shape: raw signo (WTERMSIG). The
+            // identity is ABANDONED (shmem resets wholesale); stop
+            // pointing at the doomed PGPROC.
+            self.procno.store(INVALID_PROC_NUMBER, Ordering::Release);
             self.announce(libc::SIGQUIT);
             return Control::Abandon;
         }
