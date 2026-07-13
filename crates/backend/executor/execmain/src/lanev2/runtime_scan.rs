@@ -91,10 +91,8 @@ pub(super) struct RuntimeScanShared {
     pstmt: SendConstPstmt,
     query_text: String,
     eflags: i32,
-    /// External-lane ordinal allocator (leader's drain lane included).
-    next_ordinal: AtomicUsize,
     /// Pin-board base (= runtime nthreads): run_morsel's worker index minus
-    /// this is the partial-slot ordinal.
+    /// this is the partial-slot (leased-lane) ordinal.
     pins_base: usize,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
@@ -137,6 +135,9 @@ impl RuntimeScanShared {
 
 struct WorkerExec {
     qd: ::types_portal::QueryDescHandle,
+    /// THIS helper contributed an error (its executor may be mid-batch —
+    /// take the release/abort teardown, not finish/end).
+    errored: std::cell::Cell<bool>,
 }
 
 thread_local! {
@@ -154,10 +155,16 @@ impl runtime::TaskSetWork for RuntimeScanShared {
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(worker, range)));
         match r {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => self.fail(e),
-            Err(_panic) => self.fail(
-                PgError::new(ERROR, "runtime scan worker panicked in a morsel").into(),
-            ),
+            Ok(Err(e)) => {
+                mark_self_errored();
+                self.fail(e);
+            }
+            Err(_panic) => {
+                mark_self_errored();
+                self.fail(
+                    PgError::new(ERROR, "runtime scan worker panicked in a morsel").into(),
+                );
+            }
         }
     }
 
@@ -253,18 +260,18 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
     let _ = shared;
     let Some(target) = payload.pcxt_shared.get() else { return };
     let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
-    let ordinal = payload.next_ordinal.fetch_add(1, Ordering::SeqCst);
-    if ordinal >= runtime::MAX_EXTERNAL_LANES {
+    // Process-wide lane lease: pin-board lanes are shared across every
+    // concurrently-engaged query; exhaustion = fail-closed non-participation.
+    let Some(lane) = payload.rt.acquire_external_lane() else {
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
-    }
-    let rt = payload.rt;
-    let mut local = rt.external_local(ordinal);
+    };
+    let mut local = lane.local();
     let entered = std::cell::Cell::new(false);
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, ordinal, &mut local, &rg)
+        drive_bound(payload, lane.ordinal(), &mut local, &rg)
     });
     match bound {
         Ok(()) => {}
@@ -292,10 +299,24 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
-    let my_error = payload.failed.load(Ordering::SeqCst);
-    let teardown = teardown_worker_exec(!my_error);
+    // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
+    // leaves THIS executor consistent — finish/end/free releases resources
+    // cleanly under the about-to-commit binder unbind. Only a self-error
+    // (executor possibly mid-batch) takes the release path and lets the
+    // binder's transaction abort clean up.
+    let self_errored = WORKER_EXEC
+        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let teardown = teardown_worker_exec(!self_errored);
     let _ = ordinal;
     teardown
+}
+
+fn mark_self_errored() {
+    WORKER_EXEC.with(|cell| {
+        if let Some(ex) = cell.borrow().as_ref() {
+            ex.errored.set(true);
+        }
+    });
 }
 
 fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
@@ -359,7 +380,8 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
         })();
         match armed {
             Ok(()) => {
-                *cell.borrow_mut() = Some(WorkerExec { qd });
+                *cell.borrow_mut() =
+                    Some(WorkerExec { qd, errored: std::cell::Cell::new(false) });
                 Ok(())
             }
             Err(e) => {
@@ -663,7 +685,6 @@ fn engage<'mcx>(
         }),
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         eflags: estate.es_top_eflags,
-        next_ordinal: AtomicUsize::new(0),
         pins_base: rt.nthreads(),
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
@@ -827,11 +848,16 @@ fn drain_rg(
     payload: &Arc<RuntimeScanShared>,
     rg: &runtime::RgHandle,
 ) {
+    let _ = payload;
     rg.abort();
-    let ordinal = payload.next_ordinal.fetch_add(1, Ordering::SeqCst);
-    if ordinal >= runtime::MAX_EXTERNAL_LANES {
-        return;
-    }
-    let mut local = rt.external_local(ordinal);
+    // Lane exhaustion here would strand the RG; spin-wait for one (bounded
+    // by helper drives, which settle within a morsel).
+    let lane = loop {
+        if let Some(l) = rt.acquire_external_lane() {
+            break l;
+        }
+        std::thread::yield_now();
+    };
+    let mut local = lane.local();
     let _ = rt.drive_pinned(&mut local, rg);
 }

@@ -230,8 +230,39 @@ impl Runtime {
 
     /// Per-thread bookkeeping for an external participant (pin-board lane
     /// `nthreads + ordinal`; at most [`sched::MAX_EXTERNAL_LANES`] lanes).
+    /// Callers MUST hold the lane through [`Runtime::acquire_external_lane`]
+    /// — pin-board lanes are a process-wide resource: two concurrent
+    /// participants on one lane corrupt the finalization protocol's pins.
     pub fn external_local(&self, ordinal: usize) -> WorkerLocal {
         self.sched.external_local(ordinal)
+    }
+
+    /// Lease one external pin-board lane (process-wide; None = all
+    /// [`MAX_EXTERNAL_LANES`] busy — the caller must refuse participation).
+    /// The lease releases on drop; hold it across the whole drive. Lanes are
+    /// a PROCESS resource: two concurrent participants on one lane would
+    /// corrupt the finalization protocol's pins (publish-over-unsettled).
+    pub fn acquire_external_lane(self: &Arc<Self>) -> Option<ExternalLane> {
+        let mask = &self.sched.external_lanes;
+        loop {
+            let cur = mask.load(std::sync::atomic::Ordering::SeqCst);
+            let free = !cur;
+            if free == 0 {
+                return None;
+            }
+            let bit = free.trailing_zeros() as usize;
+            if mask
+                .compare_exchange(
+                    cur,
+                    cur | (1u64 << bit),
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return Some(ExternalLane { rt: Arc::clone(self), ordinal: bit });
+            }
+        }
     }
 
     /// Drive one pinned RG as an external participant until it completes.
@@ -309,4 +340,34 @@ impl Runtime {
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
+}
+
+/// RAII lease of one external pin-board lane (see
+/// [`Runtime::acquire_external_lane`]).
+pub struct ExternalLane {
+    rt: Arc<Runtime>,
+    ordinal: usize,
+}
+
+impl ExternalLane {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    /// Fresh per-drive bookkeeping bound to this lane.
+    pub fn local(&self) -> WorkerLocal {
+        self.rt.external_local(self.ordinal)
+    }
+}
+
+impl Drop for ExternalLane {
+    fn drop(&mut self) {
+        // Release the lane bit. The pin was settled by the drive (every
+        // worker_step_pinned settles before returning), so the next lessee
+        // starts from a clean pin.
+        self.rt
+            .sched
+            .external_lanes
+            .fetch_and(!(1u64 << self.ordinal), std::sync::atomic::Ordering::SeqCst);
+    }
 }
