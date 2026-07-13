@@ -179,9 +179,14 @@ fn cstr_at(b: &[u8], pos: usize) -> (String, usize) {
     (String::from_utf8_lossy(&b[pos..end]).into_owned(), end + 1)
 }
 
-// ErrorResponse/NoticeResponse body -> libpq-shaped "SEVERITY:  message".
+// ErrorResponse/NoticeResponse body -> libpq default-verbosity message
+// (pqBuildErrorMessage3): "SEVERITY:  message" plus DETAIL/HINT/CONTEXT
+// lines. Callers (e.g. the walreceiver's "could not start WAL streaming")
+// relay the whole thing into the local log — 019_replslot_limit greps the
+// standby log for the primary's DETAIL line.
 fn parse_error_fields(body: &[u8]) -> String {
     let (mut severity, mut message) = (String::from("ERROR"), String::new());
+    let (mut detail, mut hint, mut context) = (String::new(), String::new(), String::new());
     let mut i = 0;
     while i < body.len() && body[i] != 0 {
         let code = body[i];
@@ -189,11 +194,24 @@ fn parse_error_fields(body: &[u8]) -> String {
         match code {
             b'S' => severity = val,
             b'M' => message = val,
+            b'D' => detail = val,
+            b'H' => hint = val,
+            b'W' => context = val,
             _ => {}
         }
         i = next;
     }
-    format!("{severity}:  {message}")
+    let mut out = format!("{severity}:  {message}");
+    if !detail.is_empty() {
+        out.push_str(&format!("\nDETAIL:  {detail}"));
+    }
+    if !hint.is_empty() {
+        out.push_str(&format!("\nHINT:  {hint}"));
+    }
+    if !context.is_empty() {
+        out.push_str(&format!("\nCONTEXT:  {context}"));
+    }
+    out
 }
 
 fn wait_socket(fd: RawFd, events: u32, wait_event_info: u32) -> PgResult<()> {
