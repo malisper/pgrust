@@ -6,6 +6,8 @@ use openssl_sys as ossl;
 
 // Opaque; openssl-sys does not declare it.
 pub enum X509_NAME_ENTRY {}
+// Opaque; only passed between the libcrypto calls below.
+pub enum X509_EXTENSION {}
 
 extern "C" {
     pub fn X509_NAME_get_text_by_NID(
@@ -14,6 +16,20 @@ extern "C" {
         buf: *mut c_char,
         len: c_int,
     ) -> c_int;
+    // contrib/sslinfo/sslinfo.c callees (X509_NAME_field_to_text /
+    // ssl_extension_info).
+    fn OBJ_txt2nid(s: *const c_char) -> c_int;
+    fn X509_NAME_get_index_by_NID(name: *mut ossl::X509_NAME, nid: c_int, lastpos: c_int) -> c_int;
+    fn X509_get_ext_count(x: *const ossl::X509) -> c_int;
+    fn X509_get_ext(x: *const ossl::X509, loc: c_int) -> *mut X509_EXTENSION;
+    fn X509_EXTENSION_get_object(ex: *mut X509_EXTENSION) -> *mut ossl::ASN1_OBJECT;
+    fn X509_EXTENSION_get_critical(ex: *const X509_EXTENSION) -> c_int;
+    fn X509V3_EXT_print(
+        out: *mut ossl::BIO,
+        ext: *mut X509_EXTENSION,
+        flag: c_ulong,
+        indent: c_int,
+    ) -> c_int;
     fn X509_NAME_print_ex(
         out: *mut ossl::BIO,
         nm: *mut ossl::X509_NAME,
@@ -21,10 +37,7 @@ extern "C" {
         flags: c_ulong,
     ) -> c_int;
     fn X509_NAME_entry_count(name: *const ossl::X509_NAME) -> c_int;
-    fn X509_NAME_get_entry(
-        name: *const ossl::X509_NAME,
-        loc: c_int,
-    ) -> *mut X509_NAME_ENTRY;
+    fn X509_NAME_get_entry(name: *const ossl::X509_NAME, loc: c_int) -> *mut X509_NAME_ENTRY;
     fn X509_NAME_ENTRY_get_object(ne: *const X509_NAME_ENTRY) -> *mut ossl::ASN1_OBJECT;
     fn X509_NAME_ENTRY_get_data(ne: *const X509_NAME_ENTRY) -> *mut ossl::ASN1_STRING;
     fn OBJ_obj2nid(o: *const ossl::ASN1_OBJECT) -> c_int;
@@ -86,7 +99,14 @@ impl MemBio {
     fn contents(&self) -> Vec<u8> {
         let mut p: *mut c_char = std::ptr::null_mut();
         // SAFETY: BIO_CTRL_INFO on a mem BIO yields (len, data-ptr).
-        let len = unsafe { BIO_ctrl(self.0, BIO_CTRL_INFO, 0, (&mut p as *mut *mut c_char).cast()) };
+        let len = unsafe {
+            BIO_ctrl(
+                self.0,
+                BIO_CTRL_INFO,
+                0,
+                (&mut p as *mut *mut c_char).cast(),
+            )
+        };
         if len <= 0 || p.is_null() {
             return Vec::new();
         }
@@ -122,6 +142,105 @@ pub fn nid_short_name(nid: c_int) -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// sslinfo.c X509_NAME_field_to_text outcome; the caller (contrib sslinfo)
+/// owns the ereport texts for the error arms.
+pub enum DnFieldLookup {
+    /// `OBJ_txt2nid` returned `NID_undef` (C: "invalid X.509 field name").
+    InvalidFieldName,
+    /// `X509_NAME_get_index_by_NID` found no entry (C: `return (Datum) 0`).
+    NotPresent,
+    /// `BIO_new` failed (C: "could not create OpenSSL BIO structure").
+    BioFailure,
+    /// `ASN1_STRING_print_ex` output — UTF-8, per sslinfo.c's
+    /// `(ASN1_STRFLGS_RFC2253 & ~ASN1_STRFLGS_ESC_MSB) | ASN1_STRFLGS_UTF8_CONVERT`
+    /// (the same composition as `CSTRING_ASN1_FLAGS`).
+    Value(Vec<u8>),
+}
+
+// sslinfo.c X509_NAME_field_to_text + ASN1_STRING_to_text over one name.
+pub fn x509_name_field_utf8(name: *mut ossl::X509_NAME, field: &std::ffi::CStr) -> DnFieldLookup {
+    // SAFETY: field is NUL-terminated; OBJ_txt2nid only reads it.
+    let nid = unsafe { OBJ_txt2nid(field.as_ptr()) };
+    if nid == 0 {
+        // NID_undef
+        return DnFieldLookup::InvalidFieldName;
+    }
+    // SAFETY: name is a live X509_NAME borrowed from the peer X509.
+    let index = unsafe { X509_NAME_get_index_by_NID(name, nid, -1) };
+    if index < 0 {
+        return DnFieldLookup::NotPresent;
+    }
+    let Some(bio) = MemBio::new() else {
+        return DnFieldLookup::BioFailure;
+    };
+    // SAFETY: index is a valid entry position; entry/data are borrowed from
+    // name and only read.
+    unsafe {
+        let data = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(name, index));
+        ASN1_STRING_print_ex(bio.0, data, CSTRING_ASN1_FLAGS);
+    }
+    DnFieldLookup::Value(bio.contents())
+}
+
+/// One row of sslinfo.c's ssl_extension_info SRF.
+pub struct X509ExtensionInfo {
+    /// `OBJ_nid2sn` short name.
+    pub name: String,
+    /// `X509V3_EXT_print(membuf, ext, 0, 0)` output
+    /// (C: `cstring_to_text_with_len(buf, len)`, no encoding conversion).
+    pub value: Vec<u8>,
+    /// `X509_EXTENSION_get_critical`.
+    pub critical: bool,
+}
+
+pub enum X509ExtensionsError {
+    /// `BIO_new` failed (C: ERRCODE_OUT_OF_MEMORY).
+    BioFailure,
+    /// `OBJ_obj2nid` returned `NID_undef` at this position.
+    UnknownExtension(i32),
+    /// `X509V3_EXT_print` returned <= 0 at this position.
+    PrintFailed(i32),
+}
+
+// sslinfo.c ssl_extension_info's per-call body, walked eagerly: the C SRF
+// ereports out of the executor at the first bad extension, so collecting
+// up-front is observation-equivalent.
+pub fn x509_extensions(
+    cert: *mut ossl::X509,
+) -> Result<Vec<X509ExtensionInfo>, X509ExtensionsError> {
+    // SAFETY: cert is the live peer X509 owned by the connection.
+    let count = unsafe { X509_get_ext_count(cert) };
+    let mut out = Vec::with_capacity(count.max(0) as usize);
+    for i in 0..count {
+        let bio = MemBio::new().ok_or(X509ExtensionsError::BioFailure)?;
+        // SAFETY: i < X509_get_ext_count; ext and obj are borrowed from cert
+        // and only read. OBJ_nid2sn on a known (non-undef) nid is non-NULL.
+        let (name, critical) = unsafe {
+            let ext = X509_get_ext(cert, i);
+            let obj = X509_EXTENSION_get_object(ext);
+            let nid = OBJ_obj2nid(obj);
+            if nid == 0 {
+                return Err(X509ExtensionsError::UnknownExtension(i));
+            }
+            if X509V3_EXT_print(bio.0, ext, 0, 0) <= 0 {
+                return Err(X509ExtensionsError::PrintFailed(i));
+            }
+            (
+                std::ffi::CStr::from_ptr(OBJ_nid2sn(nid))
+                    .to_string_lossy()
+                    .into_owned(),
+                X509_EXTENSION_get_critical(ext) != 0,
+            )
+        };
+        out.push(X509ExtensionInfo {
+            name,
+            value: bio.contents(),
+            critical,
+        });
+    }
+    Ok(out)
 }
 
 pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Option<String> {
