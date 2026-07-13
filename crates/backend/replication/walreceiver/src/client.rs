@@ -624,10 +624,40 @@ fn os_user_name() -> String {
     std::env::var("USER").unwrap_or_default()
 }
 
-// libpqrcv_connect (replication=true, logical=false). Ok(Err(msg)) is C's
-// NULL-return-with-*err path; the caller wraps it into its own ereport.
+// libpqrcv_connect (replication=true, logical=false): the physical
+// walreceiver's connection. Ok(Err(msg)) is C's NULL-return-with-*err path;
+// the caller wraps it into its own ereport.
 pub fn connect(conninfo: &str, appname: &str) -> PgResult<Result<PgConn, String>> {
+    connect_extended(conninfo, true, false, false, appname)
+}
+
+// libpqrcv_connect (libpqwalreceiver.c), full parameter surface: physical
+// replication (replication=true, database "replication"), logical replication
+// (replication=database + the subscriber's dbname + forced GUC options, as
+// pg_dump forces them), or a plain SQL connection (tablesync catalog reads).
+// must_use_password renders libpqrcv_check_conninfo's recheck: the conninfo
+// itself must carry a password (recorded divergence: C additionally checks
+// PQconnectionUsedPassword after connecting — server-side auth-method
+// awareness this client does not track).
+pub fn connect_extended(
+    conninfo: &str,
+    replication: bool,
+    logical: bool,
+    must_use_password: bool,
+    appname: &str,
+) -> PgResult<Result<PgConn, String>> {
+    debug_assert!(replication || !logical);
     let opts = check_conninfo(conninfo)?;
+
+    if must_use_password && opt(&opts, "password").map_or(true, |p| p.is_empty()) {
+        return throw(
+            ereport(ERROR)
+                .errcode(types_error::ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED)
+                .errmsg("password is required")
+                .errdetail("Non-superusers must provide a password in the connection string.")
+                .finish(loc("libpqrcv_connect")),
+        );
+    }
 
     let host = opt(&opts, "host").unwrap_or("").to_string();
     let hostaddr = opt(&opts, "hostaddr").unwrap_or("").to_string();
@@ -692,15 +722,32 @@ pub fn connect(conninfo: &str, appname: &str) -> PgResult<Result<PgConn, String>
         server_version: 0,
     };
 
-    // Startup packet: protocol 3.0, replication=true (physical).
-    let mut params: Vec<(&str, &str)> = vec![
-        ("user", user.as_str()),
-        ("database", "replication"),
-        ("replication", "true"),
-        ("application_name", appname.as_str()),
-    ];
-    if !options.is_empty() {
-        params.push(("options", options.as_str()));
+    // Startup packet: protocol 3.0. Parameter set per libpqrcv_connect.
+    let dbname = opt(&conn.opts, "dbname").unwrap_or("").to_string();
+    let database: &str = if replication && !logical { "replication" } else { dbname.as_str() };
+    let forced_options;
+    let options_val: &str = if logical {
+        // Force unambiguous output formats on the publisher (matches pg_dump).
+        forced_options = format!(
+            "{options} -c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3"
+        );
+        forced_options.as_str()
+    } else {
+        options.as_str()
+    };
+    let mut params: Vec<(&str, &str)> = vec![("user", user.as_str()), ("database", database)];
+    if replication {
+        params.push(("replication", if logical { "database" } else { "true" }));
+    }
+    let encoding;
+    if logical {
+        // Tell the publisher to translate to our encoding.
+        encoding = mbutils_seams::get_database_encoding_name::call();
+        params.push(("client_encoding", encoding));
+    }
+    params.push(("application_name", appname.as_str()));
+    if !options_val.is_empty() {
+        params.push(("options", options_val));
     }
     let mut body = Vec::new();
     body.extend_from_slice(&PG_PROTOCOL_3_0.to_be_bytes());
