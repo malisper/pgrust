@@ -98,6 +98,12 @@ fn mono_us() -> u64 {
 enum SinkDrain {
     /// Unprojected scan, K2 single-int-key batch probe.
     K2,
+    /// Unprojected scan, packed multi-int composite key (Mk car, q41/q42
+    /// class) — `scan_mk_batch` per staged batch, fail-closed off-compact.
+    /// Int components only: the packed image is value-derived, so worker
+    /// tables merge on the canonical key words verbatim (no per-worker
+    /// intern state, no numeric pack legality mid-build).
+    Mk,
     /// Projected scan, expr-key feed (Arith/TsTrunc/Reduced kinds) —
     /// `exprkey_sink_batch` per staged batch, fail-closed off-compact.
     ExprKey,
@@ -108,6 +114,9 @@ struct AggSink {
     /// Reduced-key shape (worker arm re-derives and must match; the emit
     /// plan's Derived columns came from it). None = single-key.
     red: Option<::nodeagg::RedShape>,
+    /// Packed multi-key shape (SinkDrain::Mk; worker arm re-derives and
+    /// must match — the emit plan's MultiComp columns came from it).
+    mk: Option<::nodeagg::MkShape>,
     cap: u32,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
@@ -321,6 +330,10 @@ struct WorkerExec {
     /// decide + the spill-replay stage slot.
     xk: Option<Box<super::ExprKeyState>>,
     stage_slot: Option<::executils::ExecSlotId>,
+    /// Mk drain state (SinkDrain::Mk only): the worker's own armed shape +
+    /// the reusable pack scratch.
+    mk: Option<super::ScanMk>,
+    mks: super::MkScratch,
 }
 
 thread_local! {
@@ -352,9 +365,10 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, .. } = ex;
+        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
         let (k2s, idxs, groups) = (&mut *k2s, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
+        let (mk, mks) = (&mut *mk, &mut *mks);
         crate::querydesc::with_qd(*qd, |q| {
             let x = q.exec.as_mut().expect("runtime agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
@@ -390,7 +404,8 @@ fn accept_morsel_body(
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
                 let drained = sink_drain_range(
-                    sink, local, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot, estate,
+                    sink, local, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot, mk, mks,
+                    estate,
                 );
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
@@ -417,10 +432,13 @@ fn sink_drain_range<'mcx>(
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     xk: &mut Option<Box<super::ExprKeyState>>,
     stage_slot: &mut Option<::executils::ExecSlotId>,
+    mk: &mut Option<super::ScanMk>,
+    mks: &mut super::MkScratch,
     estate: &mut EStateData<'mcx>,
 ) -> Result<(), AcceptFail> {
     let key_col = match sink.drain {
-        SinkDrain::ExprKey => 0, // unused; the expr-key feed derives keys
+        // Unused: the expr-key feed derives keys; the mk feed packs its own.
+        SinkDrain::ExprKey | SinkDrain::Mk => 0,
         SinkDrain::K2 => ::nodeagg::agg_hash_staged_probe_col(agg).ok_or_else(|| {
             AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                 "worker build lost its staged key column",
@@ -467,6 +485,24 @@ fn sink_drain_range<'mcx>(
             return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                 "fallback rows in a sink accept batch",
             )));
+        }
+        if sink.drain == SinkDrain::Mk {
+            // The serial lane's own packed multi-key batch (survivors →
+            // pack pre-pass → mk1/mk2 compact probe → whole-batch fold).
+            // Under the sink cap the compact backstop ERRORS instead of
+            // migrating, and Int-only components never hit the numeric
+            // pack-legality demote — a `false` here is a contract breach.
+            let mk = mk.as_ref().ok_or_else(|| {
+                AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "mk drain without a worker shape",
+                ))
+            })?;
+            if !super::scan_mk_batch(agg, ss, mk, mks, idxs, groups, n, estate)? {
+                return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "worker mk feed demoted mid-build",
+                )));
+            }
+            continue;
         }
         let ScanK2Scratch { rows, keys, knull, .. } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
@@ -621,11 +657,11 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             ::types_portal::QueryEnvHandle::NULL,
             0,
         )?;
-        let armed = (|| -> PgResult<Option<Box<super::ExprKeyState>>> {
+        let armed = (|| -> PgResult<ArmedDrain> {
             crate::execmain::executor_start_seam(qd, payload.eflags)?;
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("runtime agg worker ExecutorStart");
-                x.with_mut(|d| -> PgResult<Option<Box<super::ExprKeyState>>> {
+                x.with_mut(|d| -> PgResult<ArmedDrain> {
                     let estate = &mut d.estate;
                     let Some(crate::procnode::PlanStateNode::Agg(aps)) = d.planstate.as_mut()
                     else {
@@ -646,7 +682,12 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             })
         })();
         match armed {
-            Ok(xk) => {
+            Ok(drain) => {
+                let (xk, mk) = match drain {
+                    ArmedDrain::K2 => (None, None),
+                    ArmedDrain::ExprKey(xk) => (Some(xk), None),
+                    ArmedDrain::Mk(mk) => (None, Some(mk)),
+                };
                 *cell.borrow_mut() = Some(WorkerExec {
                     qd,
                     errored: std::cell::Cell::new(false),
@@ -655,6 +696,8 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     groups: Vec::new(),
                     xk,
                     stage_slot: None,
+                    mk,
+                    mks: super::MkScratch::default(),
                 });
                 Ok(())
             }
@@ -666,6 +709,13 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
     })
 }
 
+/// The worker arm's drain-specific state (see [`arm_sink_build`]).
+enum ArmedDrain {
+    K2,
+    ExprKey(Box<super::ExprKeyState>),
+    Mk(super::ScanMk),
+}
+
 /// The worker's sink-build arm: the serial lane's own staging + key-shape +
 /// compact arm sequence, under the sink cap, with every admission the leader
 /// proved re-checked (divergence = error). Returns the ExprKey drain's
@@ -675,7 +725,7 @@ fn arm_sink_build<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<Box<super::ExprKeyState>>> {
+) -> PgResult<ArmedDrain> {
     let shape_err = ::nodeagg::sink::sink_shape_error;
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
@@ -715,7 +765,9 @@ fn arm_sink_build<'mcx>(
             Some(SinkKeySpec::Reduced(sh)) => {
                 sink.red.as_ref().is_some_and(|r| r.width == sh.width) && sh.width == sink.width
             }
-            None => false,
+            // The expr-key drain never arms a Multi table (Mk rides its own
+            // drain; the decide refuses Multi kinds).
+            Some(SinkKeySpec::Multi(_)) | None => false,
         };
         if !spec_ok {
             return Err(shape_err("worker key spec diverged from the leader's"));
@@ -723,9 +775,38 @@ fn arm_sink_build<'mcx>(
         if ::nodeagg::sink::agg_sink_state_bytes(agg) != Some(sink.state_bytes) {
             return Err(shape_err("worker state layout diverged from the leader's"));
         }
-        return Ok(Some(xk));
+        return Ok(ArmedDrain::ExprKey(xk));
     }
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
+    if sink.drain == SinkDrain::Mk {
+        // Packed multi-key arm: the same decide the leader probed, this time
+        // arming the compact table under the sink cap. Every divergence from
+        // the leader's snapshot is an error (the sink's combine + emit plans
+        // were built off that exact shape).
+        ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
+        let Some(mk) = super::scan_mk_shape(agg, ss, estate) else {
+            return Err(shape_err("worker mk shape diverged from the leader's"));
+        };
+        if mk.dict_att.is_some() || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some()
+        {
+            return Err(shape_err("dict component on a sink mk worker"));
+        }
+        let lshape = sink
+            .mk
+            .as_ref()
+            .ok_or_else(|| shape_err("mk drain without a leader shape"))?;
+        if &mk.shape != lshape {
+            return Err(shape_err("worker mk shape diverged from the leader's"));
+        }
+        match ::nodeagg::sink::agg_sink_key_spec(agg) {
+            Some(SinkKeySpec::Multi(sh)) if &sh == lshape => {}
+            _ => return Err(shape_err("worker key spec diverged from the leader's")),
+        }
+        if ::nodeagg::sink::agg_sink_state_bytes(agg) != Some(sink.state_bytes) {
+            return Err(shape_err("worker state layout diverged from the leader's"));
+        }
+        return Ok(ArmedDrain::Mk(mk));
+    }
     if super::scan_k2_shape(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
@@ -743,7 +824,7 @@ fn arm_sink_build<'mcx>(
     if ::nodeagg::sink::agg_sink_state_bytes(agg) != Some(sink.state_bytes) {
         return Err(shape_err("worker state layout diverged from the leader's"));
     }
-    Ok(None)
+    Ok(ArmedDrain::K2)
 }
 
 fn teardown_worker_exec(clean: bool) -> PgResult<()> {
@@ -884,8 +965,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     // Drain mode: projected scans take the expr-key feed (Arith/TsTrunc/
     // Reduced kinds — the lane's decide already ran and is memoized in
-    // `xk`); unprojected scans take the K2 single-int-key batch probe.
-    let (drain, red, width);
+    // `xk`); unprojected scans take the K2 single-int-key batch probe or
+    // (Mk car) the packed multi-int composite feed.
+    let (drain, red, mk, width);
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
             refuse("projected scan without an expr-key decide");
@@ -900,6 +982,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             return Ok(false);
         };
         drain = SinkDrain::ExprKey;
+        mk = None;
         match kind {
             None => {
                 let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
@@ -916,23 +999,59 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         }
     } else {
         // The staging arm (idempotent — the serial fold feed re-arms the
-        // same shape on fallback) + the K2 single-key decide.
+        // same shape on fallback) + the K2 single-key / Mk packed decide.
         super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
-        if super::scan_k2_shape(agg, ss, estate).is_none() {
-            refuse("K2 shape");
+        if super::scan_k2_shape(agg, ss, estate).is_some() {
+            if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
+                refuse("dict-group staging");
+                return Ok(false);
+            }
+            let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
+                refuse("key width");
+                return Ok(false);
+            };
+            drain = SinkDrain::K2;
+            red = None;
+            mk = None;
+            width = w;
+        } else if let Some(probe) = {
+            // Cap-aware probe: the worker arms under the sink cap (bounded
+            // table + flush discipline), so the leader's spill-estimate gate
+            // must see the same capped group count — the K2 leader has no
+            // estimate gate at all for exactly this reason. The cap is
+            // cleared right after: the leader's own executor may still run
+            // the SERIAL build (refusal / budget fallback / rescan), which
+            // must never see sink mode.
+            ::nodeagg::sink::agg_sink_set_cap(agg, sink_cap());
+            let probe = super::scan_mk_probe(agg, ss, estate);
+            ::nodeagg::sink::agg_sink_clear_cap(agg);
+            probe
+        } {
+            // Mk car: packed multi-INT composite keys only. Intern ids are
+            // per-worker (never canonical across Locals — the C2 car needs a
+            // shared vocabulary), Numeric packs carry a mid-batch legality
+            // demote (phase 2), and nullable images are heap-source-only.
+            if probe.dict_att.is_some()
+                || probe.shape.nullable
+                || probe
+                    .shape
+                    .comps
+                    .iter()
+                    .any(|c| !matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }))
+            {
+                refuse("mk component kind (C2/numeric cars)");
+                return Ok(false);
+            }
+            drain = SinkDrain::Mk;
+            red = None;
+            mk = Some(probe.shape);
+            // Unused by the Mk drain: per-component widths ride the emit
+            // plan's MultiComp columns.
+            width = 8;
+        } else {
+            refuse("K2/Mk shape");
             return Ok(false);
         }
-        if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-            refuse("dict-group staging");
-            return Ok(false);
-        }
-        let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
-            refuse("key width");
-            return Ok(false);
-        };
-        drain = SinkDrain::K2;
-        red = None;
-        width = w;
     }
     // Combine + identity-emit qualification (fail-closed; catalog access).
     let Some(combines) = sink_resolve_combines(agg)? else {
@@ -940,9 +1059,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
-    let key_spec = match &red {
-        Some(shape) => SinkKeySpec::Reduced(shape.clone()),
-        None => SinkKeySpec::Single { width },
+    let key_spec = match (&red, &mk) {
+        (Some(shape), _) => SinkKeySpec::Reduced(shape.clone()),
+        (None, Some(shape)) => SinkKeySpec::Multi(shape.clone()),
+        (None, None) => SinkKeySpec::Single { width },
     };
     let Some(emit) = sink_build_emit_plan(agg, &key_spec) else {
         refuse("identity emit");
@@ -1009,12 +1129,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
 
     // --- Engage.
+    let key_words = mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 });
     let sink = Arc::new(AggSink {
         drain,
         red,
+        mk,
         cap: sink_cap(),
         budget,
-        key_words: 1,
+        key_words,
         state_bytes,
         width,
         combines,

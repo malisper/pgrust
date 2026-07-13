@@ -69,7 +69,7 @@ pub enum MkCompKind {
 
 /// One packed multi-key component: 0-based input attno + byte offset into
 /// the ≤16-byte little-endian key image.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MkComp {
     pub att: u16,
     pub off: u8,
@@ -93,7 +93,7 @@ impl MkComp {
 /// `nullable_keys128`) sits at offset `packed_bytes - 1`. `two_words` =
 /// the image exceeds 8 bytes (KeyRepr::Int128); otherwise the image is one
 /// u64 riding the existing KeyRepr::Int machinery.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MkShape {
     pub comps: Vec<MkComp>,
     pub packed_bytes: u8,
@@ -345,88 +345,17 @@ pub fn agg_hash_compact_try_arm_mk(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    if !compact_enabled() {
-        return CompactArm::Off;
-    }
-    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
-        return CompactArm::Off;
-    };
-    let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
-    // Stage-4 §4.4 exchange: gate/size by the bound, as in the single-key arm.
-    if let Some(cap) = crate::merge::exchange_cap_for_build(node) {
-        numgroups = numgroups.min(cap as u64);
-    }
-    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-    if ph.compact.is_some() {
+    if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
         return CompactArm::Armed;
     }
-    let key_cols = ph.hashtable.key_cols();
-    if key_cols.len() < 2 {
-        return CompactArm::KeyKind;
-    }
-    // Component kinds first; offsets are laid out per numeric width below
-    // (numeric components try the roomy 8-byte encoding, shrinking to 4
-    // bytes when the image would exceed 16 — the Q19 shape's budget:
-    // int8 + numeric4 + intern4 = 16).
-    let mut kinds: Vec<(u16, MkCompKind)> = Vec::with_capacity(key_cols.len());
-    let mut has_intern = false;
-    let mut has_numeric = false;
-    for (j, kc) in key_cols.iter().enumerate() {
-        // MkComp.att is the 0-based INPUT column (the feed reads SoA lanes
-        // by input colno); kc.att is the hashslot position, unused here.
-        let input_att = (ph.hash_grp_col_idx_input[j] - 1) as u16;
-        let kind = match kc.kind {
-            ::execgrouping::GroupKeyKind::Int { width } => MkCompKind::Int { width },
-            // Raw-bytes text packs ONLY through the dict/intern lane the
-            // feed armed for exactly this column. NULL text is never
-            // interned: non-nullable shapes carry the feed's no-NULLs proof
-            // (cbstore) or its runtime NULL-demote pre-check (slot streams);
-            // nullable shapes route NULL through the null-bitmap byte (bit
-            // set, value bits zero) without touching the intern table.
-            ::execgrouping::GroupKeyKind::TextRaw if dict_att == Some(input_att) => {
-                has_intern = true;
-                MkCompKind::Intern
-            }
-            // The canonical-form numeric key kind (keypack module doc);
-            // per-value packability is the feed's runtime gate.
-            ::execgrouping::GroupKeyKind::Numeric => {
-                has_numeric = true;
-                MkCompKind::Numeric { width: 8 }
-            }
-            _ => return CompactArm::KeyKind,
-        };
-        kinds.push((input_att, kind));
-    }
-    let layout = |kinds: &[(u16, MkCompKind)], numeric_width: u8| {
-        let mut comps: Vec<MkComp> = Vec::with_capacity(kinds.len());
-        let mut off = 0usize;
-        for &(att, kind) in kinds {
-            let kind = match kind {
-                MkCompKind::Numeric { .. } => MkCompKind::Numeric { width: numeric_width },
-                k => k,
-            };
-            let comp = MkComp { att, off: off as u8, kind };
-            off += comp.width() as usize;
-            comps.push(comp);
-        }
-        (comps, off + nullable as usize)
+    let (shape, numgroups) = match agg_hash_compact_mk_admit(node, nullable, dict_att) {
+        Ok(admitted) => admitted,
+        Err(verdict) => return verdict,
     };
-    let (mut comps, mut packed_bytes) = layout(&kinds, 8);
-    if packed_bytes > 16 && has_numeric {
-        (comps, packed_bytes) = layout(&kinds, 4);
-    }
-    if packed_bytes > 16 || (nullable && comps.len() > 8) {
-        return CompactArm::KeyKind;
-    }
+    let has_intern = shape.comps.iter().any(|c| c.kind == MkCompKind::Intern);
+    let two_words = shape.two_words;
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let additionalsize = ph.hashtable.additionalsize();
-    debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
-    // Spill-eligibility estimate at half margin (compact v1 formula; the
-    // 2-word key rides the same 8-B slack term — conservative either way).
-    let est_bytes = numgroups.saturating_mul(16 + 16 + additionalsize as u64 + 16);
-    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
-        return CompactArm::SpillRisk;
-    }
-    let two_words = packed_bytes > 8;
     let (repr, layout) = if two_words {
         // Int128 is Salt8-only (2 key words cannot inline into a 16-B slot).
         (::lanetable::KeyRepr::Int128, ::lanetable::EntryLayout::Salt8)
@@ -449,12 +378,7 @@ pub fn agg_hash_compact_try_arm_mk(
             ::lanetable::HashKind::best(),
             layout,
         ),
-        key: CompactKeySpec::Multi(MkShape {
-            comps,
-            packed_bytes: packed_bytes as u8,
-            nullable,
-            two_words,
-        }),
+        key: CompactKeySpec::Multi(shape),
         intern: has_intern.then(|| {
             ::lanetable::LaneAggTable::new(::lanetable::KeyRepr::Bytes, 8, 1 << 10)
         }),
@@ -464,6 +388,98 @@ pub fn agg_hash_compact_try_arm_mk(
         new_rows: Vec::new(),
     });
     CompactArm::Armed
+}
+
+/// The multi-key admission + packed layout WITHOUT arming a table — the
+/// probe half of [`agg_hash_compact_try_arm_mk`] (identical gates, identical
+/// shape). The M2 sink leader runs this: it must know the exact shape it is
+/// engaging without paying the worker table's prealloc on an executor that
+/// will only ever adopt the published parallel emit. `Ok((shape, n))` = the
+/// arm would install exactly `shape` with capacity hint `n`; `Err(verdict)`
+/// = the non-`Armed` verdict the arm would return.
+pub fn agg_hash_compact_mk_admit(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    dict_att: Option<u16>,
+) -> Result<(MkShape, u64), CompactArm> {
+    if !compact_enabled() {
+        return Err(CompactArm::Off);
+    }
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return Err(CompactArm::Off);
+    };
+    let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
+    // Stage-4 §4.4 exchange: gate/size by the bound, as in the single-key arm.
+    if let Some(cap) = crate::merge::exchange_cap_for_build(node) {
+        numgroups = numgroups.min(cap as u64);
+    }
+    let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    let key_cols = ph.hashtable.key_cols();
+    if key_cols.len() < 2 {
+        return Err(CompactArm::KeyKind);
+    }
+    // Component kinds first; offsets are laid out per numeric width below
+    // (numeric components try the roomy 8-byte encoding, shrinking to 4
+    // bytes when the image would exceed 16 — the Q19 shape's budget:
+    // int8 + numeric4 + intern4 = 16).
+    let mut kinds: Vec<(u16, MkCompKind)> = Vec::with_capacity(key_cols.len());
+    let mut has_numeric = false;
+    for (j, kc) in key_cols.iter().enumerate() {
+        // MkComp.att is the 0-based INPUT column (the feed reads SoA lanes
+        // by input colno); kc.att is the hashslot position, unused here.
+        let input_att = (ph.hash_grp_col_idx_input[j] - 1) as u16;
+        let kind = match kc.kind {
+            ::execgrouping::GroupKeyKind::Int { width } => MkCompKind::Int { width },
+            // Raw-bytes text packs ONLY through the dict/intern lane the
+            // feed armed for exactly this column. NULL text is never
+            // interned: non-nullable shapes carry the feed's no-NULLs proof
+            // (cbstore) or its runtime NULL-demote pre-check (slot streams);
+            // nullable shapes route NULL through the null-bitmap byte (bit
+            // set, value bits zero) without touching the intern table.
+            ::execgrouping::GroupKeyKind::TextRaw if dict_att == Some(input_att) => {
+                MkCompKind::Intern
+            }
+            // The canonical-form numeric key kind (keypack module doc);
+            // per-value packability is the feed's runtime gate.
+            ::execgrouping::GroupKeyKind::Numeric => {
+                has_numeric = true;
+                MkCompKind::Numeric { width: 8 }
+            }
+            _ => return Err(CompactArm::KeyKind),
+        };
+        kinds.push((input_att, kind));
+    }
+    let layout = |kinds: &[(u16, MkCompKind)], numeric_width: u8| {
+        let mut comps: Vec<MkComp> = Vec::with_capacity(kinds.len());
+        let mut off = 0usize;
+        for &(att, kind) in kinds {
+            let kind = match kind {
+                MkCompKind::Numeric { .. } => MkCompKind::Numeric { width: numeric_width },
+                k => k,
+            };
+            let comp = MkComp { att, off: off as u8, kind };
+            off += comp.width() as usize;
+            comps.push(comp);
+        }
+        (comps, off + nullable as usize)
+    };
+    let (mut comps, mut packed_bytes) = layout(&kinds, 8);
+    if packed_bytes > 16 && has_numeric {
+        (comps, packed_bytes) = layout(&kinds, 4);
+    }
+    if packed_bytes > 16 || (nullable && comps.len() > 8) {
+        return Err(CompactArm::KeyKind);
+    }
+    let additionalsize = ph.hashtable.additionalsize();
+    debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
+    // Spill-eligibility estimate at half margin (compact v1 formula; the
+    // 2-word key rides the same 8-B slack term — conservative either way).
+    let est_bytes = numgroups.saturating_mul(16 + 16 + additionalsize as u64 + 16);
+    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
+        return Err(CompactArm::SpillRisk);
+    }
+    let two_words = packed_bytes > 8;
+    Ok((MkShape { comps, packed_bytes: packed_bytes as u8, nullable, two_words }, numgroups))
 }
 
 /// Shared compact v1 gates for the single-word-key modes (Single/Reduced):
@@ -882,7 +898,7 @@ fn compact_key_datums_red(
 
 /// Unpack component `comp`'s raw bits from a row's ≤16-byte key image.
 #[inline]
-fn mk_unpack(words: [u64; 2], comp: &MkComp) -> u64 {
+pub(crate) fn mk_unpack(words: [u64; 2], comp: &MkComp) -> u64 {
     let image = (words[0] as u128) | ((words[1] as u128) << 64);
     let w = comp.width() as u32 * 8;
     let bits = (image >> (comp.off as u32 * 8)) as u64;
