@@ -18,6 +18,7 @@ use types_error::{
 use types_storage::RelFileLocator;
 
 mod query_task_guard;
+pub mod standing;
 
 pub use query_task_guard::QueryTaskBindingGuard;
 

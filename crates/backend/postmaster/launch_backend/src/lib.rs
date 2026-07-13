@@ -476,7 +476,14 @@ fn child_thread_stack_size() -> usize {
 
 pub fn init_seams() {
     postmaster_seams::parallel_pool_dispatch::set(wpool::dispatch);
-    postmaster_seams::parallel_pool_retire_db::set(wpool::retire_db);
+    postmaster_seams::parallel_pool_retire_db::set(retire_db_all_pools);
+}
+
+/// DROP DATABASE rider for BOTH db-pinned pools: wpool's parked standbys
+/// and the M2 standing runtime executors (parallel::standing).
+fn retire_db_all_pools(dboid: types_core::Oid) {
+    wpool::retire_db(dboid);
+    parallel::standing::retire_db(dboid);
 }
 
 pub mod wpool {
@@ -615,6 +622,10 @@ pub mod wpool {
     pub fn flush_for_crash() {
         CRASH_EPOCH.fetch_add(1, Relaxed);
         flush();
+        // M2 pool-binding: the standing runtime executors park on plain
+        // process-local primitives under the same discipline — fence them
+        // before shared memory resets (no-op if the gang never started).
+        parallel::standing::flush_for_crash();
     }
 
     fn spawn_standby() -> bool {
@@ -947,5 +958,192 @@ pub mod rtpool {
                 let _ = stack_depth::set_stack_base();
                 body();
             })
+    }
+}
+
+pub mod rtgang {
+    //! M2 pool-binding spawn glue: STANDING runtime executor threads
+    //! (parallel::standing — see that module's doc for the architecture).
+    //! This module owns everything postmaster/thread-substrate-shaped:
+    //! boot capture (Inherited globals + GUC base), thread spawn, the
+    //! bgworker-equivalent identity bring-up (InitPostmasterChild +
+    //! synthetic bgworker entry + InitProcess from the boot-reserved
+    //! segment + BaseInit), and the run_child_task-shaped exit discipline
+    //! (ProcExitThread -> deferred-callback drain, so ProcKill releases
+    //! the PGPROC; GangExit::Raw exits with zero shmem interaction for
+    //! the crash fence).
+    //!
+    //! Gang threads are process-lifetime and REGISTRY-INVISIBLE: no
+    //! postmaster child slot, no CHILD_THREADS entry, no bgworker
+    //! registry slot, no exit announce — the shutdown state machine
+    //! counts pmchild `active` only, so they neither wedge shutdown nor
+    //! receive SIGTERM (they die with the process; DROP DATABASE and
+    //! crash reinit ride parallel::standing's retire/epoch paths).
+
+    use std::sync::OnceLock;
+
+    use types_core::pid_t;
+
+    struct Boot {
+        inherited: super::Inherited,
+        guc_base: Option<std::sync::Arc<guc::layers::GucBaseSnapshot>>,
+        guc_snapshot: Vec<guc::store::NondefaultGuc>,
+    }
+
+    static BOOT: OnceLock<Boot> = OnceLock::new();
+
+    /// PGPROCs to boot-reserve for the gang: PGRUST_RUNTIME=1 (+ the
+    /// PGRUST_RUNTIME_POOLBIND=0 kill) gates it; PGRUST_RUNTIME_GANG
+    /// overrides the size (default = the runtime's worker count = cores).
+    /// Called by the postmaster BEFORE InitializeMaxBackends (sizing) and
+    /// again at install (wiring) — one pure function, values agree.
+    pub fn gang_procs_wanted() -> i32 {
+        if !runtime::runtime_enabled() || !parallel::standing::pool_binding_enabled() {
+            return 0;
+        }
+        let n = std::env::var("PGRUST_RUNTIME_GANG")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or_else(|| runtime::RuntimeConfig::from_env().workers as i64);
+        n.clamp(0, 1024) as i32
+    }
+
+    /// Postmaster boot wiring (serverloop, next to rtpool::start_if_enabled;
+    /// postmaster thread only — the Inherited/GUC captures below are only
+    /// valid there). Lazy thereafter: threads spawn at first engagement.
+    ///
+    /// GUC staleness note: the boot-captured base/snapshot seeds a gang
+    /// thread's store; per engagement the query-task binder applies the
+    /// leader's query PIN, which adopts the leader's CURRENT base — a
+    /// post-SIGHUP engagement never sees stale boot values.
+    pub fn install_if_enabled() {
+        let n = gang_procs_wanted();
+        if n <= 0 {
+            return;
+        }
+        let _ = BOOT.set(Boot {
+            inherited: super::Inherited::capture(),
+            guc_base: guc::layers::base_share_enabled()
+                .then(guc::layers::ensure_base_current),
+            guc_snapshot: if guc::layers::base_share_enabled() {
+                Vec::new()
+            } else {
+                guc::store::capture_nondefault_variables()
+            },
+        });
+        parallel::standing::install_spawner(n as usize, spawn_gang_worker);
+    }
+
+    /// parallel::standing spawner: may run on any backend thread (first
+    /// engagement / respawn) — everything postmaster-scoped was captured
+    /// at install.
+    fn spawn_gang_worker(ordinal: usize) -> bool {
+        let Some(boot) = BOOT.get() else { return false };
+        let child_pid: pid_t = super::reserve_child_pid();
+        std::thread::Builder::new()
+            .name(format!("pg:rtgang{ordinal}:{child_pid}"))
+            .stack_size(super::child_thread_stack_size())
+            .spawn(move || gang_thread(ordinal, child_pid, boot))
+            .is_ok()
+    }
+
+    fn gang_thread(ordinal: usize, child_pid: pid_t, boot: &'static Boot) {
+        // Thread-scoped local latch slot (returned on thread exit).
+        let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+        boot.inherited.apply();
+        let _ = stack_depth::set_stack_base();
+        let guc_ok = if let Some(base) = &boot.guc_base {
+            guc::store::initialize_guc_options_for_child_base(base)
+                .and_then(|()| guc::layers::bind_base(base))
+        } else {
+            guc::store::initialize_guc_options_for_child(&boot.guc_snapshot)
+                .and_then(|()| guc::store::restore_nondefault_variables(&boot.guc_snapshot))
+        };
+        if let Err(e) = guc_ok {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("standing executor {ordinal}: GUC bring-up failed: {}", e.message()),
+            );
+            parallel::standing::note_worker_exit(ordinal);
+            return;
+        }
+
+        // bgworker-equivalent identity (BackgroundWorkerMain +
+        // run_worker_body, minus registry/dispatch).
+        if let Err(e) = miscinit::InitPostmasterChild(child_pid) {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("standing executor {ordinal}: InitPostmasterChild failed: {}", e.message()),
+            );
+            parallel::standing::note_worker_exit(ordinal);
+            return;
+        }
+        procsignal::pqsignal_thread(
+            libc::SIGQUIT,
+            procsignal::ThreadSignalHandler::Simple(super::default_sigquit_handler),
+        );
+        miscinit::SetMyBackendType(types_core::init::BackendType::BgWorker);
+        bgworker::adopt_worker_entry(bgworker::BackgroundWorker {
+            bgw_name: format!("runtime standing executor {ordinal}"),
+            bgw_type: "runtime standing executor".to_string(),
+            bgw_flags: bgworker::BGWORKER_SHMEM_ACCESS
+                | bgworker::BGWORKER_BACKEND_DATABASE_CONNECTION,
+            bgw_start_time: bgworker::BgWorkerStartTime::ConsistentState,
+            bgw_restart_time: bgworker::BGW_NEVER_RESTART,
+            bgw_main: gang_entry_never,
+            bgw_main_arg: 0,
+            bgw_extra: [0u8; bgworker::BGW_EXTRALEN],
+            bgw_notify_pid: 0,
+        });
+
+        // The loop + exit discipline (run_child_task-shaped): proc_exit's
+        // unwind drains the deferred callbacks (ProcKill releases the
+        // boot-reserved PGPROC against live shmem); GangExit::Raw and
+        // pre-InitProcess failures exit with no shmem interaction; other
+        // panics are logged and the slot is left respawnable.
+        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
+                let _ = elog::elog(
+                    types_error::WARNING,
+                    format!("standing executor {ordinal}: InitProcess failed: {}", e.message()),
+                );
+                return;
+            }
+            if let Err(e) = postinit::BaseInit() {
+                let _ = elog::elog(
+                    types_error::WARNING,
+                    format!("standing executor {ordinal}: BaseInit failed: {}", e.message()),
+                );
+                // PGPROC is claimed: release identity via the exit path.
+                ipc::proc_exit(1, init_small::globals::MyProcPid());
+            }
+            match parallel::standing::gang_worker_loop(ordinal) {
+                parallel::standing::GangExit::Clean => {
+                    ipc::proc_exit(0, init_small::globals::MyProcPid());
+                }
+                parallel::standing::GangExit::Raw => {}
+            }
+        }));
+        parallel::standing::note_worker_exit(ordinal);
+        match body {
+            Ok(()) => {} // Raw exit (crash fence) or pre-PGPROC failure.
+            Err(payload) => {
+                if let Some(p) = payload.downcast_ref::<ipc::ProcExitThread>() {
+                    let code = p.code;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::run_deferred_exit_callbacks(code)
+                    }));
+                } else {
+                    let _ = elog::elog(
+                        types_error::WARNING,
+                        format!("standing executor {ordinal} died on a panic"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn gang_entry_never(_arg: u64) -> types_error::PgResult<()> {
+        unreachable!("standing executor entry is never dispatched")
     }
 }
