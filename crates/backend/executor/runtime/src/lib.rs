@@ -61,8 +61,10 @@ pub use lifecycle::{
     TaskHandle, TaskLifecycle, TaskParticipant,
 };
 pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
-pub use rg::{CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork};
-pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS};
+pub use rg::{
+    CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
+};
+pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
 pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_T_MIN_NS, EWMA_ALPHA};
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
@@ -89,6 +91,23 @@ pub use parallel::{
 pub fn runtime_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "1"))
+}
+
+/// Process-global runtime handle (M1): published once by the postmaster's
+/// rtpool start (launch_backend::rtpool) so executor-side engagement can
+/// reach the runtime without depending on the postmaster crates. None until
+/// (and unless) the kill switch spawned the pool.
+#[cfg(not(loom))]
+static GLOBAL: std::sync::OnceLock<Arc<Runtime>> = std::sync::OnceLock::new();
+
+#[cfg(not(loom))]
+pub fn install_global(rt: Arc<Runtime>) -> &'static Arc<Runtime> {
+    GLOBAL.get_or_init(|| rt)
+}
+
+#[cfg(not(loom))]
+pub fn global() -> Option<&'static Arc<Runtime>> {
+    GLOBAL.get()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -191,8 +210,129 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec);
+        let rg = self.sched.submit(spec, false);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Submit a PINNED resource group (M1 scan pipelines): executed only by
+    /// external participant threads driving [`Runtime::drive_pinned`] — the
+    /// query's own bound parallel helpers, which carry the session state the
+    /// work needs. Pool workers never claim from pinned RGs (they cannot
+    /// bind foreign query state yet; §2.3 db-pinned pool binding is the M2+
+    /// retirement path, at which point pinned submission collapses into
+    /// `submit`). Everything else — morsel cursor, adaptive sizing, the
+    /// last-worker-out finalization protocol, abort drain, completion — is
+    /// the ordinary runtime machinery.
+    pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Per-thread bookkeeping for an external participant (pin-board lane
+    /// `nthreads + ordinal`; at most [`sched::MAX_EXTERNAL_LANES`] lanes).
+    /// Callers MUST hold the lane through [`Runtime::acquire_external_lane`]
+    /// — pin-board lanes are a process-wide resource: two concurrent
+    /// participants on one lane corrupt the finalization protocol's pins.
+    pub fn external_local(&self, ordinal: usize) -> WorkerLocal {
+        self.sched.external_local(ordinal)
+    }
+
+    /// Lease one external pin-board lane (process-wide; None = all
+    /// [`MAX_EXTERNAL_LANES`] busy — the caller must refuse participation).
+    /// The lease releases on drop; hold it across the whole drive. Lanes are
+    /// a PROCESS resource: two concurrent participants on one lane would
+    /// corrupt the finalization protocol's pins (publish-over-unsettled).
+    pub fn acquire_external_lane(self: &Arc<Self>) -> Option<ExternalLane> {
+        let mask = &self.sched.external_lanes;
+        loop {
+            let cur = mask.load(std::sync::atomic::Ordering::SeqCst);
+            let free = !cur;
+            if free == 0 {
+                return None;
+            }
+            let bit = free.trailing_zeros() as usize;
+            if mask
+                .compare_exchange(
+                    cur,
+                    cur | (1u64 << bit),
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return Some(ExternalLane { rt: Arc::clone(self), ordinal: bit });
+            }
+        }
+    }
+
+    /// Drive one pinned RG as an external participant until it completes.
+    /// (Production-only: the loom models drive `worker_step` shapes and
+    /// poll try_wait; the pinned driver's yield is a std thread op.)
+    /// The participant obeys the execution-permit cap (a permit is held
+    /// across each step, released before parking) and observes aborts at
+    /// morsel boundaries like any pool worker. The WORK must not unwind
+    /// (TaskSetWork::run_morsel is infallible by contract — implementations
+    /// catch their own errors, record them, and abort the RG); a panic
+    /// escaping a step would strand the participant's pin and wedge the
+    /// finalization protocol.
+    /// Bounded pinned drive for CLEANUP paths (abort drains): like
+    /// [`Runtime::drive_pinned`] but gives up after `max_idle` consecutive
+    /// idle observations (never parks — cleanup must not sleep on wakes a
+    /// dead participant will never send). None = the RG could not be
+    /// completed (a participant died holding an unsettled pin); the caller
+    /// must treat the RG as leaked and error out loudly.
+    #[cfg(not(loom))]
+    pub fn try_drain_pinned(
+        &self,
+        local: &mut WorkerLocal,
+        rg: &RgHandle,
+        max_idle: u32,
+    ) -> Option<RgOutcome> {
+        let mut idle = 0u32;
+        loop {
+            if let Some(outcome) = rg.try_outcome() {
+                return Some(outcome);
+            }
+            self.execution_permits().acquire();
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            self.execution_permits().release();
+            match step {
+                Step::Ran => idle = 0,
+                Step::Retry => std::thread::yield_now(),
+                Step::Idle => {
+                    idle += 1;
+                    if idle >= max_idle {
+                        return rg.try_outcome();
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(500));
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        }
+    }
+
+    #[cfg(not(loom))]
+    pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
+        loop {
+            if let Some(outcome) = rg.try_outcome() {
+                return outcome;
+            }
+            let epoch = self.park_epoch();
+            self.execution_permits().acquire();
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            self.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => std::thread::yield_now(),
+                Step::Idle => {
+                    if rg.try_outcome().is_some() {
+                        continue;
+                    }
+                    self.park(epoch);
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        }
     }
 
     /// Per-thread scheduling bookkeeping; `worker` ∈ 0..nthreads().
@@ -236,4 +376,34 @@ impl Runtime {
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
+}
+
+/// RAII lease of one external pin-board lane (see
+/// [`Runtime::acquire_external_lane`]).
+pub struct ExternalLane {
+    rt: Arc<Runtime>,
+    ordinal: usize,
+}
+
+impl ExternalLane {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    /// Fresh per-drive bookkeeping bound to this lane.
+    pub fn local(&self) -> WorkerLocal {
+        self.rt.external_local(self.ordinal)
+    }
+}
+
+impl Drop for ExternalLane {
+    fn drop(&mut self) {
+        // Release the lane bit. The pin was settled by the drive (every
+        // worker_step_pinned settles before returning), so the next lessee
+        // starts from a clean pin.
+        self.rt
+            .sched
+            .external_lanes
+            .fetch_and(!(1u64 << self.ordinal), std::sync::atomic::Ordering::SeqCst);
+    }
 }
