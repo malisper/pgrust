@@ -670,6 +670,9 @@ mod tests {
                     ndict: self.datums.len() as u32,
                     epoch,
                     sorted: false,
+                    stitch: std::ptr::null(),
+                    gndv: 0,
+                    gepoch: 0,
                 },
             }
         }

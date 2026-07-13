@@ -173,8 +173,17 @@ fn drive_scan(
         let (rg, base) = scan.window_ref().expect("window staged");
         assert_eq!(rg, 0, "single-RG fixture");
         scan.batch_deform(ncols, soa, None);
-        if soa.dict_lane(1).is_some() {
+        if let Some(lane) = soa.dict_lane(1) {
             dict_windows += 1;
+            // v7 stitch rides the lane: a fresh all-dict part always
+            // publishes one, and over a single-RG part the byte-rank global
+            // codes are exactly the (byte-sorted) local codes.
+            let t = lane.table;
+            assert!(t.has_stitch(), "fresh all-dict part must publish a stitch");
+            assert!(t.gepoch != 0 && t.gndv == t.ndict);
+            for c in 0..t.ndict {
+                assert_eq!(t.global_code(c), c, "single-RG stitch is the identity");
+            }
         }
         let mut sel = [0u64; SOA_BM_WORDS];
         eval_lane_qual(lq, soa, n, &mut sel).unwrap();
