@@ -304,6 +304,8 @@ pub fn init_seams() {
     subtrans_seams::startup_subtrans::set(StartupSUBTRANS);
     subtrans_seams::sub_trans_set_parent::set(SubTransSetParent);
     subtrans_seams::extend_subtrans::set(ExtendSUBTRANS);
+    subtrans_seams::check_point_subtrans::set(CheckPointSUBTRANS);
+    subtrans_seams::truncate_subtrans::set(TruncateSUBTRANS);
 
     fn check_hook(
         newval: &mut i32,
