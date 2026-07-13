@@ -354,3 +354,39 @@ mod tests {
         assert_eq!(rel_att_by_name(&r, "c"), -1);
     }
 }
+
+// pg_get_replica_identity_index (misc.c:1101): oid of the replica identity
+// index, NULL when none. Publisher-side dependency of tablesync's
+// fetch_remote_table_info query.
+pub fn fc_pg_get_replica_identity_index(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    let reloid = fcinfo.arg(0).as_oid();
+    let mcx_owned = mcx::MemoryContext::new("pg_get_replica_identity_index");
+    let mcx = mcx_owned.mcx();
+    let rel = table::table_open(mcx, reloid, types_rel::AccessShareLock)?;
+    // Populate rd_indexlist (computes replidindex incl. the DEFAULT->pkey rule).
+    let _ = relcache::RelationGetIndexList(mcx, reloid)?;
+    let idxoid = rel
+        .rd_indexlist
+        .borrow()
+        .as_ref()
+        .map(|l| l.replidindex)
+        .unwrap_or(types_core::InvalidOid);
+    rel.close(types_rel::AccessShareLock)?;
+    if idxoid != types_core::InvalidOid {
+        Ok(datum::Datum::from_oid(idxoid))
+    } else {
+        Ok(fcinfo.return_null())
+    }
+}
+
+pub const LOGICALRELATION_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {
+    foid: 6120,
+    name: "pg_get_replica_identity_index",
+    nargs: 1,
+    strict: true,
+    retset: false,
+    func: fc_pg_get_replica_identity_index,
+}];
