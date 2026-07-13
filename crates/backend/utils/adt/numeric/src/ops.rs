@@ -831,6 +831,40 @@ pub fn numeric_avg_div(sum: Num<'_>, count: i64) -> PgResult<NumericImage> {
     numeric_div_common(sum, count_img.num())
 }
 
+/// `avg(int2/int4)` finalize core (`sum / count` over the int8 transarray):
+/// `numeric_avg_div`'s exact result — same `select_div_scale`, same
+/// round-half-away `div_var`, byte-identical image by construction — minus
+/// the two intermediate `NumericImage` materializations (`int64_to_numeric`
+/// of sum and count) it pays per group. The hashed-agg emit's finalize hot
+/// path (ClickBench Q32-class: `avg(int)` over millions of groups).
+pub fn int64_avg_div(sum: i64, count: i64) -> PgResult<NumericImage> {
+    let mut v1 = NumericVar::new();
+    set_var_from_int64(sum, &mut v1);
+    int_var_avg_div(&v1, count)
+}
+
+/// `avg(int8)` finalize core (Int128AggState sum): as [`int64_avg_div`].
+pub fn int128_avg_div(sum: i128, count: i64) -> PgResult<NumericImage> {
+    let mut v1 = NumericVar::new();
+    crate::var::int128_to_var(sum, &mut v1);
+    int_var_avg_div(&v1, count)
+}
+
+/// The shared division tail: `numeric_div_into`'s finite arm verbatim (both
+/// operands are integers — the special-value arms are unreachable).
+fn int_var_avg_div(v1: &NumericVar, count: i64) -> PgResult<NumericImage> {
+    let mut v2 = NumericVar::new();
+    set_var_from_int64(count, &mut v2);
+    let rscale = select_div_scale(v1.view(), v2.view());
+    let mut result = NumericVar::new();
+    div_var(v1.view(), v2.view(), &mut result, rscale, true, true)?;
+    let mut out = NumericImage::empty();
+    if !make_result_into(result.view(), &mut out) {
+        return Err(crate::numeric_overflow_error().into());
+    }
+    Ok(out)
+}
+
 macro_rules! unported {
     ($($name:ident),* $(,)?) => {$(
         pub fn $name() -> ! {

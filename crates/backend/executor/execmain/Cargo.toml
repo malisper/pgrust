@@ -104,6 +104,7 @@ pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
 [dev-dependencies]
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
+adt_numeric = { path = "../../utils/adt/numeric" }
 spi_seams = { path = "../spi_seams" }
 parallel = { path = "../../access/transam/parallel" }
 bgworker = { path = "../../postmaster/bgworker" }

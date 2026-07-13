@@ -962,8 +962,7 @@ pub fn fc_int8_avg(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         fcinfo.isnull = true;
         return Ok(Datum::null());
     }
-    let sum_img = crate::ops::int64_to_numeric(sum);
-    let img = crate::ops::numeric_avg_div(sum_img.num(), count)?;
+    let img = crate::ops::int64_avg_div(sum, count)?;
     img_result(fcinfo, &img)
 }
 

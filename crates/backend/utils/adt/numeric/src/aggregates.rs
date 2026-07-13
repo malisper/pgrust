@@ -828,8 +828,5 @@ pub fn numeric_poly_avg(state: Option<&Int128AggState>) -> PgResult<Option<Numer
     if state.n == 0 {
         return Ok(None);
     }
-    let mut sum = NumericVar::new();
-    crate::var::int128_to_var(state.sum_x, &mut sum);
-    let sum_img = make_result(sum.view())?;
-    Ok(Some(numeric_avg_div(sum_img.num(), state.n)?))
+    Ok(Some(crate::ops::int128_avg_div(state.sum_x, state.n)?))
 }
