@@ -1352,6 +1352,87 @@ pub fn seq_scan_topk_key_lane<'a, 'mcx>(
     ))
 }
 
+/// Staged cbstore window base for ref-carrying consumers (the lane refsort
+/// feed): (row group, rg-global row index of staged row 0); the ref of
+/// staged row `i` is `base + i`, resolvable via `seq_scan_gather_row` for
+/// the scan's life. `None` = heap AM or nothing staged.
+#[inline]
+pub fn seq_scan_batch_window_ref(node: &SeqScanState<'_>) -> Option<(u32, u32)> {
+    let sd = node.ss.ss_currentScanDesc.as_ref()?;
+    ::tableam::table_scan_window_ref(sd)
+}
+
+/// Materialize rg-global `row` of row group `rg` into the scan tuple slot
+/// under the scan's CURRENT needed set (unneeded cells null) — the refsort
+/// winner gather. Uses the AM's gather scratch; the staged window is
+/// untouched. `false` = unsupported AM / no open scan (the caller demotes).
+pub fn seq_scan_gather_row<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rg: u32,
+    row: u32,
+) -> bool {
+    let Some(sd) = node.ss.ss_currentScanDesc.as_mut() else {
+        return false;
+    };
+    let slot = estate.slot_mut(node.ss.ss_ScanTupleSlot);
+    ::tableam::table_scan_gather_row(sd, rg, row, slot)
+}
+
+/// The refsort feed's fast-leg view of the CURRENT staged batch:
+/// `(key_values, key_isnull, fallback_words, sel_words)` over the first `n`
+/// staged rows for scan column `col` (0-based), or `None` when any part is
+/// unavailable — the caller then routes every row through the per-row emit
+/// (byte-identical fallback). Soundness:
+///   * `sel_words` is `Some` iff the scan HAS a qual and the armed selection
+///     bitmap is the WHOLE qual's verdict (kernel/PREWHERE-owned, no hybrid
+///     requal tail); `None` with no qual = every staged row survives. A
+///     qual-bearing batch without an exact bitmap refuses wholesale.
+///   * The key column's staged datum cells must be valid for selected
+///     non-fallback rows: the whole-prefix deform (`!qual_only`, no foreign
+///     `key_col` redirect, no varkey pointer lane) or the dedicated
+///     key-column staging on exactly this column, and `col_datum_ready`
+///     (no unanswered dict lane, fill not skipped by a lane-read mask).
+///   * Forced-fallback rows carry a SET sel bit and stale cells — callers
+///     MUST route them through the per-row emit (exact re-check + C detoast).
+pub fn seq_scan_refsort_key_batch<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+    col: u16,
+    n: u32,
+) -> Option<(&'a [::datum::Datum], &'a [bool], &'a [u64], Option<&'a [u64]>)> {
+    let b = node.batch_soa.as_deref()?;
+    let sel = if node.ss.qual.is_some() {
+        if !(b.qual_armed && !b.lane_requal && b.nwords > 0) {
+            return None;
+        }
+        Some(&b.sel[..])
+    } else {
+        None
+    };
+    if b.varkey.is_some() {
+        return None;
+    }
+    match b.key_col {
+        Some(k) if k == col => {}
+        Some(_) => return None,
+        None => {
+            if b.qual_only {
+                return None;
+            }
+        }
+    }
+    let c = col as usize;
+    if c >= b.soa.ncols() as usize || !b.soa.col_datum_ready(c) || b.soa.nrows() < n {
+        return None;
+    }
+    Some((
+        &b.soa.col_values(c)[..n as usize],
+        &b.soa.col_isnull(c)[..n as usize],
+        b.soa.fallback_words(),
+        sel,
+    ))
+}
+
 /// Arm the varlena lane feed for the lane-v2 agg fold: stage per-row datum
 /// pointers to varlena column `attnum` into SoA column 0 via the varkey pass
 /// (the fixed-width prefix deform cannot host an `attlen == -1` column).
