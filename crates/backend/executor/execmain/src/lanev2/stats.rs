@@ -430,6 +430,7 @@ static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
 /// Zone-adaptive top-N demotions: the tracked feed observed an
 /// arrival-order-sensitive tie at the LIMIT cut and re-fed physical-order.
 static ADAPTIVE_TOPK_DEMOTED: AtomicU64 = AtomicU64::new(0);
+static ADAPTIVE_TOPK_TIE_RELAXED: AtomicU64 = AtomicU64::new(0);
 
 /// Group-level emit-side top-N boundary effect counters (lane-v2 topnemit;
 /// informational `counter` dump lines). `SEEN` counts groups walked by an
@@ -485,6 +486,18 @@ pub(super) fn tick_adaptive_topk_demoted() {
         return;
     }
     ADAPTIVE_TOPK_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one accepted retained-tie-order relaxation (relaxed adaptive
+/// top-N feed finished with an order-only boundary-tie verdict; ratified
+/// tie-ordering rule 3 — no demotion, selection exact).
+#[inline]
+pub(super) fn tick_adaptive_topk_tie_relaxed() {
+    if stats_dir().is_none() {
+        return;
+    }
+    ADAPTIVE_TOPK_TIE_RELAXED.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -578,6 +591,10 @@ fn dump() {
     out.push_str(&format!(
         "counter\tadaptivetopk-demoted\t{}\n",
         ADAPTIVE_TOPK_DEMOTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tadaptivetopk-tie-relaxed\t{}\n",
+        ADAPTIVE_TOPK_TIE_RELAXED.load(Relaxed)
     ));
     out.push_str(&format!(
         "counter\ttopnemit-groups-seen\t{}\n",

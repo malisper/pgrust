@@ -4219,13 +4219,27 @@ fn sort_feed_if_needed<'mcx>(
                 tracked,
             )?;
             // Tracked adaptive feed: an arrival-order-sensitive tie at the
-            // LIMIT cut (selection OR retained-tie order) demotes — fresh
-            // tuplesort, adaptive disarmed, full physical-order re-feed,
-            // reproducing the never-adaptive feed byte-for-byte.
+            // LIMIT cut demotes — fresh tuplesort, adaptive disarmed, full
+            // physical-order re-feed, reproducing the never-adaptive feed
+            // byte-for-byte. Under the default relaxed mode only
+            // CUT-SELECTION ambiguity demotes (which rows are returned must
+            // stay exact); retained-tie emit order is the ratified
+            // relaxation surface (docs/conformance/tie-ordering.md rule 3)
+            // and is accepted as produced.
             let ambiguity = if tracked {
                 ::nodesort::sort_lane_topk_tie_ambiguity(state)
             } else {
                 None
+            };
+            let ambiguity = match ambiguity {
+                Some(::tuplesort::TopkTieAmbiguity::RetainedOrder)
+                    if adaptive_topk_mode() == AdaptiveTopkMode::Relaxed =>
+                {
+                    stats::tick_adaptive_topk_tie_relaxed();
+                    lane_trace("adaptive topk retained-tie order relaxed (rule 3)");
+                    None
+                }
+                other => other,
             };
             if let Some(kind) = ambiguity {
                 stats::tick_adaptive_topk_demoted();
@@ -4601,16 +4615,23 @@ fn topk_cut_arm<'mcx>(
 // TIE EXACTNESS is the residual risk: the adaptive order changes ARRIVAL
 // order at the bounded heap, and both the survivor selection at a boundary
 // full-key tie and the emit order among retained full-key ties are arrival-
-// dependent (heap-shape effects). Two modes:
+// dependent (heap-shape effects). Shape/mode ladder:
 //   * ties-invisible (every non-junk output column IS a sort key column of
 //     a byte-equality type): any legal tie selection/order prints identical
 //     bytes — nothing to track.
-//   * tracked: the tuplesort's tie tracking (armed via `sort_lane_topk_tie_
-//     track_arm`) records boundary-tie discards/evictions and the finish-
-//     time output scan finds retained ties; if EITHER fires, the feed
-//     DEMOTES — fresh tuplesort, adaptive disarmed, full physical-order
-//     re-feed — reproducing the never-adaptive feed byte-for-byte.
-// Net: lane-on output is byte-identical to lane-off in both modes.
+//   * payload-visible, relaxed (DEFAULT; ratified tie-ordering rule 3): the
+//     tuplesort's tie tracking (armed via `sort_lane_topk_tie_track_arm`)
+//     still runs, and a CUT-SELECTION trigger (which rows made the LIMIT
+//     cut is arrival-dependent) DEMOTES — fresh tuplesort, adaptive
+//     disarmed, full physical-order re-feed — so the SELECTED SET is always
+//     the physical-order feed's. A RETAINED-ORDER trigger (same rows,
+//     arrival-dependent order within equal-full-key groups) is accepted:
+//     within-tie-group order is not a compatibility surface.
+//   * payload-visible, `=tracked`: EITHER trigger demotes — byte-identical
+//     to lane-off, the experiment/A-B channel.
+// Net: lane-on output is byte-identical to lane-off except, in relaxed
+// mode, for the order within equal-full-key tie groups of the emitted rows
+// (tie-normalizing gates cover that channel).
 // ===========================================================================
 
 /// Armed adaptive top-N traversal for the current sort feed. `tracked` =
@@ -4626,17 +4647,22 @@ struct AdaptiveTopk {
 enum AdaptiveTopkMode {
     /// `=0|off`: never arm (byte-identical A/B gate channel).
     Off,
-    /// Default: arm only ties-invisible shapes (every non-junk output
+    /// `=invisible`: arm only ties-invisible shapes (every non-junk output
     /// column is a byte-equality sort key — any tie handling prints
     /// identical bytes, so the walk can never demote and never loses).
+    /// The pre-relaxation default, kept as an A/B channel.
     InvisibleOnly,
-    /// `=tracked`: additionally arm payload-visible shapes with tie
-    /// tracking + demotion. Measured on the 10M sorted-v2 bank: Q25-class
-    /// shapes DEMOTE on real boundary ties (probe cost ~5%), and Q24-class
-    /// sparse-qual shapes never bound the heap early — the zone-ordered
-    /// probe degenerates to a full scattered-order scan before demoting
-    /// (2.5x). Opt-in until the probe gets a budget and the ratified
-    /// retained-tie order relaxation gets a gate-normalization story.
+    /// Default (ratified 2026-07-12, tie-ordering rule 3): additionally arm
+    /// payload-visible shapes with tie tracking, but demote ONLY on
+    /// cut-selection ambiguity — retained-tie emit order is accepted as-is
+    /// (the ratified relaxation surface: same selected rows, possibly
+    /// different order within equal-full-key groups). Q25-class shapes stop
+    /// demoting (their boundary tie was pure retained order); the exactness
+    /// backstop for WHICH rows are returned stays. The AM-side probe budget
+    /// covers the Q24-class sparse-qual degeneration.
+    Relaxed,
+    /// `=tracked`: payload-visible shapes demote on EITHER trigger
+    /// (retained-tie order included) — the byte-exact experiment channel.
     Tracked,
 }
 
@@ -4645,7 +4671,8 @@ fn adaptive_topk_mode() -> AdaptiveTopkMode {
     *MODE.get_or_init(|| match std::env::var("PGRUST_LANE_ADAPTIVE_TOPK") {
         Ok(v) if v == "0" || v.eq_ignore_ascii_case("off") => AdaptiveTopkMode::Off,
         Ok(v) if v.eq_ignore_ascii_case("tracked") => AdaptiveTopkMode::Tracked,
-        _ => AdaptiveTopkMode::InvisibleOnly,
+        Ok(v) if v.eq_ignore_ascii_case("invisible") => AdaptiveTopkMode::InvisibleOnly,
+        _ => AdaptiveTopkMode::Relaxed,
     })
 }
 
@@ -4688,17 +4715,19 @@ fn adaptive_topk_arm<'mcx>(
         _ => return Ok(None),
     };
     let tracked = !sort_topk_ties_invisible(state, outer_desc);
-    if tracked && mode != AdaptiveTopkMode::Tracked {
+    if tracked && mode == AdaptiveTopkMode::InvisibleOnly {
         return Ok(None);
     }
     if !::nodeseqscan::seq_scan_adaptive_topk_arm(ss, attnum, desc)? {
         return Ok(None);
     }
     stats::tick_owned(ShapeClass::AdaptiveTopk);
-    lane_trace(if tracked {
-        "adaptive topk armed (sort feed, tie-tracked)"
-    } else {
-        "adaptive topk armed (sort feed, ties invisible)"
+    lane_trace(match (tracked, mode) {
+        (false, _) => "adaptive topk armed (sort feed, ties invisible)",
+        (true, AdaptiveTopkMode::Relaxed) => {
+            "adaptive topk armed (sort feed, relaxed tie order)"
+        }
+        (true, _) => "adaptive topk armed (sort feed, tie-tracked)",
     });
     Ok(Some(AdaptiveTopk { tracked }))
 }

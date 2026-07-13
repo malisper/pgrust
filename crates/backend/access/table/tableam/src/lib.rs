@@ -1029,12 +1029,13 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
         TableScanDesc::Cbstore(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
                     c.blocks_pruned,
-                    c.granules_bound_skipped
+                    c.granules_bound_skipped,
+                    c.adaptive_probe_reverts
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {

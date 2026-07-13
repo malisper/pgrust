@@ -225,6 +225,42 @@ struct AdaptiveOrder {
     // docs/conformance/tie-ordering.md), so only strict domination skips.
     strict: bool,
     bound: Option<i64>,
+    // Probe budget (measured failure mode: CB Q24@10M — a sparse qual never
+    // bounds the heap early, so the best-first walk degenerated into a full
+    // scattered-order scan, 2.5x the physical drive). The walk is a PROBE:
+    // if it isn't visibly paying by these thresholds, revert the REMAINING
+    // entries to physical (rg, g) order — pure visitation-order change, so
+    // it is always correct; per-granule bound skips stay live after revert
+    // (strict domination is order-independent), only the sorted-order early
+    // STOP is forfeited.
+    //   nobound_budget: claims allowed before the consumer ever feeds a
+    //     bound (heap never filled — the Q24 class).
+    //   projected_budget: with a bound in hand the sorted entry list makes
+    //     the walk's end exact TODAY (binary search for the first dominated
+    //     bound); if that projection says more than this many further
+    //     claims, the zone/key correlation isn't there — revert now. The
+    //     projection only shrinks as the bound tightens, so a walk that
+    //     would have stopped within budget is never reverted (CB Q25@10M
+    //     stops after 34/1238 granules and must stay on the fast path).
+    nobound_budget: usize,
+    projected_budget: usize,
+    reverted: bool,
+}
+
+impl AdaptiveOrder {
+    // First index >= cursor whose bound the current stop-bound dominates;
+    // entries.len() when none (entries are bound-sorted while !reverted, so
+    // this is exactly where the sorted walk will stop).
+    fn projected_stop(&self, b: i64) -> usize {
+        let tail = &self.entries[self.cursor..];
+        self.cursor
+            + tail.partition_point(|e| match (self.desc, self.strict) {
+                (true, false) => e.bound >= b,
+                (true, true) => e.bound > b,
+                (false, false) => e.bound <= b,
+                (false, true) => e.bound < b,
+            })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -289,6 +325,7 @@ pub struct CbScanDescData<'mcx> {
     pub blocks_pruned: u64,
     pub windows_staged: u64,
     pub granules_bound_skipped: u64,
+    pub adaptive_probe_reverts: u64,
 }
 
 fn env_off(name: &str) -> bool {
@@ -374,6 +411,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             blocks_pruned: 0,
             windows_staged: 0,
             granules_bound_skipped: 0,
+            adaptive_probe_reverts: 0,
         }
     }
 
@@ -410,6 +448,16 @@ impl<'mcx> CbScanDescData<'mcx> {
         if let Some(ad) = self.adaptive.as_deref_mut() {
             ad.cursor = 0;
             ad.bound = None;
+            // A probe revert re-sorted the tail physically; restore the full
+            // bound order so the rescan probes from scratch.
+            if ad.reverted {
+                if ad.desc {
+                    ad.entries.sort_unstable_by_key(|e| (std::cmp::Reverse(e.bound), e.rg, e.g));
+                } else {
+                    ad.entries.sort_unstable_by_key(|e| (e.bound, e.rg, e.g));
+                }
+                ad.reverted = false;
+            }
         }
     }
 
@@ -457,8 +505,24 @@ impl<'mcx> CbScanDescData<'mcx> {
         } else {
             entries.sort_unstable_by_key(|e| (e.bound, e.rg, e.g));
         }
-        self.adaptive =
-            Some(Box::new(AdaptiveOrder { entries, cursor: 0, col, desc, strict, bound: None }));
+        // Probe budgets (rationale on the fields): floors of 64 cover the
+        // bound-feed latency of the largest admitted top-N (the consumer
+        // caps k at 65536 = 8 full granules) with slack; the fractions keep
+        // the worst pre-revert scattered-order share small on big directories
+        // while never reverting a walk that stops early (Q25@10M: projection
+        // ~34 << max(64, 1238/8)=154).
+        let n = entries.len();
+        self.adaptive = Some(Box::new(AdaptiveOrder {
+            entries,
+            cursor: 0,
+            col,
+            desc,
+            strict,
+            bound: None,
+            nobound_budget: (n / 16).max(64),
+            projected_budget: (n / 8).max(64),
+            reverted: false,
+        }));
         Ok(true)
     }
 
@@ -875,6 +939,26 @@ impl<'mcx> CbScanDescData<'mcx> {
                 self.win += 1;
                 return Ok(self.staged_rows as u32);
             }
+            // Probe budget (fields' comment): a best-first walk that isn't
+            // visibly paying reverts its unvisited tail to physical order —
+            // never a correctness event, purely visitation order.
+            let reverted_now = {
+                let ad = self.adaptive.as_deref_mut().unwrap();
+                let over = !ad.reverted
+                    && match ad.bound {
+                        None => ad.cursor >= ad.nobound_budget,
+                        Some(b) => ad.projected_stop(b) - ad.cursor > ad.projected_budget,
+                    };
+                if over {
+                    let cursor = ad.cursor;
+                    ad.entries[cursor..].sort_unstable_by_key(|e| (e.rg, e.g));
+                    ad.reverted = true;
+                }
+                over
+            };
+            if reverted_now {
+                self.adaptive_probe_reverts += 1;
+            }
             let ad = self.adaptive.as_deref_mut().unwrap();
             let Some(&e) = ad.entries.get(ad.cursor) else { return Ok(0) };
             if let Some(b) = ad.bound {
@@ -885,6 +969,13 @@ impl<'mcx> CbScanDescData<'mcx> {
                     (false, true) => e.bound >= b,
                 };
                 if dominated {
+                    if ad.reverted {
+                        // Physical-order tail: domination no longer implies
+                        // anything about later entries — skip just this one.
+                        self.granules_bound_skipped += 1;
+                        ad.cursor += 1;
+                        continue;
+                    }
                     self.granules_bound_skipped += (ad.entries.len() - ad.cursor) as u64;
                     ad.cursor = ad.entries.len();
                     return Ok(0);
