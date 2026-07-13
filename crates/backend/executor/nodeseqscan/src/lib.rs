@@ -1073,6 +1073,30 @@ pub fn seq_scan_batch_len_want(node: &mut SeqScanState<'_>, c: u16, chars: bool)
     true
 }
 
+/// Dict-code side channel for a str MIN/MAX fold column of the CURRENT
+/// staged batch (lane-v2-dictminmax): the staged window's u32 codes + the
+/// per-RG dictionary identity, valid until the next window stages. `Some`
+/// certifies the `lanefold::LaneCols::col_codes` contract half this seam can
+/// audit: the column's SoA values cells hold REAL datums for the window's
+/// selected rows (no still-up dict-lane answer, no length staging — both
+/// leave the cells stale or integer-valued), and on a dict window every
+/// datum cell was gathered as `dict[code]` (the cbstore fill's only Raw
+/// path for a dict chunk), so values[i] is pointer-identical to
+/// `table.datum(code(i))`. Raw (non-dict) windows and heap scans answer
+/// `None` — the fold keeps its datum memcmp path, byte-identically.
+#[inline]
+pub fn seq_scan_batch_dict_codes(
+    node: &SeqScanState<'_>,
+    c: usize,
+) -> Option<::exectuples::SoaDictLane> {
+    let sd = node.ss.ss_currentScanDesc.as_ref()?;
+    let b = node.batch_soa.as_deref()?;
+    if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
+        return None;
+    }
+    ::tableam::table_scan_batch_dict_codes(sd, c as u16)
+}
+
 /// The registered dict-group consumer column, when the dict-group arm (or a
 /// PREWHERE co-arm) holds. The agg feed re-checks this per build — a rebuilt
 /// batch (a later consumer re-armed the staging) drops the registration and

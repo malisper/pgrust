@@ -1129,6 +1129,28 @@ impl<'mcx> CbScanDescData<'mcx> {
         })
     }
 
+    /// `staged_dict_lane` repackaged as the batch-currency `SoaDictLane`
+    /// (raw pointers; the same window-lifetime contract as the dict-lane
+    /// answers `batch_deform_col` publishes) — the str MIN/MAX dict-code
+    /// side channel (lane-v2-dictminmax). The caller (nodeseqscan seam) owns
+    /// the "values cells were gathered from this dictionary" proof; this
+    /// accessor only certifies codes/dict/epoch/sorted for the CURRENT
+    /// staged window. `dict[code]` here is pointer-identical to the Raw
+    /// gather's values fill (`batch_deform_col`'s `cd.dict[code]`).
+    #[inline]
+    pub fn staged_codes_lane(&self, c: usize) -> Option<::exectuples::SoaDictLane> {
+        let lane = self.staged_dict_lane(c)?;
+        Some(::exectuples::SoaDictLane {
+            codes: lane.codes.as_ptr(),
+            table: ::exectuples::SoaDictTable {
+                dict: lane.dict.as_ptr(),
+                ndict: lane.dict.len() as u32,
+                epoch: lane.epoch,
+                sorted: lane.sorted,
+            },
+        })
+    }
+
     /// Publish staged row `i` into the virtual slot (needed columns only;
     /// unneeded cells are nulled once per scan and never read).
     pub fn store_slot(&mut self, i: u32, slot: &mut SlotData<'_>) {
