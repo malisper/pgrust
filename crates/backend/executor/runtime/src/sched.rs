@@ -54,6 +54,13 @@ use crate::taskset::{PinBoard, Slot, TaskSetRt, WorkerMailbox};
 /// arrivals wait in the FIFO queue.
 pub const DEFAULT_SLOTS: usize = 128;
 
+/// Pin-board lanes reserved for EXTERNAL participant threads (M1: the
+/// query's bound parallel helpers driving `Runtime::drive_pinned`). External
+/// lanes live above the pool's `nthreads` indexes; the finalization
+/// protocol's coordinator scans the whole board, so external participants
+/// carry marker obligations exactly like pool workers.
+pub const MAX_EXTERNAL_LANES: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// Executed (part of) a task.
@@ -88,6 +95,10 @@ pub struct WorkerLocal {
     /// Slot-word cache: (seq, task set) per slot; revalidated by one atomic
     /// read of the slot word.
     cache: Vec<Option<(u64, Arc<TaskSetRt>)>>,
+    /// Pinned-drive fast path: the last (slot, seq) this local drove for its
+    /// pinned RG. Revalidated by one slot-word read per step; the membership
+    /// lock is touched only when it goes stale (publish/finalize events).
+    pinned_slot: Option<(usize, u64)>,
     /// INERT until M5: thread-local stride state (SIGMOD'21 §2.3 — each
     /// worker runs stride scheduling locally over the same slot set).
     #[allow(dead_code)]
@@ -108,6 +119,10 @@ pub(crate) struct Scheduler {
     #[allow(dead_code)]
     mailboxes: Vec<WorkerMailbox>,
     pub(crate) park: ParkLot,
+    /// External pin-board lane lease bitmask (bit b = lane b busy). Lanes
+    /// are leased through Runtime::acquire_external_lane; MAX_EXTERNAL_LANES
+    /// = 64 keeps this one word.
+    pub(crate) external_lanes: AtomicU64,
     /// Execution-permit semaphore: exactly `permits` (= cores) permits; any
     /// task-executing thread holds one (acquired by the pool loop around
     /// worker_step). The hard runnable cap of the §2.5 permit model. The
@@ -147,9 +162,10 @@ impl Scheduler {
                 owned: (0..nslots).map(|_| None).collect(),
                 waitq: VecDeque::new(),
             }),
-            pins: PinBoard::new(nthreads),
+            pins: PinBoard::new(nthreads + MAX_EXTERNAL_LANES),
             mailboxes: (0..nthreads).map(|_| WorkerMailbox::new()).collect(),
             park: ParkLot::new(),
+            external_lanes: AtomicU64::new(0),
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
             clock,
@@ -171,6 +187,20 @@ impl Scheduler {
         WorkerLocal {
             worker,
             cache: (0..self.slots.len()).map(|_| None).collect(),
+            pinned_slot: None,
+            local_pass: 0,
+            global_pass: 0,
+        }
+    }
+
+    /// Bookkeeping for an EXTERNAL participant thread (M1 pinned driver):
+    /// pin-board lane `nthreads + ordinal`.
+    pub(crate) fn external_local(&self, ordinal: usize) -> WorkerLocal {
+        assert!(ordinal < MAX_EXTERNAL_LANES, "external participant lanes exhausted");
+        WorkerLocal {
+            worker: self.nthreads + ordinal,
+            cache: (0..self.slots.len()).map(|_| None).collect(),
+            pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
@@ -193,9 +223,9 @@ impl Scheduler {
 
     // ---- membership: submit / publish / admit -----------------------------
 
-    pub(crate) fn submit(&self, spec: QuerySpec) -> Arc<ResourceGroup> {
+    pub(crate) fn submit(&self, spec: QuerySpec, pinned: bool) -> Arc<ResourceGroup> {
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let rg = ResourceGroup::new(rg_id, spec);
+        let rg = ResourceGroup::new(rg_id, spec, pinned);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
         if rg.tasksets.is_empty() {
@@ -254,11 +284,18 @@ impl Scheduler {
             "publish rg {} taskset {} in slot {slot} seq {seq}",
             ts.rg.rg_id, index
         ));
+        let pinned = ts.rg.pinned;
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
-        self.set_active(slot);
+        // Pinned RGs are invisible to the pool's pick: only external
+        // participants (drive_pinned) may execute them — pool workers have
+        // no session binding for the query (M1; §2.3 retires this in M2+).
+        if !pinned {
+            self.set_active(slot);
+        }
         RuntimeStats::tick(&self.stats.tasksets_published);
-        // Wake parked workers: new work exists.
+        // Wake parked workers: new work exists (external pinned drivers
+        // park on the same epoch eventcount).
         self.park.wake_all();
     }
 
@@ -309,6 +346,71 @@ impl Scheduler {
                 if exhausted {
                     // Protocol step 2: exhausted → invalidate (coordinator
                     // election by slot-word CAS).
+                    self.coordinate(&ts);
+                }
+                Step::Ran
+            }
+        };
+
+        // Protocol step 4: settle own pin; pay any marker debt.
+        self.settle(local.worker);
+        step
+    }
+
+    /// One scheduling step of an EXTERNAL participant restricted to ONE
+    /// pinned RG (M1: a bound parallel helper executes only the query whose
+    /// session state it carries). Same protocol as `worker_step` — publish
+    /// before slot-word read, run, coordinate on exhaustion, settle — with
+    /// the pick replaced by a membership lookup of the RG's occupied slot.
+    /// Deliberately does NOT observe `stop`: external participants are
+    /// session-driven; their exit condition is RG completion (the caller
+    /// re-tests `RgHandle::try_outcome` around every step).
+    pub(crate) fn worker_step_pinned(
+        &self,
+        local: &mut WorkerLocal,
+        rg: &Arc<ResourceGroup>,
+    ) -> Step {
+        // Fast path: the cached (slot, seq) revalidated by one slot-word
+        // read — the membership lock is a publish/finalize-event cost, not a
+        // per-step cost (the sched-probe decision-cost budget).
+        let slot = match local.pinned_slot {
+            Some((slot, seq))
+                if self.slots[slot].word.load(Ordering::SeqCst) == (seq << 1) | 1 =>
+            {
+                Some(slot)
+            }
+            _ => {
+                let found = {
+                    let m = lock(&self.membership);
+                    m.owned.iter().enumerate().find_map(|(i, e)| {
+                        e.as_ref()
+                            .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                            .map(|e| (i, e.seq))
+                    })
+                };
+                local.pinned_slot = found;
+                found.map(|(slot, _)| slot)
+            }
+        };
+        let Some(slot) = slot else {
+            // Queued behind other RGs, or completed: the caller re-tests
+            // completion and parks on an epoch captured before this call.
+            return Step::Idle;
+        };
+
+        // Protocol step 1: publish-target-before-claim.
+        self.pins.publish(local.worker, slot);
+
+        let step = match self.resolve(local, slot) {
+            None => Step::Retry,
+            Some(ts) if !Arc::ptr_eq(&ts.rg, rg) => {
+                // The slot rolled to a different RG between lookup and
+                // revalidation; not ours to run.
+                Step::Retry
+            }
+            Some(ts) => {
+                let exhausted = self.run_task(local, &ts);
+                if exhausted {
                     self.coordinate(&ts);
                 }
                 Step::Ran
@@ -469,7 +571,7 @@ impl Scheduler {
             ts.rg.rg_id, ts.index, ts.slot, ts.seq
         ));
         let mut marked = 0i64;
-        for w in 0..self.nthreads {
+        for w in 0..self.nthreads + MAX_EXTERNAL_LANES {
             if self.pins.mark(w, ts.slot) {
                 marked += 1;
             }
@@ -574,6 +676,10 @@ impl Scheduler {
                 if aborted {
                     RuntimeStats::tick(&self.stats.rgs_aborted);
                 }
+                // Parked pinned drivers observe completion by re-testing
+                // try_outcome after a wake; the completion word itself only
+                // unparks registered leader waiters.
+                self.park.wake_all();
                 self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
             }
         }
@@ -607,6 +713,7 @@ impl Scheduler {
             rg.completion.complete(RgOutcome::Aborted);
             RuntimeStats::tick(&self.stats.rgs_completed);
             RuntimeStats::tick(&self.stats.rgs_aborted);
+            self.park.wake_all();
         }
     }
 }
