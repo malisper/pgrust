@@ -145,6 +145,7 @@ pub enum ExecStatus {
     TuplesOk,
     CopyBoth,
     CopyIn,
+    CopyOut,
     Empty,
     Error,
 }
@@ -436,6 +437,19 @@ impl PgConn {
                     self.copy_client_done = false;
                     return Ok(QueryResult {
                         status: ExecStatus::CopyBoth,
+                        nfields: 0,
+                        rows: Vec::new(),
+                        err: String::new(),
+                    });
+                }
+                b'H' => {
+                    // CopyOutResponse: the caller drains with get_copy_data
+                    // until CopyData::End, then get_result for the tail.
+                    self.in_copy = true;
+                    self.copy_server_done = false;
+                    self.copy_client_done = true; // nothing to send on COPY OUT
+                    return Ok(QueryResult {
+                        status: ExecStatus::CopyOut,
                         nfields: 0,
                         rows: Vec::new(),
                         err: String::new(),

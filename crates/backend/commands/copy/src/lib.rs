@@ -23,7 +23,7 @@ mod to;
 #[cfg(test)]
 mod tests;
 
-pub use from::{copy_from_error_context, BeginCopyFrom, CopyFrom, CopyFromState, EndCopyFrom};
+pub use from::{copy_from_error_context, BeginCopyFrom, BeginCopyFromCallback, CopyFrom, CopyFromState, EndCopyFrom};
 pub use to::{BeginCopyTo, DoCopyTo, EndCopyTo};
 #[doc(hidden)]
 pub use fromparse::bench_internals;

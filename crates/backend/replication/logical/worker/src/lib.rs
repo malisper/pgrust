@@ -31,6 +31,15 @@ use types_error::{
 use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
+mod tablesync;
+
+pub(crate) fn request_apply_worker_exit() {
+    APPLY_WORKER_EXIT.set(true);
+}
+
+pub(crate) fn apply_worker_exit_requested() -> bool {
+    APPLY_WORKER_EXIT.get()
+}
 
 fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/replication/logical/worker.c", 0, func)
@@ -268,7 +277,7 @@ pub(crate) fn send_feedback(
 // LogicalRepApplyLoop (worker.c:3574), non-streaming subset. The copy-both
 // read is the client's get_copy_data; Block means "nothing available now" and
 // maps to C's len==0 wait arm.
-fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> {
+pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> {
     let top = MemoryContext::new("ApplyMessageContext");
     // SAFETY: `top` outlives the loop; per-message allocations are reset by
     // the arena when the context drops at function exit.
@@ -297,6 +306,11 @@ fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> 
                 if !IN_REMOTE_TRANSACTION.get() {
                     inval::local::AcceptInvalidationMessages()?;
                     maybe_reread_subscription(mcx)?;
+                    if APPLY_WORKER_EXIT.get() {
+                        return Ok(());
+                    }
+                    // Launch/advance tablesync when idle (worker.c:3735).
+                    tablesync::process_syncing_tables(mcx, conn, last_received)?;
                     if APPLY_WORKER_EXIT.get() {
                         return Ok(());
                     }
@@ -362,9 +376,19 @@ fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> PgResult<()> 
 
 // libpqrcv_startstreaming's logical arm (libpqwalreceiver.c:554).
 fn start_logical_streaming(conn: &mut PgConn, startpos: XLogRecPtr) -> PgResult<()> {
-    let (slot, publications, binary, origin_opt) = my_sub(|s| {
+    let slot = my_sub(|s| s.slotname.clone().expect("slotname checked by caller"));
+    start_logical_streaming_on(conn, &slot, startpos)
+}
+
+// Same, on an explicit slot (the tablesync catchup stream).
+pub(crate) fn start_logical_streaming_on(
+    conn: &mut PgConn,
+    slotname: &str,
+    startpos: XLogRecPtr,
+) -> PgResult<()> {
+    let slot = slotname.to_string();
+    let (publications, binary, origin_opt) = my_sub(|s| {
         (
-            s.slotname.clone().expect("slotname checked by caller"),
             s.publications.clone(),
             s.binary,
             s.origin.clone(),
@@ -417,10 +441,6 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
 fn apply_worker_body(slot: usize) -> PgResult<()> {
     let w = launcher::worker_snapshot(slot).expect("attached worker slot");
 
-    if w.is_tablesync() {
-        panic!("unported: tablesync worker (round-4 inc E)");
-    }
-
     // InitializeLogRepWorker: database connection + subscription load.
     bgworker::BackgroundWorkerInitializeConnectionByOid(w.dbid, w.userid, 0)?;
 
@@ -431,6 +451,11 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     inval::invalidate::CacheRegisterSyscacheCallback(
         cache_syscache::cacheinfo::SUBSCRIPTIONOID,
         subscription_change_cb,
+        datum::Datum::null(),
+    )?;
+    inval::invalidate::CacheRegisterSyscacheCallback(
+        cache_syscache::cacheinfo::SUBSCRIPTIONRELMAP,
+        tablesync::invalidate_table_states_cb,
         datum::Datum::null(),
     )?;
 
@@ -460,6 +485,20 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     let subname = sub.name.clone();
     MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(sub));
     xact::CommitTransactionCommand()?;
+
+    if w.is_tablesync() {
+        let _ = elog::elog(
+            LOG,
+            format!(
+                "logical replication table synchronization worker for subscription \"{subname}\", relation OID {} has started",
+                w.relid
+            ),
+        );
+        apply::logicalrep_relmap_prepare()?;
+        let r = tablesync::run_tablesync_worker(mcx, w.relid);
+        let _ = origin::replorigin_session_reset();
+        return r;
+    }
 
     let _ = elog::elog(
         LOG,
