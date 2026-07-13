@@ -3155,29 +3155,36 @@ fn pull_varnos_node<'mcx>(
 /// The shared body of `pg_get_expr` / `pg_get_expr_ext`: parse the
 /// `pg_node_tree` text into a node tree, reject querytrees and (depending on
 /// `relid`) expressions referencing relations we cannot deparse, build a
-/// one-relation deparse context if a relid was given, and deparse. Returns
-/// `Ok(None)` when the relation has gone away (C returns NULL).
+/// one-relation deparse context if a relid was given, and deparse. A null node
+/// rendering produces an empty string; `Ok(None)` is reserved for a relation
+/// that has gone away (C returns NULL).
 pub fn pg_get_expr_worker<'mcx>(
     mcx: Mcx<'mcx>,
     exprstr: &str,
     relid: Oid,
     pretty_flags: i32,
 ) -> PgResult<Option<PgString<'mcx>>> {
-    // Convert expression to node tree.
-    let node = read_seams::string_to_node::call(mcx, exprstr)?;
+    // Convert expression to node tree.  A top-level "<>" is C's NULL node,
+    // which is a valid rendering for catalog fields such as an unconditional
+    // pg_rewrite.ev_qual.
+    let node = read_seams::string_to_node_opt::call(mcx, exprstr)?;
 
     // Throw error if the input is a querytree rather than an expression tree.
     // Drill past surrounding Lists, then check for a Query.
-    if let Some(tst) = drill_past_lists(&node) {
-        if tst.node_tag() == ::nodes::nodes::ntag::T_Query {
-            return Err(PgError::error("input is a query, not an expression")
-                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+    if let Some(node) = node.as_deref() {
+        if let Some(tst) = drill_past_lists(node) {
+            if tst.node_tag() == ::nodes::nodes::ntag::T_Query {
+                return Err(PgError::error("input is a query, not an expression")
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            }
         }
     }
 
     // Throw error if the expression contains Vars we won't be able to deparse.
     let mut relids: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
-    pull_varnos_node(mcx, &node, &mut relids)?;
+    if let Some(node) = node.as_deref() {
+        pull_varnos_node(mcx, node, &mut relids)?;
+    }
     if oid_is_valid(relid) {
         // !bms_is_subset(relids, bms_make_singleton(1))
         let ok = match relids.as_ref() {
@@ -3223,7 +3230,12 @@ pub fn pg_get_expr_worker<'mcx>(
     };
 
     // Deparse.
-    let str = deparse_expression_pretty(mcx, &node, context, false, false, pretty_flags, 0)?;
+    let str = match node.as_deref() {
+        Some(node) => {
+            deparse_expression_pretty(mcx, node, context, false, false, pretty_flags, 0)?
+        }
+        None => PgString::from_str_in("", mcx)?,
+    };
 
     Ok(Some(str))
 }
