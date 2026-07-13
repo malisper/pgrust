@@ -304,6 +304,15 @@ impl BgJob for BgWriterJob {
         self.announce(0); // WIFEXITED(0)
     }
 
+    /// Hook/cycle panic: C parity — a daemon panic is a child crash. The
+    /// WTERMSIG-shaped announce routes the postmaster into its ordinary
+    /// crash handling (HandleChildCrash → reinit → relaunch) instead of
+    /// wedging shutdown on a child that never exits.
+    fn crashed(&self) {
+        self.procno.store(INVALID_PROC_NUMBER, Ordering::Release);
+        self.announce(libc::SIGABRT);
+    }
+
     fn run_cycle(&self, reason: CycleReason) -> CycleOutcome {
         let overlay = *self.overlay.lock().unwrap();
         let mut st = self.state.lock().unwrap();

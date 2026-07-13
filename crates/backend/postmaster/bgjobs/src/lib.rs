@@ -135,6 +135,13 @@ pub trait BgJob: Send + Sync + 'static {
     /// [`Control::Exit`] or [`CycleOutcome::Exit`].
     fn teardown(&self) {}
 
+    /// A job hook or cycle body PANICKED (contained by the dispatcher /
+    /// cycle rim). C parity: a daemon thread panic is a child crash — the
+    /// implementation announces a WTERMSIG-shaped exit so the postmaster
+    /// runs its ordinary crash handling instead of wedging shutdown on a
+    /// child that never exits. The job is retired without teardown.
+    fn crashed(&self) {}
+
     /// One daemon cycle, executed on a pool worker under a Maintenance RG.
     fn run_cycle(&self, reason: CycleReason) -> CycleOutcome;
 }
@@ -297,8 +304,16 @@ struct CycleWork {
 impl TaskSetWork for CycleWork {
     fn run_morsel(&self, _worker: usize, range: MorselRange) {
         debug_assert_eq!(range, 0..1, "cycle task sets are single-morsel");
-        let outcome = self.job.run_cycle(self.reason);
-        *self.outcome.lock().unwrap() = Some(outcome);
+        // Panic rim: a cycle-body panic must never poison the pool worker.
+        // The empty outcome slot is the panic signal; the dispatcher's
+        // harvest converts it into the job-crash leg (crashed() announce).
+        let job = Arc::clone(&self.job);
+        let reason = self.reason;
+        if let Ok(outcome) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || job.run_cycle(reason)))
+        {
+            *self.outcome.lock().unwrap() = Some(outcome);
+        }
     }
 
     fn finalize(&self) {
@@ -368,12 +383,16 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                         Phase::Exited
                     }
                     (RgOutcome::Completed, None) => {
-                        // Structurally unreachable (the single morsel filled
-                        // the outcome before finalize); refuse to spin.
+                        // The cycle body panicked on the pool worker (the
+                        // rim in CycleWork::run_morsel swallowed it; the
+                        // outcome slot stayed empty). C parity: daemon
+                        // panic = child crash.
+                        let job = Arc::clone(&jobs[id].job);
                         elog_report(&format!(
-                            "bgjobs: job \"{}\" cycle completed without an outcome; retiring it",
-                            jobs[id].job.name()
+                            "bgjobs: job \"{}\" cycle panicked; crash-retiring it",
+                            job.name()
                         ));
+                        let _ = contain(job.as_ref(), "crashed", || job.crashed());
                         Phase::Exited
                     }
                     (RgOutcome::Aborted, _) => {
@@ -393,7 +412,8 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
             jobs[id].phase = p;
             if jobs_teardown.last() == Some(&id) {
                 // CycleOutcome::Exit: clean teardown on the dispatcher.
-                jobs[id].job.teardown();
+                let job = Arc::clone(&jobs[id].job);
+                let _ = contain(job.as_ref(), "teardown", || job.teardown());
                 jobs_teardown.pop();
                 continue;
             }
@@ -412,14 +432,21 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 // Control plane first (dispatcher thread; §3.2): signal
                 // drain, reload, shutdown. Runs under the jobs lock —
                 // acceptable: the only other lockers are register/poke.
-                match job.control() {
-                    Control::Continue => {}
-                    Control::Exit => {
-                        job.teardown();
+                // Panic containment: a hook panic is a job CRASH (child-
+                // crash announce via crashed()), never dispatcher death —
+                // an unannounced virtual child wedges shutdown.
+                match contain(job.as_ref(), "control", || job.control()) {
+                    Some(Control::Continue) => {}
+                    Some(Control::Exit) => {
+                        let _ = contain(job.as_ref(), "teardown", || job.teardown());
                         jobs[id].phase = Phase::Exited;
                         continue;
                     }
-                    Control::Abandon => {
+                    Some(Control::Abandon) => {
+                        jobs[id].phase = Phase::Exited;
+                        continue;
+                    }
+                    None => {
                         jobs[id].phase = Phase::Exited;
                         continue;
                     }
@@ -470,14 +497,21 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 let reason = if jobs[id].never_ran { CycleReason::Startup } else { reason };
                 if jobs[id].never_ran {
                     // Identity acquisition, once, on the dispatcher (§3.2).
-                    if let Err(e) = job.startup() {
-                        elog_report(&format!(
-                            "bgjobs: job \"{}\" startup failed: {}; retiring it",
-                            job.name(),
-                            e.message()
-                        ));
-                        jobs[id].phase = Phase::Exited;
-                        continue;
+                    match contain(job.as_ref(), "startup", || job.startup()) {
+                        Some(Ok(())) => {}
+                        Some(Err(e)) => {
+                            elog_report(&format!(
+                                "bgjobs: job \"{}\" startup failed: {}; retiring it",
+                                job.name(),
+                                e.message()
+                            ));
+                            jobs[id].phase = Phase::Exited;
+                            continue;
+                        }
+                        None => {
+                            jobs[id].phase = Phase::Exited;
+                            continue;
+                        }
                     }
                 }
                 jobs[id].never_ran = false;
@@ -528,6 +562,26 @@ fn dispatcher_loop(shared: Arc<Shared>) {
             None => {
                 let _ = waiter::park();
             }
+        }
+    }
+}
+
+/// Run a job hook with panic containment (dispatcher thread). A panicking
+/// hook yields None; the caller crash-retires the job via crashed(). The
+/// dispatcher itself must never die of a job's panic — an unannounced
+/// virtual child wedges the postmaster's shutdown legs.
+fn contain<R>(job: &dyn BgJob, hook: &str, f: impl FnOnce() -> R) -> Option<R> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => Some(r),
+        Err(_) => {
+            elog_report(&format!(
+                "bgjobs: job \"{}\" {hook} panicked; crash-retiring it",
+                job.name()
+            ));
+            if hook != "crashed" && hook != "teardown" {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.crashed()));
+            }
+            None
         }
     }
 }
