@@ -169,6 +169,19 @@ pub struct MetaAggScan {
     pub sums: Vec<(u16, i128)>,
 }
 
+/// v7 zero-count metadata qual: the scan qual is EXACTLY one
+/// `col <> 0` / `col = 0` conjunct (stored-domain zero) over an int-family
+/// column. `keep_nonzero` = true for `<>`. The meta arm then answers
+/// COUNT as N - zeros (or zeros), and SUM/AVG over the SAME column from the
+/// unchanged footer sum S (excluded zero rows contribute exactly zero; for
+/// `= 0` the sum is identically 0) — the admission site enforces the
+/// same-column restriction and refuses MIN/MAX.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetaZeroQual {
+    pub col: u16,
+    pub keep_nonzero: bool,
+}
+
 // Zone-ordered adaptive traversal (docs/design/cbstore-zone-adaptive.md):
 // granules visited best-first by the sort-key column's zone bound, with a
 // consumer-fed stop bound (top-k heap floor / running MIN-MAX best). Armed
@@ -578,6 +591,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         &self,
         cols: &[u16],
         sum_cols: &[u16],
+        zq: Option<MetaZeroQual>,
     ) -> PgResult<Option<MetaAggScan>> {
         if self.rs_base.rs_parallel.is_some() {
             return Ok(None);
@@ -594,19 +608,47 @@ impl<'mcx> CbScanDescData<'mcx> {
             sums: sum_cols.iter().map(|&c| (c, 0i128)).collect(),
         };
         let Some(part) = self.part.as_ref() else { return Ok(Some(out)) };
-        debug_assert!(self.zone_quals.is_empty());
+        // With a zero-count qual the cb zone quals are exactly that
+        // conjunct (advisory); the bare arm still requires none.
+        debug_assert!(zq.is_some() || self.zone_quals.is_empty());
+        // Per-granule visible-row count under the qual: grows - zeros for
+        // `<> 0`, zeros for `= 0`. Sums fold unchanged for `<> 0` (excluded
+        // zero rows contribute exactly 0 to S) and are identically 0 for
+        // `= 0` (fold_sums gates below). minmax stays the all-visible-rows
+        // fold — a superset of the qual rows' range, so the admission
+        // site's overflow-guard re-proof stays conservative-safe.
+        let gran_rows = |rg: usize, g: usize, grows: usize| -> u64 {
+            match zq {
+                None => grows as u64,
+                Some(z) => {
+                    let zc = part.granule_zerocnt(rg, g, z.col as usize) as u64;
+                    if z.keep_nonzero { grows as u64 - zc } else { zc }
+                }
+            }
+        };
+        let fold_sums = zq.map_or(true, |z| z.keep_nonzero);
         let mut scratch = (Vec::new(), Vec::new(), Vec::new());
         for rg in 0..part.rgs.len() {
             let rg_rows = part.rgs[rg].nrows;
             let ngranules = (rg_rows as usize).div_ceil(GRANULE_ROWS);
             if self.rg_wholly_visible(rg)? {
-                out.rows += rg_rows as u64;
+                // Feature detection: a qual answer needs exact zero counts
+                // on EVERY visible RG (v<=6-preserved RGs lack them) — the
+                // scan drive owns the query otherwise, byte-identically.
+                if zq.is_some() && !part.rg_has_zerocnt(rg) {
+                    return Ok(None);
+                }
+                for g in 0..ngranules {
+                    let grows = (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                    out.rows += gran_rows(rg, g, grows);
+                }
                 for e in out.minmax.iter_mut() {
                     let (_, min, max) = part.rgs[rg].chunks[e.0 as usize];
                     e.1 = e.1.min(min);
                     e.2 = e.2.max(max);
                 }
-                if part.rgs[rg].flags & RG_FLAG_SUMS != 0 {
+                if !fold_sums {
+                } else if part.rgs[rg].flags & RG_FLAG_SUMS != 0 {
                     for e in out.sums.iter_mut() {
                         e.1 += part.rg_sum(rg, e.0 as usize);
                     }
@@ -620,17 +662,27 @@ impl<'mcx> CbScanDescData<'mcx> {
             if !self.rg_visible(rg)? || !self.rg_zone_ok(rg) {
                 continue;
             }
+            if zq.is_some() && !part.rg_has_zerocnt(rg) {
+                return Ok(None);
+            }
             for g in 0..ngranules {
                 if !self.granule_zone_ok(rg, g) {
+                    // Zone-pruned granules are provably all-false under the
+                    // (single) qual the zone quals mirror: they contribute
+                    // no rows and no sum; skipping them shrinks minmax
+                    // toward the qual rows' range — still guard-safe.
                     continue;
                 }
-                out.rows += (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS) as u64;
+                let grows = (rg_rows as usize - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                out.rows += gran_rows(rg, g, grows);
                 for e in out.minmax.iter_mut() {
                     let ge = part.chunk(rg, e.0 as usize).granule(g);
                     e.1 = e.1.min(ge.min);
                     e.2 = e.2.max(ge.max);
                 }
-                sum_granule(part, rg, g, &mut out.sums, &mut scratch);
+                if fold_sums {
+                    sum_granule(part, rg, g, &mut out.sums, &mut scratch);
+                }
             }
         }
         Ok(Some(out))

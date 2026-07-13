@@ -1260,18 +1260,19 @@ pub fn table_scan_meta_count_next(scan: &mut TableScanDesc<'_>) -> PgResult<u32>
     }
 }
 
-pub use ::cbstore::MetaAggScan;
+pub use ::cbstore::{MetaAggScan, MetaZeroQual};
 
 /// Metadata MIN/MAX/COUNT/SUM answer (cbstore zone maps + footer row counts
-/// + footer sums); None = the AM has no exact metadata answer for these
-/// columns.
+/// + footer sums; `zq` = the v7 zero-count qual arm); None = the AM has no
+/// exact metadata answer for these columns.
 pub fn table_scan_meta_agg(
     scan: &TableScanDesc<'_>,
     cols: &[u16],
     sum_cols: &[u16],
+    zq: Option<MetaZeroQual>,
 ) -> PgResult<Option<MetaAggScan>> {
     match scan {
-        TableScanDesc::Cbstore(c) => c.meta_agg_scan(cols, sum_cols),
+        TableScanDesc::Cbstore(c) => c.meta_agg_scan(cols, sum_cols, zq),
         TableScanDesc::Heap(_) => Ok(None),
     }
 }

@@ -78,7 +78,20 @@ pub fn read_footer_rgs(
     let sums_len = if version >= CB_VERSION_V4 { nrgs * ncols * 16 } else { 0 };
     let sorted_len = if version >= CB_VERSION_V5 { ncols } else { 0 };
     let ckey_len = if version >= CB_VERSION_V6 { CB_CLUSTER_KEY_SECTION_LEN } else { 0 };
-    let body_len = 8 + nrgs * 24 + nrgs * ncols * 24 + ndv_len + sums_len + sorted_len + ckey_len + 16;
+    let zerocnt_len = if version >= CB_VERSION_V7 {
+        nrgs * GRANULES_PER_RG * ncols * CB_ZEROCNT_ENTRY_LEN
+    } else {
+        0
+    };
+    let body_len = 8
+        + nrgs * 24
+        + nrgs * ncols * 24
+        + ndv_len
+        + sums_len
+        + sorted_len
+        + ckey_len
+        + zerocnt_len
+        + 16;
     // Bounds-gate before the allocation and read: a torn/garbage footer word
     // must produce a clean error, not a huge alloc or a read past EOF.
     if body_len as u64 > total_len - footer_off {
@@ -116,6 +129,7 @@ pub fn parse_footer(
             flags: get_u32(buf, off + 16),
             chunks: Vec::with_capacity(ncols),
             sums: Vec::new(),
+            zerocnt: Vec::new(),
         });
         off += 24;
     }
@@ -166,7 +180,25 @@ pub fn parse_footer(
             let o = off + 2 + k * 2;
             cluster_key.push(u16::from_le_bytes(buf[o..o + 2].try_into().unwrap()));
         }
+        off += CB_CLUSTER_KEY_SECTION_LEN;
     }
+    // v7 zero-count section; pre-v7 parts read as no-zero-counts. Parsed
+    // into FooterRg only on the writer's full (want_sums) read — the scan
+    // side reads the section lazily off the mmap (Part::granule_zerocnt).
+    if version >= CB_VERSION_V7 {
+        if want_sums {
+            for rg in rgs.iter_mut() {
+                rg.zerocnt.reserve(GRANULES_PER_RG * ncols);
+                for _ in 0..GRANULES_PER_RG * ncols {
+                    rg.zerocnt.push(get_u32(buf, off));
+                    off += CB_ZEROCNT_ENTRY_LEN;
+                }
+            }
+        } else {
+            off += nrgs * GRANULES_PER_RG * ncols * CB_ZEROCNT_ENTRY_LEN;
+        }
+    }
+    let _ = off;
     Ok((rgs, ndv, sorted, cluster_key))
 }
 
@@ -221,6 +253,9 @@ pub struct Part {
     // disk, CRC-validated with the footer at open, and are read through the
     // mmap only when a metadata-sum consumer asks (rg_sum).
     sums_off: u64,
+    // File offset of the v7 per-granule zero-count section (0 = none):
+    // like sums, read lazily through the mmap (granule_zerocnt).
+    zerocnt_off: u64,
 }
 
 impl Part {
@@ -256,7 +291,15 @@ impl Part {
         } else {
             0
         };
-        Ok(Some(Part { map, rgs, ncols, footer_off, sorted, cluster_key, sums_off }))
+        let zerocnt_off = if version >= CB_VERSION_V7 {
+            // sums (nrgs x ncols x 16) + v5 sorted flags (ncols) + v6
+            // cluster-key section precede it.
+            sums_off
+                + (rgs.len() * ncols * 16 + ncols + CB_CLUSTER_KEY_SECTION_LEN) as u64
+        } else {
+            0
+        };
+        Ok(Some(Part { map, rgs, ncols, footer_off, sorted, cluster_key, sums_off, zerocnt_off }))
     }
 
     // Footer sum for (rg, col); caller gates on RG_FLAG_SUMS (which only a
@@ -264,6 +307,24 @@ impl Part {
     pub fn rg_sum(&self, rg: usize, col: usize) -> i128 {
         debug_assert!(self.sums_off != 0 && self.rgs[rg].flags & RG_FLAG_SUMS != 0);
         get_i128(self.bytes(), self.sums_off as usize + (rg * self.ncols + col) * 16)
+    }
+
+    /// The v7 zero/empty count for (rg, granule slot, col); caller gates on
+    /// `rg_has_zerocnt` (which only a v7+ writer sets, so zerocnt_off != 0
+    /// whenever the flag is present).
+    pub fn granule_zerocnt(&self, rg: usize, g: usize, col: usize) -> u32 {
+        debug_assert!(self.rg_has_zerocnt(rg));
+        get_u32(
+            self.bytes(),
+            self.zerocnt_off as usize
+                + ((rg * GRANULES_PER_RG + g) * self.ncols + col) * CB_ZEROCNT_ENTRY_LEN,
+        )
+    }
+
+    /// The RG carries exact v7 zero/empty counts (sealed by a v7+ writer;
+    /// RGs preserved from v<=6 footers read false).
+    pub fn rg_has_zerocnt(&self, rg: usize) -> bool {
+        self.zerocnt_off != 0 && self.rgs[rg].flags & RG_FLAG_ZEROCNT != 0
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -658,6 +719,13 @@ mod tests {
         if version >= CB_VERSION_V6 {
             f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
         }
+        if version >= CB_VERSION_V7 {
+            for _ in rg_rows {
+                for _ in 0..GRANULES_PER_RG * ncols {
+                    put_u32(&mut f, 0);
+                }
+            }
+        }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -806,9 +874,14 @@ mod tests {
                 put_i128(&mut f, s);
             }
         }
-        // v5 sorted flags + v6 cluster-key sections (header stamps CB_VERSION).
+        // v5 sorted flags + v6 cluster-key + v7 zero-count sections (header
+        // stamps CB_VERSION). The RGs carry no RG_FLAG_ZEROCNT — a
+        // v<=6-preserved shape — so the zero entries are never consulted.
         f.extend_from_slice(&[0u8, 0u8]);
         f.extend_from_slice(&[0u8; CB_CLUSTER_KEY_SECTION_LEN]);
+        for _ in 0..2 * GRANULES_PER_RG * 2 {
+            put_u32(&mut f, 0);
+        }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
