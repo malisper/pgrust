@@ -1034,6 +1034,242 @@ impl ExtIdMap {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Set variants (DISTINCT dedup): one-miss inline-key probe tables
+// ---------------------------------------------------------------------------
+//
+// The executor's DistinctSet keeps its value arrays (ints / blob+spans —
+// spill record formats and parallel export read those); these tables replace
+// only its slot->index indirection (two dependent misses per probe) with
+// key-in-cell probes (one miss). CH HashMap-class layout: pow2, linear
+// probing, 50% max fill, realloc in-place resize.
+
+/// Exact i64 set. 8-byte cells (the key itself); 0 is a valid key, tracked
+/// by `has_zero`; the all-zero cell is the empty sentinel.
+pub struct IntSet {
+    cells: RawCells<i64>,
+    mask: usize,
+    len: usize,
+    has_zero: bool,
+}
+
+impl Default for IntSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntSet {
+    pub fn new() -> Self {
+        IntSet { cells: RawCells::new(), mask: 0, len: 0, has_zero: false }
+    }
+
+    /// Returns true if `k` was newly inserted.
+    #[inline(always)]
+    pub fn insert(&mut self, k: i64) -> bool {
+        if k == 0 {
+            let new = !self.has_zero;
+            self.has_zero = true;
+            return new;
+        }
+        if self.cells.cap == 0 {
+            self.cells.alloc_zeroed(1 << INITIAL_DEGREE);
+            self.mask = self.cells.cap - 1;
+        }
+        let mut pos = (hash8(k as u64) as usize) & self.mask;
+        loop {
+            let c = unsafe { self.cells.get_mut(pos) };
+            if *c == k {
+                return false;
+            }
+            if *c == 0 {
+                *c = k;
+                self.len += 1;
+                if self.len * 2 > self.cells.cap {
+                    self.grow();
+                }
+                return true;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    #[cold]
+    fn grow(&mut self) {
+        let old_n = self.cells.cap;
+        self.cells.grow_double();
+        self.mask = self.cells.cap - 1;
+        unsafe {
+            for i in 0..old_n {
+                if *self.cells.get(i) != 0 {
+                    self.reinsert(i);
+                }
+            }
+            let mut i = old_n;
+            while i < self.cells.cap && *self.cells.get(i) != 0 {
+                self.reinsert(i);
+                i += 1;
+            }
+        }
+    }
+
+    #[inline]
+    unsafe fn reinsert(&mut self, i: usize) {
+        let k = *self.cells.get(i);
+        let home = (hash8(k as u64) as usize) & self.mask;
+        if home == i {
+            return;
+        }
+        let mut pos = home;
+        loop {
+            if pos == i {
+                return;
+            }
+            let slot = self.cells.get_mut(pos);
+            if *slot == 0 {
+                *slot = k;
+                *self.cells.get_mut(i) = 0;
+                return;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    /// Empty the set, KEEPING capacity (group-boundary reset).
+    pub fn clear(&mut self) {
+        if self.cells.cap != 0 {
+            unsafe { std::ptr::write_bytes(self.cells.ptr.as_ptr(), 0, self.cells.cap) };
+        }
+        self.len = 0;
+        self.has_zero = false;
+    }
+
+    pub fn mem_bytes(&self) -> usize {
+        self.cells.cap * 8
+    }
+}
+
+/// Byte-content dedup index over a caller-owned blob. 12-byte cells
+/// (caller-supplied 32-bit hash, content offset, content length); the caller
+/// guarantees content offsets are nonzero (varlena images carry a 4-byte
+/// header, so content never starts at 0) — off == 0 is the empty sentinel.
+#[derive(Clone, Copy)]
+struct CellD {
+    hash: u32,
+    off: u32,
+    len: u32,
+}
+
+pub struct BytesDedup {
+    cells: RawCells<CellD>,
+    mask: usize,
+    len: usize,
+}
+
+impl Default for BytesDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BytesDedup {
+    pub fn new() -> Self {
+        BytesDedup { cells: RawCells::new(), mask: 0, len: 0 }
+    }
+
+    /// Probe for `content` (placement + prefilter on the caller's `hash`,
+    /// e.g. hash_bytes — the same value the caller stores beside the value
+    /// arrays). If absent, record it at `content_off` (where the caller is
+    /// about to place the content inside `blob`) and return true. `blob` is
+    /// the current backing store for previously recorded offsets.
+    /// content_off must be nonzero.
+    #[inline(always)]
+    pub fn insert(&mut self, hash: u32, content: &[u8], blob: &[u8], content_off: u32) -> bool {
+        debug_assert!(content_off != 0);
+        if self.cells.cap == 0 {
+            self.cells.alloc_zeroed(1 << INITIAL_DEGREE);
+            self.mask = self.cells.cap - 1;
+        }
+        let mut pos = (hash as usize) & self.mask;
+        loop {
+            let c = unsafe { *self.cells.get(pos) };
+            if c.off == 0 {
+                unsafe {
+                    *self.cells.get_mut(pos) =
+                        CellD { hash, off: content_off, len: content.len() as u32 };
+                }
+                self.len += 1;
+                if self.len * 2 > self.cells.cap {
+                    self.grow();
+                }
+                return true;
+            }
+            if c.hash == hash && c.len as usize == content.len() && unsafe {
+                eq_bytes(blob.as_ptr().add(c.off as usize), content.as_ptr(), content.len())
+            } {
+                return false;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    #[cold]
+    fn grow(&mut self) {
+        let old_n = self.cells.cap;
+        self.cells.grow_double();
+        self.mask = self.cells.cap - 1;
+        unsafe {
+            for i in 0..old_n {
+                if self.cells.get(i).off != 0 {
+                    self.reinsert(i);
+                }
+            }
+            let mut i = old_n;
+            while i < self.cells.cap && self.cells.get(i).off != 0 {
+                self.reinsert(i);
+                i += 1;
+            }
+        }
+    }
+
+    #[inline]
+    unsafe fn reinsert(&mut self, i: usize) {
+        let c = *self.cells.get(i);
+        let home = (c.hash as usize) & self.mask;
+        if home == i {
+            return;
+        }
+        let mut pos = home;
+        loop {
+            if pos == i {
+                return;
+            }
+            let slot = self.cells.get_mut(pos);
+            if slot.off == 0 {
+                *slot = c;
+                self.cells.get_mut(i).off = 0;
+                return;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+    }
+
+    /// Empty the index, KEEPING capacity.
+    pub fn clear(&mut self) {
+        if self.cells.cap != 0 {
+            unsafe {
+                std::ptr::write_bytes(self.cells.ptr.as_ptr() as *mut u8, 0, self.cells.cap * std::mem::size_of::<CellD>())
+            };
+        }
+        self.len = 0;
+    }
+
+    pub fn mem_bytes(&self) -> usize {
+        self.cells.cap * std::mem::size_of::<CellD>()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1161,6 +1397,58 @@ mod tests {
         assert_eq!(ours.len(), reference.len());
         // find() misses
         assert_eq!(ours.find(b"definitely-not-present-key-xyzzy-0123456789", &arena), None);
+    }
+
+    #[test]
+    fn int_set_matches_reference() {
+        use std::collections::HashSet;
+        let mut s = 0xDEAD_BEEF_1234_5678u64;
+        let mut lcg = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s
+        };
+        let mut ours = IntSet::new();
+        let mut reference = HashSet::new();
+        for _ in 0..300_000 {
+            let k = (lcg() % 100_000) as i64 - 50_000; // includes 0 and negatives, heavy dups
+            assert_eq!(ours.insert(k), reference.insert(k), "key {k}");
+        }
+        ours.clear();
+        let mut reference2 = HashSet::new();
+        for k in -100i64..100 {
+            assert_eq!(ours.insert(k), reference2.insert(k));
+        }
+    }
+
+    #[test]
+    fn bytes_dedup_matches_reference() {
+        use std::collections::HashSet;
+        let mut s = 0x0F0F_1234_5678_9ABCu64;
+        let mut lcg = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s
+        };
+        let mut dd = BytesDedup::new();
+        let mut blob: Vec<u8> = vec![0u8; 4]; // offset 0 reserved (header discipline)
+        let mut reference: HashSet<Vec<u8>> = HashSet::new();
+        for _ in 0..100_000 {
+            let len = (lcg() % 33) as usize;
+            let k: Vec<u8> = (0..len).map(|_| (lcg() % 7) as u8 + b'a').collect();
+            let h = {
+                // any 32-bit content hash works; simple fnv for the test
+                let mut x = 0x811c_9dc5u32;
+                for &b in &k {
+                    x = (x ^ b as u32).wrapping_mul(16777619);
+                }
+                x
+            };
+            let off = blob.len() as u32;
+            let inserted = dd.insert(h, &k, &blob, off);
+            if inserted {
+                blob.extend_from_slice(&k);
+            }
+            assert_eq!(inserted, reference.insert(k.clone()), "key {k:?}");
+        }
     }
 
     #[test]
