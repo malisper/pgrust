@@ -8,7 +8,7 @@
 mod connect;
 mod conninfo;
 mod origin;
-pub use origin::{fc_pg_replication_origin_create, ORIGIN_BUILTINS};
+
 
 use datum::Datum;
 use mcx::{Mcx, PgString, PgVec};

@@ -135,6 +135,7 @@ pub fn init_all() {
     reorderbuffer::init_seams();
     snapbuild::init_seams();
     logical::init_seams();
+    origin::init_seams();
     test_decoding::init_seams();
     adt_formatting::init_seams();
     citext::init_seams();
@@ -283,7 +284,7 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(pg_config::PG_CONFIG_BUILTINS);
     fmgr_core::register_late_builtins(shmem::SHMEM_BUILTINS);
     fmgr_core::register_late_builtins(aio_funcs::AIO_FUNCS_BUILTINS);
-    fmgr_core::register_late_builtins(subscriptioncmds::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(origin::ORIGIN_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();
