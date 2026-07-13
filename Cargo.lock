@@ -15739,6 +15739,7 @@ dependencies = [
  "cache_syscache",
  "catalog",
  "catalog_indexing",
+ "catalog_namespace",
  "commands_define",
  "datum",
  "dbcommands",
@@ -15750,6 +15751,7 @@ dependencies = [
  "heaptuple",
  "init_small",
  "lmgr",
+ "lsyscache",
  "mcx",
  "miscinit",
  "origin_seams",
@@ -15757,6 +15759,7 @@ dependencies = [
  "pg_shdepend",
  "pg_subscription",
  "pgstat",
+ "rel_vocab",
  "superuser",
  "table",
  "transam_xlog_seams",
@@ -15770,6 +15773,7 @@ dependencies = [
  "types_snapshot",
  "types_tuple",
  "varlena",
+ "walreceiver",
  "xact",
 ]
 
