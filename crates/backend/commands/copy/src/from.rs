@@ -5,7 +5,8 @@
 use backend_progress::progress::{
     PROGRESS_COPY_BYTES_TOTAL, PROGRESS_COPY_COMMAND, PROGRESS_COPY_COMMAND_FROM,
     PROGRESS_COPY_TUPLES_EXCLUDED, PROGRESS_COPY_TUPLES_PROCESSED, PROGRESS_COPY_TUPLES_SKIPPED,
-    PROGRESS_COPY_TYPE, PROGRESS_COPY_TYPE_FILE, PROGRESS_COPY_TYPE_PIPE,
+    PROGRESS_COPY_TYPE, PROGRESS_COPY_TYPE_CALLBACK, PROGRESS_COPY_TYPE_FILE,
+    PROGRESS_COPY_TYPE_PIPE,
 };
 use backend_progress::{
     pgstat_progress_end_command, pgstat_progress_start_command, pgstat_progress_update_multi_param,
@@ -34,6 +35,10 @@ use crate::{
 pub(crate) enum CopySrc<'mcx, 's> {
     File { fd: i32, filename: &'s str },
     Frontend { msgbuf: StringInfo<'mcx> },
+    // COPY_CALLBACK (copyfrom_internal.h): tablesync pulls bytes from the
+    // publisher's COPY OUT stream. cb(buf, minread) fills up to buf.len()
+    // bytes, at least minread unless the stream ends; 0 = EOF.
+    Callback { cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's> },
 }
 
 pub struct CopyFromState<'mcx, 's> {
@@ -114,6 +119,33 @@ pub fn BeginCopyFrom<'mcx, 's>(
     rel: &Relation<'mcx>,
     where_clause: NodeList<'mcx>,
     filename: Option<&'s str>,
+    attnamelist: &NodeList<'_>,
+    options: &NodeList<'s>,
+    source_text: Option<&str>,
+) -> PgResult<CopyFromState<'mcx, 's>> {
+    begin_copy_from_guts(mcx, rel, where_clause, filename, None, attnamelist, options, source_text)
+}
+
+// BeginCopyFrom's data_source_cb form (COPY_CALLBACK): tablesync feeds bytes
+// from the publisher's COPY OUT stream. cb(buf, minread) -> bytes written,
+// 0 at end of stream.
+pub fn BeginCopyFromCallback<'mcx, 's>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attnamelist: &NodeList<'_>,
+    options: &NodeList<'s>,
+    cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's>,
+) -> PgResult<CopyFromState<'mcx, 's>> {
+    begin_copy_from_guts(mcx, rel, NodeList::nil(), None, Some(cb), attnamelist, options, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_copy_from_guts<'mcx, 's>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    where_clause: NodeList<'mcx>,
+    filename: Option<&'s str>,
+    mut data_source_cb: Option<Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's>>,
     attnamelist: &NodeList<'_>,
     options: &NodeList<'s>,
     source_text: Option<&str>,
@@ -243,7 +275,11 @@ pub fn BeginCopyFrom<'mcx, 's>(
     pgstat_progress_start_command(PROGRESS_COMMAND_COPY, rel.rd_id);
     let mut progress_type = PROGRESS_COPY_TYPE_PIPE;
     let mut progress_bytes_total: i64 = 0;
-    let src = match filename {
+    let src = if let Some(cb) = data_source_cb.take() {
+        progress_type = PROGRESS_COPY_TYPE_CALLBACK;
+        CopySrc::Callback { cb }
+    } else {
+        match filename {
         Some(filename) => {
             let fd = fd::AllocateFile(filename, "rb")?;
             if fd < 0 {
@@ -276,6 +312,7 @@ pub fn BeginCopyFrom<'mcx, 's>(
                 unported("FROM STDIN outside a remote session (stdin file arm)");
             }
             receive_copy_begin(mcx, attnumlist.len(), opts.binary)?
+        }
         }
     };
     pgstat_progress_update_multi_param(
@@ -1352,8 +1389,8 @@ pub(crate) fn limit_printout_length(bytes: &[u8]) -> String {
 
 /// `EndCopyFrom` (copyfrom.c).
 pub fn EndCopyFrom(cstate: CopyFromState<'_, '_>) -> PgResult<()> {
-    if let CopySrc::File { fd, filename } = cstate.src {
-        if fd::FreeFile(fd)? != 0 {
+    if let CopySrc::File { fd, filename } = &cstate.src {
+        if fd::FreeFile(*fd)? != 0 {
             ereport(ERROR)
                 .with_saved_errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
