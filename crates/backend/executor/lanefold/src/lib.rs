@@ -185,6 +185,17 @@ pub const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
 pub trait LaneCols {
     fn col_values(&self, c: usize) -> &[Datum];
     fn col_isnull(&self, c: usize) -> &[bool];
+    /// Length-staged column (lane-v2-asciilen): the feed answered this
+    /// column's lane as `Datum::from_i64(length)` values — the admitted
+    /// `length(v)`/`octet_length(v)` result computed AT THE FILL with C's
+    /// exact semantics (per-dict-code table / header read / C mb walk) — so
+    /// the VarLen kernels read it as a plain I64 lane and the vguard/uguard
+    /// batch proofs are vacuous for it (no datum is ever dereferenced).
+    /// Feeds without length staging keep the default.
+    #[inline(always)]
+    fn col_len_staged(&self, _c: usize) -> bool {
+        false
+    }
 }
 
 impl LaneCols for SoaBatch<'_> {
@@ -196,6 +207,24 @@ impl LaneCols for SoaBatch<'_> {
     #[inline(always)]
     fn col_isnull(&self, c: usize) -> &[bool] {
         SoaBatch::col_isnull(self, c)
+    }
+
+    #[inline(always)]
+    fn col_len_staged(&self, c: usize) -> bool {
+        SoaBatch::len_want(self, c) != 0
+    }
+}
+
+/// The width a kernel reads column `col` at: length-staged VarLen lanes read
+/// as I64 (the fill materialized the integer answers), everything else at
+/// the classify width.
+#[inline(always)]
+fn read_width(cols: &impl LaneCols, col: u16, width: LaneWidth) -> LaneWidth {
+    match width {
+        LaneWidth::VarLenBytes | LaneWidth::VarLenChars if cols.col_len_staged(col as usize) => {
+            LaneWidth::I64
+        }
+        w => w,
     }
 }
 
@@ -1091,14 +1120,20 @@ fn lane_value(values: &[Datum], width: LaneWidth, i: usize) -> i64 {
 // mul/div transforms fold per row — each transformed term is int4-proven, so
 // the i64 batch sum stays exact.
 #[inline(always)]
-fn sum_selected(t: &LaneTrans, values: &[Datum], isnull: &[bool], rows: &[u64]) -> (i64, i64) {
+fn sum_selected(
+    t: &LaneTrans,
+    width: LaneWidth,
+    values: &[Datum],
+    isnull: &[bool],
+    rows: &[u64],
+) -> (i64, i64) {
     let mut c = 0i64;
     let mut s = 0i64;
     if t.mulk == 1 && t.divk == 1 {
         for_each_row(rows, |i| {
             if !isnull[i] {
                 c += 1;
-                s = s.wrapping_add(lane_value(values, t.width, i));
+                s = s.wrapping_add(lane_value(values, width, i));
             }
         });
         s = s.wrapping_add(c.wrapping_mul(t.addend as i64));
@@ -1106,7 +1141,7 @@ fn sum_selected(t: &LaneTrans, values: &[Datum], isnull: &[bool], rows: &[u64]) 
         for_each_row(rows, |i| {
             if !isnull[i] {
                 c += 1;
-                s = s.wrapping_add(xform(t, lane_value(values, t.width, i)));
+                s = s.wrapping_add(xform(t, lane_value(values, width, i)));
             }
         });
     }
@@ -1181,14 +1216,20 @@ fn int128_state(pg: &mut AggPerGroup, aggcxt: Mcx<'_>) -> PgResult<*mut Int128Ag
 // C's own overflow envelope — leaving i128 needs > 2^64 max-magnitude rows,
 // infeasible; C's accumulation is equally unchecked).
 #[inline(always)]
-fn sum128_selected(t: &LaneTrans, values: &[Datum], isnull: &[bool], rows: &[u64]) -> (i64, i128) {
+fn sum128_selected(
+    t: &LaneTrans,
+    width: LaneWidth,
+    values: &[Datum],
+    isnull: &[bool],
+    rows: &[u64],
+) -> (i64, i128) {
     debug_assert_eq!((t.addend, t.mulk, t.divk), (0, 1, 1), "bare-Var admission only");
     let mut c = 0i64;
     let mut s = 0i128;
     for_each_row(rows, |i| {
         if !isnull[i] {
             c += 1;
-            s += lane_value(values, t.width, i) as i128;
+            s += lane_value(values, width, i) as i128;
         }
     });
     (c, s)
@@ -1292,7 +1333,7 @@ pub unsafe fn fold_batch(
                     Some(l) => {
                         let (values, isnull) =
                             (cols.col_values(l.col as usize), cols.col_isnull(l.col as usize));
-                        base_sum(l.width, l.divk as i64, values, isnull, rows)
+                        base_sum(read_width(cols, l.col, l.width), l.divk as i64, values, isnull, rows)
                     }
                     None => {
                         let isnull = cols.col_isnull(t0.col as usize);
@@ -1316,11 +1357,12 @@ pub unsafe fn fold_batch(
             CseGroupKind::MinMax => {
                 let (values, isnull) =
                     (cols.col_values(t0.col as usize), cols.col_isnull(t0.col as usize));
+                let w0 = read_width(cols, t0.col, t0.width);
                 let mut m: Option<i64> = None;
                 let want_max = t0.kind == LaneKind::Max;
                 for_each_row(rows, |i| {
                     if !isnull[i] {
-                        let v = xform(t0, lane_value(values, t0.width, i));
+                        let v = xform(t0, lane_value(values, w0, i));
                         m = Some(match m {
                             None => v,
                             Some(p) => {
@@ -1353,6 +1395,7 @@ pub unsafe fn fold_batch(
         }
         let (values, isnull) =
             (cols.col_values(t.col as usize), cols.col_isnull(t.col as usize));
+        let w = read_width(cols, t.col, t.width);
         debug_assert!(values.len() >= nrows && isnull.len() >= nrows);
         match t.kind {
             LaneKind::CountStar => unreachable!(),
@@ -1364,13 +1407,13 @@ pub unsafe fn fold_batch(
                 count_apply(pg, c);
             }
             LaneKind::Sum => {
-                let (c, s) = sum_selected(t, values, isnull, rows);
+                let (c, s) = sum_selected(t, w, values, isnull, rows);
                 if c > 0 {
                     sum_apply(pg, s);
                 }
             }
             LaneKind::AvgAccum => {
-                let (c, s) = sum_selected(t, values, isnull, rows);
+                let (c, s) = sum_selected(t, w, values, isnull, rows);
                 if c > 0 {
                     avg_apply(pg, c, s);
                 }
@@ -1380,7 +1423,7 @@ pub unsafe fn fold_batch(
                 // inputs included), so any selected row allocates the state;
                 // only the non-null inputs accumulate (see sum128_selected
                 // for the reassociation proof).
-                let (c, s) = sum128_selected(t, values, isnull, rows);
+                let (c, s) = sum128_selected(t, w, values, isnull, rows);
                 if nsel > 0 {
                     let st = int128_state(pg, aggcxt)?;
                     // SAFETY: aggcontext-lived state installed by
@@ -1397,7 +1440,7 @@ pub unsafe fn fold_batch(
                 let want_max = t.kind == LaneKind::Max;
                 for_each_row(rows, |i| {
                     if !isnull[i] {
-                        let v = xform(t, lane_value(values, t.width, i));
+                        let v = xform(t, lane_value(values, w, i));
                         m = Some(match m {
                             None => v,
                             Some(p) => {
@@ -1466,7 +1509,7 @@ pub unsafe fn fold_batch(
                 let mut m: Option<i64> = None;
                 for_each_row(rows, |i| {
                     if !isnull[i] {
-                        let v = xform(t, lane_value(values, t.width, i));
+                        let v = xform(t, lane_value(values, w, i));
                         m = Some(match m {
                             None => v,
                             Some(p) => {
@@ -1573,6 +1616,12 @@ pub unsafe fn check_guards(
         data = true;
     }
     for &c in plan.vguards.iter() {
+        // Length-staged columns carry i64 lengths, not datum pointers: the
+        // inline-form proof is vacuous (nothing dereferences a datum) and
+        // running it on integer bit patterns would be UB.
+        if cols.col_len_staged(c as usize) {
+            continue;
+        }
         let values = cols.col_values(c as usize);
         let isnull = cols.col_isnull(c as usize);
         let mut ok = true;
@@ -1600,6 +1649,12 @@ pub unsafe fn check_guards(
     // vguard loop above: uguard columns are always vguard columns, so a
     // non-inline datum has already demoted before str_payload runs here.
     for &c in plan.uguards.iter() {
+        // Length-staged columns: the fill computed C's exact answer (mb-walk
+        // parity) per value — no countability proof needed, and the lane
+        // holds i64s, not payloads.
+        if cols.col_len_staged(c as usize) {
+            continue;
+        }
         let values = cols.col_values(c as usize);
         let isnull = cols.col_isnull(c as usize);
         let mut ok = true;
@@ -1907,6 +1962,7 @@ pub unsafe fn fold_rows_grouped(
         }
         let (values, isnull) =
             (cols.col_values(t.col as usize), cols.col_isnull(t.col as usize));
+        let w = read_width(cols, t.col, t.width);
         if t.kind == LaneKind::Int128AvgAccum {
             // Dedicated row loop: the non-strict transfn runs for NULL
             // inputs too (state alloc on the group's first row of any
@@ -1924,7 +1980,7 @@ pub unsafe fn fold_rows_grouped(
                     // bit-identical by construction (the per-row path's own
                     // transition body).
                     unsafe {
-                        do_int128_accum(&mut *st, lane_value(values, t.width, i) as i128)
+                        do_int128_accum(&mut *st, lane_value(values, w, i) as i128)
                     };
                 }
             }
@@ -1942,10 +1998,10 @@ pub unsafe fn fold_rows_grouped(
             match t.kind {
                 LaneKind::CountStar | LaneKind::Int128AvgAccum => unreachable!(),
                 LaneKind::CountAny => count_apply(pg, 1),
-                LaneKind::Sum => sum_apply(pg, xform(t, lane_value(values, t.width, i))),
-                LaneKind::AvgAccum => avg_apply(pg, 1, xform(t, lane_value(values, t.width, i))),
+                LaneKind::Sum => sum_apply(pg, xform(t, lane_value(values, w, i))),
+                LaneKind::AvgAccum => avg_apply(pg, 1, xform(t, lane_value(values, w, i))),
                 LaneKind::Min | LaneKind::Max => {
-                    let v = xform(t, lane_value(values, t.width, i));
+                    let v = xform(t, lane_value(values, w, i));
                     minmax_advance(t, pg, v, t.kind == LaneKind::Max);
                 }
                 LaneKind::FMin | LaneKind::FMax => {
@@ -1955,7 +2011,7 @@ pub unsafe fn fold_rows_grouped(
                     bool_advance(pg, values[i].as_bool(), t.kind == LaneKind::BoolAnd);
                 }
                 LaneKind::BitAnd | LaneKind::BitOr => {
-                    let v = xform(t, lane_value(values, t.width, i));
+                    let v = xform(t, lane_value(values, w, i));
                     bit_advance(t, pg, v, t.kind == LaneKind::BitAnd);
                 }
                 LaneKind::StrMin | LaneKind::StrMax | LaneKind::BpMin | LaneKind::BpMax => {
