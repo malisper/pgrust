@@ -1430,6 +1430,16 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
+    // AGG_SORTED (the sort-free GroupAggregate shape — clustered/footer-
+    // sorted cbstore banks plan `Agg(AGG_SORTED) → SeqScan` with no Sort
+    // node): the sorted-agg drive over the scan's staged batches, with
+    // fold-admissible transitions run as vectorized per-group-run folds.
+    // Section doc at `try_own_sorted_agg_over_seq_scan`. Non-admissible
+    // sorted shapes fall through to the hashed gate below, which refuses
+    // exactly as before (AggNotDrainable).
+    if ::nodeagg::agg_sorted_lane_admissible(agg) {
+        return try_own_sorted_agg_over_seq_scan(agg, ss, choice, estate);
+    }
     // AGG_PLAIN exact-DISTINCT (count/sum/avg(DISTINCT x) — nodeagg's
     // set-mode admission): NOT batch-drainable (pertrans_sort non-empty), so
     // neither the fold drive above nor the legacy fused arm can host it —
@@ -5454,6 +5464,617 @@ pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
         &mut root,
         estate,
     )?))
+}
+
+// ===========================================================================
+// Sorted-agg over SeqScan (lane-v2-sortedfold): the sort-free GroupAggregate
+// shape — clustered/footer-sorted cbstore banks plan `Agg(AGG_SORTED) →
+// SeqScan` with NO Sort node (the pathkeys come from the store order), so
+// neither the hashed fold breaker (AGG_HASHED only) nor the sorted-agg-over-
+// Sort arm can host it. Two drives, chosen once per node:
+//
+//   * Fold (`sorted_fold_step`): per staged column window, detect the group
+//     boundaries over the staged SoA key lanes (width-masked raw-datum
+//     compare — exactly the ported grouping-equality program's verdict under
+//     the node's representational-equality grant, NULL keys grouping
+//     together via the null-pair compare), then run the admitted PLAIN
+//     transitions as ONE `lanefold::fold_batch` per group run — the hashed
+//     feed's kernels (strlenfold's charlen included), fed per group run
+//     instead of per table. Group prologue (first row), boundary emit
+//     (finalize + HAVING + project), residual transitions and fallback rows
+//     all delegate per row to the same `agg_sorted_*` seams the per-row
+//     operator uses.
+//   * PerRow (`sorted_perrow_step`): the SortedAggOp chain over the scan's
+//     staged batches (SeqScanSource → SeqScanFilterProject → SortedAggOp).
+//     The cbstore incumbent is the per-pull Volcano drive, so the staged
+//     window decode alone wins (the noqualfeed economics); hosts every
+//     `agg_sorted_lane_admissible` shape incl. exact-DISTINCT set entries.
+//
+// cbstore scans only: the planner produces this shape from cbstore footer
+// pathkeys; heap SeqScans are never ordered, and heap's incumbent drives own
+// heap agg shapes anyway (admission economics §4).
+//
+// Byte-identity: same rows through the same qual in the same order (the
+// staged bitmap IS the kernel/PREWHERE verdict; per-row emits re-check
+// exactly as the per-row drive; requal/resid shapes take the per-row-emit
+// fold mode); group boundaries are the grouping-equality verdicts
+// (representational grant); every fold kernel is bit-for-bit equal to C's
+// transition semantics on admitted/guard-proven data (lanefold contract) and
+// guarded batches that fail re-proof demote WHOLESALE to the checked per-row
+// program; finalize/HAVING/project is `agg_sorted_emit` per group in input
+// order — group emit order = input order = C's order. Cross-call state is
+// node-resident (scan lane cursor + persort pending slot): every mid-stream
+// pause happens exactly at the pull loop's call boundary (group closed,
+// boundary tuple saved in the pending slot), so a per-call fallback to
+// `exec_agg` is byte-safe in both directions, and the resume re-derives the
+// open group's key from the group's first tuple (`agg_sorted_group_key`).
+// ===========================================================================
+
+/// Group-key columns the sorted-fold boundary compare can host: at most this
+/// many by-value fixed-width grouping columns (CB shapes carry 1-2).
+const SORTED_FOLD_MAX_KEYS: usize = 4;
+
+/// The staged group-key column set for the sorted-fold arm: 0-based scan
+/// column + attlen per grouping column, in grpColIdx order. None = a
+/// grouping column is by-ref / dropped / out of range — the per-row drive
+/// keeps the shape.
+#[derive(Clone, Copy)]
+struct SortedFoldKeys {
+    n: usize,
+    cols: [(u16, i16); SORTED_FOLD_MAX_KEYS],
+}
+
+fn sorted_fold_key_cols<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+) -> Option<SortedFoldKeys> {
+    let group = ::nodeagg::agg_plan_group_cols(agg);
+    if group.is_empty() || group.len() > SORTED_FOLD_MAX_KEYS {
+        return None;
+    }
+    let rel = ss.ss.ss_currentRelation.as_ref()?;
+    let atts: &[_] = &rel.rd_att.compact_attrs;
+    let mut cols = [(0u16, 0i16); SORTED_FOLD_MAX_KEYS];
+    for (k, &attno) in group.iter().enumerate() {
+        if attno < 1 {
+            return None;
+        }
+        let c = (attno - 1) as usize;
+        let att = atts.get(c)?;
+        // By-value fixed-width only: the raw-datum compare's domain (by-ref
+        // keys would need byte-image walks; representational TEXTEQ shapes
+        // stay per-row in v1).
+        if !att.attbyval || !matches!(att.attlen, 1 | 2 | 4 | 8) || att.attisdropped {
+            return None;
+        }
+        cols[k] = (c as u16, att.attlen);
+    }
+    Some(SortedFoldKeys { n: group.len(), cols })
+}
+
+/// Width-masked by-value datum equality: exactly the representational
+/// grouping-equality verdict for the admitted key widths (bool/int2/int4/
+/// int8/date/timestamp — `group_eq_representational`'s operator set), with
+/// any sign-extension convention differences between producers masked off.
+#[inline(always)]
+fn sorted_key_datum_eq(a: ::datum::Datum, b: ::datum::Datum, attlen: i16) -> bool {
+    let mask = match attlen {
+        1 => 0xffu64,
+        2 => 0xffffu64,
+        4 => 0xffff_ffffu64,
+        _ => u64::MAX,
+    };
+    (a.as_u64() ^ b.as_u64()) & mask == 0
+}
+
+/// The structural lane choice for the sorted-agg-over-SeqScan drive, decided
+/// once per node: Fold when the node passes the sorted-fold admission AND
+/// the group keys are lane-comparable AND the staging (PREWHERE for qualled
+/// scans, the offset-free columnar arm otherwise) covers every fold + key
+/// column; PerRow otherwise (always available — the cbstore incumbent is the
+/// per-pull Volcano drive).
+fn decide_sorted_agg_lane<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<AggLaneChoice> {
+    if ss.ss.ps_ProjInfo.is_none() && ::nodeagg::agg_sorted_fold_admissible(agg) {
+        if let Some(keys) = sorted_fold_key_cols(agg, ss) {
+            let plan =
+                ::nodeagg::agg_lanefold_plan(agg).expect("fold admission implies a plan");
+            let mut maxcol = 0i32;
+            for &c in plan.cols.iter().chain(plan.vguards.iter()) {
+                maxcol = maxcol.max(c as i32);
+            }
+            for &(c, _) in &keys.cols[..keys.n] {
+                maxcol = maxcol.max(c as i32);
+            }
+            let prefix = maxcol + 1;
+            // Qualled scans require the PREWHERE lane (it owns the staging
+            // and the selection bitmap; its forced prefix is widened to our
+            // ask). Bare scans arm the offset-free columnar staging. A
+            // refusal keeps the per-row drive — byte-safe either way.
+            let armed = if ss.ss.qual.is_some() {
+                ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix)?
+            } else {
+                ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
+            };
+            if armed && ::nodeseqscan::seq_scan_batch_soa(ss).is_some() {
+                trace_feed("sorted-agg fold drive armed (seqscan)");
+                return Ok(AggLaneChoice::Fold);
+            }
+        }
+    }
+    // Per-row drive staging: PREWHERE/kernel-bitmap qual vectorization on
+    // the staged windows (the drained per-row feed's own arm shape).
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "sorted agg per-row feed", stitch: true },
+    )?;
+    trace_feed("sorted-agg per-row drive armed (seqscan)");
+    Ok(AggLaneChoice::PerRow)
+}
+
+/// Try to let the lane own `Agg(AGG_SORTED) → SeqScan` (section doc above).
+/// `None` = refused — the caller falls to the per-tuple `exec_agg` over
+/// `exec_seq_scan`, byte-safely (call-boundary state compatibility, section
+/// doc).
+#[inline]
+pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    choice: &mut Option<AggLaneChoice>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // cbstore scans only (section doc): heap falls through silently — the
+    // shape does not arise there and the fused drives own heap aggs.
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return Ok(None);
+    }
+    // Scan-side refuse-set: dynamic EPQ/direction gates re-checked per call;
+    // structural verdict memoized on the node (ticks under the CbScan class).
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    let c = match *choice {
+        Some(c) => c,
+        None => {
+            let c = decide_sorted_agg_lane(agg, ss, estate)?;
+            *choice = Some(c);
+            // One OWNED tick per memoized ownership decision (the sorted
+            // stream's build event; the per-group pulls all ride it).
+            stats::tick_owned(ShapeClass::AggBuild);
+            c
+        }
+    };
+    if c == AggLaneChoice::Refuse {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    Ok(Some(match c {
+        AggLaneChoice::Fold => sorted_fold_step(agg, ss, estate)?,
+        _ => sorted_perrow_step(agg, ss, estate)?,
+    }))
+}
+
+/// The per-row sorted drive: one PG pull's worth of the SortedAggOp chain
+/// over the scan's staged batches — the sorted-agg-over-IndexScan pipeline
+/// with the SeqScan source/emit pair (both proven pieces, composed).
+fn sorted_perrow_step<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mut op = SortedAggOp { agg, group_open: false };
+    let mut root = RootAdapter::new(None);
+    pull_step_chain(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut op, &mut root, estate)
+}
+
+/// One PG pull's worth of the sorted FOLD drive: walk the staged window from
+/// the node-resident cursor, folding each group run whole-batch and emitting
+/// one qual-passing group row per pull (pausing with the boundary tuple
+/// saved pending — the pull loop's own call-boundary state). See the section
+/// doc for the mode split and the byte-identity argument.
+fn sorted_fold_step<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    // C's per-pull interrupt check (the pull loop's child-fetch entry).
+    ::postgres_seams::check_for_interrupts::call()?;
+    let keys = sorted_fold_key_cols(agg, ss).expect("Fold choice proved the key shape");
+    let nkeys = keys.n;
+    let mut cur_key = [(::datum::Datum::null(), false); SORTED_FOLD_MAX_KEYS];
+    // Resume: a saved boundary tuple means the previous pull paused right
+    // after emitting a group; start the next group from it (the pull loop's
+    // next iteration) and re-derive its key from the group's first tuple.
+    let mut group_open = false;
+    if ::nodeagg::agg_sorted_have_pending(agg) {
+        ::nodeagg::agg_sorted_group_begin(agg, estate, None)?;
+        ::nodeagg::agg_sorted_group_key(agg, &mut cur_key[..nkeys]);
+        group_open = true;
+    }
+    loop {
+        // The staged window (node-resident cursor) or the next one.
+        let (pos, n) = {
+            let (pos, n) = ss.lane_cursor();
+            if pos < n {
+                (pos, n)
+            } else {
+                let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+                ss.set_lane_cursor(0, n);
+                if n == 0 {
+                    // End of scan: drop the scan slot's pin (source parity),
+                    // agg_done BEFORE the last group finalizes (the pull
+                    // loop's fetch-None arms), then flush the open group.
+                    let mcx = estate.es_query_cxt;
+                    ::exectuples::exec_clear_tuple(
+                        estate.slot_mut(ss.ss.ss_ScanTupleSlot),
+                        mcx,
+                    );
+                    ::nodeagg::agg_sorted_input_done(agg);
+                    if !group_open {
+                        return Ok(None);
+                    }
+                    return ::nodeagg::agg_sorted_emit(agg, estate);
+                }
+                ::postgres_seams::check_for_interrupts::call()?;
+                (0, n)
+            }
+        };
+        match sorted_fold_window(agg, ss, &keys, &mut cur_key, &mut group_open, pos, n, estate)?
+        {
+            Some(row) => return Ok(Some(row)),
+            None => {
+                // Window consumed; produce the next one.
+                debug_assert_eq!(ss.lane_cursor().0, n);
+            }
+        }
+    }
+}
+
+/// Process staged rows `pos..n` of the current window. `Some(row)` = a group
+/// row was emitted (the caller returns it to PG; the cursor already points
+/// at the first unconsumed row and the boundary tuple is saved pending);
+/// `None` = window fully consumed.
+#[allow(clippy::too_many_arguments)]
+fn sorted_fold_window<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    keys: &SortedFoldKeys,
+    cur_key: &mut [(::datum::Datum, bool); SORTED_FOLD_MAX_KEYS],
+    group_open: &mut bool,
+    pos: u32,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let nkeys = keys.n;
+    let nwords = (n as usize).div_ceil(64);
+    let has_resid;
+    let guarded;
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold drive without a plan");
+        has_resid = !plan.resid.is_empty();
+        guarded = plan.guarded;
+    }
+    // Selection words for this window: the PREWHERE/kernel bitmap when one
+    // owns the qual (final verdicts), all-ones on bare scans. `bitmap` mode
+    // additionally requires no residual transitions and no requal tail — the
+    // fold then touches selected non-fallback rows with NO per-row emits
+    // except group prologues/boundaries; otherwise every row goes through
+    // the per-row emit (which applies the full qual) and survivors join the
+    // fold selection.
+    let mut sel = [u64::MAX; ::exectuples::SOA_BM_WORDS];
+    let bitmap_qual = match ::nodeseqscan::seq_scan_batch_qual_sel(ss) {
+        Some(s) => {
+            sel[..nwords].copy_from_slice(&s[..nwords]);
+            true
+        }
+        None => false,
+    };
+    if n % 64 != 0 {
+        sel[nwords - 1] &= (1u64 << (n % 64)) - 1;
+    }
+    let bitmap_mode = !has_resid && (bitmap_qual || ss.ss.qual.is_none());
+    // Per-window demote verdict (recomputed on every resume of the same
+    // window — the inputs are staged and deterministic): guard re-proof over
+    // a superset of the rows the fold will touch, key lanes ready (a dict-
+    // answered or fill-skipped key lane cannot serve the compare), and in
+    // bitmap mode the staged SoA present. Demote = the WHOLE window runs the
+    // checked per-row program (never a partial fold — lanefold contract).
+    let mut demote = false;
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss).expect("fold drive staged the SoA");
+        for &(c, _) in &keys.cols[..nkeys] {
+            if !soa.col_datum_ready(c as usize) {
+                demote = true;
+            }
+        }
+    }
+    if !demote && guarded {
+        // Zone answers first (whole-window value intervals from the granule
+        // footer), prefetched before the SoA borrow.
+        let mut zmm = [(0u16, (0i64, 0i64)); 8];
+        let mut nz = 0usize;
+        {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).unwrap();
+            for g in plan.guards.iter() {
+                if nz == zmm.len() {
+                    break;
+                }
+                if let Some(mm) = ::nodeseqscan::seq_scan_window_value_minmax(ss, g.col as usize)
+                {
+                    zmm[nz] = (g.col, mm);
+                    nz += 1;
+                }
+            }
+        }
+        let plan = ::nodeagg::agg_lanefold_plan(agg).unwrap();
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss).expect("fold drive staged the SoA");
+        // Proof domain: staged non-fallback rows of the conservative
+        // selection (lane sel under PREWHERE includes requal-pending rows —
+        // a superset of everything the fold touches; unselected cells may be
+        // stale under the lazy fill).
+        let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+        match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+            Some(ls) => {
+                for ((r, fb), s) in
+                    rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(ls)
+                {
+                    *r = s & !fb;
+                }
+            }
+            None => {
+                for ((r, fb), s) in
+                    rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(&sel[..nwords])
+                {
+                    *r = s & !fb;
+                }
+            }
+        }
+        if n % 64 != 0 {
+            rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+        }
+        if rows[..nwords].iter().any(|&w| w != 0) {
+            // SAFETY: proof rows are staged non-fallback selected rows with
+            // live deformed lane values (the completing deform filled every
+            // prefix column for survivor windows; vguard columns readable at
+            // their varlena header byte).
+            demote = unsafe {
+                ::lanefold::check_guards(plan, soa, &rows[..nwords], |c| {
+                    zmm[..nz].iter().find(|e| e.0 == c).map(|e| e.1)
+                }) == ::lanefold::GuardCheck::Demote
+            };
+        }
+    }
+    // Copy the fallback words out so the walk below can interleave emits.
+    let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss).expect("fold drive staged the SoA");
+        fb[..nwords].copy_from_slice(&soa.fallback_words()[..nwords]);
+    }
+    // The open group's pending fold selection (contiguous same-key run being
+    // accumulated); flushed before every per-row event and at window end.
+    let mut run = [0u64; ::exectuples::SOA_BM_WORDS];
+    let mut run_any = false;
+    macro_rules! flush_run {
+        () => {
+            if run_any {
+                let plan = ::nodeagg::agg_lanefold_plan(agg).unwrap();
+                let aggcx = ::nodeagg::agg_aggcontext(agg);
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("fold drive staged the SoA");
+                // SAFETY: pergroup_base is the node's once-allocated current-
+                // group pergroup array covering every transno
+                // (initialize_aggregates re-wrote it at group begin); run
+                // rows are selected non-fallback rows carrying valid
+                // deformed lane values for every plan column; AvgAccum /
+                // Int128AvgAccum pergroup states follow the same
+                // initialize/fold/transfn chain contract as the plain feed;
+                // guarded plans passed check_guards above (a demoted window
+                // never reaches here).
+                unsafe {
+                    ::lanefold::fold_batch(
+                        plan,
+                        soa,
+                        &run[..nwords],
+                        n as usize,
+                        ::nodeagg::agg_sorted_pergroup_base(agg),
+                        aggcx,
+                    )?;
+                }
+                run[..nwords].fill(0);
+                run_any = false;
+            }
+        };
+    }
+    // One same-key row's full per-row delegation (fallback rows, demoted
+    // windows, group prologues and boundaries): exactly the SortedAggOp
+    // body. Returns Some(row) on a paused boundary emit.
+    macro_rules! per_row {
+        ($i:expr, $slot:expr) => {{
+            let slot = $slot;
+            if *group_open && ::nodeagg::agg_sorted_same_group(agg, estate, slot)? {
+                ::nodeagg::agg_sorted_accept(agg, estate, slot)?;
+                None
+            } else if !*group_open {
+                ::nodeagg::agg_sorted_group_begin(agg, estate, Some(slot))?;
+                ::nodeagg::agg_sorted_group_key(agg, &mut cur_key[..nkeys]);
+                *group_open = true;
+                None
+            } else {
+                // Boundary: save the boundary row first (the pull loop's
+                // order), then finalize + HAVING + project the group.
+                ::nodeagg::agg_sorted_save_pending(agg, estate, slot)?;
+                *group_open = false;
+                match ::nodeagg::agg_sorted_emit(agg, estate)? {
+                    Some(row) => Some(row),
+                    None => {
+                        // HAVING rejected: start the next group from the
+                        // pending boundary tuple (the pull loop's continue).
+                        ::nodeagg::agg_sorted_group_begin(agg, estate, None)?;
+                        ::nodeagg::agg_sorted_group_key(agg, &mut cur_key[..nkeys]);
+                        *group_open = true;
+                        None
+                    }
+                }
+            }
+        }};
+    }
+    if demote {
+        // Whole-window per-row program (checked transitions, C's detoast/
+        // overflow behavior at C's row).
+        for i in pos..n {
+            ss.set_lane_cursor(i + 1, n);
+            if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                if let Some(row) = per_row!(i, slot) {
+                    return Ok(Some(row));
+                }
+            }
+        }
+        ss.set_lane_cursor(n, n);
+        return Ok(None);
+    }
+    let mut i = pos;
+    while i < n {
+        if bitmap_mode {
+            // Phase A (staged reads only): extend the open group's run to
+            // the next event — a group boundary, a fallback row, or window
+            // end. Skipped rows are qual rejections (the bitmap IS the
+            // verdict).
+            enum Ev {
+                Boundary(u32),
+                Fallback(u32),
+                End,
+            }
+            let ev = {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("fold drive staged the SoA");
+                let mut key_vals: [&[::datum::Datum]; SORTED_FOLD_MAX_KEYS] =
+                    [&[]; SORTED_FOLD_MAX_KEYS];
+                let mut key_nulls: [&[bool]; SORTED_FOLD_MAX_KEYS] =
+                    [&[]; SORTED_FOLD_MAX_KEYS];
+                for k in 0..nkeys {
+                    key_vals[k] = soa.col_values(keys.cols[k].0 as usize);
+                    key_nulls[k] = soa.col_isnull(keys.cols[k].0 as usize);
+                }
+                let mut ev = Ev::End;
+                let mut j = i;
+                while j < n {
+                    if sel[(j / 64) as usize] & (1u64 << (j % 64)) == 0 {
+                        j += 1;
+                        continue;
+                    }
+                    if fb[(j / 64) as usize] & (1u64 << (j % 64)) != 0 {
+                        ev = Ev::Fallback(j);
+                        break;
+                    }
+                    if !*group_open {
+                        ev = Ev::Boundary(j);
+                        break;
+                    }
+                    let same = (0..nkeys).all(|k| {
+                        let (cv, cn) = cur_key[k];
+                        let jn = key_nulls[k][j as usize];
+                        if cn || jn {
+                            cn && jn
+                        } else {
+                            sorted_key_datum_eq(key_vals[k][j as usize], cv, keys.cols[k].1)
+                        }
+                    });
+                    if !same {
+                        ev = Ev::Boundary(j);
+                        break;
+                    }
+                    run[(j / 64) as usize] |= 1u64 << (j % 64);
+                    run_any = true;
+                    j += 1;
+                }
+                if matches!(ev, Ev::End) {
+                    debug_assert_eq!(j, n);
+                }
+                ev
+            };
+            // Phase B: fold the accumulated run, then the per-row event.
+            flush_run!();
+            match ev {
+                Ev::End => {
+                    i = n;
+                }
+                Ev::Fallback(j) | Ev::Boundary(j) => {
+                    ss.set_lane_cursor(j + 1, n);
+                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, j)? {
+                        if let Some(row) = per_row!(j, slot) {
+                            return Ok(Some(row));
+                        }
+                    }
+                    i = j + 1;
+                }
+            }
+        } else {
+            // Per-row-emit mode (residual transitions and/or a requal/
+            // scalar-checked qual): every row goes through the scan's
+            // per-row emit — the full qual at the per-row path's cadence —
+            // and surviving deformed rows join the fold run (residuals per
+            // row, the fold-feed discipline); fallback survivors run the
+            // full per-row program.
+            let j = i;
+            ss.set_lane_cursor(j + 1, n);
+            let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, j)? else {
+                i = j + 1;
+                continue;
+            };
+            let is_fb = fb[(j / 64) as usize] & (1u64 << (j % 64)) != 0;
+            if is_fb {
+                flush_run!();
+                if let Some(row) = per_row!(j, slot) {
+                    return Ok(Some(row));
+                }
+                i = j + 1;
+                continue;
+            }
+            // Deformed survivor: same-group rows fold; boundaries and group
+            // prologues delegate per row.
+            let same = *group_open && {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("fold drive staged the SoA");
+                (0..nkeys).all(|k| {
+                    let (cv, cn) = cur_key[k];
+                    let jn = soa.col_isnull(keys.cols[k].0 as usize)[j as usize];
+                    if cn || jn {
+                        cn && jn
+                    } else {
+                        sorted_key_datum_eq(
+                            soa.col_values(keys.cols[k].0 as usize)[j as usize],
+                            cv,
+                            keys.cols[k].1,
+                        )
+                    }
+                })
+            };
+            if same {
+                run[(j / 64) as usize] |= 1u64 << (j % 64);
+                run_any = true;
+                if has_resid {
+                    ::nodeagg::agg_sorted_accept_resid(agg, estate, slot)?;
+                }
+            } else {
+                flush_run!();
+                if let Some(row) = per_row!(j, slot) {
+                    return Ok(Some(row));
+                }
+            }
+            i = j + 1;
+        }
+    }
+    flush_run!();
+    let _ = run_any;
+    ss.set_lane_cursor(n, n);
+    Ok(None)
 }
 
 // ===========================================================================
