@@ -2742,3 +2742,268 @@ fn len_staged_lane_folds_i64_and_skips_guards() {
         assert_parity(&plan, &pg_b, &want_b);
     }
 }
+
+// ===========================================================================
+// Str MIN/MAX dict-code lanes (lane-v2-dictminmax): the col_codes side
+// channel — sorted-dict integer folds must be image-identical to the datum
+// memcmp path (itself parity-tested against the per-row C reference above).
+// ===========================================================================
+
+// One epoch's dictionary + a coded lane over it. The dict is byte-sorted +
+// deduplicated exactly like the cbstore writer (payload slice cmp — memcmp
+// then length, i.e. varstrfastcmp_c's order); values cells are dict[code]
+// (the Raw gather's pointer identity).
+struct DictEpoch {
+    dict: Vec<Datum>,
+    epoch: u64,
+}
+
+impl DictEpoch {
+    fn new(epoch: u64, payloads: &[&[u8]]) -> DictEpoch {
+        let mut entries: Vec<Vec<u8>> = payloads.iter().map(|p| p.to_vec()).collect();
+        entries.sort();
+        entries.dedup();
+        // Mix header forms across entries (short where legal) — the code
+        // path must be form-agnostic (the datum is whatever decode built).
+        let dict: Vec<Datum> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if i % 2 == 0 && p.len() + 1 <= 0x7F {
+                    vl_short(p)
+                } else {
+                    vl_4b(p)
+                }
+            })
+            .collect();
+        DictEpoch { dict, epoch }
+    }
+
+    fn code_of(&self, payload: &[u8]) -> u32 {
+        self.dict
+            .iter()
+            .position(|&d| vl_payload(d) == payload)
+            .expect("payload in dict") as u32
+    }
+}
+
+// TestCols + the coded view of column 0 (NULL rows carry code 0 — never
+// read: the kernels are strict).
+struct DictTestCols {
+    cols: TestCols,
+    codes: Vec<u32>,
+    dict: *const Datum,
+    ndict: u32,
+    epoch: u64,
+    sorted: bool,
+}
+
+impl DictTestCols {
+    fn new(ep: &DictEpoch, rows: &[Option<u32>], sorted: bool) -> DictTestCols {
+        let data: Vec<Vec<Option<Datum>>> =
+            rows.iter().map(|c| vec![c.map(|c| ep.dict[c as usize])]).collect();
+        DictTestCols {
+            cols: TestCols::from_datum_rows(1, &data),
+            codes: rows.iter().map(|c| c.unwrap_or(0)).collect(),
+            dict: ep.dict.as_ptr(),
+            ndict: ep.dict.len() as u32,
+            epoch: ep.epoch,
+            sorted,
+        }
+    }
+}
+
+impl LaneCols for DictTestCols {
+    fn col_values(&self, c: usize) -> &[Datum] {
+        self.cols.col_values(c)
+    }
+
+    fn col_isnull(&self, c: usize) -> &[bool] {
+        self.cols.col_isnull(c)
+    }
+
+    fn col_codes(&self, c: usize) -> Option<::exectuples::SoaDictLane> {
+        assert_eq!(c, 0);
+        Some(::exectuples::SoaDictLane {
+            codes: self.codes.as_ptr(),
+            table: ::exectuples::SoaDictTable {
+                dict: self.dict,
+                ndict: self.ndict,
+                epoch: self.epoch,
+                sorted: self.sorted,
+            },
+        })
+    }
+}
+
+// The dict payload pool: multibyte UTF-8, NUL-adjacent bytes (embedded NUL,
+// 0x00/0x01/0xFF extremes), prefix pairs (length tiebreak), empty string.
+fn dict_payload_pool() -> Vec<&'static [u8]> {
+    vec![
+        b"",
+        b"\x00",
+        b"\x00a",
+        b"\x01",
+        b"a",
+        b"ab",
+        b"abc",
+        "é".as_bytes(),
+        "漢字".as_bytes(),
+        "🦀".as_bytes(),
+        b"zz",
+        b"z\x00z",
+        b"\xff",
+        b"\xff\xff",
+    ]
+}
+
+#[test]
+fn fold_batch_dictcode_parity() {
+    let mcx = leaked_mcx();
+    let ep = DictEpoch::new(7, &dict_payload_pool());
+    let n = 200usize;
+    let rows: Vec<Option<u32>> = (0..n)
+        .map(|i| if i % 6 == 2 { None } else { Some(((i * 13) % ep.dict.len()) as u32) })
+        .collect();
+    for (transfn, kind) in [(459, LaneKind::StrMin), (458, LaneKind::StrMax)] {
+        let a = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+        let specs = [mk_spec_coll(transfn, &a, COLL_C)];
+        let plan = classify(mcx, &specs).expect("admits");
+        for sel in [
+            (|_: usize| true) as fn(usize) -> bool,
+            |i| i % 2 == 0,
+            |i| i % 9 == 5,
+            |_| false,
+        ] {
+            let selm = selmask(n, sel);
+            for sorted in [true, false] {
+                let cols = DictTestCols::new(&ep, &rows, sorted);
+                let mut pgs = pergroups_for(mcx, &plan, 1);
+                // SAFETY: live inline varlena lane (dict entries); pgs
+                // covers transno 0; mcx is the live test arena.
+                unsafe {
+                    fold_batch(
+                        &plan,
+                        &cols,
+                        &selm,
+                        n,
+                        NonNull::new(pgs.as_mut_ptr()).unwrap(),
+                        mcx,
+                    )
+                    .expect("fold");
+                }
+                let drows: Vec<Option<Datum>> =
+                    rows.iter().map(|c| c.map(|c| ep.dict[c as usize])).collect();
+                let want = reference_fold_str(kind, &drows, sel);
+                let pg = &pgs[0];
+                match want {
+                    None => assert!(pg.no_trans_value),
+                    Some(img) => {
+                        assert!(!pg.trans_value_is_null && !pg.no_trans_value);
+                        assert_eq!(
+                            vl_image(pg.trans_value),
+                            img,
+                            "kind {kind:?} sorted={sorted}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Grouped dict-code memo vs the plain grouped fold (itself parity-tested
+// against the per-row C reference): multiple batches, epoch changes with
+// overlapping value sets (cross-epoch survivors exercise the ¬tv_code memo
+// arm), repeated codes (tie replaces), interleaved groups, a mid-run
+// out-of-band advance with the mandated invalidate, and a Raw (code-less)
+// batch in the middle.
+#[test]
+fn fold_rows_grouped_dictcode_memo_parity() {
+    let mcx = leaked_mcx();
+    let a_min = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a_max = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let specs = [mk_spec_coll(459, &a_min, COLL_C), mk_spec_coll(458, &a_max, COLL_C)];
+    let plan = classify(mcx, &specs).expect("admits");
+    // Epoch 1 holds the global extremes; epoch 2 overlaps in the middle —
+    // epoch-2 batches then advance groups whose transvalue is an epoch-1
+    // survivor (the ¬tv_code arm), including codes better AND worse than
+    // the memoized best.
+    let ep1 = DictEpoch::new(1, &dict_payload_pool());
+    let pool2: Vec<&[u8]> = vec![b"a", b"ab", b"m", b"mm", b"zz", b"\x01", "é".as_bytes()];
+    let ep2 = DictEpoch::new(2, &pool2);
+    let ngroups = 5usize;
+    let ntrans = specs.len();
+    let mut mm_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut ref_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut mm = StrMmScratch::default();
+    // Batch schedule: (epoch, row codes). Repeats within a batch exercise
+    // the tie-replace arm; descending code runs exercise better-code arms.
+    let batches: Vec<(&DictEpoch, Vec<Option<u32>>)> = vec![
+        (&ep1, (0..90).map(|i| Some(((i * 7) % ep1.dict.len()) as u32)).collect()),
+        (&ep1, (0..90).rev().map(|i| Some(((i * 3) % ep1.dict.len()) as u32)).collect()),
+        (&ep2, (0..70).map(|i| Some(((i * 5) % ep2.dict.len()) as u32)).collect()),
+        (&ep2, vec![Some(3), Some(3), Some(3), None, Some(0), Some(0), Some(6), Some(2)]),
+        (&ep2, (0..70).rev().map(|i| Some((i % ep2.dict.len()) as u32)).collect()),
+    ];
+    let run_batch = |ep: &DictEpoch,
+                     rows: &[Option<u32>],
+                     pgs: &mut [Vec<AggPerGroup>],
+                     mm: Option<&mut StrMmScratch>| {
+        let cols = DictTestCols::new(ep, rows, true);
+        let idxs: Vec<u32> = (0..rows.len() as u32).collect();
+        let groups: Vec<NonNull<AggPerGroup>> = (0..rows.len())
+            .map(|i| NonNull::new(pgs[i % ngroups].as_mut_ptr()).unwrap())
+            .collect();
+        // SAFETY: per-group arrays cover every transno and are not moved
+        // while the pointers live; the lane holds live inline varlenas;
+        // codes satisfy the col_codes contract by construction.
+        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm).expect("fold") };
+    };
+    for (bi, (ep, rows)) in batches.iter().enumerate() {
+        run_batch(ep, rows, &mut mm_pgs, Some(&mut mm));
+        run_batch(ep, rows, &mut ref_pgs, None);
+        if bi == 2 {
+            // Out-of-band advance (a demoted row's per-row program) on both
+            // sides, then the mandated invalidate on the memo side.
+            let d = vl_short(b"\x00oob");
+            for g in 0..ngroups {
+                for tn in 0..ntrans {
+                    // SAFETY: live pergroup cells + inline varlena + arena.
+                    unsafe {
+                        str_advance(&plan.trans[tn], &mut mm_pgs[g][tn], d, mcx).expect("adv");
+                        str_advance(&plan.trans[tn], &mut ref_pgs[g][tn], d, mcx).expect("adv");
+                    }
+                }
+            }
+            mm.invalidate();
+        }
+        if bi == 3 {
+            // A Raw (code-less) window between coded ones: the datum path
+            // advances behind the memo — which must therefore miss (same
+            // epoch would otherwise reuse it). The kernel takes the datum
+            // path when col_codes is None; emulate with the plain entry
+            // point + invalidate (the feed's rule for any bypass).
+            let raw_rows: Vec<Option<u32>> = vec![Some(1), Some(4), Some(2)];
+            run_batch(&ep2, &raw_rows, &mut mm_pgs, None);
+            run_batch(&ep2, &raw_rows, &mut ref_pgs, None);
+            mm.invalidate();
+        }
+    }
+    for g in 0..ngroups {
+        for tn in 0..ntrans {
+            let (a, b) = (&mm_pgs[g][tn], &ref_pgs[g][tn]);
+            assert_eq!(a.no_trans_value, b.no_trans_value, "group {g} transno {tn}");
+            assert_eq!(a.trans_value_is_null, b.trans_value_is_null, "group {g} transno {tn}");
+            if !a.trans_value_is_null && !a.no_trans_value {
+                assert_eq!(
+                    vl_image(a.trans_value),
+                    vl_image(b.trans_value),
+                    "group {g} transno {tn}"
+                );
+            }
+        }
+    }
+}

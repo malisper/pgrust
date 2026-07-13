@@ -1318,6 +1318,21 @@ pub fn table_scan_batch_fill_len<'mcx>(
     }
 }
 
+/// Dict-code side channel of one staged cbstore window column (str MIN/MAX
+/// code folds, lane-v2-dictminmax): `Some` only when the column's current
+/// chunk is dict-encoded and decoded for the staged window. Heap scans have
+/// no dictionaries — always `None`.
+#[inline]
+pub fn table_scan_batch_dict_codes<'mcx>(
+    scan: &TableScanDesc<'mcx>,
+    c: u16,
+) -> Option<::exectuples::SoaDictLane> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(cb) => cb.staged_codes_lane(c as usize),
+    }
+}
+
 pub fn table_scan_batch_deform_col<'mcx>(
     scan: &mut TableScanDesc<'mcx>,
     c: u16,

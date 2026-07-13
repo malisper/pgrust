@@ -50,7 +50,10 @@ use std::sync::OnceLock;
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use super::{agg_fold_staged, stats, trace_feed, RefuseReason, ShapeClass};
+use super::{
+    agg_fold_staged_mm, collect_mm_codes, mm_str_cols, stats, trace_feed, CodesCols,
+    RefuseReason, ShapeClass,
+};
 
 /// Kill switch (default ON inside the lane; `PGRUST_LANE_V2` still gates
 /// every caller).
@@ -462,6 +465,20 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     });
     let mut idxs: Vec<u32> = Vec::new();
     let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
+    // Str MIN/MAX dict-code memo (lane-v2-dictminmax): plan columns are
+    // tlist attnos; the mm map resolves them to base scan columns (bare-Var
+    // admission — the computed key column never carries a str transition).
+    let mut mm = MmState {
+        cols: {
+            let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
+            mm_str_cols(plan, |c| xk.map.get(c as usize).copied().flatten())
+        },
+        codes: Vec::new(),
+        scratch: ::lanefold::StrMmScratch::default(),
+    };
+    if !mm.cols.is_empty() {
+        trace_feed("fold str min/max dict-code memo armed (expr-key)");
+    }
     // Fresh per-build epoch map (rescans must not reuse stale pergroups).
     xk.dg_epoch = None;
     xk.dg_slots.clear();
@@ -473,9 +490,20 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        exprkey_batch(agg, ss, xk, stage_slot, compact, &mut idxs, &mut groups, n, estate)?;
+        exprkey_batch(
+            agg, ss, xk, stage_slot, compact, &mut idxs, &mut groups, &mut mm, n, estate,
+        )?;
     }
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// Per-build str MIN/MAX dict-code memo state (see `StrMmScratch`).
+struct MmState {
+    /// (plan col, base scan col) pairs for the plan's StrMin/StrMax lanes.
+    cols: Vec<(u16, u16)>,
+    /// Per-batch collected code views.
+    codes: Vec<(u16, ::exectuples::SoaDictLane)>,
+    scratch: ::lanefold::StrMmScratch,
 }
 
 /// One staged batch. See `exprkey_build_fold_feed` for the routing rules.
@@ -488,6 +516,7 @@ fn exprkey_batch<'mcx>(
     compact: bool,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    mm: &mut MmState,
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -529,7 +558,11 @@ fn exprkey_batch<'mcx>(
     };
     if !batched {
         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-        return per_row_batch(agg, ss, n, estate);
+        return {
+            // Whole-batch per-row route: str advances bypass the memo.
+            mm.scratch.invalidate();
+            per_row_batch(agg, ss, n, estate)
+        };
     }
     xk.rows.clear();
     for (w, &word) in sel[..nwords].iter().enumerate() {
@@ -578,7 +611,11 @@ fn exprkey_batch<'mcx>(
                 xk.refused = true;
                 trace_feed("expr-key arith trap: replaying batch per-row (sticky)");
                 ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return per_row_batch(agg, ss, n, estate);
+                return {
+            // Whole-batch per-row route: str advances bypass the memo.
+            mm.scratch.invalidate();
+            per_row_batch(agg, ss, n, estate)
+        };
             }
         }
         ExprKeyKind::Dict { input_col, prog, gather_input } => {
@@ -599,7 +636,11 @@ fn exprkey_batch<'mcx>(
                     ::laneexec::DictEvalPrepared::Demote(reason) => {
                         ::laneexec::log_dicteval_demoted(reason);
                         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                        return per_row_batch(agg, ss, n, estate);
+                        return {
+            // Whole-batch per-row route: str advances bypass the memo.
+            mm.scratch.invalidate();
+            per_row_batch(agg, ss, n, estate)
+        };
                     }
                 }
                 let (vals, nulls) = prog.scratch();
@@ -635,7 +676,11 @@ fn exprkey_batch<'mcx>(
             } == ::lanefold::GuardCheck::Demote;
             if demote {
                 ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return per_row_batch(agg, ss, n, estate);
+                return {
+            // Whole-batch per-row route: str advances bypass the memo.
+            mm.scratch.invalidate();
+            per_row_batch(agg, ss, n, estate)
+        };
             }
         }
     }
@@ -653,13 +698,24 @@ fn exprkey_batch<'mcx>(
         if ::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
             idxs.clear();
             idxs.extend_from_slice(rows);
-            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                .expect("expr-key batched route requires the armed SoA");
             // SAFETY: every probed row is non-fallback with valid lane
             // values for every mapped plan column; each pergroup was
             // installed by the compact probe within this batch; the rest is
-            // agg_fold_staged's contract.
-            return unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) };
+            // agg_fold_staged's contract; dict-code views satisfy the
+            // col_codes contract (`seq_scan_batch_dict_codes` through the
+            // base-column map).
+            collect_mm_codes(ss, &mm.cols, &mut mm.codes);
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("expr-key batched route requires the armed SoA");
+            return unsafe {
+                agg_fold_staged_mm(
+                    agg,
+                    &CodesCols { inner: &MapCols { soa, map: &xk.map }, codes: &mm.codes },
+                    idxs,
+                    groups,
+                    Some(&mut mm.scratch),
+                )
+            };
         }
         // Runtime backstop migrated to the C table BEFORE this batch: fall
         // through to the staged probe (same rows, same order).
@@ -746,12 +802,22 @@ fn exprkey_batch<'mcx>(
             ::nodeagg::agg_hash_build_resid_group(agg, estate, slot_id, groups[k])?;
         }
     }
+    collect_mm_codes(ss, &mm.cols, &mut mm.codes);
     let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
         .expect("expr-key batched route requires the armed SoA");
     // SAFETY: as the compact arm above — non-fallback staged rows, valid
     // lane values for every mapped plan column, pergroups installed by this
-    // batch's probes, guarded plans proven above.
-    unsafe { agg_fold_staged(agg, &MapCols { soa, map: &xk.map }, idxs, groups) }
+    // batch's probes, guarded plans proven above, dict-code views per the
+    // col_codes contract.
+    unsafe {
+        agg_fold_staged_mm(
+            agg,
+            &CodesCols { inner: &MapCols { soa, map: &xk.map }, codes: &mm.codes },
+            idxs,
+            groups,
+            Some(&mut mm.scratch),
+        )
+    }
 }
 
 /// Whole-batch per-row route: the arrival loop over `seq_scan_batch_emit`
