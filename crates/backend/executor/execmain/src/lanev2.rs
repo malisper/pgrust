@@ -5754,6 +5754,332 @@ fn hashgroup_emit<'mcx>(
     }
 }
 
+// ===========================================================================
+// Dict-code batched exact-DISTINCT grouping (lane-v2-q14feed; nodeagg
+// codedgroup.rs holds the state machine + the byte-identity argument). The
+// textgroup lane's deferred lever for the near-unique single-text-key shape
+// BOTH incumbent arms price per survivor string (CB Q14: the hash arm's
+// density tier refuses at 1.95 rows/group and the narrow sort pays sort 33%
+// + memcmp 21%): group on the (epoch, dict code) INTEGER domain batch-wise —
+// per surviving row one direct-map index + one chain append of the DISTINCT
+// arg — and resolve code→string once per distinct (epoch, code); the emit
+// k-way-merges the per-epoch byte-sorted runs (sorted dicts) into the plan
+// Sort's ASC memcmp-tier group order, unioning equal-content states' chains
+// into the pertrans exact set through the unchanged finalize tail.
+//
+// Q13 negative-precedent boundary (dictgroupwire, feded70a7): for a K2 FOLD
+// under a selective qual, per-(epoch, code) lazy STRING RESOLVES INTO THE
+// HASH TABLE lost to hashing survivor strings directly (survivors-per-epoch
+// ≈ codes-per-epoch). This arm's alternative is NOT a hash probe — it is the
+// narrowed SORT — and its per-code cost is one image memcpy (no hash, no
+// table), with the cross-epoch identity resolved once at emit by the merge
+// instead of per (epoch, code) at build. The gepoch upgrade (globaldict
+// stitch tables, train-9 format group) deletes even the merge's string
+// compares: part-stable byte-rank codes make the merge an integer compare
+// and equal-gcode states merge with no memcmp at all — the documented
+// increment-2 consumer.
+//
+// Admission tier: engages ONLY where the hash arm's density tier refuses
+// (the two arms partition the density axis at MIN_ROWS_PER_GROUP), cbstore
+// scans only, dict-answered sorted windows only, bare-Var projections, the
+// Q14 transition shape (one set-mode COUNT(DISTINCT <bare int Var>)).
+// Everything else falls through to the hash arm / narrow sort exactly as
+// before. Runtime degrade replays every absorbed (key, arg) row into the
+// narrowed sort — no residual state, the narrow emit chain runs unchanged.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_CODEFEED` kill switch (default ON inside the lane) — the
+/// A/B attribution channel; OFF keeps Q14-class shapes on the narrowed text
+/// sort exactly as before this lane.
+fn codefeed_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CODEFEED").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// `PGRUST_LANE_V2_CODEFEED_FORCE=1`: skip the density/memory economics (e2e
+/// harness lever — small tables never look near-unique; the runtime degrade
+/// still bounds memory).
+fn codefeed_force() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_CODEFEED_FORCE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Emit loop over the coded-group merge: one HAVING-passing group per PG
+/// pull, in the plan Sort's prefix order. CFI per group (the pull loop's
+/// per-ExecSort-fetch cadence).
+fn codedgroup_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    loop {
+        ::postgres_seams::check_for_interrupts::call()?;
+        match ::nodeagg::agg_codedgroup_emit_next(agg, estate)? {
+            None => return Ok(None),
+            Some(None) => continue,
+            Some(Some(id)) => return Ok(Some(id)),
+        }
+    }
+}
+
+/// The one-shot coded-arm degrade: begin the narrowed sort and replay every
+/// absorbed (key, arg) row into it (the exact multiset of absorbed survivor
+/// rows — codedgroup.rs module doc), then drop the arm's state. The caller
+/// feeds all remaining input per-row and the narrow-sort emit chain resumes
+/// with NO residual preload.
+#[cold]
+#[inline(never)]
+fn degrade_codedgroup<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    sort: &mut ::nodesort::SortState<'mcx>,
+    outer_desc: &std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    k: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    trace_feed("dict-code distinct feed degrading to narrowed sort");
+    ::nodesort::sort_lane_begin_narrowed(sort, outer_desc.clone(), k)?;
+    let mcx = estate.es_query_cxt;
+    while let Some(slot) = ::nodeagg::agg_codedgroup_next_replay(agg) {
+        ::nodesort::sort_lane_put_slot(sort, mcx, slot)?;
+    }
+    ::nodeagg::agg_codedgroup_reset(agg);
+    Ok(())
+}
+
+/// Probe + build for the dict-code distinct arm (called with the narrow
+/// admission proven and `force_distinct_set` armed, BEFORE the sort exists —
+/// the hash arm's calling contract). Refused = the caller tries the hash
+/// arm, then the narrow-sort feed, exactly as before this lane.
+fn try_codedgroup_build<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    sort: &mut ::nodesort::SortState<'mcx>,
+    outer: &mut crate::procnode::PlanStateNode<'mcx>,
+    outer_desc: &Option<std::rc::Rc<::types_tuple::TupleDescData<'static>>>,
+    k: usize,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<HgBuild> {
+    /// pg_proc text_lt — the btree text opclass's `<` (ASC; DESC keeps the
+    /// incumbent arms: the merge streams ascending byte order only).
+    const F_TEXT_LT: ::types_core::Oid = 740;
+    if !codefeed_enabled() || k != 1 {
+        return Ok(HgBuild::Refused);
+    }
+    let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
+        return Ok(HgBuild::Refused);
+    };
+    // Dict lanes exist only on cbstore scans; heap keeps the incumbents.
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return Ok(HgBuild::Refused);
+    }
+    if !::nodeagg::agg_codedgroup_admissible(agg)
+        || !::nodeagg::agg_codedgroup_economical(
+            agg,
+            codefeed_force(),
+            sort.plan.plan.plan_rows,
+        )
+    {
+        return Ok(HgBuild::Refused);
+    }
+    // Emit order admission: the single prefix key is the grouping column,
+    // ASC text order under a memcmp-tier collation (varstr_cmp there IS
+    // memcmp + length tiebreak — `lanefold::str_collation_safe`, the
+    // dictminmax gate; determinism included). NULLS placement is never
+    // observed: NULL group keys cannot reach the arm (dict windows carry no
+    // NULLs; anything else degrades before being absorbed).
+    let sp = sort.plan;
+    if sp.sortColIdx.is_empty() || sp.sortColIdx[0] != ::nodeagg::agg_plan_group_cols(agg)[0] {
+        return Ok(HgBuild::Refused);
+    }
+    let Ok(opfn) = ::lsyscache::get_opcode(sp.sortOperators[0]) else {
+        return Ok(HgBuild::Refused);
+    };
+    if opfn != F_TEXT_LT {
+        return Ok(HgBuild::Refused);
+    }
+    let coll = sp.collations[0];
+    if coll == 0 || !::lanefold::str_collation_safe(coll) {
+        return Ok(HgBuild::Refused);
+    }
+    // Outer → scan column map: identity for bare scans; through the
+    // projection's per-column classification otherwise, with EVERY output
+    // column a bare Var (the arm never runs the projection, so computed —
+    // possibly volatile — columns must not exist; NULL reps are sound
+    // because an Agg output references only grouping columns + aggregates).
+    let (key_att, arg_att) = ::nodeagg::agg_codedgroup_key_arg_atts(agg);
+    let (key_col, arg_col) = match ss.ss.ps_ProjInfo.as_ref() {
+        None => (key_att, arg_att),
+        Some(p) => {
+            let Some(cols) = p.pi_state.scan_proj_cols() else {
+                return Ok(HgBuild::Refused);
+            };
+            let n = cols.n as usize;
+            if (key_att as usize) >= n || (arg_att as usize) >= n {
+                return Ok(HgBuild::Refused);
+            }
+            let var_of = |j: usize| match cols.cols[j] {
+                ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                _ => None,
+            };
+            if (0..n).any(|j| var_of(j).is_none()) {
+                return Ok(HgBuild::Refused);
+            }
+            (
+                var_of(key_att as usize).expect("checked above"),
+                var_of(arg_att as usize).expect("checked above"),
+            )
+        }
+    };
+    // Arm the staging: PREWHERE owns qualled scans (dict text tier included
+    // — the Q14 qual is on the key column itself); the columnar arm then
+    // registers the dict-group consumer on the live batch (the Q15 co-arm
+    // seam) or arms fresh offset-free staging for bare scans. The ask covers
+    // both consumed columns.
+    let ask = (key_col.max(arg_col) as i32) + 1;
+    if ss.ss.qual.is_some() && !::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)? {
+        return Ok(HgBuild::Refused);
+    }
+    if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, Some(key_col)) {
+        return Ok(HgBuild::Refused);
+    }
+    ::nodeagg::agg_codedgroup_begin(agg, estate)?;
+    trace_feed("sorted-agg dict-code distinct feed engaged");
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    // Force a forward child read for the feed's duration (`sort_feed`'s
+    // discipline — this drain replaces the sort's own feed).
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let res = codedgroup_drive(agg, sort, ss, &outer_desc, k, key_col, arg_col, estate);
+    estate.es_direction = dir;
+    res
+}
+
+/// The coded arm's batch drive (the fold feeds' loop shape): one staged
+/// window at a time, survivors decided slot-free off the whole-qual bitmap,
+/// codes + the DISTINCT-arg lane fed batch-wise into the state machine. Any
+/// window the arm cannot host — non-dict / unsorted-dict key chunk,
+/// fallback-bearing batch, no slot-free qual verdicts, NULL arg, budget
+/// crossing — degrades to the narrowed sort exactly once, at a row-exact
+/// boundary (absorbed rows replay; unconsumed rows feed per-row).
+#[allow(clippy::too_many_arguments)]
+fn codedgroup_drive<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    sort: &mut ::nodesort::SortState<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    k: usize,
+    key_col: u16,
+    arg_col: u16,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<HgBuild> {
+    let mut rows: Vec<u32> = Vec::new();
+    let mut degraded = false;
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of scan: drop the scan slot's buffer pin (SeqScanSource
+            // end-of-stream parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        if degraded {
+            // Post-degrade remainder: the narrow-sort arm's per-row feed
+            // (emit = qual verdicts + projection, one evaluation per row).
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodesort::sort_lane_put(sort, estate, slot)?;
+                }
+            }
+            continue;
+        }
+        // Window admission: a dict-answered SORTED key lane (byte order ==
+        // code order — the merge's foundation) over a fallback-free batch,
+        // with the whole qual decided by the staged bitmap (per-row emit
+        // survivors would re-evaluate rows on the degrade seam; refuse
+        // instead — the sort arm evaluates each row exactly once).
+        let (lane, all_lane) = {
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss);
+            (
+                soa.and_then(|s| s.dict_lane(key_col as usize)).filter(|l| l.table.sorted),
+                soa.is_some_and(|s| s.fallback_words().iter().all(|&w| w == 0)),
+            )
+        };
+        let survivors_decidable = ss.ss.qual.is_none()
+            || ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss).is_some();
+        let Some(lane) = lane.filter(|_| all_lane && survivors_decidable) else {
+            degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
+            degraded = true;
+            // This batch is wholly unconsumed: feed it per-row.
+            for i in 0..n {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodesort::sort_lane_put(sort, estate, slot)?;
+                }
+            }
+            continue;
+        };
+        // Slot-free survivor collection (`scan_collect_survivors`' Bitmap/
+        // All arms, minus the projection gate the admission made moot); one
+        // per-batch ExprContext reset stands in for the emit's per-row
+        // cadence (the coded absorb allocates no per-tuple memory).
+        rows.clear();
+        estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
+        match ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss) {
+            None => rows.extend(0..n),
+            Some(sel) => {
+                let nwords = (n as usize).div_ceil(64);
+                let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
+                for w in 0..nwords {
+                    let mut bits = sel[w];
+                    if w == nwords - 1 {
+                        bits &= tail_mask;
+                    }
+                    while bits != 0 {
+                        rows.push(w as u32 * 64 + bits.trailing_zeros());
+                        bits &= bits - 1;
+                    }
+                }
+            }
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        let (consumed, keep) = {
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("dict window implies the armed SoA");
+            // The DISTINCT-arg lane: valid at every selected row (PREWHERE's
+            // completing deform fills survivor windows; bare columnar arms
+            // fill every row).
+            let argv = soa.col_values(arg_col as usize);
+            let argn = soa.col_isnull(arg_col as usize);
+            let r = ::nodeagg::agg_codedgroup_accept_batch(agg, lane, &rows, argv, argn);
+            (r.consumed, r.keep)
+        };
+        if !keep {
+            degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
+            degraded = true;
+            // Row-exact boundary: absorbed survivors replayed above; the
+            // unconsumed survivors of THIS batch feed per-row (the emit's
+            // whole-qual kernel verdict is stable — non-volatile by the
+            // bitmap translation admission).
+            for &i in &rows[consumed..] {
+                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    ::nodesort::sort_lane_put(sort, estate, slot)?;
+                }
+            }
+        }
+    }
+    if degraded {
+        ::nodesort::sort_lane_finish(sort, estate)?;
+        return Ok(HgBuild::Degraded);
+    }
+    ::nodeagg::agg_codedgroup_finish_build(agg);
+    Ok(HgBuild::Emit)
+}
+
 /// Try to let the lane own `Agg(AGG_SORTED) → Sort → scan`: the sort breaker
 /// feeds once (pipeline N), then the sorted-agg operator streams the
 /// read-back into one group row per PG pull. `None` = refused (caller falls
@@ -5770,6 +6096,11 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // the now-exhausted scan; the gates cannot flip mid-node here).
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
+    }
+    // Dict-code distinct arm mid-emit resume — same contract (its build
+    // also consumed the scan; the plan's Sort must never be fed).
+    if ::nodeagg::agg_codedgroup_emitting(agg) {
+        return Ok(Some(codedgroup_emit(agg, estate)?));
     }
     // Dynamic per-call gates (mirror the bare-sort breaker).
     if estate.es_epq_active {
@@ -5858,31 +6189,61 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         if let Some(k) = narrow {
             // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
-            // Hash-grouped arm first (its own admission tier; Refused keeps
-            // the narrow-sort feed below exactly as before).
-            match try_hashgroup_build(agg, state, &mut **outer, outer_desc, k, estate)? {
+            // Dict-code distinct arm first: it owns EXACTLY the density band
+            // the hash arm's tier refuses (Q14-class near-unique text keys;
+            // the two admissions partition the density axis), so ordering
+            // between the two arms is arbitrary — coded-first keeps the
+            // engaged arm's traces unambiguous. Refused falls to the hash
+            // arm, then the narrow-sort feed, exactly as before.
+            match try_codedgroup_build(agg, state, &mut **outer, outer_desc, k, estate)? {
                 HgBuild::Emit => {
                     // One OWNED tick per lane-owned build event; the emit
                     // owns the node from here (no sort exists).
                     stats::tick_owned(ShapeClass::AggBuild);
-                    return Ok(Some(hashgroup_emit(agg, estate)?));
+                    return Ok(Some(codedgroup_emit(agg, estate)?));
                 }
                 HgBuild::Degraded => {
                     // The narrowed sort was fed and finished inside the
-                    // degrade (a real sort-feed event); the narrow-sort
-                    // emit chain below resumes over it, preloading residual
-                    // group state at each group begin (nodeagg's
-                    // initialize_aggregates hook).
+                    // degrade (a real sort-feed event); the narrow-sort emit
+                    // chain below resumes over it — NO residual preload (the
+                    // coded degrade replayed every absorbed row).
                     stats::tick_owned(ShapeClass::SortFeed);
                     stats::tick_owned(ShapeClass::AggBuild);
                 }
+                // Hash-grouped arm next (its own admission tier; Refused
+                // keeps the narrow-sort feed exactly as before).
                 HgBuild::Refused => {
-                    trace_feed("sorted-agg distinct-set narrowed sort feed armed");
-                    // The shared feed threads the narrow-key count in.
-                    if !sort_feed_if_needed(state, &mut **outer, outer_desc, narrow, estate)? {
-                        return Ok(None);
+                    match try_hashgroup_build(agg, state, &mut **outer, outer_desc, k, estate)? {
+                        HgBuild::Emit => {
+                            // One OWNED tick per lane-owned build event; the
+                            // emit owns the node from here (no sort exists).
+                            stats::tick_owned(ShapeClass::AggBuild);
+                            return Ok(Some(hashgroup_emit(agg, estate)?));
+                        }
+                        HgBuild::Degraded => {
+                            // The narrowed sort was fed and finished inside
+                            // the degrade (a real sort-feed event); the
+                            // narrow-sort emit chain below resumes over it,
+                            // preloading residual group state at each group
+                            // begin (nodeagg's initialize_aggregates hook).
+                            stats::tick_owned(ShapeClass::SortFeed);
+                            stats::tick_owned(ShapeClass::AggBuild);
+                        }
+                        HgBuild::Refused => {
+                            trace_feed("sorted-agg distinct-set narrowed sort feed armed");
+                            // The shared feed threads the narrow-key count in.
+                            if !sort_feed_if_needed(
+                                state,
+                                &mut **outer,
+                                outer_desc,
+                                narrow,
+                                estate,
+                            )? {
+                                return Ok(None);
+                            }
+                            stats::tick_owned(ShapeClass::AggBuild);
+                        }
                     }
-                    stats::tick_owned(ShapeClass::AggBuild);
                 }
             }
         } else {
