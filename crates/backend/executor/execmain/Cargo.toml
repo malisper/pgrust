@@ -103,6 +103,7 @@ types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
 [dev-dependencies]
+adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 spi_seams = { path = "../spi_seams" }
 parallel = { path = "../../access/transam/parallel" }
 bgworker = { path = "../../postmaster/bgworker" }
