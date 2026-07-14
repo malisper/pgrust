@@ -36,6 +36,7 @@
 
 mod exprkey;
 mod runtime_agg;
+mod runtime_agg_sorted;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
@@ -1554,6 +1555,12 @@ pub enum AggLaneChoice {
     /// runtime gates (MVCC snapshot, AM answerability, guard-interval
     /// re-proof) fall back to the per-row drive byte-identically.
     Meta,
+    /// q28-sorted-arm: the ordered-grouped RUNTIME sink engaged and the
+    /// stitched parallel result was adopted — every subsequent pull drains
+    /// it (`agg_sorted_sink_emit_next`). Memoized like the serial choices:
+    /// the engagement ran once, at the first pull, before anything was
+    /// consumed.
+    SortedSink,
 }
 
 ::mcx::forget_safe_nodrop!(AggLaneChoice);
@@ -8929,14 +8936,36 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
     if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
+    // Rescan re-decide: the engagement is per-execution — a rescan dropped
+    // the adopted emit state (exec_rescan_agg) and reset agg_done, so a
+    // memoized SortedSink with neither is a FRESH build: re-probe the
+    // engagement (or fall to a serial decide) instead of draining a state
+    // that no longer exists.
+    if *choice == Some(AggLaneChoice::SortedSink)
+        && !::nodeagg::sortedsink::agg_sorted_sink_emitting(agg)
+        && !::nodeagg::agg_is_done(agg)
+    {
+        *choice = None;
+    }
     let c = match *choice {
         Some(c) => c,
         None => {
-            let c = decide_sorted_agg_lane(agg, ss, estate)?;
+            // M2 runtime ORDERED-GROUPED arm first (q28-sorted-arm; armed
+            // only under PGRUST_RUNTIME=1 + pgrust.runtime_agg_pool > 0 —
+            // absent, two cheap gate reads and fall through). Engagement
+            // runs the whole parallel attempt here, before anything is
+            // consumed; every refusal/fallback keeps the serial decide
+            // below byte-identical.
+            let c = if runtime_agg_sorted::try_engage_sortedagg_runtime(agg, ss, estate)? {
+                AggLaneChoice::SortedSink
+            } else {
+                let c = decide_sorted_agg_lane(agg, ss, estate)?;
+                // One OWNED tick per memoized ownership decision (the sorted
+                // stream's build event; the per-group pulls all ride it).
+                stats::tick_owned(ShapeClass::AggBuild);
+                c
+            };
             *choice = Some(c);
-            // One OWNED tick per memoized ownership decision (the sorted
-            // stream's build event; the per-group pulls all ride it).
-            stats::tick_owned(ShapeClass::AggBuild);
             c
         }
     };
@@ -8948,6 +8977,7 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
         return Ok(Some(None));
     }
     Ok(Some(match c {
+        AggLaneChoice::SortedSink => runtime_agg_sorted::sorted_sink_emit_step(agg, estate)?,
         AggLaneChoice::Fold => sorted_fold_step(agg, ss, estate)?,
         _ => sorted_perrow_step(agg, ss, estate)?,
     }))
