@@ -1184,6 +1184,13 @@ impl CapturedGuc {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// The captured (leader-validated) value. Snapshot consumers diff on this
+    /// — never on a live process-global backing (the reload dead-diff hazard,
+    /// guc::layers).
+    pub fn value(&self) -> &config_var_val {
+        &self.val
+    }
 }
 
 fn current_value(record: &GucVariable) -> config_var_val {
