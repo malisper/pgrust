@@ -24,13 +24,17 @@
 //! per-row vocab accept against the fused classic GatherMerge drives, a
 //! comparison that no longer exists here).
 //!
-//! Budget law (m2-sinks.md R3/R5, phase 1): each Local gets the derived
+//! Budget law (m2-sinks.md R3/R5; M3.5 §4): each Local gets the derived
 //! `worker_budget` (C-parity per participant; participants = launched
 //! helpers ≤ dop, so the memory envelope is the plan-shaped one, never
-//! nthreads-shaped). A worker CROSSING its budget has no degrade target
-//! under the runtime (no queues) — the sink emits nothing until finalize,
-//! so the arm aborts the RG and the leader FALLS BACK TO THE SERIAL ARM
-//! rerun: exact, nothing consumed, bounded memory at every arm.
+//! nthreads-shaped). A worker CROSSING its budget SPILLS an epoch of its
+//! set values to its FileSet spill file (grouped int-set shapes; the
+//! docs/design/m3.5-spill.md §4 arm, `PGRUST_RUNTIME_DISTINCT_SPILL=0`
+//! restores phase 1) and keeps accepting bounded; shapes the spill cannot
+//! carry exactly — and combine partitions whose merged sets would cross
+//! the budget (value-hash recursion is the later increment) — fall back to
+//! the phase-1 law: the arm aborts the RG and the leader RERUNS THE SERIAL
+//! ARM: exact, nothing consumed, bounded memory at every arm.
 //!
 //! Engagement layering (all cheap; absent = today's serial path, byte- and
 //! perf-identical): PGRUST_RUNTIME=1 (pool spawned) + SET
@@ -41,13 +45,14 @@
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::nodeagg::{
-    pd_concat_buckets, pd_empty_grouped_table, pd_merge_bucket, PdFeed, PdHandedTable, PdMerged,
-    PdSinkLocal, PdSpec, PD_SINK_GROUP_PARTS,
+    pd_bucket_precount, pd_concat_buckets, pd_empty_grouped_table, pd_merge_bucket_refs,
+    pd_spill_record_width, pd_table_from_spill, PdFeed, PdHandedTable, PdMerged, PdSinkLocal,
+    PdSpec, PD_SINK_GROUP_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -69,6 +74,25 @@ struct SendConstPstmt(*const PlannedStmt<'static>);
 unsafe impl Send for SendConstPstmt {}
 // SAFETY: as above; helpers only read.
 unsafe impl Sync for SendConstPstmt {}
+
+/// Per-worker sink Local: the donor `PdSinkLocal` plus the M3.5 spill face —
+/// its single-writer spill file (epochs of partition-contiguous value
+/// records), created lazily at the first budget crossing when the spill arm
+/// is enabled. Plain data between flush events; rides SEAL like everything
+/// else. `seen_null`, vocab words, and the group table itself never spill —
+/// they stay inside the `PdSinkLocal` (design §4).
+pub(super) struct DistinctSinkLocal {
+    pd: PdSinkLocal,
+    spill: Option<::spillset::SpillFile>,
+}
+
+/// A sealed Local: the frozen in-memory remainder + the (frozen) spill
+/// directory the combine pre-counts and replays from (design §4: Sealed =
+/// PdHandedTable + spill directory).
+pub(super) struct DistinctSealed {
+    table: PdHandedTable,
+    spill: Option<::spillset::SpillFile>,
+}
 
 pub(super) struct RuntimeDistinctShared {
     rt: &'static Arc<runtime::Runtime>,
@@ -94,6 +118,12 @@ pub(super) struct RuntimeDistinctShared {
     /// A worker budget crossed mid-accept: NOT an error — the RG aborts and
     /// the leader falls back to the serial arm (m2-sinks.md R5 phase 1).
     crossed: AtomicBool,
+    /// M3.5 spill arm: the engagement's spill set (None = spill disabled →
+    /// budget crossings refuse exactly as before).
+    spill_set: Option<Arc<::spillset::SpillSet>>,
+    /// Spill observability (gate-record counters, the R4 line).
+    spill_epochs: AtomicU64,
+    spilled_bytes: AtomicU64,
     /// Combine output cells, one per group partition. Single writer each:
     /// partition p is claimed exactly once by the combine task set.
     out: Vec<UnsafeCell<Option<PdMerged<'static>>>>,
@@ -151,19 +181,27 @@ impl RuntimeDistinctShared {
 // ---------------------------------------------------------------------------
 
 impl runtime::SealedParallelSink for RuntimeDistinctShared {
-    type Local = PdSinkLocal;
-    type Sealed = PdHandedTable;
+    type Local = DistinctSinkLocal;
+    type Sealed = DistinctSealed;
 
-    fn fork(&self, _worker: usize) -> PdSinkLocal {
-        PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget)
+    fn fork(&self, _worker: usize) -> DistinctSinkLocal {
+        DistinctSinkLocal {
+            pd: PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget),
+            spill: None,
+        }
     }
 
-    fn accept_local(&self, local: &mut PdSinkLocal, _worker: usize, range: runtime::MorselRange) {
+    fn accept_local(
+        &self,
+        local: &mut DistinctSinkLocal,
+        worker: usize,
+        range: runtime::MorselRange,
+    ) {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             // Already aborting: drain the claim without work.
             return;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(local, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(local, worker, range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -179,20 +217,25 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         }
     }
 
-    fn seal(&self, _worker: usize, local: PdSinkLocal) -> PdHandedTable {
+    fn seal(&self, _worker: usize, local: DistinctSinkLocal) -> DistinctSealed {
+        let DistinctSinkLocal { pd, spill } = local;
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
-            return pd_empty_grouped_table(&self.spec);
+            return DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None };
         }
-        let r = catch_unwind(AssertUnwindSafe(|| local.freeze()));
+        let r = catch_unwind(AssertUnwindSafe(|| pd.freeze()));
         match r {
-            Ok(Ok(t)) => t,
+            // freeze() sees a never-spilled builder (its `!ever_spilled`
+            // invariant holds: the M3.5 spill drains set VALUES only and
+            // never touches the builder's own Mcx-bound machinery); the
+            // spill directory rides alongside the frozen remainder.
+            Ok(Ok(t)) => DistinctSealed { table: t, spill },
             Ok(Err(e)) => {
                 self.fail(e);
-                pd_empty_grouped_table(&self.spec)
+                DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None }
             }
             Err(_panic) => {
                 self.fail(PgError::new(ERROR, "runtime distinct worker panicked in seal").into());
-                pd_empty_grouped_table(&self.spec)
+                DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None }
             }
         }
     }
@@ -201,19 +244,28 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         PD_SINK_GROUP_PARTS
     }
 
-    fn combine(&self, part: u64, sealed: &[PdHandedTable]) {
+    fn combine(&self, part: u64, sealed: &[DistinctSealed]) {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| {
-            pd_merge_bucket(&self.spec, sealed, part as usize)
-        }));
+        let r = catch_unwind(AssertUnwindSafe(|| self.combine_body(part as usize, sealed)));
         match r {
-            Ok(m) => {
+            Ok(Ok(DstCombine::Done(m))) => {
                 // SAFETY: partition `part` is handed to this claimer alone
                 // (sink contract); finalize reads happen-after every combine.
                 unsafe { *self.out[part as usize].get() = Some(m) };
             }
+            Ok(Ok(DstCombine::OverBudget)) => {
+                // Bounded-memory refusal, not an error: the merged bucket
+                // would cross the worker budget (the value-hash recursive
+                // split is the chartered inc-3b) — abort to the serial
+                // rerun, which spills through its own C-parity machinery.
+                lane_trace(
+                    "runtime-distinct: combine partition over budget (value-hash recursion pending) — serial rerun",
+                );
+                self.cross();
+            }
+            Ok(Err(e)) => self.fail(e),
             Err(_panic) => {
                 self.fail(
                     PgError::new(ERROR, "runtime distinct worker panicked in combine").into(),
@@ -222,7 +274,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         }
     }
 
-    fn finalize(&self, _sealed: &[PdHandedTable]) {
+    fn finalize(&self, _sealed: &[DistinctSealed]) {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return;
         }
@@ -234,6 +286,79 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             .collect();
         let merged = pd_concat_buckets(buckets);
         *self.merged.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
+    }
+}
+
+/// Combine verdict: `OverBudget` is the conservative directory-only refusal
+/// (M3.5 §4/§7 — nothing is read from disk before the decision).
+enum DstCombine {
+    Done(PdMerged<'static>),
+    OverBudget,
+}
+
+impl RuntimeDistinctShared {
+    /// COMBINE(part b), the M3.5 spill-aware path: pre-count b's spilled
+    /// bytes from the spill-file DIRECTORIES + the in-memory tables'
+    /// partition indexes; refuse (→ serial rerun) if the merged bucket's
+    /// estimated bytes cross the worker budget; otherwise read b's records
+    /// (open-by-name on THIS thread — the files are frozen: combine
+    /// deps-follows accept), rebuild them into merge-compatible tables
+    /// through the donor builder kernel, and run the donor bucket merge
+    /// over in-memory + synthesized tables. Set-insert idempotence makes
+    /// replay order immaterial (cross-epoch duplicates re-dedup here).
+    fn combine_body(&self, b: usize, sealed: &[DistinctSealed]) -> PgResult<DstCombine> {
+        let spilled_bytes: u64 = sealed
+            .iter()
+            .filter_map(|s| s.spill.as_ref())
+            .map(|f| f.part_len(b as u32))
+            .sum();
+        if spilled_bytes == 0 {
+            // Nothing spilled into this partition: the donor merge verbatim.
+            let refs: Vec<&PdHandedTable> = sealed.iter().map(|s| &s.table).collect();
+            return Ok(DstCombine::Done(pd_merge_bucket_refs(&self.spec, &refs, b)));
+        }
+        // Pre-count size check (M3.5 §4): spilled record count from the
+        // directory alone; in-memory groups/values from the partition
+        // indexes. Every term over-counts duplicates, so this only ever
+        // refuses conservatively. Estimate: values cost ~16B each in a
+        // merged set (i64 + probe slot), spilled values are transiently
+        // held TWICE (synth table + merged output), groups carry the
+        // fixed per-group block; 3/2 headroom on the value term.
+        let width = pd_spill_record_width(&self.spec) as u64;
+        let spilled_vals = (spilled_bytes / width) as usize;
+        let mut groups = 0usize;
+        let mut inmem_vals = 0usize;
+        for s in sealed {
+            let (g, v) = pd_bucket_precount(&self.spec, &s.table, b);
+            groups += g;
+            inmem_vals += v;
+        }
+        let per_group = self.spec.nkeys() * 8
+            + 2 * self.spec.vocab.len() * 8
+            + self.spec.sets.len() * 48
+            + 64;
+        let est = (inmem_vals + 2 * spilled_vals)
+            .saturating_mul(16)
+            .saturating_mul(3)
+            / 2
+            + groups.saturating_mul(per_group);
+        if est > self.spec.worker_budget {
+            return Ok(DstCombine::OverBudget);
+        }
+        // Read + rebuild each Local's spilled partition, then merge.
+        let ctx = ::mcx::MemoryContext::new("m35-dst-spill-read");
+        let mut synth: Vec<PdHandedTable> = Vec::new();
+        for s in sealed {
+            let Some(f) = &s.spill else { continue };
+            if let Some(mut r) = f.read_part(ctx.mcx(), b as u32)? {
+                let bytes = r.read_to_end()?;
+                r.close()?;
+                synth.push(pd_table_from_spill(&self.spec, &bytes)?);
+            }
+        }
+        let refs: Vec<&PdHandedTable> =
+            sealed.iter().map(|s| &s.table).chain(synth.iter()).collect();
+        Ok(DstCombine::Done(pd_merge_bucket_refs(&self.spec, &refs, b)))
     }
 }
 
@@ -265,13 +390,61 @@ fn mark_self_errored() {
 }
 
 /// The per-morsel accept feed: rows into the worker's `PdSinkLocal`. A
-/// budget crossing flips `crossed` and drops the remainder of the morsel
-/// (the RG is aborting; nothing is emitted anywhere).
+/// budget crossing SPILLS an epoch when the M3.5 arm is on and the shape is
+/// exactly spillable; otherwise it flips `crossed` and drops the remainder
+/// of the morsel (the RG is aborting; nothing is emitted anywhere).
 struct PdAcceptSink<'a> {
-    local: &'a mut PdSinkLocal,
+    shared: &'a RuntimeDistinctShared,
+    local: &'a mut DistinctSinkLocal,
+    worker: usize,
     tmp: EcxtId,
     reset_tmp: bool,
     crossed: bool,
+}
+
+impl PdAcceptSink<'_> {
+    /// M3.5 accept-side spill (design §4): on `PdFeed::Crossed`, write the
+    /// Local's accumulated set values to its spill file as ONE epoch —
+    /// partitions 0..255 contiguous in the freeze partition law's order,
+    /// `seen_null`/vocab/group table kept in memory — then reset the sets'
+    /// values so accept continues bounded. `Ok(false)` = refused (arm off,
+    /// or a shape/economics face we cannot spill exactly): the caller falls
+    /// through to the phase-1 Crossed abort, fail-closed.
+    fn try_spill_epoch(&mut self) -> PgResult<bool> {
+        let Some(set) = &self.shared.spill_set else { return Ok(false) };
+        let DistinctSinkLocal { pd, spill } = &mut *self.local;
+        if !pd.pd_spill_eligible() {
+            return Ok(false);
+        }
+        // Worthwhileness (fail-closed): a group-table-dominated crossing
+        // cannot be helped by value spill — the epoch must move a
+        // meaningful fraction of the budget to disk or the arm refuses.
+        let budget = self.shared.spec.worker_budget;
+        if pd.pd_spill_value_bytes() < budget / 4 {
+            return Ok(false);
+        }
+        let file = spill.get_or_insert_with(|| {
+            ::spillset::SpillFile::new(
+                Arc::clone(set),
+                ::spillset::SpillSet::file_name("dst", 0, self.worker),
+                PD_SINK_GROUP_PARTS as u32,
+            )
+        });
+        let before = file.spilled_bytes();
+        // Open-per-event on the owning worker thread (§2 amendment): the
+        // BufFile handle lives inside this flush event alone. Values reset
+        // only after the epoch COMMITS — an error path loses nothing.
+        let ctx = ::mcx::MemoryContext::new("m35-dst-spill-write");
+        let mut w = file.begin_epoch(ctx.mcx())?;
+        pd.pd_spill_emit(&mut |p, bytes| w.write_part(p, bytes))?;
+        w.finish()?;
+        pd.pd_spill_reset_values();
+        self.shared.spill_epochs.fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .spilled_bytes
+            .fetch_add(file.spilled_bytes() - before, Ordering::Relaxed);
+        Ok(true)
+    }
 }
 
 impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
@@ -283,11 +456,11 @@ impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
         if self.crossed {
             return Ok(SinkFeed::NeedMore);
         }
-        let crossed = self.local.accept(estate, tuple, self.tmp)? == PdFeed::Crossed;
+        let crossed = self.local.pd.accept(estate, tuple, self.tmp)? == PdFeed::Crossed;
         if self.reset_tmp {
             estate.reset_expr_context(self.tmp);
         }
-        if crossed {
+        if crossed && !self.try_spill_epoch()? {
             self.crossed = true;
         }
         Ok(SinkFeed::NeedMore)
@@ -301,7 +474,12 @@ impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
 impl<'mcx> BatchSink<'mcx> for PdAcceptSink<'_> {}
 
 impl RuntimeDistinctShared {
-    fn morsel_body(&self, local: &mut PdSinkLocal, range: runtime::MorselRange) -> PgResult<()> {
+    fn morsel_body(
+        &self,
+        local: &mut DistinctSinkLocal,
+        worker: usize,
+        range: runtime::MorselRange,
+    ) -> PgResult<()> {
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -327,8 +505,14 @@ impl RuntimeDistinctShared {
                             "runtime distinct worker scan is not cbstore",
                         )));
                     }
-                    let mut sink =
-                        PdAcceptSink { local, tmp, reset_tmp, crossed: false };
+                    let mut sink = PdAcceptSink {
+                        shared: self,
+                        local,
+                        worker,
+                        tmp,
+                        reset_tmp,
+                        crossed: false,
+                    };
                     let fed = drain_pipeline(
                         ss,
                         &mut SeqScanSource,
@@ -537,6 +721,14 @@ fn runtime_distinct_enabled() -> bool {
     })
 }
 
+/// M3.5 spill arm kill switch: ON by default when the sink engages
+/// (refusal→engagement is the charter); `PGRUST_RUNTIME_DISTINCT_SPILL=0`
+/// restores the phase-1 budget refusal exactly.
+fn distinct_spill_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
+}
+
 // ---------------------------------------------------------------------------
 // Leader-side engagement.
 // ---------------------------------------------------------------------------
@@ -720,6 +912,22 @@ fn engage<'mcx>(
     // into their PdBuilder Locals — no Agg, no Sort).
     let pstmt = crate::execparallel::build_worker_pstmt(estate, scan_node)?;
 
+    // M3.5 spill arm: ON by default when the sink engages (the
+    // refusal→engagement charter); PGRUST_RUNTIME_DISTINCT_SPILL=0 restores
+    // the phase-1 refusal exactly. SpillSet creation is leader-side (fd
+    // substrate guaranteed); a creation failure fail-closes to refusal.
+    let spill_set = if distinct_spill_enabled() {
+        match ::spillset::SpillSet::create() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                lane_trace("runtime-distinct: spill set creation failed — spill disarmed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let payload = Arc::new(RuntimeDistinctShared {
         rt,
         rg: OnceLock::new(),
@@ -740,6 +948,9 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         crossed: AtomicBool::new(false),
+        spill_set,
+        spill_epochs: AtomicU64::new(0),
+        spilled_bytes: AtomicU64::new(0),
         out: (0..PD_SINK_GROUP_PARTS as usize).map(|_| UnsafeCell::new(None)).collect(),
         merged: Mutex::new(None),
     });
@@ -895,6 +1106,14 @@ fn engage_ceremony<'mcx>(
                 )));
             };
             stats::tick_owned(ShapeClass::AggBuild);
+            let spill_epochs = payload.spill_epochs.load(Ordering::Relaxed);
+            if spill_epochs > 0 {
+                // The R4 spill-rate observability line (e2e + gate records).
+                lane_trace(&format!(
+                    "runtime-distinct: SPILLED epochs={spill_epochs} bytes={}",
+                    payload.spilled_bytes.load(Ordering::Relaxed)
+                ));
+            }
             lane_trace(&format!(
                 "runtime-distinct: complete, groups={}",
                 merged.ngroups
