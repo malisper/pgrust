@@ -1064,7 +1064,12 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
 pub fn seq_scan_batch_gather_dict(node: &mut SeqScanState<'_>, c: usize) {
     if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
         if let Some(b) = node.batch_soa.as_deref_mut() {
-            gather_or_len(sd, &mut b.soa, c);
+            // The expr-key feed's consumers read SELECTED rows only
+            // (`xk.rows` off the armed bitmap) — the PREWHERE stale-cell
+            // contract; narrow lazy dict ensures to them when armed.
+            let sel = (b.qual_armed && !b.lane_requal && b.nwords > 0)
+                .then(|| &b.sel[..b.nwords as usize]);
+            gather_or_len(sd, &mut b.soa, c, sel);
         }
     }
 }
@@ -1079,9 +1084,15 @@ fn gather_or_len(
     scandesc: &mut ::tableam::TableScanDesc<'_>,
     soa: &mut ::exectuples::SoaBatch<'_>,
     c: usize,
+    sel: Option<&[u64]>,
 ) {
     match soa.len_want(c) {
-        0 => soa.gather_dict_lane(c),
+        0 => match sel {
+            // PREWHERE stale-cell contract: lazy sub-framed dicts ensure
+            // selected rows only (identical cell writes).
+            Some(sel) => soa.gather_dict_lane_sel(c, sel),
+            None => soa.gather_dict_lane(c),
+        },
         k => {
             ::tableam::table_scan_batch_fill_len(
                 scandesc,
@@ -1925,10 +1936,25 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 if cond_hit {
                     b.soa.begin(n);
                     if !b.bits_only && b.sel[..nwords].iter().any(|&w| w != 0) {
-                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        // Survivor-window COMPLETING deform: the armed lane
+                        // owns the qual, consumers read SELECTED rows only
+                        // (stale-cell contract) — lazy sub-framed dicts
+                        // ensure survivors' codes only.
+                        ::tableam::table_scan_batch_deform_sel(
+                            scandesc,
+                            &b.plan,
+                            &mut b.soa,
+                            None,
+                            Some(&b.sel[..nwords]),
+                        );
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }
@@ -1972,10 +1998,23 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                         // re-answer as lanes and gather below — except a
                         // registered dict-code consumer's column, whose
                         // codes the dict-group feed reads directly).
-                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        // Lazy sub-framed dicts ensure SELECTED rows only
+                        // (the armed lane's stale-cell contract).
+                        ::tableam::table_scan_batch_deform_sel(
+                            scandesc,
+                            &b.plan,
+                            &mut b.soa,
+                            None,
+                            Some(&b.sel[..nwords]),
+                        );
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }
@@ -1986,9 +2025,16 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                     // the Raw cells); every other consumer gathers exactly
                     // as before.
                     if !b.bits_only {
+                        // Post-eval gather: sel is decided — lazy sub-framed
+                        // dicts ensure selected rows only.
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }

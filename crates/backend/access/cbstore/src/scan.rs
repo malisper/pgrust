@@ -1580,6 +1580,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         ncols: usize,
         soa: &mut ::exectuples::SoaBatch<'_>,
         qual_col_only: Option<u16>,
+        sel: Option<&[u64]>,
     ) {
         let n = self.staged_rows;
         soa.begin(n as u32);
@@ -1598,7 +1599,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             if !soa.lane_fill_wanted(c) {
                 continue;
             }
-            self.batch_deform_col(c, soa);
+            self.batch_deform_col_sel(c, soa, sel);
         }
     }
 
@@ -1606,6 +1607,21 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// this per clause so undeformed clauses' columns never decode; the
     /// caller owns soa.begin and the needed/fill-mask checks.
     pub fn batch_deform_col(&mut self, c: usize, soa: &mut ::exectuples::SoaBatch<'_>) {
+        self.batch_deform_col_sel(c, soa, None)
+    }
+
+    /// `batch_deform_col` under an optional PREWHERE selection (the
+    /// COMPLETING deform of survivor windows — `seq_scan_batch_lane_armed`'s
+    /// stale-cell contract: consumers read SELECTED rows only). `sel` only
+    /// narrows the lazy sub-framed dict ENSURE set to selected rows' codes;
+    /// every cell write (pointers included) is identical to the plain path,
+    /// and unframed dicts are entirely unaffected.
+    pub fn batch_deform_col_sel(
+        &mut self,
+        c: usize,
+        soa: &mut ::exectuples::SoaBatch<'_>,
+        sel: Option<&[u64]>,
+    ) {
         debug_assert!(self.needed[c]);
         let n = self.staged_rows;
         self.ensure_col(c);
@@ -1677,12 +1693,28 @@ impl<'mcx> CbScanDescData<'mcx> {
             // a lazy sub-framed dict ensures each gathered code's bytes
             // here (all-done tables take the plain loop).
             match &cd.lazy {
-                Some(l) if !l.all_done() => {
-                    for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
-                        l.ensure_code(code);
-                        *out = cd.dict[code as usize];
+                Some(l) if !l.all_done() => match sel {
+                    // PREWHERE completing deform: ensure SELECTED rows'
+                    // codes only (unselected cells hold valid pointers to
+                    // possibly-unmaterialized bytes — never read under the
+                    // armed batch's stale-cell contract).
+                    Some(sel) => {
+                        for (i, (out, &code)) in
+                            soa.col_values_mut(c).iter_mut().zip(codes).enumerate()
+                        {
+                            if sel.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) {
+                                l.ensure_code(code);
+                            }
+                            *out = cd.dict[code as usize];
+                        }
                     }
-                }
+                    None => {
+                        for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
+                            l.ensure_code(code);
+                            *out = cd.dict[code as usize];
+                        }
+                    }
+                },
                 _ => {
                     for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
                         *out = cd.dict[code as usize];
