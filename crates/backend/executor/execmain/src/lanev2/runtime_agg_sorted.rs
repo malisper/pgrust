@@ -472,8 +472,10 @@ fn drive_claim<'mcx>(
                 if rows[..nwords].iter().any(|&w| w != 0) {
                     // SAFETY: proof rows are staged non-fallback selected
                     // rows with live deformed lane values (the completing
-                    // deform filled every prefix column; vguard columns are
-                    // structurally absent — admission).
+                    // deform filled every prefix column, vguard columns
+                    // included — the staging prefix chains plan.vguards;
+                    // len-staged columns skip their proofs inside
+                    // check_guards).
                     let demote = unsafe {
                         ::lanefold::check_guards(plan, soa, &rows[..nwords], |c| {
                             zmm[..nz].iter().find(|e| e.0 == c).map(|e| e.1)
@@ -814,12 +816,15 @@ fn arm_sorted_build<'mcx>(
 /// vguards and no residuals, every transition runtime-partial combinable.
 fn sorted_arm_shape_ok(agg: &::nodeagg::AggStateData<'_>) -> bool {
     ::nodeagg::agg_sorted_fold_admissible(agg)
-        // GUARDED plans admit (the real q28 class — charlen mb guard):
-        // the claim drive re-proves guards per window from zone answers
-        // and REFUSES on Demote (no checked per-row program exists here).
-        // vguards (str min/max varlena guards) and residuals still refuse.
-        && ::nodeagg::agg_lanefold_plan(agg)
-            .is_some_and(|p| p.vguards.is_empty() && p.resid.is_empty())
+        // GUARDED plans admit — including vguard/uguard (varlena inline-form
+        // + UTF-8 countability) obligations, which EVERY length/str lane
+        // carries (the real q28's avg(length(URL)) class): the claim drive
+        // runs the serial fold's exact `check_guards` per window (len-staged
+        // columns skip their proofs there) and REFUSES fail-closed on a
+        // Demote verdict (no checked per-row program exists in the narrow
+        // drive). Residual transitions still refuse; str/bp/f min-max kinds
+        // refuse through the runtime-partial admission below.
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.resid.is_empty())
         && !::nodeagg::agg_lanefold_has_resid(agg)
         && ::nodeagg::runtime_partial::agg_runtime_partial_admissible(agg)
 }
@@ -1019,9 +1024,7 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         if !::nodeagg::agg_sorted_fold_admissible(agg) {
             refuse("sorted fold shape (fold admission)");
         } else if let Some(p) = ::nodeagg::agg_lanefold_plan(agg) {
-            if !p.vguards.is_empty() {
-                refuse("sorted fold shape (vguards)");
-            } else if !p.resid.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
+            if !p.resid.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
                 refuse("sorted fold shape (residual transitions)");
             } else {
                 refuse("sorted fold shape (runtime-partial kinds)");
