@@ -6996,6 +6996,22 @@ fn distincthash_fold_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_SPAN` kill switch (default ON): the span
+/// form of the batched fast leg — one nodeagg call per staged run with the
+/// loop-invariant state hoisted and no per-row group switch
+/// (`agg_hashgroup_accept_batch_span`). Off, the per-row
+/// `agg_hashgroup_accept_batch_row` loop stands — the A/B attribution
+/// channel for the span delta; results are byte-identical either way.
+fn distincthash_span_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_SPAN").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -7194,6 +7210,65 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             ::postgres_seams::check_for_interrupts::call()?;
             let nk = cols.key_cols.len();
             let na = cols.arg_cols.len();
+            // Span form (default): one nodeagg call per run of fast-hosted
+            // rows — hoisted state, no per-row switch, no marshaling. The
+            // per-row loop below is the SPAN=0 control (byte-identical).
+            if distincthash_span_enabled() {
+                let mut i = pos;
+                while i < n && !self.degraded {
+                    // SAFETY: per the snapshot contract above — every view
+                    // spans `n` staged rows and the window is stable for
+                    // the whole batch; fb/selw cover bit n-1.
+                    let stop = unsafe {
+                        ::nodeagg::agg_hashgroup_accept_batch_span(
+                            self.agg,
+                            &views,
+                            na,
+                            selw.as_ref().map(|s| &s[..]),
+                            &fb,
+                            i,
+                            n,
+                        )
+                    };
+                    match stop {
+                        ::nodeagg::HgSpanStop::Done { absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            i = n;
+                        }
+                        ::nodeagg::HgSpanStop::NeedSlot { at, absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            self.slow_rows += 1;
+                            // Probe miss / forced fallback: materialize the
+                            // row and run the per-row accept (byte-identical
+                            // creation order + rep bytes).
+                            if let Some(slot) = emit.emit(at, estate)? {
+                                self.accept(slot, estate)?;
+                            }
+                            i = at + 1;
+                        }
+                        ::nodeagg::HgSpanStop::Budget { at, absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            self.degrade_impl(estate)?;
+                            i = at + 1;
+                        }
+                    }
+                }
+                // Post-degrade remainder: the exact per-row path.
+                for j in i..n {
+                    let w = (j / 64) as usize;
+                    let bit = 1u64 << (j % 64);
+                    if let Some(s) = &selw {
+                        if s[w] & bit == 0 {
+                            continue; // qual-filtered
+                        }
+                    }
+                    self.slow_rows += 1;
+                    if let Some(slot) = emit.emit(j, estate)? {
+                        self.accept(slot, estate)?;
+                    }
+                }
+                return Ok(());
+            }
             let mut keyd = [::datum::Datum::null(); 32];
             let mut keyn = [false; 32];
             let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
