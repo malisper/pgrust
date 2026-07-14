@@ -184,6 +184,101 @@ fn skipmap_source_contract() {
     assert!(!src.skipsallvis());
 }
 
+/// Independent reference for the inc-2 partial-commit surface: the same
+/// cursor transcription as [`reference_scan`], additionally recording each
+/// COMMITTED skip (>= threshold) as (position in emitted-granule space,
+/// had-av-not-af).
+fn reference_skip_positions(p: &SkipMapParams, vmap: &[u8]) -> Vec<(u64, bool)> {
+    let vm = |b: u32| vmap.get(b as usize).copied().unwrap_or(0);
+    let mut positions = Vec::new();
+    let mut emitted = 0u64;
+    let mut next_block = p.resume_block;
+    while next_block < p.rel_pages {
+        let mut b = next_block;
+        let mut skipsallvis = false;
+        let next_unskippable = loop {
+            let status = vm(b);
+            let av = status & VM_ALL_VISIBLE != 0;
+            let af = status & VM_ALL_FROZEN != 0;
+            if b == p.rel_pages - 1 || !p.skipwithvm || !av {
+                break b;
+            }
+            if !af {
+                if p.aggressive {
+                    break b;
+                }
+                skipsallvis = true;
+            }
+            b += 1;
+        };
+        if next_unskippable - next_block >= SKIP_PAGES_THRESHOLD {
+            positions.push((emitted, skipsallvis));
+            next_block = next_unskippable;
+        }
+        emitted += (next_unskippable - next_block) as u64 + 1; // short run + the unskippable block
+        next_block = next_unskippable + 1;
+    }
+    positions
+}
+
+#[test]
+fn skipsallvis_partial_commit_matches_reference() {
+    // Crafted: av run / plain gap / av run / plain tail — resume points
+    // below, between, and above the two committed runs.
+    let mut vm = vec![0u8; 2];
+    vm.extend(vec![AV; 40]); // run 1 (av-not-af), position 2
+    vm.extend(vec![0u8; 3]);
+    vm.extend(vec![AF; 40]); // run 2 (frozen — never commits skipsallvis)
+    vm.extend(vec![AV; 40]); // run 3 (av-not-af), same maximal run as run 2
+    vm.extend(vec![0u8; 3]);
+    let p = params(vm.len() as u32, 0, false, true);
+    let src = VacuumBlockSource::build(&p, |b| vm[b as usize]);
+    let positions = reference_skip_positions(&p, &vm);
+    let total = src.entries().len() as u64;
+    for r in 0..=total {
+        let expect = positions.iter().any(|&(pos, av)| av && r >= pos);
+        assert_eq!(
+            src.skipsallvis_before(r),
+            expect,
+            "partial commit diverged at resume {r} (positions {positions:?})"
+        );
+    }
+    assert_eq!(src.skipsallvis_before(total), src.skipsallvis());
+    // Monotone in the resume bound (more consumed decisions never un-commit).
+    let mut prev = false;
+    for r in 0..=total {
+        let v = src.skipsallvis_before(r);
+        assert!(v >= prev);
+        prev = v;
+    }
+}
+
+#[test]
+fn skipsallvis_partial_commit_seeded_sweep() {
+    let mut rng = Rng::new(0x5eed_beef);
+    for _ in 0..1500 {
+        let rel_pages = rng.below(180) as u32;
+        let vmap: Vec<u8> = (0..rel_pages)
+            .map(|_| match rng.below(10) {
+                0..=3 => AF,
+                4..=6 => AV,
+                7 => VM_ALL_FROZEN,
+                _ => 0,
+            })
+            .collect();
+        let resume = if rel_pages == 0 { 0 } else { rng.below(rel_pages as u64 + 1) as u32 };
+        let p = params(rel_pages, resume, rng.chance(30), rng.chance(85));
+        let src = VacuumBlockSource::build(&p, |b| vmap.get(b as usize).copied().unwrap_or(0));
+        let positions = reference_skip_positions(&p, &vmap);
+        let total = src.entries().len() as u64;
+        for r in [0, total / 2, total.saturating_sub(1), total] {
+            let expect = positions.iter().any(|&(pos, av)| av && r >= pos);
+            assert_eq!(src.skipsallvis_before(r), expect, "{p:?} vm={vmap:?} r={r}");
+        }
+        assert_eq!(src.skipsallvis_before(total), src.skipsallvis());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. Fold determinism
 // ---------------------------------------------------------------------------
