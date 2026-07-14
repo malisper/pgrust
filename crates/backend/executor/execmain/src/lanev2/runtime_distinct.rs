@@ -660,16 +660,30 @@ impl PdAcceptSink<'_> {
     /// or a shape/economics face we cannot spill exactly): the caller falls
     /// through to the phase-1 Crossed abort, fail-closed.
     fn try_spill_epoch(&mut self) -> PgResult<bool> {
-        let Some(set) = &self.shared.spill_set else { return Ok(false) };
+        // Every refusal below names its branch on the trace channel (the agg
+        // arm's refuse(why) pattern — inc-3a followup: the battery -82184
+        // fail-closed was invisible without a reason line).
+        let Some(set) = &self.shared.spill_set else {
+            trace_feed("runtime-distinct: spill refused (arm off / no spill set)");
+            return Ok(false);
+        };
         let DistinctSinkLocal { pd, spill } = &mut *self.local;
         if !pd.pd_spill_eligible() {
+            trace_feed("runtime-distinct: spill refused (shape not spill-eligible)");
             return Ok(false);
         }
         // Worthwhileness (fail-closed): a group-table-dominated crossing
-        // cannot be helped by value spill — the epoch must move a
-        // meaningful fraction of the budget to disk or the arm refuses.
+        // cannot be helped by value spill — the epoch must RELEASE a
+        // meaningful fraction of the budget or the arm refuses. The yardstick
+        // is the capacity bytes the flush frees (`spill_freeable_bytes` =
+        // total set memory; the reset shrinks the sets), NOT the value
+        // payload: crossings land right after capacity doublings, where
+        // payload is only ~1/6..1/3 of set memory and a payload-based gate
+        // deterministically refused legitimate value-dominated shapes (the
+        // q9-class lockstep corpus; see the PdBuilder doc).
         let budget = self.shared.spec.worker_budget;
-        if pd.pd_spill_value_bytes() < budget / 4 {
+        if pd.pd_spill_freeable_bytes() < budget / 4 {
+            trace_feed("runtime-distinct: spill refused (group-table-dominated crossing)");
             return Ok(false);
         }
         let file = spill.get_or_insert_with(|| {
