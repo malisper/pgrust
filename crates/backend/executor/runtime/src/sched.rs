@@ -294,6 +294,7 @@ impl Scheduler {
     ) {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let c0 = rg.tasksets[index].source.startup_c0();
+        let whole_claims = rg.tasksets[index].source.whole_boundary_claims();
         let ts = Arc::new(TaskSetRt {
             rg,
             index,
@@ -305,6 +306,7 @@ impl Scheduler {
             fin_counter: crate::sync::atomic::AtomicI64::new(0),
             finalized: AtomicBool::new(false),
             c0,
+            whole_claims,
         });
         self.trace(&format!(
             "publish rg {} taskset {} in slot {slot} seq {seq}",
@@ -572,7 +574,16 @@ impl Scheduler {
             // never cross a row-group / dictionary-epoch boundary.
             let bound = ts.source().next_boundary_after(cur).min(total);
             debug_assert!(bound > cur, "MorselSource boundary contract violated");
-            let end = cur.saturating_add(want).min(bound).max(cur + 1);
+            // Whole-boundary claims (drive-scaling inc-2): epoch-heavy
+            // sources never stop a claim short of the boundary — a split
+            // epoch is executed by 2+ workers, each rebuilding the epoch's
+            // dictionary/memo state (the measured q21 DOP15 +78% busy
+            // inflation). The sizer still observes for phase/stats.
+            let end = if ts.whole_claims {
+                bound
+            } else {
+                cur.saturating_add(want).min(bound).max(cur + 1)
+            };
             if ts
                 .cursor
                 .compare_exchange(cur, end, Ordering::SeqCst, Ordering::SeqCst)

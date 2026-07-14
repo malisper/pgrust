@@ -866,8 +866,26 @@ impl runtime::MorselSource for CbstoreGranuleSource {
     /// Granules are 8,192 rows — large against Umbra's 16-tuple C0. Seed the
     /// ramp at 2 granules (~16K rows, tens of µs on fold shapes): one probe
     /// morsel sizes the pipeline without a giant first claim on tiny scans.
+    /// (Inert under whole_boundary_claims below; kept for the kill switch.)
     fn startup_c0(&self) -> u64 {
         2
+    }
+
+    /// Row group == dictionary epoch: a claim that stops short of the RG
+    /// edge hands the rest of the RG to another worker, which rebuilds the
+    /// RG's dictionary (LZ4 blob decompress) and refills every per-epoch
+    /// lane memo (dict-eval predicate sweep) — measured on q21@10M as the
+    /// entire runtime-vs-armed drive-phase gap (WFIN decomposition,
+    /// notes/runtime-drive-scaling.md: dict_builds 153→243, busy +78% at
+    /// DOP15; the armed arm claims whole RGs and scales 13x). Whole-RG
+    /// claims are ~8 granules ≈ ~1.2ms on q21-class kernels — the same
+    /// cancel/photo-finish granularity the armed arm already ships.
+    /// PGRUST_RUNTIME_SPLIT_CLAIMS=1 restores sizer-truncated claims (A/B).
+    fn whole_boundary_claims(&self) -> bool {
+        static SPLIT: OnceLock<bool> = OnceLock::new();
+        !*SPLIT.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
+        })
     }
 }
 
