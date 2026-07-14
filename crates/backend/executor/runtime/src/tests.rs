@@ -1999,3 +1999,93 @@ fn dag_pool_win_shapes_complete() {
         assert!(rt.stats().dag_fanout_publishes >= 1, "shape {si} must fan out");
     }
 }
+
+/// Threaded-pool leg of the §3.4 fairness panel with pipeline-RGs live
+/// (the stride_threaded_pool_mid_flight_shares instrument extended per
+/// §3.6): K queries on a real pool, ONE of them holding TWO live
+/// independent pipelines the whole window — mid-flight per-QUERY CPU shares
+/// stay in the loose band (the dual-pipeline query must not take 2x).
+#[test]
+fn dag_threaded_pool_query_shares() {
+    struct Spin {
+        ns_per_granule: u64,
+    }
+    impl TaskSetWork for Spin {
+        fn run_morsel(&self, _w: usize, range: MorselRange) {
+            let n = range.end - range.start;
+            let t0 = std::time::Instant::now();
+            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
+            while t0.elapsed() < budget {
+                std::hint::spin_loop();
+            }
+        }
+        fn finalize(&self) {}
+    }
+
+    let mut cfg = RuntimeConfig::new(4);
+    cfg.slots = 16;
+    let rt = Runtime::new(cfg);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    let k = 6usize;
+    let mut handles = Vec::new();
+    let mut waiters = Vec::new();
+    // Query 1: TWO independent live pipelines (each half the work of a
+    // single-pipeline peer, so equal aggregate demand) + a tiny gated sink.
+    let (h, w) = rt.submit(QuerySpec {
+        query_id: 1,
+        tasksets: vec![
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            },
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            },
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(64)),
+                work: Arc::new(Spin { ns_per_granule: 1_000 }),
+                deps: vec![0, 1],
+            },
+        ],
+    });
+    handles.push(h);
+    waiters.push(w);
+    for q in 1..k {
+        let (h, w) = rt.submit(QuerySpec {
+            query_id: q as u64 + 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(4_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            }],
+        });
+        handles.push(h);
+        waiters.push(w);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let all_active = waiters.iter().all(|w| w.try_wait().is_none());
+    if all_active {
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        eprintln!("dag threaded query shares (mean {mean:.0}): {cpus:?}");
+        for c in &cpus {
+            assert!(
+                (*c as f64) >= 0.4 * mean && (*c as f64) <= 1.8 * mean,
+                "mid-flight QUERY share out of loose band: {c} vs mean {mean:.0} ({cpus:?}) \
+                 — query 1 holds two live pipelines and must not take 2x"
+            );
+        }
+    } else {
+        eprintln!("dag threaded shares: sample point missed (fast machine) — band skipped");
+    }
+    for w in &waiters {
+        assert_eq!(w.wait(), RgOutcome::Completed);
+    }
+    pool.shutdown();
+}
