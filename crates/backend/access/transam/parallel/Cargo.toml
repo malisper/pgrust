@@ -34,6 +34,7 @@ xact = { path = "../xact" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
 bgworker = { path = "../../../postmaster/bgworker" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 procsignal = { path = "../../../storage/ipc/procsignal" }
 latch = { path = "../../../storage/ipc/latch" }
 shm_mq = { path = "../../../storage/ipc/shm_mq" }

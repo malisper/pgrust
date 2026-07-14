@@ -326,6 +326,15 @@ pub fn apply_config_variables(
 
     if apply_settings {
         set_pg_reload_time(timestamp_seams::get_current_timestamp::call());
+        // This thread has now consumed the reload (C parity: backends run
+        // this between statements): adopt the current process-wide base as
+        // its started-with view. The postmaster publishes the new base
+        // BEFORE signaling children (process_pm_reload_request), so a
+        // backend's pass adopts the post-reload base; the postmaster's own
+        // pass runs pre-publish and its session base is unused.
+        if context == PGC_SIGHUP {
+            crate::layers::adopt_current_base();
+        }
     }
 
     bail_out(context, elevel, error, applying, apply_settings, conf_file_with_error)
