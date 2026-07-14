@@ -209,6 +209,101 @@ fn class_covered(class: CoverClass) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// M5-5 engagement-floor guards (the living matrix's floor values; measured
+// on the crossover ladder + DOP sweep, notes/m5-5-floors.md — jobs @
+// 2159563ff (rows ∈ 100k..5M, dop4) and 37decba75 (5M×dop8/16, 2.5M×dop16),
+// fast-profile, medians of 5). Admission ECONOMICS the probe applies before
+// suppressing Gather: outside a class's guard the plan keeps Gather, so
+// engine=runtime routes the shape to legacy (or the planner's natural
+// serial choice) — every guarded-off point was measured at parity, every
+// guarded-on point within 5% of best(legacy, serial) or winning.
+// min_dop is 12, not 16: the winning point was MEASURED at dop16 and dop8
+// loses only mildly (1.06–1.13x); 12–15 is interpolated — and the auto-DOP
+// clamp on 15-CPU fleet pods must clear the floor (a 16 floor would flap
+// on cores-1 boxes).
+// ---------------------------------------------------------------------------
+
+struct FloorGuard {
+    /// Below this estimated row count the arm cannot pay back engagement
+    /// (or its own executor floor refuses and the serial fallback loses to
+    /// legacy Gather) — keep Gather.
+    min_rows: f64,
+    /// Above this the LEGACY parallel machinery (PHJ / partial agg) beats
+    /// the arm at every measured DOP — keep Gather.
+    max_rows: f64,
+    /// Heap block floor (mirrors the rowdrive arm's
+    /// PGRUST_RUNTIME_ROWDRIVE_MIN_BLOCKS=8192 default, runtime_scan.rs:
+    /// suppressing below it measured 1.08–1.41x serial-fallback losses).
+    min_pages: f64,
+    /// DOP-shaped classes: suppress below `min_dop` only when rows ≤
+    /// `low_dop_max_rows` (the measured low-DOP win region, if any).
+    min_dop: i32,
+    low_dop_max_rows: f64,
+}
+
+const NO_GUARD: FloorGuard = FloorGuard {
+    min_rows: 0.0,
+    max_rows: f64::INFINITY,
+    min_pages: 0.0,
+    min_dop: 0,
+    low_dop_max_rows: f64::INFINITY,
+};
+
+fn class_guard(class: CoverClass) -> FloorGuard {
+    match class {
+        // dop4: 1.21–1.26x ≥2.5M (WIN 0.34 at 1M); dop8 1.10; dop16
+        // 0.89–1.04.
+        CoverClass::CbPlainAggFold => {
+            FloorGuard { min_dop: 12, low_dop_max_rows: 1_500_000.0, ..NO_GUARD }
+        }
+        // Wins everywhere engaged (0.49–0.76 at every measured point).
+        CoverClass::CbGroupedAggIntKeys => NO_GUARD,
+        // dop4@5M 1.60 / dop8@5M 1.24 (legacy partial-agg dedup wins at
+        // this text NDV); dop16 0.95–1.05; dop4 wins ≤2.5M (0.60–0.78).
+        CoverClass::CbGroupedAggTextKey => {
+            FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+        }
+        // Wins everywhere engaged (0.34–0.85).
+        CoverClass::CbGroupedAggTopN => NO_GUARD,
+        // dop4 1.21–1.24 at every engaged size; dop8 1.06; dop16 0.79–0.90.
+        CoverClass::CbDistinctIntKeys => {
+            FloorGuard { min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
+        }
+        // Suppressing below the rowdrive 64MB block floor measured
+        // 1.08–1.41x (arm refuses, serial fallback loses to Gather);
+        // above it the arm WINS 0.27–0.37 at every DOP.
+        CoverClass::HeapPlainCountStar => FloorGuard { min_pages: 8192.0, ..NO_GUARD },
+        // 1.13–1.39x at dop4/8 at EVERY size (the arm engages even at
+        // 100k); dop16 wins 0.73–0.76 (≥2.5M measured; 1M floor is the
+        // unmeasured-corner conservatism).
+        CoverClass::HeapCmpFoldPrefix => {
+            FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
+        }
+        // GUARDED OFF (max_rows=0): 4.30–8.00x vs legacy at EVERY measured
+        // (size, dop) — rt grows with size (11→44ms vs serial 4.3→10.1),
+        // refuting the fixed-ceremony theory; this is sort-arm parallel
+        // economics, the named follow-up. PGRUST_M5_SIZE_FLOORS=0
+        // re-enables suppression for the measure vehicle.
+        CoverClass::CbTopnBoundedIntKeys => FloorGuard { max_rows: 0.0, ..NO_GUARD },
+        // Wins ≤1M (0.41 vs serial-shaped legacy); loses 1.39–1.50x once
+        // legacy PHJ engages ≥2.5M at dop≤8, and 1.14 even at dop16@5M
+        // (dop16@2.5M's 0.92 marginal win is deliberately forgone for the
+        // clean single bound).
+        CoverClass::CbHashJoinPlainAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
+        // Footer answers are O(1) — never floored.
+        CoverClass::CbMetaFooterAgg => NO_GUARD,
+    }
+}
+
+/// M5-5 floors kill switch: PGRUST_M5_SIZE_FLOORS=0 disables every guard.
+/// The rowflip measure vehicle runs floors-off so engagement economics
+/// stay measurable at any (size, dop); production default ON.
+fn size_floors_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_M5_SIZE_FLOORS").map_or(true, |v| v.trim() != "0"))
+}
+
+// ---------------------------------------------------------------------------
 // Whitelists (pg_proc OIDs of record, verified against the vendored
 // REL 18.3 pg_proc.dat) and type keys.
 // ---------------------------------------------------------------------------
@@ -423,6 +518,8 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     };
     let is_cb = run.root.rel(rel_id).amflags & AMFLAG_CBSTORE != 0;
+    let rel_rows = run.root.rel(rel_id).rows.max(0.0);
+    let rel_pages = f64::from(run.root.rel(rel_id).pages);
     let has_quals = top.quals.is_some();
 
     // --- plain SELECT DISTINCT: UNKEYED (m5-integration-r2 re-key) ---------
@@ -462,7 +559,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                     return Ok(false);
                 }
             }
-            return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0);
+            return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
         }
         return Ok(false);
     }
@@ -471,7 +568,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // Plain aggregation, one output row.
         if is_cb {
             if tlist_all_whitelisted_aggs(parse, rti, PLAIN_FOLD_AGGS) {
-                return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0);
+                return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages);
             }
             // Meta-over-Gather (M5-5, the band-2a q30 handoff): the residual
             // plain-agg shapes the Meta footer arm answers — affine int
@@ -482,7 +579,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 && parse.sortClause.is_nil()
                 && tlist_all_meta_footer_aggs(parse, rti)
             {
-                return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0);
+                return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0, rel_rows, rel_pages);
             }
             return Ok(false);
         }
@@ -492,10 +589,10 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(false);
         }
         if is_bare_count_star(parse) {
-            return finish(run, CoverClass::HeapPlainCountStar, rte.relid, 1.0);
+            return finish(run, CoverClass::HeapPlainCountStar, rte.relid, 1.0, rel_rows, rel_pages);
         }
         if tlist_all_whitelisted_aggs(parse, rti, HEAP_CMP_AGGS) {
-            return finish(run, CoverClass::HeapCmpFoldPrefix, rte.relid, 1.0);
+            return finish(run, CoverClass::HeapCmpFoldPrefix, rte.relid, 1.0, rel_rows, rel_pages);
         }
         return Ok(false);
     }
@@ -610,7 +707,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         CoverClass::CbGroupedAggIntKeys
     };
-    finish(run, class, rte.relid, ngroups)
+    finish(run, class, rte.relid, ngroups, rel_rows, rel_pages)
 }
 
 /// Row flip 2 (CbHashJoinPlainAgg): plain whitelisted aggregation over one
@@ -683,6 +780,7 @@ fn classify_join_sides(
         return refuse_join("not a plain one-row aggregation");
     }
     let mut relids = [0u32; 2];
+    let mut max_rows = 0.0f64;
     for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
             return refuse_join("side not a plain RTE");
@@ -702,6 +800,7 @@ fn classify_join_sides(
         if rel.amflags & AMFLAG_CBSTORE == 0 {
             return refuse_join("side not cbstore");
         }
+        max_rows = max_rows.max(rel.rows.max(0.0));
         // Unindexed-only guard (see the fn doc): an index on either side
         // lets the costing pick serial merge/NL shapes the walk refuses.
         if !rel.indexlist.is_empty() {
@@ -786,7 +885,9 @@ fn classify_join_sides(
     if n == 0 {
         return refuse_join("empty tlist");
     }
-    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0)
+    // Floor guard input: the larger side's estimated rows (the ladder's
+    // per-table N; the probe fixture's dim side is negligible).
+    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
 }
 
 /// Matrix consult + optional trace, shared tail.
@@ -795,8 +896,31 @@ fn finish(
     class: CoverClass,
     relid: u32,
     ngroups: f64,
+    rows: f64,
+    pages: f64,
 ) -> PgResult<bool> {
     let covered = class_covered(class);
+    // M5-5 engagement-floor guard: a covered class outside its measured
+    // economics keeps Gather (routes legacy). Traced under its OWN prefix —
+    // floor refusals are neither suppressions (M5CENSUS greps
+    // `m5-suppress:`) nor arm refusals (`m5-suppress-refuse:`).
+    if covered && size_floors_enabled() {
+        let g = class_guard(class);
+        let dop = guc_tables::runtime_pool::runtime_dop();
+        let ok = rows >= g.min_rows
+            && rows <= g.max_rows
+            && pages >= g.min_pages
+            && (dop >= g.min_dop || rows <= g.low_dop_max_rows);
+        if !ok {
+            if trace_armed() {
+                eprintln!(
+                    "m5-suppress-floor: class={class:?} relid={relid} rows={rows:.0} \
+                     pages={pages:.0} dop={dop} => gather stands"
+                );
+            }
+            return Ok(false);
+        }
+    }
     if covered && trace_armed() {
         let _ = run; // (run reserved for a future lane_trace surface)
         eprintln!(
