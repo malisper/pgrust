@@ -111,6 +111,11 @@ pub(super) struct RuntimeScanShared {
     /// other path (dead-when-off). Same per-ordinal overwrite discipline as
     /// `partials`; read by the leader only on a clean Completed outcome.
     instr: Option<Vec<Mutex<Option<InstrumentPartial>>>>,
+    /// TIMER mode (inc-3): one clock pair per claim against `ea_epoch`
+    /// (the shared engagement origin — cross-worker comparable). false in
+    /// ROWS mode and on every non-EA path: zero clock reads.
+    ea_timer: bool,
+    ea_epoch: std::time::Instant,
 }
 
 impl RuntimeScanShared {
@@ -199,6 +204,9 @@ impl runtime::TaskSetWork for RuntimeScanShared {
 
 impl RuntimeScanShared {
     fn morsel_body(&self, worker: usize, range: runtime::MorselRange) -> PgResult<()> {
+        // TIMER mode: the claim's clock pair (§5 — the ONLY TIMING ON cost).
+        let ea_t0 = (self.ea_timer && self.instr.is_some())
+            .then(|| self.ea_epoch.elapsed().as_nanos() as u64);
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -271,6 +279,10 @@ impl RuntimeScanShared {
                         // snapshot IS the running total (prune fold, §1).
                         if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
                             ip.prune = c;
+                        }
+                        if let Some(t0) = ea_t0 {
+                            let t1 = self.ea_epoch.elapsed().as_nanos() as u64;
+                            runtime_instr::ea_claim_time(&mut ip, t0, t1);
                         }
                         let slot = worker - self.pins_base;
                         *instr[slot].lock().unwrap_or_else(|p| p.into_inner()) = Some(*ip);
@@ -866,10 +878,10 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(None);
     }
-    // Instrument MODE gate (inc-1): EXPLAIN (ANALYZE, TIMING OFF) —
-    // INSTRUMENT_ROWS exactly — engages; TIMER waits for the inc-3 clock
-    // pair, BUFFERS for threaded buffer accounting.
-    if ea && !runtime_instr::ea_rows_only(estate) {
+    // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
+    // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
+    // engage; BUFFERS/WAL combinations refuse until threaded.
+    if ea && !runtime_instr::ea_mode_admissible(estate) {
         return ea_refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
     }
     // Not from within parallel machinery: helpers of helpers don't exist,
@@ -940,7 +952,8 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
 
     // --- Engage.
     let ea_scan_node = ea.then_some(scan_plan.scan.plan.plan_node_id);
-    engage(agg, estate, rt, dop, total_granules, starts, ea_scan_node)
+    let ea_timer = ea && runtime_instr::ea_timer(estate);
+    engage(agg, estate, rt, dop, total_granules, starts, ea_scan_node, ea_timer)
 }
 
 /// Record-and-refuse (transparency line, ea-morsels.md §6): armed +
@@ -966,6 +979,7 @@ fn engage<'mcx>(
     total_granules: u64,
     starts: Vec<u64>,
     ea_scan_node: Option<i32>,
+    ea_timer: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -997,6 +1011,8 @@ fn engage<'mcx>(
         instr: ea_scan_node.map(|_| {
             (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect()
         }),
+        ea_timer,
+        ea_epoch: std::time::Instant::now(),
     });
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context

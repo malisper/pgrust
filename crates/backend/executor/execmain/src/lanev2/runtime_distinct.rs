@@ -117,6 +117,11 @@ pub(super) struct RuntimeDistinctShared {
     /// beside it, not inside it; same claim-end overwrite discipline, read
     /// by the leader on clean Completed only). Some iff `ea_scan_node`.
     ea_instr_slots: Option<Vec<Mutex<Option<InstrumentPartial>>>>,
+    /// TIMER mode (inc-3): one clock pair per claim against `ea_epoch`
+    /// (shared engagement origin — cross-worker comparable). false in ROWS
+    /// mode and on every non-EA path: zero clock reads.
+    ea_timer: bool,
+    ea_epoch: std::time::Instant,
 }
 
 // SAFETY: (i) each `out` cell has a single writer — the sink contract
@@ -381,6 +386,9 @@ impl RuntimeDistinctShared {
         worker: usize,
         range: runtime::MorselRange,
     ) -> PgResult<()> {
+        // TIMER mode: the claim's clock pair (§5 — the ONLY TIMING ON cost).
+        let ea_t0 = (self.ea_timer && self.ea_instr_slots.is_some())
+            .then(|| self.ea_epoch.elapsed().as_nanos() as u64);
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -434,6 +442,10 @@ impl RuntimeDistinctShared {
                         ipb.granules += range.end - range.start;
                         if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
                             ipb.prune = c;
+                        }
+                        if let Some(t0) = ea_t0 {
+                            let t1 = self.ea_epoch.elapsed().as_nanos() as u64;
+                            runtime_instr::ea_claim_time(&mut ipb, t0, t1);
                         }
                         *slots[worker].lock().unwrap_or_else(|p| p.into_inner()) = Some(*ipb);
                     }
@@ -753,10 +765,10 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(None);
     }
-    // Instrument MODE gate (inc-1): EXPLAIN (ANALYZE, TIMING OFF) —
-    // INSTRUMENT_ROWS exactly — engages; TIMER waits for the inc-3 clock
-    // pair, BUFFERS for threaded buffer accounting.
-    if ea && !runtime_instr::ea_rows_only(estate) {
+    // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
+    // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
+    // engage; BUFFERS/WAL combinations refuse until threaded.
+    if ea && !runtime_instr::ea_mode_admissible(estate) {
         refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
         return Ok(None);
     }
@@ -924,6 +936,8 @@ fn engage<'mcx>(
                 .map(|_| Mutex::new(None))
                 .collect()
         }),
+        ea_timer: ea && runtime_instr::ea_timer(estate),
+        ea_epoch: std::time::Instant::now(),
     });
 
     xact::EnterParallelMode();
