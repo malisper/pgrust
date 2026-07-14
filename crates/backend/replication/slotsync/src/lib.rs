@@ -46,11 +46,11 @@ const AccessShareLock: i32 = 1;
 // RS_INVAL_NONE (slot.h); the slot crate models invalidation as i32/u8 codes.
 const RS_INVAL_NONE: i32 = 0; // slot::ondisk::RS_INVAL_NONE.0
 
-// wait_event_names.txt Activity section value is cosmetic here; reuse the
-// latch wait classes the recovery code uses.
+// wait_event_names.txt Activity section: index 11 = ReplicationSlotsyncMain,
+// 12 = ReplicationSlotsyncShutdown (pg_stat_activity errors on unknown ids).
 const PG_WAIT_ACTIVITY: u32 = 0x0500_0000;
-const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 12;
-const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 13;
+const WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN: u32 = PG_WAIT_ACTIVITY + 11;
+const WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN: u32 = PG_WAIT_ACTIVITY + 12;
 
 /// SlotSyncCtxStruct: pid/stopSignaled/syncing/last_start_time behind one
 /// mutex (C uses a spinlock in shmem).
