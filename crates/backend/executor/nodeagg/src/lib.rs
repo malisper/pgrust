@@ -5021,7 +5021,8 @@ pub use pardistinct::{
     pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
     pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdBuilder, PdEmitBucket,
     PdEmitRecipe, PdExport, PdFeed, PdHandedTable, PdHandoff, PdKeyKind, PdMerged, PdParemitCol,
-    PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
+    PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PdTopnCand, PdTopnKey, PdTopnSpec,
+    PD_SINK_GROUP_PARTS,
 };
 
 /// PAREMIT shape probe (runtime distinct sink, emission-in-combine fast

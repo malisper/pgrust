@@ -969,6 +969,19 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
     seq_scan_cb_columnar_arm(node, estate, prefix, Some(key))
 }
 
+/// Whether a PREWHERE lane owns this scan's staged batch AND its forced
+/// prefix covers `prefix` columns (the filtered grouped-distinct batch
+/// feed's staging question: a covered live lane already fills every prefix
+/// column for survivor windows — `lane_fill_wanted` is unmasked, dict-tier
+/// qual columns gather back to Raw post-qual — so no further staging arm is
+/// needed or legal; an uncovered/absent lane sends the caller to its own
+/// columnar arm).
+pub fn seq_scan_cb_lane_covers(node: &SeqScanState<'_>, prefix: i32) -> bool {
+    node.batch_soa
+        .as_deref()
+        .is_some_and(|b| b.lane.is_some() && b.plan.ncols() as i32 >= prefix)
+}
+
 /// The dict-group columnar arm generalized over the dict registration
 /// (expr-key grouping tranche): `dict_key = None` arms the same offset-free
 /// columnar staging with NO column opted into dict lanes — every window
