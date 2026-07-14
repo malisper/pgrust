@@ -345,7 +345,7 @@ impl runtime::ParallelSink for AggSink {
         for l in locals.iter_mut() {
             // Canonical (text-bearing) shapes partition by canonical bytes;
             // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_ref().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
             // R3 accounting (m2-integration audit): the SEAL index is
             // per-Local retained memory that lives through the whole combine
             // phase — charge it like a run. Crossing = budget refusal (R5
