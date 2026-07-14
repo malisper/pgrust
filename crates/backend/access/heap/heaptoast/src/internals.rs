@@ -211,7 +211,7 @@ pub fn toast_save_datum<'mcx>(
     let mut chunk_seq: i32 = 0;
     let mut offset = 0usize;
     while offset < data_todo {
-        check_for_interrupts();
+        check_for_interrupts()?;
 
         let chunk_size = TOAST_MAX_CHUNK_SIZE.min(data_todo - offset);
 

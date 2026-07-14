@@ -33,10 +33,17 @@ fn character_too_large() -> PgError {
     PgError::error("requested character too large").with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
 }
 
-fn check_for_interrupts() {
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): InterruptPending pre-check, then
+// ProcessInterrupts through the tcop seam (ported since this loud stub was
+// written; the stub turned any pending interrupt during a long repeat()
+// into a panic — same class as the heaptoast site that killed
+// vacuum-morsels battery rounds, notes/vacuum-morsels.md). The pre-check
+// keeps seamless contexts (pure unit tests) off the seam.
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        panic!("CHECK_FOR_INTERRUPTS: ProcessInterrupts (tcop/postgres.c) unported");
+        return postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 // C: max_length*nchars + VARHDRSZ, s32 overflow + AllocSizeIsValid -> 54000.
@@ -611,7 +618,7 @@ pub fn repeat<'mcx>(mcx: Mcx<'mcx>, string: &[u8], count: i32) -> PgResult<Varle
     let mut image = image_with_capacity(mcx, tlen as usize)?;
     for _ in 0..count {
         mcx::vec_append_bytes(&mut image, string)?;
-        check_for_interrupts();
+        check_for_interrupts()?;
     }
     Ok(Varlena::from_image(image))
 }
