@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod router;
 mod runtime_agg;
 mod runtime_distinct;
 mod runtime_hashjoin;
@@ -45,6 +46,7 @@ mod push;
 mod stats;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use router::engine_runtime_active;
 
 use std::sync::OnceLock;
 
