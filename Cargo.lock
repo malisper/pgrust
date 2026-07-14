@@ -1968,6 +1968,7 @@ dependencies = [
  "postmaster_seams",
  "procsignal",
  "shm_mq",
+ "sinval",
  "timeout_seams",
  "types_core",
  "types_error",

@@ -1182,7 +1182,46 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     outcome
 }
 
+/// Test-only fault injection (default-off, dead unless the env var is set at
+/// server start): `PGRUST_TEST_WARM_WINDOW_FAIL=<n>` fails the first `n`
+/// WARM-claimed (wretain) pooled tasks at the top of the worker body — the
+/// exact geometry of the organic pre-connect failures (leader destroyed the
+/// parallel context before this worker attached: "could not map dynamic
+/// shared memory segment" / lock-group join refusal) that exposed the
+/// sinval-slot leak window between ReattachRetainedProc and the sinval
+/// reattach. scripts/sinval-slot-e2e.sh is the standing battery over this
+/// knob: pre-fix, each injected failure leaked its retained sinval slot
+/// (procno freed by ProcKill, slot procPid still set) and poisoned every
+/// later claimant of the procno.
+fn test_warm_window_fail() -> PgResult<()> {
+    use std::sync::atomic::AtomicUsize;
+    static BUDGET: std::sync::OnceLock<Option<AtomicUsize>> = std::sync::OnceLock::new();
+    let Some(budget) = BUDGET.get_or_init(|| {
+        std::env::var("PGRUST_TEST_WARM_WINDOW_FAIL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .map(AtomicUsize::new)
+    }) else {
+        return Ok(());
+    };
+    if !init_small::wretain::warm_claim() {
+        return Ok(());
+    }
+    if budget
+        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg("pgrust: test warm-window fail injection")
+            .finish(loc(0, "test_warm_window_fail"));
+    }
+    Ok(())
+}
+
 fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> PgResult<()> {
+    test_warm_window_fail()?;
     // C 1400-1402: leader already gone — exit quietly (Terminate still sent).
     if !lmgr_proc::BecomeLockGroupMember(
         shared.parallel_leader_proc_number,

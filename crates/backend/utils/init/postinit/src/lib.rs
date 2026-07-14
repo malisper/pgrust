@@ -12,7 +12,7 @@ use types_core::init::BackendType;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_core::xact::XACT_READ_COMMITTED;
 use types_error::{
-    ErrorLocation, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ErrorLocation, PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_TOO_MANY_CONNECTIONS, ERRCODE_UNDEFINED_DATABASE, ERRCODE_UNDEFINED_OBJECT, ERROR,
     FATAL, LOG, WARNING,
@@ -485,13 +485,29 @@ pub fn InitPostgres(
     gtrace("p.beinit");
     let warm_claim = init_small::wretain::warm_claim();
     if warm_claim {
-        // Retention claim: the sinval slot survived the park; DDL committed
-        // while parked is drained (not nuked) once the startup transaction
-        // exists below.
-        sinval::ReattachRetainedBackend()?;
+        // Retention claim: the sinval slot survived the park. Its exit
+        // callback was already re-armed by bgworker::run_worker_body,
+        // immediately after ReattachRetainedProc — it MUST never re-arm
+        // later than ProcKill's registration, or a task failure between the
+        // two exits through a drain that frees the PGPROC while the sinval
+        // slot stays claimed ("sinval slot for backend N is already in use
+        // by process M" on every later claimant of the procno — the standing
+        // chaos flake). DDL committed while parked is drained (not nuked)
+        // once the startup transaction exists below.
+        debug_assert!(sinval::RetainedSlotIsCurrent());
     } else {
         sinval::SharedInvalBackendInit(false)?;
     }
+
+    // Test-only fault injection (default-off, dead unless the env var is set
+    // at server start): PGRUST_TEST_CONNECT_FAIL_AFTER_SINVAL=<n> fails the
+    // first n BgWorker connects RIGHT AFTER the sinval slot claim — the
+    // half-connected geometry (slot claimed, connect failed) whose survivors
+    // used to self-poison standing gang workers ("sinval slot for backend N
+    // is already in use by process <own pid>" on every retry). The standing
+    // battery (scripts/sinval-slot-e2e.sh) pins the fix: a failed gang
+    // connect is now thread-fatal and the exit drain releases the claim.
+    test_connect_fail_after_sinval()?;
 
     let cancel_key = init_small::globals::MyCancelKey();
     let cancel_key_len = init_small::globals::MyCancelKeyLength() as usize;
@@ -877,6 +893,39 @@ pub fn InitPostgres(
     }
     gtrace("p.done");
 
+    Ok(())
+}
+
+/// See the call site in InitPostgres: fails the first n BgWorker connects
+/// just after SharedInvalBackendInit claimed the slot. Resolved once per
+/// process; a plain Err, exactly the class an organic ProcSignalInit /
+/// startup-transaction failure raises there.
+fn test_connect_fail_after_sinval() -> PgResult<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    static BUDGET: std::sync::OnceLock<Option<AtomicUsize>> = std::sync::OnceLock::new();
+    let Some(budget) = BUDGET.get_or_init(|| {
+        std::env::var("PGRUST_TEST_CONNECT_FAIL_AFTER_SINVAL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .map(AtomicUsize::new)
+    }) else {
+        return Ok(());
+    };
+    if miscinit::GetMyBackendType() != BackendType::BgWorker
+        || !init_small::globals::IsUnderPostmaster()
+    {
+        return Ok(());
+    }
+    if budget
+        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "pgrust: test connect-fail-after-sinval injection",
+        )));
+    }
     Ok(())
 }
 
