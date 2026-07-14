@@ -30,7 +30,8 @@ pub mod write;
 mod tests;
 
 pub use control_file::{
-    CheckPoint, ControlFileData, DataChecksumsEnabled, GetDefaultCharSignedness,
+    CheckPoint, ControlFileData, DataChecksumsEnabled, GetActiveWalLevelOnStandby,
+    GetDefaultCharSignedness,
     control_file_mark_read_for_tests, GetMockAuthenticationNonce, GetSystemIdentifier,
     LocalProcessControlFile, ReadControlFile,
     UpdateControlFile,

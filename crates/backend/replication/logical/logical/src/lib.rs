@@ -224,7 +224,20 @@ pub fn CheckLogicalDecodingRequirements() -> PgResult<()> {
     }
 
     if transam_xlog::RecoveryInProgress() {
-        unported("CheckLogicalDecodingRequirements: logical decoding on standby");
+        // Logical decoding on standby is allowed when the primary runs
+        // wal_level >= logical (GetActiveWalLevelOnStandby =
+        // ControlFile->wal_level; xlog.c). Race notes as in C: rechecked at
+        // slot creation and at decoding startup, and XLOG_PARAMETER_CHANGE
+        // invalidates existing logical slots on a wal_level drop.
+        if transam_xlog::GetActiveWalLevelOnStandby() < transam_xlog::WAL_LEVEL_LOGICAL {
+            ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(
+                    "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server",
+                )
+                .finish(loc("CheckLogicalDecodingRequirements"))?;
+            unreachable!();
+        }
     }
     Ok(())
 }
