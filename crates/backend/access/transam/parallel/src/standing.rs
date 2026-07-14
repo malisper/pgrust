@@ -371,6 +371,7 @@ pub(crate) fn engage_deferred_visibility() -> types_error::PgResult<()> {
     if DEFERRED_VIS.with(|c| c.get()) != DeferredVis::Armed {
         return Ok(());
     }
+    super::gtrace("w.vis.begin");
     procarray_seams::proc_array_add::call(init_small::globals::MyProcNumber())?;
     if let Err(e) = procsignal::ProcSignalReinitStanding(&[]) {
         let _ = elog::elog(
@@ -378,6 +379,7 @@ pub(crate) fn engage_deferred_visibility() -> types_error::PgResult<()> {
             format!("standing executor ProcSignal re-init failed: {}", e.message()),
         );
     }
+    super::gtrace("w.vis.end");
     DEFERRED_VIS.with(|c| c.set(DeferredVis::Engaged));
     Ok(())
 }
