@@ -381,6 +381,15 @@ pub fn postmaster_child_launch(
             && !init_small::globals::IsUnderPostmaster()
     );
 
+    // M4 bgjobs virtual child (docs/design/m4-bgjobs.md §3.6): a migrated
+    // periodic daemon becomes a dispatcher job on the runtime pool instead
+    // of a thread. Default OFF (PGRUST_RUNTIME_BGJOBS); everything the
+    // caller observes (pid, PmChild bookkeeping, signal fanout, exit
+    // announces) is shape-identical.
+    if let Some(pid) = rtpool::try_launch_job(child_type, child_slot) {
+        return pid;
+    }
+
     if is_external_connection_backend(child_type) {
         let StartupData::Backend(bsdata) = &mut startup_data else {
             panic!("postmaster_child_launch: {child_type:?} launched without BackendStartupData")
@@ -951,6 +960,12 @@ pub mod rtpool {
             // scan arm reaches the runtime through `runtime::global()`,
             // avoiding an execmain -> launch_backend dependency).
             runtime::install_global(Arc::clone(&rt));
+            // M4 background-job dispatcher (docs/design/m4-bgjobs.md §3.2):
+            // its own kill switch on top of the pool's; with
+            // PGRUST_RUNTIME_BGJOBS unset this is a no-op and no dispatcher
+            // thread exists. The spawner applies the child prelude — the
+            // dispatcher hosts job identity init and config reloads.
+            let _ = bgjobs::start_if_enabled(&rt, spawn_dispatcher);
             rt
         })
     }
@@ -969,6 +984,69 @@ pub mod rtpool {
                 let _ = stack_depth::set_stack_base();
                 body();
             })
+    }
+
+    fn spawn_dispatcher(
+        body: Box<dyn FnOnce() + Send>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let inherited = super::Inherited::capture();
+        // The dispatcher hosts job GUC state (overlay capture + SIGHUP
+        // ProcessConfigFile), so it gets the full child GUC prelude — the
+        // fork-inherited nondefault values (command-line -c and config
+        // file), exactly as postmaster_child_launch's thread body.
+        let guc_snapshot = guc::store::capture_nondefault_variables();
+        std::thread::Builder::new()
+            .name("pg-bgjobs-dispatcher".into())
+            .stack_size(super::child_thread_stack_size())
+            .spawn(move || {
+                inherited.apply();
+                let _ = stack_depth::set_stack_base();
+                guc::store::initialize_guc_options_for_child(&guc_snapshot)
+                    .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                    .unwrap_or_else(|e| {
+                        panic!("bgjobs dispatcher GUC prelude failed: {e:?}")
+                    });
+                body();
+            })
+    }
+
+    /// M4 bgjobs increment 4 (docs/design/m4-bgjobs.md §3.6, the virtual
+    /// child): with `PGRUST_RUNTIME_BGJOBS=1`, StartChildProcess's launch
+    /// of a MIGRATED daemon creates a dispatcher job instead of a thread
+    /// and returns the reserved pid — the PmChild, count_children masks,
+    /// SignalChildren fanout (thread signals land in the job's procsignal
+    /// slot and wake the dispatcher through the latch redirect), and the
+    /// LaunchMissingBackgroundProcesses restart logic are all untouched.
+    /// The exit announce comes from the job's teardown; the reaper's join
+    /// is a CHILD_THREADS lookup miss. Postmaster thread only.
+    pub fn try_launch_job(child_type: types_core::BackendType, child_slot: i32) -> Option<pid_t> {
+        let migrated = matches!(
+            child_type,
+            types_core::BackendType::BgWriter | types_core::BackendType::WalWriter
+        );
+        if !migrated || !bgjobs::bgjobs_enabled() {
+            return None;
+        }
+        // The pool + dispatcher start lazily here when the daemon launch
+        // precedes ServerLoop's rtpool start (boot starts bgwriter from
+        // main_entry). Both are postmaster-thread idempotent.
+        let rt = start_if_enabled()?;
+        let dispatcher = bgjobs::start_if_enabled(rt, spawn_dispatcher)?;
+        let pid: pid_t = super::reserve_child_pid();
+        match child_type {
+            types_core::BackendType::BgWriter => {
+                dispatcher.register(std::sync::Arc::new(bgwriter::job::new_bgwriter_job(
+                    pid, child_slot,
+                )));
+            }
+            types_core::BackendType::WalWriter => {
+                dispatcher.register(std::sync::Arc::new(walwriter::job::new_walwriter_job(
+                    pid, child_slot,
+                )));
+            }
+            _ => unreachable!("migrated set checked above"),
+        }
+        Some(pid)
     }
 }
 
