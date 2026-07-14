@@ -139,6 +139,17 @@ pub struct SoaDictTable {
     /// Scan-unique stitch identity: stable across every RG (and rescan) of
     /// one pinned scan, distinct across scans. 0 iff `stitch` is null.
     pub gepoch: u64,
+    /// LAZY SUB-FRAMED DICTIONARY SEAM (cbstore CHUNK_FLAG_DICT_FRAMED):
+    /// null = every entry's bytes are materialized (the historical
+    /// contract). Non-null = `dict[code]` POINTERS are always valid but a
+    /// code's entry BYTES exist only after an ensure covering it: `datum()`
+    /// / `ensure_code()` ensure per code; any consumer reading entry bytes
+    /// OUTSIDE those accessors (whole-dict sweeps, rank binary searches, raw
+    /// `dict` slices) must call `ensure_all()` first. Same lifetime as
+    /// `dict` (the publisher's staged-window contract).
+    pub lazy: *const (),
+    pub lazy_ensure: Option<unsafe fn(*const (), u32)>,
+    pub lazy_ensure_all: Option<unsafe fn(*const ())>,
 }
 
 impl SoaDictTable {
@@ -167,12 +178,38 @@ impl SoaDictTable {
     }
 
     /// Decode one code. Bounds are the filler's contract (`code < ndict`).
+    /// Lazy sub-framed dicts ensure the code's entry bytes first (the seam
+    /// no-ops on fully-materialized tables — `lazy_ensure` is None).
     #[inline]
     pub fn datum(&self, code: u32) -> Datum {
         debug_assert!(code < self.ndict);
+        self.ensure_code(code);
         // SAFETY: filler contract — `dict` spans `ndict` Datums and outlives
         // the staged window; `code` is in range for every staged row.
         unsafe { *self.dict.add(code as usize) }
+    }
+
+    /// Materialize one code's entry bytes (lazy sub-framed dicts; no-op
+    /// otherwise). For consumers that pass raw `dict` slices onward but know
+    /// the exact codes they will read.
+    #[inline]
+    pub fn ensure_code(&self, code: u32) {
+        if let Some(f) = self.lazy_ensure {
+            // SAFETY: seam contract — `lazy` is the publisher's live ensure
+            // state for this table (window lifetime, like `dict` itself).
+            unsafe { f(self.lazy, code) };
+        }
+    }
+
+    /// Materialize EVERY entry's bytes (lazy sub-framed dicts; no-op
+    /// otherwise). Required before whole-dict sweeps, rank binary searches,
+    /// or any raw `dict` slice read not covered code-by-code.
+    #[inline]
+    pub fn ensure_all(&self) {
+        if let Some(f) = self.lazy_ensure_all {
+            // SAFETY: seam contract, as `ensure_code`.
+            unsafe { f(self.lazy) };
+        }
     }
 }
 
