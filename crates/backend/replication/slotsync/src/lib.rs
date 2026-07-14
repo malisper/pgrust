@@ -85,6 +85,20 @@ const SLOTSYNC_RESTART_INTERVAL_SEC: i64 = 10;
 // read it (slot::syncing_replication_slots).
 thread_local! {
     static SLEEP_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(MIN_SLOTSYNC_WORKER_NAPTIME_MS) };
+    // Thread-model hazard class 1 (see the catalog): GUC backings are
+    // process-shared, so C's pre-read/reload/diff in slotsync_reread_config
+    // silently no-ops — the postmaster's own reload already updated the
+    // shared value before this worker rereads. The worker instead records
+    // the values it STARTED WITH and diffs the current shared values against
+    // those (same fix pattern as the walreceiver restart-on-reload, 048).
+    static STARTED_WITH: std::cell::RefCell<Option<StartedWith>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct StartedWith {
+    primary_conninfo: String,
+    primary_slotname: String,
+    hot_standby_feedback: bool,
 }
 
 /// Information fetched from the primary about one logical slot.
@@ -874,22 +888,29 @@ fn am_slotsync_worker() -> bool {
 /// slotsync_reread_config: exit (for postmaster restart) if any slot sync GUC
 /// changed.
 fn slotsync_reread_config() -> PgResult<()> {
-    let old_primary_conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
-    let old_primary_slotname = guc_tables::vars::PrimarySlotName.read().unwrap_or_default();
-    let old_sync_replication_slots = guc_tables::vars::sync_replication_slots.read();
-    let old_hot_standby_feedback = guc_tables::vars::hot_standby_feedback.read();
-
-    debug_assert!(old_sync_replication_slots);
-
     interrupt::SetConfigReloadPending(false);
     guc_file::ProcessConfigFile(types_guc::PGC_SIGHUP)?;
+
+    // Diff against started-with values, not pre-reload reads: the GUC
+    // backings are process-shared, so the postmaster's reload already
+    // changed them (thread-model hazard class 1).
+    let (old_primary_conninfo, old_primary_slotname, old_hot_standby_feedback) =
+        STARTED_WITH.with(|sw| {
+            let sw = sw.borrow();
+            let sw = sw.as_ref().expect("slot sync worker recorded its GUCs");
+            (
+                sw.primary_conninfo.clone(),
+                sw.primary_slotname.clone(),
+                sw.hot_standby_feedback,
+            )
+        });
 
     let conninfo_changed =
         old_primary_conninfo != guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
     let primary_slotname_changed =
         old_primary_slotname != guc_tables::vars::PrimarySlotName.read().unwrap_or_default();
 
-    if old_sync_replication_slots != guc_tables::vars::sync_replication_slots.read() {
+    if !guc_tables::vars::sync_replication_slots.read() {
         let _ = ereport(LOG)
             .errmsg(
                 "replication slot synchronization worker will shut down because \"sync_replication_slots\" is disabled"
@@ -1088,6 +1109,17 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
     };
 
     let conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
+
+    // Record the GUC values this worker runs with; slotsync_reread_config
+    // diffs future reloads against these (hazard class 1, see above).
+    STARTED_WITH.with(|sw| {
+        *sw.borrow_mut() = Some(StartedWith {
+            primary_conninfo: conninfo.clone(),
+            primary_slotname: guc_tables::vars::PrimarySlotName.read().unwrap_or_default(),
+            hot_standby_feedback: guc_tables::vars::hot_standby_feedback.read(),
+        });
+    });
+
     let mut conn = match client::connect_extended(&conninfo, false, false, false, &app_name)? {
         Ok(conn) => conn,
         Err(err) => {
