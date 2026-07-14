@@ -4209,12 +4209,31 @@ fn scan_mk_batch<'mcx>(
     if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
         return Ok(false);
     }
+    // SURVIVOR-LESS PREWHERE-lane window: skip BEFORE the packability
+    // pre-check below reads every staged row's cells (the q14 codedgroup
+    // precedent — condcache-census lane). A condition-cache hit whose
+    // cached verdicts are all-fail legitimately skips the survivor deform
+    // (nodeseqscan's cond_hit arm; multi-clause all-fail miss windows too),
+    // so NO cell of the window is live — the pre-check would read stale
+    // datums and could spuriously DISARM the compact table for the whole
+    // remaining build over a window that has nothing to pack or fold on any
+    // path. The conservative lane selection is exactly the completing
+    // deform's own trigger domain (requal bits included), so "no bits" ==
+    // "no deform ran" == "nothing survives". Non-lane stagings (varkey /
+    // kernel prefix) deform every staged row up front and skip nothing.
+    if let Some(lsel) = ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+        if lsel.iter().all(|&w| w == 0) {
+            return Ok(true);
+        }
+    }
     // Numeric components: per-VALUE packability over the WHOLE batch BEFORE
     // the per-row emit — an unpackable value (range / non-minimal display
     // scale, keypack module doc) migrates to the C table and the caller
     // routes this batch through the arrival leg, so the qual still runs
     // exactly once per row. Checking a superset of the survivors is sound
-    // (pack legality is per-value, effect-free).
+    // (pack legality is per-value, effect-free; survivor lane windows
+    // complete the deform for every staged row, so the cells are live — the
+    // survivor-less lane window was skipped above).
     let numeric_packable = {
         let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
             .expect("multi-key feed requires the armed SoA");
