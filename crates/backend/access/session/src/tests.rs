@@ -225,7 +225,74 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      touch another task's parking slot, and a parked thread's slot
     //      routes wakes correctly across session rebinds by construction
     //      (handles go stale by token, not by TLS swap).
-    assert_eq!(count_tree(crates), 464, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 466, re-pinned at m2-agg-sink (M1 scan pipelines + M2 aggregation
+    // sink merged): the two runtime engagement arms each add a per-helper
+    // executor slot —
+    //   4. executor/execmain/src/lanev2/runtime_scan.rs WORKER_EXEC
+    //   5. executor/execmain/src/lanev2/runtime_agg.rs WORKER_EXEC
+    //      — each holds the BOUND HELPER's thread-local QueryDesc handle for
+    //      one engagement drive (built inside the query-task binding, torn
+    //      down before unbind on every path, stale-checked at rebuild).
+    //      Deliberately non-session TLS: the slot exists only between
+    //      POST_TASK_PARK entry and exit on a parallel helper thread; no
+    //      session survives across it and the binder owns all session state
+    //      movement (envelope capture/restore must never see a mid-drive
+    //      executor).
+    // 467, re-pinned at m2-integration (agg + distinct sinks merged): the
+    // third runtime engagement arm adds its per-helper executor slot —
+    //   6. executor/execmain/src/lanev2/runtime_distinct.rs WORKER_EXEC —
+    //      same class and same argument as 4/5 (bound-helper drive slot,
+    //      built inside the query-task binding, torn down before unbind on
+    //      every path, non-session TLS). Conductor note: the distinct lane's
+    //      own 464 pin was stale for its tree (its fleet unit sweeps did not
+    //      run this crate's suite); the merged pin re-counts all three arms.
+    // 468, re-pinned at chaos-battery (m2-integration + m1-uring merged):
+    // lane C's io_uring pool-worker slot joins the three engagement arms —
+    //   7. executor/runtime/src/io.rs (WORKER_RT / PERMIT_HELD /
+    //      IN_IO_SECTION, one thread_local! block) — the pool worker
+    //      loop's §2.8/§2.9 bookkeeping: which Runtime this worker thread
+    //      serves and whether it currently holds an execution permit /
+    //      sits inside a declared blocking section (the io_permit seam
+    //      impls read it). Deliberately non-session TLS: runtime workers
+    //      are EXECUTORS, not sessions (redesign §2.1) — the state
+    //      belongs to the pool thread for the worker loop's lifetime,
+    //      carries no session or task identity, and is set/cleared only
+    //      by the loop itself (worker_enter/worker_exit); an envelope
+    //      bind/unbind must never touch another thread's permit
+    //      accounting.
+    // 469, re-pinned at train-12 (m2-integration x train-11 base composed):
+    // the guc-snapshots lane (train-11 car 2) added one block its own
+    // battery never counted (its unit sweeps did not run this crate's
+    // suite — the same stale-pin class as the distinct lane's 464) —
+    //   8. utils/misc/guc/src/layers.rs (SESSION_BASE + query-pin
+    //      statement-window cache, one thread_local! block) — the typed
+    //      base snapshot this thread last adopted (its started-with GUC
+    //      values) plus a mutation-counter-keyed cache for the query pin.
+    //      Deliberately non-session TLS in the envelope sense: the base is
+    //      installed at child bring-up / worker BIND (the binder owns the
+    //      movement, exactly like the WORKER_EXEC slots 4-6) and advanced
+    //      only by the thread's own ProcessConfigFile pass; the pin cache
+    //      is derived state keyed on the session store's mutation counter
+    //      (stale entries can never be adopted). Envelope capture/restore
+    //      moves the session GUC STORE; the layered snapshots follow it
+    //      through the bind path by construction (guc-snapshots lane
+    //      design, kill switches PGRUST_NO_GUC_BASE/_BIND).
+    // 470, re-pinned at train-12 (m3-hashjoin merged): the fourth runtime
+    // engagement arm adds its per-helper executor slot —
+    //   9. executor/execmain/src/lanev2/runtime_hashjoin.rs
+    //      (HJ_WORKER_EXEC + HJ_PAYLOAD, one thread_local! block) — the
+    //      bound helper's drive-scoped QueryDesc handle plus the frozen
+    //      join table the run_morsel bodies read; same class and same
+    //      argument as WORKER_EXEC slots 4-6 (built inside the query-task
+    //      binding, torn down before unbind on every path, non-session
+    //      TLS — the binder owns all session state movement).
+    // 471, re-pinned at train-12 (m3-sort merged): the fifth runtime
+    // engagement arm adds its per-helper executor slot —
+    //   10. executor/execmain/src/lanev2/runtime_sort.rs WORKER_EXEC —
+    //      identical class and argument as slots 4-6/9 (bound-helper
+    //      drive slot inside the query-task binding, torn down before
+    //      unbind on every path, non-session TLS).
+    assert_eq!(count_tree(crates), 471, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

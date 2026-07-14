@@ -50,6 +50,10 @@ pub(crate) struct TaskSetRt {
     pub(crate) finalized: AtomicBool,
     /// Startup-ramp seed for this pipeline (source-provided C0).
     pub(crate) c0: u64,
+    /// Whole-boundary claims (source-provided, cached at publish): every
+    /// claim extends to the next hard boundary — per-epoch state is never
+    /// split across workers (MorselSource::whole_boundary_claims).
+    pub(crate) whole_claims: bool,
 }
 
 impl TaskSetRt {

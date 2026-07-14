@@ -62,7 +62,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodeagg::runtime_partial::{
-    agg_runtime_combine, agg_runtime_export_partial, agg_runtime_partial_admissible,
+    agg_runtime_combine, agg_runtime_export_partial_into, agg_runtime_partial_admissible,
     exec_agg_runtime_partials, RuntimePartial,
 };
 use ::types_error::{PgError, PgResult, ERROR};
@@ -113,6 +113,18 @@ pub(super) struct RuntimeScanShared {
     failed: AtomicBool,
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
+    /// inc-2 bind-once: helpers drive from the ENTRY TASK (already fully
+    /// bound by parallel_worker_body — a strict superset of the query-task
+    /// binder's bind) instead of re-binding at POST_TASK_PARK. The hook
+    /// skips these payloads. PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1
+    /// hook path (kill-switch layering).
+    drive_at_entry: bool,
+    /// inc-3 standing channel: the live board entry, held so the
+    /// PRIVATE_SHUTDOWN hook can complete the standing join (abort +
+    /// drain + await detach) on leader unwind paths that never reach
+    /// standing_wait's own cleanup — the launched path gets the same
+    /// guarantee from DestroyParallelContext's worker-exit wait.
+    standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
 }
 
 impl RuntimeScanShared {
@@ -237,13 +249,19 @@ impl RuntimeScanShared {
                         }
                         DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
                     }
-                    // Cumulative partial export (overwrite): the worker's
+                    // Cumulative partial export (in place): the worker's
                     // LAST morsel's export — which precedes its settle, and
                     // therefore RG completion — is the one the leader reads.
-                    let partial = agg_runtime_export_partial(&aps.agg)?;
+                    // The slot's partial is reused across morsels (retained
+                    // capacity; a fresh Vec per morsel was a malloc+free
+                    // pair on the engaged path — m2-integration audit).
                     let slot = worker - self.pins_base;
-                    *self.partials[slot].lock().unwrap_or_else(|p| p.into_inner()) =
-                        Some(partial);
+                    let mut g =
+                        self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                    agg_runtime_export_partial_into(
+                        &aps.agg,
+                        g.get_or_insert_with(Default::default),
+                    )?;
                     Ok(())
                 })
             })
@@ -255,19 +273,138 @@ impl RuntimeScanShared {
 // Worker (helper) side: entry task + the POST_TASK_PARK drive.
 // ---------------------------------------------------------------------------
 
-/// The launched task body: nothing — all real work happens bound, at
-/// POST_TASK_PARK. (The full parallel_worker_body init/teardown around this
-/// is what makes the helper a bindable parked helper: connected to the
+/// The launched task body. M1 shape: nothing — all real work happens bound,
+/// at POST_TASK_PARK. (The full parallel_worker_body init/teardown around
+/// this is what makes the helper a bindable parked helper: connected to the
 /// leader's database, lock-group member, IsParallelWorker.)
-fn runtime_scan_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> {
+///
+/// inc-2 bind-once (payload.drive_at_entry): the entry task is ALREADY the
+/// bound context — parallel_worker_body's init is a strict superset of the
+/// query-task binder's bind (identity, lock group, db connect, transaction,
+/// relmap/combocid, snapshots, sinval drain, GUC pin, namespace, client,
+/// parallel mode) — so drive the pinned RG right here and skip the
+/// unbind->binder-rebind->unbind cycle M1-a attributed. Error surface is
+/// preserved: fold/executor errors are recorded in the payload (the leader
+/// rethrows them plain, the serial arm's surface) and the entry task
+/// returns Ok — never the parallel message channel, exactly the hook
+/// path's discipline. The binder's validate() is unnecessary here: the
+/// leader's fail-closed admission (policy probe, params, MVCC snapshot)
+/// covered the session gates, and the body itself established db/leader/
+/// worker-number; the only per-helper refusal left is lane exhaustion.
+fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
+    let Some(private) = shared.private() else { return Ok(()) };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return Ok(()) };
+    if !payload.drive_at_entry {
+        return Ok(());
+    }
+    parallel::gtrace("w.entry.drive.begin");
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive_entry(&payload)));
+    let outcome = match r {
+        Ok(o) => o,
+        Err(unwind) => {
+            mark_self_errored();
+            payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
+            let _ = teardown_worker_exec(false);
+            if parallel::standing::is_exit_unwind(&*unwind) {
+                // Exit-committed unwind: keep dying (ParallelWorkerMain's
+                // FATAL arm owns the leader notification).
+                latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+                    shared.parallel_leader_proc_number,
+                ));
+                std::panic::resume_unwind(unwind);
+            }
+            Err(Box::new(PgError::new(
+                ERROR,
+                "runtime scan worker failed (see leader error)",
+            )))
+        }
+    };
+    parallel::gtrace("w.entry.drive.end");
+    // Wake the parked leader: completion/refusal/error all re-poll there.
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+    outcome
+}
+
+/// Entry-task drive: the bound-context body (lane lease + executor build +
+/// pinned drive + teardown), errors recorded payload-side. Mirrors
+/// helper_drive minus the binder wrap.
+///
+/// Self-error discipline: the error is recorded payload-side (the leader
+/// rethrows it PLAIN — usually before it can drain the message channel,
+/// because the completion poll precedes ProcessParallelMessages) AND
+/// returned, so parallel_worker_body ABORTS the worker transaction — a
+/// released mid-batch executor must not ride a commit (the hook path gets
+/// the same via the binder's finish(false); resource-release-at-commit
+/// would warn on leaked pins).
+fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
+    // Process-wide lane lease: exhaustion = fail-closed non-participation
+    // (the leader's all-refused fallback counts it exactly like a bind
+    // refusal on the hook path).
+    let Some(lane) = payload.rt.acquire_external_lane() else {
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return Ok(());
+    };
+    let mut local = lane.local();
+    payload.started.fetch_add(1, Ordering::SeqCst);
+    if let Err(e) = build_worker_exec(payload) {
+        // Clean build failure (qd already released): commit is safe.
+        payload.fail(e);
+        return Ok(());
+    }
+    let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    emit_wfin("entry", lane.ordinal(), &local, &rg);
+    // Teardown mode per drive_bound: self-error takes the release path;
+    // the abort discipline is the transaction-level Err below (the hook
+    // path gets the same via the binder's finish(false)).
+    let self_errored = WORKER_EXEC
+        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let teardown = teardown_worker_exec(!self_errored);
+    if let Err(e) = teardown {
+        payload.fail(e);
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime scan worker failed (see leader error)",
+        )));
+    }
+    if self_errored {
+        // Mid-batch executor released: abort the worker transaction (the
+        // morsel body already recorded the original error payload-side).
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime scan worker failed (see leader error)",
+        )));
+    }
     Ok(())
+}
+
+/// PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1 POST_TASK_PARK drive.
+fn entry_drive_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ENTRY_DRIVE").map_or(true, |v| v.trim() != "0")
+    })
 }
 
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker
 /// task): no-op unless the context's private payload is ours.
 fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
+    let Some(private) = shared.private() else {
+        // F1 observability: a context with NO private payload can never be
+        // driven by any arm — trace it (foreign-payload downcast misses stay
+        // silent below: every arm's hook runs for every worker by design).
+        lane_trace("runtime-scan: post-task-park without a private payload");
+        return;
+    };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
+    if payload.drive_at_entry {
+        // inc-2: the entry task already drove this engagement — a second
+        // bind+drive here would rebuild the executor against a completed
+        // (or aborted) RG for nothing.
+        return;
+    }
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
@@ -280,11 +417,24 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShared>) {
     let _ = shared;
-    let Some(target) = payload.pcxt_shared.get() else { return };
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
+    let Some(target) = payload.pcxt_shared.get() else {
+        lane_trace("runtime-scan: helper refused (no pcxt shared)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        lane_trace("runtime-scan: helper refused (rg gone)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
     // Process-wide lane lease: pin-board lanes are shared across every
     // concurrently-engaged query; exhaustion = fail-closed non-participation.
     let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-scan: helper refused (no external lane)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
@@ -300,6 +450,18 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
         Err(e) => {
             if entered.get() {
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader waits on
+                // the all-stopped backstop's cadence. Drive the closed
+                // generation to completion (pure protocol cleanup);
+                // post-drive errors find it already complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 // Binder validate() refusal: fail-closed non-participation.
                 // The leader detects the nobody-participates case and falls
@@ -326,6 +488,7 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
+    emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
     // cleanly under the about-to-commit binder unbind. Only a self-error
@@ -334,7 +497,19 @@ fn drive_bound(
     let self_errored = WORKER_EXEC
         .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
     let teardown = teardown_worker_exec(!self_errored);
-    let _ = ordinal;
+    if self_errored {
+        // Route the binder through its transaction-ABORT unbind: a released
+        // executor may hold registered snapshots, and the normal unbind
+        // asserts a cleared xmin (the m2-agg-sink lane hit this live; the
+        // scan arm shares the teardown shape). The morsel body recorded the
+        // real error first (fail() is first-wins).
+        teardown?;
+        return Err(PgError::new(
+            ERROR,
+            "runtime scan worker unwound (recorded upstream)",
+        )
+        .into());
+    }
     teardown
 }
 
@@ -346,7 +521,109 @@ fn mark_self_errored() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// WFIN drive markers — the m0-accept harness's worker-finish channel
+// (fabled run-m0-parallel-accept.sh: `MORSEL|WFIN|qid=|pipe=|worker=|t_us=|
+// tasks=|task_avg_us=` off server stderr; unknown key=value fields are
+// ignored, so the extra decomposition fields are safe). Env-gated
+// (PGRUST_WFIN=1, passed via CB_PGRUST_ENV on diagnosis runs): default-off,
+// zero cost on the ladder's standing timing arms.
+// ---------------------------------------------------------------------------
+
+fn wfin_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
+}
+
+/// This worker's cbstore drive counters (rg_switches, dict_builds,
+/// granules_scanned, windows_staged) — read BEFORE teardown releases the qd.
+fn worker_cb_counters() -> Option<(u64, u64, u64, u64)> {
+    WORKER_EXEC.with(|cell| {
+        let b = cell.borrow();
+        let ex = b.as_ref()?;
+        crate::querydesc::with_qd(ex.qd, |q| {
+            let x = q.exec.as_mut()?;
+            x.with_mut(|d| {
+                let crate::procnode::PlanStateNode::Agg(aps) = d.planstate.as_mut()? else {
+                    return None;
+                };
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &aps.outer else {
+                    return None;
+                };
+                ::nodeseqscan::seq_scan_cb_drive_counters(ss)
+            })
+        })
+    })
+}
+
+/// One worker-finish marker per participant per drive. `t_us` is the
+/// scheduler clock at the end of this worker's LAST executed morsel (parked
+/// waiting after the pipeline's end does not count); the harness's spread =
+/// max-min of t_us per qid across workers.
+fn emit_wfin(
+    chan: &str,
+    ordinal: usize,
+    local: &runtime::WorkerLocal,
+    rg: &runtime::RgHandle,
+) {
+    if !wfin_enabled() {
+        return;
+    }
+    let d = local.drive;
+    let task_avg_us = if d.tasks > 0 { d.busy_ns / d.tasks / 1000 } else { 0 };
+    let (rgsw, dictb, gscan, wins) = worker_cb_counters().unwrap_or((0, 0, 0, 0));
+    eprintln!(
+        "MORSEL|WFIN|qid={}|pipe=0|worker={}|t_us={}|tasks={}|task_avg_us={}|first_us={}|busy_us={}|morsels={}|granules={}|chan={}|cb_rgswitch={}|cb_dictbuild={}|cb_granules={}|cb_windows={}",
+        rg.query_id(),
+        ordinal,
+        d.last_end_ns / 1000,
+        d.tasks,
+        task_avg_us,
+        d.first_claim_ns / 1000,
+        d.busy_ns / 1000,
+        d.morsels,
+        d.granules,
+        chan,
+        rgsw,
+        dictb,
+        gscan,
+        wins,
+    );
+}
+
+/// Leader-side completion mark (same clock domain as the workers' t_us):
+/// leader wake latency = LFIN t_us − max worker t_us.
+fn emit_lfin(
+    rt: &Arc<runtime::Runtime>,
+    chan: &str,
+    rg: &runtime::RgHandle,
+    total_granules: u64,
+    nrgs: usize,
+    payload: &Arc<RuntimeScanShared>,
+) {
+    if !wfin_enabled() {
+        return;
+    }
+    eprintln!(
+        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|chan={}",
+        rg.query_id(),
+        rt.now_ns() / 1000,
+        total_granules,
+        nrgs,
+        payload.started.load(Ordering::SeqCst),
+        payload.refused.load(Ordering::SeqCst),
+        chan,
+    );
+}
+
 fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+    parallel::gtrace("w.exec.build.begin");
+    let r = build_worker_exec_inner(payload);
+    parallel::gtrace("w.exec.build.end");
+    r
+}
+
+fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
         // Defensive: stale state from an aborted previous drive would alias
         // a freed leader arena.
@@ -481,8 +758,32 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 /// so every helper's drive loop observes completion and exits the hook.
 fn runtime_scan_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<RuntimeScanShared>() else { return };
-    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
+    let rg = payload.rg.get().and_then(|w| w.upgrade());
+    if let Some(rg) = &rg {
         rg.abort();
+    }
+    // Standing channel (inc-3): a leader unwind (error/panic between
+    // publish and standing_wait's own cleanup) reaches here through
+    // DestroyParallelContext with claimed workers possibly still driving.
+    // Complete the RG (drain releases drives parked on the aborted
+    // generation) and hold the frame until every participant detached —
+    // the leader arena must outlive their SendConst refs. UNCONDITIONAL
+    // on the rg upgrade: a dead weak handle still leaves the board entry
+    // occupied (every future try_engage would refuse and parked workers
+    // would wedge against an entry nobody removes).
+    let entry = payload
+        .standing
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(entry) = entry {
+        if let Some(rg) = &rg {
+            if rg.try_outcome().is_none() {
+                // drain_rg aborts (idempotent) and drives protocol cleanup.
+                drain_rg_raw(payload.rt, rg);
+            }
+        }
+        parallel::standing::close_and_await(&entry);
     }
 }
 
@@ -495,6 +796,7 @@ fn ensure_hooks_registered() {
         );
         parallel::register_parallel_post_task_park(runtime_scan_post_task_park);
         parallel::register_parallel_private_shutdown(runtime_scan_private_shutdown);
+        parallel::standing::register_standing_driver(runtime_scan_standing_driver);
     });
 }
 
@@ -609,9 +911,9 @@ fn census_drain<'mcx>(
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
-struct CbstoreGranuleSource {
+pub(super) struct CbstoreGranuleSource {
     /// Row-group start prefix sums (len nrgs+1; last = total).
-    starts: Vec<u64>,
+    pub(super) starts: Vec<u64>,
 }
 
 impl runtime::MorselSource for CbstoreGranuleSource {
@@ -629,8 +931,26 @@ impl runtime::MorselSource for CbstoreGranuleSource {
     /// Granules are 8,192 rows — large against Umbra's 16-tuple C0. Seed the
     /// ramp at 2 granules (~16K rows, tens of µs on fold shapes): one probe
     /// morsel sizes the pipeline without a giant first claim on tiny scans.
+    /// (Inert under whole_boundary_claims below; kept for the kill switch.)
     fn startup_c0(&self) -> u64 {
         2
+    }
+
+    /// Row group == dictionary epoch: a claim that stops short of the RG
+    /// edge hands the rest of the RG to another worker, which rebuilds the
+    /// RG's dictionary (LZ4 blob decompress) and refills every per-epoch
+    /// lane memo (dict-eval predicate sweep) — measured on q21@10M as the
+    /// entire runtime-vs-armed drive-phase gap (WFIN decomposition,
+    /// notes/runtime-drive-scaling.md: dict_builds 153→243, busy +78% at
+    /// DOP15; the armed arm claims whole RGs and scales 13x). Whole-RG
+    /// claims are ~8 granules ≈ ~1.2ms on q21-class kernels — the same
+    /// cancel/photo-finish granularity the armed arm already ships.
+    /// PGRUST_RUNTIME_SPLIT_CLAIMS=1 restores sizer-truncated claims (A/B).
+    fn whole_boundary_claims(&self) -> bool {
+        static SPLIT: OnceLock<bool> = OnceLock::new();
+        !*SPLIT.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
+        })
     }
 }
 
@@ -722,7 +1042,7 @@ impl<'mcx> ::nodes_core::NodeWalker<'mcx> for SafetyCx {
     }
 }
 
-fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
+pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResult<bool> {
     let mut cx = SafetyCx { safe: true };
     for n in nodes {
         use ::nodes_core::NodeWalker as _;
@@ -740,7 +1060,7 @@ fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>) -> PgResul
 
 /// Env floor for engagement (granules): below it the serial fold wins
 /// outright and launching helpers is pure overhead.
-fn min_granules() -> u64 {
+pub(super) fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_SCAN_MIN_GRANULES")
@@ -860,17 +1180,21 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // denominated, so its meaning is per-AM: ~8,192 rows/granule on
     // cbstore, one ~8KB block on heap — both env-tunable through the same
     // knob because the e2e floors force it anyway.)
-    let source: Arc<dyn runtime::MorselSource> = if is_cb {
+    // nrgs rides along for the WFIN/LFIN diagnostic channel only: cbstore
+    // row-group (= dictionary epoch) count; heap has no interior hard
+    // boundaries, so it honestly reports 0.
+    let (source, nrgs): (Arc<dyn runtime::MorselSource>, usize) = if is_cb {
         let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
         else {
             return Ok(None);
         };
-        Arc::new(CbstoreGranuleSource { starts })
+        let nrgs = starts.len().saturating_sub(1);
+        (Arc::new(CbstoreGranuleSource { starts }), nrgs)
     } else {
         let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(ss, estate)? else {
             return Ok(None);
         };
-        Arc::new(HeapBlockSource { nblocks })
+        (Arc::new(HeapBlockSource { nblocks }), 0)
     };
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
@@ -881,7 +1205,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, source)
+    engage(agg, estate, rt, dop, total_granules, nrgs, source)
 }
 
 fn engage<'mcx>(
@@ -890,6 +1214,7 @@ fn engage<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
+    nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
@@ -919,15 +1244,19 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        drive_at_entry: entry_drive_enabled(),
+        standing: Mutex::new(None),
     });
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context
     // lifetime (CreateParallelContext asserts it); an error unwind aborts
     // the transaction, which destroys live contexts and resets the mode
     // (AtEOXact_Parallel — the Gather discipline).
+    parallel::gtrace("l.engage.begin");
     xact::EnterParallelMode();
-    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, source, &payload);
+    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, nrgs, source, &payload);
     xact::ExitParallelMode();
+    parallel::gtrace("l.engage.end");
     engaged
 }
 
@@ -941,6 +1270,7 @@ fn engage_ceremony<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
+    nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
     payload: &Arc<RuntimeScanShared>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -980,6 +1310,18 @@ fn engage_ceremony<'mcx>(
             .set(rg.downgrade())
             .unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
+
+        // M2 pool-binding: STANDING engagement first — no worker launch,
+        // no entry task, one binder bind per participant. Fallback (gang
+        // unavailable/kill-switched/all-refused/claim-deadline) leaves the
+        // RG untouched and takes the launched path below.
+        match standing_wait(rt, payload, dop, total_granules, &rg, &waiter)? {
+            StandingWait::Done(outcome) => {
+                emit_lfin(rt, "standing", &rg, total_granules, nrgs, payload);
+                return finish_outcome(payload, outcome);
+            }
+            StandingWait::Fallback => {}
+        }
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         if launched <= 0 {
@@ -1043,29 +1385,19 @@ fn engage_ceremony<'mcx>(
                     "runtime scan helpers exited before completing the scan",
                 )));
             }
-            parallel::wait_parallel_finish_quantum();
+            // A raised cancel disposition (statement_timeout /
+            // pg_cancel_backend) surfaces from the latch quantum (F1 defect
+            // layer 2b): abort + drain the RG, then propagate — exactly the
+            // CFI branch above.
+            if let Err(e) = parallel::wait_parallel_finish_quantum() {
+                rg.abort();
+                drain_rg(rt, payload, &rg);
+                return Err(e);
+            }
         };
+        emit_lfin(rt, "launched", &rg, total_granules, nrgs, payload);
 
-        // Worker-phase error (fold error, binder cleanup, panic): rethrow —
-        // plain, no extra context, exactly the serial arm's error surface.
-        if let Some(e) = payload.take_error() {
-            return Err(e);
-        }
-        if outcome == runtime::RgOutcome::Aborted {
-            // Aborted without a recorded error: a cancel raced us — let the
-            // pending interrupt surface; otherwise report the abort.
-            ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(
-                ERROR,
-                "runtime scan pipeline aborted",
-            )));
-        }
-        if payload.started.load(Ordering::SeqCst) == 0 {
-            // Completed but nobody participated (all refused between the
-            // poll and completion — possible only for an empty task set).
-            return Ok(EngageOutcome::Fallback);
-        }
-        Ok(EngageOutcome::Completed)
+        finish_outcome(payload, outcome)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before
@@ -1077,7 +1409,9 @@ fn engage_ceremony<'mcx>(
             drain_rg(rt, payload, rg);
         }
     }
+    parallel::gtrace("l.destroy.begin");
     let destroy = parallel::DestroyParallelContext(pcxt);
+    parallel::gtrace("l.destroy.end");
     let outcome = body?;
     destroy?;
 
@@ -1108,6 +1442,214 @@ enum EngageOutcome {
     Completed,
 }
 
+/// Shared post-outcome tail (standing and launched channels): worker-phase
+/// errors rethrow PLAIN (no extra context — the serial arm's surface, the
+/// parity oracle); an unexplained abort surfaces the pending interrupt or
+/// reports; a completed-but-nobody-participated RG falls back serially.
+fn finish_outcome(
+    payload: &Arc<RuntimeScanShared>,
+    outcome: runtime::RgOutcome,
+) -> PgResult<EngageOutcome> {
+    if let Some(e) = payload.take_error() {
+        return Err(e);
+    }
+    if outcome == runtime::RgOutcome::Aborted {
+        // Aborted without a recorded error: a cancel raced us — let the
+        // pending interrupt surface; otherwise report the abort.
+        ::postgres_seams::check_for_interrupts::call()?;
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime scan pipeline aborted",
+        )));
+    }
+    if payload.started.load(Ordering::SeqCst) == 0 {
+        // Completed but nobody participated (all refused between the
+        // poll and completion — possible only for an empty task set).
+        return Ok(EngageOutcome::Fallback);
+    }
+    Ok(EngageOutcome::Completed)
+}
+
+// ---------------------------------------------------------------------------
+// M2 pool-binding: the standing engagement channel (parallel::standing).
+// ---------------------------------------------------------------------------
+
+enum StandingWait {
+    /// The RG reached an outcome under standing participation.
+    Done(runtime::RgOutcome),
+    /// Standing path unavailable or refused with the RG UNTOUCHED —
+    /// take the launched path.
+    Fallback,
+}
+
+/// First-claim deadline: parked standing workers wake in microseconds, so
+/// an unclaimed engagement after this long means the gang is dead/busy —
+/// fall back to the launched path (correctness never depends on this).
+fn standing_claim_deadline() -> std::time::Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(100)
+    }))
+}
+
+/// The standing channel's submit-and-park: publish the engagement, then
+/// poll completion + interrupts + participation counters. Every exit path
+/// closes the board entry and waits for claimed participants to detach
+/// (the arena-lifetime join — detach is Drop-guaranteed on the workers).
+fn standing_wait(
+    rt: &'static Arc<runtime::Runtime>,
+    payload: &Arc<RuntimeScanShared>,
+    dop: i32,
+    total_granules: u64,
+    rg: &runtime::RgHandle,
+    waiter: &runtime::CompletionWaiter,
+) -> PgResult<StandingWait> {
+    let shared = payload.pcxt_shared.get().expect("pcxt shared set before standing_wait");
+    let Some(entry) = parallel::standing::try_engage(shared, dop.max(0) as usize) else {
+        return Ok(StandingWait::Fallback);
+    };
+    // Leader-unwind containment: PRIVATE_SHUTDOWN completes the standing
+    // join if this frame never reaches one of its own cleanup paths (each
+    // of which takes the slot back first).
+    *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
+    let take_slot = || {
+        payload
+            .standing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+    };
+    let t0 = std::time::Instant::now();
+    let mut traced = false;
+    loop {
+        if let Some(o) = waiter.try_wait() {
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            if !traced {
+                lane_trace(&format!(
+                    "runtime-scan: engaged standing dop={} granules={total_granules}",
+                    entry.claimed()
+                ));
+            }
+            return Ok(StandingWait::Done(o));
+        }
+        if let Err(e) = ::postgres_seams::check_for_interrupts::call() {
+            // Order matters: abort THEN drain (the leader's protocol
+            // cleanup is what completes the RG and releases workers parked
+            // in their drives) THEN await detach.
+            rg.abort();
+            drain_rg(rt, payload, rg);
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            return Err(e);
+        }
+        let claimed = entry.claimed();
+        if !traced && claimed > 0 {
+            lane_trace(&format!(
+                "runtime-scan: engaged standing dop={claimed} granules={total_granules}"
+            ));
+            traced = true;
+        }
+        let started = payload.started.load(Ordering::SeqCst);
+        let refused = entry.refused() + payload.refused.load(Ordering::SeqCst);
+        // Nobody will participate: every ticket-holder refused pre-bind or
+        // at the bind/lane stage, before any granule was claimed.
+        if started == 0 && refused >= entry.tickets() {
+            lane_trace(&format!(
+                "runtime-scan: standing refused ({refused} refusals) — launched fallback"
+            ));
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            return Ok(StandingWait::Fallback);
+        }
+        // Nothing driving and nothing pending within the deadline: gang
+        // dead/busy (claimed==0) OR a smaller-than-tickets gang whose every
+        // claimant exited pre-drive without reaching the refusal counters'
+        // tickets floor above (started==0, detached>=claimed>0). Either
+        // way no granule was consumed; the launched path takes over. A
+        // straggler that claims right as we close simply drives the same
+        // RG (morsel claims are atomic; its partial combines like any
+        // participant's) — close_and_await bounds on its drive.
+        if started == 0
+            && entry.detached() >= claimed
+            && t0.elapsed() > standing_claim_deadline()
+        {
+            lane_trace("runtime-scan: standing claim deadline — launched fallback");
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            return Ok(StandingWait::Fallback);
+        }
+        // Participants all detached yet the RG is incomplete and no error
+        // was recorded: a worker died outside every catch layer (detach is
+        // Drop-guaranteed, so this is reachable only through that needle).
+        if claimed > 0 && started > 0 && entry.detached() >= claimed {
+            if let Some(o) = waiter.try_wait() {
+                take_slot();
+                parallel::standing::close_and_await(&entry);
+                return Ok(StandingWait::Done(o));
+            }
+            if let Some(e) = payload.take_error() {
+                rg.abort();
+                drain_rg(rt, payload, rg);
+                take_slot();
+                parallel::standing::close_and_await(&entry);
+                return Err(e);
+            }
+            rg.abort();
+            drain_rg(rt, payload, rg);
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime scan standing executors exited before completing the scan",
+            )));
+        }
+        // F1 PgResult propagation (train-12 composition seam): a raised
+        // cancel disposition (statement_timeout / pg_cancel_backend)
+        // surfaces from the latch quantum — the standing-loop mirror of
+        // the launched path's F1 defect layer 2b branch and the CFI
+        // branch above (abort THEN drain THEN close-and-await).
+        if let Err(e) = parallel::wait_parallel_finish_quantum() {
+            rg.abort();
+            drain_rg(rt, payload, rg);
+            take_slot();
+            parallel::standing::close_and_await(&entry);
+            return Err(e);
+        }
+    }
+}
+
+/// The standing driver (parallel::standing::register_standing_driver):
+/// runs ON a standing executor, already impersonated (worker number +
+/// lock group). Identical body to the POST_TASK_PARK hook — one binder
+/// bind around lane lease + executor build + pinned drive, errors
+/// payload-side, leader latch wake on exit.
+fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    if let Err(unwind) = r {
+        payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            shared.parallel_leader_proc_number,
+        ));
+        // Exit-committed unwinds (FATAL) must keep unwinding: the worker
+        // is terminating; parallel::standing rethrows them to the glue,
+        // whose proc_exit drain releases identity. Swallowing one here
+        // would resurrect a dead backend into the standing pool.
+        if parallel::standing::is_exit_unwind(&*unwind) {
+            std::panic::resume_unwind(unwind);
+        }
+        return;
+    }
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
 /// Reap a pinned RG no helper will drive (abort/fallback paths): the leader
 /// drives the protocol itself — the closed generation refuses every join,
 /// so no morsel work runs; the drive just executes invalidate/finalize/
@@ -1125,6 +1667,10 @@ fn drain_rg(
     rg: &runtime::RgHandle,
 ) -> bool {
     let _ = payload;
+    drain_rg_raw(rt, rg)
+}
+
+fn drain_rg_raw(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
     rg.abort();
     // Bounded lane wait (~2s): helper drives settle within a morsel.
     let mut lane = None;

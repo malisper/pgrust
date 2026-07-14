@@ -17,6 +17,11 @@
 //!      that entered the wait loop always observes is_set (no lost wake),
 //!      with the recheck cadence DISABLED — proving the primitive alone,
 //!      not the backstop.
+//!   5. pg_sema-over-Waiter — a mirror of pg_sema's count + waiter-word
+//!      Dekker (crates/backend/port/pg_sema): a concurrent lock/unlock pair
+//!      never loses a wake, and the retire-on-return discipline leaves NO
+//!      handle residue for the next ownership epoch (proc-slot/pool-thread
+//!      reuse; the 2026-07 dev-profile "concurrent waiters" wedge shape).
 #![cfg(loom)]
 
 use loom::sync::atomic::{fence, AtomicI32, AtomicU64, Ordering};
@@ -270,6 +275,171 @@ fn latch_dekker_set_before_wait_short_circuits() {
 }
 
 // ---------------------------------------------------------------------------
+// pg_sema-over-Waiter.
+//
+// Mirror of crates/backend/port/pg_sema's PGSemaphoreLock/Unlock protocol
+// (count + published waiter word) over the slot core: the count post and the
+// handle publication form the same Dekker pair as the latch — an unlock
+// either sees the published handle (unpark delivers) or the locker's recheck
+// sees the posted count. The models additionally pin the RETIRE-ON-RETURN
+// discipline: a returned lock leaves waiter == 0, so an ownership-epoch
+// change (proc-slot reuse, wretain token reissue — the 2026-07 dev-profile
+// "concurrent waiters on one PGPROC semaphore" wedge) finds no stale
+// residue, and the in-lock single-waiter assert stays exact.
+// ---------------------------------------------------------------------------
+
+struct ModelSema {
+    count: AtomicI32,
+    /// Packed handle word of the blocked owner (0 = none). The model packs
+    /// (1 << 32) | token, mirroring WakerHandle's never-zero layout.
+    waiter: AtomicU64,
+}
+
+fn pack(token: u32) -> u64 {
+    (1u64 << 32) | token as u64
+}
+
+impl ModelSema {
+    fn new() -> Self {
+        ModelSema {
+            count: AtomicI32::new(0),
+            waiter: AtomicU64::new(0),
+        }
+    }
+
+    /// pg_sema PGSemaphoreLock. Flag edges are RMWs where the production
+    /// code uses fence-disciplined plain stores/loads — the same loom-0.7
+    /// expressibility translation as ModelLatch (see set()'s comment): the
+    /// count recheck read, the waiter read in unlock(), and the retire
+    /// store are RMWs so loom carries the recency the SeqCst fences
+    /// guarantee on the real memory model, at equal-or-stronger ordering.
+    fn lock(&self, slot: &Slot, token: u32) {
+        let handle = pack(token);
+        let mut published = false;
+        loop {
+            let mut c = self.count.load(Ordering::Acquire);
+            while c > 0 {
+                match self
+                    .count
+                    .compare_exchange_weak(c, c - 1, Ordering::SeqCst, Ordering::Acquire)
+                {
+                    Ok(_) => {
+                        if published {
+                            // Retire-on-return (production: store(0, SeqCst)).
+                            self.waiter.swap(0, Ordering::SeqCst);
+                        }
+                        return;
+                    }
+                    Err(actual) => c = actual,
+                }
+            }
+            let prev = self.waiter.swap(handle, Ordering::SeqCst);
+            // The production debug_assert: with retire-on-return, prev is 0
+            // or this call's own handle in EVERY interleaving and EVERY
+            // ownership epoch — anything else is a concurrent waiter (or,
+            // pre-fix, the cross-epoch residue this model regression-pins).
+            assert!(
+                prev == 0 || prev == handle,
+                "pg_sema model: concurrent waiters / stale cross-epoch residue"
+            );
+            published = true;
+            fence(Ordering::SeqCst);
+            if self.count.fetch_add(0, Ordering::SeqCst) > 0 {
+                continue;
+            }
+            let r = slot.park_core(None, None, &CLOCK);
+            assert!(matches!(r, ParkResult::Notified | ParkResult::Recheck));
+        }
+    }
+
+    /// pg_sema PGSemaphoreUnlock: post the count, then wake the published
+    /// handle (production: fence + load(Acquire) + handle-validated unpark).
+    fn unlock(&self, slot: &Slot) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        let word = self.waiter.fetch_add(0, Ordering::SeqCst);
+        if word != 0 {
+            // Handle-validated in production (a stale token is a no-op).
+            slot.unpark_token(word as u32);
+        }
+    }
+}
+
+#[test]
+fn pg_sema_lock_unlock_no_lost_wake() {
+    loom::model(|| {
+        let slot = fresh_slot();
+        let token = slot.issue_token();
+        let sema = Arc::new(ModelSema::new());
+
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+
+        // Any interleaving (post-before-lock, post-during-publication,
+        // post-after-park) must complete: loom's deadlock detector is the
+        // lost-wake oracle.
+        sema.lock(&slot, token);
+        assert_eq!(sema.count.load(Ordering::SeqCst), 0);
+
+        unlocker.join().unwrap();
+    });
+}
+
+#[test]
+fn pg_sema_retire_on_return_no_epoch_residue() {
+    loom::model(|| {
+        let slot = fresh_slot();
+        let token1 = slot.issue_token();
+        let sema = Arc::new(ModelSema::new());
+
+        // Epoch 1: a lock/unlock pair in every interleaving (parked or
+        // fast-path).
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+        sema.lock(&slot, token1);
+        unlocker.join().unwrap();
+
+        // Retire-on-return: NO residue may survive the returned lock —
+        // this is exactly what the pre-fix code violated (the handle stayed
+        // published after the wait).
+        assert_eq!(
+            sema.waiter.load(Ordering::SeqCst),
+            0,
+            "returned lock left its handle published"
+        );
+
+        // Ownership-epoch boundary: pool-thread reuse reissues the token
+        // (outstanding handles go stale); proc-slot reuse hands the sema to
+        // a thread with a different handle. Pre-fix, epoch 2's lock read
+        // epoch 1's handle here and tripped the single-waiter assert.
+        let token2 = slot.reissue_token();
+        assert_ne!(token1, token2);
+
+        let unlocker = {
+            let sema = Arc::clone(&sema);
+            let slot = Arc::clone(&slot);
+            thread::spawn(move || {
+                sema.unlock(&slot);
+            })
+        };
+        sema.lock(&slot, token2);
+        unlocker.join().unwrap();
+
+        assert_eq!(sema.waiter.load(Ordering::SeqCst), 0);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // IoToken (§2.9 addendum): multi-registrant unpark, register-after-complete
 // race, completer-is-registrant. Handles in the model are (slot, token)
 // pairs; completion drives the slot core exactly as production complete()
@@ -360,5 +530,146 @@ fn io_token_multi_registrant_all_unparked() {
         assert_eq!(complete_all(&io), 0);
 
         registrant.join().unwrap();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// M1 §2.9 wait protocol (IoTokenCore::wait_with): the reap/park/complete
+// races behind bufmgr WaitIO's uring arm. The "ring" is modeled as one
+// atomic state bit (CQE consumed / buffer state settled) — completers set
+// state THEN complete the token, exactly reap_locked's order; the parker
+// runs the production protocol with model park primitives.
+// ---------------------------------------------------------------------------
+
+use waiter::io::IoWaitOutcome;
+
+/// Model park: a real block on the slot core (the LoomClock never times
+/// out, so this only returns on a delivered notify).
+fn model_park(slot: &Arc<Slot>) -> ParkResult {
+    slot.park_core(None, None, &CLOCK)
+}
+
+/// Model park with the cadence already elapsed: a latched notify still wins
+/// (Notified), otherwise the park returns Recheck immediately — models the
+/// recheck backstop firing.
+fn model_park_cadence_elapsed(slot: &Arc<Slot>) -> ParkResult {
+    slot.park_core(None, Some(0), &CLOCK)
+}
+
+#[test]
+fn uring_wait_reap_park_complete_race_never_hangs() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 1));
+
+        // The reaping thread (owner boundary reap or foreign blocking
+        // reap): buffer/ring state settles BEFORE the token completes.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            let io = Arc::clone(&io);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+                complete_all(&io);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            || model_park(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            || unreachable!("untimed model park never rechecks"),
+        );
+        // Ordering contract: however the wait exits, the settled state must
+        // be visible (reap_locked runs completions before complete()).
+        match outcome {
+            IoWaitOutcome::AlreadyCompleted | IoWaitOutcome::Completed => {
+                assert_eq!(state_done.load(Ordering::Acquire), 1);
+            }
+            other => unreachable!("model cannot reach {other:?}"),
+        }
+        reaper.join().unwrap();
+    });
+}
+
+#[test]
+fn uring_wait_dropped_completion_recheck_backstop() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 2));
+
+        // FAULT: the reaper consumes the CQE (state settles) but the token
+        // completion is dropped — the PGRUST_TEST_URING_DROP_TOKEN_COMPLETE
+        // shape. No unpark will ever arrive.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let reap_state = Arc::clone(&state_done);
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            // Cadence-elapsed park: Recheck fires (no completer wake exists).
+            || model_park_cadence_elapsed(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            // Degraded targeted reap: the waiter consumes the CQE itself
+            // (idempotent with the racing reaper in the real ring — the
+            // ring mutex + done bit serialize; here the store is idempotent
+            // by construction).
+            || reap_state.store(1, Ordering::Release),
+        );
+        match outcome {
+            // Backstop observed the settled state after the lost wake…
+            IoWaitOutcome::StateSettled
+            // …or the cadence beat the reaper and the waiter reaped itself.
+            | IoWaitOutcome::Reaped => {}
+            other => unreachable!("dropped completion cannot deliver {other:?}"),
+        }
+        assert_eq!(state_done.load(Ordering::Acquire), 1, "IO must be home");
+        reaper.join().unwrap();
+    });
+}
+
+#[test]
+fn uring_wait_backstop_races_live_completer() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 3));
+
+        // Healthy completer racing a waiter whose cadence fires anyway
+        // (spurious recheck): every interleaving must terminate with the
+        // state home and never a false StateSettled.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            let io = Arc::clone(&io);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+                complete_all(&io);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let reap_state = Arc::clone(&state_done);
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            || model_park_cadence_elapsed(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            || reap_state.store(1, Ordering::Release),
+        );
+        match outcome {
+            IoWaitOutcome::AlreadyCompleted
+            | IoWaitOutcome::Completed
+            | IoWaitOutcome::StateSettled => {
+                assert_eq!(state_done.load(Ordering::Acquire), 1);
+            }
+            IoWaitOutcome::Reaped => {} // waiter drove it home itself
+        }
+        reaper.join().unwrap();
     });
 }

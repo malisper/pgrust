@@ -42,11 +42,14 @@ mod lifecycle;
 mod morsel;
 mod rg;
 mod sched;
+mod sink;
 mod sizing;
 mod stats;
 mod sync;
 mod taskset;
 
+#[cfg(not(loom))]
+mod io;
 #[cfg(not(loom))]
 mod pool;
 
@@ -64,7 +67,11 @@ pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
 pub use rg::{
     CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
-pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
+pub use sched::{DriveLocal, Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
+pub use sink::{
+    sealed_sink_tasksets, sink_tasksets, ParallelSink, SealedParallelSink, SealedSinkTaskSets,
+    SinkProbe, SinkTaskSets,
+};
 pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_T_MIN_NS, EWMA_ALPHA};
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
@@ -175,6 +182,11 @@ impl RuntimeConfig {
 pub struct Runtime {
     sched: sched::Scheduler,
     config: RuntimeConfig,
+    /// §2.9 ring registration: worker ordinal → io_uring ring id (None: no
+    /// ring — uring unavailable, aio_uring not linked, or worker exited).
+    /// Written by the worker loop at enter/exit; diagnostics + tests read.
+    #[cfg(not(loom))]
+    rings: std::sync::Mutex<Vec<Option<u32>>>,
 }
 
 impl Runtime {
@@ -194,6 +206,8 @@ impl Runtime {
                 config.trace,
             ),
             config,
+            #[cfg(not(loom))]
+            rings: std::sync::Mutex::new(vec![None; nthreads]),
         })
     }
 
@@ -315,6 +329,10 @@ impl Runtime {
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                // WFIN marker channel: the drive is over — flush any
+                // participation this driver still holds (a worker whose last
+                // task did not observe exhaustion emits here).
+                local.wfin_flush_all();
                 return outcome;
             }
             let epoch = self.park_epoch();
@@ -363,6 +381,21 @@ impl Runtime {
         sched_park(&self.sched, seen);
     }
 
+    /// §2.9 ring registration: record `worker`'s ring id at loop enter
+    /// (Some) / exit (None). Called by the worker loop only.
+    #[cfg(not(loom))]
+    pub(crate) fn register_worker_ring(&self, worker: usize, ring: Option<u32>) {
+        let mut g = self.rings.lock().unwrap_or_else(|e| e.into_inner());
+        g[worker] = ring;
+    }
+
+    /// The io_uring ring id registered by `worker`, if any.
+    #[cfg(not(loom))]
+    pub fn worker_ring(&self, worker: usize) -> Option<u32> {
+        let g = self.rings.lock().unwrap_or_else(|e| e.into_inner());
+        g.get(worker).copied().flatten()
+    }
+
     /// Ask all workers to exit their loops (tests / shutdown).
     pub fn request_stop(&self) {
         self.sched.request_stop();
@@ -370,6 +403,13 @@ impl Runtime {
 
     pub fn stats(&self) -> RuntimeStatsSnapshot {
         self.sched.snapshot()
+    }
+
+    /// Scheduler clock read, ns — the WFIN markers' shared time domain
+    /// (worker morsel timestamps live on this clock; leader-side marks
+    /// must too, or spreads would mix clock bases).
+    pub fn now_ns(&self) -> u64 {
+        self.sched.clock_now_ns()
     }
 }
 

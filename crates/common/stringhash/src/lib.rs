@@ -1045,6 +1045,15 @@ impl ExtIdMap {
 // key-in-cell probes (one miss). CH HashMap-class layout: pow2, linear
 // probing, 50% max fill, realloc in-place resize.
 
+/// Sparse-clear crossover: `clear_with_*` probes per entry (~a few ns each)
+/// instead of memsetting the whole cell array (~0.25 ns/8 B); the targeted
+/// clear wins once entries are rarer than one per FACTOR cells. The consumer
+/// pattern that needs this is the executor's POOLED per-group DistinctSet
+/// (codedgroup emit): one big group inflates the retained capacity, then
+/// hundreds of thousands of tiny groups would each pay the full-capacity
+/// memset (the train-10 Q14 regression, +17%).
+const CLEAR_SPARSE_FACTOR: usize = 16;
+
 /// Exact i64 set. 8-byte cells (the key itself); 0 is a valid key, tracked
 /// by `has_zero`; the all-zero cell is the empty sentinel.
 pub struct IntSet {
@@ -1052,6 +1061,8 @@ pub struct IntSet {
     mask: usize,
     len: usize,
     has_zero: bool,
+    /// `clear_with_keys` position scratch (collect-then-zero; retained).
+    scratch: Vec<u32>,
 }
 
 impl Default for IntSet {
@@ -1062,7 +1073,7 @@ impl Default for IntSet {
 
 impl IntSet {
     pub fn new() -> Self {
-        IntSet { cells: RawCells::new(), mask: 0, len: 0, has_zero: false }
+        IntSet { cells: RawCells::new(), mask: 0, len: 0, has_zero: false, scratch: Vec::new() }
     }
 
     /// Returns true if `k` was newly inserted.
@@ -1145,8 +1156,54 @@ impl IntSet {
         self.has_zero = false;
     }
 
+    /// `clear` bounded by the CONTENTS instead of the capacity: `keys` must
+    /// be exactly the set's elements (any order; a 0 key lives in `has_zero`,
+    /// not a cell). Sparse tables (see CLEAR_SPARSE_FACTOR) probe each key's
+    /// cell — collect-then-zero, because zeroing while probing would break
+    /// the probe chains of keys not yet visited — dense tables fall back to
+    /// the memset `clear`.
+    pub fn clear_with_keys(&mut self, keys: &[i64]) {
+        if self.cells.cap == 0 {
+            self.len = 0;
+            self.has_zero = false;
+            return;
+        }
+        if self.len * CLEAR_SPARSE_FACTOR >= self.cells.cap {
+            self.clear();
+            return;
+        }
+        debug_assert_eq!(keys.iter().filter(|&&k| k != 0).count(), self.len);
+        self.scratch.clear();
+        for &k in keys {
+            if k == 0 {
+                continue;
+            }
+            let mut pos = (hash8(k as u64) as usize) & self.mask;
+            loop {
+                let c = unsafe { *self.cells.get(pos) };
+                if c == k {
+                    self.scratch.push(pos as u32);
+                    break;
+                }
+                if c == 0 {
+                    // `keys` disagrees with the table (caller bug): stay
+                    // correct via the full sweep.
+                    debug_assert!(false, "clear_with_keys: key {k} not in table");
+                    self.clear();
+                    return;
+                }
+                pos = (pos + 1) & self.mask;
+            }
+        }
+        for &pos in &self.scratch {
+            unsafe { *self.cells.get_mut(pos as usize) = 0 };
+        }
+        self.len = 0;
+        self.has_zero = false;
+    }
+
     pub fn mem_bytes(&self) -> usize {
-        self.cells.cap * 8
+        self.cells.cap * 8 + self.scratch.capacity() * 4
     }
 }
 
@@ -1165,6 +1222,8 @@ pub struct BytesDedup {
     cells: RawCells<CellD>,
     mask: usize,
     len: usize,
+    /// `clear_with_entries` position scratch (collect-then-zero; retained).
+    scratch: Vec<u32>,
 }
 
 impl Default for BytesDedup {
@@ -1175,7 +1234,7 @@ impl Default for BytesDedup {
 
 impl BytesDedup {
     pub fn new() -> Self {
-        BytesDedup { cells: RawCells::new(), mask: 0, len: 0 }
+        BytesDedup { cells: RawCells::new(), mask: 0, len: 0, scratch: Vec::new() }
     }
 
     /// Probe for `content` (placement + prefilter on the caller's `hash`,
@@ -1265,8 +1324,49 @@ impl BytesDedup {
         self.len = 0;
     }
 
+    /// `clear` bounded by the CONTENTS: `entries` must be exactly the
+    /// index's (hash, content offset) pairs, any order (offsets are unique
+    /// nonzero — the insert contract). Sparse tables probe each entry's
+    /// cell (collect-then-zero, as `IntSet::clear_with_keys`); dense tables
+    /// fall back to the memset `clear`.
+    pub fn clear_with_entries<I: IntoIterator<Item = (u32, u32)>>(&mut self, entries: I) {
+        if self.cells.cap == 0 {
+            self.len = 0;
+            return;
+        }
+        if self.len * CLEAR_SPARSE_FACTOR >= self.cells.cap {
+            self.clear();
+            return;
+        }
+        self.scratch.clear();
+        for (hash, off) in entries {
+            debug_assert!(off != 0);
+            let mut pos = (hash as usize) & self.mask;
+            loop {
+                let c = unsafe { *self.cells.get(pos) };
+                if c.off == off {
+                    self.scratch.push(pos as u32);
+                    break;
+                }
+                if c.off == 0 {
+                    // `entries` disagrees with the table (caller bug): stay
+                    // correct via the full sweep.
+                    debug_assert!(false, "clear_with_entries: offset {off} not in table");
+                    self.clear();
+                    return;
+                }
+                pos = (pos + 1) & self.mask;
+            }
+        }
+        debug_assert_eq!(self.scratch.len(), self.len);
+        for &pos in &self.scratch {
+            unsafe { self.cells.get_mut(pos as usize).off = 0 };
+        }
+        self.len = 0;
+    }
+
     pub fn mem_bytes(&self) -> usize {
-        self.cells.cap * std::mem::size_of::<CellD>()
+        self.cells.cap * std::mem::size_of::<CellD>() + self.scratch.capacity() * 4
     }
 }
 
@@ -1448,6 +1548,87 @@ mod tests {
                 blob.extend_from_slice(&k);
             }
             assert_eq!(inserted, reference.insert(k.clone()), "key {k:?}");
+        }
+    }
+
+    #[test]
+    fn int_set_sparse_clear() {
+        // Pooled-reuse shape: one big fill inflates capacity, then many tiny
+        // fills each clear by contents. Every element must be truly gone
+        // after each clear (re-insert returns true), including 0/has_zero.
+        let mut s = IntSet::new();
+        let mut big: Vec<i64> = (0..10_000).map(|i| i * 2654435761 % 1_000_003 - 500_000).collect();
+        big.sort_unstable();
+        big.dedup();
+        for &k in &big {
+            s.insert(k);
+        }
+        let cap_before = s.mem_bytes();
+        s.clear_with_keys(&big); // dense enough or not — must fully empty
+        for round in 0..1_000 {
+            let keys = [round as i64 + 1, -(round as i64) - 1, 0, round as i64 + 1];
+            let mut held: Vec<i64> = Vec::new();
+            for &k in &keys {
+                if s.insert(k) {
+                    held.push(k);
+                }
+            }
+            assert_eq!(held.len(), 3, "round {round}");
+            s.clear_with_keys(&held);
+        }
+        // Capacity retained (clears never shrink).
+        assert!(s.mem_bytes() >= cap_before);
+        // Everything cleared: the big set re-inserts as all-new.
+        for &k in &big {
+            assert!(s.insert(k), "key {k} survived a sparse clear");
+        }
+    }
+
+    #[test]
+    fn bytes_dedup_sparse_clear() {
+        let hash = |k: &[u8]| -> u32 {
+            let mut x = 0x811c_9dc5u32;
+            for &b in k {
+                x = (x ^ b as u32).wrapping_mul(16777619);
+            }
+            x
+        };
+        let mut dd = BytesDedup::new();
+        let mut blob: Vec<u8> = vec![0u8; 4];
+        // Big fill inflates capacity.
+        let mut entries: Vec<(u32, u32)> = Vec::new();
+        for i in 0..5_000u32 {
+            let k = format!("bigkey-{i}");
+            let h = hash(k.as_bytes());
+            let off = blob.len() as u32;
+            assert!(dd.insert(h, k.as_bytes(), &blob, off));
+            blob.extend_from_slice(k.as_bytes());
+            entries.push((h, off));
+        }
+        dd.clear_with_entries(entries.iter().copied());
+        // Tiny per-group cycles over the retained big table.
+        for round in 0..1_000u32 {
+            blob.truncate(4);
+            let mut held: Vec<(u32, u32)> = Vec::new();
+            for k in [format!("k-{round}"), format!("k2-{round}"), format!("k-{round}")] {
+                let h = hash(k.as_bytes());
+                let off = blob.len() as u32;
+                if dd.insert(h, k.as_bytes(), &blob, off) {
+                    blob.extend_from_slice(k.as_bytes());
+                    held.push((h, off));
+                }
+            }
+            assert_eq!(held.len(), 2, "round {round}");
+            dd.clear_with_entries(held.iter().copied());
+        }
+        // Everything cleared: the big set re-inserts as all-new.
+        blob.truncate(4);
+        for i in 0..5_000u32 {
+            let k = format!("bigkey-{i}");
+            let h = hash(k.as_bytes());
+            let off = blob.len() as u32;
+            assert!(dd.insert(h, k.as_bytes(), &blob, off), "key {k} survived a sparse clear");
+            blob.extend_from_slice(k.as_bytes());
         }
     }
 

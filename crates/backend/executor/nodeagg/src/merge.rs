@@ -53,7 +53,7 @@ use crate::{
 // 1138 date_larger, 1139 date_smaller, 1377 time_larger, 1378 time_smaller,
 // 2036 timestamp_larger, 2035 timestamp_smaller, 1196/1195 the timestamptz
 // pg_proc rows over the same int64 comparison.
-const COMBINE_WHITELIST: &[Oid] = &[
+pub(crate) const COMBINE_WHITELIST: &[Oid] = &[
     176, 177, 463, 768, 769, 770, 771, 1236, 1237, 2515, 2516, 1138, 1139, 1377, 1378, 2036,
     2035, 1196, 1195,
 ];
@@ -1360,6 +1360,11 @@ fn exchange_resolve(node: &mut AggStateData<'_>) {
 /// table cannot become spill-eligible, so the arm gates/sizes by the cap
 /// instead of the full plan-time group estimate.
 pub(crate) fn exchange_cap_for_build(node: &mut AggStateData<'_>) -> Option<u32> {
+    // M2 sink worker builds (sink.rs): the sink cap plays the exchange cap's
+    // role — bounded table, flush at the cap — without any handoff registry.
+    if let Some(cap) = node.perhash.as_ref().and_then(|ph| ph.sink_cap) {
+        return Some(cap);
+    }
     if matches!(
         node.perhash.as_ref().expect("hashed Agg has perhash").exchange,
         ExchangeState::Unresolved

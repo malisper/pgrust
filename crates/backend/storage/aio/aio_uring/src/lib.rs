@@ -5,6 +5,18 @@
 //! drain a ring's completions (C's deadlock rule: whoever waits completes).
 //! Divergence from C 18: availability-gated, not io_method-gated; fadvise
 //! stays the fallback where the ring is absent.
+//!
+//! M1 §2.9 (parallelism-redesign): every in-flight slot carries a
+//! `waiter::io::IoToken`; reaping completes it (unpark-all). Runtime-pool
+//! worker rings are created at worker start (`uring_worker_ring_init`,
+//! owner-submits-only), boundary-reaped at every task boundary
+//! (`uring_boundary_reap`), and torn down at worker exit. WaitIO's wait arm
+//! (`uring_buf_read_wait`) peeks first (permit-churn elision), then either
+//! parks on the IoToken (foreign waiter, boundary-reaped ring) or does the
+//! targeted blocking reap — both inside the §2.8 declared blocking section
+//! (io_permit_release/reacquire → the runtime's IoGuard). Inert by default:
+//! tokens only park when a runtime pool marked the ring, and the permit
+//! seams are only installed by a running pool.
 
 pub fn init_seams() {
     aio_seams::uring_buf_read::set(uring_buf_read);
@@ -13,6 +25,9 @@ pub fn init_seams() {
     aio_seams::uring_drain_own::set(uring_drain_own);
     aio_seams::uring_available::set(uring_available);
     aio_seams::uring_drain_all_raw::set(uring_drain_all_raw);
+    aio_seams::uring_worker_ring_init::set(uring_worker_ring_init);
+    aio_seams::uring_worker_ring_teardown::set(uring_worker_ring_teardown);
+    aio_seams::uring_boundary_reap::set(uring_boundary_reap);
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -31,18 +46,28 @@ mod imp {
         false
     }
     pub fn uring_drain_all_raw() {}
+    pub fn uring_worker_ring_init() -> i32 {
+        -1
+    }
+    pub fn uring_worker_ring_teardown() {}
+    pub fn uring_boundary_reap() {}
 }
 
 use imp::*;
 
 #[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub use imp::test_set_drop_token_complete_1in;
+
+#[cfg(target_os = "linux")]
 mod imp {
     use std::cell::Cell;
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use elog::ereport;
     use types_error::{ErrorLocation, LOG};
+    use waiter::io::IoToken;
 
     const ENTRIES: u32 = 128;
     const SLOTS: u32 = 128;
@@ -119,14 +144,23 @@ mod imp {
         flags: u32,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Default)]
     struct Slot {
         buffer: i32,
         gen: u64,
+        /// §2.9 IoToken for the in-flight read: created at submit, completed
+        /// (unpark-all) by whichever thread reaps the CQE, dropped at
+        /// collect/reuse. None once reaped or while the slot is free.
+        token: Option<Arc<IoToken>>,
     }
 
     struct RingState {
         alive: bool,
+        /// True for runtime-pool worker rings (uring_worker_ring_init): the
+        /// owner drains CQEs at every task boundary, so foreign WaitIO
+        /// waiters may park on the slot's IoToken instead of blocking-
+        /// reaping this ring.
+        boundary_reaper: bool,
         fd: i32,
         sq_ptr: *mut u8,
         sq_len: usize,
@@ -249,6 +283,7 @@ mod imp {
             let cq_mask = *cq_ptr.add(p.cq_off.ring_mask as usize).cast::<u32>();
             Some(RingState {
                 alive: true,
+                boundary_reaper: false,
                 fd,
                 sq_ptr,
                 sq_len,
@@ -267,7 +302,7 @@ mod imp {
                 done: 0,
                 inflight: 0,
                 next_gen: 1,
-                slots: [Slot { buffer: 0, gen: 0 }; SLOTS as usize],
+                slots: std::array::from_fn(|_| Slot::default()),
             })
         }
     }
@@ -312,6 +347,37 @@ mod imp {
         Some((handle, idx as u32))
     }
 
+    // Fault injection (§2.9 gate): PGRUST_TEST_URING_DROP_TOKEN_COMPLETE_1IN=N
+    // drops every Nth IoToken completion at the reap site — exactly the
+    // lost-completion shape (buffer state advanced, waiter wake dropped).
+    // Parked waiters must recover through the wait protocol's recheck
+    // backstop (state probe / degraded reap). u32::MAX = env not read yet.
+    static DROP_TOKEN_COMPLETE_1IN: AtomicU32 = AtomicU32::new(u32::MAX);
+    static DROP_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn drop_token_complete_fires() -> bool {
+        let mut n = DROP_TOKEN_COMPLETE_1IN.load(Ordering::Relaxed);
+        if n == u32::MAX {
+            n = std::env::var("PGRUST_TEST_URING_DROP_TOKEN_COMPLETE_1IN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v != u32::MAX)
+                .unwrap_or(0);
+            DROP_TOKEN_COMPLETE_1IN.store(n, Ordering::Relaxed);
+        }
+        if n == 0 {
+            return false;
+        }
+        DROP_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed) % n as u64 == n as u64 - 1
+    }
+
+    /// Test override for the drop-completion injector (0 disables).
+    #[doc(hidden)]
+    pub fn test_set_drop_token_complete_1in(n: u32) {
+        DROP_TOKEN_COUNTER.store(0, Ordering::Relaxed);
+        DROP_TOKEN_COMPLETE_1IN.store(n, Ordering::Relaxed);
+    }
+
     fn reap_locked(st: &mut RingState) {
         // SAFETY: module invariant (alive maps; head/tail via atomics).
         unsafe {
@@ -328,6 +394,14 @@ mod imp {
                 st.done |= 1u128 << slot;
                 st.inflight -= 1;
                 head = head.wrapping_add(1);
+                // §2.9: buffer state first (io_wref clear + TerminateBufferIO
+                // + done bit), THEN IoToken complete → Waiter unpark-all, so
+                // an unparked waiter always observes the settled state.
+                if let Some(token) = st.slots[slot as usize].token.take() {
+                    if !drop_token_complete_fires() {
+                        token.complete();
+                    }
+                }
             }
             atomic_u32(st.cq_head).store(head, Ordering::Release);
         }
@@ -381,7 +455,10 @@ mod imp {
         let slot = st.free.trailing_zeros();
         let gen = st.next_gen;
         st.next_gen += 1;
-        st.slots[slot as usize] = Slot { buffer, gen };
+        // One IoToken per in-flight read (§2.9): cqe id = the slot
+        // generation; completed by whichever thread reaps the CQE.
+        st.slots[slot as usize] =
+            Slot { buffer, gen, token: Some(Arc::new(IoToken::new(ring_id, gen))) };
         // Arm the wref before the SQE can complete: waiters route to this ring.
         bufmgr::uring_set_io_wref(buffer, ring_id * SLOTS + slot + 1, gen);
         // SAFETY: module invariant; idx masked into the SQE array; the slot bit
@@ -419,6 +496,13 @@ mod imp {
                 continue;
             }
             bufmgr::uring_clear_io_wref(buffer);
+            // No CQE will ever arrive for this slot: complete the token so a
+            // racer that cloned it between the wref arming and this backout
+            // can never park forever (registration was impossible while we
+            // held the ring mutex, so this is belt-and-braces).
+            if let Some(token) = st.slots[slot as usize].token.take() {
+                token.complete();
+            }
             log_fallback("io_uring_enter", e);
             teardown(&mut st);
             return false;
@@ -428,32 +512,95 @@ mod imp {
         true
     }
 
+    /// The IO settled from this waiter's point of view: ring dead, slot
+    /// reused (stale generation), collected, or reaped-done. Mirrors the
+    /// pre-M1 wait loop's exit predicate exactly.
+    fn io_settled(st: &RingState, slot: usize, generation: u64) -> bool {
+        let bit = 1u128 << slot;
+        !st.alive
+            || st.slots[slot].gen != generation
+            || st.free & bit != 0
+            || st.done & bit != 0
+    }
+
+    /// Targeted blocking reap on the owning ring (any-thread-completes):
+    /// drain CQEs — running completions, including foreign slots' — until
+    /// (slot, generation) settles.
+    fn blocking_reap(handle: &'static Mutex<RingState>, slot: usize, generation: u64) {
+        let mut st = lock(handle);
+        loop {
+            if io_settled(&st, slot, generation) {
+                return;
+            }
+            reap_locked(&mut st);
+            if st.done & (1u128 << slot) != 0 {
+                return;
+            }
+            wait_locked(&mut st);
+        }
+    }
+
     pub fn uring_buf_read_wait(aio_index: u32, generation: u64) {
         if aio_index == 0 {
             return;
         }
         let idx = aio_index - 1;
-        let (ring_id, slot) = ((idx / SLOTS) as usize, idx % SLOTS);
+        let (ring_id, slot) = ((idx / SLOTS) as usize, (idx % SLOTS) as usize);
         let p = REGISTRY[ring_id].load(Ordering::Acquire);
         if p.is_null() {
             return;
         }
         // SAFETY: registry entries are leaked, never freed.
-        let mut st = lock(unsafe { &*p });
-        let bit = 1u128 << slot;
-        loop {
-            if !st.alive
-                || st.slots[slot as usize].gen != generation
-                || st.free & bit != 0
-                || st.done & bit != 0
-            {
+        let handle: &'static Mutex<RingState> = unsafe { &*p };
+
+        // Peek-complete (§2.9): one non-blocking reap of the owner ring. An
+        // already-complete IO returns here — no token registration and NO
+        // permit churn (the IoGuard elision).
+        let token = {
+            let mut st = lock(handle);
+            if io_settled(&st, slot, generation) {
                 return;
             }
             reap_locked(&mut st);
-            if st.done & bit != 0 {
+            if io_settled(&st, slot, generation) {
                 return;
             }
-            wait_locked(&mut st);
+            // Genuinely pending: pick the wait shape. Parking on the IoToken
+            // is sound only when the ring's owner reaps at task boundaries
+            // (runtime-pool rings) and we are not that owner; every other
+            // case keeps the pre-M1 targeted blocking reap.
+            if st.boundary_reaper && RING_ID.get() != ring_id as i32 {
+                st.slots[slot].token.clone()
+            } else {
+                None
+            }
+        };
+
+        // Declared blocking section (§2.8): a pool worker holding an
+        // execution permit releases it here (a standby absorbs the core)
+        // and reacquires after the wait — the runtime's IoGuard, reached
+        // through the seam pair. Plain backends: seam uninstalled or
+        // returns false, a no-op.
+        let released = aio_seams::io_permit_release::is_installed()
+            && aio_seams::io_permit_release::call();
+        match token {
+            Some(token) => {
+                // Owner reaps at its task boundaries; park on the token.
+                // Recheck cadence backstop: a lost completion is caught by
+                // the settled-state probe, and a genuinely-unreaped IO
+                // (owner parked idle / wedged) degrades to the targeted
+                // blocking reap after one cadence.
+                token.wait_with(
+                    waiter::current_handle(),
+                    waiter::park,
+                    || io_settled(&lock(handle), slot, generation),
+                    || blocking_reap(handle, slot, generation),
+                );
+            }
+            None => blocking_reap(handle, slot, generation),
+        }
+        if released {
+            aio_seams::io_permit_reacquire::call();
         }
     }
 
@@ -491,6 +638,49 @@ mod imp {
         own_ring().is_some()
     }
 
+    /// §2.9 ring topology for the runtime pool: eagerly create THIS worker
+    /// thread's ring and mark it boundary-reaped (the owner drains CQEs at
+    /// every task boundary, so WaitIO waiters may park on the IoToken).
+    /// Returns the ring id for registration with the runtime worker struct,
+    /// or -1 when uring is unavailable here.
+    pub fn uring_worker_ring_init() -> i32 {
+        let Some((handle, ring_id)) = own_ring() else {
+            return -1;
+        };
+        let mut st = lock(handle);
+        if !st.alive {
+            return -1;
+        }
+        st.boundary_reaper = true;
+        ring_id as i32
+    }
+
+    /// §2.9: pool-worker exit — wait out this thread's in-flight DMA
+    /// (completions run, IoTokens complete), drop the issuer pins, then
+    /// unmap and close the ring. Pin collection MUST precede teardown: the
+    /// slot-held pins are this thread's and no one else will ever drop them.
+    pub fn uring_worker_ring_teardown() {
+        let id = RING_ID.get();
+        if id < 0 {
+            return;
+        }
+        bufmgr::uring_drain_pins();
+        // SAFETY: registry entries are leaked, never freed.
+        let mut st = lock(unsafe { &*REGISTRY[id as usize].load(Ordering::Relaxed) });
+        teardown(&mut st);
+    }
+
+    /// §2.9 boundary duty: non-blocking drain of THIS thread's CQEs.
+    /// Completions run (io_wref clear + TerminateBufferIO + IoToken
+    /// complete → Waiter unpark-all) and collected issuer pins drop —
+    /// bufmgr's collect/drain discipline, driven from the worker loop.
+    pub fn uring_boundary_reap() {
+        if RING_ID.get() < 0 {
+            return;
+        }
+        bufmgr::uring_collect_pins();
+    }
+
     pub fn uring_drain_all_raw() {
         let n = (NEXT_RING.load(Ordering::Relaxed) as usize).min(MAX_RINGS);
         for reg in REGISTRY.iter().take(n) {
@@ -521,6 +711,11 @@ mod imp {
             }
             st.done = 0;
             st.free = if SLOTS == 128 { u128::MAX } else { (1u128 << SLOTS) - 1 };
+            // Crash-cycle reset: drop the tokens WITHOUT completing them —
+            // every child that could have parked on one is dead.
+            for s in st.slots.iter_mut() {
+                s.token = None;
+            }
         }
     }
 
@@ -668,10 +863,26 @@ mod tests {
         resowner::SetCurrentResourceOwner(owner);
     }
 
+    // §2.8 permit-seam stand-ins (the runtime crate is not linked here, so
+    // the slots are ours): count the release/reacquire pairing every wait
+    // path must respect. Returning true = "this thread held a permit".
+    static PERMIT_RELEASES: AtomicI32 = AtomicI32::new(0);
+    static PERMIT_REACQUIRES: AtomicI32 = AtomicI32::new(0);
+
     fn setup() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
+            // Before ANY waiter park in this binary: a short recheck cadence
+            // so the lost-completion backstop tests bound at ~50ms.
+            std::env::set_var("PGRUST_WAITER_RECHECK_MS", "50");
+            aio_seams::io_permit_release::set(|| {
+                PERMIT_RELEASES.fetch_add(1, Ordering::SeqCst);
+                true
+            });
+            aio_seams::io_permit_reacquire::set(|| {
+                PERMIT_REACQUIRES.fetch_add(1, Ordering::SeqCst);
+            });
             shmem_seams::shmem_alloc::set(|size| {
                 let layout = std::alloc::Layout::from_size_align(size, 128).unwrap();
                 // Cluster-lifetime allocation, deliberately leaked (C: shmem).
@@ -700,7 +911,14 @@ mod tests {
                 Ok(())
             });
             smgr_seams::smgr_start_buffer_read::set(|rlb, _f, blocknum, buffer| {
-                assert_eq!(rlb.locator.relNumber, URING_REL);
+                // URING_REL is the M0 suite's shared relation; the M1
+                // tests take fresh relnumbers above it (same file bytes,
+                // fresh buffer tags — cold by construction).
+                assert!(
+                    (URING_REL..URING_REL + 100).contains(&rlb.locator.relNumber),
+                    "unexpected test relation {}",
+                    rlb.locator.relNumber
+                );
                 Ok(aio_seams::uring_buf_read::call(
                     uring_file_fd(),
                     blocknum as i64 * BLCKSZ as i64,
@@ -745,10 +963,44 @@ mod tests {
     }
 
     fn uring_smgr() -> RelFileLocatorBackend {
+        rel_smgr(URING_REL)
+    }
+
+    fn rel_smgr(rel: u32) -> RelFileLocatorBackend {
         RelFileLocatorBackend {
-            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: URING_REL },
+            locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel },
             backend: INVALID_PROC_NUMBER,
         }
+    }
+
+    /// A relation nobody has touched: fresh buffer tags over the SAME test
+    /// file bytes — every block is cold by construction, so the M1 tests
+    /// can assert `Issued` regardless of suite order.
+    fn fresh_rel() -> u32 {
+        static NEXT: AtomicI32 = AtomicI32::new(1);
+        URING_REL + NEXT.fetch_add(1, Ordering::Relaxed) as u32
+    }
+
+    fn uring_start_rel(rel: u32, blk: u32) -> Option<PrefetchOutcome> {
+        bufmgr::uring_start_read(
+            rel_smgr(rel),
+            RELPERSISTENCE_PERMANENT,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+        )
+        .unwrap()
+    }
+
+    fn read_blk_rel(rel: u32, blk: u32) -> Buffer {
+        ReadBufferWithoutRelcache(
+            rel_smgr(rel).locator,
+            ForkNumber::MAIN_FORKNUM,
+            blk,
+            ReadBufferMode::Normal,
+            None,
+            true,
+        )
+        .unwrap()
     }
 
     fn uring_start(blk: u32) -> Option<PrefetchOutcome> {
@@ -889,6 +1141,268 @@ mod tests {
             assert_eq!(GetPrivateRefCount(b), 1, "only the arrival pin may remain");
             ReleaseBuffer(b).unwrap();
         }
+        AtEOXact_Buffers(true);
+    }
+
+    // ---- M1 §2.9: IoToken wiring, boundary reaping, permit discipline ------
+
+    fn permit_counts() -> (i32, i32) {
+        (PERMIT_RELEASES.load(Ordering::SeqCst), PERMIT_REACQUIRES.load(Ordering::SeqCst))
+    }
+
+    /// Every wait path pairs release with reacquire — the IoGuard contract.
+    fn assert_permit_pairing(before: (i32, i32)) {
+        let after = permit_counts();
+        assert_eq!(
+            after.0 - before.0,
+            after.1 - before.1,
+            "io_permit_release must pair 1:1 with io_permit_reacquire"
+        );
+    }
+
+    /// Worker-ring lifecycle + owner boundary reap driving a foreign
+    /// waiter's arrival: the issuer marks its ring boundary-reaped (the
+    /// runtime worker shape), a foreign thread arrives at the pending read
+    /// (token park when it loses the race to the CQE, settled peek when it
+    /// wins — both legal), and the issuer's boundary reaps complete the IO
+    /// and drop the issuer pin. No sync fallback, byte parity, permits
+    /// paired.
+    #[test]
+    fn boundary_reap_unparks_foreign_waiter_on_pool_ring() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        let ring = aio_seams::uring_worker_ring_init::call();
+        assert!(ring >= 0, "worker ring init must succeed where uring is available");
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        let before_permits = permit_counts();
+
+        let rel = fresh_rel();
+        let blk = 1u32;
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
+
+        let foreign = std::thread::spawn(move || {
+            become_backend();
+            let b = read_blk_rel(rel, blk);
+            let field = page_block_field(b);
+            ReleaseBuffer(b).unwrap();
+            field
+        });
+        // The issuer's task-boundary duty, on its own cadence.
+        while !foreign.is_finished() {
+            aio_seams::uring_boundary_reap::call();
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        assert_eq!(foreign.join().unwrap(), blk + 100, "page must arrive via uring DMA");
+        assert_eq!(SYNC_READS.load(Ordering::Relaxed), before_sync, "no sync fallback");
+        assert_permit_pairing(before_permits);
+
+        // Boundary reaps must have collected the issuer pin.
+        aio_seams::uring_boundary_reap::call();
+        let b = read_blk_rel(rel, blk);
+        assert_eq!(GetPrivateRefCount(b), 1, "issuer prefetch pin must be collected");
+        ReleaseBuffer(b).unwrap();
+        AtEOXact_Buffers(true);
+    }
+
+    /// Peek-complete elision: a wait that finds the IO already settled at
+    /// the peek must not touch the permit seams. The CQE is given ample
+    /// time to arrive before the waiter shows up; if the device is
+    /// pathologically slow the wait legitimately blocks (permits paired) —
+    /// the elision assertion is then skipped rather than failed.
+    #[test]
+    fn settled_peek_elides_permit_release() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        let rel = fresh_rel();
+        let blk = 2u32;
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
+        // Ample time for the µs-scale DMA to land its CQE (unreaped).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let before_permits = permit_counts();
+        let t = std::thread::spawn(move || {
+            become_backend();
+            let b = read_blk_rel(rel, blk);
+            let field = page_block_field(b);
+            ReleaseBuffer(b).unwrap();
+            field
+        });
+        assert_eq!(t.join().unwrap(), blk + 100);
+        let after = permit_counts();
+        assert_permit_pairing(before_permits);
+        if after.0 != before_permits.0 {
+            eprintln!("CQE lost the 100ms race; elision not exercised this run");
+        } else {
+            assert_eq!(after, before_permits, "settled peek must not churn permits");
+        }
+        bufmgr::uring_collect_pins();
+        AtEOXact_Buffers(true);
+    }
+
+    /// Fault injection (drop-CQE hook): every IoToken completion is dropped
+    /// at the reap site, so a token-parked waiter never gets its wake. The
+    /// recheck backstop (50ms cadence in this binary) must recover via the
+    /// settled-state probe / degraded reap — the read completes correctly
+    /// and nothing hangs.
+    #[test]
+    fn dropped_token_completion_recovered_by_recheck_backstop() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                crate::test_set_drop_token_complete_1in(0);
+            }
+        }
+        let _reset = ResetHook;
+        crate::test_set_drop_token_complete_1in(1); // drop EVERY token wake
+
+        let ring = aio_seams::uring_worker_ring_init::call();
+        assert!(ring >= 0);
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        let before_permits = permit_counts();
+        let rel = fresh_rel();
+        let blk = 3u32;
+        assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
+
+        let foreign = std::thread::spawn(move || {
+            become_backend();
+            let b = read_blk_rel(rel, blk);
+            let field = page_block_field(b);
+            ReleaseBuffer(b).unwrap();
+            field
+        });
+        // Owner boundary reaps: consume the CQE (state settles, pin
+        // collects) but the token wake is dropped by the hook.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !foreign.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiter failed to recover from a dropped token completion"
+            );
+            aio_seams::uring_boundary_reap::call();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(foreign.join().unwrap(), blk + 100);
+        assert_eq!(SYNC_READS.load(Ordering::Relaxed), before_sync, "no sync fallback");
+        assert_permit_pairing(before_permits);
+        bufmgr::uring_collect_pins();
+        AtEOXact_Buffers(true);
+    }
+
+    /// The targeted M1 e2e at unit altitude: a COLD scan (fresh buffers, all
+    /// reads via uring DMA) at DOP — one boundary-reaping issuer ring (the
+    /// pool-worker shape) racing several foreign arrival threads over every
+    /// block, byte-parity against the known page images, permit pairing
+    /// intact, zero sync fallbacks. (The server-level cold heap scan at DOP
+    /// through runtime scan TaskSets lands with M1 lane A — this exercises
+    /// the full ring/reap/IoToken/IoGuard stack under real concurrency.)
+    #[test]
+    fn cold_scan_at_dop_byte_parity() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        // Fresh relation: every block cold by construction.
+        let rel = fresh_rel();
+        let ring = aio_seams::uring_worker_ring_init::call();
+        assert!(ring >= 0);
+        let before_sync = SYNC_READS.load(Ordering::Relaxed);
+        let before_permits = permit_counts();
+
+        // Issue the whole file's reads from the issuer (readahead shape).
+        for blk in 0..FILE_PAGES {
+            assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued), "block {blk}");
+        }
+        // DOP arrival threads, each scanning EVERY block (max contention on
+        // the WaitIO/token paths), asserting byte parity per page.
+        const DOP: usize = 4;
+        let workers: Vec<_> = (0..DOP)
+            .map(|w| {
+                std::thread::spawn(move || {
+                    become_backend();
+                    for step in 0..FILE_PAGES {
+                        // Stagger start blocks so threads collide on
+                        // different in-flight IOs.
+                        let blk = (step + w as u32 * 2) % FILE_PAGES;
+                        let b = read_blk_rel(rel, blk);
+                        assert_eq!(
+                            page_block_field(b),
+                            blk + 100,
+                            "worker {w}: page {blk} must arrive via uring DMA"
+                        );
+                        ReleaseBuffer(b).unwrap();
+                    }
+                })
+            })
+            .collect();
+        // The issuer's boundary-reap cadence runs the whole time; finished
+        // workers are JOINED so their assertion panics surface here.
+        let mut pending = workers;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !pending.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "cold DOP scan wedged");
+            aio_seams::uring_boundary_reap::call();
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            let (done, rest): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|h| h.is_finished());
+            for h in done {
+                h.join().unwrap();
+            }
+            pending = rest;
+        }
+        assert_eq!(
+            SYNC_READS.load(Ordering::Relaxed),
+            before_sync,
+            "cold scan must be served entirely by uring DMA"
+        );
+        assert_permit_pairing(before_permits);
+        // Every issuer pin collected; nothing stranded.
+        aio_seams::uring_boundary_reap::call();
+        for blk in 0..FILE_PAGES {
+            let b = read_blk_rel(rel, blk);
+            assert_eq!(GetPrivateRefCount(b), 1, "block {blk}: stranded issuer pin");
+            ReleaseBuffer(b).unwrap();
+        }
+        AtEOXact_Buffers(true);
+    }
+
+    /// Worker-ring teardown at pool exit: in-flight DMA is waited out
+    /// (tokens complete), the ring dies, and later reads fall back cleanly.
+    #[test]
+    fn worker_ring_teardown_waits_out_inflight() {
+        let _g = setup();
+        if !uring_here() {
+            return;
+        }
+        // A dedicated "pool worker" thread with its own ring (TLS-keyed).
+        let rel = fresh_rel();
+        let worker = std::thread::spawn(move || {
+            become_backend();
+            let ring = aio_seams::uring_worker_ring_init::call();
+            assert!(ring >= 0);
+            let blk = 4u32;
+            assert_eq!(uring_start_rel(rel, blk), Some(PrefetchOutcome::Issued));
+            // Exit with the IO in flight: teardown must wait it out, run
+            // its completion (BM_VALID or BM_IO_ERROR — never a torn page)
+            // and collect the slot pin before the ring dies.
+            aio_seams::uring_worker_ring_teardown::call();
+            blk
+        });
+        let blk = worker.join().unwrap();
+        // Arrival on this thread: the completed page (or a clean sync
+        // re-read on BM_IO_ERROR) — content must be correct either way.
+        let before_permits = permit_counts();
+        let b = read_blk_rel(rel, blk);
+        let field = page_block_field(b);
+        assert!(field == blk + 100 || field == blk, "torn/foreign page after teardown");
+        ReleaseBuffer(b).unwrap();
+        assert_permit_pairing(before_permits);
         AtEOXact_Buffers(true);
     }
 }

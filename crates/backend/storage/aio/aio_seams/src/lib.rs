@@ -47,6 +47,49 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // M1 §2.9 ring topology: eagerly create THIS thread's ring at runtime-
+    // pool worker start and mark it boundary-reaped (its owner drains CQEs
+    // at every task boundary, so WaitIO waiters may park on the IoToken
+    // instead of blocking-reaping). Returns the ring id, or -1 when uring is
+    // unavailable. Installed by aio_uring; called only by the runtime pool.
+    pub fn uring_worker_ring_init() -> i32
+);
+
+seam_core::seam!(
+    // M1 §2.9: tear down THIS thread's ring at pool-worker exit — waits out
+    // in-flight DMA (completions run, IoTokens complete) then unmaps/closes.
+    pub fn uring_worker_ring_teardown()
+);
+
+seam_core::seam!(
+    // M1 §2.9 boundary duty: non-blocking drain of THIS thread's CQEs —
+    // completions run (io_wref clear + TerminateBufferIO + IoToken
+    // complete/unpark-all) and collected issuer pins drop. Called by the
+    // runtime worker loop at every task boundary; rides the existing
+    // ~1-2ms task cadence. Installed by aio_uring.
+    pub fn uring_boundary_reap()
+);
+
+seam_core::seam!(
+    // §2.8 declared-blocking-section entry, installed by the runtime
+    // (launch_backend rtpool workers): if the calling thread is a pool
+    // worker holding an execution permit, release it (a standby absorbs the
+    // core) and return true — the caller MUST then call io_permit_reacquire
+    // when the blocking wait ends. false = not a permit holder (plain
+    // backend, standby, or already inside a blocking section): no-op, do
+    // not call reacquire. First callers: aio_uring's genuinely-pending
+    // uring_buf_read_wait paths (peek-complete elision happens before this).
+    pub fn io_permit_release() -> bool
+);
+
+seam_core::seam!(
+    // §2.8 declared-blocking-section exit: reacquire the execution permit
+    // released by a true-returning io_permit_release (ordinary contender,
+    // no priority). Pairs 1:1 with true returns.
+    pub fn io_permit_reacquire()
+);
+
+seam_core::seam!(
     // Crash-cycle reset (postmaster, all children dead): wait out every ring's
     // in-flight DMA into the pool WITHOUT running completions.
     pub fn uring_drain_all_raw()

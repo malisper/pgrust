@@ -165,11 +165,62 @@ pub fn FreeWaitEventSet(handle: WaitEventSetHandle) {
             .and_then(Option::take)
     }) {
         Ok(set) => set,
-        // Registry TLS already destroyed (thread exit): the OS reclaims fds.
+        // Registry TLS already destroyed (thread exit). Only PROCESS death
+        // reclaims kernel fds, which is why WaitEventSetReleaseGuard frees
+        // every still-registered set before TLS teardown; a call landing
+        // here can only race that guard, whose sweep already freed the set.
         Err(_) => return,
     };
     if let Some(set) = set {
         set.backend.free();
+    }
+}
+
+// Frees every set still registered on this thread. BackendSet deliberately
+// has no Drop (docs/no-drop.md keeps drop authority in explicit owners), so
+// a set that is still live when the thread's TLS unwinds would leak its
+// epoll/kqueue fd: C's "static, never freed" sets (LatchWaitSet, FeBeWaitSet)
+// are reclaimed by process death, and a session THREAD's death reclaims
+// nothing (chaos F2: 2 leaked epoll fds per connection under churn).
+fn release_thread_wait_event_sets() {
+    // Defensive try_with: the guard drops before TLS destruction on the
+    // launch paths, but an exotic exit must degrade to the old leak, not
+    // panic inside unwinding.
+    let Ok(sets) = SETS.try_with(|sets| std::mem::take(&mut *sets.borrow_mut())) else {
+        return;
+    };
+    for set in sets.into_iter().flatten() {
+        set.backend.free();
+    }
+}
+
+/// Backend-thread teardown for this thread's WaitEventSets: Drop frees every
+/// set still registered — the thread-model analog of C's reclaim-at-process-
+/// death for the deliberately-never-freed sets (LatchWaitSet, FeBeWaitSet).
+/// Held at the top of the child thread (LocalLatchReleaseGuard house style),
+/// declared AFTER the latch guard so it drops FIRST: strictly after
+/// run_child_task has drained the deferred proc_exit callback stacks (no
+/// callback can wait on a freed set), and before the local latch slot the
+/// sets reference is recycled. Thread-scoped, not per-task: a parked wretain
+/// standby keeps its sets warm; only thread exit frees them.
+#[must_use]
+pub struct WaitEventSetReleaseGuard(());
+
+impl WaitEventSetReleaseGuard {
+    pub fn new() -> Self {
+        Self(())
+    }
+}
+
+impl Default for WaitEventSetReleaseGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for WaitEventSetReleaseGuard {
+    fn drop(&mut self) {
+        release_thread_wait_event_sets();
     }
 }
 

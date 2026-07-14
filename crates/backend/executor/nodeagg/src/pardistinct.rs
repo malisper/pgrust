@@ -801,6 +801,25 @@ pub struct PdMerged<'mcx> {
     pub(crate) dsets: Vec<Option<DistinctSet<'mcx>>>,
 }
 
+impl PdMerged<'_> {
+    /// Retained CONTENT bytes of one merged bucket (R3 accounting for the
+    /// combine phase — the merged result is held until the leader adopts).
+    /// Deliberately len-based, matching `PdHandedTable::mem_bytes`'s
+    /// convention: the envelope check compares against the sum of the
+    /// sealed tables' CONTENT, and capacity-based counting (Vec doubling +
+    /// probe-table roundup on freshly rebuilt sets, ~2-4x slack) would
+    /// spuriously cross it for legitimately near-budget merges (review
+    /// finding R1). DistinctSet::mem_bytes is the builder's own metering,
+    /// shared with the accept-phase budget.
+    pub fn mem_bytes(&self) -> usize {
+        self.keys.len() * 8
+            + self.keynulls.len() * 4
+            + self.states.len() * 8
+            + self.dsets.len() * core::mem::size_of::<Option<DistinctSet<'_>>>()
+            + self.dsets.iter().flatten().map(|d| d.mem_bytes()).sum::<usize>()
+    }
+}
+
 impl PdMerged<'static> {
     /// Rebind a scoped-thread-built (never-spilled) merge result to the
     /// node's `'mcx` (see `DistinctSet::unspilled_into`).
@@ -1083,29 +1102,41 @@ pub fn pd_parallel_merge_plain<'m>(
 // AggStateData. Everything here is per-plan static.
 // ===========================================================================
 
-/// Map a transfn to its vocab kind given the (single) argument's outer
-/// attno + width. The oids are `order_insensitive_exact_transfn`'s, minus
-/// the Int128 family (int8_avg_accum — v1 refusal).
-pub(crate) fn vocab_kind(transfn_oid: Oid, att: Option<(u16, PdInt)>) -> Option<PdVocabKind> {
-    const F_INT8INC: Oid = 1219;
-    const F_INT8INC_ANY: Oid = 2804;
-    const F_INT2_SUM: Oid = 1840;
-    const F_INT4_SUM: Oid = 1841;
-    const F_INT2_AVG_ACCUM: Oid = 1962;
-    const F_INT4_AVG_ACCUM: Oid = 1963;
-    match transfn_oid {
-        F_INT8INC => Some(PdVocabKind::CountStar),
-        F_INT8INC_ANY => att.map(|(a, _)| PdVocabKind::CountAny { att: a }),
-        F_INT2_SUM => att.and_then(|(a, k)| {
+/// Map an AGGREGATE (Aggref.aggfnoid — what the derivation actually holds)
+/// to its vocab kind given the (single) argument's outer attno + width.
+/// These aggregates' transfns are exactly the
+/// `order_insensitive_exact_transfn` whitelist minus the Int128 family
+/// (count(*)→int8inc, count(any)→int8inc_any, sum(int2/4)→int2/4_sum,
+/// avg(int2/4)→int2/4_avg_accum; avg/sum(int8) accumulate Int128/numeric —
+/// v1 refusal).
+///
+/// HISTORY NOTE (m2-distinct-sink): the original table listed the TRANSFN
+/// proc oids while the caller passed `ar.aggfnoid` — no vocab shape could
+/// ever derive. Unobservable under the Gather-era arm (its v1 economics
+/// refused non-empty vocab before deriving); found by the sink's Q10-class
+/// e2e engagement coverage.
+pub(crate) fn vocab_kind(aggfnoid: Oid, att: Option<(u16, PdInt)>) -> Option<PdVocabKind> {
+    /// pg_proc: count(*) / count(any) / sum(int2) / sum(int4) /
+    /// avg(int2) / avg(int4).
+    const AGG_COUNT_STAR: Oid = 2803;
+    const AGG_COUNT_ANY: Oid = 2147;
+    const AGG_SUM_INT2: Oid = 2109;
+    const AGG_SUM_INT4: Oid = 2108;
+    const AGG_AVG_INT2: Oid = 2102;
+    const AGG_AVG_INT4: Oid = 2101;
+    match aggfnoid {
+        AGG_COUNT_STAR => Some(PdVocabKind::CountStar),
+        AGG_COUNT_ANY => att.map(|(a, _)| PdVocabKind::CountAny { att: a }),
+        AGG_SUM_INT2 => att.and_then(|(a, k)| {
             (k == PdInt::I16).then_some(PdVocabKind::SumInt { att: a, kind: k })
         }),
-        F_INT4_SUM => att.and_then(|(a, k)| {
+        AGG_SUM_INT4 => att.and_then(|(a, k)| {
             (k == PdInt::I32).then_some(PdVocabKind::SumInt { att: a, kind: k })
         }),
-        F_INT2_AVG_ACCUM => att.and_then(|(a, k)| {
+        AGG_AVG_INT2 => att.and_then(|(a, k)| {
             (k == PdInt::I16).then_some(PdVocabKind::AvgInt { att: a, kind: k })
         }),
-        F_INT4_AVG_ACCUM => att.and_then(|(a, k)| {
+        AGG_AVG_INT4 => att.and_then(|(a, k)| {
             (k == PdInt::I32).then_some(PdVocabKind::AvgInt { att: a, kind: k })
         }),
         _ => None,
@@ -1118,4 +1149,185 @@ pub(crate) fn vocab_kind(transfn_oid: Oid, att: Option<(u16, PdInt)>) -> Option<
 #[cold]
 pub(crate) fn pd_internal(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("pardistinct internal: {msg}")))
+}
+
+// ===========================================================================
+// M2 runtime-sink surface (m2-distinct-sink): the donor machinery above,
+// re-shaped for the morsel runtime's SealedParallelSink contract. The
+// builder becomes a lifetime-erased, Send-able worker Local; freeze is the
+// seal; `pd_merge_bucket` is the per-partition combine; the concatenation
+// helper assembles the published merged result. The Gather-era registry /
+// handoff / leader-partial machinery above is NOT used by the sink (it
+// remains the compat path until the runtime arm subsumes it).
+// ===========================================================================
+
+/// A worker-side [`PdBuilder`] with its `'mcx` lifetime erased to `'static`.
+///
+/// SOUNDNESS (the module-level worker discipline, made a type invariant):
+/// the wrapped builder is constructed with `mcx: None`, so it can never
+/// spill and never holds an arena handle; every byte it retains is owned
+/// plain data (`DistinctSet` copies inserted content into its own blob; the
+/// detoast scratch lives in the CALLER's per-tuple context and is reset per
+/// row). Nothing borrowed from any `EStateData` survives an `accept` call,
+/// which is what makes the lifetime erasure and the `Send` below sound —
+/// the same self-contained-buffer argument as [`PdHandedTable`].
+pub struct PdSinkLocal {
+    builder: PdBuilder<'static>,
+}
+
+// SAFETY: `mcx` is `None` by construction (`new` is the only constructor)
+// and `DistinctSet` without spill state is owned plain data; see the type
+// doc.
+unsafe impl Send for PdSinkLocal {}
+
+impl PdSinkLocal {
+    pub fn new(spec: Arc<PdSpec>, budget: usize) -> PdSinkLocal {
+        PdSinkLocal { builder: PdBuilder::new(spec, budget, None) }
+    }
+
+    /// Feed one row (the worker accept). `PdFeed::Crossed` = the worker
+    /// budget crossed — the sink arm's policy is abort-and-refuse (the
+    /// runtime has no degrade target; the leader reruns the serial arm).
+    #[inline]
+    pub fn accept<'mcx>(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        id: ExecSlotId,
+        tmp: EcxtId,
+    ) -> PgResult<PdFeed> {
+        // SAFETY: pure lifetime erasure — the `mcx: None` builder retains no
+        // borrow from `estate` (type invariant above); shortening `'static`
+        // to `'mcx` on the receiver is the safe direction for every field
+        // the call can touch.
+        let b: &mut PdBuilder<'mcx> =
+            unsafe { core::mem::transmute::<&mut PdBuilder<'static>, &mut PdBuilder<'mcx>>(
+                &mut self.builder,
+            ) };
+        b.accept(estate, id, tmp)
+    }
+
+    /// Seal: freeze into the partitioned wire form.
+    pub fn freeze(self) -> PgResult<PdHandedTable> {
+        self.builder.freeze()
+    }
+
+    pub fn ngroups(&self) -> usize {
+        self.builder.ngroups()
+    }
+
+    pub fn mem_bytes(&self) -> usize {
+        self.builder.mem_bytes()
+    }
+}
+
+/// An empty, well-formed GROUPED handed table (the seal error path's
+/// placeholder: the RG is already aborting, but the wire shape must stay
+/// consumable by any combine that races the abort observation).
+pub fn pd_empty_grouped_table(spec: &Arc<PdSpec>) -> PdHandedTable {
+    PdBuilder::new(Arc::clone(spec), usize::MAX, None)
+        .freeze()
+        .expect("freezing an empty builder cannot fail")
+}
+
+/// Number of grouped combine partitions (the sink's partition space).
+pub const PD_SINK_GROUP_PARTS: u64 = PD_GROUP_PARTS as u64;
+
+/// Merge ONE group partition across the sealed tables (slice order = worker
+/// slot order = the combine's deterministic input order). This is the
+/// donors' `merge_bucket` verbatim, exposed for the runtime sink's
+/// partition-claim combine.
+pub fn pd_merge_bucket(
+    spec: &PdSpec,
+    tables: &[PdHandedTable],
+    bucket: usize,
+) -> PdMerged<'static> {
+    merge_bucket(spec, tables, bucket)
+}
+
+/// Concatenate per-bucket merge outputs (bucket order) into the one merged
+/// result — the grouped parallel merge's tail, exposed for the sink's
+/// finalize.
+pub fn pd_concat_buckets(buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
+    let mut merged = PdMerged {
+        ngroups: 0,
+        keys: Vec::new(),
+        keynulls: Vec::new(),
+        states: Vec::new(),
+        dsets: Vec::new(),
+    };
+    for m in buckets {
+        merged.ngroups += m.ngroups;
+        merged.keys.extend(m.keys);
+        merged.keynulls.extend(m.keynulls);
+        merged.states.extend(m.states);
+        merged.dsets.extend(m.dsets);
+    }
+    merged
+}
+
+/// A merged result crossing threads (helper finalize → parked leader).
+///
+/// SAFETY invariant: only ever constructed from `pd_merge_bucket` outputs —
+/// bucket merges build FRESH, never-spilled `DistinctSet<'static>`s (no
+/// tape state, no arena handles), so the payload is owned plain data.
+pub struct PdSinkMerged(PdMerged<'static>);
+
+// SAFETY: see the type doc (never-spilled sets are owned plain data — the
+// `PdHandedTable` argument).
+unsafe impl Send for PdSinkMerged {}
+
+impl PdSinkMerged {
+    pub fn new(merged: PdMerged<'static>) -> PdSinkMerged {
+        PdSinkMerged(merged)
+    }
+
+    /// Rebind to the consuming node's `'mcx` (the `into_lt` law: sound for
+    /// never-spilled merge results, which is the constructor's invariant).
+    pub fn into_merged<'m>(self) -> PdMerged<'m> {
+        self.0.into_lt()
+    }
+
+    pub fn ngroups(&self) -> usize {
+        self.0.ngroups
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (m2-distinct-sink): the vocab table must key on AGGREGATE
+    /// oids — the derivation passes `Aggref.aggfnoid`. The original table
+    /// listed transfn proc oids and no vocab shape could ever derive.
+    #[test]
+    fn vocab_kind_keys_on_aggregate_oids() {
+        assert!(matches!(vocab_kind(2803, None), Some(PdVocabKind::CountStar)));
+        assert!(matches!(
+            vocab_kind(2147, Some((3, PdInt::I64))),
+            Some(PdVocabKind::CountAny { att: 3 })
+        ));
+        assert!(matches!(
+            vocab_kind(2109, Some((1, PdInt::I16))),
+            Some(PdVocabKind::SumInt { att: 1, kind: PdInt::I16 })
+        ));
+        assert!(matches!(
+            vocab_kind(2108, Some((2, PdInt::I32))),
+            Some(PdVocabKind::SumInt { att: 2, kind: PdInt::I32 })
+        ));
+        assert!(matches!(
+            vocab_kind(2102, Some((4, PdInt::I16))),
+            Some(PdVocabKind::AvgInt { att: 4, kind: PdInt::I16 })
+        ));
+        assert!(matches!(
+            vocab_kind(2101, Some((5, PdInt::I32))),
+            Some(PdVocabKind::AvgInt { att: 5, kind: PdInt::I32 })
+        ));
+        // Width mismatches and the Int128/numeric families refuse.
+        assert!(vocab_kind(2108, Some((2, PdInt::I16))).is_none());
+        assert!(vocab_kind(2107, Some((2, PdInt::I64))).is_none()); // sum(int8)
+        assert!(vocab_kind(2100, Some((2, PdInt::I64))).is_none()); // avg(int8)
+        // The OLD (buggy) transfn oids must NOT match.
+        assert!(vocab_kind(1219, None).is_none());
+        assert!(vocab_kind(2804, Some((0, PdInt::I64))).is_none());
+    }
 }

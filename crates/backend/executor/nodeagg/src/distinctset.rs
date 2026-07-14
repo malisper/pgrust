@@ -72,8 +72,21 @@ struct BytesSpan {
 /// one-miss inline-key tables (crates/common/stringhash set variants). The
 /// value arrays (`ints` / `blob`+`spans`) are IDENTICAL under both arms —
 /// spill record formats, replay order, and the parallel export never see the
-/// difference. Chosen at the first insert; kill switch
+/// difference; the arm swap only replaces the probe INDEX. Kill switch
 /// PGRUST_LANE_V2_STRINGHASH_SET=0/off keeps the legacy table.
+///
+/// SIZE GATE (train-10 Q14 follow-up): the stringhash tables' fixed cost —
+/// a 2-3 KiB zeroed initial allocation (1<<INITIAL_DEGREE cells) per set,
+/// paid again in dealloc — loses to the 256 B legacy table on the many
+/// small per-group sets a grouped COUNT(DISTINCT) with high group count
+/// builds (Q14: +17% on train 10). Every set therefore STARTS legacy and
+/// promotes to the stringhash arm only when it holds
+/// `stringhash_promote_len()` values (default 56 = the legacy table's first
+/// grow boundary, so an ungated set never grows the legacy table): small
+/// sets keep the cheap representation for their whole life, big sets
+/// (Q5/Q6/Q9/Q10/Q11 winners) pay one trivial <=threshold-key rebuild.
+/// PGRUST_LANE_V2_STRINGHASH_SET_MINLEN=0 restores the ungated train-10
+/// behavior (promote on first insert) for A/B.
 enum ProbeTab {
     /// Undecided (empty set) — also the replay-only state (`from_values`).
     Empty,
@@ -89,6 +102,20 @@ fn stringhash_set_enabled() -> bool {
             std::env::var("PGRUST_LANE_V2_STRINGHASH_SET").as_deref(),
             Ok("0") | Ok("off") | Ok("false")
         )
+    })
+}
+
+/// Set size at which a legacy set promotes to the stringhash arm. Default
+/// 56 = INIT_TABLE * 7/8, the legacy table's first grow point (a gated set
+/// never grows legacy — it promotes instead). 0 = promote on first insert
+/// (the ungated train-10 behavior).
+fn stringhash_promote_len() -> usize {
+    static LEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LEN.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_STRINGHASH_SET_MINLEN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(INIT_TABLE * 7 / 8)
     })
 }
 
@@ -257,16 +284,23 @@ impl<'mcx> DistinctSet<'mcx> {
 
     /// Flush-time reset: values only — `seen_null` (never spilled) and the
     /// spill state survive; capacities are retained for the next epoch.
+    /// Stringhash arms clear by CONTENTS (the value arrays), not capacity:
+    /// the pooled per-group reuse (codedgroup emit) lets one big group
+    /// inflate the retained table, and a capacity-bounded memset would then
+    /// tax every later small group with it (the train-10 Q14 +17%).
     fn reset_values(&mut self) {
-        match &mut self.table {
+        let DistinctSet { table, ints, blob, spans, .. } = self;
+        match table {
             ProbeTab::Empty => {}
             ProbeTab::Legacy(t) => t.iter_mut().for_each(|s| *s = 0),
-            ProbeTab::Int(t) => t.clear(),
-            ProbeTab::Bytes(t) => t.clear(),
+            ProbeTab::Int(t) => t.clear_with_keys(ints),
+            ProbeTab::Bytes(t) => t.clear_with_entries(
+                spans.iter().map(|s| (s.hash, s.off + varatt::VARHDRSZ as u32)),
+            ),
         }
-        self.ints.clear();
-        self.blob.clear();
-        self.spans.clear();
+        ints.clear();
+        blob.clear();
+        spans.clear();
     }
 
     /// Degrade-time reset: give the memory back (the tuplesort owns the
@@ -277,7 +311,11 @@ impl<'mcx> DistinctSet<'mcx> {
     }
 
     /// Legacy arm: grow-if-needed, then return the probe mask. 7/8 load
-    /// factor. Decides the arm on first use (kill-switch aware).
+    /// factor. Every set starts here (an empty table becomes legacy);
+    /// promotion to the stringhash arms is the callers' size gate — at the
+    /// default threshold the first grow below never fires (the set promotes
+    /// at exactly the 7/8 boundary of INIT_TABLE), but a raised
+    /// SET_MINLEN keeps growing legacy until the gate opens.
     #[inline]
     fn probe_ready_legacy(&mut self) -> usize {
         if matches!(self.table, ProbeTab::Empty) {
@@ -315,12 +353,52 @@ impl<'mcx> DistinctSet<'mcx> {
         self.table = ProbeTab::Legacy(table);
     }
 
+    /// Size gate (see `ProbeTab` doc): true when a legacy/empty set has
+    /// reached the promotion threshold. Never true with the stringhash arms
+    /// killed.
+    #[inline]
+    fn should_promote(&self) -> bool {
+        stringhash_set_enabled() && self.len() >= stringhash_promote_len()
+    }
+
+    /// Rebuild the probe index for the held `ints` in a stringhash IntSet
+    /// (one-time legacy->stringhash promotion). Pure index swap: the value
+    /// array — the spill / replay / export authority — is untouched.
+    #[cold]
+    #[inline(never)]
+    fn promote_ints(&mut self) {
+        let mut t = ::stringhash::IntSet::new();
+        for &k in &self.ints {
+            let inserted = t.insert(k);
+            debug_assert!(inserted, "value array holds distinct keys");
+        }
+        self.table = ProbeTab::Int(t);
+    }
+
+    /// `promote_ints`'s bytes counterpart: re-index the held spans (stored
+    /// content hashes reused) in a stringhash BytesDedup. `blob` bytes and
+    /// span order are untouched.
+    #[cold]
+    #[inline(never)]
+    fn promote_bytes(&mut self) {
+        let mut t = ::stringhash::BytesDedup::new();
+        for sp in &self.spans {
+            let at = sp.off as usize + varatt::VARHDRSZ;
+            let content = &self.blob[at..at + sp.len as usize];
+            let inserted = t.insert(sp.hash, content, &self.blob, at as u32);
+            debug_assert!(inserted, "value array holds distinct values");
+        }
+        self.table = ProbeTab::Bytes(t);
+    }
+
     /// Insert a sign-extended integer key (no-op if present).
     #[inline]
     pub(crate) fn insert_i64(&mut self, k: i64) {
-        if stringhash_set_enabled() {
-            // Int arm hashes internally (hardware CRC); mix64 skipped.
-            self.insert_i64_hashed(k, 0);
+        if let ProbeTab::Int(t) = &mut self.table {
+            // Promoted arm hashes internally (hardware CRC); mix64 skipped.
+            if t.insert(k) {
+                self.ints.push(k);
+            }
             return;
         }
         self.insert_i64_hashed(k, mix64(k as u64));
@@ -331,24 +409,27 @@ impl<'mcx> DistinctSet<'mcx> {
     /// in row order with the precomputed hash. Element-for-element identical
     /// to `insert_i64` in the same order.
     pub(crate) fn insert_i64_batch(&mut self, keys: &[i64], hashes: &mut Vec<u64>) {
-        if stringhash_set_enabled() {
-            // Int arm: no precomputed-hash pass (the kernel hashes in-probe).
+        if matches!(self.table, ProbeTab::Int(_)) {
+            // Promoted arm: no precomputed-hash pass (the kernel hashes
+            // in-probe).
             for &k in keys {
-                self.insert_i64_hashed(k, 0);
+                self.insert_i64(k);
             }
             return;
         }
         hashes.clear();
         hashes.extend(keys.iter().map(|&k| mix64(k as u64)));
         for (&k, &h) in keys.iter().zip(hashes.iter()) {
+            // May promote mid-batch; the hashed path re-dispatches (the
+            // precomputed hash is simply unused after promotion).
             self.insert_i64_hashed(k, h);
         }
     }
 
     #[inline]
     fn insert_i64_hashed(&mut self, k: i64, h: u64) {
-        if matches!(self.table, ProbeTab::Empty) && stringhash_set_enabled() {
-            self.table = ProbeTab::Int(::stringhash::IntSet::new());
+        if !matches!(self.table, ProbeTab::Int(_)) && self.should_promote() {
+            self.promote_ints();
         }
         if let ProbeTab::Int(t) = &mut self.table {
             // One-miss inline-key probe; the value array stays the spill /
@@ -383,8 +464,8 @@ impl<'mcx> DistinctSet<'mcx> {
     /// live datum pointer.
     pub(crate) fn insert_bytes(&mut self, content: &[u8]) {
         let hash = ::hashfn::hash_bytes(content);
-        if matches!(self.table, ProbeTab::Empty) && stringhash_set_enabled() {
-            self.table = ProbeTab::Bytes(::stringhash::BytesDedup::new());
+        if !matches!(self.table, ProbeTab::Bytes(_)) && self.should_promote() {
+            self.promote_bytes();
         }
         if let ProbeTab::Bytes(t) = &mut self.table {
             // Prospective image layout (identical bytes to the legacy arm);
@@ -843,6 +924,44 @@ mod tests {
             }
         }
         assert!(s.mem_bytes() > 1_000 * 8);
+    }
+
+    #[test]
+    fn promotion_boundary_dedups_across_arms() {
+        // Walk the set size across the default promotion threshold (56):
+        // values inserted while legacy must stay deduplicated after the
+        // stringhash promotion, and vice versa, for both key kinds.
+        let boundary = super::stringhash_promote_len().max(1);
+        let n = boundary * 2 + 3;
+
+        let mut s = DistinctSet::new();
+        for i in 0..n as i64 {
+            s.insert_i64(i);
+            s.insert_i64(i); // immediate dup
+        }
+        for i in 0..n as i64 {
+            s.insert_i64(i); // post-promotion re-insert of legacy-era keys
+        }
+        s.insert_i64(0); // has_zero arm
+        assert_eq!(s.len(), n);
+        // Value array order is insertion order regardless of arm.
+        assert_eq!(s.ints()[0], 0);
+        assert_eq!(s.ints()[n - 1], (n - 1) as i64);
+
+        let mut b = DistinctSet::new();
+        for i in 0..n {
+            b.insert_bytes(format!("k-{i}").as_bytes());
+            b.insert_bytes(format!("k-{i}").as_bytes());
+        }
+        for i in 0..n {
+            b.insert_bytes(format!("k-{i}").as_bytes());
+        }
+        assert_eq!(b.len(), n);
+        // Clear keeps the promoted arm usable and empty.
+        b.clear();
+        assert_eq!(b.len(), 0);
+        b.insert_bytes(b"fresh");
+        assert_eq!(b.len(), 1);
     }
 
     #[test]
