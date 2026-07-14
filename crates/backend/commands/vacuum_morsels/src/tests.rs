@@ -298,6 +298,28 @@ fn random_counters(rng: &mut Rng, xid_base: TransactionId) -> ScanCounters {
 }
 
 #[test]
+fn fold_accepts_fresh_cluster_mxid() {
+    // Fresh cluster: OldestMxact == FirstMultiXactId == 1 — a valid
+    // MultiXactId that is NOT "normal" by XID rules. The inc-2 fleet
+    // battery caught the original fold assert panicking on the very first
+    // engaged claim fold (job pgrust-combined-gates-1784013375-80750);
+    // this pins the fixed contract.
+    let mut acc = ScanCounters::seed(1000, 1);
+    let mut claim = ScanCounters::seed(1000, 1);
+    claim.scanned_pages = 3;
+    claim.NewRelfrozenXid = 900; // ratcheted back by a page with older xids
+    acc.fold(&claim);
+    assert_eq!(acc.NewRelfrozenXid, 900);
+    assert_eq!(acc.NewRelminMxid, 1);
+    // And the mxid min-fold is modular (MultiXactIdPrecedes), no
+    // bootstrap/frozen special cases.
+    let mut older = ScanCounters::seed(1000, 5);
+    let newer = ScanCounters::seed(1000, 2);
+    older.fold(&newer);
+    assert_eq!(older.NewRelminMxid, 2);
+}
+
+#[test]
 fn fold_is_order_insensitive_exact() {
     let mut rng = Rng::new(0xf01d);
     // Include a wraparound-adjacent base: XID minimums must fold under

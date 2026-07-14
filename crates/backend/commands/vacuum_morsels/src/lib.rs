@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use types_core::primitive::TransactionId;
-use types_core::xact::{TransactionIdIsNormal, TransactionIdPrecedes};
+use types_core::xact::{MultiXactIdPrecedes, TransactionIdIsNormal, TransactionIdPrecedes};
 
 /// C vacuumlazy.c:209 — runs of skippable pages shorter than this are
 /// scanned anyway (kernel readahead beats the seek + rescan-risk math).
@@ -278,14 +278,19 @@ impl ScanCounters {
         self.missed_dead_tuples += other.missed_dead_tuples;
         self.nonempty_pages = self.nonempty_pages.max(other.nonempty_pages);
         debug_assert!(
-            TransactionIdIsNormal(other.NewRelfrozenXid)
-                && TransactionIdIsNormal(other.NewRelminMxid),
+            TransactionIdIsNormal(other.NewRelfrozenXid),
             "vacuum folds only normal XIDs (seeded from cutoffs)"
         );
+        // MultiXactIds have their own validity floor: FirstMultiXactId == 1
+        // is a legitimate OldestMxact on a fresh cluster (a "not normal"
+        // value by XID rules — the inc-2 fleet battery caught the stricter
+        // assert panicking on the very first engaged fold). Compare with
+        // MultiXactIdPrecedes, C's own comparator for this tracker.
+        debug_assert!(other.NewRelminMxid != 0, "vacuum folds only valid MultiXactIds");
         if TransactionIdPrecedes(other.NewRelfrozenXid, self.NewRelfrozenXid) {
             self.NewRelfrozenXid = other.NewRelfrozenXid;
         }
-        if TransactionIdPrecedes(other.NewRelminMxid, self.NewRelminMxid) {
+        if MultiXactIdPrecedes(other.NewRelminMxid, self.NewRelminMxid) {
             self.NewRelminMxid = other.NewRelminMxid;
         }
     }
