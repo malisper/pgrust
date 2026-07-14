@@ -12639,7 +12639,7 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     };
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc, false) else {
         return Ok(None);
     };
     // v1 economics: engage the grouped arm only when the DISTINCT sets are
@@ -12688,7 +12688,7 @@ pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     };
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc, false) else {
         return Ok(None);
     };
     debug_assert_eq!(spec.nkeys(), 0);

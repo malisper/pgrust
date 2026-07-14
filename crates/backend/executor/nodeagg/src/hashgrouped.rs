@@ -392,6 +392,50 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
     est_groups * per_group * 2.0 <= hashgroup_budget() as f64
 }
 
+/// The RUNTIME DISTINCT SINK's economics twin of
+/// [`agg_hashgroup_economical`] (distinct-bytes car). The budget-fit term
+/// is UNCHANGED (group tables never spill; only set values do): estimated
+/// groups must fit the per-Local budget with 2x slack. Density reads its
+/// own threshold (`PGRUST_RUNTIME_DISTINCT_MINRPG`) — MEASURED 2026-07-14
+/// (job pgrust-m0-accept-1784045139-06ee, 10M v7u bank, wm=1GB,
+/// condcache=on): with the tier at 1.0 the near-unique CB-q14 class
+/// (SearchPhrase text key, ~1.6 rows/group, 835k merged groups) ENGAGES
+/// with full parity + morsel-elastic disturb (4.7%) but LOSES —
+/// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
+/// the leader-side adopt/emit tail (concat + rep synthesis + order +
+/// per-group emit over 835k groups) dominates, the q19@10M
+/// "emit/combine-bound near-unique" class. Default therefore stays at
+/// the serial-calibrated 8.0 — near-unique shapes keep their serial/def
+/// arms until a parallel-emit car exists; the env knob is the
+/// measurement channel (this run's evidence came through it).
+pub fn agg_hashgroup_economical_sink(
+    node: &AggStateData<'_>,
+    force: bool,
+    input_rows: f64,
+) -> bool {
+    if force {
+        return true;
+    }
+    const PER_GROUP_EST: f64 = 256.0;
+    const PER_TEXT_KEY_EST: f64 = 64.0;
+    fn sink_min_rpg() -> f64 {
+        static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_DISTINCT_MINRPG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8.0)
+        })
+    }
+    let est_groups = (node.plan.numGroups as f64).max(1.0);
+    if input_rows > 0.0 && input_rows < sink_min_rpg() * est_groups {
+        return false;
+    }
+    let per_group =
+        PER_GROUP_EST + PER_TEXT_KEY_EST * agg_hashgroup_text_key_count(node) as f64;
+    est_groups * per_group * 2.0 <= hashgroup_budget() as f64
+}
+
 /// Whether the arm is mid-emit (the drive routes straight to
 /// `agg_hashgroup_emit_next`, never touching the plan's Sort node).
 pub fn agg_hashgroup_emitting(node: &AggStateData<'_>) -> bool {
@@ -1844,6 +1888,8 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
     const INT2OID: ::types_core::Oid = 21;
     const INT4OID: ::types_core::Oid = 23;
     const INT8OID: ::types_core::Oid = 20;
+    const TEXTOID: ::types_core::Oid = 25;
+    const VARCHAROID: ::types_core::Oid = 1043;
     debug_assert!(node.hashgroup.is_none());
     debug_assert!(node.force_distinct_set);
     let mcx = estate.es_query_cxt;
@@ -1864,6 +1910,10 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         key_kinds.push(match desc.attr((col - 1) as usize).atttypid {
             INT2OID => HgKeyKind::Int16,
             INT4OID => HgKeyKind::Int32,
+            // distinct-bytes car: text keys arrive as arena spans in the
+            // merged result (`PdMerged::key_arena`) — the same packed-span
+            // convention this arm's serial build uses.
+            TEXTOID | VARCHAROID => HgKeyKind::Text,
             _ => HgKeyKind::Int64,
         });
     }
@@ -1880,6 +1930,11 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         let mut scratch =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
         let natts = desc.natts as usize;
+        // Text-key scratch varlenas (distinct-bytes car): one 4B-header
+        // text image per text key column, rebuilt per group and kept live
+        // until the minimal-tuple copy below detaches it (the AvgInt
+        // stack-image discipline).
+        let mut text_bufs: Vec<Vec<u8>> = vec![Vec::new(); nkeys];
         for g in 0..n {
             exectuples::exec_clear_tuple(&mut scratch, mcx);
             {
@@ -1898,9 +1953,19 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
                         HgKeyKind::Int16 => ::datum::Datum::from_i16(w as i16),
                         HgKeyKind::Int32 => ::datum::Datum::from_i32(w as i32),
                         HgKeyKind::Int64 => ::datum::Datum::from_i64(w),
-                        // pardistinct admission is integer-key only; the
-                        // oid map above never yields Text.
-                        HgKeyKind::Text => unreachable!("pardistinct merged keys are integer-only"),
+                        HgKeyKind::Text => {
+                            let (off, len) = unpack_span(w);
+                            let buf = &mut text_bufs[i];
+                            buf.clear();
+                            buf.extend_from_slice(
+                                &::types_tuple::varatt::set_varsize_4b_word((len + 4) as u32)
+                                    .to_ne_bytes(),
+                            );
+                            buf.extend_from_slice(&merged.key_arena[off..off + len]);
+                            // Live until the minimal-tuple copy this
+                            // iteration; rebuilt next group.
+                            ::datum::Datum::from_usize(buf.as_ptr() as usize)
+                        }
                     };
                 }
             }
@@ -1992,8 +2057,15 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         })
         .collect();
     let total_set_mem = set_mem.iter().sum();
-    let order =
-        order_groups(&merged.keys, &merged.keynulls, &order_spec, nkeys, &key_kinds, &[], n)?;
+    let order = order_groups(
+        &merged.keys,
+        &merged.keynulls,
+        &order_spec,
+        nkeys,
+        &key_kinds,
+        &merged.key_arena,
+        n,
+    )?;
     let rep_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
     node.hashgroup = Some(Box::new(HashGroupedState {
@@ -2008,7 +2080,9 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         table: Vec::new(),
         hashes,
         keys: merged.keys,
-        arena: Vec::new(),
+        // distinct-bytes car: text-key content rides the merged arena
+        // (spans packed in `keys` — this arm's own convention).
+        arena: merged.key_arena,
         probe_buf: Vec::new(),
         probe_spans: vec![(0, 0); nkeys],
         keynulls: merged.keynulls,
@@ -2027,8 +2101,8 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         budget: hashgroup_budget(),
         rep_slot,
         rep_cursor: 0,
-        // Parallel merged adoption is int-key-only (key_kinds above); the
-        // stringhash table never engages here.
+        // The merged adoption emits only (no probing); the stringhash
+        // table never engages here.
         smap: None,
         null_group: None,
         mcx,
