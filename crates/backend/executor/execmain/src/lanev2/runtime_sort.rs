@@ -42,7 +42,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
-use ::nodesort::sink::{topn_merge, TopnEntry, TopnHeap, TOPN_MAX_BOUND};
+use ::nodesort::sink::{
+    topn_merge, TopnEntry, TopnHeap, TopnWideHeap, WideEntry, TOPN_MAX_BOUND,
+};
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
@@ -81,17 +83,25 @@ fn key_i64(d: ::datum::Datum, w: KeyWidth) -> i64 {
     }
 }
 
-struct TopnSpec {
-    /// The leading sort key's scan column (0-based; the SoA fast-leg read).
-    key_attno_scan: u16,
-    /// The key's position in the outer (child output) desc — the fallback
-    /// leg reads the key from this projected slot cell.
-    key_resno_outer: usize,
-    /// Outer resno -> scan attno (the deferred Var-only winner projection).
-    tlist_map: Vec<u16>,
+/// One admitted sort key (plain data; workers read it from the payload).
+#[derive(Clone, Copy)]
+struct KeyCol {
+    /// Scan column (0-based; the SoA fast-leg read).
+    attno_scan: u16,
+    /// Position in the outer (child output) desc — the fallback leg reads
+    /// this projected slot cell.
+    resno_outer: usize,
     desc: bool,
     nulls_first: bool,
     width: KeyWidth,
+}
+
+struct TopnSpec {
+    /// The admitted sort keys in plan order (1 = the narrow u128 heap;
+    /// 2..=TOPN_MAX_KEYS = the wide heap — inc-5).
+    keys: Vec<KeyCol>,
+    /// Outer resno -> scan attno (the deferred Var-only winner projection).
+    tlist_map: Vec<u16>,
     bound: usize,
 }
 
@@ -104,35 +114,23 @@ fn topn_spec<'mcx>(
     if !state.bounded || state.bound <= 0 || state.bound > TOPN_MAX_BOUND as i64 {
         return None;
     }
-    // Single-column output sorts bare datums (nothing to late-materialize);
-    // phase-1 key arity is the refsort envelope.
+    // Single-column output sorts bare datums (nothing to late-materialize).
     if ::nodesort::sort_lane_is_datum(state) {
         return None;
     }
     let plan = state.plan;
-    if plan.numCols != 1 || plan.sortColIdx.is_empty() || plan.nullsFirst.is_empty() {
+    let nkeys = plan.numCols as usize;
+    if !(1..=::nodesort::sink::TOPN_MAX_KEYS).contains(&nkeys)
+        || plan.sortColIdx.len() < nkeys
+        || plan.sortOperators.len() < nkeys
+        || plan.nullsFirst.len() < nkeys
+    {
         return None;
     }
     // Window refs only exist for cbstore staged batches.
     if !::nodeseqscan::seq_scan_is_cbstore(ss) {
         return None;
     }
-    // Int-family leading key (the POD-heap encoding vocabulary — the
-    // adaptive walk's own list; timestamps/dates ride their I8/I4 cmp
-    // shapes). Anything else refuses to the serial arms.
-    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
-    use ::execexpr::CmpOp::*;
-    let (width, desc) = match ::execexpr::CmpOp::for_fn_oid(opfn) {
-        Some(Int2Lt) => (KeyWidth::I2, false),
-        Some(Int2Gt) => (KeyWidth::I2, true),
-        Some(Int4Lt) => (KeyWidth::I4, false),
-        Some(Int4Gt) => (KeyWidth::I4, true),
-        Some(Int8Lt) => (KeyWidth::I8, false),
-        Some(Int8Gt) => (KeyWidth::I8, true),
-        Some(OidLt) => (KeyWidth::U32, false),
-        Some(OidGt) => (KeyWidth::U32, true),
-        _ => return None,
-    };
     let natts = outer_desc.natts as usize;
     let tlist_map: Vec<u16> = match ss.ss.ps_ProjInfo.as_ref() {
         // No projection: outer resno j is scan attno j (physical tlist).
@@ -153,20 +151,38 @@ fn topn_spec<'mcx>(
                 .collect::<Option<Vec<u16>>>()?
         }
     };
-    let oc = plan.sortColIdx[0];
-    if oc < 1 || oc as usize > natts {
-        return None;
+    // Every key: int-family operator (the POD-heap encoding vocabulary —
+    // the adaptive walk's own list; timestamps/dates ride their I8/I4 cmp
+    // shapes) over a mapped scan column. Anything else refuses.
+    let mut keys = Vec::with_capacity(nkeys);
+    for i in 0..nkeys {
+        let opfn = ::lsyscache::get_opcode(plan.sortOperators[i]).ok()?;
+        use ::execexpr::CmpOp::*;
+        let (width, desc) = match ::execexpr::CmpOp::for_fn_oid(opfn) {
+            Some(Int2Lt) => (KeyWidth::I2, false),
+            Some(Int2Gt) => (KeyWidth::I2, true),
+            Some(Int4Lt) => (KeyWidth::I4, false),
+            Some(Int4Gt) => (KeyWidth::I4, true),
+            Some(Int8Lt) => (KeyWidth::I8, false),
+            Some(Int8Gt) => (KeyWidth::I8, true),
+            Some(OidLt) => (KeyWidth::U32, false),
+            Some(OidGt) => (KeyWidth::U32, true),
+            _ => return None,
+        };
+        let oc = plan.sortColIdx[i];
+        if oc < 1 || oc as usize > natts {
+            return None;
+        }
+        let resno_outer = (oc - 1) as usize;
+        keys.push(KeyCol {
+            attno_scan: tlist_map[resno_outer],
+            resno_outer,
+            desc,
+            nulls_first: plan.nullsFirst[i],
+            width,
+        });
     }
-    let key_resno_outer = (oc - 1) as usize;
-    Some(TopnSpec {
-        key_attno_scan: tlist_map[key_resno_outer],
-        key_resno_outer,
-        tlist_map,
-        desc,
-        nulls_first: plan.nullsFirst[0],
-        width,
-        bound: state.bound as usize,
-    })
+    Some(TopnSpec { keys, tlist_map, bound: state.bound as usize })
 }
 
 // ---------------------------------------------------------------------------
@@ -189,12 +205,9 @@ pub(super) struct RuntimeSortShared {
     pstmt: SendConstPstmt,
     query_text: String,
     eflags: i32,
-    /// Worker-readable spec pod (plain data; Locals fork from `bound`).
-    key_attno_scan: u16,
-    key_resno_outer: usize,
-    desc: bool,
-    nulls_first: bool,
-    width: KeyWidth,
+    /// Worker-readable spec pod (plain data; Locals fork from `bound` +
+    /// the key arity).
+    keys: Vec<KeyCol>,
     bound: usize,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
@@ -207,9 +220,25 @@ pub(super) struct RuntimeSortShared {
     /// A sink contract break (staged batch without a window ref): NOT an
     /// error — the RG aborts and the leader reruns the serial arm (R5).
     broke: AtomicBool,
-    /// The published winner list (combine writes — partitions()=1, single
-    /// claimer; the leader takes after completion).
-    winners: Mutex<Option<Vec<TopnEntry>>>,
+    /// The published winner ROWREF list in emission order (combine writes
+    /// — partitions()=1, single claimer; the leader takes after
+    /// completion and gathers by rowref — the entry width is a worker
+    /// detail).
+    winners: Mutex<Option<Vec<u64>>>,
+}
+
+/// Per-worker Local: the narrow u128 heap at key arity 1 (the shipped
+/// inc-2 path), the wide heap at arity 2..=TOPN_MAX_KEYS (inc-5).
+pub(super) enum TopnLocal {
+    Narrow(TopnHeap),
+    Wide(TopnWideHeap),
+}
+
+/// The sealed (sorted) form of a Local. Variants never mix within one
+/// engagement (fork decides once from the spec's key arity).
+pub(super) enum TopnSealed {
+    Narrow(Vec<TopnEntry>),
+    Wide(Vec<WideEntry>),
 }
 
 impl RuntimeSortShared {
@@ -239,7 +268,7 @@ impl RuntimeSortShared {
         self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
-    fn take_winners(&self) -> Option<Vec<TopnEntry>> {
+    fn take_winners(&self) -> Option<Vec<u64>> {
         self.winners.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 }
@@ -251,14 +280,18 @@ impl RuntimeSortShared {
 // ---------------------------------------------------------------------------
 
 impl runtime::SealedParallelSink for RuntimeSortShared {
-    type Local = TopnHeap;
-    type Sealed = Vec<TopnEntry>;
+    type Local = TopnLocal;
+    type Sealed = TopnSealed;
 
-    fn fork(&self, _worker: usize) -> TopnHeap {
-        TopnHeap::new(self.bound)
+    fn fork(&self, _worker: usize) -> TopnLocal {
+        if self.keys.len() == 1 {
+            TopnLocal::Narrow(TopnHeap::new(self.bound))
+        } else {
+            TopnLocal::Wide(TopnWideHeap::new(self.bound))
+        }
     }
 
-    fn accept_local(&self, local: &mut TopnHeap, _worker: usize, range: runtime::MorselRange) {
+    fn accept_local(&self, local: &mut TopnLocal, _worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
             return; // aborting: drain the claim without work
         }
@@ -276,28 +309,56 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
         }
     }
 
-    fn seal(&self, _worker: usize, local: TopnHeap) -> Vec<TopnEntry> {
+    fn seal(&self, _worker: usize, local: TopnLocal) -> TopnSealed {
         if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
-            return Vec::new();
+            return TopnSealed::Narrow(Vec::new());
         }
         // POD sort — cannot unwind.
-        local.into_sorted()
+        match local {
+            TopnLocal::Narrow(h) => TopnSealed::Narrow(h.into_sorted()),
+            TopnLocal::Wide(h) => TopnSealed::Wide(h.into_sorted()),
+        }
     }
 
     fn partitions(&self) -> u64 {
         1
     }
 
-    fn combine(&self, part: u64, sealed: &[Vec<TopnEntry>]) {
+    fn combine(&self, part: u64, sealed: &[TopnSealed]) {
         debug_assert_eq!(part, 0);
         if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
             return;
         }
-        let merged = topn_merge(sealed, self.bound);
-        *self.winners.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
+        // Variants never mix within one engagement (fork decides once);
+        // aborted-path placeholder Narrow(empty) seals are harmless in
+        // either collection (empty runs contribute nothing).
+        let rowrefs: Vec<u64> = if self.keys.len() == 1 {
+            let runs: Vec<Vec<TopnEntry>> = sealed
+                .iter()
+                .map(|s| match s {
+                    TopnSealed::Narrow(v) => v.clone(),
+                    TopnSealed::Wide(_) => unreachable!("mixed sealed variants in one sort sink"),
+                })
+                .collect();
+            topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
+        } else {
+            let runs: Vec<Vec<WideEntry>> = sealed
+                .iter()
+                .map(|s| match s {
+                    TopnSealed::Wide(v) => v.clone(),
+                    // Aborted seal placeholders are Narrow(empty).
+                    TopnSealed::Narrow(v) => {
+                        debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
+                        Vec::new()
+                    }
+                })
+                .collect();
+            topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
+        };
+        *self.winners.lock().unwrap_or_else(|p| p.into_inner()) = Some(rowrefs);
     }
 
-    fn finalize(&self, _sealed: &[Vec<TopnEntry>]) {
+    fn finalize(&self, _sealed: &[TopnSealed]) {
         // Publish already happened in the (single) combine; nothing to do.
         // Aborted RGs skip finalize; the leader validates the winner slot
         // on the Completed path (protocol-violation error, never silence).
@@ -335,26 +396,44 @@ fn mark_self_errored() {
 /// arrival): the sink cannot carry rowrefs — contract break, RG abort,
 /// serial rerun.
 struct TopnAcceptSink<'a> {
-    heap: &'a mut TopnHeap,
-    key_col: u16,
-    key_resno: usize,
-    desc: bool,
-    nulls_first: bool,
-    width: KeyWidth,
+    heap: &'a mut TopnLocal,
+    keys: &'a [KeyCol],
     broke: bool,
+    /// Per-row multi-key scratch (avoids a per-row alloc).
+    obs: [( i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
+    flags: [(bool, bool); ::nodesort::sink::TOPN_MAX_KEYS],
 }
 
-impl TopnAcceptSink<'_> {
+impl<'a> TopnAcceptSink<'a> {
+    fn new(heap: &'a mut TopnLocal, keys: &'a [KeyCol]) -> TopnAcceptSink<'a> {
+        let mut flags = [(false, false); ::nodesort::sink::TOPN_MAX_KEYS];
+        for (i, k) in keys.iter().enumerate() {
+            flags[i] = (k.desc, k.nulls_first);
+        }
+        TopnAcceptSink {
+            heap,
+            keys,
+            broke: false,
+            obs: [(0, false); ::nodesort::sink::TOPN_MAX_KEYS],
+            flags,
+        }
+    }
+
+    /// Push the row whose per-key observations sit in `self.obs[..nkeys]`.
     #[inline]
-    fn push(&mut self, key: ::datum::Datum, isnull: bool, rg: u32, row: u32) {
+    fn push_obs(&mut self, rg: u32, row: u32) {
         let rowref = ((rg as u64) << 32) | row as u64;
-        self.heap.push(TopnEntry::encode(
-            key_i64(key, self.width),
-            isnull,
-            self.desc,
-            self.nulls_first,
-            rowref,
-        ));
+        let nk = self.keys.len();
+        match self.heap {
+            TopnLocal::Narrow(h) => {
+                let (k, n) = self.obs[0];
+                let key = &self.keys[0];
+                h.push(TopnEntry::encode(k, n, key.desc, key.nulls_first, rowref));
+            }
+            TopnLocal::Wide(h) => {
+                h.push(WideEntry::encode(&self.obs[..nk], &self.flags[..nk], rowref));
+            }
+        }
     }
 }
 
@@ -391,16 +470,40 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
         // leg's rows have no per-row seam call; emit-path rows keep their
         // per-row check inside `emit`) — the RefSortSink cadence.
         ::postgres_seams::check_for_interrupts::call()?;
-        let fast = emit.refsort_key_batch(self.key_col, n).map(|(_, _, fallback, sel)| {
+        // Fast leg availability: EVERY key column's staged lane must be
+        // clean-readable (the single-key law applied per key). The
+        // fallback masks are OR-united across keys (a row forced to the
+        // per-row path for ANY key takes it for all — one emit, all keys
+        // read from the projected slot). The sel bitmap is per-batch
+        // (whole-qual verdict), identical across columns.
+        let nk = self.keys.len();
+        let fast = {
             let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
-            fb[..fallback.len()].copy_from_slice(fallback);
-            let selw = sel.map(|s| {
-                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                w[..s.len()].copy_from_slice(s);
-                w
-            });
-            (fb, selw)
-        });
+            let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let mut ok = true;
+            for (ki, key) in self.keys.iter().enumerate() {
+                match emit.refsort_key_batch(key.attno_scan, n) {
+                    Some((_, _, fallback, sel)) => {
+                        for (w, &word) in fallback.iter().enumerate() {
+                            fb[w] |= word;
+                        }
+                        if ki == 0 {
+                            selw = sel.map(|s| {
+                                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                                w[..s.len()].copy_from_slice(s);
+                                w
+                            });
+                        }
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok.then_some((fb, selw))
+        };
+        let max_resno = self.keys.iter().map(|k| k.resno_outer).max().unwrap_or(0);
         for i in pos..n {
             if let Some((fb, selw)) = &fast {
                 let w = (i / 64) as usize;
@@ -411,33 +514,41 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                     }
                 }
                 if fb[w] & bit == 0 {
-                    // Clean staged row: key straight from the SoA column.
-                    let (key, isnull) = {
+                    // Clean staged row: every key straight from its SoA
+                    // column (re-borrowed per key — batch-stable).
+                    for ki in 0..nk {
+                        let key = self.keys[ki];
                         let (kvals, knulls, _, _) = emit
-                            .refsort_key_batch(self.key_col, n)
+                            .refsort_key_batch(key.attno_scan, n)
                             .expect("refsort key batch stable within a staged batch");
-                        (kvals[i as usize], knulls[i as usize])
-                    };
-                    self.push(key, isnull, rg, row0 + i);
+                        let (d, isnull) = (kvals[i as usize], knulls[i as usize]);
+                        self.obs[ki] = (key_i64(d, key.width), isnull);
+                    }
+                    self.push_obs(rg, row0 + i);
                     continue;
                 }
                 // Forced-fallback row: exact per-row emit below.
             }
             let Some(id) = emit.emit(i, estate)? else { continue };
-            let (key, isnull) = {
+            {
                 let slot = estate.slot_mut(id);
-                ::exectuples::slot_getsomeattrs(slot, self.key_resno as i32 + 1);
+                ::exectuples::slot_getsomeattrs(slot, max_resno as i32 + 1);
                 let base = slot.base();
-                (base.tts_values[self.key_resno], base.tts_isnull[self.key_resno])
-            };
-            self.push(key, isnull, rg, row0 + i);
+                for ki in 0..nk {
+                    let key = self.keys[ki];
+                    let (d, isnull) =
+                        (base.tts_values[key.resno_outer], base.tts_isnull[key.resno_outer]);
+                    self.obs[ki] = (key_i64(d, key.width), isnull);
+                }
+            }
+            self.push_obs(rg, row0 + i);
         }
         Ok(())
     }
 }
 
 impl RuntimeSortShared {
-    fn morsel_body(&self, local: &mut TopnHeap, range: runtime::MorselRange) -> PgResult<()> {
+    fn morsel_body(&self, local: &mut TopnLocal, range: runtime::MorselRange) -> PgResult<()> {
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -460,15 +571,7 @@ impl RuntimeSortShared {
                         range.start,
                         range.end,
                     )?;
-                    let mut sink = TopnAcceptSink {
-                        heap: local,
-                        key_col: self.key_attno_scan,
-                        key_resno: self.key_resno_outer,
-                        desc: self.desc,
-                        nulls_first: self.nulls_first,
-                        width: self.width,
-                        broke: false,
-                    };
+                    let mut sink = TopnAcceptSink::new(local, &self.keys);
                     let fed = drain_pipeline(
                         ss,
                         &mut SeqScanSource,
@@ -592,19 +695,18 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                     let estate = &mut d.estate;
                     let ss = sort_worker_scan(d.planstate.as_mut())?;
                     // Key-only staged accept (inc-4 lever 1): the worker
-                    // emits nothing but (key, rowref) — narrow the scan's
-                    // needed set to qual columns ∪ the key so staging never
-                    // decompresses the payload width (q24 take-1 profile:
-                    // 77.5% decompress_frame_into of columns nothing read;
-                    // the LEADER's winner gather runs under its own FULL
-                    // needed set). Before staging arms, so the deform plans
-                    // bake the narrowed set. Unneeded per-row-emit cells
-                    // read NULL and never escape (the sink reads the key
-                    // cell only).
-                    ::nodeseqscan::seq_scan_cb_narrow_needed(
-                        ss,
-                        &[payload.key_attno_scan],
-                    );
+                    // emits nothing but (keys, rowref) — narrow the scan's
+                    // needed set to qual columns ∪ the sort keys so staging
+                    // never decompresses the payload width (q24 take-1
+                    // profile: 77.5% decompress_frame_into of columns
+                    // nothing read; the LEADER's winner gather runs under
+                    // its own FULL needed set). Before staging arms, so the
+                    // deform plans bake the narrowed set. Unneeded
+                    // per-row-emit cells read NULL and never escape (the
+                    // sink reads the key cells only).
+                    let key_attnos: Vec<u16> =
+                        payload.keys.iter().map(|k| k.attno_scan).collect();
+                    ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &key_attnos);
                     super::arm_scan_staging(
                         ss,
                         estate,
@@ -819,11 +921,7 @@ fn engage<'mcx>(
         }),
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         eflags: estate.es_top_eflags,
-        key_attno_scan: spec.key_attno_scan,
-        key_resno_outer: spec.key_resno_outer,
-        desc: spec.desc,
-        nulls_first: spec.nulls_first,
-        width: spec.width,
+        keys: spec.keys.clone(),
         bound: spec.bound,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
@@ -852,7 +950,7 @@ fn engage<'mcx>(
 
 enum EngageOutcome {
     Fallback,
-    Completed(Vec<TopnEntry>),
+    Completed(Vec<u64>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -999,15 +1097,14 @@ fn adopt_winners<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
     estate: &mut EStateData<'mcx>,
     spec: &TopnSpec,
-    winners: Vec<TopnEntry>,
+    winners: Vec<u64>,
 ) -> PgResult<bool> {
     ::nodesort::sort_lane_runtime_topn_begin(state);
     let natts = outer_desc.natts as usize;
     let mut values = vec![::datum::Datum::null(); natts];
     let mut isnull = vec![true; natts];
     let mcx = estate.es_query_cxt;
-    for e in &winners {
-        let r = e.rowref();
+    for &r in &winners {
         let (rg, row) = ((r >> 32) as u32, r as u32);
         if !::nodeseqscan::seq_scan_gather_row(ss, estate, rg, row) {
             lane_trace("runtime-sort: winner gather failed; serial fallback");
