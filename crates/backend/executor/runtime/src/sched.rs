@@ -88,10 +88,33 @@ struct Membership {
     waitq: VecDeque<Arc<ResourceGroup>>,
 }
 
+/// Per-drive observability accumulators (the WFIN marker channel —
+/// fabled run-m0-parallel-accept.sh parses `MORSEL|WFIN|…` off server
+/// stderr). Plain thread-owned data written at morsel/task cadence and
+/// read by the drive's owner after completion: no synchronization, no
+/// loom-visible operations. Timestamps are the scheduler clock's ns.
+#[derive(Default, Clone, Copy)]
+pub struct DriveLocal {
+    /// Tasks this local executed (claim loops entered with a live join).
+    pub tasks: u64,
+    pub morsels: u64,
+    pub granules: u64,
+    /// Sum of executed-morsel durations (excludes claim/park/settle time).
+    pub busy_ns: u64,
+    /// Clock at the first claimed morsel's execution start; 0 = none ran.
+    pub first_claim_ns: u64,
+    /// Clock at the end of the last executed morsel (the WFIN t_us).
+    pub last_end_ns: u64,
+}
+
 /// Thread-local scheduling bookkeeping (one per worker, owned by the worker
 /// loop — deliberately NOT thread_local! so loom can drive it).
 pub struct WorkerLocal {
     worker: usize,
+    /// WFIN drive accumulators (fresh per `Runtime::external_local`; pool
+    /// workers accumulate for their thread's lifetime — only the external
+    /// pinned drives read them today).
+    pub drive: DriveLocal,
     /// Slot-word cache: (seq, task set) per slot; revalidated by one atomic
     /// read of the slot word.
     cache: Vec<Option<(u64, Arc<TaskSetRt>)>>,
@@ -284,6 +307,7 @@ impl Scheduler {
         assert!(worker < self.nthreads);
         WorkerLocal {
             worker,
+            drive: DriveLocal::default(),
             cache: (0..self.slots.len()).map(|_| None).collect(),
             wfin: if markers_enabled() {
                 (0..self.slots.len()).map(|_| None).collect()
@@ -302,6 +326,7 @@ impl Scheduler {
         assert!(ordinal < MAX_EXTERNAL_LANES, "external participant lanes exhausted");
         WorkerLocal {
             worker: self.nthreads + ordinal,
+            drive: DriveLocal::default(),
             cache: (0..self.slots.len()).map(|_| None).collect(),
             wfin: if markers_enabled() {
                 (0..self.slots.len()).map(|_| None).collect()
@@ -312,6 +337,11 @@ impl Scheduler {
             local_pass: 0,
             global_pass: 0,
         }
+    }
+
+    /// Scheduler clock read (WFIN leader marks share the workers' domain).
+    pub(crate) fn clock_now_ns(&self) -> u64 {
+        self.clock.now_ns()
     }
 
     pub(crate) fn snapshot(&self) -> RuntimeStatsSnapshot {
@@ -383,6 +413,7 @@ impl Scheduler {
         // slot word below admits any worker — generation-keyed partial state
         // (the M2 sink plumbing) is armed before the first claim can land.
         rg.tasksets[index].work.bind_generation(rg.generation());
+        let whole_claims = rg.tasksets[index].source.whole_boundary_claims();
         let ts = Arc::new(TaskSetRt {
             rg,
             index,
@@ -394,6 +425,7 @@ impl Scheduler {
             fin_counter: crate::sync::atomic::AtomicI64::new(0),
             finalized: AtomicBool::new(false),
             c0,
+            whole_claims,
         });
         if self.trace {
             self.trace(&format!(
@@ -584,6 +616,7 @@ impl Scheduler {
                 true
             }
             Ok(participant) => {
+                local.drive.tasks += 1;
                 let mut sizer = TaskSizer::new(self.params, ts.c0);
                 let mut exhausted = false;
                 loop {
@@ -616,7 +649,16 @@ impl Scheduler {
                         exhausted = true;
                         break;
                     }
-                    let dt = self.clock.now_ns().saturating_sub(t0);
+                    let t1 = self.clock.now_ns();
+                    let dt = t1.saturating_sub(t0);
+                    // WFIN accumulators (thread-owned plain data).
+                    local.drive.morsels += 1;
+                    local.drive.granules += granules;
+                    local.drive.busy_ns += dt;
+                    if local.drive.first_claim_ns == 0 {
+                        local.drive.first_claim_ns = t0;
+                    }
+                    local.drive.last_end_ns = t1;
                     sizer.observe(&ts.sizer, granules, dt);
                     // INERT stride accounting (M5 reads this).
                     ts.rg.cpu_consumed_ns.fetch_add(dt, Ordering::Relaxed);
@@ -668,7 +710,16 @@ impl Scheduler {
             // never cross a row-group / dictionary-epoch boundary.
             let bound = ts.source().next_boundary_after(cur).min(total);
             debug_assert!(bound > cur, "MorselSource boundary contract violated");
-            let end = cur.saturating_add(want).min(bound).max(cur + 1);
+            // Whole-boundary claims (drive-scaling inc-2): epoch-heavy
+            // sources never stop a claim short of the boundary — a split
+            // epoch is executed by 2+ workers, each rebuilding the epoch's
+            // dictionary/memo state (the measured q21 DOP15 +78% busy
+            // inflation). The sizer still observes for phase/stats.
+            let end = if ts.whole_claims {
+                bound
+            } else {
+                cur.saturating_add(want).min(bound).max(cur + 1)
+            };
             if ts
                 .cursor
                 .compare_exchange(cur, end, Ordering::SeqCst, Ordering::SeqCst)
