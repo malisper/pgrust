@@ -1063,6 +1063,24 @@ pub fn get_hash_memory_limit() -> usize {
     }
 }
 
+/// The inner-relation footprint `ExecChooseHashTableSize` prices batching
+/// against: `ntuples × (HJTUPLE_OVERHEAD + maxaligned minimal header +
+/// maxaligned data width)` — the same arithmetic as the estimator's
+/// `inner_rel_bytes`, exported for envelope-sizing callers (the M3.5 join
+/// spill admission sizes its level-0 batch count from this over the raw
+/// combined limit, not from exec_choose's rebalance-reduced nbatch).
+pub fn estimate_hash_inner_rel_bytes(ntuples: f64, tupwidth: i32) -> u64 {
+    let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
+    let tupsize =
+        HJTUPLE_OVERHEAD + maxalign(SizeofMinimalTupleHeader) + maxalign(tupwidth as usize);
+    let bytes = ntuples * tupsize as f64;
+    if bytes < u64::MAX as f64 {
+        bytes as u64
+    } else {
+        u64::MAX
+    }
+}
+
 /// `ExecChooseHashTableSize` -> (numbuckets, numbatches, num_skew_mcvs).
 pub fn exec_choose_hash_table_size(
     ntuples: f64,

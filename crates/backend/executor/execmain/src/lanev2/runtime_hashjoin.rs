@@ -60,10 +60,13 @@
 //! partial tail, and the gates use tie-normalized comparison. Batch
 //! processing order is a scheduling choice, not a semantic one (§9).
 //!
-//! Memory (§6/§7): admission sizes the build with the C combined envelope
+//! Memory (§6/§7): admission decides batching with the C combined rule
 //! (`exec_choose_hash_table_size_full(try_combined_hash_mem=true)`); each
-//! file batch gets the same combined envelope (C parity: one live hash
-//! table). PLAN-BATCHES checks EXACT file bytes + tuple counts against an
+//! live table — batch 0 and every file leaf — gets the RAW combined
+//! envelope `get_hash_memory_limit() × (dop+1)` (one gang-shared table at
+//! a time; exec_choose's rebalance-reduced `space_allowed` sized C's
+//! per-worker tables and over-fanned splits — the train-14 inc-4/5 ledger
+//! item). PLAN-BATCHES checks EXACT file bytes + tuple counts against an
 //! exact-arithmetic capacity model (never estimates — the agg/distinct
 //! duplicate-inflation class does not exist here); router buffers are
 //! bounded constants per worker. Every spill syscall brackets the SpillIo
@@ -2164,6 +2167,20 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         true,  // try_combined_hash_mem: pooled participant budget
         dop,
     );
+    // SPILL ENVELOPE (train-14 inc-4/5 ledger, open item 2): every live
+    // table here — batch 0 and every file leaf — is ONE gang-shared table,
+    // so its envelope is the raw combined limit `get_hash_memory_limit() ×
+    // (dop+1)`. exec_choose's `space_allowed` is NOT that once nbatch > 1:
+    // C recurses to PER-WORKER sizing (its PHJ builds per-worker batch
+    // tables) and only partially restores it under the buckets-vs-batches
+    // rebalance — the reduced envelope over-fanned splits (leg 6 landed
+    // exactly at the 32-leaf cap at jbits=4) and manufactured admission
+    // refusals a combined-envelope leaf absorbs. `max` keeps the envelope
+    // monotonic vs the old value; at nbatch == 1 `space_allowed` IS the
+    // combined limit, so unbatched/dormant engagements are bit-identical.
+    let combined_limit =
+        ::nodehash::get_hash_memory_limit().saturating_mul(dop.max(0) as usize + 1);
+    let envelope = space_allowed.max(combined_limit);
     let mut spill_batches: Option<u32> = hj_spill_force_batches();
     if nbatch > 1 && spill_batches.is_none() {
         if !hj_spill_enabled() {
@@ -2171,11 +2188,23 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
             return Ok(None);
         }
-        // Headroomed sizing (§5.3: round-0 splits should be rare).
-        let want = (nbatch as u32).next_power_of_two().saturating_mul(2).max(2);
+        // Headroomed sizing (§5.3: round-0 splits should be rare): level-0
+        // batch count from the estimated inner footprint over the COMBINED
+        // envelope each leaf actually gets — C's nbatch is relative to the
+        // reduced per-worker budget and over-fans by ~(dop+1)×.
+        let est_inner = ::nodehash::estimate_hash_inner_rel_bytes(
+            hash_plan.plan.plan_rows,
+            hash_plan.plan.plan_width,
+        );
+        let need = est_inner.div_ceil(envelope.max(1) as u64).max(1);
+        let want = u32::try_from(need)
+            .unwrap_or(u32::MAX / 2)
+            .next_power_of_two()
+            .saturating_mul(2)
+            .max(2);
         if want as usize > hj_spill_max_batches() {
             lane_trace(&format!(
-                "runtime-hashjoin: REFUSED (estimated nbatch {nbatch} exceeds the spill batch cap) — serial arm"
+                "runtime-hashjoin: REFUSED (estimated batches {want} exceed the spill batch cap) — serial arm"
             ));
             stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
             return Ok(None);
@@ -2218,7 +2247,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         outer_granules,
         outer_starts,
         inner_starts,
-        space_allowed,
+        envelope,
         fill_inner,
         spill_batches,
     )
@@ -2233,7 +2262,9 @@ fn engage<'mcx>(
     outer_granules: u64,
     outer_starts: Vec<u64>,
     inner_starts: Vec<u64>,
-    space_allowed: usize,
+    // Combined gang envelope per live table (admission's `envelope`; equals
+    // exec_choose's space_allowed exactly when nbatch == 1).
+    envelope: usize,
     fill_inner: bool,
     spill_batches: Option<u32>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -2247,7 +2278,7 @@ fn engage<'mcx>(
             Ok(set) => Some(Arc::new(HjSpill::new(
                 set,
                 n,
-                space_allowed,
+                envelope,
                 dop as u64,
                 fill_inner,
             ))),
@@ -2293,7 +2324,7 @@ fn engage<'mcx>(
         leaf_tables: (0..leaf_cap).map(|_| Mutex::new(None)).collect(),
     });
     let sink = Arc::new(JoinBuildSink {
-        budget: JoinBudget::new(space_allowed),
+        budget: JoinBudget::new(envelope),
         plan: Mutex::new(None),
         table: Mutex::new(None),
         shared: Arc::downgrade(&payload),
