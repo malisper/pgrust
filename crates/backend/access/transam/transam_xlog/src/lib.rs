@@ -42,8 +42,9 @@ pub use insert::{
 };
 pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};
 pub use write::{
-    GetFlushRecPtr, GetLastSegSwitchData, GetXLogWriteRecPtr, SetWalWriterSleeping,
-    XLogBackgroundFlush, XLogFileInit, XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,
+    stamp_wal_sync_method, wal_flush_pacing_decide, GetFlushRecPtr, GetLastSegSwitchData,
+    GetXLogWriteRecPtr, SetWalWriterSleeping, WalFlushPacing, XLogBackgroundFlush, XLogFileInit,
+    XLogFileOpen, XLogFlush, XLogNeedsFlush, XLogSetAsyncXactLSN,
 };
 
 pub const InvalidXLogRecPtr: XLogRecPtr = 0;
