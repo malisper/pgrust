@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
 use ::nodeagg::sink::{
-    sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_partition_remainder,
+    sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket,
     sink_resolve_combines, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
     SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS,
 };
@@ -204,14 +204,17 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         for l in locals.iter_mut() {
-            l.part = l.table.as_ref().map(|t| sink_partition_remainder(t.table()));
+            // Canonical (text-bearing) shapes partition by canonical bytes;
+            // word shapes by key words — the handle dispatches.
+            l.part = l.table.as_ref().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
             // R3 accounting (m2-integration audit): the SEAL index is
             // per-Local retained memory that lives through the whole combine
             // phase — charge it like a run. Crossing = budget refusal (R5
-            // whole-attempt rerun), never an error.
+            // whole-attempt rerun), never an error. Table mem includes the
+            // intern table (text shapes) — it lives through combine too.
             if let Some(p) = &l.part {
                 l.run_bytes += p.bytes();
-                let table_mem = l.table.as_ref().map_or(0, |t| t.table().mem_used());
+                let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
                 if l.run_bytes + table_mem > self.budget {
                     self.refuse_budget();
                     return;
@@ -239,7 +242,7 @@ impl runtime::ParallelSink for AggSink {
                 .map(|l| SinkLocalView {
                     runs: &l.runs,
                     remainder: match (&l.table, &l.part) {
-                        (Some(t), Some(p)) => Some((t.table(), p)),
+                        (Some(t), Some(p)) => Some(t.remainder_view(p)),
                         _ => None,
                     },
                 })
@@ -490,16 +493,21 @@ fn sink_drain_range<'mcx>(
         }
         ::postgres_seams::check_for_interrupts::call()?;
         if sink.drain == SinkDrain::ExprKey {
-            // Expr-key feed: keys derived per batch; fail-closed inside the
-            // adapter (range guard / per-row route / compact disarm).
+            // Expr-key feed: keys derived per batch. A route off the compact
+            // table (sticky range-guard/arith trap, a numeric pack demote's
+            // disarm) is a REFUSAL, not an error: RG abort → serial
+            // whole-attempt rerun (a data-borne C error then surfaces from
+            // the serial replay with C's exact error identity).
             let xk = xk.as_deref_mut().ok_or_else(|| {
                 AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                     "expr-key drain without a worker decide",
                 ))
             })?;
-            super::exprkey::exprkey_sink_batch(
-                agg, ss, xk, stage_slot, idxs, groups, n, estate,
-            )?;
+            if !super::exprkey::exprkey_sink_batch(
+                agg, ss, xk, sink.mk.as_ref(), stage_slot, idxs, groups, n, estate,
+            )? {
+                return Err(AcceptFail::Budget);
+            }
             continue;
         }
         // Fail-closed: a fallback row has no staged key — the sink cannot
@@ -515,14 +523,26 @@ fn sink_drain_range<'mcx>(
             // The serial lane's own packed multi-key batch (survivors →
             // pack pre-pass → mk1/mk2 compact probe → whole-batch fold).
             // Under the sink cap the compact backstop ERRORS instead of
-            // migrating, and Int-only components never hit the numeric
-            // pack-legality demote — a `false` here is a contract breach.
+            // migrating. A `false` = the feed demoted mid-build: Numeric
+            // components carry a per-value pack-legality demote (and the
+            // C2 shapes ride the same batch) — that is a REFUSAL (RG abort
+            // → serial whole-attempt rerun), never silent wrong-table
+            // routing. Int-only components cannot demote — a `false` there
+            // is a contract breach and stays an error.
             let mk = mk.as_ref().ok_or_else(|| {
                 AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                     "mk drain without a worker shape",
                 ))
             })?;
             if !super::scan_mk_batch(agg, ss, mk, mks, idxs, groups, n, estate)? {
+                let demotable = mk
+                    .shape
+                    .comps
+                    .iter()
+                    .any(|c| !matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }));
+                if demotable {
+                    return Err(AcceptFail::Budget);
+                }
                 return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
                     "worker mk feed demoted mid-build",
                 )));
@@ -785,13 +805,13 @@ fn arm_sink_build<'mcx>(
         }
         let kind = xk.sink_key_kind();
         ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
-        match (&sink.red, kind) {
-            (None, Some(None)) => {
+        match (&sink.red, &sink.mk, kind) {
+            (None, None, Some(super::exprkey::SinkXkKind::Single)) => {
                 if ::nodeagg::agg_hash_compact_try_arm(agg) != ::nodeagg::CompactArm::Armed {
                     return Err(shape_err("worker compact arm refused under the sink cap"));
                 }
             }
-            (Some(shape), Some(Some(wshape))) => {
+            (Some(shape), None, Some(super::exprkey::SinkXkKind::Reduced(wshape))) => {
                 if wshape.width != shape.width || wshape.keys.len() != shape.keys.len() {
                     return Err(shape_err("worker reduced shape diverged from the leader's"));
                 }
@@ -801,16 +821,37 @@ fn arm_sink_build<'mcx>(
                     return Err(shape_err("worker reduced arm refused under the sink cap"));
                 }
             }
+            (
+                None,
+                Some(lshape),
+                Some(super::exprkey::SinkXkKind::Multi { dict_input_att }),
+            ) => {
+                // The q19 class: the serial build's own mk arm sequence
+                // under the sink cap; every divergence from the leader's
+                // snapshot is an error (combine + emit plans were built off
+                // that exact shape).
+                if ::nodeagg::agg_hash_compact_try_arm_mk(agg, false, dict_input_att)
+                    != ::nodeagg::CompactArm::Armed
+                {
+                    return Err(shape_err("worker mk arm refused under the sink cap"));
+                }
+                let wshape = ::nodeagg::agg_hash_compact_mk_shape(agg)
+                    .ok_or_else(|| shape_err("armed mk table lost its shape"))?;
+                if &wshape != lshape {
+                    return Err(shape_err("worker mk shape diverged from the leader's"));
+                }
+            }
             _ => return Err(shape_err("worker expr-key kind diverged from the leader's")),
         }
         let spec_ok = match ::nodeagg::sink::agg_sink_key_spec(agg) {
-            Some(SinkKeySpec::Single { width }) => sink.red.is_none() && width == sink.width,
+            Some(SinkKeySpec::Single { width }) => {
+                sink.red.is_none() && sink.mk.is_none() && width == sink.width
+            }
             Some(SinkKeySpec::Reduced(sh)) => {
                 sink.red.as_ref().is_some_and(|r| r.width == sh.width) && sh.width == sink.width
             }
-            // The expr-key drain never arms a Multi table (Mk rides its own
-            // drain; the decide refuses Multi kinds).
-            Some(SinkKeySpec::Multi(_)) | None => false,
+            Some(SinkKeySpec::Multi(sh)) => sink.mk.as_ref() == Some(&sh),
+            None => false,
         };
         if !spec_ok {
             return Err(shape_err("worker key spec diverged from the leader's"));
@@ -825,19 +866,29 @@ fn arm_sink_build<'mcx>(
         // Packed multi-key arm: the same decide the leader probed, this time
         // arming the compact table under the sink cap. Every divergence from
         // the leader's snapshot is an error (the sink's combine + emit plans
-        // were built off that exact shape).
+        // were built off that exact shape). Single-text shapes (one Intern
+        // component) re-run the C2 admission; text-bearing shapes NEED their
+        // dict/intern lane — only pure-int shapes refuse dict staging.
         ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
-        let Some(mk) = super::scan_mk_shape(agg, ss, estate) else {
-            return Err(shape_err("worker mk shape diverged from the leader's"));
-        };
-        if mk.dict_att.is_some() || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some()
-        {
-            return Err(shape_err("dict component on a sink mk worker"));
-        }
         let lshape = sink
             .mk
             .as_ref()
             .ok_or_else(|| shape_err("mk drain without a leader shape"))?;
+        let single_text = lshape.comps.len() == 1 && lshape.intern_comp().is_some();
+        let mk = if single_text {
+            super::scan_mk1_text_shape(agg, ss, estate)
+        } else {
+            super::scan_mk_shape(agg, ss, estate)
+        };
+        let Some(mk) = mk else {
+            return Err(shape_err("worker mk shape diverged from the leader's"));
+        };
+        if mk.shape.intern_comp().is_none()
+            && (mk.dict_att.is_some()
+                || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some())
+        {
+            return Err(shape_err("dict component on a pure-int sink mk worker"));
+        }
         if &mk.shape != lshape {
             return Err(shape_err("worker mk shape diverged from the leader's"));
         }
@@ -929,6 +980,40 @@ fn sink_cap() -> u32 {
     })
 }
 
+/// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
+/// admission classes — Intern (text) components merged on canonical raw
+/// bytes, and Numeric components under the demote→refusal discipline. Off,
+/// those shapes refuse exactly as before the car (attribution channel).
+fn runtime_agg_text_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The sink's packed-shape component gates (leader admission): non-nullable
+/// image; at most ONE Intern (text) component (the canonical tail decodes
+/// unambiguously only then); any non-Int component class (Intern/Numeric)
+/// rides the text-car kill switch.
+fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
+    if shape.nullable {
+        return false;
+    }
+    let n_intern = shape
+        .comps
+        .iter()
+        .filter(|c| c.kind == ::nodeagg::MkCompKind::Intern)
+        .count();
+    if n_intern > 1 {
+        return false;
+    }
+    let all_int = shape
+        .comps
+        .iter()
+        .all(|c| matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }));
+    all_int || runtime_agg_text_enabled()
+}
+
 /// Engagement floor (granules) — below it helper launches are pure overhead.
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
@@ -1007,9 +1092,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     // Drain mode: projected scans take the expr-key feed (Arith/TsTrunc/
-    // Reduced kinds — the lane's decide already ran and is memoized in
-    // `xk`); unprojected scans take the K2 single-int-key batch probe or
-    // (Mk car) the packed multi-int composite feed.
+    // Reduced/Multi kinds — the lane's decide already ran and is memoized
+    // in `xk`); unprojected scans take the K2 single-int-key batch probe,
+    // the single-TEXT 1-component packed feed (C2 car), or the packed
+    // multi-key composite feed (Mk car, int/numeric/one-text components).
     let (drain, red, mk, width);
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
@@ -1021,30 +1107,55 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             return Ok(false);
         }
         let Some(kind) = xk.sink_key_kind() else {
-            refuse("expr-key kind (dict/multi cars)");
+            refuse("expr-key kind (dict car)");
             return Ok(false);
         };
         drain = SinkDrain::ExprKey;
-        mk = None;
         match kind {
-            None => {
+            super::exprkey::SinkXkKind::Single => {
                 let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
                     refuse("key width");
                     return Ok(false);
                 };
                 red = None;
+                mk = None;
                 width = w;
             }
-            Some(shape) => {
+            super::exprkey::SinkXkKind::Reduced(shape) => {
                 width = shape.width;
                 red = Some(shape);
+                mk = None;
+            }
+            super::exprkey::SinkXkKind::Multi { dict_input_att } => {
+                // q19 class: packed multi-key over the projected scan
+                // (int/numeric components + at most one text through the
+                // canonical-bytes lane). Cap-aware admission probe — no
+                // table armed on the leader (see the Mk comment below).
+                ::nodeagg::sink::agg_sink_set_cap(agg, sink_cap());
+                let admitted =
+                    ::nodeagg::agg_hash_compact_mk_admit(agg, false, dict_input_att);
+                ::nodeagg::sink::agg_sink_clear_cap(agg);
+                let Ok((shape, _numgroups)) = admitted else {
+                    refuse("expr-key mk admission");
+                    return Ok(false);
+                };
+                if !mk_shape_sink_ok(&shape) {
+                    refuse("mk component kind (text car gate)");
+                    return Ok(false);
+                }
+                red = None;
+                mk = Some(shape);
+                width = 8;
             }
         }
     } else {
         // The staging arm (idempotent — the serial fold feed re-arms the
-        // same shape on fallback) + the K2 single-key / Mk packed decide.
+        // same shape on fallback) + the K2 single-int / single-text / Mk
+        // packed decides.
         super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
-        if super::scan_k2_shape(agg, ss, estate).is_some() {
+        let k2_int = super::scan_k2_shape(agg, ss, estate).is_some()
+            && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
+        if k2_int {
             if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
                 refuse("dict-group staging");
                 return Ok(false);
@@ -1058,7 +1169,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             mk = None;
             width = w;
         } else if let Some(probe) = {
-            // Cap-aware probe: the worker arms under the sink cap (bounded
+            // Cap-aware probes: the worker arms under the sink cap (bounded
             // table + flush discipline), so the leader's spill-estimate gate
             // must see the same capped group count — the K2 leader has no
             // estimate gate at all for exactly this reason. The cap is
@@ -1066,23 +1177,24 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             // the SERIAL build (refusal / budget fallback / rescan), which
             // must never see sink mode.
             ::nodeagg::sink::agg_sink_set_cap(agg, sink_cap());
-            let probe = super::scan_mk_probe(agg, ss, estate);
+            // Single-text (C2) first — its shape class (one TEXT key) is
+            // disjoint from the multi-key decide's (>= 2 keys).
+            let probe = if runtime_agg_text_enabled() {
+                super::scan_mk1_text_probe(agg, ss, estate)
+            } else {
+                None
+            }
+            .or_else(|| super::scan_mk_probe(agg, ss, estate));
             ::nodeagg::sink::agg_sink_clear_cap(agg);
             probe
         } {
-            // Mk car: packed multi-INT composite keys only. Intern ids are
-            // per-worker (never canonical across Locals — the C2 car needs a
-            // shared vocabulary), Numeric packs carry a mid-batch legality
-            // demote (phase 2), and nullable images are heap-source-only.
-            if probe.dict_att.is_some()
-                || probe.shape.nullable
-                || probe
-                    .shape
-                    .comps
-                    .iter()
-                    .any(|c| !matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }))
-            {
-                refuse("mk component kind (C2/numeric cars)");
+            // Component gates: nullable images are heap-source-only; at most
+            // one Intern (text) component — merged on CANONICAL RAW BYTES
+            // (intern ids stay per-worker); Numeric packs are demote-SAFE
+            // (a mid-build pack failure maps to the budget-refusal rerun);
+            // text/numeric classes ride the text-car kill switch.
+            if !mk_shape_sink_ok(&probe.shape) {
+                refuse("mk component kind (text car gate)");
                 return Ok(false);
             }
             drain = SinkDrain::Mk;
@@ -1184,7 +1296,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
 
     // --- Engage.
-    let key_words = mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 });
+    // Canonical (text-bearing) shapes merge on canonical key BYTES:
+    // key_words 0 = the combine's bytes mode.
+    let canon = mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
+    let key_words = if canon {
+        0
+    } else {
+        mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 })
+    };
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
     let sink = Arc::new(AggSink {
         drain,

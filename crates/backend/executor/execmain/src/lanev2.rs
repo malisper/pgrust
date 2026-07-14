@@ -3779,6 +3779,112 @@ struct MkScratch {
     code_ids: Vec<Option<u32>>,
 }
 
+/// SINGLE-TEXT sink admission (M2 C2 car, sink-only — the serial lane's
+/// single-text builds keep their own K2-staged-text / dictgroup paths): the
+/// one grouping key is a text/varchar column probing through the TEXT
+/// kernel (deterministic collation proved at kernel selection), hosted as a
+/// 1-component Intern MkShape over the packed machinery — the intern id IS
+/// the packed image; canonical raw bytes are the cross-worker merge key.
+/// Works under BOTH stagings: dictgroup-armed (codes through the per-epoch
+/// intern memo) and prewhere/raw staged text (the Intern arm's raw branch).
+/// `arm` mirrors `scan_mk_admit`'s halves (leader probe vs worker arm).
+fn scan_mk1_text_admit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    arm: bool,
+) -> Option<ScanMk> {
+    if !multikey_enabled() || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        return None;
+    }
+    let plan_ok = ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
+        && !::nodeagg::agg_lanefold_has_resid(agg);
+    if !plan_ok {
+        return None;
+    }
+    let refused = |r: RefuseReason| {
+        stats::tick_refused(ShapeClass::AggBuild, r);
+        None
+    };
+    let key = ::nodeagg::agg_hash_staged_probe_col(agg)?;
+    if !::nodeagg::agg_hash_staged_probe_is_text(agg) {
+        return None;
+    }
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+        if !plan.vguards.is_empty() {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+        // Stale-cell rule: while a dict lane answers the key column, its
+        // SoA Datum cells are stale — the fold must not read them. (Raw
+        // staging has no dict lane, but the worker's staging arm may
+        // dict-arm where the leader's did — gate on the plan either way.)
+        if plan.cols.iter().any(|&c| c == key) {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    // Every needed column must be a staged SoA lane (the mk feed's own
+    // SoA-half checks, verbatim).
+    {
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)?;
+        let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
+        let natts = estate
+            .slot(ss.ss.ss_ScanTupleSlot)
+            .base()
+            .tts_tupleDescriptor
+            .as_ref()?
+            .attrs
+            .len();
+        if colnos_needed.len() != natts || max_colno > soa.ncols() as i32 {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+        if key as usize >= soa.ncols() as usize || !colnos_needed[key as usize] {
+            return refused(RefuseReason::MultiKeyShape);
+        }
+    }
+    let dict = Some(key);
+    let verdict = if arm {
+        match ::nodeagg::agg_hash_compact_try_arm_mk1(agg, dict) {
+            ::nodeagg::CompactArm::Armed => {
+                let shape =
+                    ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed single-text table");
+                return Some(ScanMk { shape, dict_att: dict });
+            }
+            v => v,
+        }
+    } else {
+        match ::nodeagg::agg_hash_compact_mk_admit1(agg, dict) {
+            Ok((shape, _numgroups)) => return Some(ScanMk { shape, dict_att: dict }),
+            Err(v) => v,
+        }
+    };
+    match verdict {
+        ::nodeagg::CompactArm::Armed => unreachable!("armed verdicts returned above"),
+        ::nodeagg::CompactArm::KeyKind => refused(RefuseReason::MultiKeyShape),
+        ::nodeagg::CompactArm::SpillRisk => refused(RefuseReason::CompactSpillRisk),
+        ::nodeagg::CompactArm::Off => None,
+    }
+}
+
+/// The probe half of the single-text admission (M2 sink leader — no table
+/// armed; the serial fallback re-runs its own arm at its own build).
+fn scan_mk1_text_probe<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    scan_mk1_text_admit(agg, ss, estate, false)
+}
+
+/// The arm half of the single-text admission (M2 sink worker builds).
+fn scan_mk1_text_shape<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    scan_mk1_text_admit(agg, ss, estate, true)
+}
+
 /// The scan feed's multi-key admission + compact arm, decided once per
 /// build: plan-level gates (`scan_mk_plan_wanted`), the dict component's
 /// lane registration (when one exists), key lanes staged in the armed SoA,
