@@ -490,8 +490,23 @@ pub fn CreateDecodingContext(
         unreachable!();
     }
 
-    if transam_xlog::RecoveryInProgress() && slot.data.get().synced != 0 {
-        unported("CreateDecodingContext: synced slot on standby");
+    // Slots being synced from the primary can't be used for decoding (they
+    // are for use after failover) — but the slot sync machinery itself may
+    // advance their LSNs (update_local_synced_slot).
+    if transam_xlog::RecoveryInProgress()
+        && slot.data.get().synced != 0
+        && !slot::syncing_replication_slots()
+    {
+        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "cannot use replication slot \"{name}\" for logical decoding"
+            ))
+            .errdetail("This replication slot is being synchronized from the primary server.")
+            .errhint("Specify another replication slot.")
+            .finish(loc("CreateDecodingContext"))?;
+        unreachable!();
     }
 
     debug_assert!(slot.data.get().invalidated == RS_INVAL_NONE);

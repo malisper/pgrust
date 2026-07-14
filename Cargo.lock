@@ -18006,6 +18006,7 @@ dependencies = [
  "adt_timestamp",
  "backend_status",
  "elog",
+ "fd",
  "guc",
  "guc_tables",
  "init_small",
