@@ -314,7 +314,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      serve_ticket, consumed at the first-touch bind, reset in the
     //      serve tail): pure worker-loop bookkeeping, no session identity,
     //      same argument as the io.rs pool-worker block (slot 7).
-    assert_eq!(count_tree(crates), 473, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 474, re-pinned at mt16-cliffs (PRE-EXISTING main drift — train-13
+    // cars 8/9 landed without running the session suite; net +1 vs the
+    // ceremony-v2 pin, all non-session TLS):
+    //   13. access/heap/vacuumlazy/src/morsels.rs (car 9,
+    //      vacuum-morsels) — the VACUUM morsel worker's drive-scoped
+    //      slot; worker-loop bookkeeping, same class as slots 4-6.
+    //   14. executor/runtime/src/blocking.rs — the runtime blocking-pool
+    //      worker slot; pool-worker bookkeeping, the io.rs slot-7 class.
+    //   15. postmaster/auxjob/src/lib.rs (car 8, m4-walwriter/bgjobs) —
+    //      the dispatcher-job Seat slot; aux-worker bookkeeping, no
+    //      session identity.
+    //   MINUS one of transam_xlog/src/write.rs's two blocks and
+    //   bufmgr/src/bgwriter_sync.rs's block, both removed by the car-8
+    //   bgwriter/walwriter dispatcher rework.
+    assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
