@@ -16,6 +16,7 @@ types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 pglz = { path = "../../../../common/pglz" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 heaptuple = { path = "../../common/heaptuple" }
 detoast = { path = "../../common/detoast" }
 detoast_seams = { path = "../../common/detoast_seams" }
