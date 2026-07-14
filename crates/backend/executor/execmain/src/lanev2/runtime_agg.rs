@@ -525,7 +525,7 @@ impl runtime::ParallelSink for AggSink {
         for l in locals.iter_mut() {
             // Canonical (text-bearing) shapes partition by canonical bytes;
             // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_ref().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
             // R3 accounting (m2-integration audit): the SEAL index is
             // per-Local retained memory that lives through the whole combine
             // phase — charge it like a run. Crossing = budget refusal (R5
@@ -1098,6 +1098,10 @@ fn accept_morsel_body(
                 if let Some(t) = local.table.take() {
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
+                // Sink-owned table: arm the batch-tail canonical hashing
+                // (idempotent; the first morsel's table arms during the
+                // drain below, so mark again before reclaiming it).
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 let drained = sink_drain_range(
                     sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
                     stage_slot, mk, mks,
@@ -1120,6 +1124,7 @@ fn accept_morsel_body(
                 }
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
                     local.table = Some(t);
                 }
