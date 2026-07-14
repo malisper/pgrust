@@ -1094,14 +1094,6 @@ pub mod rtgang {
             procsignal::ThreadSignalHandler::Simple(super::default_sigquit_handler),
         );
         miscinit::SetMyBackendType(types_core::init::BackendType::BgWorker);
-        // bgworker parity (BackgroundWorkerMain's setup block): initialize
-        // the per-thread timeout registry BEFORE any connect path can
-        // RegisterTimeout — serve_ticket/warm_connect's
-        // BackgroundWorkerInitializeConnectionByOid reaches InitPostgres's
-        // timeout registrations, and a missing init trips RegisterTimeout's
-        // debug assert, killing every gang worker on a dev-profile server
-        // (the standing-wedge finding, notes/runtime-rowdrive.md).
-        timeout_seams::initialize_timeouts::call();
         bgworker::adopt_worker_entry(bgworker::BackgroundWorker {
             bgw_name: format!("runtime standing executor {ordinal}"),
             bgw_type: "runtime standing executor".to_string(),
