@@ -407,6 +407,7 @@ pub fn agg_hashgroup_residual_active(node: &AggStateData<'_>) -> bool {
 /// transvalues, which the rescan's own aggcontext reset frees).
 pub fn agg_hashgroup_reset(node: &mut AggStateData<'_>) {
     if let Some(mut hg) = node.hashgroup.take() {
+        let bytes = hg.mem();
         let mcx = hg.mcx;
         exectuples::exec_clear_tuple(&mut hg.rep_slot, mcx);
         for d in hg.dsets.iter_mut().flatten() {
@@ -414,6 +415,21 @@ pub fn agg_hashgroup_reset(node: &mut AggStateData<'_>) {
         }
         // The node-side pertrans dset slots may hold the current group's
         // swapped-in sets; the group-boundary restart clears those.
+        drop(hg);
+        // The DISTINCT-sink half of 69b97573f's teardown discipline (the
+        // q33-lane flag: "the same teardown release belongs in the distinct
+        // sink"): the runtime distinct sink adopts its merged result HERE
+        // (agg_hashgroup_adopt_merged), and the parallel build that produced
+        // it churned a multi-GB per-worker working set in helper threads
+        // that have already exited — all freed-but-retained by mimalloc.
+        // mi_collect(force) purges those abandoned segments so a repeat
+        // execution (1session try-2) rebuilds inside the same RSS envelope
+        // instead of ratcheting toward the pod cgroup ceiling. Same >=64MB
+        // engagement floor as the agg sink's release (the serial hashgroup
+        // arm passes through here too; sub-64MB builds skip the collect).
+        if bytes >= crate::SINK_RELEASE_MIN_BYTES {
+            crate::hashagg_release_retained("hashgroup_teardown");
+        }
     }
 }
 

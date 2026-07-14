@@ -329,7 +329,7 @@ pub fn agg_hash_compact_sink_would_refuse(node: &AggStateData<'_>, cap: u32) -> 
 /// ("worker compact arm refused under the sink cap"), erroring before it
 /// ever joined the drive and stranding the pinned RG — the leader must
 /// refuse engagement up front (fail-closed → serial arm) instead.
-pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32) -> bool {
+pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32, spill_ok: bool) -> bool {
     if !compact_enabled() {
         return false;
     }
@@ -342,6 +342,16 @@ pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32) -> bo
     let Some(ph) = node.perhash.as_ref() else {
         return false;
     };
+    // M3.5 spill-armed admission (the q33@100M hmm=2 cliff): with a live
+    // spill arm on a word-keyed engagement the WORKER gates vacate the
+    // estimate refusal (compact_single_word_gates / try_arm / mk_admit_n
+    // under `sink_spill_ok`), so this leader mirror must vacate it too —
+    // the F1 invariant is leader verdict == worker verdict, in both
+    // directions. `spill_ok` here = the engagement's spill arm is live AND
+    // the shape is word-keyed (the caller's `canon` predicate).
+    if spill_ok {
+        return true;
+    }
     let additionalsize = ph.hashtable.additionalsize();
     let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
     numgroups <= ph.hash_ngroups_limit / 2 && est_bytes <= ph.hash_mem_limit as u64 / 2
@@ -376,8 +386,10 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     let additionalsize = ph.hashtable.additionalsize();
     debug_assert!(additionalsize > 0, "K2 shapes carry a fold plan (numtrans > 0)");
     // Spill-eligibility estimate at half margin ([`single_word_spillrisk`],
-    // the single-sourced arithmetic — the M2 sink leader mirror reads it too).
-    if single_word_spillrisk(ph, numgroups) {
+    // the single-sourced arithmetic — the M2 sink leader mirror reads it
+    // too). M3.5 spill-armed sink builds vacate the estimate refusal
+    // (single-word keys are always spillable; the cap bounds the table).
+    if single_word_spillrisk(ph, numgroups) && !(ph.sink_cap.is_some() && ph.sink_spill_ok) {
         return CompactArm::SpillRisk;
     }
     // Entry layout by planner group estimate. Inline16 resolves hits from
@@ -605,8 +617,19 @@ fn mk_admit_n(
     debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
     // Spill-eligibility estimate at half margin (compact v1 formula; the
     // 2-word key rides the same 8-B slack term — conservative either way).
+    // M3.5 spill-armed sink admission (the q33@100M hmm=2 cliff): a live
+    // spill arm absorbs budget crossings for WORD-KEYED shapes (runs spill
+    // as fixed-width records), so the ESTIMATE refusal is vacated then —
+    // the cap-bounded sizing (numgroups min'd above) still holds. Intern
+    // (canonical-bytes) shapes keep the refusal: their runs cannot
+    // round-trip the word-mode spill record format (the C2 gap).
+    let spill_admits = ph.sink_cap.is_some()
+        && ph.sink_spill_ok
+        && !kinds.iter().any(|&(_, k)| matches!(k, MkCompKind::Intern));
     let est_bytes = numgroups.saturating_mul(16 + 16 + additionalsize as u64 + 16);
-    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
+    if !spill_admits
+        && (numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2)
+    {
         return Err(CompactArm::SpillRisk);
     }
     let two_words = packed_bytes > 8;
@@ -635,7 +658,10 @@ fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm>
         ph.hashtable.additionalsize() > 0,
         "fold-fed shapes carry transitions (numtrans > 0)"
     );
-    if single_word_spillrisk(ph, numgroups) {
+    // M3.5 spill-armed sink admission: single-word keys are always
+    // spillable — a live spill arm vacates the estimate refusal (the
+    // cap-bounded sizing above still holds; see mk_admit_n's twin).
+    if single_word_spillrisk(ph, numgroups) && !(ph.sink_cap.is_some() && ph.sink_spill_ok) {
         return Err(CompactArm::SpillRisk);
     }
     Ok(numgroups)
