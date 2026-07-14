@@ -108,10 +108,14 @@ use super::{lane_trace, seq_scan_fusible};
 /// Router flush threshold: staged record bytes per worker before an epoch
 /// flush (bounded per-participant buffer memory, §7).
 const HJ_ROUTER_FLUSH: usize = 8 << 20;
-/// Leaf-build chunk growth ceiling (words): keeps the PLAN-BATCHES capacity
-/// model's per-worker last-chunk waste term at ≤1MB.
-const LEAF_CHUNK_CAP_WORDS: usize = (1 << 20) / 8;
-const LEAF_CHUNK_CAP_BYTES: u64 = 1 << 20;
+/// Leaf-build chunk growth ceiling: bounds the PLAN-BATCHES capacity
+/// model's per-worker last-chunk waste term. SCALED to the envelope
+/// (space/8 across the gang, clamped to the Local's 64KB..16MB ladder) —
+/// a flat per-worker constant would doom small-budget engagements (the
+/// waste term alone would exceed the envelope).
+fn leaf_chunk_cap_bytes(space_allowed: usize, dop: u64) -> u64 {
+    ((space_allowed as u64) / (8 * dop.max(1))).clamp(64 << 10, 1 << 20)
+}
 /// Split-node id space (= split-round file partition space).
 const MAX_SPLIT_NODES: usize = 1024;
 
@@ -369,6 +373,8 @@ struct HjSpill {
     space_allowed: usize,
     dop: u64,
     fill_inner: bool,
+    /// Envelope-scaled chunk ceiling for leaf builds (bytes).
+    chunk_cap_bytes: u64,
     leaf_cap: usize,
     rounds_max: usize,
     batch0_demoted: AtomicBool,
@@ -409,6 +415,7 @@ impl HjSpill {
             space_allowed,
             dop,
             fill_inner,
+            chunk_cap_bytes: leaf_chunk_cap_bytes(space_allowed, dop),
             leaf_cap,
             rounds_max,
             batch0_demoted: AtomicBool::new(false),
@@ -431,7 +438,7 @@ impl HjSpill {
     }
 
     fn est_fits(&self, bytes: u64, tuples: u64) -> bool {
-        estimate_batch_table_mem(bytes, tuples, self.dop, LEAF_CHUNK_CAP_BYTES)
+        estimate_batch_table_mem(bytes, tuples, self.dop, self.chunk_cap_bytes)
             <= self.space_allowed as u64
     }
 
@@ -1317,7 +1324,7 @@ fn resolve_node(
         payload.refuse_budget_traced("split depth cap — batch does not shrink");
         return false;
     }
-    let est = estimate_batch_table_mem(bytes, tuples, spill.dop, LEAF_CHUNK_CAP_BYTES);
+    let est = estimate_batch_table_mem(bytes, tuples, spill.dop, spill.chunk_cap_bytes);
     let ratio = est.div_ceil(spill.space_allowed.max(1) as u64).max(2);
     // Children sized to fit with one-bit headroom; bounded fan (≤16-way).
     let jbits = (64 - ratio.leading_zeros()).clamp(1, 4);
@@ -1596,7 +1603,14 @@ impl runtime::ParallelSink for LeafBatchSink {
     type Local = JoinBuildLocal;
 
     fn fork(&self, worker: usize) -> JoinBuildLocal {
-        JoinBuildLocal::with_chunk_cap(worker, Arc::clone(&self.budget), LEAF_CHUNK_CAP_WORDS)
+        let Some(shared) = self.shared.upgrade() else {
+            return JoinBuildLocal::new(worker, Arc::clone(&self.budget));
+        };
+        let cap_words = shared
+            .spill
+            .as_ref()
+            .map_or(1 << 17, |sp| (sp.chunk_cap_bytes / 8) as usize);
+        JoinBuildLocal::with_chunk_cap(worker, Arc::clone(&self.budget), cap_words)
     }
 
     fn accept_local(&self, local: &mut JoinBuildLocal, _worker: usize, range: runtime::MorselRange) {
