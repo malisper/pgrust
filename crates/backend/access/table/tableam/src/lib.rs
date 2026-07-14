@@ -1195,6 +1195,16 @@ pub fn table_scan_cb_set_granule_range(
     }
 }
 
+/// Drive-scaling observability counters of a cbstore scan (the runtime
+/// WFIN channel): (rg_switches, dict_builds, granules_scanned,
+/// windows_staged). None = heap.
+pub fn table_scan_cb_drive_counters(scan: &TableScanDesc<'_>) -> Option<(u64, u64, u64, u64)> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => Some(c.drive_counters()),
+    }
+}
+
 /// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {

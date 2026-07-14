@@ -268,7 +268,11 @@ pub fn ProcGlobalSemas() -> i32 {
 pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
     let max_backends = g::MaxBackends();
     let max_connections = g::MaxConnections();
-    let max_worker_processes = g::max_worker_processes();
+    // M2 pool-binding: the standing runtime executor gang's boot-reserved
+    // PGPROCs ride the Bgworker freelist segment (widened below) without
+    // touching the max_worker_processes GUC (postinit::InitializeMaxBackends
+    // added the matching MaxBackends term). 0 unless PGRUST_RUNTIME=1.
+    let max_worker_processes = g::max_worker_processes() + g::RuntimeGangProcs();
     assert!(max_backends > 0, "MaxBackends not initialized");
     debug_assert_eq!(
         max_backends,
@@ -534,7 +538,14 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     if MyProc().is_some() {
         return Err(Box::new(PgError::new(ERROR, "you already exist")));
     }
-    if g::IsUnderPostmaster() {
+    // M2 pool-binding: STANDING runtime executors (launch_backend::rtgang)
+    // are postmaster-environment threads with NO postmaster child slot by
+    // design (registry-invisible: no dispatch, no reaper entry, no
+    // shutdown-count charge — the rtpool contract). The child-active
+    // PMChildFlags protocol is slot-keyed, so it only applies to slotted
+    // children; every C child has a slot, so this gate is vacuous for
+    // every pre-existing caller.
+    if g::IsUnderPostmaster() && g::MyPMChildSlot() != 0 {
         pmsignal_seams::register_postmaster_child_active::call();
     }
 
@@ -910,6 +921,64 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     if autovacuum_seams::wake_autovacuum_launcher::is_installed() {
         autovacuum_seams::wake_autovacuum_launcher::call();
     }
+}
+
+/// M2 pool-binding: a STANDING runtime executor leaves the lock group it
+/// joined for one engagement (`BecomeLockGroupMember`) without exiting the
+/// thread — the leave-group block of `ProcKill` (above) extracted for a
+/// live proc. Lock-group membership is strictly per-engagement for standing
+/// workers: they must be back at `lockGroupLeader == INVALID_PROC_NUMBER`
+/// before the next engagement's join (BecomeLockGroupMember asserts it).
+///
+/// Preconditions: the caller ended its engagement transaction (no locks
+/// held anywhere in myProcLocks — asserted, mirroring ProcKill) and is a
+/// group MEMBER, never a group leader. The leader-exited-first arm is
+/// preserved verbatim: the leader is always on its own lockGroupMembers
+/// list while alive (BecomeLockGroupLeader), so the list only empties here
+/// when the leader already exited conditionally-retaining its PGPROC — in
+/// which case the last member out returns it (C proc.c ProcKill parity).
+///
+/// No-op when the caller is not in a lock group.
+pub fn LeaveLockGroup() {
+    let hdr = ProcGlobal();
+    let procno = my_proc_required();
+    let proc = GetPGProcByNumber(procno);
+
+    let leader_no = proc.lockGroupLeader.load(Relaxed);
+    if leader_no == INVALID_PROC_NUMBER {
+        return;
+    }
+    debug_assert_ne!(
+        leader_no, procno,
+        "LeaveLockGroup: caller is a lock-group LEADER (standing executors only ever join)"
+    );
+    for i in 0..NUM_LOCK_PARTITIONS as usize {
+        debug_assert!(
+            proc.myProcLocks[i].get().head.next.is_none(),
+            "LeaveLockGroup with locks still held"
+        );
+    }
+
+    let leader = GetPGProcByNumber(leader_no);
+    let leader_lwlock = LockHashPartitionLockByProc(leader_no);
+    lwlock::LWLockAcquire(leader_lwlock, lwlock::LW_EXCLUSIVE, procno)
+        .expect("partition lock in LeaveLockGroup");
+    debug_assert!(!plist_is_empty(&leader.lockGroupMembers));
+    plist_delete(hdr, &leader.lockGroupMembers, procno, group_link_of);
+    // Unlike ProcKill's dying caller, this proc lives on: its own
+    // lockGroupLeader must clear in BOTH arms (the postcondition the next
+    // BecomeLockGroupMember asserts) — in the leader-exited-first arm a
+    // stale pointer would advertise membership in a recycled PGPROC slot.
+    proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
+    if plist_is_empty(&leader.lockGroupMembers) {
+        leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
+        // Leader exited first; return its PGPROC (ProcKill parity).
+        let list = leader.procgloballist.get().expect("leader freelist");
+        spin_acquire(&ProcStructLock);
+        plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
+        ProcStructLock.unlock();
+    }
+    lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in LeaveLockGroup");
 }
 
 pub fn AuxiliaryProcKill(_code: i32, arg: usize) {
