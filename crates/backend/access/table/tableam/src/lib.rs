@@ -1188,6 +1188,25 @@ pub fn table_scan_heap_block_geometry(scan: &TableScanDesc<'_>) -> Option<u64> {
     }
 }
 
+/// Position a CBSTORE scan on the granule claim [g0, g1). Ok(false) =
+/// heap, scan untouched — the m2 sink arms' fail-closed worker check
+/// (their admission is cbstore-only; AM-dispatching them onto heap blocks
+/// would silently change the claim unit under a divergent worker plan).
+/// The AM-dispatched positioning is `table_scan_set_morsel_range` below.
+pub fn table_scan_cb_set_granule_range(
+    scan: &mut TableScanDesc<'_>,
+    g0: u64,
+    g1: u64,
+) -> PgResult<bool> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(false),
+        TableScanDesc::Cbstore(c) => {
+            c.set_granule_range(g0, g1)?;
+            Ok(true)
+        }
+    }
+}
+
 /// Position the scan on the morsel claim [g0, g1), dispatching on the AM
 /// (the runtime morsel drive): cbstore absolute granules (must lie inside
 /// one row group — the runtime clamps claims to the boundaries

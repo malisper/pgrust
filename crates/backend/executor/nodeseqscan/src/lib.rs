@@ -3194,6 +3194,24 @@ pub fn seq_scan_heap_block_geometry<'mcx>(
     .filter(|&n| n > 0))
 }
 
+/// Position a CBSTORE scan on the granule claim [g0, g1). Ok(false) = not
+/// cbstore, scan untouched — the m2 sink arms' fail-closed worker check
+/// (cbstore-only admission). The AM-dispatched positioning for the runtime
+/// scan arm is `seq_scan_set_morsel_range` below.
+pub fn seq_scan_cb_set_granule_range<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    g0: u64,
+    g1: u64,
+) -> PgResult<bool> {
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_cb_set_granule_range(
+        node.ss.ss_currentScanDesc.as_mut().unwrap(),
+        g0,
+        g1,
+    )
+}
+
 /// Position the scan on the morsel claim [g0, g1) (the runtime's
 /// boundary-clamped claim contract), dispatching on the AM: cbstore
 /// absolute granules (whole granules within one row group) or heap blocks.

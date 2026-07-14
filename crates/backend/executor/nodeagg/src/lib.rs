@@ -4676,6 +4676,51 @@ pub fn agg_plain_pergroup_base(node: &AggStateData<'_>) -> NonNull<AggPerGroup> 
     node.pergroup_base
 }
 
+/// Bare-count storeless shape probe: the node's WHOLE transition program is
+/// one `int8inc(transvalue)` — count(*) reading no input columns — compiled
+/// to a byval kernel (`ExprState::agg_count_star`'s contract). The shape
+/// `exec_agg_batched`'s storeless arm advances once per page batch; the
+/// runtime direct morsel drive admits exactly it (bare heap count(*)).
+/// FILTER, count(expr), or any second transition compiles to
+/// `Kernel::Program` and probes false.
+pub fn agg_plain_count_star_shape(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_PLAIN
+        && node.evaltrans.as_deref().is_some_and(|et| et.agg_count_star().is_some())
+}
+
+/// One page batch of `n` VISIBLE rows through the bare-count storeless
+/// advance — `exec_agg_batched`'s storeless count(*) arm verbatim: one
+/// checked add per batch, one tmpcontext reset per batch (the per-row
+/// resets are no-ops for this shape: the transition allocates nothing). A
+/// refused advance (int8 overflow / null transvalue under a non-strict
+/// call) re-runs the batch through the per-row kernel so the ereport rises
+/// at exactly C's row. Caller contract: `agg_plain_count_star_shape` holds
+/// and `n` counts visible qual-free rows (`BatchSource::storeless_ok`).
+pub fn agg_plain_count_star_accept_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    n: u32,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
+    if let Some((pergroup, strict)) =
+        node.evaltrans.as_deref().and_then(|et| et.agg_count_star())
+    {
+        if ::execexpr::agg_count_star_advance(pergroup, strict, n) {
+            estate.reset_expr_context(node.tmpcontext);
+            return Ok(());
+        }
+    }
+    // Refused advance (or a diverged shape): the per-row storeless kernel —
+    // input-free transitions store no slot (exec_agg_batched's per-row
+    // storeless loop, ereport-at-C's-row parity).
+    for _ in 0..n {
+        let mut slots = EvalSlots::default();
+        exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
+        estate.reset_expr_context(node.tmpcontext);
+    }
+    Ok(())
+}
+
 /// Retrieve: `exec_agg`'s post-drain tail (finalize + HAVING + project, sets
 /// `agg_done`) — the one result row, C's zero-row contract included.
 pub fn agg_plain_finish<'mcx>(
