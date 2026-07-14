@@ -630,6 +630,12 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     }
     let pstmt = qd.plannedstmt();
 
+    // M5-0 (docs/design/m5-planner.md §2.2): under pgrust.parallel_engine=
+    // runtime with no runtime pool, degrade to legacy with a loud-once LOG
+    // line. One TLS read + cmp on the legacy default. The M5-1 unified
+    // admission router hooks here — executor startup, serial plan in hand.
+    let _ = crate::lanev2::engine_runtime_active();
+
     if (guc_tables::vars::XactReadOnly.read() || xact::IsInParallelMode())
         && eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
     {
