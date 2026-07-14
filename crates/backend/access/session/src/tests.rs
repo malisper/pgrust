@@ -314,7 +314,31 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      serve_ticket, consumed at the first-touch bind, reset in the
     //      serve tail): pure worker-loop bookkeeping, no session identity,
     //      same argument as the io.rs pool-worker block (slot 7).
-    assert_eq!(count_tree(crates), 473, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 474, re-pinned at train-14 (conductor debt fix): three train-13 cars
+    // landed AFTER ceremony2's 473 re-pin and this suite never ran at the
+    // train-13 merged tip (its battery's TEST_CRATES was empty), so the pin
+    // went stale by net +1 — three additions minus two migrations
+    // (transam_xlog/src/write.rs's walwriter slot moved into the auxjob
+    // layer; bufmgr/src/bgwriter_sync.rs's block moved into the bgwriter
+    // job). The additions, all classified non-session:
+    //   13. executor/runtime/src/blocking.rs PERMIT_SEM (m35-spill inc-1) —
+    //      non-null exactly while a PermitThreadReg for the pool worker
+    //      thread lives (the spill blocking-section facade reads it): pool
+    //      thread bookkeeping with no session or task identity, created and
+    //      cleared only by the worker loop — same argument as the io.rs
+    //      pool-worker block (slot 7).
+    //   14. postmaster/auxjob/src/lib.rs THREAD_CHILD_INITED (bgjobs
+    //      identity-seat layer) — once-per-thread aux-child init latch
+    //      (InitPostmasterChild/BaseInit halves) shared across all aux jobs
+    //      hosted by the thread: aux daemons are not sessions; the latch
+    //      never crosses threads and carries no session state.
+    //   15. access/heap/vacuumlazy/src/morsels.rs WORKER_CX (vacuum-morsels)
+    //      — the vacuum SCAN task set's drive-scoped worker context pointer,
+    //      set for one run_morsel drive and cleared on every exit path —
+    //      same drive-scoped class and argument as WORKER_EXEC slots 4-6.
+    // Train-14's own cargo (q5/q22/q14/topn) adds ZERO sources — the
+    // per-file census at the train-13 tip and the train-14 tip is identical.
+    assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
