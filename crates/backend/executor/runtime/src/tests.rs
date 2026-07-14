@@ -257,6 +257,135 @@ fn whole_boundary_claims_are_boundary_aligned() {
     }
 }
 
+/// Claim coalescing (dop1-tax fix 1): an opted-in whole-boundary source at
+/// LOW live width claims SEVERAL epochs per morsel (default target 8 at one
+/// worker) — but every claim stays boundary-ALIGNED, the Startup ramp stays
+/// single-epoch (no stale-width giant claim can front-run a mid-query
+/// widening: coalescing waits for the Default phase, by which point every
+/// gang member's join is visible in active_workers), Shutdown (photo
+/// finish) stays single-epoch, and every granule still executes exactly
+/// once.
+#[test]
+fn coalesced_claims_are_boundary_aligned_and_multi_epoch() {
+    struct CoalescingSource(SyntheticMorselSource);
+    impl MorselSource for CoalescingSource {
+        fn total_granules(&self) -> u64 {
+            self.0.total_granules()
+        }
+        fn next_boundary_after(&self, start: u64) -> u64 {
+            self.0.next_boundary_after(start)
+        }
+        fn startup_c0(&self) -> u64 {
+            self.0.startup_c0()
+        }
+        fn whole_boundary_claims(&self) -> bool {
+            true
+        }
+        fn coalesce_claims(&self) -> bool {
+            true
+        }
+    }
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    let total = 20_000u64;
+    let every = 100u64;
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (_h, waiter) = rt.submit(spec_one(
+        &work,
+        Arc::new(CoalescingSource(SyntheticMorselSource::with_boundaries(total, every))),
+    ));
+
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+
+    let claims = work.claims.lock().unwrap();
+    let mut multi = 0usize;
+    for r in claims.iter() {
+        assert!(
+            r.start % every == 0 && (r.end % every == 0 || r.end == total),
+            "claim {r:?} is not boundary-aligned (every {every})"
+        );
+        // Never past the coalescing target (default 8 epochs at 1 worker).
+        assert!(
+            r.end - r.start <= 8 * every,
+            "claim {r:?} exceeds the coalescing target"
+        );
+        if r.end - r.start > every {
+            multi += 1;
+        }
+    }
+    // Startup-ramp claims precede any coalescing: the first claim is
+    // exactly one epoch (the width signal is not yet trustworthy there).
+    let first = &claims[0];
+    assert_eq!((first.start, first.end), (0, every), "ramp claims must stay single-epoch");
+    // Default-phase claims at one worker DID coalesce (the fix's point:
+    // ~total/(8·every) Default claims instead of total/every).
+    assert!(multi > 0, "no multi-epoch claim at DOP1 — coalescing never engaged");
+    assert!(
+        claims.len() < (total / every) as usize / 2,
+        "coalescing must cut the claim count (got {})",
+        claims.len()
+    );
+    // The photo-finish tail: the LAST claim is back to a single epoch
+    // (Shutdown never coalesces).
+    let last = claims.last().unwrap();
+    assert!(
+        last.end - last.start <= every,
+        "shutdown claims must stay single-epoch, got {last:?}"
+    );
+}
+
+/// Coalescing under a REAL pool (8 workers, real clock): whatever width the
+/// claim path observes moment to moment, boundary alignment and
+/// exactly-once execution hold — the widenability invariant's mechanical
+/// half (the factor is a live active_workers read, re-evaluated per claim).
+#[test]
+fn coalesced_claims_with_pool_stay_exact() {
+    struct CoalescingSource(SyntheticMorselSource);
+    impl MorselSource for CoalescingSource {
+        fn total_granules(&self) -> u64 {
+            self.0.total_granules()
+        }
+        fn next_boundary_after(&self, start: u64) -> u64 {
+            self.0.next_boundary_after(start)
+        }
+        fn whole_boundary_claims(&self) -> bool {
+            true
+        }
+        fn coalesce_claims(&self) -> bool {
+            true
+        }
+    }
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 8,
+        standbys: 2,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let total = 4_000u64;
+    let every = 40u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (_h, waiter) = rt.submit(spec_one(
+        &work,
+        Arc::new(CoalescingSource(SyntheticMorselSource::with_boundaries(total, every))),
+    ));
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+    for r in work.claims.lock().unwrap().iter() {
+        assert!(
+            r.start % every == 0 && (r.end % every == 0 || r.end == total),
+            "claim {r:?} is not boundary-aligned (every {every})"
+        );
+    }
+    pool.shutdown();
+}
+
 // ---- protocol end-to-end over real threads ---------------------------------
 
 /// Full pool: several RGs with dependency-DAG-ordered task sets, real
