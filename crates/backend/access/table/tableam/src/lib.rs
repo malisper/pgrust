@@ -1194,6 +1194,27 @@ pub fn table_scan_cb_set_granule_range(
     }
 }
 
+/// EA-on-morsels: snapshot the cbstore scan descriptor's cumulative debug
+/// counters (the CBSCAN line's fields) for the EXPLAIN ANALYZE prune fold —
+/// [granules_scanned, granules_pruned, granules_bloom_pruned, granules_meta,
+/// granules_bound_skipped, blocks_pruned, windows_staged]. None on heap.
+/// Read-only; the counters are the pre-existing unconditional scan-desc
+/// accumulators (docs/design/ea-morsels.md §1).
+pub fn table_scan_cb_ea_counters(scan: &TableScanDesc<'_>) -> Option<[u64; 7]> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => Some([
+            c.granules_scanned,
+            c.granules_pruned,
+            c.granules_bloom_pruned,
+            c.granules_meta,
+            c.granules_bound_skipped,
+            c.blocks_pruned,
+            c.windows_staged,
+        ]),
+    }
+}
+
 /// Relation size at scan start (heap rs_nblocks): the deform-JIT page gate.
 pub fn table_scan_nblocks(scan: &TableScanDesc<'_>) -> u32 {
     match scan {

@@ -1459,6 +1459,37 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
+    // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): the
+    // runtime admission walk's verdict for a node that did not engage.
+    // Records exist ONLY on armed + instrumented walks — unarmed sessions
+    // (every existing gate: the C-diff explain e2e, regress) print nothing
+    // and stay byte-identical.
+    if es.analyze && !es.qd.is_null() {
+        if let Some(refs) =
+            execmain_seams::query_desc_runtime_ea_refusals::call(es.qd, plan.plan_node_id)
+        {
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                crate::format::ExplainIndentText(es);
+                append!(es, "runtime: refused (");
+                for (i, (arm, reason)) in refs.iter().enumerate() {
+                    if i > 0 {
+                        append!(es, "; ");
+                    }
+                    append!(es, "{arm}: {reason}");
+                }
+                append!(es, ")\n");
+            } else {
+                for (arm, reason) in &refs {
+                    crate::format::ExplainPropertyText(
+                        "Runtime Refused",
+                        &format!("{arm}: {reason}"),
+                        es,
+                    );
+                }
+            }
+        }
+    }
+
     // Per-worker buffer usage, then flush the worker
     // sections and pop the set-aside state.
     if es.workers_state.is_some() && es.buffers && es.verbose {

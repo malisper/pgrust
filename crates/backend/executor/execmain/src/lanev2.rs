@@ -37,6 +37,7 @@
 mod exprkey;
 mod runtime_agg;
 mod runtime_distinct;
+mod runtime_instr;
 mod runtime_scan;
 mod push;
 mod stats;
@@ -674,6 +675,29 @@ fn seq_scan_fusible<'mcx>(
     Ok(v)
 }
 
+/// EA-on-morsels fusibility (docs/design/ea-morsels.md §6, E4): the RUNTIME
+/// arms' admission proxy under EXPLAIN ANALYZE. The leader's node carries an
+/// instr slot (so `seq_scan_fusible` memoizes REFUSE — correct for the
+/// serial lane, whose batched drive would skip the per-node instrument
+/// wrappers), but the runtime's WORKER executors are built uninstrumented,
+/// so for runtime admission the Instrumented gate — and ONLY that gate — is
+/// vacuous. Evaluates the same dynamic gates + the same call-invariant
+/// refuse-set with the instrument check skipped; touches neither the
+/// memoized serial verdict nor the engagement stat counters (the runtime
+/// arm ticks its own). Cold: runs once per engagement attempt.
+#[cold]
+pub(super) fn seq_scan_fusible_runtime_ea<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(false);
+    }
+    Ok(seq_scan_refuse_reason_ex(ss, estate, true)?.is_none())
+}
+
 /// The call-invariant half of the SeqScan refuse-set: plan shape, init-time
 /// eflags, parallel wiring, instrumentation, and AM page-batch support.
 /// `None` = admitted; `Some(reason)` = refused (the caller ticks accounting).
@@ -681,10 +705,22 @@ fn seq_scan_refuse_reason<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<RefuseReason>> {
+    seq_scan_refuse_reason_ex(ss, estate, false)
+}
+
+/// `ignore_instrument`: the EA-on-morsels arm evaluates fusibility FOR ITS
+/// UNINSTRUMENTED WORKERS — every other gate applies identically (the E4
+/// rule: EA may never change the admission verdict except the instrument
+/// gate itself).
+fn seq_scan_refuse_reason_ex<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ignore_instrument: bool,
+) -> PgResult<Option<RefuseReason>> {
     if !ss.batch_allowed() {
         return Ok(Some(RefuseReason::ScrollMark));
     }
-    if ss.ss.instr_idx.is_some() {
+    if !ignore_instrument && ss.ss.instr_idx.is_some() {
         return Ok(Some(RefuseReason::Instrumented));
     }
     match ss.variant() {
@@ -2168,6 +2204,28 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
     // gates re-checked per call; structural verdict memoized on the node).
     if !seq_scan_fusible(ss, estate)? {
+        // EA-on-morsels (docs/design/ea-morsels.md §5): the serial lane
+        // refuses instrumented scans (its batched drive bypasses the
+        // per-node instrument wrappers), but the RUNTIME arm's workers run
+        // uninstrumented executors — so under EXPLAIN ANALYZE the runtime
+        // arm still gets its walk, gated on the SAME lane choice the
+        // uninstrumented run computes (E4: EA may never change the
+        // engagement decision except the instrument gate itself).
+        if runtime_instr::ea_active(estate) {
+            let c = match *choice {
+                Some(c) => c,
+                None => {
+                    let c = decide_plain_agg_lane(agg, ss, estate)?;
+                    *choice = Some(c);
+                    c
+                }
+            };
+            if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
+                if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+                    return Ok(Some(r));
+                }
+            }
+        }
         return Ok(None);
     }
     let c = match *choice {
@@ -2571,11 +2629,35 @@ fn agg_plain_fold_feed<'mcx>(
 /// loop per claimed granule range): drives `seq_scan_next_pagebatch` to
 /// exhaustion — the whole scan on the serial feed; exactly the positioned
 /// claim on a granule-ranged scan — folding into the CURRENT pergroups.
-/// Byte-path-identical to the pre-split body (pure extraction).
+/// Byte-path-identical to the pre-split body (pure extraction; the EA=false
+/// instantiation compiles every tally out — the serial machine code is the
+/// pre-split machine code).
 fn agg_plain_fold_drain<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    agg_plain_fold_drain_impl::<false>(agg, ss, estate, &mut Default::default())
+}
+
+/// EA-on-morsels drain (docs/design/ea-morsels.md §2): identical fold, plus
+/// the row-funnel tally — window-grain popcounts on the bitmap paths, a
+/// per-survivor increment where a per-row emit already happened. Runtime
+/// workers only; never on a serial path.
+pub(super) fn agg_plain_fold_drain_ea<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tally: &mut runtime_instr::EaRowTally,
+) -> PgResult<()> {
+    agg_plain_fold_drain_impl::<true>(agg, ss, estate, tally)
+}
+
+fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tally: &mut runtime_instr::EaRowTally,
 ) -> PgResult<()> {
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
@@ -2599,6 +2681,9 @@ fn agg_plain_fold_drain<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        if EA {
+            tally.scanned += n as u64;
+        }
         let nwords = (n as usize).div_ceil(64);
         // Guarded plans: prove the batch over every staged non-fallback row —
         // a superset of the rows the fold will touch — before any fold (same
@@ -2651,6 +2736,9 @@ fn agg_plain_fold_drain<'mcx>(
         if demote {
             for i in 0..n {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if EA {
+                        tally.survived += 1;
+                    }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
             }
@@ -2674,11 +2762,19 @@ fn agg_plain_fold_drain<'mcx>(
                     fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
             }
+            if EA {
+                // Window-grain: the selected non-fallback rows all fold.
+                tally.survived +=
+                    rows[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
+            }
             for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
                 while bits != 0 {
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
                     if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        if EA {
+                            tally.survived += 1;
+                        }
                         ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                     }
                 }
@@ -2688,6 +2784,9 @@ fn agg_plain_fold_drain<'mcx>(
                 let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
                     continue;
                 };
+                if EA {
+                    tally.survived += 1;
+                }
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i))
                 {
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;

@@ -3166,6 +3166,14 @@ pub fn seq_scan_cb_granule_geometry<'mcx>(
     ))
 }
 
+/// EA-on-morsels: this scan descriptor's cumulative cbstore counters (the
+/// CBSCAN fields — see tableam::table_scan_cb_ea_counters for the order).
+/// None = heap or no descriptor opened yet. Read-only snapshot; the EA
+/// prune fold takes it at claim end (docs/design/ea-morsels.md §2).
+pub fn seq_scan_cb_ea_counters(node: &SeqScanState<'_>) -> Option<[u64; 7]> {
+    ::tableam::table_scan_cb_ea_counters(node.ss.ss_currentScanDesc.as_ref()?)
+}
+
 /// Position a cbstore scan on the absolute-granule morsel claim [g0, g1)
 /// (whole granules within one row group -- the runtime's boundary-clamped
 /// claim contract). false = not a cbstore scan.

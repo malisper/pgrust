@@ -654,6 +654,16 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // the caller's seam does not gate instrumentation for the serial arms.
     if estate.es_instrument != 0 || estate.es_epq_active {
         refused("instrumented/epq");
+        // EA-on-morsels transparency (ea-morsels.md §6): the distinct arm's
+        // TIMING OFF un-refusal is the inc-1b car; until then an EA walk
+        // reaching this gate records the honest reason for the EXPLAIN line.
+        if estate.es_instrument != 0 {
+            estate.runtime_ea_record_refusal(
+                agg.plan.plan.plan_node_id,
+                "distinct",
+                "instrumented",
+            );
+        }
         return Ok(None);
     }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
