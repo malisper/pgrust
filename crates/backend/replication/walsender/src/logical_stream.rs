@@ -29,8 +29,11 @@ use crate::streaming::{
 use crate::WalSndState;
 
 // WAIT_EVENT_WAL_SENDER_WAIT_FOR_WAL / _WRITE_DATA (wait_event_types.h, Client section).
-const WAIT_EVENT_WAL_SENDER_WAIT_WAL: u32 = 0x0600_0000 | 6;
-const WAIT_EVENT_WAL_SENDER_WRITE_DATA: u32 = 0x0600_0000 | 7;
+// wait_event_names.txt Client section order: ...(5)=SSL_OPEN_SERVER,
+// (6)=WAIT_FOR_STANDBY_CONFIRMATION, (7)=WAL_SENDER_WAIT_FOR_WAL,
+// (8)=WAL_SENDER_WRITE_DATA.
+const WAIT_EVENT_WAL_SENDER_WAIT_WAL: u32 = 0x0600_0000 | 7;
+const WAIT_EVENT_WAL_SENDER_WRITE_DATA: u32 = 0x0600_0000 | 8;
 
 fn get_ts() -> TimestampTz {
     timestamp_seams::get_current_timestamp::call()
