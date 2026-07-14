@@ -59,7 +59,16 @@ pub const DEFAULT_SLOTS: usize = 128;
 /// lanes live above the pool's `nthreads` indexes; the finalization
 /// protocol's coordinator scans the whole board, so external participants
 /// carry marker obligations exactly like pool workers.
-pub const MAX_EXTERNAL_LANES: usize = 64;
+///
+/// 256 (DOP-192 readiness): every gang helper leases one lane for the whole
+/// drive, so this constant IS the per-process pinned-participation ceiling —
+/// at the old 64, a dop-192 engagement silently refused 128+ helpers
+/// (fail-closed non-participation). 256 = 192 helpers + vacuum drivers +
+/// concurrent-query headroom; the lease mask is `EXTERNAL_LANE_WORDS` words.
+pub const MAX_EXTERNAL_LANES: usize = 256;
+
+/// Words of the external-lane lease bitmask (64 lanes per `AtomicU64`).
+pub(crate) const EXTERNAL_LANE_WORDS: usize = MAX_EXTERNAL_LANES / 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -261,10 +270,10 @@ pub(crate) struct Scheduler {
     #[allow(dead_code)]
     mailboxes: Vec<WorkerMailbox>,
     pub(crate) park: ParkLot,
-    /// External pin-board lane lease bitmask (bit b = lane b busy). Lanes
-    /// are leased through Runtime::acquire_external_lane; MAX_EXTERNAL_LANES
-    /// = 64 keeps this one word.
-    pub(crate) external_lanes: AtomicU64,
+    /// External pin-board lane lease bitmask (word w bit b = lane w*64+b
+    /// busy). Lanes are leased through Runtime::acquire_external_lane;
+    /// MAX_EXTERNAL_LANES = 256 ⇒ 4 words, scanned low-word-first.
+    pub(crate) external_lanes: [AtomicU64; EXTERNAL_LANE_WORDS],
     /// Execution-permit semaphore: exactly `permits` (= cores) permits; any
     /// task-executing thread holds one (acquired by the pool loop around
     /// worker_step). The hard runnable cap of the §2.5 permit model. The
@@ -308,7 +317,7 @@ impl Scheduler {
             pins: PinBoard::new(nthreads + MAX_EXTERNAL_LANES),
             mailboxes: (0..nthreads).map(|_| WorkerMailbox::new()).collect(),
             park: ParkLot::new(),
-            external_lanes: AtomicU64::new(0),
+            external_lanes: std::array::from_fn(|_| AtomicU64::new(0)),
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
             clock,
