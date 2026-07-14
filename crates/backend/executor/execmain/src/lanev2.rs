@@ -945,6 +945,14 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn rowref_base(&self) -> Option<u64> {
         ::nodeseqscan::seq_scan_batch_rowref_base(self.node)
     }
+
+    #[inline]
+    fn live_sel(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.node)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
+    }
 }
 
 // ===========================================================================
@@ -6221,6 +6229,12 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
             fn emit_rowref(&self, i: u32) -> Option<u64> {
                 self.rrbase.map(|b| b + i as u64)
             }
+            #[inline(always)]
+            fn live_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+                // The cut mask is exactly this feed's skip contract: a
+                // cleared bit answers `emit`/`emit_key` with None above.
+                self.sel.copied()
+            }
         }
         // Streaming top-k cutoff: once the bounded heap is full, discard the
         // batch's cannot-make-top-k rows (strictly worse than the k-th
@@ -6235,6 +6249,21 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         if let Some(tk) = self.topk.as_mut() {
             filtered = tk.batch_mask(self.sort, &*emit, pos, n)?;
         }
+        // Fold the feed's qual-survivor snapshot into the skip mask: a
+        // qual-cleared bit is a row whose `emit` returns None with no
+        // observable effect (`BatchEmit::live_sel`), so cutting it is
+        // put-stream-identical — and lets the put loop skip the whole
+        // per-row emit ceremony word-wise for selective quals.
+        let filtered = match (filtered, emit.live_sel()) {
+            (Some(mut t), Some(q)) => {
+                for (w, qw) in t.iter_mut().zip(q.iter()) {
+                    *w &= *qw;
+                }
+                Some(t)
+            }
+            (Some(t), None) => Some(t),
+            (None, q) => q,
+        };
         match filtered {
             Some(sel) => ::nodesort::sort_lane_put_batch(
                 self.sort,
