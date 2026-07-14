@@ -1861,6 +1861,46 @@ pub fn agg_sink_flush_if_due(
     }
 }
 
+/// LIVE bytes of a word-keyed sink table: entry line (16 B at ≤0.5 fill),
+/// key words, and the state block per live row — the compact spill gate's
+/// own per-entry arithmetic, applied to `nrows` instead of retained
+/// capacity. Used by the spill-armed pressure/backstop accounting only.
+pub(crate) fn sink_table_live_bytes(t: &LaneAggTable) -> usize {
+    t.nrows() * (16 + 8 * table_key_words(t) + t.state_bytes())
+}
+
+/// Force-flush the armed table into a run NOW, regardless of the cap
+/// (`None` = empty table, nothing to flush). The budget-pressure spill law
+/// (mt16-cliffs, the q33@100M hmm=2 cliff): when half-limit pressure trips
+/// on a spill-armed engagement, the drain flushes the bounded table through
+/// this and spills the accumulated runs as one epoch instead of refusing —
+/// the mem-leg pressure is table-driven there, and the flush drains it.
+/// Same canonical-twin + intern-reset semantics as [`agg_sink_flush_if_due`]
+/// (the caller MUST honor the reset flag identically).
+pub fn agg_sink_flush_now(node: &mut AggStateData<'_>) -> Option<(SinkRun, bool)> {
+    let ph = node.perhash.as_mut()?;
+    let hash_mem_limit = ph.hash_mem_limit;
+    let ch = ph.compact.as_mut()?;
+    if ch.table.len() == 0 {
+        return None;
+    }
+    if compact_canon_shape(ch).is_some() {
+        let run = sink_flush_table_canon(ch);
+        let reset_intern = ch
+            .intern
+            .as_ref()
+            .is_some_and(|t| t.mem_used() > hash_mem_limit / 4);
+        if reset_intern {
+            if let Some(t) = ch.intern.as_mut() {
+                t.reset();
+            }
+        }
+        Some((run, reset_intern))
+    } else {
+        Some((sink_flush_table(&mut ch.table), false))
+    }
+}
+
 /// Half-limit budget PRESSURE (the compact backstop's own condition plus
 /// headroom): the sink drain refuses on `true` (RG abort → serial rerun)
 /// BEFORE the backstop's sink-mode belt would raise its hard error — the
@@ -1871,7 +1911,18 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     let Some(ch) = ph.compact.as_ref() else { return false };
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used();
-    let mem = ch.table.mem_used()
+    // Spill-armed sink builds count the table's LIVE rows, not its retained
+    // capacity: `LaneAggTable::reset` (the flush) keeps capacity, so
+    // capacity-based accounting re-trips permanently after the first
+    // pressure flush and the spill law could never drain the pressure. The
+    // retained capacity is the bounded flush-cycle working set (≤ the cap's
+    // sizing, inside the R3 full-budget envelope), not growth.
+    let table_mem = if ph.sink_cap.is_some() && ph.sink_spill_ok {
+        sink_table_live_bytes(&ch.table)
+    } else {
+        ch.table.mem_used()
+    };
+    let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):

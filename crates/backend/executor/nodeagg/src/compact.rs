@@ -876,7 +876,18 @@ pub fn agg_hash_compact_backstop<'mcx>(
     {
         let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
         let Some(ch) = ph.compact.as_ref() else { return Ok(false) };
-        let mem = ch.table.mem_used()
+        // Spill-armed sink builds count the table's LIVE rows, not retained
+        // capacity — the flush keeps capacity, and the pressure→spill law
+        // (runtime_agg drain) drains live pressure BEFORE this belt would
+        // trip (32MB headroom); capacity-based accounting here would raise
+        // the breach on the batch right after a pressure flush. Mirrors
+        // agg_sink_budget_pressure's accounting exactly.
+        let table_mem = if ph.sink_cap.is_some() && ph.sink_spill_ok {
+            crate::sink::sink_table_live_bytes(&ch.table)
+        } else {
+            ch.table.mem_used()
+        };
+        let mem = table_mem
             + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
             + aggctx.context().subtree_used();
         if (ch.table.len() as u64) < ph.hash_ngroups_limit / 2 && mem < ph.hash_mem_limit / 2 {
