@@ -593,6 +593,20 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                 x.with_mut(|d| -> PgResult<()> {
                     let estate = &mut d.estate;
                     let ss = sort_worker_scan(d.planstate.as_mut())?;
+                    // Key-only staged accept (inc-4 lever 1): the worker
+                    // emits nothing but (key, rowref) — narrow the scan's
+                    // needed set to qual columns ∪ the key so staging never
+                    // decompresses the payload width (q24 take-1 profile:
+                    // 77.5% decompress_frame_into of columns nothing read;
+                    // the LEADER's winner gather runs under its own FULL
+                    // needed set). Before staging arms, so the deform plans
+                    // bake the narrowed set. Unneeded per-row-emit cells
+                    // read NULL and never escape (the sink reads the key
+                    // cell only).
+                    ::nodeseqscan::seq_scan_cb_narrow_needed(
+                        ss,
+                        &[payload.key_attno_scan],
+                    );
                     super::arm_scan_staging(
                         ss,
                         estate,
