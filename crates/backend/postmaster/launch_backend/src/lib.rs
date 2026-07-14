@@ -411,6 +411,13 @@ pub fn postmaster_child_launch(
             // the local latch slab slot returns on every thread exit —
             // announce fallthrough and panic unwind alike.
             let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+            // C's process death closes the "static, never freed" wait event
+            // sets (LatchWaitSet, FeBeWaitSet); a session thread's death
+            // closes nothing (chaos F2: 2 leaked epoll fds per connection).
+            // Declared after the latch guard so it drops first — after
+            // run_child_task's deferred proc_exit drain, before the latch
+            // slot the sets reference is recycled.
+            let _wait_event_sets_release = waiteventset::WaitEventSetReleaseGuard::new();
 
             inherited.apply();
 
@@ -620,6 +627,10 @@ pub mod wpool {
                 // Thread-scoped, not per-task: a parked standby keeps its
                 // local latch slot warm; only thread exit returns it.
                 let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+                // As on the spawn path: a rotating standby's exit must close
+                // its wait event sets (parked standbys keep them warm).
+                let _wait_event_sets_release =
+                    waiteventset::WaitEventSetReleaseGuard::new();
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 guc::store::initialize_guc_options_for_child(&guc_snapshot)
