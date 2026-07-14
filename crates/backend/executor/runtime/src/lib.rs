@@ -263,6 +263,20 @@ impl Runtime {
         self.sched.stride_enabled()
     }
 
+    /// M5+1 pipeline-DAG dispatch toggle (tests / A-B arms). Production
+    /// default is the `PGRUST_RUNTIME_PIPELINE_DAG` switch, read once at
+    /// construction — DEFAULT OFF at this increment. ON ⇒ every
+    /// dependency-satisfied task set of an RG is published concurrently,
+    /// each in its own slot (independent-subtree overlap, m5-planner §3.6);
+    /// OFF ⇒ the sequential one-slot task-set walk, byte-identical.
+    pub fn set_dag(&self, on: bool) {
+        self.sched.set_dag(on);
+    }
+
+    pub fn dag_enabled(&self) -> bool {
+        self.sched.dag_enabled()
+    }
+
     /// Submit a MAINTENANCE resource group (M4 background-job cycles,
     /// docs/design/m4-bgjobs.md §3.4/§3.5): pool-executed like `submit`, but
     /// preferred by the pick over foreground FIFO order and admitted ahead
