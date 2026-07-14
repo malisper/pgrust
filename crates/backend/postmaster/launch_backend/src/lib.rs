@@ -1020,7 +1020,11 @@ pub mod rtpool {
     /// The exit announce comes from the job's teardown; the reaper's join
     /// is a CHILD_THREADS lookup miss. Postmaster thread only.
     pub fn try_launch_job(child_type: types_core::BackendType, child_slot: i32) -> Option<pid_t> {
-        if child_type != types_core::BackendType::BgWriter || !bgjobs::bgjobs_enabled() {
+        let migrated = matches!(
+            child_type,
+            types_core::BackendType::BgWriter | types_core::BackendType::WalWriter
+        );
+        if !migrated || !bgjobs::bgjobs_enabled() {
             return None;
         }
         // The pool + dispatcher start lazily here when the daemon launch
@@ -1029,8 +1033,19 @@ pub mod rtpool {
         let rt = start_if_enabled()?;
         let dispatcher = bgjobs::start_if_enabled(rt, spawn_dispatcher)?;
         let pid: pid_t = super::reserve_child_pid();
-        dispatcher
-            .register(std::sync::Arc::new(bgwriter::job::BgWriterJob::new(pid, child_slot)));
+        match child_type {
+            types_core::BackendType::BgWriter => {
+                dispatcher.register(std::sync::Arc::new(bgwriter::job::new_bgwriter_job(
+                    pid, child_slot,
+                )));
+            }
+            types_core::BackendType::WalWriter => {
+                dispatcher.register(std::sync::Arc::new(walwriter::job::new_walwriter_job(
+                    pid, child_slot,
+                )));
+            }
+            _ => unreachable!("migrated set checked above"),
+        }
         Some(pid)
     }
 }
