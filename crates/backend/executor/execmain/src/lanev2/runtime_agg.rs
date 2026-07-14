@@ -1112,8 +1112,44 @@ fn sink_drain_range<'mcx>(
         // aggcontext vs the compact backstop's own thresholds) REFUSE — RG
         // abort -> serial rerun — before the backstop's sink-mode belt
         // would raise its hard error (the q34@100M wide-vocabulary class).
+        //
+        // M3.5 x mt16-cliffs (the q33@100M hmm=2 cliff — measured: the
+        // engaged arm hit THIS demote with ZERO spill epochs and fell to a
+        // 150s serial spill): with a live spill arm the pressure is
+        // table-driven (the mem leg counts the cap-bounded table, which the
+        // mem-derived cap sizes to ~half the limit ALONE; cumulative byref
+        // aggcontext eats the margin) — a budget the spill arm can absorb.
+        // Law: force-flush the bounded table into a run (identical
+        // intern-reset handling to the cap flush above) and spill the
+        // accumulated runs as one epoch; only RESIDUAL pressure after the
+        // flush+spill (the aggcontext floor the runs still reference)
+        // refuses. Spill-disarmed (canonical/kill-switch) keeps the plain
+        // refusal exactly.
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
-            return Err(AcceptFail::Budget);
+            match &sink.spill_set {
+                Some(set) => {
+                    if let Some((run, intern_reset)) =
+                        ::nodeagg::sink::agg_sink_flush_now(agg)
+                    {
+                        local.run_bytes += run.bytes();
+                        local.runs.push(run);
+                        if intern_reset {
+                            mks.epoch = None;
+                            mks.code_ids.clear();
+                            if let Some(xk) = xk.as_deref_mut() {
+                                xk.invalidate_mk_intern_cache();
+                            }
+                        }
+                    }
+                    if !local.runs.is_empty() {
+                        spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
+                    }
+                    if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                        return Err(AcceptFail::Budget);
+                    }
+                }
+                None => return Err(AcceptFail::Budget),
+            }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
@@ -1489,7 +1525,9 @@ fn arm_sink_build<'mcx>(
             return Err(shape_err("worker expr-key decide starts refused"));
         }
         let kind = xk.sink_key_kind();
-        ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
+        // Spill-armed admission flag mirrors the leader's exactly
+        // (spill_set exists only on word-keyed spill-armed engagements).
+        ::nodeagg::sink::agg_sink_set_cap_spill(agg, sink.cap, sink.spill_set.is_some());
         match (&sink.red, &sink.mk, kind) {
             (None, None, Some(super::exprkey::SinkXkKind::Single)) => {
                 if ::nodeagg::agg_hash_compact_try_arm(agg) != ::nodeagg::CompactArm::Armed {
@@ -1554,7 +1592,9 @@ fn arm_sink_build<'mcx>(
         // were built off that exact shape). Single-text shapes (one Intern
         // component) re-run the C2 admission; text-bearing shapes NEED their
         // dict/intern lane — only pure-int shapes refuse dict staging.
-        ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
+        // Spill-armed admission flag mirrors the leader's exactly
+        // (spill_set exists only on word-keyed spill-armed engagements).
+        ::nodeagg::sink::agg_sink_set_cap_spill(agg, sink.cap, sink.spill_set.is_some());
         let lshape = sink
             .mk
             .as_ref()
@@ -1592,7 +1632,9 @@ fn arm_sink_build<'mcx>(
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
         return Err(shape_err("dict-group staging on a sink worker"));
     }
-    ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
+    // Spill-armed admission flag mirrors the leader's exactly
+    // (spill_set exists only on word-keyed spill-armed engagements).
+    ::nodeagg::sink::agg_sink_set_cap_spill(agg, sink.cap, sink.spill_set.is_some());
     if ::nodeagg::agg_hash_compact_try_arm(agg) != ::nodeagg::CompactArm::Armed {
         return Err(shape_err("worker compact arm refused under the sink cap"));
     }
@@ -1907,9 +1949,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 // (int/numeric components + at most one text through the
                 // canonical-bytes lane). Cap-aware admission probe — no
                 // table armed on the leader (see the Mk comment below).
-                ::nodeagg::sink::agg_sink_set_cap(
+                // Spill-armed admission: mk_admit_n vacates its estimate
+                // refusal only for word-keyed (Intern-free) shapes.
+                ::nodeagg::sink::agg_sink_set_cap_spill(
                     agg,
                     sink_cap_for(state_bytes, budget, ngroups_limit),
+                    agg_spill_enabled(),
                 );
                 let admitted =
                     ::nodeagg::agg_hash_compact_mk_admit(agg, false, dict_input_att);
@@ -1955,9 +2000,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             // cleared right after: the leader's own executor may still run
             // the SERIAL build (refusal / budget fallback / rescan), which
             // must never see sink mode.
-            ::nodeagg::sink::agg_sink_set_cap(
+            ::nodeagg::sink::agg_sink_set_cap_spill(
                 agg,
                 sink_cap_for(state_bytes, budget, ngroups_limit),
+                agg_spill_enabled(),
             );
             // Single-text (C2) first — its shape class (one TEXT key) is
             // disjoint from the multi-key decide's (>= 2 keys).
@@ -2013,9 +2059,15 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
+    // Spill-armed word-keyed engagements vacate the estimate half of the
+    // gate on BOTH sides (the workers arm under `sink_spill_ok`) — the
+    // predicate below must match the worker flag exactly (F1 invariant).
+    let spill_admission =
+        agg_spill_enabled() && !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
     if !::nodeagg::agg_hash_compact_sink_admissible(
         agg,
         sink_cap_for(state_bytes, budget, ngroups_limit),
+        spill_admission,
     ) {
         refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
@@ -2110,8 +2162,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         match ::spillset::SpillSet::create() {
             Ok(s) => Some(s),
             Err(_) => {
-                lane_trace("runtime-agg: spill set creation failed — spill disarmed");
-                None
+                // FAIL-CLOSED REFUSAL (not disarm): admission above may
+                // have vacated the estimate gates under `spill_admission`;
+                // launching spill-less workers would re-refuse under the
+                // sink cap pre-drive and strand the pinned RG (the F1
+                // class). Refuse the whole engagement — serial arm runs.
+                lane_trace("runtime-agg: spill set creation failed — refused");
+                refuse(estate, ea, node_id, "spill set creation failed");
+                return Ok(false);
             }
         }
     } else {
