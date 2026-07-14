@@ -874,6 +874,23 @@ pub fn connect_extended(
         }
     }
 
+    // Set always-secure search path for connections that run SQL queries, so
+    // malicious users can't redirect user code, e.g. operators
+    // (libpqrcv_connect after commit b3f6b14cf48; ALWAYS_SECURE_SEARCH_PATH_SQL).
+    // recovery/040's poisoned-'=' scenario catches its absence.
+    if !replication || logical {
+        match conn.exec("SELECT pg_catalog.set_config('search_path', '', false);") {
+            Ok(res) if res.status == ExecStatus::TuplesOk => {}
+            Ok(res) => {
+                return Ok(Err(format!(
+                    "could not clear \"search_path\": {}",
+                    res.err
+                )));
+            }
+            Err(e) => return Ok(Err(format!("could not clear \"search_path\": {e}"))),
+        }
+    }
+
     Ok(Ok(conn))
 }
 
