@@ -7675,6 +7675,7 @@ dependencies = [
  "types_guc",
  "types_startup",
  "types_storage",
+ "waiteventset",
  "waiteventset_seams",
  "walsummarizer",
  "walwriter",

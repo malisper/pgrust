@@ -36,7 +36,10 @@ fn errno() -> i32 {
 }
 
 thread_local! {
-    // WaitEventSet *FeBeWaitSet; never freed, as C (lives for the backend).
+    // WaitEventSet *FeBeWaitSet; never explicitly freed, as C (lives for the
+    // backend). C reclaims it at process death; the thread model reclaims at
+    // session-thread exit via WaitEventSetReleaseGuard (chaos F2: without it
+    // every connection leaked this set's epoll fd).
     static FE_BE_WAIT_SET: Cell<Option<WaitEventSetHandle>> = const { Cell::new(None) };
     // static List *sock_paths (postmaster-thread state).
     static SOCK_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

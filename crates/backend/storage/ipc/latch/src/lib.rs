@@ -80,7 +80,10 @@ pub fn latch_ref(latch: LatchHandle) -> &'static Latch {
 }
 
 thread_local! {
-    // static WaitEventSet *LatchWaitSet — never freed, like the C static.
+    // static WaitEventSet *LatchWaitSet — never explicitly freed, like the C
+    // static; C reclaims it at process death, and the thread model's analog
+    // is WaitEventSetReleaseGuard at the top of the child thread (chaos F2:
+    // without it every session thread's exit leaked this set's epoll fd).
     static LATCH_WAIT_SET: Cell<Option<WaitEventSetHandle>> = const { Cell::new(None) };
 }
 
