@@ -39,6 +39,7 @@
 class	arm	spill_eligible	topn_composable	adopt_eligible	status	route_to	probe_key	notes
 cbstore-scan-fold	scan	na	na	na	covered	runtime	CbPlainAggFold	runtime16=armed16 (100%); DOP-1 1.00x (dop1-tax2)
 cbstore-census-qual	scan	na	na	na	covered	runtime	CbPlainAggFold	bits-only staging; bare count(*) defers to Meta/footer
+cbstore-meta-footer-agg	scan	na	na	na	covered	runtime	CbMetaFooterAgg	M5-5 meta-over-gather (band-2a q30 handoff): plain agg, no quals, footer-answerable incl. affine int sum/avg (sum(v+k) batteries); planner-parallel FinalizeAgg->Gather escaped the Meta arm entirely (q30@100M 3.9-7.2s vs ~5ms footer, ~700x); serial-lane Meta arm answers, runtime scan fold is the engagement fallback; cb-arm-guard.py is the regression pin
 heap-cmp-fold	heap	na	na	na	covered	runtime	HeapCmpFoldPrefix	12.58x DOP15; heap CMP DOP-1 == serial (717ms both); EA refuses (cbstore-only)
 heap-count-star	heap	na	na	na	covered	runtime	HeapPlainCountStar	bare count(*) StorelessCount (rowdrive car 1, train-13); M5-3 probe keys it apart from the CMP-prefix folds (its own bootstrap row)
 heap-like-fold	heap	na	na	na	refused	legacy	-	M1-b next car (rowdrive PerRowFold substrate)
