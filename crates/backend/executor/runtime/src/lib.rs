@@ -277,6 +277,35 @@ impl Runtime {
         self.sched.dag_enabled()
     }
 
+    /// M5-5 decaying-priorities toggle (tests / A-B arms). Production
+    /// default is the `PGRUST_RUNTIME_DECAY` kill switch, read once at
+    /// construction — default ON. OFF ⇒ every RG stays at p0: the M5-4
+    /// equal-shares scheduler exactly.
+    pub fn set_decay(&self, on: bool) {
+        self.sched.set_decay(on);
+    }
+
+    pub fn decay_enabled(&self) -> bool {
+        self.sched.decay_enabled()
+    }
+
+    /// M5-5 test hook: tighten the consumed-CPU decay quantum so
+    /// deterministic virtual-clock tests cross decay boundaries. Production
+    /// keeps the ratified constant (50ms CPU).
+    pub fn set_decay_quantum_ns(&self, ns: u64) {
+        self.sched.set_decay_quantum_ns(ns);
+    }
+
+    /// M5-5 test hook: probe alternative starvation floors (adversarial
+    /// skew tests). Production keeps the ratified default (p0/16 = 625).
+    pub fn set_p_min(&self, p: u32) {
+        self.sched.set_p_min(p);
+    }
+
+    pub fn p_min(&self) -> u32 {
+        self.sched.p_min_value()
+    }
+
     /// Submit a MAINTENANCE resource group (M4 background-job cycles,
     /// docs/design/m4-bgjobs.md §3.4/§3.5): pool-executed like `submit`, but
     /// preferred by the pick over foreground FIFO order and admitted ahead

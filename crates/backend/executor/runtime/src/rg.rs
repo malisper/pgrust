@@ -248,8 +248,14 @@ pub struct ResourceGroup {
     pub(crate) completion: Completion,
     pub(crate) stats: RgStats,
     /// Priority feeding the slot stride (M5-4: constant p_0 = equal shares;
-    /// M5-5 activates the decay update `p_{i+1} = max(p_min, λ·p_i)` here).
+    /// M5-5 LIVE: decays with consumed CPU, `p(q) = max(p_min, p0·λ^q)`,
+    /// applied at the task-completion charge site in sched.rs; monotone
+    /// non-increasing over the RG's life).
     pub(crate) priority: AtomicU32,
+    /// M5-5 decay bookkeeping: last consumed-CPU quantum count the decay
+    /// was applied at (CAS-guarded — each boundary applies exactly once
+    /// across racing workers).
+    pub(crate) decay_quanta: AtomicU64,
     /// CPU nanoseconds consumed by this RG's tasks — the quantity stride
     /// passes advance by (LIVE as of M5-4), and the per-RG CPU-share
     /// readback of the fairness instruments (§3.5).
@@ -330,6 +336,7 @@ impl ResourceGroup {
             completion: Completion::new(),
             stats: RgStats::default(),
             priority: AtomicU32::new(INITIAL_PRIORITY),
+            decay_quanta: AtomicU64::new(0),
             cpu_consumed_ns: AtomicU64::new(0),
             session_token,
             pass_account: AtomicU64::new(0),
@@ -540,5 +547,13 @@ impl RgHandle {
             self.rg.first_service_ns.load(Ordering::Relaxed),
             self.rg.done_ns.load(Ordering::Relaxed),
         )
+    }
+
+    /// Current (possibly decayed) priority — M5-5 instrument readback:
+    /// p0 = fresh; p_min = fully-decayed floor. Tests assert the decay
+    /// trajectory and the floor clamp through this.
+    pub fn priority(&self) -> u32 {
+        use crate::sync::atomic::Ordering;
+        self.rg.priority.load(Ordering::Relaxed)
     }
 }

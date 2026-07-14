@@ -1342,6 +1342,301 @@ fn stride_equal_share_k_sweep() {
     }
 }
 
+/// M5-5 decay trajectory + floor clamp (inter-query §5.4): a single RG's
+/// priority follows p(q) = max(p_min, p0·λ^q) exactly as its consumed CPU
+/// crosses decay-quantum boundaries, and clamps at the p_min floor (reached
+/// at q=4 with the ratified λ=1/2, p_min=p0/16).
+#[test]
+fn decay_priority_trajectory_and_floor() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(true);
+    let qn = 4_000_000u64; // 4 ms CPU per decay quantum (test-tightened)
+    rt.set_decay_quantum_ns(qn);
+    assert_eq!(rt.p_min(), 625, "ratified default floor = p0/16");
+    let total = 400_000u64; // long-lived: never finishes inside the loop
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(h.priority(), 10_000, "fresh RG holds p0");
+    let mut local = rt.worker_local(0);
+    let mut reached_floor_at_q = None;
+    while h.cpu_consumed_ns() < 10 * qn {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        let q = (h.cpu_consumed_ns() / qn).min(63) as i32;
+        let expect = ((10_000f64 * 0.5f64.powi(q)) as u32).max(625);
+        assert_eq!(
+            h.priority(),
+            expect,
+            "after q={q} quanta ({}ns cpu) priority must be max(p_min, p0·λ^q)",
+            h.cpu_consumed_ns()
+        );
+        if expect == 625 && reached_floor_at_q.is_none() {
+            reached_floor_at_q = Some(q);
+        }
+    }
+    assert_eq!(reached_floor_at_q, Some(4), "λ=1/2 floors p0/16 at exactly 4 quanta");
+    assert_eq!(h.priority(), 625, "floor holds: later quanta never lower it further");
+    h.abort();
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+}
+
+/// M5-5 kill switch: decay OFF pins every RG at p0 regardless of consumed
+/// CPU — the M5-4 equal-shares scheduler exactly.
+#[test]
+fn decay_off_keeps_p0() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(false);
+    rt.set_decay_quantum_ns(1_000_000);
+    let total = 100_000u64;
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+        assert_eq!(h.priority(), 10_000, "decay off: priority never moves");
+    }
+    assert!(h.cpu_consumed_ns() >= 50_000_000, "consumed far past many quanta");
+}
+
+/// M5-5 single-RG bit-identity (re-proof at this increment): with one RG
+/// the pick is forced before any pass/stride read, so decay ON vs OFF must
+/// produce the identical claim sequence, morsel for morsel.
+#[test]
+fn decay_single_rg_claim_sequence_identical() {
+    let run = |decay: bool| -> Vec<Range<u64>> {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        rt.set_decay_quantum_ns(1_000_000); // aggressive: many boundaries
+        let total = 16_000u64;
+        let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        let claims = work.claims.lock().unwrap();
+        claims.clone()
+    };
+    assert_eq!(
+        run(true),
+        run(false),
+        "single-RG claim sequence must be identical under decay"
+    );
+}
+
+/// M5-5 K-sweep invariance: with decay ACTIVE (boundaries crossed many
+/// times), K equal RGs consume equally, decay identically, and keep equal
+/// shares — the M5-4 proportional-share gate holds through live decay.
+#[test]
+fn decay_equal_consumption_keeps_equal_shares() {
+    for k in [2usize, 4, 8] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_decay_quantum_ns(2_000_000); // one boundary per ~task
+        let total = 400_000u64;
+        let mut handles = Vec::new();
+        let mut waiters = Vec::new();
+        for q in 0..k {
+            let w = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) = rt.submit(QuerySpec {
+                query_id: q as u64 + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            handles.push(h);
+            waiters.push(waiter);
+        }
+        let mut local = rt.worker_local(0);
+        for _ in 0..(20 * k) {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        for h in &handles {
+            assert!(h.priority() < 10_000, "decay must have engaged (boundaries crossed)");
+        }
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        let mut max_err = 0f64;
+        for c in &cpus {
+            max_err = max_err.max((*c as f64 - mean).abs() / mean);
+        }
+        assert!(
+            max_err <= 0.06,
+            "K={k}: share error {max_err:.4} out of band under live decay; cpus={cpus:?}"
+        );
+        eprintln!("decay K-sweep K={k}: max share error {max_err:.4}");
+        for h in &handles {
+            h.abort();
+        }
+        for w in &waiters {
+            while w.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+    }
+}
+
+/// M5-5 starvation bound + share skew (the §3.4 floor law, unit form): a
+/// batch RG decayed to the p_min floor against a fresh p0 arrival must
+/// (a) keep receiving service with a bounded gap between its tasks —
+/// ≈ p0/p_min boundaries, the starvation bound the lock-wait edge relies
+/// on — and (b) hold a CPU share ≈ p_min/(p_min+p0) = 1/17.
+#[test]
+fn decay_starvation_floor_share_skew() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(true);
+    rt.set_decay_quantum_ns(2_000_000);
+    let total = 40_000_000u64; // 40 s virtual CPU: nobody finishes
+    // Phase 1: batch B runs alone and decays to the floor.
+    let b = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(total))));
+    let mut local = rt.worker_local(0);
+    while hb.priority() > rt.p_min() {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    }
+    assert_eq!(hb.priority(), 625);
+    // Freeze further decay (quantum → ∞) so the fresh arrival keeps p0:
+    // persistent adversarial skew, the §3.4 worst case.
+    rt.set_decay_quantum_ns(u64::MAX);
+    let a = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(ha.priority(), 10_000);
+    // Phase 2: 340 task boundaries ≈ 20 rotations of the 17-slot cycle.
+    let b_start = hb.cpu_consumed_ns();
+    let a_start = ha.cpu_consumed_ns();
+    let mut last_b = b_start;
+    let mut gap = 0u32;
+    let mut max_gap = 0u32;
+    const BOUNDARIES: u32 = 340;
+    for _ in 0..BOUNDARIES {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        let bc = hb.cpu_consumed_ns();
+        if bc > last_b {
+            last_b = bc;
+            gap = 0;
+        } else {
+            gap += 1;
+            max_gap = max_gap.max(gap);
+        }
+    }
+    // (a) Starvation bound: the floor guarantees B a task at least every
+    // ~p0/p_min = 16 boundaries; allow ramp slack.
+    assert!(
+        max_gap <= 24,
+        "starvation bound violated: floor RG waited {max_gap} boundaries (p0/p_min=16)"
+    );
+    // (b) Proportional skew: B's share ≈ p_min/(p_min+p0) = 1/17 ≈ 0.0588.
+    let b_cpu = (hb.cpu_consumed_ns() - b_start) as f64;
+    let a_cpu = (ha.cpu_consumed_ns() - a_start) as f64;
+    let b_share = b_cpu / (b_cpu + a_cpu);
+    assert!(
+        (0.035..=0.085).contains(&b_share),
+        "floor share {b_share:.4} outside the ≈1/17 band (b={b_cpu} a={a_cpu})"
+    );
+    eprintln!("decay skew: floor share {b_share:.4}, max service gap {max_gap} boundaries");
+    ha.abort();
+    hb.abort();
+    while wa.try_wait().is_none() || wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+}
+
+/// M5-5 latency payoff (the §3.4 MLFQ effect, unit form): a fresh short
+/// query submitted against a decayed 6-query batch background completes in
+/// far fewer task boundaries with decay ON (batch at the floor: the short
+/// query holds ~73% of the pool) than with decay OFF (equal shares: 1/7).
+/// Runs at the RATIFIED constants (50ms quantum, λ=1/2, p_min=625): the
+/// 20ms short query is sub-quantum by definition and never decays.
+#[test]
+fn decay_short_query_latency_under_batch_background() {
+    let run = |decay: bool| -> u32 {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        let batch_total = 40_000_000u64;
+        let mut batch = Vec::new();
+        let mut batch_waiters = Vec::new();
+        for q in 0..6u64 {
+            let w = SyntheticWork::new(batch_total, Some(Arc::clone(&clock)), 1_000);
+            let (h, wt) = rt.submit(QuerySpec {
+                query_id: q + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(batch_total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            batch.push(h);
+            batch_waiters.push(wt);
+        }
+        let mut local = rt.worker_local(0);
+        // Warm the background past the decay horizon: each batch RG needs
+        // 4 quanta = 200ms CPU to floor; 6 RGs × ~100 2ms-tasks ⇒ ~600
+        // boundaries (virtual clock: instant). Decay ON: all six settle to
+        // the floor; OFF: they stay at p0.
+        for _ in 0..700 {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        if decay {
+            for h in &batch {
+                assert_eq!(h.priority(), 625, "background must sit at the floor");
+            }
+        }
+        // Submit the short interactive query (≈ 10 tasks of work) and count
+        // boundaries until it completes.
+        let short = SyntheticWork::new(20_000, Some(Arc::clone(&clock)), 1_000);
+        let (_hs, ws) = rt.submit(QuerySpec {
+            query_id: 99,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(20_000)),
+                work: Arc::clone(&short) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        let mut boundaries = 0u32;
+        while ws.try_wait().is_none() {
+            rt.worker_step(&mut local);
+            boundaries += 1;
+            assert!(boundaries < 10_000, "short query starved");
+        }
+        for h in &batch {
+            h.abort();
+        }
+        for wt in &batch_waiters {
+            while wt.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+        boundaries
+    };
+    let on = run(true);
+    let off = run(false);
+    assert!(
+        on * 2 < off,
+        "MLFQ effect missing: short query took {on} boundaries with decay vs {off} without"
+    );
+    eprintln!("decay latency: short query {on} boundaries (decay on) vs {off} (off)");
+}
+
 /// Session-affine stickiness as pick-tiebreaker (§5.2; ceremony-v2
 /// mechanism): at EQUAL pass, a worker sticky-bound to RG B's leader session
 /// picks B's slot over the lower-index equal-pass slot of RG A. Equal-pass

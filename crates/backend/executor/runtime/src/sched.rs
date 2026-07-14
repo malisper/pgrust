@@ -91,7 +91,7 @@ use crate::morsel::MorselRange;
 use crate::rg::{QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
 use crate::stats::{RuntimeStats, RuntimeStatsSnapshot};
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::{lock, Mutex, ParkLot, Semaphore};
 use crate::taskset::{PinBoard, Slot, TaskSetRt, WorkerMailbox};
 
@@ -129,6 +129,67 @@ fn dag_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_RUNTIME_PIPELINE_DAG").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// M5-5 decaying priorities (inter-query §5.4, MLFQ-via-stride): an RG's
+/// priority decays with its CONSUMED CPU — `p(q) = max(p_min, p0·λ^q)`
+/// where `q = cpu_consumed_ns / decay_quantum_ns`. New/short queries keep
+/// p0 (interactive latency); long queries settle to the p_min fair-share
+/// floor. Constants are ratified in-code (inter-query ruling 2: decay is
+/// automatic, no user input); the env overrides below are TEST/CALIBRATION
+/// knobs on the PGRUST_RUNTIME_STRIDE precedent, not product surface.
+///
+/// Ratified values: λ = 0.5 per 50ms-CPU quantum (one halving per 50ms of
+/// consumed CPU — a sub-50ms interactive query never decays at all);
+/// p_min = p0/16 = 625, i.e. a fully-decayed batch query holds ≥ 1/16 the
+/// stride weight of a fresh arrival (reached after 4 quanta = 200ms CPU).
+/// p_min is LOAD-BEARING for C-legality (inter-query §3.4): it bounds
+/// lock-holder starvation to C's own nondeterministic window; the
+/// lock-wait-fairness test validates exactly this floor.
+const DECAY_LAMBDA_DEFAULT: f64 = 0.5;
+const DECAY_QUANTUM_NS_DEFAULT: u64 = 50_000_000;
+pub(crate) const P_MIN_DEFAULT: u32 = crate::rg::INITIAL_PRIORITY / 16;
+
+/// M5-5 kill switch: `PGRUST_RUNTIME_DECAY=0` pins every RG at p0 (the
+/// M5-4 equal-shares scheduler exactly). Default ON. Read once; tests
+/// toggle per-instance via [`crate::Runtime::set_decay`].
+fn decay_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DECAY").map_or(true, |v| v.trim() != "0"))
+}
+
+fn decay_lambda_default() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DECAY_LAMBDA")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|l| *l > 0.0 && *l < 1.0)
+            .unwrap_or(DECAY_LAMBDA_DEFAULT)
+    })
+}
+
+fn decay_quantum_default() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DECAY_QUANTUM_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|q| *q > 0)
+            .map(|us| us.saturating_mul(1000))
+            .unwrap_or(DECAY_QUANTUM_NS_DEFAULT)
+    })
+}
+
+fn p_min_default() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_PMIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0 && *p <= crate::rg::INITIAL_PRIORITY)
+            .unwrap_or(P_MIN_DEFAULT)
     })
 }
 
@@ -377,6 +438,20 @@ pub(crate) struct Scheduler {
     /// increment; tests toggle per instance). OFF ⇒ the sequential
     /// one-slot-per-RG task-set walk, byte-identical.
     dag: AtomicBool,
+    /// M5-5 decaying-priorities switch (env default ON; tests toggle per
+    /// instance). OFF ⇒ every RG stays at p0 — the M5-4 equal-shares
+    /// scheduler exactly.
+    decay: AtomicBool,
+    /// M5-5 decay rate λ ∈ (0,1) per consumed quantum (immutable after
+    /// construction; ratified constant, env-overridable for calibration).
+    decay_lambda: f64,
+    /// M5-5 decay quantum in consumed-CPU ns (atomic: virtual-clock tests
+    /// tighten it per instance to reach decay boundaries deterministically).
+    decay_quantum_ns: AtomicU64,
+    /// M5-5 starvation floor p_min ≥ 1 (atomic: the adversarial-skew tests
+    /// probe alternative floors per instance; production is the ratified
+    /// default).
+    p_min: AtomicU32,
     /// Global pass watermark (monotone max of charged passes): a NEWLY
     /// admitted RG's slot pass starts here — standard stride join, no
     /// credit for queue wait, no monopoly for late arrivals.
@@ -421,6 +496,10 @@ impl Scheduler {
             stop: AtomicBool::new(false),
             stride: AtomicBool::new(stride_default()),
             dag: AtomicBool::new(dag_default()),
+            decay: AtomicBool::new(decay_default()),
+            decay_lambda: decay_lambda_default(),
+            decay_quantum_ns: AtomicU64::new(decay_quantum_default()),
+            p_min: AtomicU32::new(p_min_default()),
             global_pass: AtomicU64::new(0),
             clock,
             params,
@@ -493,6 +572,33 @@ impl Scheduler {
 
     pub(crate) fn dag_enabled(&self) -> bool {
         self.dag.load(Ordering::Relaxed)
+    }
+
+    /// M5-5: per-instance decay toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_DECAY default once at construction — default ON).
+    pub(crate) fn set_decay(&self, on: bool) {
+        self.decay.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn decay_enabled(&self) -> bool {
+        self.decay.load(Ordering::Relaxed)
+    }
+
+    /// M5-5 test hook: tighten the decay quantum so deterministic
+    /// virtual-clock tests cross decay boundaries. Production keeps the
+    /// ratified constant.
+    pub(crate) fn set_decay_quantum_ns(&self, ns: u64) {
+        self.decay_quantum_ns.store(ns.max(1), Ordering::SeqCst);
+    }
+
+    /// M5-5 test hook: probe alternative starvation floors (adversarial
+    /// skew tests). Production keeps the ratified default.
+    pub(crate) fn set_p_min(&self, p: u32) {
+        self.p_min.store(p.clamp(1, crate::rg::INITIAL_PRIORITY), Ordering::SeqCst);
+    }
+
+    pub(crate) fn p_min_value(&self) -> u32 {
+        self.p_min.load(Ordering::Relaxed)
     }
 
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
@@ -1067,7 +1173,11 @@ impl Scheduler {
                     // virtual-clock charges so multi-RG progress still
                     // rotates (task-count round-robin) in deterministic
                     // tests and loom models.
-                    ts.rg.cpu_consumed_ns.fetch_add(t_cpu_ns, Ordering::Relaxed);
+                    let cpu_total = ts
+                        .rg
+                        .cpu_consumed_ns
+                        .fetch_add(t_cpu_ns, Ordering::Relaxed)
+                        .saturating_add(t_cpu_ns);
                     if self.stride.load(Ordering::Relaxed) {
                         let stride = self.slots[ts.slot].stride.load(Ordering::Relaxed);
                         let adv = (t_cpu_ns.saturating_mul(stride) >> PASS_SHIFT).max(1);
@@ -1098,6 +1208,52 @@ impl Scheduler {
                             ) {
                                 Ok(_) => break,
                                 Err(c) => cur = c,
+                            }
+                        }
+                        // M5-5 decaying priorities (inter-query §5.4): when
+                        // the RG's consumed CPU crosses a decay-quantum
+                        // boundary, recompute p(q) = max(p_min, p0·λ^q) and
+                        // refresh THIS slot's stride in place so the new
+                        // share takes effect at the next advance (sibling
+                        // DAG slots refresh on republish — advisory, same
+                        // argument as the pass words). The completed task
+                        // was charged at the stride it RAN under (the load
+                        // above precedes this refresh). The decay_quanta
+                        // CAS makes each boundary apply exactly once across
+                        // racing workers; priority is monotone
+                        // non-increasing (min with current) so late racers
+                        // never raise it. Skipped entirely once the RG sits
+                        // at the floor.
+                        if self.decay.load(Ordering::Relaxed) {
+                            let qn = self.decay_quantum_ns.load(Ordering::Relaxed).max(1);
+                            let q = cpu_total / qn;
+                            let prev_q = ts.rg.decay_quanta.load(Ordering::Relaxed);
+                            let p_min = self.p_min.load(Ordering::Relaxed);
+                            if q > prev_q
+                                && ts.rg.priority.load(Ordering::Relaxed) > p_min
+                                && ts
+                                    .rg
+                                    .decay_quanta
+                                    .compare_exchange(
+                                        prev_q,
+                                        q,
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                let p0 = crate::rg::INITIAL_PRIORITY as f64;
+                                let decayed =
+                                    (p0 * self.decay_lambda.powi(q.min(64) as i32)) as u32;
+                                let cur_p = ts.rg.priority.load(Ordering::Relaxed);
+                                let p = decayed.max(p_min).min(cur_p);
+                                if p < cur_p {
+                                    ts.rg.priority.store(p, Ordering::Relaxed);
+                                    self.slots[ts.slot]
+                                        .stride
+                                        .store(stride_for(p), Ordering::Relaxed);
+                                    RuntimeStats::tick(&self.stats.priority_decays);
+                                }
                             }
                         }
                     }
@@ -1560,7 +1716,7 @@ impl Scheduler {
             return;
         }
         eprintln!(
-            "MORSEL|RGDONE|qid={}|rg={}|class={:?}|outcome={}|submit_us={}|first_us={}|done_us={}|cpu_us={}",
+            "MORSEL|RGDONE|qid={}|rg={}|class={:?}|outcome={}|submit_us={}|first_us={}|done_us={}|cpu_us={}|prio={}",
             rg.query_id,
             rg.rg_id,
             rg.class,
@@ -1569,6 +1725,7 @@ impl Scheduler {
             rg.first_service_ns.load(Ordering::Relaxed) / 1000,
             rg.done_ns.load(Ordering::Relaxed) / 1000,
             rg.cpu_consumed_ns.load(Ordering::Relaxed) / 1000,
+            rg.priority.load(Ordering::Relaxed),
         );
     }
 }
