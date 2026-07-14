@@ -847,12 +847,17 @@ impl LaneAggTable {
         let sw = if INLINE { 2 } else { 1 };
         // C3 channel (a register for the whole run): per-shape slot-line
         // hint distance (Inline16 resolves in the slot; Salt8 pays a
-        // dependent row line — see PREFETCH_LOOKAHEAD).
+        // dependent row line — see PREFETCH_LOOKAHEAD), clamped to the
+        // staged batch: a filtered window hands ~35 survivors of the
+        // 256-row window, where distance 24 forfeits ~2/3 of the hint
+        // coverage (Q15/Q31 same-pod +2% — the short-batch clamp keeps
+        // them at ~8 while full windows keep 24).
         let la = probe_lookahead(if INLINE {
             PREFETCH_LOOKAHEAD_INLINE
         } else {
             PREFETCH_LOOKAHEAD
-        });
+        })
+        .min(keys.len() / 4);
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             // Hoisted raw parts (re-derived after every insert — see
@@ -1224,8 +1229,9 @@ impl LaneAggTable {
     ) {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
-        // C3 channel (see probe_fold_hashed_run; Int128 is Salt8-only).
-        let la = probe_lookahead(PREFETCH_LOOKAHEAD);
+        // C3 channel (see probe_fold_hashed_run; Int128 is Salt8-only —
+        // the same short-batch clamp applies).
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             let bp: *mut EntrySet = match &mut self.buckets {
