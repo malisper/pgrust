@@ -48,7 +48,8 @@ agg-const-tlist	agg	na	na	na	refused	legacy	-	q35 class; const-tlist car
 agg-poly-numeric-states	agg	na	na	na	refused	legacy	-	PolyInt128/NumericAgg relocation car
 agg-topn-composed	agg	yes	degrade:passthrough,combine-split	yes	covered	runtime	CbGroupedAggTopN	m3-sort-b car 1: 100M 1.5-1.7xCH (was 3.5-6.3x); law 2b degrade rules
 groupby-high-1e7	agg	yes	no	no	covered-losing	legacy	-	runtime 2.23x vs legacy radix 2.73x; HOLD until parity (§10 Q2, v2 ruling)
-distinct-int-keys	distinct	yes	na	na	covered	runtime	CbDistinctIntKeys	q9/q10 22-28x rt16; DOP-1 budget class flipped to 1.69-2.06x WIN via spill
+distinct-int-keys	distinct	yes	na	na	covered	runtime	CbDistinctIntKeys	q9/q10 22-28x rt16; DOP-1 budget class flipped to 1.69-2.06x WIN via spill; PROBE RE-KEYED at m5-integration-r2 to grouped count(DISTINCT int) — the sink's sorted-distinct feed (the bootstrap plain-SELECT-DISTINCT key was a measured 2.66x suppress-then-refuse false positive at dop4)
+distinct-plain-shape	distinct	na	na	na	not-covered	legacy	-	plain SELECT DISTINCT plans HashAggregate, which the runtime sink refuses (lane-serial distincthash owns it serially); UNKEYED until the hash shape is wired — found by the rowflip measure vehicle
 distinct-text-date-args	distinct	na	na	na	refused	legacy	-	C1 car (text); date int_kind follow-up; plain q5/q6 shape unwired
 hashjoin-nbatch1	hashjoin	no	na	na	covered	runtime	CbHashJoinPlainAgg	inc-2 GREEN 14/14 byte parity; right family inc-3; ROW FLIPPED at m5-integration-r2 (probe: one JoinExpr OR the flat 2-RangeTblRef INNER form, unindexed cbstore rels, int equi key, nbatch==1 both sides)
 hashjoin-multibatch-spill	hashjoin	yes	na	na	covered	legacy	-	m35 inc-4/5 LANDED train-14 (spill default ON; engagement beats serial fallback 2.26x); probe keeps nbatch>1 estimates on Gather until this row's own measured flip
