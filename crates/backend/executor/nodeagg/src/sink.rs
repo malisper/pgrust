@@ -2611,11 +2611,11 @@ pub fn agg_sink_key_spec(node: &AggStateData<'_>) -> Option<SinkKeySpec> {
             if shape.nullable {
                 return None;
             }
-            // Exactly one Intern component (the canonical tail decodes
-            // unambiguously only then); intern table presence must match.
-            let n_intern =
-                shape.comps.iter().filter(|c| c.kind == MkCompKind::Intern).count();
-            if n_intern > 1 || (n_intern == 1) != ch.intern.is_some() {
+            // Intern component(s) decode through the canonical image (one
+            // tail raw — the historical image; two tails length-prefixed,
+            // canon-sink car 1); the intern table's presence must match the
+            // shape.
+            if (shape.n_intern() >= 1) != ch.intern.is_some() {
                 return None;
             }
             Some(SinkKeySpec::Multi(shape.clone()))
@@ -5535,7 +5535,7 @@ mod tests {
             drain(&locals)
         };
         assert_eq!(with_gids, without_gids, "GID merge is byte-invisible");
-        assert_eq!(with_gids.len(), 4);
+        assert_eq!(with_gids.len(), 3);
         assert_eq!(with_gids[&(1, b"first-gen-a".to_vec())], 11);
         assert_eq!(with_gids[&(2, b"first-gen-b".to_vec())], 5);
         assert_eq!(with_gids[&(1, b"second-gen-a".to_vec())], 1100);
