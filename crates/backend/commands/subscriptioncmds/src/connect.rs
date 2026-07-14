@@ -346,3 +346,36 @@ pub(crate) fn AlterSubscription_refresh<'mcx>(
     drop(wrconn);
     result
 }
+
+// libpqrcv_alter_slot (libpqwalreceiver.c): ALTER_REPLICATION_SLOT with
+// FAILOVER and/or TWO_PHASE options.
+pub(crate) fn walrcv_alter_slot(
+    conn: &mut PgConn,
+    slotname: &str,
+    failover: Option<bool>,
+    two_phase: Option<bool>,
+) -> PgResult<()> {
+    let mut opts: Vec<String> = Vec::new();
+    if let Some(f) = failover {
+        opts.push(format!("FAILOVER {}", if f { "true" } else { "false" }));
+    }
+    if let Some(t) = two_phase {
+        opts.push(format!("TWO_PHASE {}", if t { "true" } else { "false" }));
+    }
+    let cmd = format!(
+        "ALTER_REPLICATION_SLOT \"{}\" ( {} );",
+        slotname.replace('"', "\"\""),
+        opts.join(", ")
+    );
+    let res = conn.exec(&cmd)?;
+    if res.status != ExecStatus::CommandOk {
+        return Err(err(
+            format!(
+                "could not alter replication slot \"{slotname}\": {}",
+                res.err.clone()
+            ),
+            types_error::ERRCODE_PROTOCOL_VIOLATION,
+        ));
+    }
+    Ok(())
+}

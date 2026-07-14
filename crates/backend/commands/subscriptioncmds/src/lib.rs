@@ -857,6 +857,8 @@ pub fn AlterSubscription<'mcx>(
     let mut update_tuple = false;
     let mut update_failover = false;
     let mut update_two_phase = false;
+    let mut alter_failover_value = false;
+    let mut alter_two_phase_value = false;
     let mut slotname_buf = NameData::default();
     let mut pub_img_keepalive: Option<PgVec<'mcx, u8>> = None;
 
@@ -933,6 +935,7 @@ pub fn AlterSubscription<'mcx>(
 
             if is_set(opts.specified_opts, SUBOPT_TWOPHASE_COMMIT) {
                 update_two_phase = !opts.twophase;
+                alter_two_phase_value = opts.twophase;
 
                 CheckAlterSubOption(&sub, "two_phase", update_two_phase, is_top_level)?;
 
@@ -960,6 +963,7 @@ pub fn AlterSubscription<'mcx>(
 
             if is_set(opts.specified_opts, SUBOPT_FAILOVER) {
                 update_failover = true;
+                alter_failover_value = opts.failover;
 
                 CheckAlterSubOption(&sub, "failover", update_failover, is_top_level)?;
 
@@ -1194,8 +1198,39 @@ pub fn AlterSubscription<'mcx>(
     }
     drop(pub_img_keepalive);
 
+    // Update the corresponding slot property on the publisher
+    // (subscriptioncmds.c: walrcv_connect + walrcv_alter_slot, disconnect in
+    // PG_FINALLY — the connection drops on both paths here).
     if update_failover || update_two_phase {
-        panic!("unported: walrcv_alter_slot (ALTER SUBSCRIPTION failover/two_phase slot update)");
+        let must_use_password = sub.passwordrequired && !sub.ownersuperuser;
+        let mut wrconn = match connect::connect(
+            mcx,
+            sub.conninfo.as_str(),
+            must_use_password,
+            sub.name.as_str(),
+        )? {
+            Err(errmsg) => {
+                return Err(err(
+                    format!(
+                        "subscription \"{}\" could not connect to the publisher: {errmsg}",
+                        sub.name.as_str()
+                    ),
+                    ERRCODE_CONNECTION_FAILURE,
+                ));
+            }
+            Ok(conn) => conn,
+        };
+        let slotname = sub
+            .slotname
+            .as_ref()
+            .expect("CheckAlterSubOption verified a slot name")
+            .as_str();
+        connect::walrcv_alter_slot(
+            &mut wrconn,
+            slotname,
+            update_failover.then_some(alter_failover_value),
+            update_two_phase.then_some(alter_two_phase_value),
+        )?;
     }
 
     rel.close(RowExclusiveLock)?;
