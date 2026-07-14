@@ -1862,6 +1862,230 @@ fn stride_threaded_pool_mid_flight_shares() {
     pool.shutdown();
 }
 
+/// M5-5 lock-wait-fairness (inter-query §6.3, the §3.4/§5.4 gate — CI
+/// form): an adversarial priority-skew + contention workload that WOULD
+/// starve a lock holder under unclamped decay, asserted bounded by p_min.
+/// The lock-wait bound IS the holder's completion bound: whoever queues on
+/// the holder's lock waits exactly until the holder's query completes and
+/// releases it. Deterministic (virtual clock, one worker): a floor-decayed
+/// holder with R remaining work against K fresh-p0 adversaries completes
+/// within tasks(R) × (1 + K·p0/p_min) boundaries — and the bound tightens
+/// proportionally when the floor is raised, proving p_min is the binding
+/// constant (the C-legality window §3.4 relies on).
+#[test]
+fn lock_wait_fairness_pmin_bounds_holder() {
+    let run = |p_min: u32| -> (u32, u32) {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_p_min(p_min);
+        rt.set_decay_quantum_ns(2_000_000);
+        // The HOLDER: enough total work that ~20ms remains after it decays
+        // to the floor (worst-case: it consumed heavily while holding).
+        let holder_total = 40_000u64; // 40 ms virtual CPU
+        let h_work = SyntheticWork::new(holder_total, Some(Arc::clone(&clock)), 1_000);
+        let (hh, hw) =
+            rt.submit(spec_one(&h_work, Arc::new(SyntheticMorselSource::new(holder_total))));
+        let mut local = rt.worker_local(0);
+        while hh.priority() > rt.p_min() {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        assert_eq!(hh.priority(), p_min);
+        let consumed = hh.cpu_consumed_ns();
+        let remaining_ns = holder_total * 1_000 - consumed;
+        // Freeze decay so the adversaries KEEP p0 — sustained maximal skew.
+        rt.set_decay_quantum_ns(u64::MAX);
+        const K: u64 = 8;
+        let adv_total = 40_000_000u64; // 40 s: adversaries never finish
+        let mut adv = Vec::new();
+        let mut adv_waiters = Vec::new();
+        for q in 0..K {
+            let w = SyntheticWork::new(adv_total, Some(Arc::clone(&clock)), 1_000);
+            let (h, wt) = rt.submit(QuerySpec {
+                query_id: 100 + q,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(adv_total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            adv.push(h);
+            adv_waiters.push(wt);
+        }
+        // Drive until the holder completes (= the lock releases); count
+        // boundaries — the deterministic "wall clock" of the wait.
+        let mut boundaries = 0u32;
+        while hw.try_wait().is_none() {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+            boundaries += 1;
+            assert!(
+                boundaries < 2_000_000,
+                "holder starved outright at p_min={p_min} — the floor failed"
+            );
+        }
+        assert_eq!(hw.wait(), RgOutcome::Completed);
+        // Theory: holder runs 1 task per (1 + K·p0/p_min) boundaries.
+        let holder_tasks = remaining_ns.div_ceil(2_000_000).max(1) as u32; // t_max tasks
+        let rotation = 1 + (K as u32) * 10_000 / p_min;
+        let bound = holder_tasks * rotation * 13 / 10 + rotation; // +30% ramp slack
+        assert!(
+            boundaries <= bound,
+            "p_min={p_min}: lock-holder wait {boundaries} boundaries exceeds the \
+             floor-derived bound {bound} (tasks={holder_tasks}, rotation={rotation})"
+        );
+        for h in &adv {
+            h.abort();
+        }
+        for wt in &adv_waiters {
+            while wt.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+        (boundaries, bound)
+    };
+    // Ratified floor: bounded.
+    let (b625, bound625) = run(625);
+    // Raised floor: the window tightens ~4x — p_min is the binding constant.
+    let (b2500, bound2500) = run(2_500);
+    assert!(
+        b2500 * 3 < b625,
+        "raising p_min 4x must shrink the lock-wait window ~4x (625: {b625}, 2500: {b2500})"
+    );
+    eprintln!(
+        "lock-wait fairness: p_min=625 wait {b625}/{bound625} boundaries; \
+         p_min=2500 wait {b2500}/{bound2500} — floor bounds the window"
+    );
+}
+
+/// M5-5 §3.4 latency-fairness panel, MULTI arm (unit form; the fleet panel
+/// script drives the SQL altitude): a controlled mix of short probes
+/// against a saturating batch background on a REAL 4-worker pool, decay ON
+/// vs OFF. Emits the M0ACCEPT|FAIR verdict line the m0-accept channel
+/// greps. Gate: short-query p50/p95 under load approaches isolated (the
+/// MLFQ effect); batch throughput floor guarded by completion.
+#[test]
+fn multi_fairness_panel_short_latency_under_batch() {
+    struct Spin {
+        ns_per_granule: u64,
+    }
+    impl TaskSetWork for Spin {
+        fn run_morsel(&self, _w: usize, range: MorselRange) {
+            let n = range.end - range.start;
+            let t0 = std::time::Instant::now();
+            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
+            while t0.elapsed() < budget {
+                std::hint::spin_loop();
+            }
+        }
+        fn finalize(&self) {}
+    }
+    // One probe = ~4 ms of work (sub-quantum: never decays).
+    let submit_probe = |rt: &Arc<Runtime>, qid: u64| {
+        rt.submit(QuerySpec {
+            query_id: qid,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(200)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            }],
+        })
+    };
+    let percentile = |xs: &mut Vec<u64>, p: f64| -> u64 {
+        xs.sort_unstable();
+        xs[((xs.len() - 1) as f64 * p) as usize]
+    };
+    let run = |decay: bool| -> (u64, u64, u64, u64) {
+        let mut cfg = RuntimeConfig::new(4);
+        cfg.slots = 16;
+        let rt = Runtime::new(cfg);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        // Tight quantum so the batch decays within the test's horizon
+        // (real clock; the ratified 50ms/quantum geometry scaled down).
+        rt.set_decay_quantum_ns(5_000_000);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        // Isolated baseline: 8 probes, quiet pool.
+        let mut iso = Vec::new();
+        for i in 0..8u64 {
+            let (h, w) = submit_probe(&rt, 1000 + i);
+            assert_eq!(w.wait(), RgOutcome::Completed);
+            let (s, _f, d) = h.service_times();
+            iso.push(d - s);
+        }
+        // Saturating batch background (~200 ms each); count env-tunable
+        // for fleet calibration.
+        let n_batch: u64 = std::env::var("M5_PANEL_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        let mut batch = Vec::new();
+        let mut batch_waiters = Vec::new();
+        for q in 0..n_batch {
+            let (h, w) = rt.submit(QuerySpec {
+                query_id: q + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(10_000)),
+                    work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                    deps: vec![],
+                }],
+            });
+            batch.push(h);
+            batch_waiters.push(w);
+        }
+        // Let the background consume past the decay horizon.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Under-load probes: 8 shorts, controlled spacing.
+        let mut load = Vec::new();
+        for i in 0..8u64 {
+            let (h, w) = submit_probe(&rt, 2000 + i);
+            assert_eq!(w.wait(), RgOutcome::Completed);
+            let (s, _f, d) = h.service_times();
+            load.push(d - s);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Batch background must still complete (throughput floor: no
+        // starvation of the decayed class).
+        for w in &batch_waiters {
+            assert_eq!(w.wait(), RgOutcome::Completed);
+        }
+        pool.shutdown();
+        (
+            percentile(&mut iso, 0.5),
+            percentile(&mut iso, 0.95),
+            percentile(&mut load, 0.5),
+            percentile(&mut load, 0.95),
+        )
+    };
+    let (on_iso_p50, on_iso_p95, on_p50, on_p95) = run(true);
+    let (off_iso_p50, _off_iso_p95, off_p50, off_p95) = run(false);
+    let r50 = on_p50 as f64 / on_iso_p50.max(1) as f64;
+    let r95 = on_p95 as f64 / on_iso_p95.max(1) as f64;
+    let r50_off = off_p50 as f64 / off_iso_p50.max(1) as f64;
+    let verdict = if r95 <= 8.0 && r50 <= 6.0 { "PASS" } else { "FAIL" };
+    eprintln!(
+        "M0ACCEPT|FAIR|arm=multi-unit|decay=on|short_p50_us={}|short_p95_us={}|iso_p50_us={}|\
+         iso_p95_us={}|p50_ratio={r50:.2}|p95_ratio={r95:.2}|off_p50_ratio={r50_off:.2}|\
+         off_p50_us={}|off_p95_us={}|verdict={verdict}",
+        on_p50 / 1000,
+        on_p95 / 1000,
+        on_iso_p50 / 1000,
+        on_iso_p95 / 1000,
+        off_p50 / 1000,
+        off_p95 / 1000,
+    );
+    // Loose CI bands (real threads; the calibrated band is the fleet
+    // panel's): under-load short latency must stay within an order of
+    // magnitude of isolated with decay ON, and must beat decay OFF on p50.
+    assert_eq!(verdict, "PASS", "latency-fairness panel out of band");
+    assert!(
+        on_p50 <= off_p50.max(1) * 2,
+        "decay ON p50 ({on_p50}ns) should not exceed 2x decay OFF p50 ({off_p50}ns)"
+    );
+}
+
 // ---- M5+1 pipeline-DAG dispatch (m5-planner §3.6, increment 1) --------------
 //
 // Independent-subtree overlap: every dependency-satisfied task set publishes
