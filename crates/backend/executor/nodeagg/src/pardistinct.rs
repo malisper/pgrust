@@ -839,22 +839,70 @@ fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'
 
 /// The bucket merge over BORROWED tables (the M3.5 combine mixes sealed
 /// in-memory tables with spill-synthesized ones it owns locally; everything
-/// else about the merge is the donor verbatim).
+/// else about the merge is the donor verbatim). Implemented as the
+/// incremental [`PdBucketMerger`] driven in one pass, so the donor
+/// semantics stay single-sourced.
 fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMerged<'static> {
-    let nkeys = spec.nkeys();
-    let nvocab = spec.vocab.len();
-    let nsets = spec.sets.len();
-    let mut out = PdMerged {
-        ngroups: 0,
-        keys: Vec::new(),
-        keynulls: Vec::new(),
-        states: Vec::new(),
-        dsets: Vec::new(),
-    };
-    // Bucket-local open-addressed probe over the output groups.
-    let mut table: Vec<u32> = vec![0; 64];
-    let mut hashes: Vec<u64> = Vec::new();
+    let mut m = PdBucketMerger::new(spec);
     for &t in tables {
+        m.absorb(t, b);
+    }
+    m.finish()
+}
+
+/// Incremental donor bucket merge (M3.5 inc-3b): [`merge_bucket_refs`]'s
+/// loop body, restructured so the combine-split path can absorb tables IN
+/// SEQUENCE — the sealed in-memory tables in one pass, then one value-hash
+/// slice's synthesized table at a time, dropping each between absorbs so
+/// transient memory stays bounded.
+///
+/// EXACTLY-ONCE LAW (the inc-3b hazard): value-hash slices partition each
+/// group's VALUE SET disjointly, but everything that is NOT a per-value
+/// fact must merge exactly once, not once per slice. The sealed IN-MEMORY
+/// tables are the sole carriers of group-level state — vocab (acc,count)
+/// words, `seen_null`, and group existence (a spilled record can never
+/// reference a group its own Local's remainder lacks: groups are created
+/// at accept and the epoch reset clears only set VALUES) — and they are
+/// absorbed ONCE, before any slice. Each slice's synthesized table
+/// ([`pd_table_from_spill`]) is built by replaying value records through a
+/// fresh builder: its vocab states are all ZERO and its `set_null` faces
+/// all FALSE (`create_group` zero-init; NULLs never touch the file), so
+/// absorbing it adds 0 to every vocab word, ORs `false` into every
+/// `seen_null`, and contributes ONLY set-value insertions — idempotent,
+/// over slices that are disjoint by the routing law. Hence "in-memory once
+/// + slices in any sequence" equals the direct one-pass donor merge
+/// (property test `split_slice_merge_invariance`).
+pub struct PdBucketMerger<'s> {
+    spec: &'s PdSpec,
+    out: PdMerged<'static>,
+    /// Bucket-local open-addressed probe over the output groups.
+    table: Vec<u32>,
+    hashes: Vec<u64>,
+}
+
+impl<'s> PdBucketMerger<'s> {
+    pub fn new(spec: &'s PdSpec) -> PdBucketMerger<'s> {
+        PdBucketMerger {
+            spec,
+            out: PdMerged {
+                ngroups: 0,
+                keys: Vec::new(),
+                keynulls: Vec::new(),
+                states: Vec::new(),
+                dsets: Vec::new(),
+            },
+            table: vec![0; 64],
+            hashes: Vec::new(),
+        }
+    }
+
+    /// Merge bucket `b` of `t` into the output — the donor loop body
+    /// verbatim.
+    pub fn absorb(&mut self, t: &PdHandedTable, b: usize) {
+        let nkeys = self.spec.nkeys();
+        let nvocab = self.spec.vocab.len();
+        let nsets = self.spec.sets.len();
+        let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
         for &g in &parts.idx[s..e] {
@@ -889,7 +937,7 @@ fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMe
                                 }
                                 nt[sl] = (gg + 1) as u32;
                             }
-                            table = nt;
+                            *table = nt;
                         }
                         break d;
                     }
@@ -923,7 +971,28 @@ fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMe
             }
         }
     }
-    out
+
+    /// Capacity-based bytes of the merged-so-far bucket — the combine
+    /// split's EXACT dedup-aware budget check (read after every slice
+    /// absorb; no directory estimate can see through duplicates, this can).
+    pub fn mem_bytes(&self) -> usize {
+        self.out.keys.capacity() * 8
+            + self.out.keynulls.capacity() * 4
+            + self.out.states.capacity() * 8
+            + self.hashes.capacity() * 8
+            + self.table.capacity() * 4
+            + self.out.dsets.capacity() * core::mem::size_of::<Option<DistinctSet<'static>>>()
+            + self
+                .out
+                .dsets
+                .iter()
+                .map(|d| d.as_ref().map_or(0, |d| d.mem_bytes()))
+                .sum::<usize>()
+    }
+
+    pub fn finish(self) -> PdMerged<'static> {
+        self.out
+    }
 }
 
 fn pd_claim_loop(ctx: &PdParCtx<'_>, nbuckets: usize) {
@@ -1498,6 +1567,44 @@ pub fn pd_table_from_spill(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHande
     b.freeze()
 }
 
+/// Route spilled distinct records into 256 value-hash SLICES by the byte of
+/// `mix64(value)` `depth` levels from the top (depth 1 = bits 56..64,
+/// depth 2 = bits 48..56, …, depth 6 = bits 16..24) — the M3.5 §4
+/// COMBINE-SPLIT law (inc-3b). The mixer is distinctset.rs's own spill
+/// mixer (splitmix64, the `spill_part` law); distinctset's serial spill
+/// consumes bits UPWARD from bit 32 (`(mix64(v) >> 32) & (nparts-1)`),
+/// while this routing consumes whole bytes TOP-DOWN — any deterministic
+/// slicing of the same full-avalanche hash is legal (equal values hash
+/// equal, so every distinct (group, set, value) lands in exactly one
+/// slice), and top-down bytes make recursion levels strictly nested (a
+/// depth-d slice is subdivided exactly by the next byte down). Fail-closed
+/// on torn input and out-of-range depth.
+pub fn pd_route_value_records(
+    spec: &PdSpec,
+    bytes: &[u8],
+    depth: u32,
+    out: &mut [Vec<u8>],
+) -> PgResult<()> {
+    debug_assert_eq!(out.len(), PD_GROUP_PARTS);
+    if !(1..=6).contains(&depth) {
+        return Err(pd_internal("distinct value-slice depth out of range"));
+    }
+    let width = pd_spill_record_width(spec);
+    if bytes.len() % width != 0 {
+        return Err(pd_internal("torn distinct spill record (partial row) in split"));
+    }
+    let voff = width - 8;
+    let shift = 64 - 8 * depth;
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let v = u64::from_ne_bytes(bytes[off + voff..off + width].try_into().unwrap());
+        let s = ((mix64(v) >> shift) & 0xFF) as usize;
+        out[s].extend_from_slice(&bytes[off..off + width]);
+        off += width;
+    }
+    Ok(())
+}
+
 /// Combine-side pre-count of one bucket's IN-MEMORY faces: (groups, set
 /// values). Together with the spill directory's `part_len`, this is
 /// everything the conservative over-budget refusal reads — nothing touches
@@ -1735,5 +1842,120 @@ mod tests {
         // A well-formed empty image and a single record are fine.
         assert!(pd_table_from_spill(&spec, &[]).is_ok());
         assert!(pd_table_from_spill(&spec, &vec![0u8; width]).is_ok());
+    }
+
+    /// M3.5 inc-3b slice invariance: routing a bucket's spilled records by
+    /// `mix64(value)` bytes and merging per-slice synth tables IN SEQUENCE
+    /// (after the one-pass in-memory merge) equals the direct never-spilled
+    /// merge on every bucket — groups, keynulls, vocab states, sorted set
+    /// values, and the seen_null face — with every distinct (group, set,
+    /// value) record in exactly one slice, at depth 1 and depth 2.
+    #[test]
+    fn split_slice_merge_invariance() {
+        let spec = spill_test_spec();
+
+        // Reference: direct merge of two never-spilled workers.
+        let t1 = build_worker(&spec, 0).freeze().unwrap();
+        let t2 = build_worker(&spec, 5).freeze().unwrap();
+        let tables = [t1, t2];
+        let direct = pd_concat_buckets(
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
+        );
+
+        // Spill arm: same two workers drained mid-build, then a second
+        // accept wave (cross-epoch duplicates by construction) — the
+        // inc-3a construction, reused.
+        let mut spilled: Vec<std::collections::HashMap<u32, Vec<u8>>> = Vec::new();
+        let mut remainders: Vec<PdHandedTable> = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker(&spec, salt);
+            let mut parts: std::collections::HashMap<u32, Vec<u8>> = Default::default();
+            b.spill_emit(&mut |p, bytes| {
+                parts.entry(p).or_default().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            b.spill_reset_values();
+            for i in 0..4000i64 {
+                let k = [(i * 13 + salt) % 37, ((i * 7 + salt) % 11) as i64];
+                let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
+                let h = key_hash(&k, nulls);
+                let (found, _) = b.probe(&k, nulls, h);
+                let g = found.expect("group exists from epoch 1") as usize;
+                b.states[g * 2 * spec.vocab.len()] -= 1;
+                feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
+            }
+            spilled.push(parts);
+            remainders.push(b.freeze().unwrap());
+        }
+
+        let width = pd_spill_record_width(&spec);
+        for depth in [1u32, 2] {
+            let mut buckets = Vec::with_capacity(PD_GROUP_PARTS);
+            for bkt in 0..PD_GROUP_PARTS {
+                // Every Local's bucket records concatenated (the runtime
+                // streams all Locals' partitions through one router).
+                let mut bytes = Vec::new();
+                for parts in &spilled {
+                    if let Some(bb) = parts.get(&(bkt as u32)) {
+                        bytes.extend_from_slice(bb);
+                    }
+                }
+                let mut slices: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+                pd_route_value_records(&spec, &bytes, depth, &mut slices).unwrap();
+                // Routing loses nothing and duplicates nothing…
+                assert_eq!(slices.iter().map(|s| s.len()).sum::<usize>(), bytes.len());
+                // …and every distinct record (group identity + set + value)
+                // has exactly one home slice.
+                let mut home: std::collections::HashMap<Vec<u8>, usize> = Default::default();
+                for (si, s) in slices.iter().enumerate() {
+                    for r in s.chunks(width) {
+                        if let Some(prev) = home.insert(r.to_vec(), si) {
+                            assert_eq!(prev, si, "record in two slices");
+                        }
+                    }
+                }
+                // The split combine: in-memory tables ONCE, then each
+                // slice's synth table in sequence, dropped between absorbs.
+                let mut merger = PdBucketMerger::new(&spec);
+                for t in &remainders {
+                    merger.absorb(t, bkt);
+                }
+                for s in &slices {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    let synth = pd_table_from_spill(&spec, s).unwrap();
+                    merger.absorb(&synth, bkt);
+                }
+                buckets.push(merger.finish());
+            }
+            let merged = pd_concat_buckets(buckets);
+            assert_eq!(canon(&spec, &direct), canon(&spec, &merged), "depth {depth}");
+        }
+    }
+
+    /// Torn / out-of-range input to the value router fails closed; a single
+    /// record routes to exactly the mix64-top-byte slice.
+    #[test]
+    fn value_route_torn_fails_closed() {
+        let spec = spill_test_spec();
+        let width = pd_spill_record_width(&spec);
+        let mut out: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+        // Torn: not a whole number of records.
+        assert!(pd_route_value_records(&spec, &vec![0u8; width + 1], 1, &mut out).is_err());
+        // Depth outside the routing vocabulary.
+        assert!(pd_route_value_records(&spec, &vec![0u8; width], 0, &mut out).is_err());
+        assert!(pd_route_value_records(&spec, &vec![0u8; width], 7, &mut out).is_err());
+        // Empty image routes nothing.
+        assert!(pd_route_value_records(&spec, &[], 1, &mut out).is_ok());
+        assert!(out.iter().all(|s| s.is_empty()));
+        // One record lands in exactly the depth-1 (top-byte) slice.
+        let mut rec = vec![0u8; width];
+        rec[width - 8..].copy_from_slice(&77i64.to_ne_bytes());
+        pd_route_value_records(&spec, &rec, 1, &mut out).unwrap();
+        let expect = (mix64(77i64 as u64) >> 56) as usize;
+        assert_eq!(out[expect].len(), width);
+        assert_eq!(out.iter().map(|s| s.len()).sum::<usize>(), width);
     }
 }

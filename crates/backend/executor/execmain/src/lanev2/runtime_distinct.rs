@@ -30,10 +30,13 @@
 //! nthreads-shaped). A worker CROSSING its budget SPILLS an epoch of its
 //! set values to its FileSet spill file (grouped int-set shapes; the
 //! docs/design/m3.5-spill.md §4 arm, `PGRUST_RUNTIME_DISTINCT_SPILL=0`
-//! restores phase 1) and keeps accepting bounded; shapes the spill cannot
-//! carry exactly — and combine partitions whose merged sets would cross
-//! the budget (value-hash recursion is the later increment) — fall back to
-//! the phase-1 law: the arm aborts the RG and the leader RERUNS THE SERIAL
+//! restores phase 1) and keeps accepting bounded; a combine partition
+//! whose pre-count crosses the budget SPLITS its spilled records by
+//! `mix64(value)` bytes and merges bounded slices in sequence (inc-3b,
+//! `PGRUST_RUNTIME_DISTINCT_SPILL_DEPTH` caps the recursion). Shapes the
+//! spill cannot carry exactly — and split refusals (depth cap, or a merged
+//! bucket whose TRUE deduplicated size cannot fit) — fall back to the
+//! phase-1 law: the arm aborts the RG and the leader RERUNS THE SERIAL
 //! ARM: exact, nothing consumed, bounded memory at every arm.
 //!
 //! Engagement layering (all cheap; absent = today's serial path, byte- and
@@ -51,8 +54,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::nodeagg::{
     pd_bucket_precount, pd_concat_buckets, pd_empty_grouped_table, pd_merge_bucket_refs,
-    pd_spill_record_width, pd_table_from_spill, PdFeed, PdHandedTable, PdMerged, PdSinkLocal,
-    PdSpec, PD_SINK_GROUP_PARTS,
+    pd_route_value_records, pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdFeed,
+    PdHandedTable, PdMerged, PdSinkLocal, PdSpec, PD_SINK_GROUP_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -124,6 +127,11 @@ pub(super) struct RuntimeDistinctShared {
     /// Spill observability (gate-record counters, the R4 line).
     spill_epochs: AtomicU64,
     spilled_bytes: AtomicU64,
+    /// Combine-split observability (inc-3b): split events, deepest level
+    /// reached, and a per-engagement uniquifier for split-file names.
+    combine_splits: AtomicU64,
+    split_depth_max: AtomicU64,
+    split_uniq: AtomicU64,
     /// Combine output cells, one per group partition. Single writer each:
     /// partition p is claimed exactly once by the combine task set.
     out: Vec<UnsafeCell<Option<PdMerged<'static>>>>,
@@ -257,11 +265,12 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             }
             Ok(Ok(DstCombine::OverBudget)) => {
                 // Bounded-memory refusal, not an error: the merged bucket
-                // would cross the worker budget (the value-hash recursive
-                // split is the chartered inc-3b) — abort to the serial
-                // rerun, which spills through its own C-parity machinery.
+                // cannot be carried under the worker budget (split depth
+                // cap, spill disarmed, or the TRUE deduplicated bucket
+                // itself cannot fit) — abort to the serial rerun, which
+                // spills through its own C-parity machinery.
                 lane_trace(
-                    "runtime-distinct: combine partition over budget (value-hash recursion pending) — serial rerun",
+                    "runtime-distinct: combine partition over budget (split depth cap, spill disarmed, or merged set cannot fit) — serial rerun",
                 );
                 self.cross();
             }
@@ -289,8 +298,11 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
     }
 }
 
-/// Combine verdict: `OverBudget` is the conservative directory-only refusal
-/// (M3.5 §4/§7 — nothing is read from disk before the decision).
+/// Combine verdict: `OverBudget` = bounded-memory refusal → serial rerun
+/// (spill disarmed, the in-memory merge alone cannot fit, split depth cap,
+/// or the merged bucket's exact deduplicated size crossed the budget). The
+/// SIZE decision itself is directory-only (M3.5 §4/§7 — nothing is read
+/// from disk before it); the split's own refusals come after bounded I/O.
 enum DstCombine {
     Done(PdMerged<'static>),
     OverBudget,
@@ -299,8 +311,10 @@ enum DstCombine {
 impl RuntimeDistinctShared {
     /// COMBINE(part b), the M3.5 spill-aware path: pre-count b's spilled
     /// bytes from the spill-file DIRECTORIES + the in-memory tables'
-    /// partition indexes; refuse (→ serial rerun) if the merged bucket's
-    /// estimated bytes cross the worker budget; otherwise read b's records
+    /// partition indexes; SPLIT by value hash (inc-3b, [`Self::split_combine`])
+    /// if the merged bucket's estimated bytes cross the worker budget —
+    /// refusal (→ serial rerun) remains for the disarmed/cannot-fit faces;
+    /// otherwise read b's records
     /// (open-by-name on THIS thread — the files are frozen: combine
     /// deps-follows accept), rebuild them into merge-compatible tables
     /// through the donor builder kernel, and run the donor bucket merge
@@ -343,7 +357,24 @@ impl RuntimeDistinctShared {
             / 2
             + groups.saturating_mul(per_group);
         if est > self.spec.worker_budget {
-            return Ok(DstCombine::OverBudget);
+            // inc-3b: recursive COMBINE-SPLIT by value hash — the estimate
+            // over-counts cross-epoch/cross-Local duplicates, and the split
+            // converts exactly that inflation (design §4). No spill set =
+            // the disarmed refusal, exactly as before.
+            let Some(set) = &self.spill_set else {
+                return Ok(DstCombine::OverBudget);
+            };
+            // The one-pass in-memory merge is NOT value-sliced (group-level
+            // facts must merge exactly once, see PdBucketMerger): if IT
+            // alone cannot fit, no recursion helps — the final merged
+            // bucket is a superset of the in-memory merge and must fit to
+            // be emitted at all.
+            let est_inmem = inmem_vals.saturating_mul(16).saturating_mul(3) / 2
+                + groups.saturating_mul(per_group);
+            if est_inmem > self.spec.worker_budget {
+                return Ok(DstCombine::OverBudget);
+            }
+            return self.split_combine(b, sealed, set, groups, per_group);
         }
         // Read + rebuild each Local's spilled partition, then merge.
         let ctx = ::mcx::MemoryContext::new("m35-dst-spill-read");
@@ -359,6 +390,220 @@ impl RuntimeDistinctShared {
         let refs: Vec<&PdHandedTable> =
             sealed.iter().map(|s| &s.table).chain(synth.iter()).collect();
         Ok(DstCombine::Done(pd_merge_bucket_refs(&self.spec, &refs, b)))
+    }
+
+    /// inc-3b COMBINE-SPLIT (design §4, the agg inc-2b twin on the VALUE
+    /// axis): route partition `b`'s spilled records from every Local by the
+    /// top byte of `mix64(value)` into a combine-task-owned split file,
+    /// then merge bounded: the sealed IN-MEMORY tables in ONE pass (they
+    /// carry ALL group-level state — vocab words, seen_null, group
+    /// existence — and are not value-sliced, so nothing merges twice; see
+    /// PdBucketMerger's exactly-once law), then each slice's synthesized
+    /// table in sequence (states all zero, set_null all false — pure
+    /// idempotent set-value insertions over disjoint value slices), dropped
+    /// between absorbs. A slice whose synth table would cross the budget
+    /// recurses one mix64 byte deeper into a fresh file, depth-capped →
+    /// refusal → serial rerun. After every slice absorb the merged bucket's
+    /// EXACT capacity-based size is checked — the dedup-aware bound no
+    /// directory pre-count can compute: duplicate-inflation crossings
+    /// convert (dedup keeps the bucket small), TRUE-cardinality overflows
+    /// refuse there (wasted routing I/O, never unbounded growth).
+    fn split_combine(
+        &self,
+        b: usize,
+        sealed: &[DistinctSealed],
+        set: &Arc<::spillset::SpillSet>,
+        groups: usize,
+        per_group: usize,
+    ) -> PgResult<DstCombine> {
+        self.combine_splits.fetch_add(1, Ordering::Relaxed);
+        self.split_depth_max.fetch_max(1, Ordering::Relaxed);
+        let width = pd_spill_record_width(&self.spec);
+        // Route every Local's partition-b records (row-aligned streaming;
+        // torn records fail closed) into the depth-1 slice file.
+        let mut router = DstSubRouter::new(self, set, b, 1);
+        for s in sealed {
+            let Some(f) = &s.spill else { continue };
+            super::runtime_agg::stream_part_rows(f, b as u32, width, |chunk| {
+                router.absorb(&self.spec, chunk)
+            })?;
+        }
+        router.flush()?;
+        // In-memory tables merge EXACTLY ONCE, before any slice.
+        let mut merger = PdBucketMerger::new(&self.spec);
+        for s in sealed {
+            merger.absorb(&s.table, b);
+        }
+        if !self.split_slices_into(&mut merger, b, set, &router.file, 1, groups, per_group)? {
+            return Ok(DstCombine::OverBudget);
+        }
+        Ok(DstCombine::Done(merger.finish()))
+    }
+
+    /// Merge each value slice of a routed split file into `merger`; slices
+    /// whose synth table would cross the budget recurse one mix64 byte
+    /// deeper (fresh file), depth-capped. Returns false on depth-cap
+    /// overflow or when the merged bucket's exact size crosses the budget
+    /// (the caller refuses → R5 serial rerun).
+    #[allow(clippy::too_many_arguments)]
+    fn split_slices_into(
+        &self,
+        merger: &mut PdBucketMerger<'_>,
+        b: usize,
+        set: &Arc<::spillset::SpillSet>,
+        file: &::spillset::SpillFile,
+        depth: u32,
+        groups: usize,
+        per_group: usize,
+    ) -> PgResult<bool> {
+        let width = pd_spill_record_width(&self.spec);
+        let budget = self.spec.worker_budget;
+        for sl in 0..DST_SPLIT_SLICES {
+            // Abort responsiveness: a split is the longest single combine
+            // task this sink can run (routing I/O + up to 256^depth slice
+            // merges) — if the RG is already failing/crossed, stop here
+            // instead of finishing the loop (the verdict no longer
+            // matters; the leader's DestroyParallelContext join is waiting
+            // on this task). Recorded hazard: the inc-2b agg SWEEP
+            // DeadlineExceeded diagnosis names exactly this surface.
+            if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            let blen = file.part_len(sl as u32) as usize;
+            if blen == 0 {
+                continue;
+            }
+            let rows = blen / width;
+            // Slice TRANSIENT bound (the synth table alone; the merged
+            // bucket has its own exact check below). Rows over-count
+            // duplicates → conservative; same-VALUE duplicates never slice
+            // apart (they share every mix64 byte), so a slice dominated by
+            // copies of few values recurses to the cap and refuses even
+            // though its deduplicated table would fit — the inc-2b
+            // limitation, value-inverted (ledger item: streaming replay).
+            let est_slice = rows.saturating_mul(16).saturating_mul(3) / 2
+                + rows.min(groups).saturating_mul(per_group);
+            if est_slice > budget {
+                if depth + 1 > distinct_split_depth_cap() {
+                    return Ok(false);
+                }
+                self.combine_splits.fetch_add(1, Ordering::Relaxed);
+                self.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
+                let mut router = DstSubRouter::new(self, set, b, depth + 1);
+                super::runtime_agg::stream_part_rows(file, sl as u32, width, |chunk| {
+                    router.absorb(&self.spec, chunk)
+                })?;
+                router.flush()?;
+                if !self.split_slices_into(
+                    merger,
+                    b,
+                    set,
+                    &router.file,
+                    depth + 1,
+                    groups,
+                    per_group,
+                )? {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let ctx = ::mcx::MemoryContext::new("m35-dst-split-read");
+            let Some(mut rd) = file.read_part(ctx.mcx(), sl as u32)? else { continue };
+            let bytes = rd.read_to_end()?;
+            rd.close()?;
+            let synth = pd_table_from_spill(&self.spec, &bytes)?;
+            merger.absorb(&synth, b);
+            drop(synth);
+            // The DEDUP-AWARE final bound: exact, capacity-based. The
+            // merged bucket must fit to be emitted at all — a crossing
+            // here is a TRUE-cardinality overflow no slicing can convert.
+            if merger.mem_bytes() > budget {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// One-byte value-slice routing vocabulary (each recursion level consumes
+/// one mix64 byte).
+const DST_SPLIT_SLICES: usize = 256;
+/// Router epoch-flush threshold (mirrors the agg SubRouter's).
+const DST_SPLIT_FLUSH_BYTES: usize = 16 << 20;
+
+/// Combine-split depth cap: mix64(value) bytes (top-down) the recursion may
+/// consume (depth 1 = the first split). Default 3; clamped to the routing
+/// vocabulary (≤6).
+fn distinct_split_depth_cap() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL_DEPTH")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(3)
+            .clamp(1, 6)
+    })
+}
+
+/// Bounded value-slice router (inc-3b, the agg SubRouter's twin): records
+/// absorb into 256 in-memory buffers by the `mix64(value)` byte at `depth`
+/// and epoch-flush to a combine-task-owned spill file when the staged total
+/// crosses [`DST_SPLIT_FLUSH_BYTES`] — partition-ascending per epoch,
+/// extents accumulating across epochs (the substrate contract).
+struct DstSubRouter {
+    file: ::spillset::SpillFile,
+    bufs: Vec<Vec<u8>>,
+    staged: usize,
+    depth: u32,
+}
+
+impl DstSubRouter {
+    fn new(
+        shared: &RuntimeDistinctShared,
+        set: &Arc<::spillset::SpillSet>,
+        b: usize,
+        depth: u32,
+    ) -> DstSubRouter {
+        let uniq = shared.split_uniq.fetch_add(1, Ordering::Relaxed);
+        DstSubRouter {
+            file: ::spillset::SpillFile::new(
+                Arc::clone(set),
+                format!("m35-dstcmb-p{b}-d{depth}-u{uniq}"),
+                DST_SPLIT_SLICES as u32,
+            ),
+            bufs: vec![Vec::new(); DST_SPLIT_SLICES],
+            staged: 0,
+            depth,
+        }
+    }
+
+    fn absorb(&mut self, spec: &PdSpec, records: &[u8]) -> PgResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        pd_route_value_records(spec, records, self.depth, &mut self.bufs)?;
+        self.staged += records.len();
+        if self.staged >= DST_SPLIT_FLUSH_BYTES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> PgResult<()> {
+        if self.staged == 0 {
+            return Ok(());
+        }
+        let ctx = ::mcx::MemoryContext::new("m35-dst-split-write");
+        let mut w = self.file.begin_epoch(ctx.mcx())?;
+        for (s, buf) in self.bufs.iter_mut().enumerate() {
+            if !buf.is_empty() {
+                w.write_part(s as u32, buf)?;
+                buf.clear();
+            }
+        }
+        w.finish()?;
+        self.staged = 0;
+        Ok(())
     }
 }
 
@@ -951,6 +1196,9 @@ fn engage<'mcx>(
         spill_set,
         spill_epochs: AtomicU64::new(0),
         spilled_bytes: AtomicU64::new(0),
+        combine_splits: AtomicU64::new(0),
+        split_depth_max: AtomicU64::new(0),
+        split_uniq: AtomicU64::new(0),
         out: (0..PD_SINK_GROUP_PARTS as usize).map(|_| UnsafeCell::new(None)).collect(),
         merged: Mutex::new(None),
     });
@@ -1112,6 +1360,13 @@ fn engage_ceremony<'mcx>(
                 lane_trace(&format!(
                     "runtime-distinct: SPILLED epochs={spill_epochs} bytes={}",
                     payload.spilled_bytes.load(Ordering::Relaxed)
+                ));
+            }
+            let splits = payload.combine_splits.load(Ordering::Relaxed);
+            if splits > 0 {
+                lane_trace(&format!(
+                    "runtime-distinct: COMBINE-SPLIT splits={splits} max_depth={}",
+                    payload.split_depth_max.load(Ordering::Relaxed)
                 ));
             }
             lane_trace(&format!(
