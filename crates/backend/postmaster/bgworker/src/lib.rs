@@ -727,6 +727,16 @@ pub fn MyBgworkerEntry() -> Option<BackgroundWorker> {
     MY_BGWORKER_ENTRY.with(|e| e.borrow().clone())
 }
 
+/// M2 pool-binding: a STANDING runtime executor (parallel::standing) is a
+/// bgworker-SHAPED thread that never goes through the registry/dispatch
+/// machinery — it adopts a synthetic entry so the ordinary bgworker
+/// connect path (`BackgroundWorkerInitializeConnectionByOid`, which
+/// consults `MyBgworkerEntry` for the DATABASE_CONNECTION flag) works
+/// unchanged. Thread-local; call once at thread identity setup.
+pub fn adopt_worker_entry(worker: BackgroundWorker) {
+    MY_BGWORKER_ENTRY.with(|e| *e.borrow_mut() = Some(worker));
+}
+
 pub fn bgworker_die() -> PgResult<()> {
     let bgw_type = MY_BGWORKER_ENTRY
         .with(|e| e.borrow().as_ref().map(|w| w.bgw_type.clone()))

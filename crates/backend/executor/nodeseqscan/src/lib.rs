@@ -3187,6 +3187,16 @@ pub fn seq_scan_cb_set_granule_range<'mcx>(
     )
 }
 
+/// Drive-scaling observability counters of a cbstore scan (runtime WFIN
+/// channel): (rg_switches, dict_builds, granules_scanned, windows_staged).
+/// None = heap or scan not opened yet.
+pub fn seq_scan_cb_drive_counters(node: &SeqScanState<'_>) -> Option<(u64, u64, u64, u64)> {
+    node.ss
+        .ss_currentScanDesc
+        .as_ref()
+        .and_then(::tableam::table_scan_cb_drive_counters)
+}
+
 // Plan-derived need-set + zone-mappable conjuncts for a cbstore scan.
 fn cb_scan_info<'mcx>(
     node: &SeqScan<'mcx>,
