@@ -720,7 +720,10 @@ pub(super) fn try_own_sort_topn<'mcx>(
         refused("extern params");
         return Ok(false);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refused("no planned stmt");
+        return Ok(false);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         refused("exec params");
         return Ok(false);
@@ -728,7 +731,10 @@ pub(super) fn try_own_sort_topn<'mcx>(
     // Plan shape below the Sort: exactly THIS SeqScan (the workers receive
     // the SCAN SUBTREE as their pstmt; the Sort need not be the plan root —
     // Limit above it is the whole point of the shape).
-    let Some(scan_node) = state.plan.plan.lefttree else { return Ok(false) };
+    let Some(scan_node) = state.plan.plan.lefttree else {
+        refused("sort child missing");
+        return Ok(false);
+    };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
         refused("sort child not SeqScan");
         return Ok(false);
@@ -752,9 +758,12 @@ pub(super) fn try_own_sort_topn<'mcx>(
     }
 
     // --- Geometry: enough granules to be worth a gang. (This also OPENS the
-    // leader's scan desc — the winner gather below depends on it.)
+    // leader's scan desc — the winner gather below depends on it.) `None` =
+    // no columnar Part yet (freshly INSERTed data still row-store-resident;
+    // rowrefs would not exist) — refuse.
     let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
+        refused("granule geometry unavailable (no columnar part)");
         return Ok(false);
     };
     if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
