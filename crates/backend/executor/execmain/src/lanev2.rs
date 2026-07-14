@@ -5964,6 +5964,34 @@ fn sort_feed_sink_batched<'mcx>(
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
     let spec = topn_emit_arm(sort, agg);
+    // COMPOSED top-N winner list (topn-winners-only amendment): when the
+    // sink published winners, the winner list IS the drain — put exactly
+    // the ≤bound winner rows in the selection total order (rule 5), in
+    // BOTH selection modes. This restores the winners-vs-FullDrain
+    // byte-identity oracle on tie-bearing shapes: the landed bucket walk
+    // fed ALL rows and let the bounded heap re-pick tie members
+    // (arrival-order-arbitrary — the ratified count-gated class); the
+    // winner-directed put pins tie members to the deterministic selection
+    // order. Winner sets are a valid top-bound under the sort's count
+    // order by the refinement argument (selection order = count badness
+    // first), so the tuplesort's bounded result stays correct by
+    // construction. Degraded/uncomposed sinks take `None` and walk the
+    // buckets exactly as before.
+    if let Some(winners) = ::nodeagg::sink::agg_sink_emit_take_winners(agg) {
+        for &(b, r) in &winners {
+            ::postgres_seams::check_for_interrupts::call()?;
+            let slot =
+                ::nodeagg::sink::agg_sink_emit_block_row(agg, estate, b as usize, r as usize);
+            ::nodesort::sort_lane_put(sort, estate, slot)?;
+        }
+        if stats::armed() && spec.is_some() {
+            stats::tick_topnemit_groups(winners.len() as u64, 0);
+        }
+        ::nodeagg::sink::agg_sink_emit_drained(agg);
+        ::nodesort::sort_lane_finish(sort, estate)?;
+        estate.es_direction = dir;
+        return Ok(());
+    }
     // The armed spec's sort key as an EMIT column: sortColIdx is 1-based
     // over the agg's output tlist = the EmitBuf's column order.
     let key_col = spec.map(|_| (sort.plan.sortColIdx[0] - 1) as usize);
