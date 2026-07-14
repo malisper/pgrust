@@ -469,9 +469,21 @@ fn sink_drain_range<'mcx>(
     loop {
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
         // held across this point), budget-check table + runs.
-        if let Some(run) = ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap) {
+        if let Some((run, intern_reset)) =
+            ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
+        {
             local.run_bytes += run.bytes();
             local.runs.push(run);
+            if intern_reset {
+                // The flush RESET the intern table (wide-vocabulary
+                // bounding): every code→intern-id cache is now stale — a
+                // cached id would materialize the WRONG canonical bytes.
+                mks.epoch = None;
+                mks.code_ids.clear();
+                if let Some(xk) = xk.as_deref_mut() {
+                    xk.invalidate_mk_intern_cache();
+                }
+            }
             let aggctx = if sink.byref_states {
                 ::nodeagg::sink::agg_sink_aggctx_mem(agg)
             } else {
@@ -482,6 +494,13 @@ fn sink_drain_range<'mcx>(
             {
                 return Err(AcceptFail::Budget);
             }
+        }
+        // Demote = refusal: at half-limit pressure (table + intern +
+        // aggcontext vs the compact backstop's own thresholds) REFUSE — RG
+        // abort -> serial rerun — before the backstop's sink-mode belt
+        // would raise its hard error (the q34@100M wide-vocabulary class).
+        if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+            return Err(AcceptFail::Budget);
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {

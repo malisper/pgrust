@@ -1596,6 +1596,17 @@ impl ExprKeyState {
     pub(super) fn sink_refused(&self) -> bool {
         self.refused
     }
+
+    /// Invalidate the Multi kind's per-epoch code→intern-id cache. The M2
+    /// sink drain calls this after a flush that RESET the worker's intern
+    /// table (wide-vocabulary bounding) — a cached id would materialize
+    /// the WRONG bytes. No-op for the other kinds.
+    pub(super) fn invalidate_mk_intern_cache(&mut self) {
+        if let ExprKeyKind::Multi(m) = &mut self.kind {
+            m.mks.epoch = None;
+            m.mks.code_ids.clear();
+        }
+    }
 }
 
 fn exprkey_batch<'mcx>(
