@@ -6027,9 +6027,34 @@ fn agg_retrieve_hash_table<'mcx>(
     }
 }
 
+/// M2 sink teardown floor: an adopted parallel emit result at or above this
+/// content size triggers an allocator release after the drop. The engagement
+/// that produced it churned a working set several times larger (per-worker
+/// tables + radix runs + merge tables, most of it in helper threads that have
+/// already exited), all freed-but-RETAINED by mimalloc — at q33@100M-class
+/// shapes (~10^8 groups) that ratchet is multi-GB per execution and a repeat
+/// run of the same query crosses the pod cgroup ceiling: the kernel
+/// OOM-kills the whole (single-process) server silently (m2-coverage
+/// forensics class; notes/q33-try2-kill.md). Same discipline as the hashagg
+/// spill path's `hashagg_release_retained` sites. Small emits skip: the
+/// collect is not free and sub-64MB engagements cannot meaningfully ratchet.
+const SINK_RELEASE_MIN_BYTES: usize = 64 << 20;
+
 /// `ExecEndAgg` node-local half; the caller ends the outer child (contexts
 /// are freed with the EState).
 pub fn exec_end_agg(node: &mut AggStateData<'_>) {
+    // M2 sink: drop the adopted parallel emit state NOW (its bufs are std
+    // allocations, not EState arena) and, for engagement-sized results,
+    // release the allocator's freed-but-retained segments so the NEXT
+    // execution of this shape rebuilds inside the same RSS envelope instead
+    // of stacking a second working set on top (see SINK_RELEASE_MIN_BYTES).
+    if let Some(st) = node.sink_emit.take() {
+        let bytes: usize = st.bufs.iter().map(|b| b.bytes()).sum();
+        drop(st);
+        if bytes >= SINK_RELEASE_MIN_BYTES {
+            hashagg_release_retained("sink_teardown");
+        }
+    }
     node.qual = None;
     node.merge = None;
     hashgrouped::agg_hashgroup_reset(node);
