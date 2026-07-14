@@ -5163,6 +5163,7 @@ dependencies = [
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
+ "spillset",
  "subtrans",
  "sync_seams",
  "syncrep_seams",
