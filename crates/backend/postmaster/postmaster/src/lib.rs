@@ -665,6 +665,18 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
+        // C process_pm_child_exit slot sync worker arm: status 0/1 is a
+        // normal stop (config change, promotion); the main loop relaunches
+        // it after SLOTSYNC_RESTART_INTERVAL_SEC when still applicable.
+        if with_pm(|pm| pm.slotsync_worker.map(|c| c.pid)) == Some(pid) {
+            let ss = with_pm(|pm| pm.slotsync_worker.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(ss.child_slot);
+            if !(status0 || status1) {
+                handle_child_crash("slot sync worker process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
         if with_pm(|pm| pm.syslogger.map(|c| c.pid)) == Some(pid) {
             let logger = with_pm(|pm| pm.syslogger.take()).expect("checked");
             pmchild_seams::release_postmaster_child_slot::call(logger.child_slot);
