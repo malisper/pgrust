@@ -6979,6 +6979,23 @@ fn distincthash_batch_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_FOLD` kill switch (default ON): mixed-shape
+/// admission into the batched fast leg — plain exact-integer vocabulary
+/// transitions (count(*)/count(x)/sum(int2/4)/avg(int2/4), the pardistinct
+/// vocab) fold in sidecar words beside the DISTINCT set parks (Q10-class:
+/// sums alongside the COUNT DISTINCT). Off, mixed shapes keep the per-row
+/// transition program exactly as before (the historical all-set-mode batch
+/// gate) — the A/B attribution channel for the fold delta.
+fn distincthash_fold_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_FOLD").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -7056,12 +7073,14 @@ fn hashgroup_order_spec(
 /// further row goes straight to the sort (the narrow-sort arm's feed,
 /// resumed mid-stream; section doc).
 /// Scan-column map for the batched fast leg (`agg_hashgroup_batch_shape`
-/// order): the grouping keys' and the per-pertrans DISTINCT args' 0-based
-/// SCAN columns — every mapped outer column proved a bare Var, so the
-/// staged scan cell IS the projected outer cell.
+/// order): the grouping keys', the per-pertrans DISTINCT args', and the
+/// arg-bearing fold-vocab entries' 0-based SCAN columns — every mapped
+/// outer column proved a bare Var, so the staged scan cell IS the projected
+/// outer cell.
 struct HgBatchCols {
     key_cols: Vec<u16>,
     arg_cols: Vec<u16>,
+    fold_cols: Vec<u16>,
 }
 
 struct HashGroupDistinctSink<'a, 'mcx> {
@@ -7144,12 +7163,16 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             // projects into a slot and never restages (the dict-lane feed
             // relies on the same window-stability contract); the pointers
             // are consumed before this call returns.
-            let nc = cols.key_cols.len() + cols.arg_cols.len();
+            let nc = cols.key_cols.len() + cols.arg_cols.len() + cols.fold_cols.len();
             let mut views: Vec<(*const ::datum::Datum, *const bool)> = Vec::with_capacity(nc);
             let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
             let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
-            for (ci, &col) in
-                cols.key_cols.iter().chain(cols.arg_cols.iter()).enumerate()
+            for (ci, &col) in cols
+                .key_cols
+                .iter()
+                .chain(cols.arg_cols.iter())
+                .chain(cols.fold_cols.iter())
+                .enumerate()
             {
                 let Some((vals, nulls, fallback, sel)) = emit.refsort_key_batch(col, n)
                 else {
@@ -7170,9 +7193,11 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             // per-row check inside `emit`).
             ::postgres_seams::check_for_interrupts::call()?;
             let nk = cols.key_cols.len();
+            let na = cols.arg_cols.len();
             let mut keyd = [::datum::Datum::null(); 32];
             let mut keyn = [false; 32];
             let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
+            let mut folds: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.fold_cols.len()];
             for i in pos..n {
                 let w = (i / 64) as usize;
                 let bit = 1u64 << (i % 64);
@@ -7197,8 +7222,11 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         keyd[j] = *v.add(i as usize);
                         keyn[j] = *nl.add(i as usize);
                     }
-                    for (j, &(v, nl)) in views[nk..].iter().enumerate() {
+                    for (j, &(v, nl)) in views[nk..nk + na].iter().enumerate() {
                         args[j] = (*v.add(i as usize), *nl.add(i as usize));
+                    }
+                    for (j, &(v, nl)) in views[nk + na..].iter().enumerate() {
+                        folds[j] = (*v.add(i as usize), *nl.add(i as usize));
                     }
                 }
                 match ::nodeagg::agg_hashgroup_accept_batch_row(
@@ -7206,6 +7234,7 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     &keyd[..nk],
                     &keyn[..nk],
                     &args,
+                    &folds,
                 ) {
                     ::nodeagg::HgBatchRow::Absorbed(true) => self.fast_rows += 1,
                     ::nodeagg::HgBatchRow::Absorbed(false) => {
@@ -7257,7 +7286,7 @@ impl<'mcx> HashGroupDistinctSink<'_, 'mcx> {
         while let Some(slot) = ::nodeagg::agg_hashgroup_next_rep(self.agg) {
             ::nodesort::sort_lane_put_slot(self.sort, mcx, slot)?;
         }
-        ::nodeagg::agg_hashgroup_set_residual(self.agg);
+        ::nodeagg::agg_hashgroup_set_residual(self.agg)?;
         self.degraded = true;
         Ok(())
     }
@@ -7327,26 +7356,44 @@ fn try_hashgroup_build<'mcx>(
     // (identity for bare scans; through the projection classification
     // otherwise — the staged scan cell is then the projected outer cell).
     let batch = if distincthash_batch_enabled() {
-        ::nodeagg::agg_hashgroup_batch_shape(agg).and_then(|(katts, aatts)| {
-            let map = |att: u16| -> Option<u16> {
-                match ss.ss.ps_ProjInfo.as_ref() {
-                    None => Some(att),
-                    Some(p) => {
-                        let cols = p.pi_state.scan_proj_cols()?;
-                        if (att as usize) >= cols.n as usize {
-                            return None;
-                        }
-                        match cols.cols[att as usize] {
-                            ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
-                            _ => None,
+        ::nodeagg::agg_hashgroup_batch_shape(agg, distincthash_fold_enabled()).and_then(
+            |shape| {
+                let map = |att: u16| -> Option<u16> {
+                    match ss.ss.ps_ProjInfo.as_ref() {
+                        None => Some(att),
+                        Some(p) => {
+                            let cols = p.pi_state.scan_proj_cols()?;
+                            if (att as usize) >= cols.n as usize {
+                                return None;
+                            }
+                            match cols.cols[att as usize] {
+                                ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                                _ => None,
+                            }
                         }
                     }
+                };
+                let key_cols: Option<Vec<u16>> =
+                    shape.key_atts.iter().map(|&a| map(a)).collect();
+                let arg_cols: Option<Vec<u16>> =
+                    shape.set_args.iter().map(|&a| map(a)).collect();
+                let fold_cols: Option<Vec<u16>> =
+                    shape.fold_atts.iter().map(|&a| map(a)).collect();
+                let cols = HgBatchCols {
+                    key_cols: key_cols?,
+                    arg_cols: arg_cols?,
+                    fold_cols: fold_cols?,
+                };
+                // Arm the sidecar vocab only once the whole column map held
+                // (a fold-armed build whose batch never engages would waste
+                // the per-group sidecar words for nothing).
+                if !shape.vocab.is_empty() {
+                    trace_feed("hash-grouped distinct fold vocab armed");
+                    ::nodeagg::agg_hashgroup_arm_fold(agg, shape.vocab);
                 }
-            };
-            let key_cols: Option<Vec<u16>> = katts.iter().map(|&a| map(a)).collect();
-            let arg_cols: Option<Vec<u16>> = aatts.iter().map(|&a| map(a)).collect();
-            Some(HgBatchCols { key_cols: key_cols?, arg_cols: arg_cols? })
-        })
+                Some(cols)
+            },
+        )
     } else {
         None
     };
@@ -7362,6 +7409,7 @@ fn try_hashgroup_build<'mcx>(
             .key_cols
             .iter()
             .chain(b.arg_cols.iter())
+            .chain(b.fold_cols.iter())
             .map(|&c| c as i32 + 1)
             .max()
             .unwrap_or(0);
