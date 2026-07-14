@@ -397,8 +397,26 @@ pub(super) struct RuntimeAggShared {
     eflags: i32,
     refused: AtomicUsize,
     started: AtomicUsize,
+    /// Helpers that have EXITED `helper_drive` (every exit path — refused
+    /// bind, errored, drove to completion — bumps exactly once, by drop
+    /// guard). Liveness reap input (inc-2c): a pinned RG is invisible to
+    /// pool workers, so once `exited >= launched` with the RG incomplete,
+    /// nobody will ever step it — the leader must reap or park forever.
+    exited: AtomicUsize,
     sink: Arc<AggSink>,
     query_id: AtomicU64,
+}
+
+/// Bump-on-drop exit counter: rides `helper_drive`'s frame so EVERY exit
+/// path (including a panic unwinding into the hook's catch_unwind) counts
+/// exactly once. `pub(super)`: runtime_distinct's helper hook has the
+/// identical liveness hole and shares this guard.
+pub(super) struct ExitBump<'a>(pub(super) &'a AtomicUsize);
+
+impl Drop for ExitBump<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 struct WorkerExec {
@@ -904,6 +922,9 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShared>) {
     let _ = shared;
+    // Every launched helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`).
+    let _exit = ExitBump(&payload.exited);
     let Some(target) = payload.pcxt_shared.get() else { return };
     let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
     let Some(lane) = payload.rt.acquire_external_lane() else {
@@ -1382,6 +1403,20 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let Some(budget) = ::nodeagg::sink::agg_sink_hash_mem_limit(agg) else {
         return Ok(false);
     };
+    // inc-2c: MIRROR the worker's compact-arm spill gate under the sink cap
+    // BEFORE engaging (the leg-4d wedge class: at tiny work_mem the cap'd
+    // group estimate is spill-eligible, so EVERY worker's `arm_sink_build`
+    // must refuse — engaging such a shape is pure waste and, before the
+    // liveness reap, wedged the leader forever). The predicate is READ-ONLY
+    // (the leader's own build may already be serial-armed) and
+    // single-sourced with the worker arm's arithmetic
+    // (`single_word_spillrisk` in nodeagg::compact) — both drain modes (K2
+    // and expr-key Single/Reduced) arm through that same gate.
+    if ::nodeagg::agg_hash_compact_sink_would_refuse(agg, sink_cap()) {
+        refuse("compact arm would refuse under the sink cap/budget — serial");
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(false);
+    }
     // --- Session/binder gates (the M1 set, verbatim).
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
         refuse("in parallel mode");
@@ -1511,6 +1546,7 @@ fn engage<'mcx>(
         eflags: estate.es_top_eflags,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
+        exited: AtomicUsize::new(0),
         sink: Arc::clone(&sink),
         query_id: AtomicU64::new(0),
     });
@@ -1588,6 +1624,7 @@ fn engage_ceremony<'mcx>(
             "runtime-agg: engaged dop={launched} granules={total_granules}"
         ));
 
+        let mut all_exited_seen = false;
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -1606,6 +1643,28 @@ fn engage_ceremony<'mcx>(
                 rg.abort();
                 drain_rg(rt, &rg);
                 return Ok(EngageOutcome::Fallback);
+            }
+            // LIVENESS REAP (inc-2c, the leg-4d wedge class): a pinned RG is
+            // invisible to pool workers (rg.rs — publication never sets the
+            // global active bit), so once every launched helper has exited
+            // without the RG completing, NOBODY will ever step it and the
+            // leader parks forever. Reap: abort + drain the closed
+            // generation ourselves; the next try_wait surfaces Aborted and
+            // the existing error/budget/fallback handling below decides.
+            // Two consecutive sightings before reaping let a mid-settlement
+            // completion land first — belt only: a helper's exit bump
+            // happens-after its drive's completion.complete(), and abort +
+            // drive_pinned on a completed RG are benign no-ops.
+            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+                if all_exited_seen && waiter.try_wait().is_none() {
+                    lane_trace(
+                        "runtime-agg: all helpers exited without completing the RG — reaping",
+                    );
+                    rg.abort();
+                    drain_rg(rt, &rg);
+                    continue;
+                }
+                all_exited_seen = true;
             }
             parallel::wait_parallel_finish_quantum();
         };
