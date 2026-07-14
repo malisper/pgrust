@@ -203,6 +203,14 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_condition_cache_size,
         set: backing::set_pgrust_condition_cache_size,
     });
+    vars::pgrust_parallel_engine.install(GucVarAccessors {
+        get: backing::pgrust_parallel_engine,
+        set: backing::set_pgrust_parallel_engine,
+    });
+    vars::pgrust_runtime_dop.install(GucVarAccessors {
+        get: backing::pgrust_runtime_dop,
+        set: backing::set_pgrust_runtime_dop,
+    });
     vars::check_function_bodies.install(GucVarAccessors {
         get: backing::check_function_bodies,
         set: backing::set_check_function_bodies,

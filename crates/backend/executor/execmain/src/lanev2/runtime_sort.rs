@@ -50,6 +50,7 @@ use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::{drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed};
 use super::{lane_trace, seq_scan_fusible, trace_feed};
 
@@ -1171,8 +1172,11 @@ fn runtime_sort_enabled() -> bool {
 
 /// Refusal diagnosis trace (PGRUST_LANE_V2_TRACE only; emitted only once the
 /// arm is ARMED — dop set + runtime on — so unarmed sessions stay silent).
+/// M5-1: every sort-arm refusal also feeds the router's consolidated
+/// taxonomy (static vocabulary — the callers all pass literals).
 #[cold]
-fn refused(reason: &str) {
+fn refused(reason: &'static str) {
+    router::tick_refused(ArmClass::Sort, reason);
     lane_trace(&format!("runtime-sort: refused ({reason})"));
 }
 
@@ -1198,7 +1202,10 @@ pub(super) fn try_own_sort<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_sort_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    // The arm's own kills (PGRUST_RUNTIME_SORT / _FULL) keep gating here.
+    let dop = router::arm_dop(ArmClass::Sort);
     if dop <= 0 || !runtime::runtime_enabled() || !runtime_sort_enabled() {
         return Ok(false);
     }
@@ -1206,6 +1213,7 @@ pub(super) fn try_own_sort<'mcx>(
         return Ok(false);
     }
     let Some(rt) = runtime::global() else { return Ok(false) };
+    router::tick(ArmClass::Sort, ArmCounter::Offered);
     lane_trace("runtime-sort: probed");
 
     // --- Shape + session gates (fail-closed; every refusal = serial arm).
@@ -1302,7 +1310,15 @@ pub(super) fn try_own_sort<'mcx>(
     }
 
     // --- Engage.
-    engage(state, ss, outer_desc, estate, rt, dop, total_granules, starts, spec, scan_node)
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::Sort, ArmCounter::Engaged);
+    let r = engage(state, ss, outer_desc, estate, rt, dop, total_granules, starts, spec, scan_node)?;
+    router::tick(
+        ArmClass::Sort,
+        if r { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
 }
 
 /// Which sort-sink arm is engaging (the payload construction switch).

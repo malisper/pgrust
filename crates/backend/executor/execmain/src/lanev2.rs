@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod router;
 mod runtime_agg;
 mod runtime_distinct;
 mod runtime_hashjoin;
@@ -45,6 +46,8 @@ mod push;
 mod stats;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use router::engine_runtime_active;
+pub(crate) use router::query_start as router_query_start;
 
 use std::sync::OnceLock;
 
@@ -73,12 +76,18 @@ pub fn enabled() -> bool {
 /// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`
 /// logs lane engagement events to stderr. Resolved once per process.
 fn lane_trace(event: &str) {
-    static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
-    }) {
+    if lane_trace_enabled() {
         eprintln!("[lane-v2] {event}");
     }
+}
+
+/// Whether the engagement trace is armed — callers gating format! work
+/// (router trace lines) check this before building the string.
+fn lane_trace_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    })
 }
 
 /// M5-2 liveness-battery fault injection (test-only, default-off — dead
@@ -7788,8 +7797,9 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Armed-only, before any side effect (two placeholder GUC lookups).
-    if ::guc_tables::runtime_pool::runtime_distinct_pool_dop() <= 0
+    // Armed-only, before any side effect (M5-1: the router's arming read —
+    // bench GUC verbatim, else engine=runtime at pgrust.runtime_dop).
+    if router::arm_dop(router::ArmClass::Distinct) <= 0
         || !runtime::runtime_enabled()
     {
         return Ok(None);
