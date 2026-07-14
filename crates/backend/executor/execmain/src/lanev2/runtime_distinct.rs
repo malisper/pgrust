@@ -298,7 +298,16 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
                 // as an accept-phase crossing.
                 let b = m.mem_bytes();
                 let total = self.merged_bytes.fetch_add(b, Ordering::Relaxed) + b;
-                if total > self.spec.worker_budget.saturating_mul(sealed.len().max(1)) {
+                // COMPOSITION (train-13, m35 spill x train-12 R3; the agg
+                // arm's retain_bucket law verbatim): the in-memory envelope
+                // holds for spill-DISABLED engagements only — with the spill
+                // arm armed the merged result is legitimately bounded by the
+                // spilled content (combine_body's directory-only pre-count
+                // bounds each claim's transient footprint). Metering stays
+                // on for observability either way.
+                if self.spill_set.is_none()
+                    && total > self.spec.worker_budget.saturating_mul(sealed.len().max(1))
+                {
                     self.cross();
                     return;
                 }
