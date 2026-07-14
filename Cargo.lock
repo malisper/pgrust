@@ -1978,6 +1978,7 @@ dependencies = [
  "lwlock",
  "miscinit",
  "pgstat_seams",
+ "postinit",
  "postmaster_seams",
  "procsignal",
  "procsignal_seams",
