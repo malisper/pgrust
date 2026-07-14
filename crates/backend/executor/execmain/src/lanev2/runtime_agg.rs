@@ -1125,6 +1125,20 @@ fn sink_drain_range<'mcx>(
         // flush+spill (the aggcontext floor the runs still reference)
         // refuses. Spill-disarmed (canonical/kill-switch) keeps the plain
         // refusal exactly.
+        //
+        // EPOCH SIZING add-on (spill-envelopes lane, on the law above): the
+        // flush already drained the table-driven pressure — the run's bytes
+        // were live table bytes a moment ago, so HOLDING them to the R3
+        // budget crossing (the cap-flush path's own spill law above) keeps
+        // the per-Local envelope intact while cutting FEWER, BIGGER epochs.
+        // The pressure trip sits at the ~half-limit altitude (pinned by the
+        // compact backstop's sink-mode belt — raising it means moving the
+        // belt's hard error), so spill-per-trip wrote one ~(half-limit −
+        // aggctx) run per epoch (q33@100M: 15 × ~400MB per Local); the
+        // budget-crossing law accumulates ~2 trips per epoch — half the
+        // epoch brackets, half the combine-replay extents, same bytes.
+        // PGRUST_RUNTIME_AGG_SPILL_EAGER=1 restores spill-per-trip (the
+        // A/B attribution arm).
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
             match &sink.spill_set {
                 Some(set) => {
@@ -1141,7 +1155,18 @@ fn sink_drain_range<'mcx>(
                             }
                         }
                     }
-                    if !local.runs.is_empty() {
+                    let aggctx = if sink.byref_states {
+                        ::nodeagg::sink::agg_sink_aggctx_mem(agg)
+                    } else {
+                        0
+                    };
+                    if !local.runs.is_empty()
+                        && (agg_spill_eager()
+                            || local.run_bytes
+                                + ::nodeagg::sink::agg_sink_table_mem(agg)
+                                + aggctx
+                                > sink.budget)
+                    {
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
@@ -1757,6 +1782,15 @@ fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
 fn agg_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
+}
+
+/// EPOCH SIZING A/B arm (spill-envelopes lane): `1` restores the
+/// spill-on-every-pressure-trip behavior (one ~(half-limit − aggctx) run
+/// per epoch); default OFF = pressure-flush runs accumulate to the R3
+/// budget crossing before an epoch is written (fewer, bigger epochs).
+fn agg_spill_eager() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
 }
 
 /// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
