@@ -50,7 +50,7 @@ agg-topn-composed	agg	yes	degrade:passthrough,combine-split	yes	covered	runtime	
 groupby-high-1e7	agg	yes	no	no	covered-losing	legacy	-	runtime 2.23x vs legacy radix 2.73x; HOLD until parity (§10 Q2, v2 ruling)
 distinct-int-keys	distinct	yes	na	na	covered	runtime	CbDistinctIntKeys	q9/q10 22-28x rt16; DOP-1 budget class flipped to 1.69-2.06x WIN via spill
 distinct-text-date-args	distinct	na	na	na	refused	legacy	-	C1 car (text); date int_kind follow-up; plain q5/q6 shape unwired
-hashjoin-nbatch1	hashjoin	no	na	na	covered	runtime	CbHashJoinPlainAgg	inc-2 GREEN 14/14 byte parity; right family inc-3; ROW FLIPPED at m5-integration-r2 (probe: one JoinExpr, unindexed cbstore rels, int equi key, nbatch==1 both sides)
+hashjoin-nbatch1	hashjoin	no	na	na	covered	runtime	CbHashJoinPlainAgg	inc-2 GREEN 14/14 byte parity; right family inc-3; ROW FLIPPED at m5-integration-r2 (probe: one JoinExpr OR the flat 2-RangeTblRef INNER form, unindexed cbstore rels, int equi key, nbatch==1 both sides)
 hashjoin-multibatch-spill	hashjoin	yes	na	na	covered	legacy	-	m35 inc-4/5 LANDED train-14 (spill default ON; engagement beats serial fallback 2.26x); probe keeps nbatch>1 estimates on Gather until this row's own measured flip
 hashjoin-multibuild-sql	hashjoin	na	na	na	not-covered	legacy	-	m5p1 gap: NO arm admits 2+ build sides in one engagement (DAG substrate runtime-ready; the multi-pipeline QuerySpec plan-walk is the missing piece); probe classifies nested JoinExprs uncovered by construction
 topn-bounded-int-keys	sort	na	yes	na	covered	runtime	CbTopnBoundedIntKeys	tranche 77/77; multi-key inc-5; relaxed tie-order default (probe-budget guard); ROW FLIPPED at m5-integration-r2 (probe: ORDER BY int Vars + LIMIT no OFFSET, all-Var tlist)

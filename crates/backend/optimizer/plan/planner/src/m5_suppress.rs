@@ -347,12 +347,31 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    // Exactly one FROM item: a plain relation (the single-rel classes) or
-    // ONE explicit JoinExpr (row flip 2, CbHashJoinPlainAgg). A flat
-    // comma-join (`FROM a, b WHERE ...`, fromlist len 2) and nested join
-    // trees (multi-build-side — the m5p1 SQL admission gap) classify
-    // uncovered by construction.
+    // FROM shapes the probe keys (everything else classifies uncovered by
+    // construction — notably nested join trees, the m5p1 multi-build-side
+    // SQL admission gap):
+    //   * ONE plain relation (the single-rel classes);
+    //   * ONE explicit JoinExpr (row flip 2, CbHashJoinPlainAgg — the
+    //     outer-join families survive to the planner in this form);
+    //   * TWO RangeTblRefs (row flip 2, flat form): the INNER-join shape as
+    //     the planner sees it — `a JOIN b ON q` and `a, b WHERE q` are the
+    //     same FromExpr by probe time, with the equi quals in top.quals.
     let Some(top) = parse.jointree else { return Ok(false) };
+    if top.fromlist.len() == 2 {
+        let (Some(ra), Some(rb)) = (
+            top.fromlist.nth(0).as_range_tbl_ref(),
+            top.fromlist.nth(1).as_range_tbl_ref(),
+        ) else {
+            return Ok(false);
+        };
+        return classify_join_sides(
+            run,
+            parse,
+            ra.rtindex as usize,
+            rb.rtindex as usize,
+            top.quals,
+        );
+    }
     if top.fromlist.len() != 1 {
         return Ok(false);
     }
@@ -561,15 +580,49 @@ fn classify_join_covered(
     je: &types_nodes::primnodes::JoinExpr<'_>,
 ) -> PgResult<bool> {
     use types_nodes::JoinType;
-    // Refusal diagnostics (PGRUST_M5_SUPPRESS_TRACE=1): the join probe's
-    // guards are planner-choice-shaped and worth naming when they refuse —
-    // the suppression tranche's leg-1 failures are undiagnosable without.
-    fn refuse_join(why: &str) -> PgResult<bool> {
-        if trace_armed() {
-            eprintln!("m5-suppress: join probe refused ({why})");
-        }
-        Ok(false)
+    // Phase-1 + right join families the walk admits (semi/anti arrive via
+    // sublinks, prefiltered upstream).
+    if !matches!(
+        je.jointype,
+        JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT | JoinType::JOIN_FULL
+    ) {
+        return refuse_join("join family");
     }
+    // Both arms plain relations (no nested joins: the multi-build-side SQL
+    // shapes are the m5p1 admission gap, uncovered).
+    let mut sides = [0usize; 2];
+    for (i, arg) in [je.larg, je.rarg].into_iter().enumerate() {
+        let Some(rtr) = arg.as_range_tbl_ref() else {
+            return refuse_join("nested join tree (multi-build-side gap)");
+        };
+        sides[i] = rtr.rtindex as usize;
+    }
+    classify_join_sides(run, parse, sides[0], sides[1], je.quals)
+}
+
+/// Refusal diagnostics (PGRUST_M5_SUPPRESS_TRACE=1): the join probe's
+/// guards are planner-choice-shaped and worth naming when they refuse.
+/// The prefix is deliberately NOT `m5-suppress:` — the conformance leg's
+/// M5CENSUS counts that exact prefix as SUPPRESSIONS, and the regress
+/// corpus is full of join queries whose refusals would flood it.
+fn refuse_join(why: &str) -> PgResult<bool> {
+    if trace_armed() {
+        eprintln!("m5-suppress-refuse: join probe ({why})");
+    }
+    Ok(false)
+}
+
+/// The join classifier's shared body (both FROM forms of row flip 2: one
+/// explicit JoinExpr, or the flat two-RangeTblRef FromExpr the planner
+/// carries for INNER joins — `a JOIN b ON q` == `a, b WHERE q` by probe
+/// time, quals in the FromExpr).
+fn classify_join_sides(
+    run: &mut PlannerRun<'_>,
+    parse: &Query<'_>,
+    rti_l: usize,
+    rti_r: usize,
+    join_quals: Option<Node<'_>>,
+) -> PgResult<bool> {
     // Plain one-row aggregation only (the arm drives a plain agg sink):
     // no grouping, no DISTINCT, no ORDER BY/LIMIT decoration.
     if !parse.hasAggs
@@ -581,24 +634,6 @@ fn classify_join_covered(
     {
         return refuse_join("not a plain one-row aggregation");
     }
-    // Phase-1 + right join families the walk admits (semi/anti arrive via
-    // sublinks, prefiltered upstream).
-    if !matches!(
-        je.jointype,
-        JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT | JoinType::JOIN_FULL
-    ) {
-        return refuse_join("join family");
-    }
-    // Both arms plain cbstore relations (no nested joins: the
-    // multi-build-side SQL shapes are the m5p1 admission gap, uncovered).
-    let mut sides = [0usize; 2];
-    for (i, arg) in [je.larg, je.rarg].into_iter().enumerate() {
-        let Some(rtr) = arg.as_range_tbl_ref() else {
-            return refuse_join("nested join tree (multi-build-side gap)");
-        };
-        sides[i] = rtr.rtindex as usize;
-    }
-    let [rti_l, rti_r] = sides;
     let mut relids = [0u32; 2];
     for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
@@ -644,9 +679,9 @@ fn classify_join_covered(
         }
     }
     // >=1 hashjoinable int-family equi clause between the two sides in the
-    // JOIN quals (top-level AND terms only).
+    // join quals (top-level AND terms only).
     let mut has_equi = false;
-    let quals: Vec<Node<'_>> = match je.quals {
+    let quals: Vec<Node<'_>> = match join_quals {
         None => return refuse_join("no join quals"),
         Some(q) => match q.as_bool_expr() {
             Some(be)
