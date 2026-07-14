@@ -81,6 +81,29 @@ fn lane_trace(event: &str) {
     }
 }
 
+/// M5-2 liveness-battery fault injection (test-only, default-off — dead
+/// unless the env var is set at server start): `PGRUST_TEST_HELPER_PANIC=
+/// <arm>[,<arm>...]` (or `all`; arms: scan/agg/distinct/hashjoin/sort)
+/// makes every helper of the named arm(s) panic BEFORE binding or driving.
+/// This is the exact all-helpers-exit-without-driving wedge geometry of the
+/// m35-spill inc-2c agg wedge (a pinned RG is invisible to pool workers, so
+/// with every helper gone nobody steps it and the leader parks forever) —
+/// the geometry the leader's ExitBump reap must convert into a prompt,
+/// recoverable error. scripts/runtime-liveness-e2e.sh is the standing
+/// battery over this knob. Resolved once per process.
+fn test_helper_panic(arm: &str) {
+    static KNOB: OnceLock<Option<String>> = OnceLock::new();
+    let Some(v) = KNOB.get_or_init(|| std::env::var("PGRUST_TEST_HELPER_PANIC").ok()) else {
+        return;
+    };
+    if v.split(',').any(|a| {
+        let a = a.trim();
+        a == "all" || a.eq_ignore_ascii_case(arm)
+    }) {
+        panic!("pgrust: test helper panic injection ({arm})");
+    }
+}
+
 // ===========================================================================
 // Phase-3 qual kernel: the vectorized selection-bitmap qual for lane-owned
 // filtered scans. This restores the fast path the NON-lane `WithQual` drive

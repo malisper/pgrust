@@ -78,6 +78,14 @@ pub(super) struct RuntimeHjShared {
     pins_base: usize,
     refused: AtomicUsize,
     started: AtomicUsize,
+    /// Helpers that have EXITED `helper_drive` (every exit path — refused
+    /// bind, errored, drove to completion, panic-unwind — bumps exactly
+    /// once, by drop guard; the m35-spill inc-2c `ExitBump` pattern, ported
+    /// here per the inc-2c FLAG). Liveness reap input: a pinned RG is
+    /// invisible to pool workers, so once `exited >= launched` with the RG
+    /// incomplete, nobody will ever step it — the leader must reap or park
+    /// forever.
+    exited: AtomicUsize,
     error: Mutex<Option<Box<PgError>>>,
     failed: AtomicBool,
     /// §6 envelope crossing: abort → LEADER FALLBACK (serial rerun), not an
@@ -583,9 +591,30 @@ fn runtime_hj_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeHjShared>) {
     let _ = shared;
-    let Some(target) = payload.pcxt_shared.get() else { return };
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // Every launched helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`;
+    // m35-spill inc-2c port).
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("hashjoin");
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
+    let Some(target) = payload.pcxt_shared.get() else {
+        lane_trace("runtime-hashjoin: helper refused (no pcxt shared)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        lane_trace("runtime-hashjoin: helper refused (rg gone)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
     let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-hashjoin: helper refused (no external lane)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
@@ -600,7 +629,23 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeHjShared
         Ok(()) => {}
         Err(e) => {
             if entered.get() {
+                // Budget refusals are NOT query errors (the leader falls
+                // back to the serial arm); the leader drops any recorded
+                // secondary errors on that path.
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader parks on
+                // its recheck cadence until the reap. Drive the closed
+                // generation to completion here (pure protocol cleanup,
+                // the drain_rg discipline); post-drive errors find it
+                // already complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 lane_trace(&format!(
                     "runtime-hashjoin: helper bind refused: {}",
@@ -952,6 +997,7 @@ fn engage<'mcx>(
         pins_base: rt.nthreads(),
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
+        exited: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         budget_refused: AtomicBool::new(false),
@@ -1068,6 +1114,7 @@ fn engage_ceremony<'mcx>(
             "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules}"
         ));
 
+        let mut all_exited_seen = false;
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -1110,7 +1157,41 @@ fn engage_ceremony<'mcx>(
                     "runtime hash-join helpers exited before completing the join",
                 )));
             }
-            parallel::wait_parallel_finish_quantum();
+            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
+            // arm class; the agg leg-4d wedge): a pinned RG is invisible to
+            // pool workers, so once every launched helper has exited
+            // without the RG completing, NOBODY will ever step it and the
+            // leader parks forever (the all-stopped probe above cannot see
+            // helpers that exited their drive but parked back to the pool).
+            // Reap: abort + drain the closed generation ourselves; the next
+            // try_wait surfaces Aborted and the existing error/budget/
+            // fallback handling below decides. Two consecutive sightings
+            // before reaping let a mid-settlement completion land first —
+            // belt only: a helper's exit bump happens-after its drive's
+            // completion, and abort + drive_pinned on a completed RG are
+            // benign no-ops.
+            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+                if all_exited_seen && waiter.try_wait().is_none() {
+                    lane_trace(
+                        "runtime-hashjoin: all helpers exited without completing the RG — reaping",
+                    );
+                    rg.abort();
+                    drain_rg(rt, &rg);
+                    continue;
+                }
+                all_exited_seen = true;
+            }
+            // A raised cancel disposition (statement_timeout /
+            // pg_cancel_backend) surfaces from the latch quantum as an Err
+            // (F1 defect layer 2b): abort + drain the RG, then propagate —
+            // exactly the CFI branch above. Discarding it made this park
+            // loop uncancellable (the F1 chaos finding the quantum's
+            // contract documents; fixed at the M5-2 consolidation).
+            if let Err(e) = parallel::wait_parallel_finish_quantum() {
+                rg.abort();
+                drain_rg(rt, &rg);
+                return Err(e);
+            }
         };
 
         if payload.budget_refused.load(Ordering::SeqCst) {
