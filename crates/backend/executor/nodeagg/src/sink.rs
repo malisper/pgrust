@@ -1278,17 +1278,13 @@ fn table_emit_datum(
 enum SinkEmitSrc {
     /// Combine-materialized per-bucket rows.
     Bufs(Vec<SinkEmitBuf>),
-    /// The adopted single-Local table: rows addressed bucket-by-bucket
-    /// through the SEAL partition index — the same rows in the same order
-    /// the pass-through emit would have materialized (insertion order per
-    /// bucket; the out-of-band NULL group row LAST in `SINK_NULL_BUCKET`).
-    Table {
-        table: SinkTableHandle,
-        part: SinkPart,
-        plan: SinkEmitPlan,
-        /// The NULL group's table row, resolved once at adopt.
-        null_row: Option<u32>,
-    },
+    /// The adopted single-Local table, drained LINEARLY: bucket 0 carries
+    /// every row in table insertion order (for a DOP1 build — the only
+    /// shape that adopts — sequential claims make that the SERIAL build's
+    /// own emit order, including the NULL group row at its insertion
+    /// position); buckets 1..255 are empty. No SEAL partition exists and
+    /// none is ever built.
+    Table { table: SinkTableHandle, plan: SinkEmitPlan },
 }
 
 /// The leader's adopted parallel emit state, drained bucket 0..255 in
@@ -1306,28 +1302,18 @@ impl SinkEmitState {
     fn bucket_len(&self, b: usize) -> usize {
         match &self.src {
             SinkEmitSrc::Bufs(bufs) => bufs[b].nrows,
-            SinkEmitSrc::Table { part, null_row, .. } => {
-                (part.starts[b + 1] - part.starts[b]) as usize
-                    + usize::from(b == SINK_NULL_BUCKET && null_row.is_some())
+            SinkEmitSrc::Table { table, .. } => {
+                if b == 0 {
+                    table.table().nrows()
+                } else {
+                    0
+                }
             }
         }
     }
 
-    /// The adopted table row behind (bucket, drain position) — partition
-    /// rows in SEAL order, the NULL row last in its bucket.
-    #[inline]
-    fn table_row(part: &SinkPart, null_row: Option<u32>, b: usize, row: usize) -> usize {
-        let lo = part.starts[b] as usize;
-        let hi = part.starts[b + 1] as usize;
-        if lo + row < hi {
-            part.idx[lo + row] as usize
-        } else {
-            debug_assert!(b == SINK_NULL_BUCKET && row == hi - lo);
-            null_row.expect("drain position past bucket end without a NULL row") as usize
-        }
-    }
-
-    /// One column datum of drain position (b, row).
+    /// One column datum of drain position (b, row). Table backing is
+    /// LINEAR: bucket 0, position == table row.
     #[inline]
     fn row_datum(&self, b: usize, row: usize, col: usize) -> (Datum, bool) {
         match &self.src {
@@ -1336,9 +1322,9 @@ impl SinkEmitState {
                 let i = row * self.natts + col;
                 (buf.values[i], buf.nulls[i])
             }
-            SinkEmitSrc::Table { table, part, plan, null_row } => {
-                let trow = Self::table_row(part, *null_row, b, row);
-                table_emit_datum(plan, table.table(), trow, col)
+            SinkEmitSrc::Table { table, plan } => {
+                debug_assert_eq!(b, 0);
+                table_emit_datum(plan, table.table(), row, col)
             }
         }
     }
@@ -1354,10 +1340,10 @@ impl SinkEmitState {
                 values[..self.natts].copy_from_slice(&buf.values[base..base + self.natts]);
                 nulls[..self.natts].copy_from_slice(&buf.nulls[base..base + self.natts]);
             }
-            SinkEmitSrc::Table { table, part, plan, null_row } => {
-                let trow = Self::table_row(part, *null_row, b, row);
+            SinkEmitSrc::Table { table, plan } => {
+                debug_assert_eq!(b, 0);
                 for c in 0..self.natts {
-                    let (v, isnull) = table_emit_datum(plan, table.table(), trow, c);
+                    let (v, isnull) = table_emit_datum(plan, table.table(), row, c);
                     values[c] = v;
                     nulls[c] = isnull;
                 }
@@ -1379,28 +1365,20 @@ pub fn agg_sink_adopt_emit(node: &mut AggStateData<'_>, bufs: Vec<SinkEmitBuf>, 
 }
 
 /// TRUE TABLE ADOPT (dop1-tax2 inc-1): adopt the published single-Local
-/// table + SEAL partition wholesale — zero emit materialization; the drain
-/// forms rows on demand (survivors only, under the consumers' boundary
-/// cut). Byval emit plans only (the adoption gate — re-checked here).
+/// table wholesale — zero emit materialization, zero partitioning; the
+/// drain forms rows on demand (survivors only, under the consumers'
+/// boundary cut), LINEARLY in table insertion order (the DOP1 build's
+/// serial-equivalent order). Byval emit plans only (the adoption gate —
+/// re-checked here).
 pub fn agg_sink_adopt_table(
     node: &mut AggStateData<'_>,
     table: SinkTableHandle,
-    part: SinkPart,
     plan: SinkEmitPlan,
 ) {
     debug_assert!(sink_emit_plan_all_byval(&plan), "table adopt over a byref emit plan");
-    // Resolve the out-of-band NULL group row once (single O(n) sweep —
-    // the pass-through emit's scan, hoisted out of the drain).
-    let null_row = if part.has_null {
-        let t = table.table();
-        (0..t.nrows()).find(|&r| t.row_key_int(r).is_none()).map(|r| r as u32)
-    } else {
-        None
-    };
-    debug_assert_eq!(part.has_null, null_row.is_some());
     let natts = plan.cols.len();
     node.sink_emit = Some(Box::new(SinkEmitState {
-        src: SinkEmitSrc::Table { table, part, plan, null_row },
+        src: SinkEmitSrc::Table { table, plan },
         natts,
         bucket: 0,
         pos: 0,
@@ -1988,21 +1966,20 @@ mod tests {
         assert_eq!(total_rows, 2001);
     }
 
-    /// TRUE TABLE ADOPT oracle (dop1-tax2 inc-1): the table-backed drain's
-    /// per-position addressing (`SinkEmitState::table_row`) + on-demand
-    /// column forming (`table_emit_datum`) reproduce the pass-through
-    /// emit's rows byte-for-byte (values, nulls, order) for every bucket
-    /// including the NULL group's — and the pass-through is itself oracled
-    /// against the merge arm above, closing the chain to the general path.
+    /// TRUE TABLE ADOPT oracle (dop1-tax2 inc-1b): the LINEAR table-backed
+    /// drain (`table_emit_datum` over rows 0..n) reproduces
+    /// `sink_emit_bucket`'s whole-table emit byte-for-byte — the exact
+    /// forming the merge arm applies (values, nulls; order = insertion
+    /// order with the NULL group row at its insertion position). Content
+    /// parity with the merge/pass-through arms is closed by
+    /// `passthrough_emit_matches_merge_arm` (same emit_row core).
     #[test]
-    fn table_drain_matches_passthrough_emit() {
+    fn table_linear_drain_matches_whole_table_emit() {
         let mut t = mk_table(64);
         for k in 0..2000 {
             bump(&mut t, Some(k), 1, 3 * k + 1);
         }
         bump(&mut t, None, 4, 11);
-        let part = sink_partition_remainder(&t);
-        assert!(part.has_null);
         let plan = SinkEmitPlan {
             width: 8,
             cols: vec![
@@ -2013,34 +1990,21 @@ mod tests {
         };
         assert!(sink_emit_plan_all_byval(&plan));
         let natts = plan.cols.len();
-        // The adopt-time NULL row resolution, verbatim.
-        let null_row =
-            (0..t.nrows()).find(|&r| t.row_key_int(r).is_none()).map(|r| r as u32);
-        assert!(null_row.is_some());
-        let mut total_rows = 0usize;
-        for b in 0..SINK_NBUCKETS {
-            let want = sink_emit_bucket_passthrough(&plan, &t, &part, b).unwrap();
-            let lo = part.starts[b] as usize;
-            let hi = part.starts[b + 1] as usize;
-            let n = hi - lo + usize::from(b == SINK_NULL_BUCKET && null_row.is_some());
-            assert_eq!(n, want.nrows, "bucket {b} row count");
-            for row in 0..n {
-                let trow = SinkEmitState::table_row(&part, null_row, b, row);
-                for c in 0..natts {
-                    let (v, isnull) = table_emit_datum(&plan, &t, trow, c);
-                    assert_eq!(isnull, want.nulls[row * natts + c], "bucket {b} row {row} col {c} null");
-                    if !isnull {
-                        assert_eq!(
-                            v.as_i64(),
-                            want.values[row * natts + c].as_i64(),
-                            "bucket {b} row {row} col {c} datum"
-                        );
-                    }
+        let want = sink_emit_bucket(&plan, &t).unwrap();
+        assert_eq!(want.nrows, 2001);
+        for row in 0..want.nrows {
+            for c in 0..natts {
+                let (v, isnull) = table_emit_datum(&plan, &t, row, c);
+                assert_eq!(isnull, want.nulls[row * natts + c], "row {row} col {c} null");
+                if !isnull {
+                    assert_eq!(
+                        v.as_i64(),
+                        want.values[row * natts + c].as_i64(),
+                        "row {row} col {c} datum"
+                    );
                 }
             }
-            total_rows += n;
         }
-        assert_eq!(total_rows, 2001);
     }
 
     #[test]
