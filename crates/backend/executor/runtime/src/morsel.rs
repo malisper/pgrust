@@ -50,6 +50,18 @@ pub trait MorselSource: Send + Sync {
     fn whole_boundary_claims(&self) -> bool {
         false
     }
+
+    /// Claim coalescing (dop1-tax fix 1), on top of whole-boundary claims:
+    /// at LOW live width one claim may span SEVERAL boundaries (the factor
+    /// decays to one epoch as workers join — sched.rs claim_morsel). Only
+    /// sources whose WORK BODY subdivides a multi-boundary claim back into
+    /// per-epoch segments may opt in (runtime_scan's morsel_body does; the
+    /// sink drains feed a claim straight into `set_granule_range`, which
+    /// refuses boundary-crossing ranges — they must not). Ignored unless
+    /// `whole_boundary_claims()` is also true.
+    fn coalesce_claims(&self) -> bool {
+        false
+    }
 }
 
 /// Deterministic in-memory source for M0 tests: `total` granules with a hard

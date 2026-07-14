@@ -668,6 +668,7 @@ pub enum SinkEmitCol {
     SumInt128 { transno: u32 },
 }
 
+#[derive(Clone)]
 pub struct SinkEmitPlan {
     pub width: u8,
     pub cols: Vec<SinkEmitCol>,
@@ -801,6 +802,148 @@ fn key_datum(width: u8, k: i64) -> Datum {
     }
 }
 
+/// Append one 8-aligned byref image to the arena and record a (values
+/// index, arena offset) fix-up, resolved after the arena stops growing
+/// (Vec growth may move the heap buffer). Varlena consumers may read
+/// 4-byte headers + aligned payloads — hence the 8-alignment.
+fn push_image(
+    values: &mut Vec<Datum>,
+    nulls: &mut Vec<bool>,
+    arena: &mut Vec<u8>,
+    fixups: &mut Vec<(usize, usize)>,
+    img: &[u8],
+) {
+    let pad = (8 - arena.len() % 8) % 8;
+    arena.resize(arena.len() + pad, 0);
+    let off = arena.len();
+    arena.extend_from_slice(img);
+    fixups.push((values.len(), off));
+    values.push(Datum::null());
+    nulls.push(false);
+}
+
+/// Finalize+project one table row into the emit vectors (the per-row core
+/// of [`sink_emit_bucket`] / [`sink_emit_bucket_passthrough`]). Byref
+/// outputs (the numeric finalize vocabulary) land in `arena` with a fix-up
+/// recorded; the caller resolves fix-ups once the arena's length is final.
+#[inline]
+fn emit_row(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    row: usize,
+    values: &mut Vec<Datum>,
+    nulls: &mut Vec<bool>,
+    arena: &mut Vec<u8>,
+    fixups: &mut Vec<(usize, usize)>,
+) -> PgResult<()> {
+    // Single/Reduced tables: kw[0] IS the canonical i64 key (Int repr);
+    // Multi tables: kw is the packed key image (1 or 2 words). None =
+    // the out-of-band NULL group (single-word shapes only — Multi
+    // tables never probe it).
+    let kw = row_key_words(t, row);
+    let key = kw.map(|w| w[0] as i64);
+    let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
+    for c in &plan.cols {
+        match *c {
+            SinkEmitCol::Key => match key {
+                Some(k) => {
+                    values.push(key_datum(plan.width, k));
+                    nulls.push(false);
+                }
+                None => {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                }
+            },
+            SinkEmitCol::Derived(d) => match key {
+                // Reconstruction is exact by the feed's admission-time
+                // range guard; a NULL representative derives NULL (the
+                // strict ± operators' per-row result).
+                Some(k) => {
+                    values.push(key_datum(plan.width, d.eval(k)));
+                    nulls.push(false);
+                }
+                None => {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                }
+            },
+            SinkEmitCol::MultiComp { off, width } => match kw {
+                // compact_key_datums_mk's Int arm: width bytes at off,
+                // sign-extended, datum at the component's width.
+                Some(w) => {
+                    let image = (w[0] as u128) | ((w[1] as u128) << 64);
+                    let bits = (image >> (off as u32 * 8)) as u64;
+                    let sh = 64 - width as u32 * 8;
+                    let v =
+                        if sh == 0 { bits as i64 } else { ((bits << sh) as i64) >> sh };
+                    values.push(key_datum(width, v));
+                    nulls.push(false);
+                }
+                None => {
+                    // Unreachable for Multi tables (no NULL group row);
+                    // fail-soft as SQL NULL rather than asserting.
+                    values.push(Datum::null());
+                    nulls.push(true);
+                }
+            },
+            // SAFETY: the row's state block holds numtrans pergroups
+            // (bucket-table config = the sink's state_bytes); transno <
+            // numtrans by plan construction. Byval transvalues only.
+            SinkEmitCol::Agg { transno } => unsafe {
+                let pg = &*states.add(transno as usize);
+                values.push(pg.trans_value);
+                nulls.push(pg.trans_value_is_null);
+            },
+            // fc_int8_avg's exact core: strict (NULL trans → NULL),
+            // count == 0 → NULL, else the int64_avg_div image.
+            // SAFETY: non-null _int8 transvalue is a live merged image
+            // (combine contract).
+            SinkEmitCol::AvgInt8 { transno } => unsafe {
+                let pg = &*states.add(transno as usize);
+                if pg.trans_value_is_null {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                } else {
+                    let (count, sum) =
+                        crate::compact::int8_avg_trans_read(pg.trans_value)?;
+                    if count == 0 {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    } else {
+                        let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
+                        push_image(values, nulls, arena, fixups, img.as_bytes());
+                    }
+                }
+            },
+            // numeric_poly_avg / numeric_poly_sum's exact cores over the
+            // merged Int128AggState (NULL trans → None → NULL).
+            // SAFETY: as AvgInt8 — live merged state, sole reader.
+            SinkEmitCol::AvgInt128 { transno } | SinkEmitCol::SumInt128 { transno } => unsafe {
+                let pg = &*states.add(transno as usize);
+                let state = (!pg.trans_value_is_null).then(|| {
+                    &*(pg.trans_value.as_usize()
+                        as *const ::adt_numeric::aggregates::Int128AggState)
+                });
+                let img = match *c {
+                    SinkEmitCol::AvgInt128 { .. } => {
+                        ::adt_numeric::aggregates::numeric_poly_avg(state)?
+                    }
+                    _ => ::adt_numeric::aggregates::numeric_poly_sum(state)?,
+                };
+                match img {
+                    Some(img) => push_image(values, nulls, arena, fixups, img.as_bytes()),
+                    None => {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    }
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
 /// Finalize+project one merged bucket (rows in insertion order — the merge's
 /// first-seen order) into a [`SinkEmitBuf`]. Byref outputs (the numeric-avg
 /// finalize vocabulary) materialize into the buf's own arena: images land in
@@ -813,134 +956,55 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<SinkE
     let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
     let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
     let mut arena: Vec<u8> = Vec::new();
-    // (values index, arena offset) fix-ups, resolved after the arena stops
-    // growing (Vec growth may move the heap buffer).
     let mut fixups: Vec<(usize, usize)> = Vec::new();
-    let mut push_image = |values: &mut Vec<Datum>,
-                          nulls: &mut Vec<bool>,
-                          arena: &mut Vec<u8>,
-                          fixups: &mut Vec<(usize, usize)>,
-                          img: &[u8]| {
-        // 8-align every image (varlena consumers may read 4-byte headers +
-        // aligned payloads).
-        let pad = (8 - arena.len() % 8) % 8;
-        arena.resize(arena.len() + pad, 0);
-        let off = arena.len();
-        arena.extend_from_slice(img);
-        fixups.push((values.len(), off));
-        values.push(Datum::null());
-        nulls.push(false);
-    };
     for row in 0..n {
-        // Single/Reduced tables: kw[0] IS the canonical i64 key (Int repr);
-        // Multi tables: kw is the packed key image (1 or 2 words). None =
-        // the out-of-band NULL group (single-word shapes only — Multi
-        // tables never probe it).
-        let kw = row_key_words(t, row);
-        let key = kw.map(|w| w[0] as i64);
-        let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
-        for c in &plan.cols {
-            match *c {
-                SinkEmitCol::Key => match key {
-                    Some(k) => {
-                        values.push(key_datum(plan.width, k));
-                        nulls.push(false);
-                    }
-                    None => {
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    }
-                },
-                SinkEmitCol::Derived(d) => match key {
-                    // Reconstruction is exact by the feed's admission-time
-                    // range guard; a NULL representative derives NULL (the
-                    // strict ± operators' per-row result).
-                    Some(k) => {
-                        values.push(key_datum(plan.width, d.eval(k)));
-                        nulls.push(false);
-                    }
-                    None => {
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    }
-                },
-                SinkEmitCol::MultiComp { off, width } => match kw {
-                    // compact_key_datums_mk's Int arm: width bytes at off,
-                    // sign-extended, datum at the component's width.
-                    Some(w) => {
-                        let image = (w[0] as u128) | ((w[1] as u128) << 64);
-                        let bits = (image >> (off as u32 * 8)) as u64;
-                        let sh = 64 - width as u32 * 8;
-                        let v =
-                            if sh == 0 { bits as i64 } else { ((bits << sh) as i64) >> sh };
-                        values.push(key_datum(width, v));
-                        nulls.push(false);
-                    }
-                    None => {
-                        // Unreachable for Multi tables (no NULL group row);
-                        // fail-soft as SQL NULL rather than asserting.
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    }
-                },
-                // SAFETY: the row's state block holds numtrans pergroups
-                // (bucket-table config = the sink's state_bytes); transno <
-                // numtrans by plan construction. Byval transvalues only.
-                SinkEmitCol::Agg { transno } => unsafe {
-                    let pg = &*states.add(transno as usize);
-                    values.push(pg.trans_value);
-                    nulls.push(pg.trans_value_is_null);
-                },
-                // fc_int8_avg's exact core: strict (NULL trans → NULL),
-                // count == 0 → NULL, else the int64_avg_div image.
-                // SAFETY: non-null _int8 transvalue is a live merged image
-                // (combine contract).
-                SinkEmitCol::AvgInt8 { transno } => unsafe {
-                    let pg = &*states.add(transno as usize);
-                    if pg.trans_value_is_null {
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    } else {
-                        let (count, sum) =
-                            crate::compact::int8_avg_trans_read(pg.trans_value)?;
-                        if count == 0 {
-                            values.push(Datum::null());
-                            nulls.push(true);
-                        } else {
-                            let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
-                            push_image(
-                                &mut values, &mut nulls, &mut arena, &mut fixups,
-                                img.as_bytes(),
-                            );
-                        }
-                    }
-                },
-                // numeric_poly_avg / numeric_poly_sum's exact cores over the
-                // merged Int128AggState (NULL trans → None → NULL).
-                // SAFETY: as AvgInt8 — live merged state, sole reader.
-                SinkEmitCol::AvgInt128 { transno } | SinkEmitCol::SumInt128 { transno } => unsafe {
-                    let pg = &*states.add(transno as usize);
-                    let state = (!pg.trans_value_is_null).then(|| {
-                        &*(pg.trans_value.as_usize()
-                            as *const ::adt_numeric::aggregates::Int128AggState)
-                    });
-                    let img = match *c {
-                        SinkEmitCol::AvgInt128 { .. } => {
-                            ::adt_numeric::aggregates::numeric_poly_avg(state)?
-                        }
-                        _ => ::adt_numeric::aggregates::numeric_poly_sum(state)?,
-                    };
-                    match img {
-                        Some(img) => push_image(
-                            &mut values, &mut nulls, &mut arena, &mut fixups,
-                            img.as_bytes(),
-                        ),
-                        None => {
-                            values.push(Datum::null());
-                            nulls.push(true);
-                        }
-                    }
-                },
+        emit_row(plan, t, row, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+    }
+    // Arena is final — resolve the byref datums.
+    for (i, off) in fixups {
+        values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
+    }
+    Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
+}
+
+/// SINGLE-LOCAL PASS-THROUGH emit (dop1-tax fix 3, class b): when the
+/// combine sees exactly one sealed Local with zero flushed runs, bucket `b`'s
+/// merged table would be a verbatim re-insert of the Local's own rows — so
+/// emit STRAIGHT from the Local's table through its SEAL partition index
+/// instead (no per-bucket table build, no double insert). Output is
+/// byte-identical to the merge arm's by construction: the SEAL index lists
+/// bucket rows in insertion order (counting sort over ascending row index),
+/// which is exactly [`sink_combine_bucket`]'s first-seen order for a single
+/// no-runs source, the NULL row last in [`SINK_NULL_BUCKET`] (the merge
+/// arm's absorb order), and a new-key absorb copies state blocks verbatim.
+/// The decision is LIVE STATE (Local count + run count at combine time) —
+/// a widened engagement (≥2 Locals) or a flushed Local takes the merge arm.
+pub fn sink_emit_bucket_passthrough(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    part: &SinkPart,
+    b: usize,
+) -> PgResult<SinkEmitBuf> {
+    debug_assert!(b < SINK_NBUCKETS);
+    let natts = plan.cols.len();
+    let lo = part.starts[b] as usize;
+    let hi = part.starts[b + 1] as usize;
+    let with_null = b == SINK_NULL_BUCKET && part.has_null;
+    let n = hi - lo + usize::from(with_null);
+    let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
+    let mut arena: Vec<u8> = Vec::new();
+    let mut fixups: Vec<(usize, usize)> = Vec::new();
+    for &row in &part.idx[lo..hi] {
+        emit_row(plan, t, row as usize, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+    }
+    if with_null {
+        // The out-of-band NULL group emits LAST in its bucket (the merge
+        // arm's order: runs/remainder rows first, then the NULL absorb).
+        for row in 0..t.nrows() {
+            if t.row_key_int(row).is_none() {
+                emit_row(plan, t, row, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+                break;
             }
         }
     }
@@ -955,6 +1019,19 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<SinkE
 /// table (fail-closed conversion helper).
 pub fn sink_shape_error(what: &str) -> Box<PgError> {
     PgError::new(ERROR, format!("aggregation sink shape violation: {what}")).into()
+}
+
+/// The compact backstop's sink-cap breach message (compact.rs raises it when
+/// a worker table crosses the hash limits under a live sink cap — a
+/// shape-ESTIMATE failure, not a correctness error). The runtime drain
+/// classifies it into a budget-style refusal (serial rerun) by exact
+/// message: a private, same-crate-family contract.
+pub const SINK_CAP_BREACH_MSG: &str =
+    "worker compact table crossed the hash memory limits under the sink cap";
+
+/// True when `e` is the compact backstop's sink-cap breach.
+pub fn is_sink_cap_breach(e: &PgError) -> bool {
+    e.message().contains(SINK_CAP_BREACH_MSG)
 }
 
 /// A group count over an emit-buf set (observability).
@@ -998,6 +1075,14 @@ pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
 /// The node's per-participant hash memory budget (C
 /// `work_mem × hash_mem_multiplier` — `get_hash_memory_limit`), the R3
 /// per-Local envelope.
+/// The node's hash-groups admission limit (C `hash_agg_check_limits`
+/// vocabulary) — the second bound of the sink admission gate; the
+/// budget-derived flush cap must respect BOTH bounds or it manufactures
+/// refusals the fixed cap never hit (dop1-tax inc-3b fix-up).
+pub fn agg_sink_ngroups_limit(node: &AggStateData<'_>) -> Option<u64> {
+    node.perhash.as_ref().map(|ph| ph.hash_ngroups_limit)
+}
+
 pub fn agg_sink_hash_mem_limit(node: &AggStateData<'_>) -> Option<usize> {
     node.perhash.as_ref().map(|ph| ph.hash_mem_limit)
 }
@@ -1116,22 +1201,188 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 
 // ---------------------------------------------------------------------------
 // Leader-side adopted emit (the published sink output as the Agg's source).
+// Two backings behind one drain interface:
+//   Bufs — combine-materialized per-bucket EmitBufs (the general arm);
+//   Table — TRUE TABLE ADOPT (dop1-tax2 inc-1): the single sealed Local's
+//   whole table + SEAL partition index, published by finalize WITHOUT any
+//   emit materialization. Rows are formed on demand at drain time (byval
+//   emit plans only — a byref transvalue points into a WORKER aggcontext,
+//   which dies with the helpers; byref shapes keep the EmitBuf arms, whose
+//   arena copy is exactly what makes them self-contained).
 // ---------------------------------------------------------------------------
 
-/// The leader's adopted parallel emit state: published per-bucket
-/// identity-projected rows, drained bucket 0..255 in insertion order.
+/// Every emit column projects a byval datum (no arena materialization):
+/// the TABLE-ADOPT shape gate.
+pub fn sink_emit_plan_all_byval(plan: &SinkEmitPlan) -> bool {
+    plan.cols.iter().all(|c| {
+        matches!(
+            c,
+            SinkEmitCol::Key
+                | SinkEmitCol::Derived(_)
+                | SinkEmitCol::MultiComp { .. }
+                | SinkEmitCol::Agg { .. }
+        )
+    })
+}
+
+/// One emit column of table row `row`, formed directly from the adopted
+/// table (byval kinds only — `sink_emit_plan_all_byval` gates adoption).
+/// The `Agg` arm is the ledger's "transvalue read via the resolved transno":
+/// the datum IS the raw transvalue, no copy, no arena.
+#[inline]
+fn table_emit_datum(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    row: usize,
+    col: usize,
+) -> (Datum, bool) {
+    match plan.cols[col] {
+        SinkEmitCol::Key => match t.row_key_int(row) {
+            Some(k) => (key_datum(plan.width, k), false),
+            None => (Datum::null(), true),
+        },
+        SinkEmitCol::Derived(d) => match t.row_key_int(row) {
+            Some(k) => (key_datum(plan.width, d.eval(k)), false),
+            None => (Datum::null(), true),
+        },
+        SinkEmitCol::MultiComp { off, width } => match row_key_words(t, row) {
+            Some(w) => {
+                let image = (w[0] as u128) | ((w[1] as u128) << 64);
+                let bits = (image >> (off as u32 * 8)) as u64;
+                let sh = 64 - width as u32 * 8;
+                let v = if sh == 0 { bits as i64 } else { ((bits << sh) as i64) >> sh };
+                (key_datum(width, v), false)
+            }
+            None => (Datum::null(), true),
+        },
+        // SAFETY: the row's state block holds numtrans pergroups (adopted
+        // table config = the sink's state_bytes); transno < numtrans by
+        // plan construction. Byval transvalues only (adoption gate).
+        SinkEmitCol::Agg { transno } => unsafe {
+            let pg =
+                &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(transno as usize);
+            (pg.trans_value, pg.trans_value_is_null)
+        },
+        // Byref finalize kinds never reach a table-backed drain:
+        // sink_emit_plan_all_byval refuses adoption (and the debug_assert
+        // in agg_sink_adopt_table re-checks).
+        SinkEmitCol::AvgInt8 { .. }
+        | SinkEmitCol::AvgInt128 { .. }
+        | SinkEmitCol::SumInt128 { .. } => {
+            unreachable!("byref emit column in a table-backed sink drain")
+        }
+    }
+}
+
+/// The drain source behind [`SinkEmitState`].
+enum SinkEmitSrc {
+    /// Combine-materialized per-bucket rows.
+    Bufs(Vec<SinkEmitBuf>),
+    /// The adopted single-Local table, drained LINEARLY: bucket 0 carries
+    /// every row in table insertion order (for a DOP1 build — the only
+    /// shape that adopts — sequential claims make that the SERIAL build's
+    /// own emit order, including the NULL group row at its insertion
+    /// position); buckets 1..255 are empty. No SEAL partition exists and
+    /// none is ever built.
+    Table { table: SinkTableHandle, plan: SinkEmitPlan },
+}
+
+/// The leader's adopted parallel emit state, drained bucket 0..255 in
+/// insertion order.
 pub struct SinkEmitState {
-    pub bufs: Vec<SinkEmitBuf>,
-    pub natts: usize,
+    src: SinkEmitSrc,
+    natts: usize,
     bucket: usize,
     pos: usize,
+}
+
+impl SinkEmitState {
+    /// Bucket `b`'s row count.
+    #[inline]
+    fn bucket_len(&self, b: usize) -> usize {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => bufs[b].nrows,
+            SinkEmitSrc::Table { table, .. } => {
+                if b == 0 {
+                    table.table().nrows()
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
+    /// One column datum of drain position (b, row). Table backing is
+    /// LINEAR: bucket 0, position == table row.
+    #[inline]
+    fn row_datum(&self, b: usize, row: usize, col: usize) -> (Datum, bool) {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => {
+                let buf = &bufs[b];
+                let i = row * self.natts + col;
+                (buf.values[i], buf.nulls[i])
+            }
+            SinkEmitSrc::Table { table, plan } => {
+                debug_assert_eq!(b, 0);
+                table_emit_datum(plan, table.table(), row, col)
+            }
+        }
+    }
+
+    /// Fill one drained row's datums/nulls (the slot-store body).
+    #[inline]
+    fn fill_row(&self, b: usize, row: usize, values: &mut [Datum], nulls: &mut [bool]) {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => {
+                let buf = &bufs[b];
+                debug_assert!(row < buf.nrows);
+                let base = row * self.natts;
+                values[..self.natts].copy_from_slice(&buf.values[base..base + self.natts]);
+                nulls[..self.natts].copy_from_slice(&buf.nulls[base..base + self.natts]);
+            }
+            SinkEmitSrc::Table { table, plan } => {
+                debug_assert_eq!(b, 0);
+                for c in 0..self.natts {
+                    let (v, isnull) = table_emit_datum(plan, table.table(), row, c);
+                    values[c] = v;
+                    nulls[c] = isnull;
+                }
+            }
+        }
+    }
 }
 
 /// Adopt the published emit set; subsequent [`agg_sink_emit_next`] calls
 /// drain it. The Agg becomes a pure Source (its build never ran).
 pub fn agg_sink_adopt_emit(node: &mut AggStateData<'_>, bufs: Vec<SinkEmitBuf>, natts: usize) {
     debug_assert_eq!(bufs.len(), SINK_NBUCKETS);
-    node.sink_emit = Some(Box::new(SinkEmitState { bufs, natts, bucket: 0, pos: 0 }));
+    node.sink_emit = Some(Box::new(SinkEmitState {
+        src: SinkEmitSrc::Bufs(bufs),
+        natts,
+        bucket: 0,
+        pos: 0,
+    }));
+}
+
+/// TRUE TABLE ADOPT (dop1-tax2 inc-1): adopt the published single-Local
+/// table wholesale — zero emit materialization, zero partitioning; the
+/// drain forms rows on demand (survivors only, under the consumers'
+/// boundary cut), LINEARLY in table insertion order (the DOP1 build's
+/// serial-equivalent order). Byval emit plans only (the adoption gate —
+/// re-checked here).
+pub fn agg_sink_adopt_table(
+    node: &mut AggStateData<'_>,
+    table: SinkTableHandle,
+    plan: SinkEmitPlan,
+) {
+    debug_assert!(sink_emit_plan_all_byval(&plan), "table adopt over a byref emit plan");
+    let natts = plan.cols.len();
+    node.sink_emit = Some(Box::new(SinkEmitState {
+        src: SinkEmitSrc::Table { table, plan },
+        natts,
+        bucket: 0,
+        pos: 0,
+    }));
 }
 
 /// Mid-emit resume marker for the lane dispatch.
@@ -1154,8 +1405,7 @@ pub fn agg_sink_emit_next<'mcx>(
             if st.bucket >= SINK_NBUCKETS {
                 break None;
             }
-            let b = &st.bufs[st.bucket];
-            if st.pos >= b.nrows {
+            if st.pos >= st.bucket_len(st.bucket) {
                 st.bucket += 1;
                 st.pos = 0;
                 continue;
@@ -1167,21 +1417,19 @@ pub fn agg_sink_emit_next<'mcx>(
     };
     let Some((bucket, row)) = next else {
         // KEEP the drained state (its bufs' arenas back byref datums already
-        // handed out this scan — C's aggcontext lifetime analog); it drops
+        // handed out this scan — C's aggcontext lifetime analog; the adopted
+        // table backs handed-out transvalue datums the same way); it drops
         // at rescan/teardown through agg_sink_reset_emit.
         node.agg_done = true;
         return Ok(None);
     };
     let st = node.sink_emit.as_ref().expect("sink emit state adopted");
     let natts = st.natts;
-    let buf = &st.bufs[bucket];
-    let base = row * natts;
     let slot = estate.slot_mut(node.ps_ResultTupleSlot);
     ::exectuples::exec_clear_tuple(slot, mcx);
     {
         let sb = slot.base_mut();
-        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
-        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+        st.fill_row(bucket, row, &mut sb.tts_values[..natts], &mut sb.tts_isnull[..natts]);
     }
     ::exectuples::exec_store_virtual_tuple(slot);
     Ok(Some(node.ps_ResultTupleSlot))
@@ -1190,6 +1438,64 @@ pub fn agg_sink_emit_next<'mcx>(
 /// Drop any adopted emit state (rescan / teardown safety).
 pub fn agg_sink_reset_emit(node: &mut AggStateData<'_>) {
     node.sink_emit = None;
+}
+
+// ---------------------------------------------------------------------------
+// Batched drain of the adopted emit (dop1-tax fix 4): a consuming breaker
+// (the lane's agg→sort feed) drains the published rows in per-bucket BLOCKS
+// instead of pulling one row per produce through the emit cursor — same
+// rows, same order (bucket 0..255, insertion order within), same slot
+// contents as agg_sink_emit_next; only the per-row pull ceremony is hoisted.
+// ---------------------------------------------------------------------------
+
+/// Bucket `b`'s row count in the adopted emit state (`None` = not adopted).
+pub fn agg_sink_emit_bucket_len(node: &AggStateData<'_>, b: usize) -> Option<usize> {
+    node.sink_emit.as_ref().map(|st| st.bucket_len(b))
+}
+
+/// True while the adopted emit cursor has not advanced — the batched drain
+/// starts from row 0 and must never double-emit after a partial per-row
+/// drain (defensive; the lane's consumers never mix the two).
+pub fn agg_sink_emit_unstarted(node: &AggStateData<'_>) -> bool {
+    node.sink_emit.as_ref().is_some_and(|st| st.bucket == 0 && st.pos == 0)
+}
+
+/// Store row `row` of bucket `b` into the node's result slot (the
+/// agg_sink_emit_next body, cursor-free). Caller drives bucket/row order.
+pub fn agg_sink_emit_block_row<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut ::executils::EStateData<'mcx>,
+    b: usize,
+    row: usize,
+) -> ::executils::ExecSlotId {
+    let mcx = estate.es_query_cxt;
+    let st = node.sink_emit.as_ref().expect("sink emit state adopted");
+    let natts = st.natts;
+    let slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    ::exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let sb = slot.base_mut();
+        st.fill_row(b, row, &mut sb.tts_values[..natts], &mut sb.tts_isnull[..natts]);
+    }
+    ::exectuples::exec_store_virtual_tuple(slot);
+    node.ps_ResultTupleSlot
+}
+
+/// One emitted-column datum of row `row` in bucket `b` (the batched drain's
+/// boundary-cut key read — no slot build for rows the cut will skip; on a
+/// table-backed drain this reads the raw transvalue straight off the
+/// adopted table).
+#[inline]
+pub fn agg_sink_emit_datum(node: &AggStateData<'_>, b: usize, row: usize, col: usize) -> (Datum, bool) {
+    let st = node.sink_emit.as_ref().expect("sink emit state adopted");
+    st.row_datum(b, row, col)
+}
+
+/// End of a batched drain: the adopted state is consumed exactly as the
+/// cursor drain's EOF (state dropped, agg_done set — rescans rebuild).
+pub fn agg_sink_emit_drained(node: &mut AggStateData<'_>) {
+    node.sink_emit = None;
+    node.agg_done = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,6 +1921,90 @@ mod tests {
         assert_eq!(buf2.values[0].as_i64(), -123456789);
         assert_eq!(buf2.values[1].as_i32(), 54321);
         assert_eq!(buf2.values[2].as_i64(), 2);
+    }
+
+    /// dop1-tax fix 3 oracle: the single-Local no-runs pass-through emit is
+    /// byte-identical (values, nulls, row order) to the merge arm's emit of
+    /// the same bucket, for every bucket including the NULL group's.
+    #[test]
+    fn passthrough_emit_matches_merge_arm() {
+        let mut t = mk_table(64);
+        for k in 0..2000 {
+            bump(&mut t, Some(k), 1, 3 * k + 1);
+        }
+        bump(&mut t, None, 4, 11);
+        let part = sink_partition_remainder(&t);
+        assert!(part.has_null);
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        let locals =
+            [SinkLocalView { runs: &[], remainder: Some((&t, &part)) }];
+        let combines = test_combines();
+        let mut total_rows = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let merged =
+                sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            let want = sink_emit_bucket(&plan, &merged).unwrap();
+            let got = sink_emit_bucket_passthrough(&plan, &t, &part, b).unwrap();
+            assert_eq!(got.nrows, want.nrows, "bucket {b} row count");
+            assert_eq!(got.nulls, want.nulls, "bucket {b} null bitmap");
+            let eq = got
+                .values
+                .iter()
+                .zip(want.values.iter())
+                .zip(got.nulls.iter())
+                .all(|((g, w), &null)| null || g.as_i64() == w.as_i64());
+            assert!(eq, "bucket {b} datums diverge");
+            total_rows += got.nrows;
+        }
+        assert_eq!(total_rows, 2001);
+    }
+
+    /// TRUE TABLE ADOPT oracle (dop1-tax2 inc-1b): the LINEAR table-backed
+    /// drain (`table_emit_datum` over rows 0..n) reproduces
+    /// `sink_emit_bucket`'s whole-table emit byte-for-byte — the exact
+    /// forming the merge arm applies (values, nulls; order = insertion
+    /// order with the NULL group row at its insertion position). Content
+    /// parity with the merge/pass-through arms is closed by
+    /// `passthrough_emit_matches_merge_arm` (same emit_row core).
+    #[test]
+    fn table_linear_drain_matches_whole_table_emit() {
+        let mut t = mk_table(64);
+        for k in 0..2000 {
+            bump(&mut t, Some(k), 1, 3 * k + 1);
+        }
+        bump(&mut t, None, 4, 11);
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        assert!(sink_emit_plan_all_byval(&plan));
+        let natts = plan.cols.len();
+        let want = sink_emit_bucket(&plan, &t).unwrap();
+        assert_eq!(want.nrows, 2001);
+        for row in 0..want.nrows {
+            for c in 0..natts {
+                let (v, isnull) = table_emit_datum(&plan, &t, row, c);
+                assert_eq!(isnull, want.nulls[row * natts + c], "row {row} col {c} null");
+                if !isnull {
+                    assert_eq!(
+                        v.as_i64(),
+                        want.values[row * natts + c].as_i64(),
+                        "row {row} col {c} datum"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

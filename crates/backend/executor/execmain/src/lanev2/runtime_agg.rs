@@ -113,7 +113,23 @@ struct AggSink {
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
     /// finalize's published output (leader consumes after completion).
-    published: Mutex<Option<Vec<SinkEmitBuf>>>,
+    published: Mutex<Option<SinkPublished>>,
+    /// TRUE TABLE ADOPT (dop1-tax2 inc-1) shape gate, fixed at construction:
+    /// every emit column byval AND no byref combine state class — a byref
+    /// transvalue points into a WORKER aggcontext, which dies with the
+    /// helpers; byref shapes keep the EmitBuf arms (whose arena copy is what
+    /// makes them self-contained).
+    adopt_shape: bool,
+    /// Seal-time hand-off: the single sealed Local's whole table (no SEAL
+    /// partition — the leader drains it linearly). Set only when the LIVE
+    /// seal census admits (exactly one sealed Local, zero flushed runs,
+    /// adopt_shape) — every combine claim then no-ops and finalize
+    /// publishes the table wholesale (the ledger's literal "adopt its
+    /// table (pointer hand-off)").
+    adopted: Mutex<Option<SinkTableHandle>>,
+    /// Lock-free mirror of `adopted` for the per-claim combine check
+    /// (written once at SEAL, which happens-before every combine claim).
+    adopted_flag: AtomicBool,
     /// Abort/observability control (shared with the engagement payload).
     rg: OnceLock<runtime::WeakRgHandle>,
     failed: AtomicBool,
@@ -138,6 +154,17 @@ struct AggSink {
 // partition (the runtime's exactly-once combine claim) and read only by
 // finalize, which happens-after every combine by last-worker-out.
 unsafe impl Sync for AggSink {}
+
+/// What finalize hands the leader.
+enum SinkPublished {
+    /// Combine-materialized per-bucket EmitBufs (the general arm).
+    Emit(Vec<SinkEmitBuf>),
+    /// TRUE TABLE ADOPT: the single sealed Local's whole table — no SEAL
+    /// partition, no merge, no re-insert, no EmitBuf materialization; the
+    /// leader drains the table LINEARLY (insertion order = the DOP1
+    /// build's serial-equivalent order).
+    Table(SinkTableHandle),
+}
 
 impl AggSink {
     fn fail(&self, e: Box<PgError>) {
@@ -166,6 +193,25 @@ impl AggSink {
     fn take_error(&self) -> Option<Box<PgError>> {
         self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
+
+    /// Shared combine tail (merge and pass-through arms): meter the RETAINED
+    /// emit buffer against the admitted envelope (R3, m2-integration audit —
+    /// the emit buffers are the merged result, held until the leader
+    /// drains; the union is bounded by the admitted Locals' content, so a
+    /// crossing is a real accounting surprise → budget refusal, fail-closed)
+    /// and store it in the claimed partition's slot.
+    fn retain_bucket(&self, part: u64, buf: SinkEmitBuf, nlocals: usize) -> PgResult<()> {
+        let retained = buf.bytes();
+        let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
+        if total > self.budget.saturating_mul(nlocals.max(1)) {
+            self.refuse_budget();
+            return Ok(());
+        }
+        // SAFETY: partition `part` is claimed exactly once (runtime
+        // contract); this is its single writer.
+        unsafe { *self.out_emit[part as usize].get() = buf };
+        Ok(())
+    }
 }
 
 impl runtime::ParallelSink for AggSink {
@@ -188,7 +234,16 @@ impl runtime::ParallelSink for AggSink {
             }
             Ok(Err(AcceptFail::Error(e))) => {
                 mark_self_errored();
-                self.fail(e);
+                // Estimate-failure class (the compact backstop tripping
+                // UNDER the sink cap — a planner-underestimate shape the
+                // admission gate could not see): a REFUSAL, not an error.
+                // The leader reruns serially, byte-identically (the leg-4
+                // budget-refusal path). Every other error stays an error.
+                if ::nodeagg::sink::is_sink_cap_breach(&e) {
+                    self.refuse_budget();
+                } else {
+                    self.fail(e);
+                }
             }
             Err(_panic) => {
                 mark_self_errored();
@@ -202,6 +257,26 @@ impl runtime::ParallelSink for AggSink {
     fn seal(&self, locals: &mut [AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
+        // (the sealed-Local census is final: last-worker-out; a widened
+        // engagement forked >=2 Locals and takes the merge arms below).
+        // Exactly one sealed Local, zero flushed runs, all-byval shape:
+        // hand the table to finalize WHOLESALE — no SEAL partition (the
+        // leader drains the table LINEARLY: for a DOP1 build the insertion
+        // order IS the serial build's own order — sequential claims — so
+        // the drain is serial-faithful AND cache-linear), no combine work,
+        // no emit materialization. Memory: the table was charged during
+        // accept; no partition index is ever built.
+        if self.adopt_shape {
+            if let [l] = &mut *locals {
+                if l.runs.is_empty() && l.table.is_some() {
+                    let t = l.table.take().expect("checked Some");
+                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
+                    self.adopted_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
         }
         for l in locals.iter_mut() {
             l.part = l.table.as_ref().map(|t| sink_partition_remainder(t.table()));
@@ -228,7 +303,35 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // TRUE TABLE ADOPT: seal took the single Local's table — there is
+        // nothing to merge and nothing to materialize; finalize publishes
+        // the table itself. (Set at SEAL, which happens-before every
+        // combine claim; SeqCst pairs with the seal store.)
+        if self.adopted_flag.load(Ordering::SeqCst) {
+            return;
+        }
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
+            // SINGLE-LOCAL PASS-THROUGH (dop1-tax fix 3): exactly one sealed
+            // Local and zero flushed runs — the merged bucket table would be
+            // a verbatim re-insert of the Local's rows, so emit straight
+            // from its table through the SEAL partition index (no 256-way
+            // rebuild, no double insert; byte-identical order by
+            // construction — see sink_emit_bucket_passthrough). LIVE-STATE
+            // decision: a widened engagement (≥2 Locals) or a flushed Local
+            // takes the merge arm below; no plan/DOP special-casing.
+            if let [l] = locals {
+                if l.runs.is_empty() {
+                    if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                        let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
+                            &self.emit,
+                            t.table(),
+                            p,
+                            part as usize,
+                        )?;
+                        return self.retain_bucket(part, buf, locals.len());
+                    }
+                }
+            }
             // Std-collections audit note: this views Vec is a per-claim
             // allocation, but the combine morsel space is a FIXED 256
             // partitions x dop-sized views — bounded per engagement,
@@ -252,26 +355,7 @@ impl runtime::ParallelSink for AggSink {
                 &self.combines,
             )?;
             let buf = sink_emit_bucket(&self.emit, &merged)?;
-            // R3 accounting (m2-integration audit): the emit buffers are the
-            // RETAINED merged result (held until the leader drains) — meter
-            // them against the ADMITTED envelope (forked Locals × per-Local
-            // budget, the same law as the distinct sink): the union is
-            // bounded by the sum of the admitted Locals' content, so this
-            // trips only on real overhead/accounting surprises — fail-closed
-            // and visible without a deterministic refuse-and-rerun cliff for
-            // legitimately admitted dop-wide results (review finding). The
-            // transient per-bucket merge table is bounded by <= dop
-            // concurrent claims of bucket-sized tables and drops here.
-            let retained = buf.bytes();
-            let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
-            if total > self.budget.saturating_mul(locals.len().max(1)) {
-                self.refuse_budget();
-                return Ok(());
-            }
-            // SAFETY: partition `part` is claimed exactly once (runtime
-            // contract); this is its single writer.
-            unsafe { *self.out_emit[part as usize].get() = buf };
-            Ok(())
+            self.retain_bucket(part, buf, locals.len())
         }));
         match r {
             Ok(Ok(())) => {}
@@ -282,11 +366,22 @@ impl runtime::ParallelSink for AggSink {
         }
     }
 
-    /// Publish: move the 256 emit buffers out (O(partitions), the §6
-    /// contract). Locals drop with the plumbing right after.
+    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
+    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
+    /// Locals drop with the plumbing right after.
     fn finalize(&self, _locals: &[AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        if self.adopted_flag.load(Ordering::SeqCst) {
+            if let Some(t) = self.adopted.lock().unwrap_or_else(|g| g.into_inner()).take() {
+                *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(SinkPublished::Table(t));
+                return;
+            }
+            // Unreachable by construction (flag implies content); fall
+            // through fail-closed to the buf publish (empty → leader errors
+            // on "published nothing"-class checks rather than wedging).
         }
         let bufs: Vec<SinkEmitBuf> = self
             .out_emit
@@ -297,7 +392,7 @@ impl runtime::ParallelSink for AggSink {
                 unsafe { std::mem::take(&mut *c.get()) }
             })
             .collect();
-        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(bufs);
+        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(SinkPublished::Emit(bufs));
     }
 }
 
@@ -916,17 +1011,61 @@ fn ensure_hooks_registered() {
 // Leader-side admission + engagement.
 // ---------------------------------------------------------------------------
 
-/// Sink cap (worker table bound, entries). Default = the exchange cap class
-/// (64K); env-tunable for triage.
-fn sink_cap() -> u32 {
-    static N: OnceLock<u32> = OnceLock::new();
+/// Env override for the sink flush cap (entries); None = budget-derived.
+fn sink_cap_override() -> Option<u32> {
+    static N: OnceLock<Option<u32>> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_AGG_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|&c| c >= 1024)
-            .unwrap_or(1 << 16)
     })
+}
+
+/// Sink flush cap (worker table bound, entries) — BUDGET-DERIVED (dop1-tax
+/// inc-3b). The fixed 64K exchange-class cap forced ~17 flush cycles on
+/// q36@10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
+/// permanently dormant and re-inserting every group at combine. The cap is
+/// now the entry count whose compact-table estimate fills HALF the
+/// per-Local budget (the compact spill gate's own arithmetic:
+/// 16+8+state+16 bytes/entry), floored at the 64K class — at default
+/// work_mem it degenerates to ~the old cap (tranche behavior preserved);
+/// under the matched-memory protocol (1GB) a q36-class Local holds all its
+/// groups, never flushes, and the pass-through fires. Width-INDEPENDENT:
+/// each Local is budget-bounded exactly as before (runs held the same
+/// bytes the larger live table now holds — the R3 envelope arithmetic is
+/// unchanged, and the seal/accept budget checks still refuse crossings).
+/// PGRUST_RUNTIME_AGG_CAP overrides to a fixed cap (the A/B arm; 65536 =
+/// the old behavior).
+fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
+    if let Some(c) = sink_cap_override() {
+        return c;
+    }
+    let entry = 16u64 + 8 + state_bytes as u64 + 16;
+    // BOTH admission bounds (compact_admission / agg_hash_compact_sink_
+    // admissible): capped-numgroups must satisfy est_bytes <= budget/2 AND
+    // numgroups <= ngroups_limit/2 — a cap above either manufactures
+    // refusals the fixed 64K cap never hit (round-3 battery: count-only
+    // high-NDV shapes flipped admit->refuse because the mem-derived cap
+    // 74898 crossed ngroups_limit/2 ~73.7k at default work_mem). The 64K
+    // floor keeps heavy-state shapes exactly at the old cap (their old
+    // verdict, admit or refuse, is reproduced verbatim).
+    let mem_bound = (budget as u64 / 2) / entry.max(1);
+    // TRIP GUARD (dop1-tax2): the drain's flush-if-due runs BEFORE each
+    // batch and a batch can insert up to a full staged batch of NEW groups,
+    // so the cap must sit a batch below the runtime backstop's ngroups trip
+    // (hash_ngroups_limit/2) or the flush never fires first. The old 64K
+    // floor could RAISE the cap ABOVE the trip on small-limit plans
+    // (planner underestimates the Mk car now admits) — the worker backstop
+    // then errored mid-build (battery legs 2d/2e parity FAIL @ 5451ddc9d:
+    // "worker compact table crossed the hash memory limits under the sink
+    // cap" on the 389k-group two-key corpus query). The floor is kept for
+    // admission-verdict stability but NEVER above the trip.
+    let trip = (ngroups_limit / 2)
+        .saturating_sub(2 * ::exectuples::SOA_MAX_ROWS as u64)
+        .max(1);
+    let cap = mem_bound.min(trip);
+    cap.clamp((1 << 16).min(trip), u32::MAX as u64 / 2) as u32
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
@@ -1006,6 +1145,19 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse("fold plan guarded/varlena/residual");
         return Ok(false);
     }
+    // Budget triple (hoisted above the shape decide): the leader-side
+    // cap-aware mk probe below and the sink construction must see the SAME
+    // budget-derived cap (dop1-tax inc-3b — sink_cap_for replaces the fixed
+    // 64K cap everywhere a cap is decided).
+    let Some(state_bytes) = ::nodeagg::sink::agg_sink_state_bytes(agg) else {
+        return Ok(false);
+    };
+    let Some(budget) = ::nodeagg::sink::agg_sink_hash_mem_limit(agg) else {
+        return Ok(false);
+    };
+    let Some(ngroups_limit) = ::nodeagg::sink::agg_sink_ngroups_limit(agg) else {
+        return Ok(false);
+    };
     // Drain mode: projected scans take the expr-key feed (Arith/TsTrunc/
     // Reduced kinds — the lane's decide already ran and is memoized in
     // `xk`); unprojected scans take the K2 single-int-key batch probe or
@@ -1065,7 +1217,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             // cleared right after: the leader's own executor may still run
             // the SERIAL build (refusal / budget fallback / rescan), which
             // must never see sink mode.
-            ::nodeagg::sink::agg_sink_set_cap(agg, sink_cap());
+            ::nodeagg::sink::agg_sink_set_cap(
+                agg,
+                sink_cap_for(state_bytes, budget, ngroups_limit),
+            );
             let probe = super::scan_mk_probe(agg, ss, estate);
             ::nodeagg::sink::agg_sink_clear_cap(agg);
             probe
@@ -1112,12 +1267,6 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
-    let Some(state_bytes) = ::nodeagg::sink::agg_sink_state_bytes(agg) else {
-        return Ok(false);
-    };
-    let Some(budget) = ::nodeagg::sink::agg_sink_hash_mem_limit(agg) else {
-        return Ok(false);
-    };
     // F1 root cause (chaos-battery): the WORKER arm re-runs the compact
     // spill-eligibility gate under the sink cap with the leader's restored
     // work_mem — at small work_mem (<=256kB on 16k-group shapes) EVERY
@@ -1125,7 +1274,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
-    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap()) {
+    if !::nodeagg::agg_hash_compact_sink_admissible(
+        agg,
+        sink_cap_for(state_bytes, budget, ngroups_limit),
+    ) {
         refuse("worker compact arm would refuse under the sink budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -1186,11 +1338,16 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // --- Engage.
     let key_words = mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 });
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
+    // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
+    // the adopted table's rows must be self-contained past helper teardown
+    // (a byref transvalue points into a worker aggcontext).
+    let adopt_shape =
+        ::nodeagg::sink::sink_emit_plan_all_byval(&emit) && !byref_states;
     let sink = Arc::new(AggSink {
         drain,
         red,
         mk,
-        cap: sink_cap(),
+        cap: sink_cap_for(state_bytes, budget, ngroups_limit),
         budget,
         key_words,
         state_bytes,
@@ -1200,6 +1357,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         emit,
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
+        adopt_shape,
+        adopted: Mutex::new(None),
+        adopted_flag: AtomicBool::new(false),
         rg: OnceLock::new(),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
@@ -1417,7 +1577,7 @@ fn engage_ceremony<'mcx>(
             Ok(false)
         }
         EngageOutcome::Completed => {
-            let bufs = sink
+            let published = sink
                 .published
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -1426,9 +1586,20 @@ fn engage_ceremony<'mcx>(
                     ::nodeagg::sink::sink_shape_error("completed sink published nothing")
                 })?;
             let natts = sink.emit.cols.len();
-            let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
-            lane_trace(&format!("runtime-agg: complete, groups={rows}"));
-            ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+            match published {
+                SinkPublished::Emit(bufs) => {
+                    let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
+                    lane_trace(&format!("runtime-agg: complete, groups={rows}"));
+                    ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+                }
+                SinkPublished::Table(table) => {
+                    let rows = table.table().nrows();
+                    lane_trace(&format!(
+                        "runtime-agg: complete (table adopt), groups={rows}"
+                    ));
+                    ::nodeagg::sink::agg_sink_adopt_table(agg, table, sink.emit.clone());
+                }
+            }
             Ok(true)
         }
     }

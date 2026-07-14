@@ -1021,12 +1021,22 @@ fn engage_ceremony<'mcx>(
         let runtime::SinkTaskSets { accept, combine, probe: _sink_probe } =
             runtime::sink_tasksets(
                 sink,
-                Arc::new(CbstoreGranuleSource { starts: inner_starts }),
+                Arc::new(CbstoreGranuleSource {
+                    starts: Arc::new(inner_starts),
+                    // This arm feeds claims straight into set_granule_range
+                    // (single-epoch contract); it does not subdivide
+                    // multi-epoch claims — never coalesce.
+                    coalesce: false,
+                }),
                 rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
                 0,
             );
         let probe = runtime::TaskSetSpec {
-            source: Arc::new(CbstoreGranuleSource { starts: outer_starts }),
+            source: Arc::new(CbstoreGranuleSource {
+                starts: Arc::new(outer_starts),
+                // As above: straight set_granule_range feed, never coalesce.
+                coalesce: false,
+            }),
             work: Arc::clone(payload) as Arc<dyn runtime::TaskSetWork>,
             deps: vec![1],
         };

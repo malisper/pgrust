@@ -760,9 +760,7 @@ pub fn agg_hash_compact_backstop<'mcx>(
         // fail the parallel attempt (RG abort → serial rerun), never a
         // silent migration.
         if ph.sink_cap.is_some() {
-            return Err(crate::sink::sink_shape_error(
-                "worker compact table crossed the hash memory limits under the sink cap",
-            ));
+            return Err(crate::sink::sink_shape_error(crate::sink::SINK_CAP_BREACH_MSG));
         }
     }
     compact_migrate(node, estate)?;
