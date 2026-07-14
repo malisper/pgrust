@@ -4517,6 +4517,84 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
     Ok(())
 }
 
+/// One staged window of the direct-feed drive consumed as the scan's KEY
+/// LANE (hot-gap lever C2, the q5 class): `vals`/`isnull` are the staged key
+/// column's value and null lanes for the window's rows, in row order.
+/// Equivalent to `agg_plain_distinct_insert_batch` over the same rows —
+/// NULLs elided value-for-value and folded into the set's one `seen_null` —
+/// with the null scan hoisted to once per window (the all-non-null arm is
+/// one straight datum→i64 pass; cbstore lanes are null-free by the format).
+/// Same batch-granular budget-check/overflow contract; a degraded group
+/// keeps feeding its tuplesort (non-null values in row order + one NULL —
+/// one stands for the window's many, which dedup to one either way).
+pub fn agg_plain_distinct_insert_lane_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    vals: &[Datum],
+    isnull: &[bool],
+    ints: &mut Vec<i64>,
+    hashes: &mut Vec<u64>,
+) -> PgResult<()> {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    debug_assert_eq!(vals.len(), isnull.len());
+    let saw_null = isnull.contains(&true);
+    let ps = &mut node.pertrans_sort[0];
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    if ps.dset_degraded {
+        let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
+        for (&d, &nl) in vals.iter().zip(isnull) {
+            if !nl {
+                sort.putdatum(d, false)?;
+            }
+        }
+        if saw_null {
+            sort.putdatum(Datum::null(), true)?;
+        }
+        return Ok(());
+    }
+    ints.clear();
+    match kind {
+        distinctset::DistinctKeyKind::Int16 => {
+            if saw_null {
+                ints.extend(
+                    vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i16() as i64),
+                );
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i16() as i64));
+            }
+        }
+        distinctset::DistinctKeyKind::Int32 => {
+            if saw_null {
+                ints.extend(
+                    vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i32() as i64),
+                );
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i32() as i64));
+            }
+        }
+        distinctset::DistinctKeyKind::Int64 => {
+            if saw_null {
+                ints.extend(vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i64()));
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i64()));
+            }
+        }
+        distinctset::DistinctKeyKind::Bytes => {
+            unreachable!("bytes keys take agg_plain_distinct_insert_bytes_batch")
+        }
+    }
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    dset.insert_i64_batch(ints, hashes);
+    if saw_null {
+        dset.seen_null = true;
+    }
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
+    }
+    Ok(())
+}
+
 /// One staged batch of the direct-feed drive, TEXT keys (the varlena key
 /// staging): `keys` are the batch's NON-NULL key datums in row order — live
 /// text/varchar varlena pointers (in-page on heap, decoded images on
