@@ -6359,6 +6359,10 @@ struct HashGroupDistinctSink<'a, 'mcx> {
     /// `distincthash_batch_enabled`); per-batch availability still gates
     /// each staged window (`refsort_key_batch`'s soundness contract).
     batch: Option<HgBatchCols>,
+    /// Engagement counters (trace observability): rows absorbed by the
+    /// fast leg vs rows routed through the per-row emit path.
+    fast_rows: u64,
+    slow_rows: u64,
 }
 
 impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
@@ -6376,6 +6380,12 @@ impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.batch.is_some() {
+            trace_feed(&format!(
+                "hashgroup batch feed: fast={} perrow={}",
+                self.fast_rows, self.slow_rows
+            ));
+        }
         if self.degraded {
             ::nodesort::sort_lane_finish(self.sort, estate)
         } else {
@@ -6459,6 +6469,7 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                 if self.degraded || fb[w] & bit != 0 {
                     // Post-degrade remainder / forced-fallback row: the
                     // exact per-row path (emit re-checks + C detoast).
+                    self.slow_rows += 1;
                     if let Some(slot) = emit.emit(i, estate)? {
                         self.accept(slot, estate)?;
                     }
@@ -6481,9 +6492,13 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     &keyn[..nk],
                     &args,
                 ) {
-                    ::nodeagg::HgBatchRow::Absorbed(true) => {}
-                    ::nodeagg::HgBatchRow::Absorbed(false) => self.degrade_impl(estate)?,
+                    ::nodeagg::HgBatchRow::Absorbed(true) => self.fast_rows += 1,
+                    ::nodeagg::HgBatchRow::Absorbed(false) => {
+                        self.fast_rows += 1;
+                        self.degrade_impl(estate)?;
+                    }
                     ::nodeagg::HgBatchRow::NeedSlot => {
+                        self.slow_rows += 1;
                         // Probe miss: group creation defers this row as the
                         // rep — materialize it and run the per-row accept
                         // (byte-identical creation order + rep bytes).
@@ -6496,6 +6511,9 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             return Ok(());
         }
         // Per-row delegation loop (the default impl, verbatim).
+        if self.batch.is_some() {
+            self.slow_rows += (n - pos) as u64;
+        }
         for i in pos..n {
             if let Some(slot) = emit.emit(i, estate)? {
                 match self.accept(slot, estate)? {
@@ -6617,15 +6635,37 @@ fn try_hashgroup_build<'mcx>(
     } else {
         None
     };
-    if batch.is_some() {
+    if let Some(b) = &batch {
         trace_feed("hash-grouped distinct batch accept armed");
+        // The fast leg reads staged SoA cells. Qual-less cbstore scans have
+        // no PREWHERE lane and the RowFeed arm stages no SoA plan — arm the
+        // offset-free columnar staging covering the key+arg columns
+        // (codedgroup's arm precedent; idempotent/co-arm-aware, false on
+        // heap). Failure just leaves the per-row path (the views refuse
+        // per batch).
+        let ask = b
+            .key_cols
+            .iter()
+            .chain(b.arg_cols.iter())
+            .map(|&c| c as i32 + 1)
+            .max()
+            .unwrap_or(0);
+        let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
     }
     // Force a forward child read for the feed's duration (`sort_feed`'s
     // discipline — this drain replaces the sort's own feed).
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink =
-        HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false, batch };
+    let mut sink = HashGroupDistinctSink {
+        agg,
+        sort,
+        outer_desc,
+        nkeys: k,
+        degraded: false,
+        batch,
+        fast_rows: 0,
+        slow_rows: 0,
+    };
     let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
     let degraded = sink.degraded;
     estate.es_direction = dir;
