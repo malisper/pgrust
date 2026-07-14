@@ -277,7 +277,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      moves the session GUC STORE; the layered snapshots follow it
     //      through the bind path by construction (guc-snapshots lane
     //      design, kill switches PGRUST_NO_GUC_BASE/_BIND).
-    assert_eq!(count_tree(crates), 469, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 470, re-pinned at train-12 (m3-hashjoin merged): the fourth runtime
+    // engagement arm adds its per-helper executor slot —
+    //   9. executor/execmain/src/lanev2/runtime_hashjoin.rs
+    //      (HJ_WORKER_EXEC + HJ_PAYLOAD, one thread_local! block) — the
+    //      bound helper's drive-scoped QueryDesc handle plus the frozen
+    //      join table the run_morsel bodies read; same class and same
+    //      argument as WORKER_EXEC slots 4-6 (built inside the query-task
+    //      binding, torn down before unbind on every path, non-session
+    //      TLS — the binder owns all session state movement).
+    assert_eq!(count_tree(crates), 470, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
