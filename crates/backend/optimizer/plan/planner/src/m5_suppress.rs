@@ -84,8 +84,14 @@ pub enum CoverClass {
     /// m3-sort-b combine-phase top-N composition, q17/q18/q31–33 family);
     /// §2.4 law 2b degrade rules are arm-internal.
     CbGroupedAggTopN,
-    /// SELECT DISTINCT over cbstore, int-family Var keys (distinct sink);
-    /// ORDER BY + LIMIT above are walk-admitted.
+    /// Grouped COUNT(DISTINCT <int Var>) over cbstore, int-family GROUP
+    /// keys (the runtime distinct sink's sorted-distinct feed — CB q9/q10
+    /// class); plain whitelisted aggs may ride alongside; single-agg-key
+    /// ORDER BY + LIMIT composition is walk-admitted. RE-KEYED at
+    /// m5-integration-r2: the bootstrap probe keyed plain `SELECT
+    /// DISTINCT`, whose HashAggregate shape the sink never admits — a
+    /// measured suppress-then-refuse false positive (2.66x vs legacy at
+    /// dop4); plain SELECT DISTINCT is now UNKEYED (named matrix gap).
     CbDistinctIntKeys,
     /// Bare `count(*)` over a plain heap rel, no quals (rowdrive car 1,
     /// StorelessCount direct morsel drive; block floor is arm-internal).
@@ -153,7 +159,7 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::CbDistinctIntKeys,
         covered: true,
-        qualifiers: "int-family keys only; ORDER BY+LIMIT above admitted; spill-eligible",
+        qualifiers: "grouped count(DISTINCT int); int-family group keys; plain-agg passengers; agg-key ORDER BY+LIMIT admitted; spill-eligible; plain SELECT DISTINCT unkeyed (hash-shape gap)",
     },
     MatrixRow {
         class: CoverClass::HeapPlainCountStar,
@@ -398,21 +404,13 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let is_cb = run.root.rel(rel_id).amflags & AMFLAG_CBSTORE != 0;
     let has_quals = top.quals.is_some();
 
-    // --- DISTINCT over cbstore, int keys -----------------------------------
+    // --- plain SELECT DISTINCT: UNKEYED (m5-integration-r2 re-key) ---------
+    // The runtime distinct sink admits the SORTED-distinct feed (grouped
+    // count(DISTINCT), below); the plain shape plans HashAggregate, which
+    // the sink refuses — suppressing it was a measured serial-instead-of-
+    // legacy false positive (rowflip measure, 2.66x at dop4). Keep Gather.
     if !parse.distinctClause.is_nil() {
-        if !is_cb || parse.hasAggs || !parse.groupClause.is_nil() {
-            return Ok(false);
-        }
-        // Plain SELECT DISTINCT: every tlist entry a non-junk int-family
-        // Var on the scanned rel (junk entries would be DISTINCT-invalid
-        // sort keys anyway; refuse them).
-        for tle_node in &parse.targetList {
-            let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
-            if tle.resjunk || !is_covered_key_var(tle.expr, rti, |t| is_int_family(t)) {
-                return Ok(false);
-            }
-        }
-        return finish(run, CoverClass::CbDistinctIntKeys, rte.relid, 0.0);
+        return Ok(false);
     }
 
     // --- Aggregate shapes ----------------------------------------------------
@@ -497,9 +495,12 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         }
         key_refs.push(gc.tleSortGroupRef);
     }
-    // Emit discipline: every tlist entry is a bare group-key Var or a
+    // Emit discipline: every tlist entry is a bare group-key Var, a
     // whitelisted sink aggregate (const tlist entries — the q35 refusal —
-    // and non-identity emits classify uncovered here).
+    // and non-identity emits classify uncovered here), or a
+    // count(DISTINCT <int Var>) — the runtime distinct sink's class
+    // (CbDistinctIntKeys; int GROUP keys only, checked below).
+    let mut n_count_distinct = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
         if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
@@ -508,9 +509,18 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             }
             continue;
         }
+        if is_count_distinct_int(tle.expr, rti) {
+            n_count_distinct += 1;
+            continue;
+        }
         if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS) {
             return Ok(false);
         }
+    }
+    // The distinct sink's class: int-family GROUP keys only (text grouped
+    // distinct stays the refused distinct-text row).
+    if n_count_distinct > 0 && n_text > 0 {
+        return Ok(false);
     }
 
     // Sort/limit composition: none at all (plain grouped emit), or the
@@ -530,7 +540,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
             return Ok(false);
         };
-        if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS) {
+        if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS)
+            && !is_count_distinct_int(tle.expr, rti)
+        {
             return Ok(false);
         }
         true
@@ -555,7 +567,11 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    let class = if topn {
+    let class = if n_count_distinct > 0 {
+        // The sorted-distinct feed owns grouped count(DISTINCT) — with or
+        // without the top-N composition (walk-admitted, e2e leg 177 class).
+        CoverClass::CbDistinctIntKeys
+    } else if topn {
         CoverClass::CbGroupedAggTopN
     } else if n_text > 0 {
         CoverClass::CbGroupedAggTextKey
@@ -779,6 +795,27 @@ fn is_covered_key_var(expr: Node<'_>, rti: usize, type_ok: impl Fn(u32) -> bool)
 fn is_whitelisted_agg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
     let Some(agg) = expr.as_aggref() else { return false };
     aggref_plain(agg, rti) && whitelist.contains(&agg.aggfnoid)
+}
+
+/// A `count(DISTINCT <int-family Var>)` on the scanned rel: normal kind,
+/// one arg, one-entry aggdistinct, no order/filter/variadic decoration —
+/// the runtime distinct sink's aggregate (CbDistinctIntKeys).
+fn is_count_distinct_int(expr: Node<'_>, rti: usize) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if agg.aggfnoid != F_COUNT_ANY
+        || agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || agg.aggdistinct.len() != 1
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+        || agg.args.len() != 1
+    {
+        return false;
+    }
+    let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
+    is_covered_key_var(arg_tle.expr, rti, is_int_family)
 }
 
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
