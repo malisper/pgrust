@@ -692,12 +692,45 @@ impl Scheduler {
     /// free slots; capacity shortfalls defer (the deferred pipeline
     /// re-publishes when one of the query's own pipelines finishes).
     fn start_rg_locked(&self, m: &mut Membership, rg: Arc<ResourceGroup>, slot: usize) {
-        // Stride join (M5-4): a newly-admitted RG starts at the global pass
-        // watermark — no credit for queue wait, no monopoly over incumbents.
-        // Stored BEFORE the publish makes the slot pickable; persists across
-        // the RG's task-set republishes (publish never resets it).
+        // Stride join (M5-4, refined at M5-5): a newly-admitted RG starts at
+        // the stride VIRTUAL TIME — the minimum pass among currently-active
+        // slots — falling back to the M5-4 global-pass watermark when
+        // nothing is active (or when the M5-5 kill switch is off, which
+        // restores M5-4 exactly). M5-4's max-watermark join made
+        // submit→first-service grow O(K·t_max) under a K-query background:
+        // every active slot had to lap the watermark before the arrival's
+        // first pick (MULTI panel measured 25µs → 3.9ms → 11ms at
+        // K=1/2/6×4-workers). Joining at the min active pass restores the
+        // §3.4 law (short-query latency under batch load approaches
+        // isolated) with NO queue-wait credit and NO monopoly — the arrival
+        // merely ties the most-behind incumbent and advances at its own
+        // stride from there — and NO change to the starvation floor: a
+        // floor RG's pass sits at most one (decayed, 16x) jump above the
+        // min, so the 1/(1+K·p0/p_min) share bound is unchanged. Stored
+        // BEFORE the publish makes the slot pickable; persists across the
+        // RG's task-set republishes (publish never resets it).
         let watermark = self.global_pass.load(Ordering::Relaxed);
-        self.slots[slot].pass.store(watermark, Ordering::Relaxed);
+        let join = if self.decay.load(Ordering::Relaxed) && self.stride.load(Ordering::Relaxed)
+        {
+            let mut min_active: Option<u64> = None;
+            for (i, mask) in self.active.iter().enumerate() {
+                let mut w = mask.load(Ordering::Relaxed);
+                while w != 0 {
+                    let b = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    let s = i * 64 + b;
+                    if s >= self.slots.len() {
+                        break;
+                    }
+                    let p = self.slots[s].pass.load(Ordering::Relaxed);
+                    min_active = Some(min_active.map_or(p, |m| m.min(p)));
+                }
+            }
+            min_active.map_or(watermark, |m| m.min(watermark))
+        } else {
+            watermark
+        };
+        self.slots[slot].pass.store(join, Ordering::Relaxed);
         if !self.dag.load(Ordering::Relaxed) {
             let first = {
                 let mut p = lock(&rg.progress);
@@ -706,9 +739,9 @@ impl Scheduler {
             self.publish_taskset_locked(m, rg, first, slot);
             return;
         }
-        // DAG join: the QUERY's shared stride account starts at the
-        // watermark; every slot publish mirrors it into the slot's pass.
-        rg.pass_account.store(watermark, Ordering::Relaxed);
+        // DAG join: the QUERY's shared stride account starts at the same
+        // join pass; every slot publish mirrors it into the slot's pass.
+        rg.pass_account.store(join, Ordering::Relaxed);
         let free = m.owned.iter().filter(|e| e.is_none()).count();
         debug_assert!(free >= 1, "caller must hand start_rg_locked a free slot");
         let (ready, deferred) = {
