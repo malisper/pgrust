@@ -715,39 +715,24 @@ fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                             super::arm_fold_len_lanes(&aps.agg, ss);
                         }
                         DriveMode::Census => {
-                            // dop1-tax fix 2 (measured re-attribution): the
-                            // M1 RowFeed arm handed census scans to the
-                            // PREWHERE lane, whose survivor-window completing
-                            // deform + gather_dict_lane MATERIALIZES value
-                            // lanes a count(*) census never reads — the
-                            // runtime1 q21 flat carried gather_dict_lane
-                            // (~2.5%) + proportionally inflated decompress
-                            // vs serial, while cutting claim re-entries
-                            // 154→21 (inc-1) measured wall-flat. Arm the
-                            // SERIAL fused count path's staging instead
-                            // (procnode.rs exec_agg_batched census arm,
-                            // verbatim): the qual column alone, qual_only —
-                            // the census reads BITS, not the prefix;
-                            // fallback rows re-check off the stored tuple.
-                            // A declined staging leaves census_drain on its
-                            // graceful per-row path, byte-identically.
-                            let outer = ::nodeagg::agg_batch_outer_prefix(&aps.agg);
-                            let prefix = outer
-                                .and_then(|p| match ss.ss.qual.as_deref() {
-                                    Some(q) => q
-                                        .max_fetch(::execexpr::SlotSrc::Scan)
-                                        .map(|m| p.max(m)),
-                                    None => Some(p),
-                                })
-                                .unwrap_or(0);
-                            ::nodeseqscan::seq_scan_batch_soa_prepare(
+                            // Census shape: row-feed staging (kernel-qual
+                            // selection bitmap / PREWHERE when the qual has
+                            // kernel shape; stitched tiers on) — the same
+                            // staging the SERIAL q21-class drive uses (the
+                            // lane refuses census and the Volcano pull runs
+                            // over the prewhere-staged scan). A qual-only
+                            // restage was tried here (dop1-tax inc-2 first
+                            // cut) and REVERTED: LIKE quals are not
+                            // cmp-const clauses, so it armed NO bitmap and
+                            // the drain fell to the per-row path.
+                            super::arm_scan_staging(
                                 ss,
                                 estate,
-                                prefix,
-                                outer == Some(0),
-                                false,
-                                false,
-                            );
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime scan census feed",
+                                    stitch: true,
+                                },
+                            )?;
                         }
                     }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
