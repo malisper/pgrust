@@ -1530,6 +1530,56 @@ struct MmState {
 
 /// One staged batch. See `exprkey_build_fold_feed` for the routing rules.
 #[allow(clippy::too_many_arguments)]
+/// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
+/// the expr-key feed under SINK constraints — compact table REQUIRED, no
+/// multi-key/dict/code-histogram state, empty str-mm memo. Fails closed if
+/// the batch routed anywhere the compact table cannot host (sticky range-
+/// guard refusal, a per-row route's compact disarm): the sink cannot export
+/// the C tuplehash, so the engagement aborts and the serial arm reruns.
+pub(super) fn exprkey_sink_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    stage_slot: &mut Option<ExecSlotId>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut mm = MmState {
+        cols: Vec::new(),
+        codes: Vec::new(),
+        scratch: ::lanefold::StrMmScratch::default(),
+    };
+    let mut ch: Option<CodeHistState> = None;
+    exprkey_batch(agg, ss, xk, stage_slot, true, None, idxs, groups, &mut mm, &mut ch, n, estate)?;
+    if xk.refused || !::nodeagg::agg_hash_compact_armed(agg) {
+        return Err(::nodeagg::sink::sink_shape_error(
+            "expr-key batch routed off the compact table (range guard / disarm)",
+        ));
+    }
+    Ok(())
+}
+
+impl ExprKeyState {
+    /// The sink-admissible single-word key spec of this decide (phase 1):
+    /// `Single` for the Arith/TsTrunc kinds, `Reduced` for the redundant-key
+    /// kind; `None` for Dict/Multi (C2/Mk cars). Width from the armed
+    /// staged-probe kernel (the caller's admission reads it off the node).
+    pub(super) fn sink_key_kind(&self) -> Option<Option<::nodeagg::RedShape>> {
+        match &self.kind {
+            ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(None),
+            ExprKeyKind::Reduced { shape, .. } => Some(Some(shape.clone())),
+            ExprKeyKind::Dict { .. } | ExprKeyKind::Multi(_) => None,
+        }
+    }
+
+    /// Sticky per-build refusal flag (arith trap / range guard).
+    pub(super) fn sink_refused(&self) -> bool {
+        self.refused
+    }
+}
+
 fn exprkey_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,

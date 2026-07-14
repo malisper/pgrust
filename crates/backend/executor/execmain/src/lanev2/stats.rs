@@ -446,6 +446,14 @@ static TOPNEMIT_GROUPS_CUT: AtomicU64 = AtomicU64::new(0);
 /// first_slot scatter); `FEEDS` counts armed feeds.
 static BATCHEMIT_GROUPS: AtomicU64 = AtomicU64::new(0);
 static BATCHEMIT_FEEDS: AtomicU64 = AtomicU64::new(0);
+/// Topkfin (top-k group selection before finalize/emit; hot-c1) effect
+/// counters (informational `counter` dump lines). `GROUPS` counts groups the
+/// selection scan walked; `SELECTED` counts survivors finalized + emitted
+/// (≤ the sort bound); `DEMOTED` counts armed passes that declined (no
+/// compact table or a NULL order-key transvalue) back to the batched feed.
+static TOPKFIN_GROUPS: AtomicU64 = AtomicU64::new(0);
+static TOPKFIN_SELECTED: AtomicU64 = AtomicU64::new(0);
+static TOPKFIN_DEMOTED: AtomicU64 = AtomicU64::new(0);
 /// Refsort (late-materialization top-N) engagement counters (informational
 /// `counter` dump lines): `OWNED` = feeds the refsort arm completed (narrow
 /// puts + winner gather); `DEMOTED` = armed feeds that demoted back to the
@@ -585,6 +593,29 @@ pub(super) fn tick_batchemit_groups(groups: u64, feeds: u64) {
     arm_dump_on_thread_exit();
 }
 
+/// Record one owned topkfin feed: `groups` walked by the selection scan,
+/// `selected` survivors finalized + emitted.
+#[inline]
+pub(super) fn tick_topkfin_groups(groups: u64, selected: u64) {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPKFIN_GROUPS.fetch_add(groups, Relaxed);
+    TOPKFIN_SELECTED.fetch_add(selected, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one topkfin decline (armed pass fell back to the batched feed
+/// before any side effect).
+#[inline]
+pub(super) fn tick_topkfin_demoted() {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPKFIN_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 /// TLS drop guard: any backend thread that ticked dumps the cumulative totals
 /// on its way out (backend exit = thread exit in this server). Dump-on-exit
 /// keeps the hot path free of I/O and needs no exit-callback registration.
@@ -675,6 +706,18 @@ fn dump() {
     out.push_str(&format!(
         "counter\tbatchemit-feeds\t{}\n",
         BATCHEMIT_FEEDS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-groups\t{}\n",
+        TOPKFIN_GROUPS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-selected\t{}\n",
+        TOPKFIN_SELECTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-demoted\t{}\n",
+        TOPKFIN_DEMOTED.load(Relaxed)
     ));
     out.push_str(&format!(
         "counter\trefsort-owned\t{}\n",

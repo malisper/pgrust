@@ -35,7 +35,11 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod runtime_agg;
+mod runtime_distinct;
+mod runtime_hashjoin;
 mod runtime_scan;
+mod runtime_sort;
 mod push;
 mod stats;
 
@@ -2779,13 +2783,18 @@ struct PlainDistinctAggBuildSink<'a, 'mcx> {
     keys: Vec<::datum::Datum>,
     ints: Vec<i64>,
     hashes: Vec<u64>,
-    /// Dict-code insert memo, EPOCH-SCOPED (cleared whenever the staged dict
-    /// lane's epoch changes): bit = this code's value was already fed this
-    /// epoch. Never carries across epochs — epoch-scoped ids are not stable
-    /// value identities (the set stores full bytes; the memo only filters
-    /// repeat inserts, which every downstream consumer dedups anyway).
+    /// Dict-code insert memo, IDENTITY-SCOPED (cleared whenever the memo
+    /// identity changes): bit = this code's value was already fed under this
+    /// identity. Without a v7 stitch the identity is `(false, epoch)` and
+    /// bits are local codes — never carries across epochs (epoch-scoped ids
+    /// are not stable value identities). With a stitch the identity is
+    /// `(true, gepoch)` and bits are PART-GLOBAL codes (0..gndv) — the memo
+    /// never resets at row-group rolls, deleting the per-epoch re-insert tax
+    /// (the global-dict lane's distinct-set consumer, mirroring dict-group).
+    /// Either way the set stores full bytes; the memo only filters repeat
+    /// inserts, which every downstream consumer dedups anyway.
     dict_memo: Vec<u64>,
-    dict_epoch: Option<u64>,
+    dict_ident: Option<(bool, u64)>,
 }
 
 impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
@@ -2802,7 +2811,7 @@ impl<'a, 'mcx> PlainDistinctAggBuildSink<'a, 'mcx> {
             ints: Vec::new(),
             hashes: Vec::new(),
             dict_memo: Vec::new(),
-            dict_epoch: None,
+            dict_ident: None,
         }
     }
 }
@@ -2847,18 +2856,35 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
         if self.key_bytes {
             if let Some(lane) = emit.key_dict_lane() {
                 let t = lane.table;
-                if self.dict_epoch != Some(t.epoch) {
+                // Memo identity roll: part-global (gepoch, never resets
+                // across row groups) when the v7 stitch is published, else
+                // per-epoch local codes (see the field doc).
+                let global = t.has_stitch();
+                let (ident, size) = if global {
+                    ((true, t.gepoch), t.gndv as usize)
+                } else {
+                    ((false, t.epoch), t.ndict as usize)
+                };
+                if self.dict_ident != Some(ident) {
                     self.dict_memo.clear();
-                    self.dict_memo.resize((t.ndict as usize).div_ceil(64), 0);
-                    self.dict_epoch = Some(t.epoch);
+                    self.dict_memo.resize(size.div_ceil(64), 0);
+                    self.dict_ident = Some(ident);
+                    trace_feed(&format!(
+                        "distinct-set dict memo {} {} (n={size})",
+                        if global { "gepoch" } else { "epoch" },
+                        ident.1
+                    ));
                 }
                 // SAFETY: the lane covers the staged window's `n` rows and
-                // `ndict` dict entries (the fill's contract); consumed
+                // `ndict` dict entries (the fill's contract; the stitch spans
+                // `ndict` u32s per the Part::stitch length check); consumed
                 // before the next window stages.
-                let (codes, dict) = unsafe {
+                let (codes, dict, stitch) = unsafe {
                     (
                         core::slice::from_raw_parts(lane.codes, n as usize),
                         core::slice::from_raw_parts(t.dict, t.ndict as usize),
+                        global
+                            .then(|| core::slice::from_raw_parts(t.stitch, t.ndict as usize)),
                     )
                 };
                 return ::nodeagg::agg_plain_distinct_insert_dict_batch(
@@ -2866,6 +2892,7 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                     estate,
                     &codes[pos as usize..],
                     dict,
+                    stitch,
                     &mut self.dict_memo,
                 );
             }
@@ -3063,7 +3090,18 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
-    if ::nodeagg::agg_hash_table_filled(agg) {
+    if ::nodeagg::agg_hash_table_filled(agg) || ::nodeagg::sink::agg_sink_emitting(agg) {
+        return Ok(());
+    }
+    // M2 runtime aggregation sink (runtime_agg.rs): the forced/explicit
+    // parallel engagement, tried at the ONE build seam every drive chain
+    // shares (bare agg hook, Limit-over-agg, sort feed). Success adopts the
+    // published emit; every retrieve path drains it through
+    // agg_hash_retrieve's sink branch. Refusal falls through to the serial
+    // build byte-identically.
+    if c == AggLaneChoice::Fold
+        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), estate)?
+    {
         return Ok(());
     }
     // One OWNED tick per lane-owned hash-agg build event (the gate's
@@ -3752,6 +3790,28 @@ fn scan_mk_shape<'mcx>(
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<ScanMk> {
+    scan_mk_admit(agg, ss, estate, true)
+}
+
+/// The probe half of [`scan_mk_shape`] for the M2 sink leader: identical
+/// gates and shape, but the compact table is NOT armed — the leader's
+/// executor only ever adopts the published parallel emit, so arming would
+/// buy a dead group-estimate-sized prealloc (the serial fallback re-runs
+/// the real arm at its own build).
+fn scan_mk_probe<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    scan_mk_admit(agg, ss, estate, false)
+}
+
+fn scan_mk_admit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    arm: bool,
+) -> Option<ScanMk> {
     if !scan_mk_plan_wanted(agg) {
         return None;
     }
@@ -3805,12 +3865,24 @@ fn scan_mk_shape<'mcx>(
     }
     // Packing admission + table arm (nullable = heap; cbstore rides the
     // no-NULLs per-chunk proof and packs no null byte).
-    match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict_att.filter(|_| is_cb)) {
-        ::nodeagg::CompactArm::Armed => {
-            let shape =
-                ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
-            Some(ScanMk { shape, dict_att: dict_att.filter(|_| is_cb) })
+    let dict = dict_att.filter(|_| is_cb);
+    let verdict = if arm {
+        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict) {
+            ::nodeagg::CompactArm::Armed => {
+                let shape =
+                    ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
+                return Some(ScanMk { shape, dict_att: dict });
+            }
+            v => v,
         }
+    } else {
+        match ::nodeagg::agg_hash_compact_mk_admit(agg, !is_cb, dict) {
+            Ok((shape, _numgroups)) => return Some(ScanMk { shape, dict_att: dict }),
+            Err(v) => v,
+        }
+    };
+    match verdict {
+        ::nodeagg::CompactArm::Armed => unreachable!("armed verdicts returned above"),
         ::nodeagg::CompactArm::KeyKind => refused(RefuseReason::MultiKeyShape),
         ::nodeagg::CompactArm::SpillRisk => refused(RefuseReason::CompactSpillRisk),
         ::nodeagg::CompactArm::Off => None,
@@ -4253,7 +4325,7 @@ pub fn try_own_sort<'mcx>(
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
 
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
@@ -4383,9 +4455,27 @@ fn sort_feed_if_needed<'mcx>(
             None
         };
         match (bplan, spec) {
-            (Some(plan), spec) => {
+            (Some(mut plan), spec) => {
                 lane_trace("batch emit armed (compact finalize kernels)");
-                sort_feed_agg_batched(state, &mut aps.agg, outer_desc, spec, plan, estate)?
+                // Top-k group selection before finalize/emit (lane-v2
+                // topkfin, hot-c1): on the single-key bounded shape, pick the
+                // k surviving groups on the RAW states and finalize/form only
+                // those. Declines (Ok(false)) fall through to the batched
+                // feed with nothing mutated.
+                let owned = match spec {
+                    Some(spec) if topkfin_admits(state) => sort_feed_agg_topk_finalize(
+                        state,
+                        &mut aps.agg,
+                        outer_desc.clone(),
+                        spec,
+                        &mut plan,
+                        estate,
+                    )?,
+                    _ => false,
+                };
+                if !owned {
+                    sort_feed_agg_batched(state, &mut aps.agg, outer_desc, spec, plan, estate)?
+                }
             }
             (None, Some(spec)) => {
                 sort_feed_agg_topn(state, &mut aps.agg, outer_desc, spec, estate)?
@@ -4411,6 +4501,16 @@ fn sort_feed_if_needed<'mcx>(
     match outer {
         crate::procnode::PlanStateNode::SeqScan(ss) => {
             arm_scan_staging(ss, estate, ScanFeedShape::RowFeed { ctx: "sort feed", stitch: true })?;
+            // M3 runtime top-N sink (docs/design/m3-sort.md; PGRUST_RUNTIME=1
+            // + pgrust.runtime_sort_pool + PGRUST_RUNTIME_SORT layering —
+            // absent, one GUC read and today's serial path byte-identically).
+            // Probed BEFORE the serial arms arm anything: true = the winners
+            // are gathered and buffered, the refsort emit face is live;
+            // false = refused or fell back with nothing consumed and no sort
+            // state touched.
+            if runtime_sort::try_own_sort_topn(state, ss, &outer_desc, estate)? {
+                return Ok(true);
+            }
             // Zone-adaptive top-N granule order (cbstore bounded sorts; None
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
@@ -5281,6 +5381,98 @@ fn batch_emit_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(std::env::var("PGRUST_LANE_V2_BATCHEMIT").as_deref(), Ok("0") | Ok("off"))
     })
+}
+
+// ===========================================================================
+// Lane-v2 topkfin (hot-c1-topk-finalize): top-k group selection BEFORE
+// finalize/emit. The batched feed above still finalizes and forms a tuple for
+// EVERY group the topnemit boundary cut can't skip — and the streaming cut
+// only skips groups STRICTLY worse than the live k-th boundary, so on flat
+// order-key distributions (Q32/Q33: ~10M groups, boundary count ~1) it skips
+// nothing and ~10M numeric-avg divisions + tuple forms feed a sort that
+// keeps 10. This pass selects the k surviving groups FIRST, on the raw int8
+// order-key states (`nodeagg::topk_finalize_select` — a bounded (key, row)
+// heap in first-arrival total order), then runs the batched finalize+emit
+// for those k rows only.
+//
+// Admission (fail-closed, on top of the batchemit + topnemit admissions the
+// caller already proved):
+//   * single-column ORDER BY (the k-th boundary's tie-break must not need
+//     secondary keys);
+//   * bounded sort with a sane positive bound;
+//   * relaxed adaptive-topk tie mode (the selected members of the boundary
+//     tie group are the first-arrived, deterministic, C-LEGAL set — rule 2
+//     of docs/conformance/tie-ordering.md applied to agg groups; `tracked`
+//     and `0` stay byte-exact channels and never arm this);
+//   * every group's order-key transvalue non-NULL, checked row-by-row inside
+//     the selection scan (a NULL bails the whole pass before any side
+//     effect — NULLS placement stays the tuplesort's authority).
+// Kill switch: PGRUST_LANE_V2_TOPKFIN=0. Declines are never lane refusals —
+// the batched (or per-row) feed runs unchanged.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_TOPKFIN` kill switch (default ON inside the lane).
+fn topkfin_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_TOPKFIN").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Plan-shape admission for the topkfin pass (invariant block above). The
+/// state-level conditions (compact table present, non-NULL order keys) are
+/// checked by the selection itself.
+fn topkfin_admits(state: &::nodesort::SortState<'_>) -> bool {
+    topkfin_enabled()
+        && adaptive_topk_mode() == AdaptiveTopkMode::Relaxed
+        && state.bounded
+        && state.bound > 0
+        && state.plan.numCols == 1
+}
+
+/// The topkfin agg→sort feed: select the top-k groups on raw states, then
+/// `sort_feed_agg_batched`'s begin/put/finish frame over exactly those rows.
+/// Ok(false) = the selection declined (no compact table or a NULL order key)
+/// — nothing was mutated and no sort side effect happened; the caller runs
+/// the pre-existing feed.
+fn sort_feed_agg_topk_finalize<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    spec: ::nodeagg::TopnEmitSpec,
+    plan: &mut ::nodeagg::BatchEmitPlan,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let k = usize::try_from(sort.bound).expect("admission checked bound > 0");
+    let Some((rows, groups)) = ::nodeagg::topk_finalize_select(agg, spec, k)? else {
+        stats::tick_topkfin_demoted();
+        return Ok(false);
+    };
+    lane_trace("topk finalize armed (group selection before finalize/emit)");
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    for chunk in rows.chunks(::nodeagg::BATCH_EMIT_BLOCK) {
+        // Block-granular ExprContext reset — the previous block's finalized
+        // images were copied by its sort puts (batchemit's residency rule).
+        ::nodeagg::batch_emit_set_block(agg, estate, plan, chunk);
+        ::nodesort::sort_lane_put_batch(
+            sort,
+            estate,
+            0,
+            chunk.len() as u32,
+            false,
+            &mut BatchEmitFeed { agg, plan },
+        )?;
+    }
+    ::nodeagg::agg_emit_mark_drained(agg);
+    if stats::armed() {
+        stats::tick_topkfin_groups(groups, rows.len() as u64);
+        stats::tick_batchemit_groups(rows.len() as u64, 1);
+    }
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(true)
 }
 
 /// `SortLaneBatchFeed` face of the batched compact emit: staged position `i`
@@ -6256,6 +6448,22 @@ fn distincthash_text_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_BATCH` kill switch (default ON): the
+/// batched fast leg of the hash-grouped distinct feed (staged-cell key
+/// probe + direct set insert, skipping per-row slot projection and the
+/// transition program for the all-set-mode bare-Var shape — Q9-class).
+/// Off, the sink feeds per-row exactly as before — the A/B attribution
+/// channel for the batch delta.
+fn distincthash_batch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_BATCH").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -6332,12 +6540,29 @@ fn hashgroup_order_spec(
 /// begins late, the deferred representatives dump into it, and every
 /// further row goes straight to the sort (the narrow-sort arm's feed,
 /// resumed mid-stream; section doc).
+/// Scan-column map for the batched fast leg (`agg_hashgroup_batch_shape`
+/// order): the grouping keys' and the per-pertrans DISTINCT args' 0-based
+/// SCAN columns — every mapped outer column proved a bare Var, so the
+/// staged scan cell IS the projected outer cell.
+struct HgBatchCols {
+    key_cols: Vec<u16>,
+    arg_cols: Vec<u16>,
+}
+
 struct HashGroupDistinctSink<'a, 'mcx> {
     agg: &'a mut ::nodeagg::AggStateData<'mcx>,
     sort: &'a mut ::nodesort::SortState<'mcx>,
     outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
     nkeys: usize,
     degraded: bool,
+    /// `Some` = the batched fast leg is admitted (shape + Var map +
+    /// `distincthash_batch_enabled`); per-batch availability still gates
+    /// each staged window (`refsort_key_batch`'s soundness contract).
+    batch: Option<HgBatchCols>,
+    /// Engagement counters (trace observability): rows absorbed by the
+    /// fast leg vs rows routed through the per-row emit path.
+    fast_rows: u64,
+    slow_rows: u64,
 }
 
 impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
@@ -6355,6 +6580,12 @@ impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
     }
 
     fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if self.batch.is_some() {
+            trace_feed(&format!(
+                "hashgroup batch feed: fast={} perrow={}",
+                self.fast_rows, self.slow_rows
+            ));
+        }
         if self.degraded {
             ::nodesort::sort_lane_finish(self.sort, estate)
         } else {
@@ -6363,9 +6594,141 @@ impl<'mcx> Sink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
     }
 }
 
-/// Batch-granular feed: the default per-row delegation loop (the arm's
-/// accept is per-row by nature — group probe + transition program).
-impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {}
+/// Batch-granular feed. Default: the per-row delegation loop (group probe +
+/// transition program per row). With `batch` armed (all-int keys, every
+/// transition a set-mode bare-Var pertrans) the FAST LEG reads the keys and
+/// DISTINCT args straight from the staged scan cells and absorbs found-group
+/// rows with zero slot work — no `emit` projection, no `slot_getsomeattrs`,
+/// no transition program (`agg_hashgroup_accept_batch_row` reproduces
+/// `run_row`'s set collect verbatim). Rows the fast leg cannot host go
+/// through the exact per-row path in ROW ORDER (single pass): qual-dead rows
+/// skip (the whole-qual bitmap verdict — the emit's own verdict), forced-
+/// fallback rows and probe misses (group creation defers the row as the
+/// group's rep, which needs a materialized slot) take `emit` + `accept`.
+/// Byte identity: same rows, same order, same group-creation order, same
+/// rep bytes, same degrade point (`Absorbed(false)` mirrors `accept`'s
+/// `Ok(false)` — the row is absorbed first, then the one-shot degrade).
+impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        'fast: {
+            if self.degraded || self.batch.is_none() {
+                break 'fast;
+            }
+            let cols = self.batch.as_ref().expect("checked");
+            // Snapshot the staged views: value/isnull cell pointers per
+            // needed column + one copy of the shared fallback/sel words.
+            // Any column unavailable this batch -> the per-row loop.
+            // SAFETY of the raw pointers: the staged window (SoA cells,
+            // bitmap words) is stable for the whole batch — `emit.emit`
+            // projects into a slot and never restages (the dict-lane feed
+            // relies on the same window-stability contract); the pointers
+            // are consumed before this call returns.
+            let nc = cols.key_cols.len() + cols.arg_cols.len();
+            let mut views: Vec<(*const ::datum::Datum, *const bool)> = Vec::with_capacity(nc);
+            let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
+            let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            for (ci, &col) in
+                cols.key_cols.iter().chain(cols.arg_cols.iter()).enumerate()
+            {
+                let Some((vals, nulls, fallback, sel)) = emit.refsort_key_batch(col, n)
+                else {
+                    break 'fast;
+                };
+                if ci == 0 {
+                    fb[..fallback.len()].copy_from_slice(fallback);
+                    selw = sel.map(|s| {
+                        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                        w[..s.len()].copy_from_slice(s);
+                        w
+                    });
+                }
+                views.push((vals.as_ptr(), nulls.as_ptr()));
+            }
+            // Interrupt cadence floor: one check per staged batch (the
+            // refsort fast leg's cadence; per-row-path rows keep their
+            // per-row check inside `emit`).
+            ::postgres_seams::check_for_interrupts::call()?;
+            let nk = cols.key_cols.len();
+            let mut keyd = [::datum::Datum::null(); 32];
+            let mut keyn = [false; 32];
+            let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
+            for i in pos..n {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
+                if let Some(s) = &selw {
+                    if s[w] & bit == 0 {
+                        continue; // qual-filtered (exact whole-qual verdict)
+                    }
+                }
+                if self.degraded || fb[w] & bit != 0 {
+                    // Post-degrade remainder / forced-fallback row: the
+                    // exact per-row path (emit re-checks + C detoast).
+                    self.slow_rows += 1;
+                    if let Some(slot) = emit.emit(i, estate)? {
+                        self.accept(slot, estate)?;
+                    }
+                    continue;
+                }
+                // SAFETY: per the snapshot contract above; `i < n` and every
+                // view spans `n` staged rows.
+                unsafe {
+                    for (j, &(v, nl)) in views[..nk].iter().enumerate() {
+                        keyd[j] = *v.add(i as usize);
+                        keyn[j] = *nl.add(i as usize);
+                    }
+                    for (j, &(v, nl)) in views[nk..].iter().enumerate() {
+                        args[j] = (*v.add(i as usize), *nl.add(i as usize));
+                    }
+                }
+                match ::nodeagg::agg_hashgroup_accept_batch_row(
+                    self.agg,
+                    &keyd[..nk],
+                    &keyn[..nk],
+                    &args,
+                ) {
+                    ::nodeagg::HgBatchRow::Absorbed(true) => self.fast_rows += 1,
+                    ::nodeagg::HgBatchRow::Absorbed(false) => {
+                        self.fast_rows += 1;
+                        self.degrade_impl(estate)?;
+                    }
+                    ::nodeagg::HgBatchRow::NeedSlot => {
+                        self.slow_rows += 1;
+                        // Probe miss: group creation defers this row as the
+                        // rep — materialize it and run the per-row accept
+                        // (byte-identical creation order + rep bytes).
+                        if let Some(slot) = emit.emit(i, estate)? {
+                            self.accept(slot, estate)?;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // Per-row delegation loop (the default impl, verbatim).
+        if self.batch.is_some() {
+            self.slow_rows += (n - pos) as u64;
+        }
+        for i in pos..n {
+            if let Some(slot) = emit.emit(i, estate)? {
+                match self.accept(slot, estate)? {
+                    SinkFeed::NeedMore => {}
+                    SinkFeed::Full => {
+                        return Err(Box::new(::types_error::PgError::error(
+                            "lane-v2 batch feed: breaker sink returned Full".to_string(),
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl<'mcx> HashGroupDistinctSink<'_, 'mcx> {
     /// The one-shot degrade (section doc): begin the narrowed sort, dump
@@ -6444,11 +6807,65 @@ fn try_hashgroup_build<'mcx>(
         ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
     )?;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    // Batched fast-leg admission (conversion 3): the all-set-mode bare-Var
+    // int shape + every needed outer column a bare Var of a scan column
+    // (identity for bare scans; through the projection classification
+    // otherwise — the staged scan cell is then the projected outer cell).
+    let batch = if distincthash_batch_enabled() {
+        ::nodeagg::agg_hashgroup_batch_shape(agg).and_then(|(katts, aatts)| {
+            let map = |att: u16| -> Option<u16> {
+                match ss.ss.ps_ProjInfo.as_ref() {
+                    None => Some(att),
+                    Some(p) => {
+                        let cols = p.pi_state.scan_proj_cols()?;
+                        if (att as usize) >= cols.n as usize {
+                            return None;
+                        }
+                        match cols.cols[att as usize] {
+                            ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                            _ => None,
+                        }
+                    }
+                }
+            };
+            let key_cols: Option<Vec<u16>> = katts.iter().map(|&a| map(a)).collect();
+            let arg_cols: Option<Vec<u16>> = aatts.iter().map(|&a| map(a)).collect();
+            Some(HgBatchCols { key_cols: key_cols?, arg_cols: arg_cols? })
+        })
+    } else {
+        None
+    };
+    if let Some(b) = &batch {
+        trace_feed("hash-grouped distinct batch accept armed");
+        // The fast leg reads staged SoA cells. Qual-less cbstore scans have
+        // no PREWHERE lane and the RowFeed arm stages no SoA plan — arm the
+        // offset-free columnar staging covering the key+arg columns
+        // (codedgroup's arm precedent; idempotent/co-arm-aware, false on
+        // heap). Failure just leaves the per-row path (the views refuse
+        // per batch).
+        let ask = b
+            .key_cols
+            .iter()
+            .chain(b.arg_cols.iter())
+            .map(|&c| c as i32 + 1)
+            .max()
+            .unwrap_or(0);
+        let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
+    }
     // Force a forward child read for the feed's duration (`sort_feed`'s
     // discipline — this drain replaces the sort's own feed).
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
-    let mut sink = HashGroupDistinctSink { agg, sort, outer_desc, nkeys: k, degraded: false };
+    let mut sink = HashGroupDistinctSink {
+        agg,
+        sort,
+        outer_desc,
+        nkeys: k,
+        degraded: false,
+        batch,
+        fast_rows: 0,
+        slow_rows: 0,
+    };
     let fed = drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
     let degraded = sink.degraded;
     estate.es_direction = dir;
@@ -6699,6 +7116,7 @@ fn codedgroup_drive<'mcx>(
 ) -> PgResult<HgBuild> {
     let mut rows: Vec<u32> = Vec::new();
     let mut degraded = false;
+    let mut mode_traced = false;
     loop {
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
@@ -6781,6 +7199,14 @@ fn codedgroup_drive<'mcx>(
             let r = ::nodeagg::agg_codedgroup_accept_batch(agg, lane, &rows, argv, argn);
             (r.consumed, r.keep)
         };
+        // One-shot code-domain trace (engagement observability): global =
+        // part-global stitch codes, local = per-epoch codes + k-way merge.
+        if !mode_traced {
+            if let Some(g) = ::nodeagg::agg_codedgroup_mode_global(agg) {
+                trace_feed(if g { "codedgroup global codes" } else { "codedgroup local codes" });
+                mode_traced = true;
+            }
+        }
         if !keep {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;
@@ -6904,7 +7330,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !state.sort_done() {
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
@@ -6912,6 +7338,18 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         if let Some(k) = narrow {
             // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
+            // M2 runtime DISTINCT sink first (armed only under
+            // PGRUST_RUNTIME=1 + pgrust.runtime_distinct_pool > 0, falling
+            // back to pgrust.runtime_scan_pool — absent, two placeholder GUC
+            // lookups (alloc-free when never SET) and fall through). Owns
+            // the node on engagement; refusal/fallback keeps every serial
+            // arm below byte-identical.
+            match runtime_distinct::try_own_sorted_distinct_runtime(
+                agg, state, &mut **outer, outer_desc, rd_shape_refused, k, estate,
+            )? {
+                Some(row) => return Ok(Some(row)),
+                None => {}
+            }
             // Dict-code distinct arm first: it owns EXACTLY the density band
             // the hash arm's tier refuses (Q14-class near-unique text keys;
             // the two admissions partition the density axis), so ordering
@@ -9666,6 +10104,13 @@ pub fn try_own_agg_over_hash_join<'mcx>(
         stats::tick_refused(ShapeClass::Join, RefuseReason::Backward);
         return Ok(None);
     }
+    // M3 runtime hash-join arm (FORCED engagement under PGRUST_RUNTIME=1 +
+    // pgrust.runtime_hashjoin_pool; serial plan surface unchanged). Owns the
+    // plain-agg-over-join probe tails; None = not engaged/refused — fall
+    // through byte-identically (nothing was consumed).
+    if let Some(r) = runtime_hashjoin::try_own_agg_over_hash_join_runtime(agg, hj, estate)? {
+        return Ok(Some(r));
+    }
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
         return Ok(None);
@@ -10019,7 +10464,7 @@ pub fn try_own_limit<'mcx>(
             // (the tuplesort bound set by the prologue makes it top-N,
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
             if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple
@@ -11140,7 +11585,7 @@ pub fn try_pardistinct_worker_sort<'mcx>(
         s.pd_state = Some(false);
         return Ok(None);
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
         s.pd_state = Some(false);
         return Ok(None);

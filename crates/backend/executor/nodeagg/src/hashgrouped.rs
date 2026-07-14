@@ -998,6 +998,124 @@ pub fn agg_hashgroup_accept<'mcx>(
     Ok(hg.mem() <= hg.budget)
 }
 
+/// Batch-feed shape probe (the lanev2 batched accept, hot-levers-t11
+/// lever 2 conversion 3): `Some((key_atts, arg_atts))` (0-based OUTER
+/// attnos) when EVERY grouping key is an integer kind and EVERY transition
+/// of the node is a set-mode pertrans with a bare integer-Var argument
+/// (`direct_att`: single input, no FILTER). Under that shape the transition
+/// program's whole per-row effect is "park each pertrans' arg" — the
+/// batched accept reproduces `run_row`'s set collect exactly from staged
+/// column cells without projecting a slot or running the program. Mixed
+/// transitions (Q10-class sums alongside the DISTINCT) refuse: the program
+/// must run per row for them. Callable only after `agg_hashgroup_begin`.
+pub fn agg_hashgroup_batch_shape(node: &AggStateData<'_>) -> Option<(Vec<u16>, Vec<u16>)> {
+    let hg = node.hashgroup.as_deref()?;
+    if hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
+        return None;
+    }
+    debug_assert!(hg.smap.is_none(), "smap engages only on a single text key");
+    if hg.numtrans != node.pertrans_sort.len() {
+        return None;
+    }
+    let mut args = Vec::with_capacity(node.pertrans_sort.len());
+    for ps in &node.pertrans_sort {
+        if !matches!(
+            ps.set_kind,
+            Some(DistinctKeyKind::Int16 | DistinctKeyKind::Int32 | DistinctKeyKind::Int64)
+        ) {
+            return None;
+        }
+        args.push(ps.direct_att?);
+    }
+    Some((hg.key_atts.clone(), args))
+}
+
+/// One clean staged row through the batched fast leg. `key_datums`/`key_nulls`
+/// are the row's grouping-key cells (one per key, `agg_hashgroup_batch_shape`
+/// order) and `args` the row's DISTINCT-arg cells (one per pertrans). On a
+/// probe hit this is the whole row: switch to the group and run `run_row`'s
+/// set collect verbatim (park semantics — `direct_att` proved the program
+/// parks exactly these cells), then the same shared-set accounting and
+/// budget verdict as `agg_hashgroup_accept`. On a probe miss it does
+/// NOTHING and returns `NeedSlot`: group creation defers the row as the
+/// group's representative (a materialized slot), so the caller must emit
+/// the row and route it through the per-row `agg_hashgroup_accept` —
+/// byte-identical creation order and rep bytes.
+pub enum HgBatchRow {
+    /// Row fully absorbed; the payload is `mem() <= budget` (false = the
+    /// caller must degrade, exactly as `agg_hashgroup_accept`'s `Ok(false)`).
+    Absorbed(bool),
+    /// Probe miss: materialize the row and feed it per-row.
+    NeedSlot,
+}
+
+pub fn agg_hashgroup_accept_batch_row(
+    node: &mut AggStateData<'_>,
+    key_datums: &[Datum],
+    key_nulls: &[bool],
+    args: &[(Datum, bool)],
+) -> HgBatchRow {
+    debug_assert!(matches!(
+        node.hashgroup.as_deref(),
+        Some(HashGroupedState { phase: HgPhase::Building, .. })
+    ));
+    let mut words = [0i64; 32];
+    let found = {
+        let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+        debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
+        debug_assert_eq!(key_datums.len(), hg.nkeys);
+        let mut nulls = 0u32;
+        for (i, (&d, &isnull)) in key_datums.iter().zip(key_nulls.iter()).enumerate() {
+            if isnull {
+                nulls |= 1 << i;
+                words[i] = 0;
+                continue;
+            }
+            words[i] = match hg.key_kinds[i] {
+                HgKeyKind::Int16 => d.as_i16() as i64,
+                HgKeyKind::Int32 => d.as_i32() as i64,
+                HgKeyKind::Int64 => d.as_i64(),
+                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
+            };
+        }
+        let nkeys = hg.nkeys;
+        let h = hg.key_hash(&words[..nkeys], nulls);
+        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
+        found
+    };
+    let Some(g) = found else {
+        return HgBatchRow::NeedSlot;
+    };
+    switch_to(node, g);
+    // run_row's set collect, verbatim semantics (flag is always set for a
+    // direct_att pertrans: unconditional single-input park, no FILTER).
+    for (ps, &(d, isnull)) in node.pertrans_sort.iter_mut().zip(args.iter()) {
+        let kind = ps.set_kind.expect("batch shape: set-mode pertrans");
+        let dset = ps.dset.get_or_insert_with(DistinctSet::new);
+        if isnull {
+            dset.seen_null = true;
+            continue;
+        }
+        match kind {
+            DistinctKeyKind::Int16 => dset.insert_i64(d.as_i16() as i64),
+            DistinctKeyKind::Int32 => dset.insert_i64(d.as_i32() as i64),
+            DistinctKeyKind::Int64 => dset.insert_i64(d.as_i64()),
+            DistinctKeyKind::Bytes => unreachable!("batch shape excludes byte sets"),
+        }
+    }
+    // Shared-accounting update (the accept's existing-group arm, verbatim).
+    let sets: usize = node
+        .pertrans_sort
+        .iter()
+        .map(|ps| ps.dset.as_ref().map_or(0, |d| d.mem_bytes()))
+        .sum();
+    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+    let c = g as usize;
+    hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
+    hg.set_mem[c] = sets;
+    HgBatchRow::Absorbed(hg.mem() <= hg.budget)
+}
+
 /// Build complete (input exhausted, no degrade): replay every group's
 /// DEFERRED representative row through the transition program, then order
 /// the groups by the plan Sort's prefix (module doc: total, C-identical

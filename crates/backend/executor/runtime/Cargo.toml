@@ -28,6 +28,10 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 # crate's global slot surface is itself cfg(not(loom)).
 parallel = { path = "../../access/transam/parallel" }
 waiter = { path = "../../storage/ipc/waiter" }
+# §2.9 uring duties of the worker loop (src/io.rs): ring lifecycle +
+# boundary-reap calls, and the io_permit_release/reacquire (IoGuard) seam
+# impls. Seam-only dep: aio_uring installs; absent = guarded no-ops.
+aio_seams = { path = "../../storage/aio/aio_seams" }
 
 # Loom is cfg-gated, not feature-gated, so release binaries can never link
 # it: build the models with

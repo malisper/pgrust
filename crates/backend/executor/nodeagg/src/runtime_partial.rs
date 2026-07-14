@@ -126,14 +126,29 @@ unsafe fn int8_transarray_elems(datum: Datum) -> PgResult<*mut i64> {
     Ok(arr.add(::lanefold::ARR_OVERHEAD_NONULLS_1).cast::<i64>())
 }
 
-/// WORKER side: read the node's plain pergroups into a self-contained
-/// partial. Must run before the worker's executor is torn down (the by-ref
-/// states live in its aggcontext).
-pub fn agg_runtime_export_partial(node: &AggStateData<'_>) -> PgResult<RuntimePartial> {
+/// WORKER side helper for the export below. Must run before the worker's
+/// executor is torn down (the by-ref states live in its aggcontext).
+/// Export the node's plain pergroups into a caller-retained partial
+/// (capacity reused across morsels — the export runs once per morsel per
+/// worker, and a fresh Vec each time was a malloc+free pair on the engaged
+/// data path; m2-integration std-collections audit, AGENTS.md rule 7).
+///
+/// ERROR-PATH INVARIANT (leader side must uphold): the partial is cleared
+/// BEFORE the fallible fill, so on Err the slot holds a TRUNCATED partial.
+/// This is safe because every worker error marks the drive self-errored and
+/// the leader combines partials only on a clean Completed outcome
+/// (runtime_scan's take_error discipline) — never adopt a slot from an
+/// errored engagement.
+pub fn agg_runtime_export_partial_into(
+    node: &AggStateData<'_>,
+    partial: &mut RuntimePartial,
+) -> PgResult<()> {
     let plan = crate::agg_lanefold_plan(node)
         .ok_or_else(|| PgError::error("runtime partial export without a fold plan".to_string()))?;
     let base = crate::agg_plain_pergroup_base(node);
-    let mut out = Vec::with_capacity(plan.trans.len());
+    let out = &mut partial.trans;
+    out.clear();
+    out.reserve(plan.trans.len());
     for t in plan.trans.iter() {
         // SAFETY: transno indexes the node's once-allocated pergroup array
         // (fold plan transnos come from its spec list).
@@ -195,7 +210,7 @@ pub fn agg_runtime_export_partial(node: &AggStateData<'_>) -> PgResult<RuntimePa
         };
         out.push((t.transno, p));
     }
-    Ok(RuntimePartial { trans: out })
+    Ok(())
 }
 
 fn combine_two(kind: LaneKind, a: RuntimePartialTrans, b: RuntimePartialTrans) -> RuntimePartialTrans {

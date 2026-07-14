@@ -54,14 +54,18 @@ mod gsets;
 mod hashgrouped;
 pub mod merge;
 pub mod pardistinct;
+pub mod sink;
 pub mod runtime_partial;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
-    batch_emit_row, batch_emit_scan_block, BATCH_EMIT_BLOCK,
+    agg_emit_mark_drained, batch_emit_row, batch_emit_scan_block, batch_emit_set_block,
+    topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
-    agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
-    agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_reduced,
+    agg_hash_compact_intern, agg_hash_compact_mk_admit, agg_hash_compact_mk_shape,
+    agg_hash_compact_reduced_admissible,
+    agg_hash_compact_sink_admissible, agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk,
+    agg_hash_compact_try_arm_reduced,
     agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
     RedDerived, RedOp, RedShape,
@@ -69,15 +73,16 @@ pub use compact::{
 pub use codedgroup::{
     agg_codedgroup_accept_batch, agg_codedgroup_admissible, agg_codedgroup_begin,
     agg_codedgroup_economical, agg_codedgroup_emit_next, agg_codedgroup_emitting,
-    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_next_replay,
-    agg_codedgroup_reset, CgAccept,
+    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_mode_global,
+    agg_codedgroup_next_replay, agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
-    agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_adopt_merged,
-    agg_hashgroup_begin, agg_hashgroup_economical, agg_hashgroup_emit_next,
-    agg_hashgroup_emitting, agg_hashgroup_finish_build, agg_hashgroup_next_rep,
-    agg_hashgroup_reset, agg_hashgroup_residual_active, agg_hashgroup_set_residual,
-    agg_hashgroup_state_active, agg_hashgroup_text_key_count, HashGroupOrderKey,
+    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_admissible,
+    agg_hashgroup_adopt_merged, agg_hashgroup_batch_shape, agg_hashgroup_begin,
+    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
+    agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
+    agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
+    agg_hashgroup_text_key_count, HashGroupOrderKey, HgBatchRow,
 };
 pub use ::execgrouping::GroupKeyKind;
 
@@ -160,6 +165,10 @@ pub struct AggStateData<'mcx> {
     // (building or emitting). Plain Rust memory only — no aggcontext
     // residue, no interplay with the group-boundary resets (module doc).
     codedgroup: Option<Box<codedgroup::CodedGroupState<'mcx>>>,
+    // M2 aggregation sink (sink.rs): the LEADER's adopted parallel emit
+    // state — published per-bucket identity-projected rows drained one per
+    // call. Plain Rust memory; no aggcontext residue.
+    sink_emit: Option<Box<sink::SinkEmitState>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -596,6 +605,11 @@ struct PerHashData<'mcx> {
     // Stage-4 §4.4 radix exchange (merge.rs): the worker-side bounded-table
     // state, lazily resolved off the handoff registry on the first probe.
     exchange: merge::ExchangeState,
+    // M2 aggregation sink (sink.rs): Some(cap) on a SINK WORKER build — the
+    // compact arms size/gate by the cap (bounded Local discipline) and the
+    // backstop must never migrate into the C table (the sink cannot export
+    // it); the sink drain flushes at the cap instead.
+    sink_cap: Option<u32>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1515,6 +1529,7 @@ pub fn exec_init_agg<'mcx>(
         hash_build_combined: false,
         hashgroup: None,
         codedgroup: None,
+        sink_emit: None,
     })
 }
 
@@ -1898,6 +1913,7 @@ fn init_perhash<'mcx>(
         table_filled: false,
         compact: None,
         exchange: merge::ExchangeState::Unresolved,
+        sink_cap: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -2737,6 +2753,28 @@ fn distinctfin_enabled() -> bool {
     })
 }
 
+/// Add a materialized COUNT(DISTINCT) contribution `n` to a count pergroup
+/// state — the distinctfin shortcut's arithmetic, shared with the codedgroup
+/// emit fastpath. Overflow parity: C's int8inc errors at the crossing
+/// increment (int8.c "bigint out of range") — unreachable in practice (the n
+/// distinct values were materialized by this backend), kept for the exact
+/// error surface.
+///
+/// SAFETY: `pg` must point at a live pergroup slot holding a NON-NULL by-val
+/// i64 transition state (`set_count_transfn` + the callers' null guards).
+pub(crate) unsafe fn count_distinct_apply(pg: *mut AggPerGroup, n: i64) -> PgResult<()> {
+    let cur = unsafe { (*pg).trans_value.as_i64() };
+    let Some(newv) = cur.checked_add(n) else {
+        return Err(Box::new(PgError::error("bigint out of range").with_sqlstate(
+            ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+        )));
+    };
+    unsafe {
+        (*pg).trans_value = Datum::from_i64(newv);
+    }
+    Ok(())
+}
+
 // Budget crossing (collect-time): first crossing picks the group's overflow
 // path once — the v2 set spill when the budget can absorb the tape write
 // buffers (`SPILL_MIN_BUDGET`), else the v1 degrade-to-tuplesort — and later
@@ -3256,23 +3294,9 @@ pub(crate) fn process_ordered_aggregates_set<'mcx>(
                             _ => dset.ints().len() as i64,
                         }
                     };
-                    // Overflow parity: C's int8inc errors at the crossing
-                    // increment (int8.c "bigint out of range") — unreachable
-                    // here (n distinct values were materialized by this
-                    // backend), kept for the exact error surface.
-                    // SAFETY: as the guard read above.
-                    let cur = unsafe { (*pg).trans_value.as_i64() };
-                    let Some(newv) = cur.checked_add(n) else {
-                        return Err(Box::new(
-                            PgError::error("bigint out of range").with_sqlstate(
-                                ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                            ),
-                        ));
-                    };
-                    // SAFETY: as above; by-val i64 state (count's int8).
-                    unsafe {
-                        (*pg).trans_value = Datum::from_i64(newv);
-                    }
+                    // SAFETY: pg is the once-allocated pergroup slot with a
+                    // non-null by-val i64 state (guard read above).
+                    unsafe { count_distinct_apply(pg, n)? };
                     dset.clear();
                     ps.dset = Some(dset);
                     continue;
@@ -4545,35 +4569,53 @@ pub fn agg_plain_distinct_insert_bytes_batch<'mcx>(
 /// One staged batch of the direct-feed drive, DICT-CODED text keys (the
 /// cbstore zero-decode dict lane): `codes` are the batch's per-row u32 codes
 /// into `dict` (the row group's decoded-Datum dictionary; NULL-free by the
-/// dict-lane contract), and `memo` is the caller's EPOCH-SCOPED per-code
-/// dedup bitmap (≥ dict.len() bits, cleared by the caller whenever the dict
-/// epoch changes). A memo hit means this code's value was already FED this
-/// scan-epoch — to the in-memory set, a spill tape, or the degraded
-/// tuplesort — all of which dedup exactly, so skipping the repeat insert is
-/// value-invisible: the distinct-value multiset each consumer sees is
-/// unchanged. The memo NEVER substitutes codes for set elements — the set
-/// stores the full content bytes (epoch-scoped ids are not stable across
-/// row groups, so ids-as-elements would break exactness; ids only serve as
-/// a per-epoch insert filter).
+/// dict-lane contract), and `memo` is the caller's IDENTITY-SCOPED per-code
+/// dedup bitmap (cleared by the caller whenever the memo identity changes).
+/// Without a stitch the identity is the dict epoch and the memo is indexed
+/// by local code (≥ dict.len() bits). With `stitch` (`Some`, the v7
+/// part-global dictionary): the identity is the scan-stable gepoch, the
+/// memo is indexed by PART-GLOBAL code (`stitch[local]`, ≥ gndv bits) and
+/// never clears at epoch rolls — each distinct string is detoasted +
+/// hashed + inserted once per part instead of once per row group. A memo
+/// hit means this code's value was already FED this identity — to the
+/// in-memory set, a spill tape, or the degraded tuplesort — all of which
+/// dedup exactly, so skipping the repeat insert is value-invisible: the
+/// distinct-value multiset each consumer sees is unchanged (this holds
+/// across a mid-identity degrade too: every memo-marked value was fed to a
+/// structure the degrade replays). The memo NEVER substitutes codes for set
+/// elements — the set stores the full content bytes (codes, global or
+/// local, are scan-scoped identities, so ids-as-elements would break
+/// exactness; ids only serve as an insert filter).
 pub fn agg_plain_distinct_insert_dict_batch<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     codes: &[u32],
     dict: &[Datum],
+    stitch: Option<&[u32]>,
     memo: &mut [u64],
 ) -> PgResult<()> {
     debug_assert!(agg_plain_distinct_direct_shape(node));
-    debug_assert!(memo.len() * 64 >= dict.len());
+    debug_assert!(stitch.is_none_or(|s| s.len() == dict.len()));
+    debug_assert!(stitch.is_some() || memo.len() * 64 >= dict.len());
+    // Memo bit index for a local code: part-global when stitched (bitmap
+    // indexed 0..gndv, never reset across row groups), local otherwise.
+    let bit = |c: u32| -> usize {
+        match stitch {
+            Some(s) => s[c as usize] as usize,
+            None => c as usize,
+        }
+    };
     let tmp = node.tmpcontext;
     let ps = &mut node.pertrans_sort[0];
     debug_assert_eq!(ps.set_kind, Some(distinctset::DistinctKeyKind::Bytes));
     if ps.dset_degraded {
-        // Degraded group: feed each epoch-new value once (the sort's drain
-        // re-dedups; feeding one representative per value is the same
+        // Degraded group: feed each identity-new value once (the sort's
+        // drain re-dedups; feeding one representative per value is the same
         // distinct multiset the per-row feed produces).
         let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
         for &c in codes {
-            let (w, b) = (c as usize / 64, c as usize % 64);
+            let i = bit(c);
+            let (w, b) = (i / 64, i % 64);
             if memo[w] >> b & 1 == 0 {
                 memo[w] |= 1 << b;
                 sort.putdatum(dict[c as usize], false)?;
@@ -4583,7 +4625,8 @@ pub fn agg_plain_distinct_insert_dict_batch<'mcx>(
     }
     let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
     for &c in codes {
-        let (w, b) = (c as usize / 64, c as usize % 64);
+        let i = bit(c);
+        let (w, b) = (i / 64, i % 64);
         if memo[w] >> b & 1 == 0 {
             memo[w] |= 1 << b;
             // SAFETY: dict entries are live decoded text varlena images
@@ -4659,6 +4702,19 @@ pub fn agg_plain_finish<'mcx>(
 /// key type. Derivation treats presorted entries as set-mode (the arm always
 /// arms `force_distinct_set` before engaging — but only AFTER every refusal
 /// point, so a refusal leaves the classic path's adjacent-dedup untouched).
+/// Env-gated derive-refusal diagnosis (PGRUST_LANE_V2_TRACE — the lane's
+/// trace channel; pd_derive_spec is a pure Option chain, so the refusal
+/// POINT is otherwise invisible to the arm's traces).
+#[cold]
+fn pd_derive_trace(msg: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    }) {
+        eprintln!("[lane-v2] pd_derive_spec refused: {msg}");
+    }
+}
+
 pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
@@ -4705,15 +4761,23 @@ pub fn pd_derive_spec(
     let mut sets = Vec::with_capacity(node.pertrans_sort.len());
     let mut set_transnos: Vec<usize> = Vec::with_capacity(node.pertrans_sort.len());
     for ps in node.pertrans_sort.iter() {
-        let kind = ps.set_kind?;
+        let Some(kind) = ps.set_kind else {
+            pd_derive_trace("set transition without set_kind");
+            return None;
+        };
         if !ps.set_active(true) || ps.num_inputs != 1 {
+            pd_derive_trace("set transition inactive or multi-input");
             return None;
         }
         let pa = node.peragg.iter().find(|pa| pa.transno as usize == ps.transno)?;
         if !pa.aggref.aggorder.is_nil() || pa.aggref.aggdistinct.is_nil() {
+            pd_derive_trace("set aggref has aggorder / lacks aggdistinct");
             return None;
         }
-        let att = arg_att(pa.aggref)?;
+        let Some(att) = arg_att(pa.aggref) else {
+            pd_derive_trace("set argument not a plain outer Var");
+            return None;
+        };
         // The set kind was established from this very argument at init; the
         // width re-check keeps the extraction honest.
         match kind {
@@ -4742,22 +4806,35 @@ pub fn pd_derive_spec(
         seen[transno] = true;
         let ar = pa.aggref;
         if !ar.aggdistinct.is_nil() || !ar.aggorder.is_nil() {
+            pd_derive_trace("vocab aggref carries aggdistinct/aggorder");
             return None;
         }
         let att = if ar.args.is_nil() {
             None
         } else {
-            let a = arg_att(ar)?;
+            let Some(a) = arg_att(ar) else {
+                pd_derive_trace("vocab argument not a plain outer Var");
+                return None;
+            };
             max_att = max_att.max(a as i32 + 1);
-            Some((a, int_kind(desc.attr(a as usize).atttypid)?))
+            let Some(k) = int_kind(desc.attr(a as usize).atttypid) else {
+                pd_derive_trace("vocab argument not an int2/int4/int8 column");
+                return None;
+            };
+            Some((a, k))
         };
         if ar.aggfilter.is_some() {
+            pd_derive_trace("vocab aggref has FILTER");
             return None;
         }
-        let kind = pardistinct::vocab_kind(ar.aggfnoid, att)?;
+        let Some(kind) = pardistinct::vocab_kind(ar.aggfnoid, att) else {
+            pd_derive_trace("vocab transfn outside the exact-integer whitelist");
+            return None;
+        };
         vocab.push(PdVocab { transno: transno as u32, kind });
     }
     if !seen.iter().all(|&s| s) {
+        pd_derive_trace("uncovered transition (neither set nor vocab)");
         return None;
     }
     Some(std::sync::Arc::new(PdSpec {
@@ -4773,9 +4850,11 @@ pub fn pd_derive_spec(
 /// Vocab aggfnoids map through the transfn whitelist; re-exported check the
 /// leader arm uses to pair `pd_derive_spec` with its admission story.
 pub use pardistinct::{
-    pd_adopt_registry, pd_clear_thread_registry, pd_export_registry, pd_registry_get,
-    pd_registry_insert, pd_registry_nonempty, pd_registry_remove, pd_parallel_merge_grouped,
-    pd_parallel_merge_plain, PdBuilder, PdExport, PdFeed, PdHandoff, PdMerged,
+    pd_adopt_registry, pd_clear_thread_registry, pd_concat_buckets, pd_empty_grouped_table,
+    pd_export_registry, pd_merge_bucket, pd_parallel_merge_grouped, pd_parallel_merge_plain,
+    pd_registry_get, pd_registry_insert, pd_registry_nonempty, pd_registry_remove, PdBuilder,
+    PdExport, PdFeed, PdHandedTable, PdHandoff, PdMerged, PdSinkLocal, PdSinkMerged, PdSpec,
+    PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
@@ -5854,6 +5933,12 @@ fn agg_retrieve_hash_table<'mcx>(
     estate: &mut EStateData<'mcx>,
     mut cut: Option<TopnEmitCut<'_>>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // M2 sink (sink.rs): an adopted parallel result is the node's source —
+    // finished, fully-projected rows (no pergroups; the topn cut is a skip
+    // optimization over transvalues and simply does not apply).
+    if node.sink_emit.is_some() {
+        return sink::agg_sink_emit_next(node, estate);
+    }
     let mcx = estate.es_query_cxt;
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
@@ -6014,6 +6099,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
     merge::reset_merge_for_rescan(node);
+    // M2 sink: a rescan re-engages (or falls back) from scratch; any adopted
+    // parallel emit state is spent.
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6061,6 +6149,8 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
+    // M2 sink: spent on rescan (see exec_rescan_agg_chg).
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6178,7 +6268,7 @@ mcx::forget_safe_struct!(
         spill, tapeset, rslot, wslot, tmp_ctx },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill;
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
@@ -6187,7 +6277,8 @@ mcx::forget_safe_struct!(
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup },
+        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup,
+        sink_emit },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },

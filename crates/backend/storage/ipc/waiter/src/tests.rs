@@ -264,3 +264,109 @@ fn io_token_completer_is_registrant() {
     assert!(token.is_completed());
     assert_eq!(park(), ParkResult::Notified);
 }
+
+// -- wait_with (the §2.9 M1 wait protocol) -------------------------------------
+
+#[test]
+fn io_wait_with_completed_fast_path_never_parks() {
+    let token = io::IoToken::new(0, 3);
+    token.complete();
+    let outcome = token.wait_with(
+        current_handle(),
+        || panic!("must not park on a completed token"),
+        || panic!("must not probe state on the fast path"),
+        || panic!("must not reap on the fast path"),
+    );
+    assert_eq!(outcome, io::IoWaitOutcome::AlreadyCompleted);
+}
+
+#[test]
+fn io_wait_with_cross_thread_completion() {
+    let token = Arc::new(io::IoToken::new(2, 4));
+    let completer = {
+        let token = Arc::clone(&token);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            token.complete();
+        })
+    };
+    let outcome = token.wait_with(
+        current_handle(),
+        park,
+        // A cadence recheck may race the completer; the state probe says
+        // "still pending" so the protocol re-checks the token first (which
+        // wins as soon as complete() lands) — never a false StateSettled.
+        || false,
+        || {
+            // Degraded reap: legal if a recheck fired before the completer
+            // ran; completion is then observed by waiting here.
+            while !token.is_completed() {
+                std::thread::yield_now();
+            }
+        },
+    );
+    assert!(
+        matches!(outcome, io::IoWaitOutcome::Completed | io::IoWaitOutcome::Reaped),
+        "unexpected outcome {outcome:?}"
+    );
+    completer.join().unwrap();
+    assert!(token.is_completed());
+}
+
+#[test]
+fn io_wait_with_spurious_notify_retests_and_reparks() {
+    let token = Arc::new(io::IoToken::new(3, 5));
+    let parks = AtomicU64::new(0);
+    let token2 = Arc::clone(&token);
+    let outcome = token.wait_with(
+        current_handle(),
+        || {
+            match parks.fetch_add(1, Ordering::Relaxed) {
+                // First park: spurious notify (no completion behind it) —
+                // the loop must re-test the predicate and re-park.
+                0 => ParkResult::Notified,
+                // Second park: the completion lands, then the wake.
+                _ => {
+                    token2.complete();
+                    ParkResult::Notified
+                }
+            }
+        },
+        || panic!("state probe unreachable: parks only return Notified"),
+        || panic!("reap unreachable"),
+    );
+    assert_eq!(outcome, io::IoWaitOutcome::Completed);
+    assert!(parks.load(Ordering::Relaxed) >= 2, "spurious notify must re-park");
+}
+
+#[test]
+fn io_wait_with_recheck_backstop_catches_lost_completion() {
+    // The lost-completion shape: IO state advanced but the token complete
+    // (and so the unpark) was dropped. The cadence recheck must recover via
+    // the authoritative state probe, without a blocking reap.
+    let token = io::IoToken::new(4, 6);
+    let state_done = AtomicBool::new(true); // state settled, wake lost
+    let outcome = token.wait_with(
+        current_handle(),
+        || ParkResult::Recheck, // cadence fires
+        || state_done.load(Ordering::Relaxed),
+        || panic!("state settled: must not degrade to a reap"),
+    );
+    assert_eq!(outcome, io::IoWaitOutcome::StateSettled);
+}
+
+#[test]
+fn io_wait_with_degrades_to_blocking_reap_when_owner_never_reaps() {
+    // Genuinely pending after a full cadence (owner parked idle / wedged):
+    // the waiter must drive the ring home itself.
+    let token = io::IoToken::new(5, 7);
+    let reaped = AtomicBool::new(false);
+    let outcome = token.wait_with(
+        current_handle(),
+        || ParkResult::Recheck,
+        || false,
+        || reaped.store(true, Ordering::Relaxed),
+    );
+    assert_eq!(outcome, io::IoWaitOutcome::Reaped);
+    assert!(reaped.load(Ordering::Relaxed));
+}

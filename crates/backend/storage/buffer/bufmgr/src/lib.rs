@@ -294,8 +294,8 @@ unported! {
 
 pub use read::{PrefetchBuffer, PrefetchBufferResult, PrefetchOutcome, PrefetchSharedBuffer};
 pub use uring::{
-    collect_done as uring_collect_pins, start_read as uring_start_read, uring_clear_io_wref,
-    uring_read_complete, uring_set_io_wref,
+    collect_done as uring_collect_pins, drain_own as uring_drain_pins,
+    start_read as uring_start_read, uring_clear_io_wref, uring_read_complete, uring_set_io_wref,
 };
 
 pub fn BufferIsPermanent(buffer: Buffer) -> bool {

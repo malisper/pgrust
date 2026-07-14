@@ -71,11 +71,15 @@ pub(super) fn with_query_task_binding<T>(
     body: impl FnOnce() -> PgResult<T>,
 ) -> PgResult<T> {
     validate(shared)?;
+    super::gtrace("w.qtb.bind.begin");
     let mut guard = QueryTaskBindingGuard::bind(shared)?;
+    super::gtrace("w.qtb.bind.end");
     let outcome = catch_unwind(AssertUnwindSafe(body));
+    super::gtrace("w.qtb.body.end");
     match outcome {
         Ok(Ok(value)) => {
             guard.finish(true)?;
+            super::gtrace("w.qtb.finish.end");
             Ok(value)
         }
         Ok(Err(error)) => {
@@ -258,8 +262,14 @@ impl QueryTaskBindingGuard {
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
             guc::ResetAllOptions();
-            if guc::store::session_guc_bind_enabled() {
-                guard.guc_binding = Some(guc::store::bind_session_gucs(&shared.guc_bind)?);
+            // Composition (train-11): guc-snapshots replaced ParallelShared's
+            // captured-session share (guc_bind) with the typed query pin
+            // (guc_pin, populated iff session_guc_bind_enabled() at capture);
+            // parked query tasks adopt it exactly like the worker path in
+            // lib.rs — leader-validated values + base adoption, no check-hook
+            // rerun. bind_query_pin returns the same SessionGucBinding guard.
+            if let Some(pin) = shared.guc_pin.as_ref() {
+                guard.guc_binding = Some(guc::layers::bind_query_pin(pin)?);
             } else {
                 guc::store::restore_nondefault_variables(&shared.guc_state)?;
             }

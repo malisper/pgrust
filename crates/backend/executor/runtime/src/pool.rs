@@ -23,16 +23,28 @@ use crate::Runtime;
 /// The worker loop. Permit discipline: a permit is held across the whole
 /// scheduling step (superset of task execution — satisfies "any
 /// task-executing thread holds one"), released before parking so an idle
-/// worker never caps a busy one. Park discipline: the epoch is captured
-/// BEFORE the step, so a publish between a failed pick and the park is
-/// never lost.
-pub fn worker_loop(rt: &Runtime, worker: usize) {
+/// worker never caps a busy one; a task that blocks inside the step may
+/// donate the permit to a standby through the §2.8 seams (crate::io).
+/// Park discipline: the epoch is captured BEFORE the step, so a publish
+/// between a failed pick and the park is never lost.
+///
+/// §2.9 uring duties: ring created at loop start / torn down at loop exit,
+/// and a non-blocking boundary reap after EVERY step — completions run
+/// (IoToken unpark-all) and issuer pins drop before the worker runs its
+/// next task or parks.
+pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
     let mut local = rt.worker_local(worker);
+    let ring = crate::io::worker_enter(rt);
+    rt.register_worker_ring(worker, ring);
     loop {
         let epoch = rt.park_epoch();
         rt.execution_permits().acquire();
+        crate::io::note_permit(true);
         let step = rt.worker_step(&mut local);
+        crate::io::note_permit(false);
         rt.execution_permits().release();
+        // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
+        crate::io::boundary_reap();
         match step {
             Step::Ran => {}
             // Retry: the coordinator is mid-invalidation (slot word invalid,
@@ -41,9 +53,11 @@ pub fn worker_loop(rt: &Runtime, worker: usize) {
             // no-lone-progress hint on exactly this edge).
             Step::Retry => std::thread::yield_now(),
             Step::Idle => rt.park(epoch),
-            Step::Stop => return,
+            Step::Stop => break,
         }
     }
+    rt.register_worker_ring(worker, None);
+    crate::io::worker_exit();
 }
 
 /// Handle to a spawned pool (join-able; tests and clean shutdown).

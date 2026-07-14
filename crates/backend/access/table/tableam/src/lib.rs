@@ -1029,7 +1029,7 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
         TableScanDesc::Cbstore(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
@@ -1037,7 +1037,8 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
                     c.granules_bound_skipped,
                     c.adaptive_probe_reverts,
                     c.granules_meta,
-                    c.granules_bloom_pruned
+                    c.granules_bloom_pruned,
+                    c.rgs_readahead
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
@@ -1200,6 +1201,16 @@ pub fn table_scan_set_morsel_range(
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_set_block_range(h, g0, g1),
         TableScanDesc::Cbstore(c) => c.set_granule_range(g0, g1),
+    }
+}
+
+/// Drive-scaling observability counters of a cbstore scan (the runtime
+/// WFIN channel): (rg_switches, dict_builds, granules_scanned,
+/// windows_staged). None = heap.
+pub fn table_scan_cb_drive_counters(scan: &TableScanDesc<'_>) -> Option<(u64, u64, u64, u64)> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(c) => Some(c.drive_counters()),
     }
 }
 

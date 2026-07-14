@@ -80,7 +80,11 @@ pub fn collect_done() {
     }
 }
 
-pub(crate) fn drain_own() {
+/// Blocking form of [`collect_done`]: wait out every in-flight read on this
+/// thread's ring (completions run, IoTokens complete), then drop the issuer
+/// pins. Pool-worker exit calls this (via bufmgr::uring_drain_pins) before
+/// tearing its ring down so no slot pin is ever stranded.
+pub fn drain_own() {
     if !aio_seams::uring_drain_own::is_installed() {
         return;
     }
