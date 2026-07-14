@@ -1468,12 +1468,19 @@ fn hg_fold_combine(node: &mut AggStateData<'_>) -> PgResult<()> {
             let cnt = hg.fold[g * 2 * nvocab + 2 * vi + 1];
             let pg = &mut hg.pergroup[g * numtrans + v.transno as usize];
             match v.kind {
+                // NULL authority note: `trans_value_is_null` is the state's
+                // SQL-null truth. `no_trans_value` is NOT — it is the
+                // strict-init latch only (C's noTransValue), which the
+                // non-strict transition steps (int2/int4_sum's class,
+                // `agg_trans_byval`) faithfully never clear: a sum state
+                // advanced by the rep replay still has `no_trans_value ==
+                // true` from its NULL initval. Deciding replace-vs-add on
+                // that stale latch overwrote the rep's contribution (the
+                // q10 parity bug: every group's sum short by exactly its
+                // deferred representative's value).
                 PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => {
                     if acc != 0 {
-                        debug_assert!(
-                            !pg.trans_value_is_null && !pg.no_trans_value,
-                            "count initval 0 is never NULL"
-                        );
+                        debug_assert!(!pg.trans_value_is_null, "count initval 0 is never NULL");
                         // SAFETY: live pergroup slot holding the non-null
                         // by-val i64 count state (initval '0'; int8inc/
                         // int8inc_any only ever produce non-null i64).
@@ -1482,7 +1489,7 @@ fn hg_fold_combine(node: &mut AggStateData<'_>) -> PgResult<()> {
                 }
                 PdVocabKind::SumInt { .. } => {
                     if cnt > 0 {
-                        if pg.no_trans_value || pg.trans_value_is_null {
+                        if pg.trans_value_is_null {
                             pg.trans_value = Datum::from_i64(acc);
                         } else {
                             pg.trans_value =
@@ -1498,7 +1505,7 @@ fn hg_fold_combine(node: &mut AggStateData<'_>) -> PgResult<()> {
                         // '{0,0}' — never NULL; every producer in this
                         // engine emits the canonical 40-byte 4B-header
                         // no-nulls int8[2]).
-                        if pg.trans_value_is_null || pg.no_trans_value {
+                        if pg.trans_value_is_null {
                             return Err(Box::new(::types_error::PgError::error(
                                 "hashgroup fold: NULL avg transition state".to_string(),
                             )));
