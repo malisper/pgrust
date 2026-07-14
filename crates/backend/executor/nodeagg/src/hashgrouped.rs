@@ -1121,16 +1121,32 @@ pub struct HgBatchShape {
 /// running the program (folds accumulate in the sidecar words;
 /// `hg_fold_combine` merges them into the real trans states at finish/
 /// degrade). `allow_fold=false` = the historical all-set-mode gate exactly.
+///
+/// `allow_text` (named-kernels-distinct, the filtered grouped-distinct
+/// batch feed): TEXT/VARCHAR grouping keys are admitted to the batched
+/// accepts — the span/row arms stage each staged cell's inline varlena
+/// content through the SAME `probe_buf`/`probe_spans` discipline as the
+/// per-row `stage_text_keys` (identical bytes: the staged cbstore cell is
+/// the decoded datum; non-inline images route to the per-row path, whose
+/// detoast yields the same content), probe read-only (`smap.find` on the
+/// stringhash single-key engagement / the generic content probe), and
+/// defer every probe MISS to the per-row path (`NeedSlot` — group creation
+/// order and rep bytes stay byte-identical). `allow_text=false` = the
+/// historical int-keys-only gate exactly.
 /// Callable only after `agg_hashgroup_begin`.
 pub fn agg_hashgroup_batch_shape(
     node: &AggStateData<'_>,
     allow_fold: bool,
+    allow_text: bool,
 ) -> Option<HgBatchShape> {
     let hg = node.hashgroup.as_deref()?;
-    if hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
+    if !allow_text && hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
         return None;
     }
-    debug_assert!(hg.smap.is_none(), "smap engages only on a single text key");
+    debug_assert!(
+        hg.smap.is_none() || (hg.nkeys == 1 && hg.key_kinds[0] == HgKeyKind::Text),
+        "smap engages only on a single text key"
+    );
     if hg.numtrans != node.pertrans_sort.len() && !allow_fold {
         return None;
     }
@@ -1254,6 +1270,98 @@ pub enum HgBatchRow {
     NeedSlot,
 }
 
+/// Content bytes of an INLINE (1B- or uncompressed-4B-header) varlena
+/// datum, no detoast, no copy. `None` = external/compressed image — the
+/// caller routes the row through the per-row path, whose
+/// `datum_varlena_packed` detoast produces the identical content bytes.
+///
+/// # Safety
+/// `d` is a non-null live varlena datum whose header (and, for inline
+/// images, full body) is readable — the staged-cell contract of the
+/// batched accepts (cbstore staged text cells are decoded in-window
+/// images).
+#[inline]
+unsafe fn inline_varlena_bytes<'a>(d: Datum) -> Option<&'a [u8]> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — header readable; sizes from the header
+    // bound the body reads.
+    unsafe {
+        if varatt::varatt_is_1b(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            ))
+        } else if varatt::varatt_is_4b_u(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ),
+                varatt::varsize_4b(p) - varatt::VARHDRSZ,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Key-extraction outcome of the batched accepts' shared per-row key pass:
+/// stage the row's key cells into `words` (+ text content into the probe
+/// staging), or defer the row (`None` = a non-inline text image).
+#[inline]
+fn hg_stage_batch_keys(
+    hg: &mut HashGroupedState<'_>,
+    read: impl Fn(usize) -> (Datum, bool),
+) -> Option<([i64; 32], u32)> {
+    let mut words = [0i64; 32];
+    let mut nulls = 0u32;
+    let mut text_cleared = false;
+    for i in 0..hg.nkeys {
+        let (d, isnull) = read(i);
+        if isnull {
+            nulls |= 1 << i;
+            words[i] = 0;
+            continue;
+        }
+        match hg.key_kinds[i] {
+            HgKeyKind::Int16 => words[i] = d.as_i16() as i64,
+            HgKeyKind::Int32 => words[i] = d.as_i32() as i64,
+            HgKeyKind::Int64 => words[i] = d.as_i64(),
+            HgKeyKind::Text => {
+                // SAFETY: staged-cell contract (fn doc above).
+                let b = unsafe { inline_varlena_bytes(d) }?;
+                if !text_cleared {
+                    hg.probe_buf.clear();
+                    text_cleared = true;
+                }
+                let off = hg.probe_buf.len();
+                hg.probe_buf.extend_from_slice(b);
+                hg.probe_spans[i] = (off as u32, b.len() as u32);
+                words[i] = 0;
+            }
+        }
+    }
+    Some((words, nulls))
+}
+
+/// Read-only group probe over the staged key pass ([`hg_stage_batch_keys`]
+/// already ran): the stringhash single-text-key map (`find` — never
+/// inserts) or the generic content probe. `None` = probe miss (creation
+/// defers to the per-row path).
+#[inline]
+fn hg_probe_staged(hg: &HashGroupedState<'_>, words: &[i64], nulls: u32) -> Option<u32> {
+    if let Some(smap) = hg.smap.as_ref() {
+        if nulls != 0 {
+            hg.null_group
+        } else {
+            let (poff, plen) = hg.probe_spans[0];
+            let bytes = &hg.probe_buf[poff as usize..(poff + plen) as usize];
+            smap.find(bytes, &hg.arena)
+        }
+    } else {
+        let h = hg.key_hash(words, nulls);
+        hg.probe(words, nulls, h).0
+    }
+}
+
 pub fn agg_hashgroup_accept_batch_row(
     node: &mut AggStateData<'_>,
     key_datums: &[Datum],
@@ -1265,29 +1373,17 @@ pub fn agg_hashgroup_accept_batch_row(
         node.hashgroup.as_deref(),
         Some(HashGroupedState { phase: HgPhase::Building, .. })
     ));
-    let mut words = [0i64; 32];
     let found = {
         let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
-        debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
         debug_assert_eq!(key_datums.len(), hg.nkeys);
-        let mut nulls = 0u32;
-        for (i, (&d, &isnull)) in key_datums.iter().zip(key_nulls.iter()).enumerate() {
-            if isnull {
-                nulls |= 1 << i;
-                words[i] = 0;
-                continue;
-            }
-            words[i] = match hg.key_kinds[i] {
-                HgKeyKind::Int16 => d.as_i16() as i64,
-                HgKeyKind::Int32 => d.as_i32() as i64,
-                HgKeyKind::Int64 => d.as_i64(),
-                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
-            };
-        }
+        let Some((words, nulls)) =
+            hg_stage_batch_keys(hg, |i| (key_datums[i], key_nulls[i]))
+        else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgBatchRow::NeedSlot;
+        };
         let nkeys = hg.nkeys;
-        let h = hg.key_hash(&words[..nkeys], nulls);
-        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
-        found
+        hg_probe_staged(hg, &words[..nkeys], nulls)
     };
     let Some(g) = found else {
         return HgBatchRow::NeedSlot;
@@ -1404,17 +1500,25 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
     switch_out(node);
     let AggStateData { hashgroup, pertrans_sort, .. } = node;
     let hg = hashgroup.as_deref_mut().expect("hashgroup state");
-    debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
     let nkeys = hg.nkeys;
     let nsort = hg.nsort;
     let nvocab = hg.vocab.len();
     debug_assert_eq!(views.len(), nkeys + nargs + hg_fold_cells(&hg.vocab));
-    let mut words = [0i64; 32];
     let mut absorbed = 0u32;
-    for i in pos..n {
+    let mut i = pos;
+    while i < n {
         let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
         if let Some(s) = sel {
+            // Word skip (the q22 survivor-walk precedent): an all-dead sel
+            // word advances 64 rows in one test. Forced-fallback rows carry
+            // a SET sel bit (the refsort contract), so no NeedSlot row is
+            // ever skipped with its word.
+            if i % 64 == 0 && i + 64 <= n && s[w] == 0 {
+                i += 64;
+                continue;
+            }
             if s[w] & bit == 0 {
+                i += 1;
                 continue; // qual-filtered (exact whole-qual verdict)
             }
         }
@@ -1422,26 +1526,15 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
             return HgSpanStop::NeedSlot { at: i, absorbed };
         }
         let ii = i as usize;
-        let mut nulls = 0u32;
-        for j in 0..nkeys {
+        let Some((words, nulls)) = hg_stage_batch_keys(hg, |j| {
             let (v, nl) = views[j];
             // SAFETY: caller contract — `views` spans `n` staged rows.
-            let (d, isnull) = unsafe { (*v.add(ii), *nl.add(ii)) };
-            if isnull {
-                nulls |= 1 << j;
-                words[j] = 0;
-                continue;
-            }
-            words[j] = match hg.key_kinds[j] {
-                HgKeyKind::Int16 => d.as_i16() as i64,
-                HgKeyKind::Int32 => d.as_i32() as i64,
-                HgKeyKind::Int64 => d.as_i64(),
-                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
-            };
-        }
-        let h = hg.key_hash(&words[..nkeys], nulls);
-        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
-        let Some(g) = found else {
+            unsafe { (*v.add(ii), *nl.add(ii)) }
+        }) else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        };
+        let Some(g) = hg_probe_staged(hg, &words[..nkeys], nulls) else {
             return HgSpanStop::NeedSlot { at: i, absorbed };
         };
         let c = g as usize;
@@ -1502,6 +1595,7 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
         if hg.mem() > hg.budget {
             return HgSpanStop::Budget { at: i, absorbed };
         }
+        i += 1;
     }
     HgSpanStop::Done { absorbed }
 }

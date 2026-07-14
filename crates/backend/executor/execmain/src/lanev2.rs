@@ -7406,6 +7406,22 @@ fn distincthash_span_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH` kill switch (default ON): admit
+/// TEXT/VARCHAR grouping keys to the batched fast leg (named-kernels-
+/// distinct kernel 1 — the filtered grouped-distinct batch feed, CB
+/// q11/q12). Off = the historical int-keys-only batch gate; the text-key
+/// arm then rides the per-row path exactly as before this lane (the A/B
+/// attribution channel; results byte-identical either way).
+fn distincthash_textbatch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -7814,19 +7830,24 @@ fn try_hashgroup_build<'mcx>(
     if text_keys > 0 {
         trace_feed("hash-grouped distinct arm: text group keys armed");
     }
-    arm_scan_staging(
-        ss,
-        estate,
-        ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
-    )?;
-    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-    // Batched fast-leg admission (conversion 3): the all-set-mode bare-Var
-    // int shape + every needed outer column a bare Var of a scan column
-    // (identity for bare scans; through the projection classification
-    // otherwise — the staged scan cell is then the projected outer cell).
-    let batch = if distincthash_batch_enabled() {
-        ::nodeagg::agg_hashgroup_batch_shape(agg, distincthash_fold_enabled()).and_then(
-            |shape| {
+    // Filtered grouped-distinct batch feed (named-kernels-distinct): the
+    // batched fast leg's staged views need (a) the PREWHERE lane's forced
+    // prefix to COVER the key/arg/fold columns — the lane arms first-wins
+    // and never widens (`seq_scan_cb_prewhere_arm` keeps an armed lane), so
+    // the ask must ride the FIRST arm — and (b) the lane fill to
+    // materialize those columns (`lane_fill_wanted` masks non-lane-read
+    // columns once a lane program arms). Resolve the batch column map
+    // BEFORE the staging arm, pre-arm PREWHERE with the covering ask on
+    // qual-bearing cbstore scans, and register the feed's columns as lane
+    // reads. Every refusal leaves the per-row path byte-identically (the
+    // views refuse per batch).
+    let batch_cols = if distincthash_batch_enabled() {
+        ::nodeagg::agg_hashgroup_batch_shape(
+            agg,
+            distincthash_fold_enabled(),
+            distincthash_textbatch_enabled(),
+        )
+        .and_then(|shape| {
                 let map = |att: u16| -> Option<u16> {
                     match ss.ss.ps_ProjInfo.as_ref() {
                         None => Some(att),
@@ -7861,19 +7882,16 @@ fn try_hashgroup_build<'mcx>(
                     ::nodeagg::agg_hashgroup_arm_fold(agg, shape.vocab);
                 }
                 Some(cols)
-            },
-        )
+        })
     } else {
         None
     };
-    if let Some(b) = &batch {
-        trace_feed("hash-grouped distinct batch accept armed");
-        // The fast leg reads staged SoA cells. Qual-less cbstore scans have
-        // no PREWHERE lane and the RowFeed arm stages no SoA plan — arm the
-        // offset-free columnar staging covering the key+arg columns
-        // (codedgroup's arm precedent; idempotent/co-arm-aware, false on
-        // heap). Failure just leaves the per-row path (the views refuse
-        // per batch).
+    // Pre-arm PREWHERE with the feed's covering column ask (qual-bearing
+    // cbstore scans; a no-qual/refused arm returns false and the ordinary
+    // staging below proceeds). Idempotent with `arm_scan_staging`'s own
+    // PREWHERE arm — an armed lane is kept there, and the ask=0 re-arm
+    // early-returns.
+    if let Some(b) = &batch_cols {
         let ask = b
             .key_cols
             .iter()
@@ -7882,8 +7900,44 @@ fn try_hashgroup_build<'mcx>(
             .map(|&c| c as i32 + 1)
             .max()
             .unwrap_or(0);
-        let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
+        if ::nodeseqscan::seq_scan_is_cbstore(ss)
+            && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)?
+        {
+            trace_feed("hash-grouped distinct batch feed: prewhere pre-armed");
+        }
     }
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
+    )?;
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    let batch = match batch_cols {
+        Some(b) => {
+            trace_feed("hash-grouped distinct batch accept armed");
+            let ask = b
+                .key_cols
+                .iter()
+                .chain(b.arg_cols.iter())
+                .chain(b.fold_cols.iter())
+                .map(|&c| c as i32 + 1)
+                .max()
+                .unwrap_or(0);
+            // A live PREWHERE lane whose forced prefix covers the feed's
+            // ask already stages everything the views read (survivor
+            // completing deform fills every prefix column; the qual's
+            // dict lanes gather back to Raw post-qual). Otherwise arm the
+            // offset-free columnar staging covering the key+arg columns
+            // (codedgroup's arm precedent; idempotent/co-arm-aware, false
+            // on heap). Failure just leaves the per-row path (the views
+            // refuse per batch).
+            if !::nodeseqscan::seq_scan_cb_lane_covers(ss, ask) {
+                let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
+            }
+            Some(b)
+        }
+        None => None,
+    };
     // Force a forward child read for the feed's duration (`sort_feed`'s
     // discipline — this drain replaces the sort's own feed).
     let dir = estate.es_direction;
