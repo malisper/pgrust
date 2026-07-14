@@ -1543,15 +1543,18 @@ pub fn sink_bucket_row_count(b: usize, locals: &[SinkLocalView<'_>]) -> usize {
 }
 
 /// Per-(worker, generation) packed-words → merged-state map (GID-merge,
-/// canon-sink car 2). Open addressing over the two packed key words; empty
-/// slots carry a null state pointer (live rows never do). Sized once per
-/// combine claim off the bucket's total row count, cleared per Local and at
-/// every generation roll.
+/// canon-sink car 2). Open addressing over the two packed key words; a
+/// slot is LIVE iff its stamp equals the map's current stamp, so the per-
+/// Local / per-generation clear is O(1) (stamp bump) — a table memset per
+/// Local would scale with the bucket total × locals and dwarf the probes
+/// this map removes. Sized once per combine claim off the bucket's total
+/// row count.
 struct GidMap {
     gen: Option<u64>,
+    stamp: u32,
     mask: usize,
-    /// (w0, w1, merged-row state block); null state = empty slot.
-    slots: Vec<(u64, u64, *mut u8)>,
+    /// (w0, w1, merged-row state block, stamp); live iff stamp matches.
+    slots: Vec<(u64, u64, *mut u8, u32)>,
     len: usize,
 }
 
@@ -1564,18 +1567,22 @@ impl GidMap {
         };
         GidMap {
             gen: None,
+            stamp: 1,
             mask: cap.saturating_sub(1),
-            slots: vec![(0, 0, core::ptr::null_mut()); cap],
+            slots: vec![(0, 0, core::ptr::null_mut(), 0); cap],
             len: 0,
         }
     }
 
-    /// Forget everything (new Local).
+    /// Forget everything (new Local) — O(1) stamp bump.
     fn clear(&mut self) {
-        if self.len > 0 {
-            self.slots.fill((0, 0, core::ptr::null_mut()));
-            self.len = 0;
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            // Wrap: a stale slot could alias stamp 0 — one real sweep.
+            self.slots.fill((0, 0, core::ptr::null_mut(), 0));
+            self.stamp = 1;
         }
+        self.len = 0;
         self.gen = None;
     }
 
@@ -1595,11 +1602,12 @@ impl GidMap {
         }
         let mut i = (sink_hash(w[0], w[1]) as usize) & self.mask;
         loop {
-            let (w0, w1, p) = self.slots[i];
-            if p.is_null() {
+            let (w0, w1, p, s) = self.slots[i];
+            if s != self.stamp {
                 return None;
             }
             if w0 == w[0] && w1 == w[1] {
+                debug_assert!(!p.is_null());
                 return Some(p);
             }
             i = (i + 1) & self.mask;
@@ -1617,9 +1625,9 @@ impl GidMap {
         }
         let mut i = (sink_hash(w[0], w[1]) as usize) & self.mask;
         loop {
-            let (w0, w1, q) = self.slots[i];
-            if q.is_null() {
-                self.slots[i] = (w[0], w[1], p);
+            let (w0, w1, q, s) = self.slots[i];
+            if s != self.stamp {
+                self.slots[i] = (w[0], w[1], p, self.stamp);
                 self.len += 1;
                 return;
             }
