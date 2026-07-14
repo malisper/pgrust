@@ -187,6 +187,23 @@ pub(crate) struct CompactHash {
     /// stored in the row's 8 state bytes for hit-side read-back). The
     /// reverse map IS the table's key arena (`row_key_bytes`).
     pub(crate) intern: Option<::lanetable::LaneAggTable>,
+    /// Canonical (text-bearing Multi) shapes: row i's sink hash over its
+    /// canonical byte image (`sink::sink_hash_bytes` of the row's
+    /// `canon_row_bytes`), parallel to the table's rows. Extended at the
+    /// BATCH TAIL for newly inserted rows (the accept path — parallel and
+    /// cache-warm), so the flush and the single-threaded SEAL partition
+    /// never hash: the SEAL collapses to a counting sort over these values
+    /// (the q19@100M settle/finalize serial-tail profile). Cleared with
+    /// every table reset (flush) — rows restart per epoch. Empty for word
+    /// shapes.
+    pub(crate) canon_hashes: Vec<u64>,
+    /// True once the RUNTIME sink drain owns this table (set per worker by
+    /// `agg_sink_mark_sink_mode`). Gates the batch-tail canonical hashing:
+    /// the serial lane shares this compact table and never flushes or
+    /// SEAL-partitions, so accept-time hashes would be pure overhead there.
+    /// The flush/partition entries keep their unconditional defensive
+    /// extend (first-morsel rows hashed before the flag, and the tests).
+    pub(crate) sink_mode: bool,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -206,6 +223,8 @@ pub(crate) fn compact_hash_for_tests(
         table,
         key,
         intern,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -423,6 +442,8 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         ),
         key: CompactKeySpec::Single { width },
         intern: None,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -448,7 +469,30 @@ pub fn agg_hash_compact_try_arm_mk(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    try_arm_mk_n(node, nullable, dict_att, 2)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    try_arm_mk_n(node, nullable, atts, 2)
+}
+
+/// [`agg_hash_compact_try_arm_mk`] over a SET of Intern (text) components
+/// (band-2a CaseDict, q40 class): every att in `intern_atts` packs as a
+/// 4-byte intern id through the SHARED intern pool (ids only distinguish
+/// equal bytes, so one pool serves any number of components; read-back maps
+/// each component id through the same reverse map). SERIAL-ONLY admission:
+/// the M2 sink's canonical-bytes machinery caps Intern components at ONE
+/// (single text tail), so multi-intern shapes refuse the sink upstream.
+pub fn agg_hash_compact_try_arm_mk_multi(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    intern_atts: &[u16],
+) -> CompactArm {
+    try_arm_mk_n(node, nullable, intern_atts, 2)
 }
 
 /// [`agg_hash_compact_try_arm_mk`] with the arity gate relaxed to ONE
@@ -461,19 +505,27 @@ pub fn agg_hash_compact_try_arm_mk1(
     node: &mut AggStateData<'_>,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    try_arm_mk_n(node, false, dict_att, 1)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    try_arm_mk_n(node, false, atts, 1)
 }
 
 fn try_arm_mk_n(
     node: &mut AggStateData<'_>,
     nullable: bool,
-    dict_att: Option<u16>,
+    intern_atts: &[u16],
     min_keys: usize,
 ) -> CompactArm {
     if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
         return CompactArm::Armed;
     }
-    let (shape, numgroups) = match mk_admit_n(node, nullable, dict_att, min_keys) {
+    let (shape, numgroups) = match mk_admit_n(node, nullable, intern_atts, min_keys) {
         Ok(admitted) => admitted,
         Err(verdict) => return verdict,
     };
@@ -507,6 +559,8 @@ fn try_arm_mk_n(
         intern: has_intern.then(|| {
             ::lanetable::LaneAggTable::new(::lanetable::KeyRepr::Bytes, 8, 1 << 10)
         }),
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -527,7 +581,25 @@ pub fn agg_hash_compact_mk_admit(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> Result<(MkShape, u64), CompactArm> {
-    mk_admit_n(node, nullable, dict_att, 2)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    mk_admit_n(node, nullable, atts, 2)
+}
+
+/// [`agg_hash_compact_mk_admit`] over a SET of Intern components — the
+/// probe half of [`agg_hash_compact_try_arm_mk_multi`].
+pub fn agg_hash_compact_mk_admit_multi(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    intern_atts: &[u16],
+) -> Result<(MkShape, u64), CompactArm> {
+    mk_admit_n(node, nullable, intern_atts, 2)
 }
 
 /// [`agg_hash_compact_mk_admit`]'s single-key relaxation — the probe half of
@@ -536,13 +608,21 @@ pub fn agg_hash_compact_mk_admit1(
     node: &mut AggStateData<'_>,
     dict_att: Option<u16>,
 ) -> Result<(MkShape, u64), CompactArm> {
-    mk_admit_n(node, false, dict_att, 1)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    mk_admit_n(node, false, atts, 1)
 }
 
 fn mk_admit_n(
     node: &mut AggStateData<'_>,
     nullable: bool,
-    dict_att: Option<u16>,
+    intern_atts: &[u16],
     min_keys: usize,
 ) -> Result<(MkShape, u64), CompactArm> {
     if !compact_enabled() {
@@ -579,7 +659,7 @@ fn mk_admit_n(
             // (cbstore) or its runtime NULL-demote pre-check (slot streams);
             // nullable shapes route NULL through the null-bitmap byte (bit
             // set, value bits zero) without touching the intern table.
-            ::execgrouping::GroupKeyKind::TextRaw if dict_att == Some(input_att) => {
+            ::execgrouping::GroupKeyKind::TextRaw if intern_atts.contains(&input_att) => {
                 MkCompKind::Intern
             }
             // The canonical-form numeric key kind (keypack module doc);
@@ -724,6 +804,8 @@ pub fn agg_hash_compact_try_arm_reduced(
         ),
         key: CompactKeySpec::Reduced(shape),
         intern: None,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -766,6 +848,12 @@ pub fn agg_hash_compact_intern(node: &mut AggStateData<'_>, bytes: &[u8]) -> u32
 /// Whether this build currently runs on the compact table.
 pub fn agg_hash_compact_armed(node: &AggStateData<'_>) -> bool {
     node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some())
+}
+
+/// Live group count of the armed compact table (`None` = not armed). The
+/// freeze install election reads this after each batch.
+pub fn agg_hash_compact_ngroups(node: &AggStateData<'_>) -> Option<usize> {
+    node.perhash.as_ref()?.compact.as_ref().map(|ch| ch.table.nrows())
 }
 
 /// One staged batch through the compact table: canonicalize the key lane to
@@ -958,16 +1046,26 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if !s.two_words));
-    let CompactHash { table, states, hashes, new_rows, .. } = ch;
-    states.clear();
-    new_rows.clear();
-    groups.clear();
-    table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
-    groups.extend(states.iter().map(|&s| {
-        // SAFETY: probe never returns null state pointers.
-        unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
-    }));
+    {
+        let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
+        states.clear();
+        new_rows.clear();
+        groups.clear();
+        table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        groups.extend(states.iter().map(|&s| {
+            // SAFETY: probe never returns null state pointers.
+            unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
+        }));
+    }
+    // Canonical shapes under the RUNTIME SINK ONLY: hash the batch's NEW
+    // rows' canonical images while their text bytes are cache-warm, on this
+    // (accepting) worker — the flush and the single-threaded SEAL partition
+    // then never hash. Serial lane: flag unset, zero added work (no-op for
+    // word shapes either way).
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 
@@ -984,16 +1082,22 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if s.two_words));
-    let CompactHash { table, states, hashes, new_rows, .. } = ch;
-    states.clear();
-    new_rows.clear();
-    groups.clear();
-    table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
-    groups.extend(states.iter().map(|&s| {
-        // SAFETY: probe never returns null state pointers.
-        unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
-    }));
+    {
+        let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
+        states.clear();
+        new_rows.clear();
+        groups.clear();
+        table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        groups.extend(states.iter().map(|&s| {
+            // SAFETY: probe never returns null state pointers.
+            unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
+        }));
+    }
+    // Canonical shapes under the runtime sink only — see the mk1 twin.
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 

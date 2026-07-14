@@ -1346,6 +1346,33 @@ fn distinct_spill_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
+/// Runtime-sink per-Local budget (bytes) — the FULL chartered R3 envelope:
+/// `work_mem × hash_mem_multiplier` per participant (C's
+/// `get_hash_memory_limit`, m2-sinks.md §5 R3 — "each Local gets the full
+/// work_mem × hash_mem_multiplier budget exactly as each PG worker
+/// instance does"), clamped like the donor's `distinct_set_budget`. The
+/// derived `PdSpec::worker_budget` is `distinct_set_budget()/2` = raw
+/// work_mem HALVED — the Gather-era split (the leader's OWN partial shared
+/// the envelope with each worker) with no multiplier; the sink has no
+/// leader partial, so that sizing under-budgets every Local 4× at default
+/// hash_mem_multiplier and fires the accept spill / seal refusal / combine
+/// value-hash splits that much early (train-14 spill-envelope ledger).
+/// `PGRUST_RUNTIME_DISTINCT_BUDGET_KB` pins a fixed per-Local budget (the
+/// A/B attribution arm; absent/0 = derived).
+fn runtime_distinct_worker_budget() -> usize {
+    static KB: OnceLock<Option<usize>> = OnceLock::new();
+    let ov = *KB.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_BUDGET_KB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+    });
+    match ov {
+        Some(kb) => kb.saturating_mul(1024).min(1 << 31),
+        None => ::nodehash::get_hash_memory_limit().min(1 << 31),
+    }
+}
+
 /// PAREMIT kill switch (default ON): `PGRUST_RUNTIME_DISTINCT_PAREMIT=0`
 /// keeps every engagement on the adopt tail — the A/B attribution channel
 /// (results are byte-identical either way; see the pardistinct.rs paremit
@@ -1582,11 +1609,18 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // of the same gate: no surface without a bytes-comparable image ever
     // sees a bytes key — the m2-sinks §1 rule-5 selection-order totality
     // law's admission discipline).
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc, true) else {
+    let Some(mut spec) = ::nodeagg::pd_derive_spec(agg, desc, true) else {
         refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);
     };
+    // Envelope right-sizing: the RUNTIME sink re-budgets the fresh spec to
+    // the full R3 per-Local envelope (fn doc above). The Gather-era
+    // pardistinct arm keeps the derived /2 budget untouched — its leader
+    // partial still shares the envelope.
+    if let Some(s) = Arc::get_mut(&mut spec) {
+        s.worker_budget = runtime_distinct_worker_budget();
+    }
     if spec.max_att > desc.natts {
         refused(estate, ea, node_id, "att bound");
         *rd_shape_refused = true;

@@ -982,6 +982,22 @@ pub fn seq_scan_cb_lane_covers(node: &SeqScanState<'_>, prefix: i32) -> bool {
         .is_some_and(|b| b.lane.is_some() && b.plan.ncols() as i32 >= prefix)
 }
 
+/// EXTRA dict-lane registration (band-2a CaseDict, q40 class): opt ANOTHER
+/// column into dict lanes on the ALREADY-ARMED columnar batch — the CASE
+/// source column, read per (epoch, code) beside the primary dict-group key.
+/// Call with/after [`seq_scan_cb_columnar_arm`], before the first window
+/// (the fill reads `dict_want` per window). `false` = no armed batch (the
+/// caller refuses its feed; nothing was changed).
+pub fn seq_scan_cb_dict_want_extra(node: &mut SeqScanState<'_>, c: u16) -> bool {
+    match node.batch_soa.as_deref_mut() {
+        Some(b) if (c as usize) < b.plan.ncols() as usize => {
+            b.soa.set_dict_want(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The dict-group columnar arm generalized over the dict registration
 /// (expr-key grouping tranche): `dict_key = None` arms the same offset-free
 /// columnar staging with NO column opted into dict lanes — every window

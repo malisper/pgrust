@@ -165,6 +165,13 @@ struct AggSink {
     /// across all workers (worker-time, not wall — divide by the engaged
     /// DOP for a critical-path estimate).
     topn_ctr: TopnCounters,
+    /// LIMIT-k-no-ORDER group-admission freeze (band-2a q18 class; see the
+    /// sink.rs section doc): armed only on the Mk drain from a bare
+    /// Limit-over-Agg bound; structurally never co-armed with `topn`.
+    /// Workers install/consult it through [`scan_mk_batch`]; the combine
+    /// filters merged buckets to set members; seal/passthrough/adopt fast
+    /// paths are skipped once FROZEN (their tables may carry stragglers).
+    freeze: Option<Arc<::nodeagg::sink::SinkFreeze>>,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -499,7 +506,13 @@ impl runtime::ParallelSink for AggSink {
         // the drain is serial-faithful AND cache-linear), no combine work,
         // no emit materialization. Memory: the table was charged during
         // accept; no partition index is ever built.
-        if self.adopt_shape {
+        // Freeze composition: a FROZEN engagement's tables can carry
+        // pre-freeze straggler groups (undercounted past the freeze point) —
+        // the wholesale table hand-off cannot filter them, so it stands
+        // down and the combine's member filter runs instead. An armed-but-
+        // never-frozen freeze dropped nothing — the adopt stays valid.
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        if self.adopt_shape && !frozen {
             if let [l] = &mut *locals {
                 if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
                     let t = l.table.take().expect("checked Some");
@@ -512,7 +525,7 @@ impl runtime::ParallelSink for AggSink {
         for l in locals.iter_mut() {
             // Canonical (text-bearing) shapes partition by canonical bytes;
             // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_ref().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
             // R3 accounting (m2-integration audit): the SEAL index is
             // per-Local retained memory that lives through the whole combine
             // phase — charge it like a run. Crossing = budget refusal (R5
@@ -572,8 +585,13 @@ impl runtime::ParallelSink for AggSink {
             // takes the merge arm below; no plan/DOP special-casing.
             // M3.5 composition: a spilled face disqualifies the arm too —
             // spilled epochs live on the Local's file, not its table.
+            // Freeze composition: a FROZEN engagement's Local tables can
+            // carry pre-freeze stragglers — the pass-through emits verbatim
+            // and cannot filter, so it stands down (the merge arm below
+            // runs the member filter; frozen tables are tiny).
+            let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
             if let [l] = locals {
-                if l.runs.is_empty() && l.spill.is_none() {
+                if l.runs.is_empty() && l.spill.is_none() && !frozen {
                     if let (Some(t), Some(p)) = (&l.table, &l.part) {
                         // Top-N composition (m3-sort-b car 1) selects on the
                         // MERGED table; the pass-through never builds one, so
@@ -636,6 +654,15 @@ impl runtime::ParallelSink for AggSink {
                 let Some(set) = &self.spill_set else {
                     return Ok(CombineOutcome::OverBudget);
                 };
+                // Freeze composition: the split emits sub-partition tables
+                // piecemeal and cannot run the member filter — a FROZEN
+                // engagement refuses instead (unreachable by arithmetic:
+                // frozen tables hold <= bound + first-batch stragglers,
+                // orders below any budget; fail-closed, never
+                // silent-wrong).
+                if self.freeze.as_ref().is_some_and(|f| f.frozen()) {
+                    return Ok(CombineOutcome::OverBudget);
+                }
                 // Top-N × split composition (winners-phase2 §split×selection):
                 //  * WinnersOnly — each split LEAF (a disjoint sub-partition
                 //    of this partition's groups) runs the selection on its
@@ -732,6 +759,30 @@ impl runtime::ParallelSink for AggSink {
                 self.topn_ctr
                     .build_ns
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+            // Freeze member filter (band-2a q18): a FROZEN engagement emits
+            // ONLY set members — pre-freeze stragglers are undercounted
+            // past the freeze point and must never leave the sink. Rows
+            // ascend (sink_emit_bucket_rows contract). Structurally
+            // disjoint from the topn arm below (never co-armed).
+            if let Some(fz) = &self.freeze {
+                if let Some(entries) = fz.entries() {
+                    let shape = self
+                        .mk
+                        .as_ref()
+                        .expect("freeze arms only on the Mk drain");
+                    let rows = ::nodeagg::sink::sink_freeze_member_rows(
+                        &merged,
+                        self.key_words,
+                        shape,
+                        entries,
+                    );
+                    fz.note_stragglers((merged.nrows() - rows.len()) as u64);
+                    let buf =
+                        ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
+                    self.retain_bucket(part, buf, locals.len())?;
+                    return Ok(CombineOutcome::Done);
+                }
             }
             // Combine-phase top-N (car 1 + the winners-only amendment):
             // select this partition's winners on the merged raw states
@@ -962,6 +1013,8 @@ struct WorkerExec {
     errored: std::cell::Cell<bool>,
     /// Per-worker reusable drain scratch.
     k2s: ScanK2Scratch,
+    /// Dict-code sink feed cache (DictFeed::Code; K2 drain only).
+    dgs: SinkDictScratch,
     idxs: Vec<u32>,
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     /// ExprKey drain state (SinkDrain::ExprKey only): the worker's own
@@ -1007,8 +1060,8 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
-        let (k2s, idxs, groups) = (&mut *k2s, &mut *idxs, &mut *groups);
+        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
+        let (k2s, dgs, idxs, groups) = (&mut *k2s, &mut *dgs, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
         crate::querydesc::with_qd(*qd, |q| {
@@ -1045,9 +1098,13 @@ fn accept_morsel_body(
                 if let Some(t) = local.table.take() {
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
+                // Sink-owned table: arm the batch-tail canonical hashing
+                // (idempotent; the first morsel's table arms during the
+                // drain below, so mark again before reclaiming it).
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 let drained = sink_drain_range(
-                    sink, local, worker, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot,
-                    mk, mks,
+                    sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
+                    stage_slot, mk, mks,
                     estate,
                 );
                 // EA-on-morsels claim fold (EXACT — accumulate in the Local,
@@ -1067,6 +1124,7 @@ fn accept_morsel_body(
                 }
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
                     local.table = Some(t);
                 }
@@ -1448,6 +1506,163 @@ fn split_subparts_and_emit(
     Ok(SplitOutcome::Done)
 }
 
+/// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
+/// what the K2 sink does when the scan staging is dict-group armed (the
+/// single-int-key GROUP BY over a dict-encoded cbstore column whose
+/// fixed-width prefix deform is unarmable — UserID past varlena columns).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DictFeed {
+    /// Keep the dict-group registration and admit. MEASURED FINDING
+    /// (q16-columnar-feed lane): cbstore NEVER dict-encodes INT chunks
+    /// (`encode_int_chunk`: Const/For/Raw/DeltaFor only — Encoding::Dict is
+    /// the varlena encoder's arm), and the K2 sink admits int keys only
+    /// (`agg_sink_key_width`), so dict windows cannot reach this drain
+    /// today: every window fills decoded Datums and the plain keys path
+    /// runs. The dict-window branch (`sink_dict_batch` — CH
+    /// LowCardinality-style per-epoch code -> state cache) is the
+    /// fail-closed guard that makes keeping the registration SOUND (a dict
+    /// window's key Datum cells are stale by the set_dict_lane contract),
+    /// and the ready lane if int dict encoding ever lands.
+    Code,
+    /// Dict-free columnar re-arm (the q5-serial precedent): rebuild the
+    /// scan staging with NO dict registration so windows fill decoded
+    /// Datums, then the plain K2 per-row probe drain runs unchanged.
+    Raw,
+    /// Refuse the engagement exactly as before this lane (kill switch).
+    Off,
+}
+
+fn dict_feed_mode() -> DictFeed {
+    static MODE: OnceLock<DictFeed> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
+        Ok("0") | Ok("off") => DictFeed::Off,
+        Ok("raw") => DictFeed::Raw,
+        _ => DictFeed::Code,
+    })
+}
+
+/// Per-worker dict-code sink scratch (DictFeed::Code): the direct-indexed
+/// code -> live compact-table state map, keyed on the serial dict-group
+/// arm's exact identity tuple (is_global, epoch/gepoch). The cached pointers
+/// are LaneAggTable row-state addresses — allocation-stable across inserts
+/// and across the morsel take/put hand-off (chunked row storage; the table
+/// handle moves, its rows do not) — and they die at every sink flush
+/// (`sink_flush_table` resets the table), which must `invalidate` this
+/// scratch exactly like the mk intern-id cache beside it.
+#[derive(Default)]
+pub(super) struct SinkDictScratch {
+    ident: Option<(bool, u64)>,
+    slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    /// This batch's first-appearance-ordered unresolved codes (parallel to
+    /// the miss probe batch).
+    miss_codes: Vec<u32>,
+}
+
+impl SinkDictScratch {
+    fn invalidate(&mut self) {
+        self.ident = None;
+        self.slots.clear();
+    }
+}
+
+/// One dict-answered staged batch through the CODE sink feed: pass 1 marks
+/// each first-appearing unresolved code (first-arrival order preserved:
+/// the miss batch probes in first-appearance order, which is row order),
+/// one compact batch probe resolves all of this batch's misses, pass 2
+/// hands every surviving row its cached state for the whole-batch fold.
+/// Mirrors the serial `scan_dictgroup_batch` against the WORKER's bounded
+/// compact table instead of the global C tuplehash; there is no spill leg
+/// (the sink table never spills — it flushes at the cap, which invalidates
+/// this cache in the drain loop).
+#[allow(clippy::too_many_arguments)]
+fn sink_dict_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    dgs: &mut SinkDictScratch,
+    rows: &[u32],
+    keys: &mut Vec<::datum::Datum>,
+    knull: &mut Vec<bool>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    lane: ::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> Result<(), AcceptFail> {
+    let ndict = lane.table.ndict as usize;
+    let global = lane.table.has_stitch();
+    let (ident, size) = if global {
+        ((true, lane.table.gepoch), lane.table.gndv as usize)
+    } else {
+        ((false, lane.table.epoch), ndict)
+    };
+    if dgs.ident != Some(ident) {
+        dgs.ident = Some(ident);
+        dgs.slots.clear();
+        dgs.slots.resize(size, None);
+        lane_trace(&format!(
+            "sink dict-group {} {} (n={size})",
+            if global { "gepoch" } else { "epoch" },
+            ident.1
+        ));
+    }
+    debug_assert!(dgs.slots.len() >= size, "dict size is fixed per identity");
+    // PENDING sentinel: marks a code queued in THIS batch's miss list. A
+    // dangling NonNull can never equal a live table row address.
+    let pending = core::ptr::NonNull::<::execexpr::AggPerGroup>::dangling();
+    dgs.miss_codes.clear();
+    keys.clear();
+    knull.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        debug_assert!(code < size, "stitch contract: global code < gndv");
+        if dgs.slots[code].is_none() {
+            dgs.slots[code] = Some(pending);
+            dgs.miss_codes.push(code as u32);
+            // NULL discipline: dict codes have no NULL representation and
+            // cbstore stores no NULLs (per-chunk proof) — as the serial arm.
+            keys.push(lane.table.datum(local));
+            knull.push(false);
+        }
+    }
+    if !keys.is_empty() {
+        groups.clear();
+        if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
+            // The sink-mode backstop errors before migrating; belt-and-braces
+            // (the raw K2 leg's exact treatment).
+            return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "worker compact table disarmed mid-build",
+            )));
+        }
+        for (k, &code) in dgs.miss_codes.iter().enumerate() {
+            dgs.slots[code as usize] = Some(groups[k]);
+        }
+    }
+    idxs.clear();
+    groups.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        let pg = dgs.slots[code].expect("every survivor code resolved above");
+        debug_assert!(pg != pending, "pending sentinel must have been installed");
+        idxs.push(i);
+        groups.push(pg);
+    }
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
+    // SAFETY: as the raw K2 sink fold — every probed row is non-fallback
+    // (cbstore stages none; the caller admits all-lane batches only) with
+    // valid lane values for every plan column (the key column is NOT in
+    // `plan.cols`: the dict-group arm refuses that shape, and only that arm
+    // registers the dict lane); the plan is unguarded (sink admission);
+    // each state is a live compact-table row installed by a probe since the
+    // last flush (flushes invalidate this cache before the next batch).
+    unsafe { super::agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(())
+}
+
 /// The narrow sink drain over the positioned claim: per staged page batch —
 /// cap-flush check, survivor collection, canonical key gather, compact
 /// batch probe (never the C table), whole-batch fold.
@@ -1459,6 +1674,7 @@ fn sink_drain_range<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     k2s: &mut ScanK2Scratch,
+    dgs: &mut SinkDictScratch,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     xk: &mut Option<Box<super::ExprKeyState>>,
@@ -1484,6 +1700,9 @@ fn sink_drain_range<'mcx>(
         {
             local.run_bytes += run.bytes();
             local.runs.push(run);
+            // The flush RESET the compact table: every cached code -> state
+            // pointer is a dangling table row — drop the dict-code cache.
+            dgs.invalidate();
             if intern_reset {
                 // The flush RESET the intern table (wide-vocabulary
                 // bounding): every code→intern-id cache is now stale — a
@@ -1530,6 +1749,20 @@ fn sink_drain_range<'mcx>(
         // flush+spill (the aggcontext floor the runs still reference)
         // refuses. Spill-disarmed (canonical/kill-switch) keeps the plain
         // refusal exactly.
+        //
+        // EPOCH SIZING add-on (spill-envelopes lane, on the law above): the
+        // flush already drained the table-driven pressure — the run's bytes
+        // were live table bytes a moment ago, so HOLDING them to the R3
+        // budget crossing (the cap-flush path's own spill law above) keeps
+        // the per-Local envelope intact while cutting FEWER, BIGGER epochs.
+        // The pressure trip sits at the ~half-limit altitude (pinned by the
+        // compact backstop's sink-mode belt — raising it means moving the
+        // belt's hard error), so spill-per-trip wrote one ~(half-limit −
+        // aggctx) run per epoch (q33@100M: 15 × ~400MB per Local); the
+        // budget-crossing law accumulates ~2 trips per epoch — half the
+        // epoch brackets, half the combine-replay extents, same bytes.
+        // PGRUST_RUNTIME_AGG_SPILL_EAGER=1 restores spill-per-trip (the
+        // A/B attribution arm).
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
             match &sink.spill_set {
                 Some(set) => {
@@ -1546,7 +1779,18 @@ fn sink_drain_range<'mcx>(
                             }
                         }
                     }
-                    if !local.runs.is_empty() {
+                    let aggctx = if sink.byref_states {
+                        ::nodeagg::sink::agg_sink_aggctx_mem(agg)
+                    } else {
+                        0
+                    };
+                    if !local.runs.is_empty()
+                        && (agg_spill_eager()
+                            || local.run_bytes
+                                + ::nodeagg::sink::agg_sink_table_mem(agg)
+                                + aggctx
+                                > sink.budget)
+                    {
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
@@ -1616,7 +1860,17 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
-            if !super::scan_mk_batch(agg, ss, mk, mks, idxs, groups, n, estate)? {
+            if !super::scan_mk_batch(
+                agg,
+                ss,
+                mk,
+                mks,
+                idxs,
+                groups,
+                n,
+                sink.freeze.as_deref(),
+                estate,
+            )? {
                 let demotable = mk
                     .shape
                     .comps
@@ -1635,6 +1889,18 @@ fn sink_drain_range<'mcx>(
         super::scan_collect_survivors(ss, estate, n, rows)?;
         if ea {
             local.instr.rows.survived += rows.len() as u64;
+        }
+        // Dict-answered window under the CODE feed (dict-group staging on a
+        // sink build): group on the u32 codes through the per-epoch cache —
+        // the key column's Datum cells are STALE while the dict lane
+        // answers, so this branch must own every dict window. Raw-answered
+        // windows (non-dict key chunks) take the plain keys path below;
+        // both resolve into the same worker table in the same row order.
+        if let Some(lane) = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .and_then(|soa| soa.dict_lane(key_col))
+        {
+            sink_dict_batch(agg, ss, dgs, rows, keys, knull, idxs, groups, lane, estate)?;
+            continue;
         }
         keys.clear();
         knull.clear();
@@ -1881,6 +2147,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     qd,
                     errored: std::cell::Cell::new(false),
                     k2s: ScanK2Scratch::default(),
+                    dgs: SinkDictScratch::default(),
                     idxs: Vec::new(),
                     groups: Vec::new(),
                     xk,
@@ -1896,6 +2163,27 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             }
         }
     })
+}
+
+/// DictFeed::Raw: rebuild the scan staging as the dict-FREE columnar arm —
+/// the same offset-free window deform with NO column opted into dict lanes
+/// (`seq_scan_cb_columnar_arm(.., None)`; the q5-serial `arm_key_soa`
+/// precedent generalized to the fold prefix) — so every window fills
+/// decoded Datums and the plain K2 drain runs untouched. Fail-closed: the
+/// re-arm must actually shed the dict registration (a PREWHERE-owned batch
+/// keeps its co-consumers; single-key dict co-arms don't exist on that
+/// path today, but the check is what makes this safe, not the today).
+/// A later serial fallback re-arms dict-group idempotently — the fold
+/// feed's `arm_scan_staging` re-runs its whole ladder.
+fn sink_rearm_dictfree<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(prefix) = super::fused_agg_soa_prefix(agg, ss) else { return false };
+    ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
+        && ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_none()
+        && ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
 }
 
 /// The worker arm's drain-specific state (see [`arm_sink_build`]).
@@ -2034,8 +2322,24 @@ fn arm_sink_build<'mcx>(
     if super::scan_k2_shape(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
+    // Dict-group staging on the K2 build (the q16 class): the same mode
+    // decision the leader made. Code = keep the dict registration (the
+    // drain's dict-window branch consumes the codes); Raw = dict-free
+    // columnar re-arm (windows fill decoded Datums; the plain drain runs);
+    // Off = the pre-lane refusal. Leader/worker verdicts agree because the
+    // mode is a process-wide constant and both sides arm the same store.
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-        return Err(shape_err("dict-group staging on a sink worker"));
+        match dict_feed_mode() {
+            DictFeed::Code => {}
+            DictFeed::Raw => {
+                if !sink_rearm_dictfree(agg, ss, estate) {
+                    return Err(shape_err("dict-free columnar re-arm on a sink worker"));
+                }
+            }
+            DictFeed::Off => {
+                return Err(shape_err("dict-group staging on a sink worker"));
+            }
+        }
     }
     // Spill-armed admission flag mirrors the leader's exactly
     // (spill_set exists only on word-keyed spill-armed engagements).
@@ -2164,6 +2468,15 @@ fn agg_spill_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
 }
 
+/// EPOCH SIZING A/B arm (spill-envelopes lane): `1` restores the
+/// spill-on-every-pressure-trip behavior (one ~(half-limit − aggctx) run
+/// per epoch); default OFF = pressure-flush runs accumulate to the R3
+/// budget crossing before an epoch is written (fewer, bigger epochs).
+fn agg_spill_eager() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
+}
+
 /// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
 /// admission classes — Intern (text) components merged on canonical raw
 /// bytes, and Numeric components under the demote→refusal discipline. Off,
@@ -2196,6 +2509,17 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
         .iter()
         .all(|c| matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }));
     all_int || runtime_agg_text_enabled()
+}
+
+/// `PGRUST_RUNTIME_AGG_FREEZE` kill switch (default ON): the LIMIT-k-no-
+/// ORDER group-admission freeze (band-2a q18 class). Off, bare-Limit bounds
+/// are ignored and those engagements run the plain full drain exactly as
+/// before the car.
+fn agg_freeze_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
+    })
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
@@ -2243,6 +2567,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: Option<&super::ExprKeyState>,
     topn: Option<SinkTopnSpec>,
+    freeze_bound: Option<u32>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -2385,9 +2710,29 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         let k2_int = super::scan_k2_shape(agg, ss, estate).is_some()
             && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
         if k2_int {
+            // Dict-group staging (the q16 class: a single dict-encoded int
+            // key whose fixed-width prefix deform is unarmable). CODE feed:
+            // admit with the dict registration kept — the sink drain's
+            // dict-window branch consumes the codes through the per-epoch
+            // cache. RAW feed: dict-free columnar re-arm, plain K2 drain.
+            // Off: the pre-lane refusal exactly.
             if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-                refuse(estate, ea, node_id, "dict-group staging");
-                return Ok(false);
+                match dict_feed_mode() {
+                    DictFeed::Code => {
+                        lane_trace("runtime-agg: K2 dict-code feed admitted");
+                    }
+                    DictFeed::Raw => {
+                        if !sink_rearm_dictfree(agg, ss, estate) {
+                            refuse(estate, ea, node_id, "dict-free columnar re-arm");
+                            return Ok(false);
+                        }
+                        lane_trace("runtime-agg: K2 dict-free columnar re-arm");
+                    }
+                    DictFeed::Off => {
+                        refuse(estate, ea, node_id, "dict-group staging");
+                        return Ok(false);
+                    }
+                }
             }
             let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
                 refuse(estate, ea, node_id, "key width");
@@ -2589,6 +2934,38 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         None
     };
+    // LIMIT-k-no-ORDER group-admission freeze (band-2a q18): armed only on
+    // the unprojected Mk drain — the one worker feed carrying the filter
+    // hooks — with a small bound, no composed top-N (structurally exclusive:
+    // topn derives from a Sort consumer, the bound from a bare Limit), a
+    // non-nullable all-Int/one-Intern image (Numeric components demote
+    // mid-build, which the membership filter must never race), and the kill
+    // switch on. Declines keep the plain full drain, byte-identically.
+    let freeze = match freeze_bound {
+        Some(b)
+            if drain == SinkDrain::Mk
+                && topn.is_none()
+                && agg_freeze_enabled()
+                && b >= 1
+                && b <= ::nodeagg::sink::SINK_FREEZE_MAX_BOUND
+                && mk.as_ref().is_some_and(|s| {
+                    !s.nullable
+                        && s.comps.iter().all(|c| {
+                            !matches!(c.kind, ::nodeagg::MkCompKind::Numeric { .. })
+                        })
+                }) =>
+        {
+            lane_trace(&format!("runtime-agg freeze: armed (bound={b})"));
+            Some(Arc::new(::nodeagg::sink::SinkFreeze::new(b)))
+        }
+        Some(b) => {
+            lane_trace(&format!(
+                "runtime-agg freeze: declined (bound={b}; drain/shape/switch gate)"
+            ));
+            None
+        }
+        None => None,
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -2618,6 +2995,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         ),
         topn_refused: AtomicBool::new(false),
         topn_ctr: TopnCounters::default(),
+        freeze,
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -2980,6 +3358,21 @@ fn engage_ceremony<'mcx>(
                             c.select_ns.load(Ordering::Relaxed) / 1_000,
                             c.emit_ns.load(Ordering::Relaxed) / 1_000,
                         ));
+                    }
+                    // Freeze evidence line (e2e legs grep this): FROZEN
+                    // engagements emit exactly `bound` member groups.
+                    if let Some(fz) = &sink.freeze {
+                        if fz.frozen() {
+                            lane_trace(&format!(
+                                "runtime-agg freeze: engaged bound={} dropped_rows={} \
+                                 stragglers={}",
+                                fz.bound(),
+                                fz.dropped(),
+                                fz.stragglers()
+                            ));
+                        } else {
+                            lane_trace("runtime-agg freeze: armed, never froze (full drain)");
+                        }
                     }
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }

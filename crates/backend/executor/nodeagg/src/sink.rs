@@ -137,6 +137,13 @@ pub struct SinkRun {
     /// frees its arena; the intern table is scan-lifetime but the run must
     /// stay self-contained — the groundwork's copy discipline).
     pub key_bytes: Vec<u8>,
+    /// Bytes mode: row i's [`sink_hash_bytes`] over its canonical bytes,
+    /// bucket-major (parallel to `key_offs` slots). Computed once at flush
+    /// and REUSED as the combine table's probe hash (`probe_bytes` takes
+    /// the hash as a parameter; its slot index reads the hash's low bits
+    /// and its salt bits 32..48 — the sink's constant-per-bucket top byte
+    /// is never consumed). Empty in word modes.
+    pub hashes: Vec<u64>,
 }
 
 impl SinkRun {
@@ -158,6 +165,7 @@ impl SinkRun {
             + self.null_states.as_ref().map_or(0, |b| b.capacity() * 8)
             + self.key_offs.capacity() * 4
             + self.key_bytes.capacity()
+            + self.hashes.capacity() * 8
     }
 }
 
@@ -260,6 +268,7 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
         null_states,
         key_offs: Vec::new(),
         key_bytes: Vec::new(),
+        hashes: Vec::new(),
     }
 }
 
@@ -274,6 +283,34 @@ fn compact_canon_shape(ch: &crate::compact::CompactHash) -> Option<&MkShape> {
     match &ch.key {
         crate::compact::CompactKeySpec::Multi(s) if s.intern_comp().is_some() => Some(s),
         _ => None,
+    }
+}
+
+/// Extend the compact state's stored canonical hashes to cover every table
+/// row (rows are append-only within an epoch; a flush resets both). Called
+/// at the BATCH TAIL by the packed probes (new groups hash while their
+/// text bytes are cache-warm, on the accepting worker — parallel), and
+/// defensively at flush/SEAL entry (no-op when the batch tails covered
+/// everything; covers the per-row test/fallback insert paths). Word shapes
+/// return immediately.
+pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) {
+    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactKeySpec::Multi(shape) = key else { return };
+    if shape.intern_comp().is_none() {
+        return;
+    }
+    let Some(intern) = intern.as_ref() else { return };
+    let n = table.nrows();
+    if canon_hashes.len() >= n {
+        debug_assert_eq!(canon_hashes.len(), n, "canon hashes never outrun the table");
+        return;
+    }
+    let mut scratch: Vec<u8> = Vec::with_capacity(64);
+    canon_hashes.reserve(n - canon_hashes.len());
+    for row in canon_hashes.len()..n {
+        scratch.clear();
+        canon_row_bytes_append(table, shape, intern, row, &mut scratch);
+        canon_hashes.push(sink_hash_bytes(&scratch));
     }
 }
 
@@ -304,17 +341,32 @@ fn canon_row_bytes(
     row: usize,
     out: &mut Vec<u8>,
 ) {
+    out.clear();
+    canon_row_bytes_append(table, shape, intern, row, out);
+}
+
+/// [`canon_row_bytes`] without the clear: appends row `row`'s canonical
+/// image to `out` (the flush's flat single-materialization buffer — each
+/// row's image is built exactly once and permuted into bucket order by a
+/// plain byte copy).
+fn canon_row_bytes_append(
+    table: &LaneAggTable,
+    shape: &MkShape,
+    intern: &LaneAggTable,
+    row: usize,
+    out: &mut Vec<u8>,
+) {
     debug_assert!(!shape.nullable, "canonical shapes are non-nullable (sink admission)");
     let words = mk_words_of(table, shape, row);
     let (_, icomp) =
         shape.intern_comp().expect("canonical shapes carry an Intern component");
     let id = crate::compact::mk_unpack(words, icomp) as u32;
-    out.clear();
+    let base = out.len();
     let mut flat = [0u8; 16];
     flat[..8].copy_from_slice(&words[0].to_le_bytes());
     flat[8..].copy_from_slice(&words[1].to_le_bytes());
     out.extend_from_slice(&flat[..shape.packed_bytes as usize]);
-    let ioff = icomp.off as usize;
+    let ioff = base + icomp.off as usize;
     for b in &mut out[ioff..ioff + 4] {
         *b = 0;
     }
@@ -332,25 +384,40 @@ fn canon_row_bytes(
 /// ids stay valid). Bucket-major two-pass counting sort by
 /// [`sink_hash_bytes`] over the canonical bytes.
 fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
-    let crate::compact::CompactHash { table, key, intern, .. } = ch;
+    // The batch tails already hashed every row's canonical image
+    // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
+    // here is the defensive no-op sweep for the non-batched insert paths.
+    // Pass 1: materialize each row's canonical image EXACTLY ONCE into a
+    // flat arrival-order scratch (image offsets recorded) and take
+    // per-bucket row + byte counts off the stored hashes. Pass 2 is then a
+    // plain permuting byte copy — the old shape re-ran the whole canonical
+    // materialization (word unpack + intern reverse-map chase + component
+    // assembly) a second time per row AND hashed at flush, which the
+    // q13/q19 profiles put at ~14% of the engaged 16-thread query.
+    compact_extend_canon_hashes(ch);
+    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else {
         unreachable!("canonical flush requires a Multi shape")
     };
     let intern = intern.as_ref().expect("canonical shapes carry the intern table");
     let state_words = table.state_bytes() / 8;
     let n = table.nrows();
-    let mut canon: Vec<u8> = Vec::with_capacity(64);
-    // Pass 1: per-bucket row + byte counts (hashes cached — the canonical
-    // materialization reruns in pass 2, the hash need not).
+    debug_assert_eq!(canon_hashes.len(), n, "flush entry extended the hashes");
+    let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
     let mut byte_counts = [0usize; SINK_NBUCKETS];
-    let mut hashes: Vec<u64> = Vec::with_capacity(n);
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut scratch_offs: Vec<u32> = Vec::with_capacity(n + 1);
+    scratch_offs.push(0);
     for i in 0..n {
-        canon_row_bytes(table, shape, intern, i, &mut canon);
-        let h = sink_hash_bytes(&canon);
-        hashes.push(h);
+        let base = scratch.len();
+        canon_row_bytes_append(table, shape, intern, i, &mut scratch);
+        let img = &scratch[base..];
+        debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+        let h = hashes[i];
         counts[bucket_of(h)] += 1;
-        byte_counts[bucket_of(h)] += canon.len();
+        byte_counts[bucket_of(h)] += img.len();
+        scratch_offs.push(scratch.len() as u32);
     }
     let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
     let mut acc = 0u32;
@@ -373,15 +440,18 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
     let mut key_offs: Vec<u32> = vec![0; n + 1];
     let mut key_bytes: Vec<u8> = vec![0; total_bytes];
     let mut states: Vec<u64> = vec![0; n * state_words];
+    let mut run_hashes: Vec<u64> = vec![0; n];
     for i in 0..n {
-        canon_row_bytes(table, shape, intern, i, &mut canon);
+        let img =
+            &scratch[scratch_offs[i] as usize..scratch_offs[i + 1] as usize];
         let b = bucket_of(hashes[i]);
         let slot = cursor[b] as usize;
         cursor[b] += 1;
         let off = bcursor[b];
-        bcursor[b] += canon.len();
+        bcursor[b] += img.len();
         key_offs[slot] = off as u32;
-        key_bytes[off..off + canon.len()].copy_from_slice(&canon);
+        key_bytes[off..off + img.len()].copy_from_slice(img);
+        run_hashes[slot] = hashes[i];
         // SAFETY: the row's state block is state_words u64s (8-aligned by
         // the LaneAggTable state layout); dst was sized above.
         unsafe {
@@ -398,6 +468,8 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
     // out contiguously — slot s's key ends exactly where slot s+1 begins.
     debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
     table.reset();
+    // The epoch's rows are gone — the stored hashes restart with them.
+    canon_hashes.clear();
     SinkRun {
         key_words: 0,
         state_words,
@@ -407,26 +479,25 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
         null_states: None,
         key_offs,
         key_bytes,
+        hashes: run_hashes,
     }
 }
 
-/// [`sink_partition_remainder`]'s canonical twin: bucket index by
-/// [`sink_hash_bytes`] over each remainder row's canonical bytes. Canonical
-/// shapes are non-nullable — `has_null` is structurally false.
-fn sink_partition_remainder_canon(ch: &crate::compact::CompactHash) -> SinkPart {
-    let crate::compact::CompactHash { table, key, intern, .. } = ch;
-    let crate::compact::CompactKeySpec::Multi(shape) = key else {
-        unreachable!("canonical partition requires a Multi shape")
-    };
-    let intern = intern.as_ref().expect("canonical shapes carry the intern table");
+/// [`sink_partition_remainder`]'s canonical twin: bucket index by the
+/// STORED canonical hashes (`compact_extend_canon_hashes` — accept-time,
+/// parallel). This runs on the single-threaded last-worker-out SEAL, which
+/// the q19@100M profile showed serializing a canon+hash sweep over every
+/// Local's remainder while 15 workers waited — with the hashes carried it
+/// is a plain counting sort. Canonical shapes are non-nullable —
+/// `has_null` is structurally false.
+fn sink_partition_remainder_canon(ch: &mut crate::compact::CompactHash) -> SinkPart {
+    compact_extend_canon_hashes(ch);
+    let crate::compact::CompactHash { table, canon_hashes, .. } = ch;
     let n = table.nrows();
-    let mut canon: Vec<u8> = Vec::with_capacity(64);
+    debug_assert_eq!(canon_hashes.len(), n, "partition entry extended the hashes");
+    let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
-    let mut hashes: Vec<u64> = Vec::with_capacity(n);
-    for i in 0..n {
-        canon_row_bytes(table, shape, intern, i, &mut canon);
-        let h = sink_hash_bytes(&canon);
-        hashes.push(h);
+    for &h in hashes.iter() {
         counts[bucket_of(h)] += 1;
     }
     let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
@@ -438,12 +509,239 @@ fn sink_partition_remainder_canon(ch: &crate::compact::CompactHash) -> SinkPart 
     }
     let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
     let mut idx = vec![0u32; acc as usize];
+    let mut part_hashes = vec![0u64; acc as usize];
     for (i, &h) in hashes.iter().enumerate() {
         let b = bucket_of(h);
         idx[cursor[b] as usize] = i as u32;
+        part_hashes[cursor[b] as usize] = h;
         cursor[b] += 1;
     }
-    SinkPart { starts, idx, has_null: false }
+    SinkPart { starts, idx, has_null: false, hashes: part_hashes }
+}
+
+// ---------------------------------------------------------------------------
+// LIMIT-k-no-ORDER group-admission FREEZE (band-kernels-2a, ClickBench q18
+// class): `GROUP BY ... LIMIT k` with NO ORDER BY needs only k groups with
+// EXACT aggregates — the ratified q18 PASS-TIE membership class (count-gated:
+// rowcount equal, values exact for whichever groups emit). The law:
+//  * OPEN: every worker admits groups normally (nothing is ever dropped).
+//  * INSTALL: the first worker whose live compact table holds >= bound
+//    groups wins a CAS election and publishes those groups' CANONICAL key
+//    bytes as the frozen set. ANY bound groups are a valid set — every row
+//    of every group present anywhere has been counted so far (no drops
+//    before FROZEN), and set members keep counting after.
+//  * FROZEN: workers drop rows whose key is NOT in the set BEFORE the table
+//    probe (the per-row build cost collapses to a tiny membership check);
+//    rows of set members flow exactly as before, so members' aggregates are
+//    exact over ALL their input rows.
+//  * COMBINE: pre-freeze straggler groups (admitted before their owner
+//    observed FROZEN) are UNDERCOUNTED from the freeze point on — the
+//    combine filters every merged bucket to set members only, so stragglers
+//    never emit. Total emitted rows == bound (when >= bound groups exist;
+//    otherwise the freeze never installs and the drain is the plain full
+//    drain, byte-identical).
+// Mutual exclusion with the composed top-N is structural: the topn spec is
+// derived only from a bounded Sort consumer; the freeze bound only from a
+// bare Limit-over-Agg (no Sort) — both never arm together.
+// ---------------------------------------------------------------------------
+
+/// Freeze bound ceiling: entry masks ride a u64 in the worker filter, and
+/// the class only pays off for small k (q18 is LIMIT 10). Larger bounds
+/// decline at arming and keep the full drain.
+pub const SINK_FREEZE_MAX_BOUND: u32 = 64;
+
+const FREEZE_OPEN: u8 = 0;
+const FREEZE_INSTALLING: u8 = 1;
+const FREEZE_FROZEN: u8 = 2;
+const FREEZE_DISABLED: u8 = 3;
+
+/// The engagement-shared freeze control: bound + install election + the
+/// published canonical key set. One per sink engagement (leader-armed),
+/// shared by every worker through the sink.
+pub struct SinkFreeze {
+    bound: u32,
+    /// OPEN -> INSTALLING (CAS, the election) -> FROZEN (Release publish).
+    /// DISABLED = an install could not extract (fail-open: no drops ever
+    /// happen, the drain stays full — correct, just unoptimized).
+    state: core::sync::atomic::AtomicU8,
+    /// Canonical key bytes per entry (the seal/flush encoding — see
+    /// [`canon_row_bytes`]; word-keyed Multi shapes use the packed image's
+    /// `packed_bytes` little-endian bytes). Written ONLY by the installer
+    /// between the CAS and the FROZEN store; read only at/after FROZEN
+    /// (Acquire pairs with the Release store).
+    set: core::cell::UnsafeCell<Vec<Vec<u8>>>,
+    /// Rows dropped by worker filters (observability).
+    dropped: core::sync::atomic::AtomicU64,
+    /// Straggler groups filtered at combine (observability).
+    stragglers: core::sync::atomic::AtomicU64,
+}
+
+// SAFETY: `set` is written only by the single CAS-elected installer before
+// the FROZEN Release store, and read only after an Acquire load observes
+// FROZEN — a happens-before edge orders every read after the last write.
+unsafe impl Sync for SinkFreeze {}
+
+impl SinkFreeze {
+    pub fn new(bound: u32) -> SinkFreeze {
+        debug_assert!(bound >= 1 && bound <= SINK_FREEZE_MAX_BOUND);
+        SinkFreeze {
+            bound,
+            state: core::sync::atomic::AtomicU8::new(FREEZE_OPEN),
+            set: core::cell::UnsafeCell::new(Vec::new()),
+            dropped: core::sync::atomic::AtomicU64::new(0),
+            stragglers: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn bound(&self) -> u32 {
+        self.bound
+    }
+
+    /// The frozen canonical set, or None while OPEN/INSTALLING/DISABLED.
+    #[inline]
+    pub fn entries(&self) -> Option<&[Vec<u8>]> {
+        if self.state.load(core::sync::atomic::Ordering::Acquire) == FREEZE_FROZEN {
+            // SAFETY: FROZEN observed with Acquire — the installer's writes
+            // happened-before; nobody writes after FROZEN.
+            Some(unsafe { &*self.set.get() })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn frozen(&self) -> bool {
+        self.state.load(core::sync::atomic::Ordering::Acquire) == FREEZE_FROZEN
+    }
+
+    /// Election: exactly one caller wins the right to install. The winner
+    /// MUST follow with [`Self::publish`] or [`Self::disable`].
+    pub fn try_begin_install(&self) -> bool {
+        self.state
+            .compare_exchange(
+                FREEZE_OPEN,
+                FREEZE_INSTALLING,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Installer-only: publish the canonical set and flip FROZEN.
+    pub fn publish(&self, entries: Vec<Vec<u8>>) {
+        debug_assert_eq!(entries.len(), self.bound as usize);
+        // SAFETY: single writer by the CAS election; no reader until the
+        // Release store below.
+        unsafe { *self.set.get() = entries };
+        self.state.store(FREEZE_FROZEN, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Installer-only: the extraction failed — fail OPEN forever (no drops
+    /// ever happen; the engagement drains fully, correct but unoptimized).
+    pub fn disable(&self) {
+        self.state.store(FREEZE_DISABLED, core::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
+    pub fn note_dropped(&self, n: u64) {
+        if n > 0 {
+            self.dropped.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn note_stragglers(&self, n: u64) {
+        if n > 0 {
+            self.stragglers.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn stragglers(&self) -> u64 {
+        self.stragglers.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Extract the first `bound` insertion-order groups of the ARMED compact
+/// Multi table as canonical key bytes (the install source). `None` when the
+/// table is not an armed Multi shape or holds fewer than `bound` groups.
+/// ANY `bound` groups form a valid frozen set (see the section doc) — the
+/// first rows are simply the cheapest to name.
+pub fn sink_freeze_extract(node: &AggStateData<'_>, bound: u32) -> Option<Vec<Vec<u8>>> {
+    let ph = node.perhash.as_ref()?;
+    sink_freeze_extract_ch(ph.compact.as_ref()?, bound)
+}
+
+/// [`sink_freeze_extract`] over the armed compact state itself (split for
+/// the unit tests, which build [`crate::compact::CompactHash`] directly).
+pub(crate) fn sink_freeze_extract_ch(
+    ch: &crate::compact::CompactHash,
+    bound: u32,
+) -> Option<Vec<Vec<u8>>> {
+    let crate::compact::CompactKeySpec::Multi(shape) = &ch.key else { return None };
+    if shape.nullable || ch.table.nrows() < bound as usize {
+        return None;
+    }
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(bound as usize);
+    match compact_canon_shape(ch) {
+        Some(shape) => {
+            let intern = ch.intern.as_ref()?;
+            let mut canon: Vec<u8> = Vec::with_capacity(64);
+            for i in 0..bound as usize {
+                canon_row_bytes(&ch.table, shape, intern, i, &mut canon);
+                out.push(canon.clone());
+            }
+        }
+        None => {
+            // Word-keyed Multi shape: the canonical bytes are the packed
+            // image's little-endian `packed_bytes` prefix (value-derived —
+            // identical on every worker).
+            for i in 0..bound as usize {
+                let words = mk_words_of(&ch.table, shape, i);
+                let mut flat = [0u8; 16];
+                flat[..8].copy_from_slice(&words[0].to_le_bytes());
+                flat[8..].copy_from_slice(&words[1].to_le_bytes());
+                out.push(flat[..shape.packed_bytes as usize].to_vec());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Combine-side membership filter: the merged bucket table's rows whose
+/// canonical key bytes are in the frozen set, ascending row order (the
+/// [`sink_emit_bucket_rows`] contract). `key_words == 0` = bytes-mode table
+/// (rows key on canonical byte strings); word modes reconstruct the image
+/// prefix per row.
+pub fn sink_freeze_member_rows(
+    t: &LaneAggTable,
+    key_words: usize,
+    shape: &MkShape,
+    entries: &[Vec<u8>],
+) -> Vec<u32> {
+    let set: std::collections::HashSet<&[u8]> =
+        entries.iter().map(|e| e.as_slice()).collect();
+    let mut out: Vec<u32> = Vec::new();
+    let mut scratch = [0u8; 8];
+    for i in 0..t.nrows() {
+        let member = if key_words == 0 {
+            t.row_key_bytes(i, &mut scratch).is_some_and(|b| set.contains(b))
+        } else {
+            let words = mk_words_of(t, shape, i);
+            let mut flat = [0u8; 16];
+            flat[..8].copy_from_slice(&words[0].to_le_bytes());
+            flat[8..].copy_from_slice(&words[1].to_le_bytes());
+            set.contains(&flat[..shape.packed_bytes as usize])
+        };
+        if member {
+            out.push(i as u32);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +815,7 @@ pub fn sink_run_from_spill(
         null_states: None,
         key_offs: Vec::new(),
         key_bytes: Vec::new(),
+        hashes: Vec::new(),
     })
 }
 
@@ -616,6 +915,7 @@ pub fn sink_null_only_run(key_words: usize, state_words: usize, block: Vec<u64>)
         null_states: Some(block),
         key_offs: Vec::new(),
         key_bytes: Vec::new(),
+        hashes: Vec::new(),
     }
 }
 
@@ -631,6 +931,11 @@ pub struct SinkPart {
     pub starts: Vec<u32>,
     pub idx: Vec<u32>,
     pub has_null: bool,
+    /// Canonical (bytes-mode) shapes: slot i's [`sink_hash_bytes`] over
+    /// `idx[i]`'s canonical bytes (parallel to `idx`) — computed by the
+    /// SEAL partition anyway and carried so the combine's remainder probe
+    /// reuses it instead of re-hashing. Empty in word modes.
+    pub hashes: Vec<u64>,
 }
 
 impl SinkPart {
@@ -638,6 +943,7 @@ impl SinkPart {
     /// combine set finishes and is charged like a run).
     pub fn bytes(&self) -> usize {
         (self.starts.capacity() + self.idx.capacity()) * core::mem::size_of::<u32>()
+            + self.hashes.capacity() * 8
     }
 }
 
@@ -667,7 +973,7 @@ pub fn sink_partition_remainder(t: &LaneAggTable) -> SinkPart {
             cursor[b] += 1;
         }
     }
-    SinkPart { starts, idx, has_null }
+    SinkPart { starts, idx, has_null, hashes: Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,10 +1330,16 @@ pub fn sink_combine_bucket(
         };
         merge_states(pr, src)
     };
-    let absorb_bytes = |t: &mut LaneAggTable, key: &[u8], src: *const u64| -> PgResult<()> {
-        let pr = t.probe_bytes(key, t.hash_key_bytes(key));
-        merge_states(pr, src)
-    };
+    // Bytes-mode probes reuse the flush/SEAL-computed sink hash (carried in
+    // the run / part) instead of re-hashing every arrival's byte image —
+    // probe_bytes consumes the hash's low bits (slot) and bits 32..48
+    // (salt), so the sink hash's constant-per-bucket top byte never hurts,
+    // and one hash per (row, table) stays consistent across all probes.
+    let absorb_bytes =
+        |t: &mut LaneAggTable, key: &[u8], h: u64, src: *const u64| -> PgResult<()> {
+            let pr = t.probe_bytes(key, h);
+            merge_states(pr, src)
+        };
 
     // Canonical remainder scratch (bytes mode only).
     let mut canon: Vec<u8> = Vec::new();
@@ -1045,7 +1357,7 @@ pub fn sink_combine_bucket(
                 if key_words == 0 {
                     let ks = r.key_offs[i] as usize;
                     let ke = r.key_offs[i + 1] as usize;
-                    absorb_bytes(&mut t, &r.key_bytes[ks..ke], src)?;
+                    absorb_bytes(&mut t, &r.key_bytes[ks..ke], r.hashes[i], src)?;
                 } else {
                     let w0 = r.keys[i * key_words];
                     let w1 = if key_words == 2 { r.keys[i * key_words + 1] } else { 0 };
@@ -1068,9 +1380,14 @@ pub fn sink_combine_bucket(
                 let (shape, intern) = rem
                     .canon
                     .ok_or_else(|| sink_shape_error("bytes-mode remainder without a canon face"))?;
-                for &row in &part.idx[lo..hi] {
+                for (slot, &row) in part.idx[lo..hi].iter().enumerate() {
                     canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
-                    absorb_bytes(&mut t, &canon, rt.row_states(row as usize).cast_const().cast())?;
+                    absorb_bytes(
+                        &mut t,
+                        &canon,
+                        part.hashes[lo + slot],
+                        rt.row_states(row as usize).cast_const().cast(),
+                    )?;
                 }
                 debug_assert!(!part.has_null, "canonical shapes are non-nullable");
             } else {
@@ -1848,19 +2165,21 @@ impl SinkTableHandle {
     /// SEAL-time bucket index over this handle's remainder — canonical
     /// (text-bearing) shapes partition by their canonical bytes, word shapes
     /// by the key words ([`sink_partition_remainder`]).
-    pub fn partition_remainder(&self) -> SinkPart {
+    pub fn partition_remainder(&mut self) -> SinkPart {
         if compact_canon_shape(&self.0).is_some() {
-            sink_partition_remainder_canon(&self.0)
+            sink_partition_remainder_canon(&mut self.0)
         } else {
             sink_partition_remainder(&self.0.table)
         }
     }
 
-    /// This handle's retained footprint (compact + intern tables) — the
-    /// SEAL-time budget accounting twin of [`agg_sink_table_mem`].
+    /// This handle's retained footprint (compact + intern tables + the
+    /// stored canonical row hashes) — the SEAL-time budget accounting twin
+    /// of [`agg_sink_table_mem`].
     pub fn mem_used(&self) -> usize {
         self.0.table.mem_used()
             + self.0.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+            + self.0.canon_hashes.capacity() * 8
     }
 
     /// The combine-visible remainder face over this handle (+ the canonical
@@ -1880,6 +2199,18 @@ impl SinkTableHandle {
 
 /// Move the armed compact state OUT of the executor (end of a morsel drain:
 /// the Local owns it until the next morsel / SEAL). `None` = not armed.
+/// Mark the node's armed compact table as RUNTIME-SINK-owned (idempotent;
+/// no-op when no compact table is armed). Gates the batch-tail canonical
+/// hashing — the serial lane shares the compact table and must not pay for
+/// hashes it never consumes.
+pub fn agg_sink_mark_sink_mode(node: &mut AggStateData<'_>) {
+    if let Some(ph) = node.perhash.as_mut() {
+        if let Some(ch) = ph.compact.as_mut() {
+            ch.sink_mode = true;
+        }
+    }
+}
+
 pub fn agg_sink_take_table(node: &mut AggStateData<'_>) -> Option<SinkTableHandle> {
     node.perhash.as_mut()?.compact.take().map(SinkTableHandle)
 }
@@ -3212,7 +3543,7 @@ mod tests {
         // same canonical bytes) + a new text.
         bump_canon(&mut w1, Some(1), b"apple", 10);
         bump_canon(&mut w1, Some(3), b"cherry", 5);
-        let h1 = SinkTableHandle(w1);
+        let mut h1 = SinkTableHandle(w1);
         let part1 = h1.partition_remainder();
         assert!(!part1.has_null);
 
@@ -3220,7 +3551,7 @@ mod tests {
         bump_canon(&mut w2, Some(9), b"zzz", 7);
         bump_canon(&mut w2, Some(1), b"banana", 20);
         bump_canon(&mut w2, Some(1), b"apple", 30);
-        let h2 = SinkTableHandle(w2);
+        let mut h2 = SinkTableHandle(w2);
         let part2 = h2.partition_remainder();
 
         let locals = [
@@ -3290,7 +3621,7 @@ mod tests {
         // Second epoch re-inserts two of them (ids reused from intern).
         bump_canon(&mut w, None, b"a", 100);
         bump_canon(&mut w, None, b"abcdefghijklmnop", 200);
-        let h = SinkTableHandle(w);
+        let mut h = SinkTableHandle(w);
         let part = h.partition_remainder();
         let locals = [SinkLocalView {
             spilled: &[],
@@ -3322,6 +3653,60 @@ mod tests {
         assert_eq!(seen[&b"a".to_vec()], 102);
         assert_eq!(seen[&b"abcd".to_vec()], 3);
         assert_eq!(seen[&b"abcdefghijklmnop".to_vec()], 204);
+    }
+
+    /// The carried-hash invariant (text-kernels W2): a bytes-mode run's
+    /// `hashes[i]` is exactly `sink_hash_bytes` of slot i's canonical
+    /// bytes, and a canonical SEAL partition's `hashes` are slot-parallel
+    /// to `idx` — the combine probes with these values, so a drift here is
+    /// a wrong-merge, not a slowdown.
+    #[test]
+    fn canonical_run_and_part_carry_slot_hashes() {
+        let shape = MkShape {
+            comps: vec![crate::compact::MkComp {
+                att: 0,
+                off: 0,
+                kind: MkCompKind::Intern,
+            }],
+            packed_bytes: 4,
+            nullable: false,
+            two_words: false,
+        };
+        let mut w = canon_worker(shape);
+        let texts: [&[u8]; 5] =
+            [b"", b"a", b"abcd", b"abcdefghijklmnop", b"zzzzzzzzzzzzzzzzzzzzzzzz"];
+        for (i, t) in texts.iter().enumerate() {
+            bump_canon(&mut w, None, t, (i + 1) as i64);
+        }
+        let run = sink_flush_table_canon(&mut w);
+        assert_eq!(run.hashes.len(), run.nrows());
+        for i in 0..run.nrows() {
+            let ks = run.key_offs[i] as usize;
+            let ke = run.key_offs[i + 1] as usize;
+            assert_eq!(
+                run.hashes[i],
+                sink_hash_bytes(&run.key_bytes[ks..ke]),
+                "run slot {i} carries its own canonical hash"
+            );
+        }
+        // Remainder epoch: two re-arrivals + one new key.
+        bump_canon(&mut w, None, b"a", 100);
+        bump_canon(&mut w, None, b"new-remainder-key", 7);
+        let part = sink_partition_remainder_canon(&mut w);
+        let crate::compact::CompactKeySpec::Multi(shape_ref) = &w.key else {
+            unreachable!("canon worker is Multi");
+        };
+        assert_eq!(part.hashes.len(), part.idx.len());
+        let intern = w.intern.as_ref().unwrap();
+        let mut canon = Vec::new();
+        for (slot, &row) in part.idx.iter().enumerate() {
+            canon_row_bytes(&w.table, shape_ref, intern, row as usize, &mut canon);
+            assert_eq!(
+                part.hashes[slot],
+                sink_hash_bytes(&canon),
+                "part slot {slot} carries row {row}'s canonical hash"
+            );
+        }
     }
 
     #[test]
@@ -4118,5 +4503,153 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- LIMIT-k-no-ORDER group-admission freeze (band-2a q18) -------------
+
+    /// SinkFreeze state machine: election is exclusive, entries visible
+    /// only after publish, disable fails open.
+    #[test]
+    fn freeze_state_machine() {
+        let fz = SinkFreeze::new(3);
+        assert!(!fz.frozen());
+        assert!(fz.entries().is_none());
+        assert!(fz.try_begin_install(), "first election wins");
+        assert!(!fz.try_begin_install(), "second election loses");
+        assert!(fz.entries().is_none(), "no entries mid-install");
+        fz.publish(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert!(fz.frozen());
+        assert_eq!(fz.entries().unwrap().len(), 3);
+        assert!(!fz.try_begin_install(), "frozen never re-elects");
+
+        let dz = SinkFreeze::new(2);
+        assert!(dz.try_begin_install());
+        dz.disable();
+        assert!(!dz.frozen());
+        assert!(dz.entries().is_none());
+        assert!(!dz.try_begin_install(), "disabled never re-elects");
+    }
+
+    /// Extraction + membership + subset emit, end to end at the sink unit
+    /// level over the canonical (int8, text) shape: freeze on worker 1's
+    /// first two groups, combine both workers' faces, filter every bucket —
+    /// exactly the two member groups emit, with their FULL cross-worker
+    /// combined counts; stragglers never emit.
+    #[test]
+    fn freeze_member_filter_end_to_end() {
+        // Worker 1: (1,apple) (1,banana) (2,apple) — install source.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w1, Some(1), b"apple", 1);
+        bump_canon(&mut w1, Some(1), b"banana", 2);
+        bump_canon(&mut w1, Some(2), b"apple", 3);
+        let entries = sink_freeze_extract_ch(&w1, 2).expect("extractable");
+        assert_eq!(entries.len(), 2);
+        // Under-bound tables refuse extraction.
+        assert!(sink_freeze_extract_ch(&w1, 4).is_none());
+        // Worker 2 counts more rows of the members (different intern ids)
+        // plus stragglers.
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w2, Some(9), b"zzz", 7);
+        bump_canon(&mut w2, Some(1), b"banana", 20);
+        bump_canon(&mut w2, Some(1), b"apple", 30);
+        let mut h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+        let mut h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(h2.remainder_view(&part2)),
+            },
+        ];
+        let combines = test_combines();
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(12),
+            cols: vec![
+                SinkEmitCol::MultiComp { off: 0, width: 8 },
+                SinkEmitCol::MultiText,
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        let shape = canon_shape_int8_text();
+        let mut seen: std::collections::HashMap<(i64, Vec<u8>), i64> =
+            std::collections::HashMap::new();
+        let mut stragglers = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let t = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            let rows = sink_freeze_member_rows(&t, 0, &shape, &entries);
+            assert!(rows.windows(2).all(|w| w[0] < w[1]), "ascending rows");
+            stragglers += t.nrows() - rows.len();
+            let full = sink_emit_bucket(&plan, &t).unwrap();
+            let buf = sink_emit_bucket_rows(&plan, &t, &rows).unwrap();
+            assert_eq!(buf.nrows, rows.len());
+            for (ci, &fi) in rows.iter().enumerate() {
+                // Subset emit == full emit at the original indices.
+                for c in 0..3usize {
+                    let (fv, fn_) = (
+                        full.values[fi as usize * 3 + c],
+                        full.nulls[fi as usize * 3 + c],
+                    );
+                    let (cv, cn) = (buf.values[ci * 3 + c], buf.nulls[ci * 3 + c]);
+                    assert_eq!(fn_, cn);
+                    if c == 1 {
+                        assert_eq!(emit_text(&full, fv), emit_text(&buf, cv));
+                    } else {
+                        assert_eq!(fv.as_i64(), cv.as_i64());
+                    }
+                }
+                let k = buf.values[ci * 3].as_i64();
+                let text = emit_text(&buf, buf.values[ci * 3 + 1]);
+                let c = buf.values[ci * 3 + 2].as_i64();
+                assert!(seen.insert((k, text), c).is_none(), "member in two buckets");
+            }
+        }
+        // Exactly the two members, full cross-worker counts; the (2,apple)
+        // and (9,zzz) stragglers were filtered.
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[&(1, b"apple".to_vec())], 31, "1 + 30 across workers");
+        assert_eq!(seen[&(1, b"banana".to_vec())], 22, "2 + 20 across workers");
+        assert_eq!(stragglers, 2);
+    }
+
+    /// Word-keyed Multi shapes: canonical entries are the packed image's LE
+    /// prefix; the member filter reconstructs and matches them.
+    #[test]
+    fn freeze_member_filter_word_mode() {
+        let shape = MkShape {
+            comps: vec![
+                crate::compact::MkComp { att: 0, off: 0, kind: MkCompKind::Int { width: 4 } },
+                crate::compact::MkComp { att: 1, off: 4, kind: MkCompKind::Int { width: 2 } },
+            ],
+            packed_bytes: 6,
+            nullable: false,
+            two_words: false,
+        };
+        // Packed images as the mk feed would build them (LE component
+        // packing of (int4, int2) pairs, negative values included).
+        let pack = |a: i32, b: i16| -> i64 {
+            ((a as u32 as u64) | (((b as u16 as u64) & 0xFFFF) << 32)) as i64
+        };
+        let mut t = mk_table(16);
+        for (a, b, c) in [(7, -1i16, 5i64), (-3, 2, 6), (100, 0, 7)] {
+            bump(&mut t, Some(pack(a, b)), c, 0);
+        }
+        let ch = crate::compact::compact_hash_for_tests(
+            t,
+            crate::compact::CompactKeySpec::Multi(shape.clone()),
+            None,
+        );
+        let entries = sink_freeze_extract_ch(&ch, 2).expect("extractable");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.len() == 6), "6-byte LE image prefix");
+        let rows = sink_freeze_member_rows(&ch.table, 1, &shape, &entries);
+        assert_eq!(rows, vec![0, 1], "first two insertion rows are the members");
     }
 }
