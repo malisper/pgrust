@@ -70,7 +70,7 @@ pub enum PdInt {
 
 impl PdInt {
     #[inline]
-    fn read(self, d: Datum) -> i64 {
+    pub(crate) fn read(self, d: Datum) -> i64 {
         match self {
             PdInt::I16 => d.as_i16() as i64,
             PdInt::I32 => d.as_i32() as i64,

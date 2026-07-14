@@ -78,12 +78,13 @@ pub use codedgroup::{
     agg_codedgroup_next_replay, agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
-    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_admissible,
-    agg_hashgroup_adopt_merged, agg_hashgroup_batch_shape, agg_hashgroup_begin,
-    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
-    agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
-    agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
-    agg_hashgroup_text_key_count, HashGroupOrderKey, HgBatchRow,
+    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_accept_batch_span,
+    agg_hashgroup_admissible, agg_hashgroup_adopt_merged, agg_hashgroup_arm_fold,
+    agg_hashgroup_batch_shape, agg_hashgroup_begin, agg_hashgroup_economical,
+    agg_hashgroup_emit_next, agg_hashgroup_emitting, agg_hashgroup_finish_build,
+    agg_hashgroup_next_rep, agg_hashgroup_reset, agg_hashgroup_residual_active,
+    agg_hashgroup_set_residual, agg_hashgroup_state_active, agg_hashgroup_text_key_count,
+    HashGroupOrderKey, HgBatchRow, HgBatchShape, HgSpanStop,
 };
 pub use ::execgrouping::GroupKeyKind;
 
