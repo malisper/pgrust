@@ -269,7 +269,13 @@ fn runtime_scan_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> 
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker
 /// task): no-op unless the context's private payload is ours.
 fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
+    let Some(private) = shared.private() else {
+        // F1 observability: a context with NO private payload can never be
+        // driven by any arm — trace it (foreign-payload downcast misses stay
+        // silent below: every arm's hook runs for every worker by design).
+        lane_trace("runtime-scan: post-task-park without a private payload");
+        return;
+    };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
@@ -283,11 +289,24 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShared>) {
     let _ = shared;
-    let Some(target) = payload.pcxt_shared.get() else { return };
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
+    let Some(target) = payload.pcxt_shared.get() else {
+        lane_trace("runtime-scan: helper refused (no pcxt shared)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        lane_trace("runtime-scan: helper refused (rg gone)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
     // Process-wide lane lease: pin-board lanes are shared across every
     // concurrently-engaged query; exhaustion = fail-closed non-participation.
     let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-scan: helper refused (no external lane)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
@@ -303,6 +322,18 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
         Err(e) => {
             if entered.get() {
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader waits on
+                // the all-stopped backstop's cadence. Drive the closed
+                // generation to completion (pure protocol cleanup);
+                // post-drive errors find it already complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 // Binder validate() refusal: fail-closed non-participation.
                 // The leader detects the nobody-participates case and falls
@@ -987,7 +1018,15 @@ fn engage_ceremony<'mcx>(
                     "runtime scan helpers exited before completing the scan",
                 )));
             }
-            parallel::wait_parallel_finish_quantum();
+            // A raised cancel disposition (statement_timeout /
+            // pg_cancel_backend) surfaces from the latch quantum (F1 defect
+            // layer 2b): abort + drain the RG, then propagate — exactly the
+            // CFI branch above.
+            if let Err(e) = parallel::wait_parallel_finish_quantum() {
+                rg.abort();
+                drain_rg(rt, payload, &rg);
+                return Err(e);
+            }
         };
 
         // Worker-phase error (fold error, binder cleanup, panic): rethrow —
