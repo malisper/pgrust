@@ -264,6 +264,47 @@ fn thread_signal_bit(signo: i32) -> u32 {
     1u32 << signo as u32
 }
 
+/// M4 bgjobs multi-job seat (docs/design/m4-bgjobs.md §3.2): one dispatcher
+/// thread hosts several migrated daemons' signal planes. A job's
+/// thread-signal identity — the procsignal slot registration
+/// (MY_PROC_SIGNAL_SLOT; the SHARED pending word is already per-job via
+/// pss_pid) plus the per-thread handler table (the tables differ between
+/// daemons: e.g. bgwriter SIGINT=Ignore, walwriter SIGINT=shutdown) — is
+/// stashed here while the job is not the thread's bound identity.
+pub struct ThreadSignalIdentity {
+    slot: Option<usize>,
+    handlers: [ThreadSignalHandler; NUM_THREAD_SIGNALS],
+}
+
+impl ThreadSignalIdentity {
+    pub const fn unbound() -> ThreadSignalIdentity {
+        ThreadSignalIdentity {
+            slot: None,
+            handlers: [ThreadSignalHandler::Unset; NUM_THREAD_SIGNALS],
+        }
+    }
+}
+
+impl Default for ThreadSignalIdentity {
+    fn default() -> Self {
+        ThreadSignalIdentity::unbound()
+    }
+}
+
+/// Exchange the calling thread's signal identity with `saved`.
+/// Self-inverse: bind and unbind are the same call (the seat swap
+/// discipline — LIFO, RAII-guarded by the caller).
+pub fn swap_thread_signal_identity(saved: &mut ThreadSignalIdentity) {
+    let cur = MY_PROC_SIGNAL_SLOT.get();
+    MY_PROC_SIGNAL_SLOT.set(saved.slot);
+    saved.slot = cur;
+    THREAD_SIGNAL_HANDLERS.with(|t| {
+        let cur = t.get();
+        t.set(saved.handlers);
+        saved.handlers = cur;
+    });
+}
+
 // pqsignal (port/pqsignal.c) for the thread model: dispositions are the
 // registering thread's, run by DrainThreadSignals on that thread.
 pub fn pqsignal_thread(signo: i32, handler: ThreadSignalHandler) {

@@ -1604,6 +1604,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "auxjob"
+version = "0.0.0"
+dependencies = [
+ "auxprocess",
+ "backend_status",
+ "bgjobs",
+ "elog",
+ "guc_file_seams",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "libc",
+ "lmgr_proc",
+ "miscinit",
+ "postinit",
+ "postmaster_seams",
+ "procsignal",
+ "procsignal_seams",
+ "resowner",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+]
+
+[[package]]
 name = "auxprocess"
 version = "0.0.0"
 dependencies = [
@@ -1959,6 +1987,7 @@ name = "bgwriter"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "auxjob",
  "auxprocess",
  "bgjobs",
  "bufmgr",
@@ -18356,7 +18385,9 @@ name = "walwriter"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "auxjob",
  "auxprocess",
+ "bgjobs",
  "bufmgr",
  "condition_variable_seams",
  "dynahash",

@@ -17,6 +17,7 @@ types_storage = { path = "../../../_support/types/types_storage" }
 aio_seams = { path = "../../storage/aio/aio_seams" }
 auxprocess = { path = "../auxprocess" }
 bgjobs = { path = "../bgjobs" }
+auxjob = { path = "../auxjob" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
 checkpointer = { path = "../checkpointer" }
 condition_variable_seams = { path = "../../storage/lmgr/condition_variable_seams" }
