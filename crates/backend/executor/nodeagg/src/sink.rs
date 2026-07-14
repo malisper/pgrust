@@ -1021,6 +1021,19 @@ pub fn sink_shape_error(what: &str) -> Box<PgError> {
     PgError::new(ERROR, format!("aggregation sink shape violation: {what}")).into()
 }
 
+/// The compact backstop's sink-cap breach message (compact.rs raises it when
+/// a worker table crosses the hash limits under a live sink cap — a
+/// shape-ESTIMATE failure, not a correctness error). The runtime drain
+/// classifies it into a budget-style refusal (serial rerun) by exact
+/// message: a private, same-crate-family contract.
+pub const SINK_CAP_BREACH_MSG: &str =
+    "worker compact table crossed the hash memory limits under the sink cap";
+
+/// True when `e` is the compact backstop's sink-cap breach.
+pub fn is_sink_cap_breach(e: &PgError) -> bool {
+    e.message().contains(SINK_CAP_BREACH_MSG)
+}
+
 /// A group count over an emit-buf set (observability).
 pub fn sink_emit_rows(bufs: &[SinkEmitBuf]) -> usize {
     bufs.iter().map(|b| b.nrows).sum()
