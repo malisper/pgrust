@@ -123,6 +123,9 @@ struct AggSink {
     key_words: usize,
     state_bytes: usize,
     width: u8,
+    /// Any byref state class present (PolyInt128/AvgInt8): the drain's
+    /// budget accounting adds the aggcontext subtree (states live there).
+    byref_states: bool,
     combines: Vec<SinkCombineFn>,
     emit: SinkEmitPlan,
     /// 256 per-bucket outputs; slot b is written only by the combine task
@@ -246,7 +249,7 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
-            let buf = sink_emit_bucket(&self.emit, &merged);
+            let buf = sink_emit_bucket(&self.emit, &merged)?;
             // SAFETY: partition `part` is claimed exactly once (runtime
             // contract); this is its single writer.
             unsafe { *self.out_emit[part as usize].get() = buf };
@@ -451,7 +454,14 @@ fn sink_drain_range<'mcx>(
         if let Some(run) = ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap) {
             local.run_bytes += run.bytes();
             local.runs.push(run);
-            if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) > sink.budget {
+            let aggctx = if sink.byref_states {
+                ::nodeagg::sink::agg_sink_aggctx_mem(agg)
+            } else {
+                0
+            };
+            if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) + aggctx
+                > sink.budget
+            {
                 return Err(AcceptFail::Budget);
             }
         }
@@ -1130,6 +1140,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
 
     // --- Engage.
     let key_words = mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 });
+    let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -1138,6 +1149,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         budget,
         key_words,
         state_bytes,
+        byref_states,
         width,
         combines,
         emit,

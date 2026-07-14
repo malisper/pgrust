@@ -258,20 +258,61 @@ pub fn sink_partition_remainder(t: &LaneAggTable) -> SinkPart {
 // Combine-function resolution + application.
 // ---------------------------------------------------------------------------
 
-/// One transno's resolved combine: a bare whitelist fn pointer (the
-/// thread-native `combine_one_par` byval discipline — the whitelist fns
-/// read only their args; no flinfo, no fcinfo.context, byval result).
+/// How the sink owns and combines one transno's state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SinkCombineKind {
+    /// Byval whitelist combinefn — bare fn-pointer call, state rides in the
+    /// pergroup word (self-contained everywhere).
+    Byval,
+    /// `Int128AggState` (INTERNAL transtype; `int8_avg_combine` 2785 — the
+    /// avg/sum(int8) family): thread-native n/sum_x adds; a NULL dst adopts
+    /// the src POINTER. Sources are consumed exactly once and every source
+    /// (run state blocks, remainder tables, the worker aggcontexts their
+    /// transvalues point into) outlives the combine task — `drive_pinned`
+    /// holds every helper until the whole RG settles. Emit finalizes into
+    /// self-contained bytes (the EmitBuf arena) before anything crosses to
+    /// the leader.
+    PolyInt128,
+    /// int8[2] `{count,sum}` transarray (`_int8` 1016; `int4_avg_combine`
+    /// 3324 — the avg(int2/int4) family): thread-native element adds through
+    /// the live aggcontext image, same lifetime argument as PolyInt128.
+    AvgInt8,
+}
+
+/// One transno's resolved combine: the kind + (byval only) a bare whitelist
+/// fn pointer (the thread-native `combine_one_par` byval discipline — the
+/// whitelist fns read only their args; no flinfo, no fcinfo.context, byval
+/// result).
 #[derive(Clone, Copy)]
 pub struct SinkCombineFn {
     pub func: PGFunction,
     pub strict: bool,
     pub collation: Oid,
+    pub kind: SinkCombineKind,
 }
 
+/// INTERNAL — the pointer-datum transition type of the poly agg family.
+const INTERNALOID: Oid = 2281;
+/// `_int8` (int8 array) — int8_avg's declared transition type.
+const INT8ARRAYOID: Oid = 1016;
+/// `int8_avg_combine` — the Int128AggState combine (avg/sum over int8).
+const COMBINE_POLY: Oid = 2785;
+/// `int4_avg_combine` — the int8[2] transarray combine (avg over int2/int4).
+const COMBINE_INT4_AVG: Oid = 3324;
+/// `int8_avg` — avg(int2/int4)'s finalfn over the int8[2] transarray.
+const FINALFN_INT8_AVG: Oid = 1964;
+/// `numeric_poly_avg` / `numeric_poly_sum` — the Int128AggState finalfns.
+const FINALFN_POLY_AVG: Oid = 3389;
+const FINALFN_POLY_SUM: Oid = 3388;
+
 /// Resolve every transno's catalog combine function, fail-closed:
-/// `Ok(None)` = a transition refuses the sink (non-byval state, missing or
-/// non-whitelist combinefn, DISTINCT/ORDER BY qualifiers) — the caller falls
-/// back to the serial arm. Never errors on shape; only on catalog access.
+/// `Ok(None)` = a transition refuses the sink (unknown state class, missing
+/// or non-whitelist combinefn, DISTINCT/ORDER BY qualifiers) — the caller
+/// falls back to the serial arm. Never errors on shape; only on catalog
+/// access. Admitted classes: byval whitelist, PolyInt128 (avg/sum int8),
+/// AvgInt8 (avg int2/int4) — the two byref classes finalize at emit
+/// ([`sink_emit_bucket`]), so nothing pointer-shaped ever reaches the
+/// leader.
 pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<SinkCombineFn>>> {
     let numtrans = node.numtrans;
     let mut out: Vec<Option<SinkCombineFn>> = vec![None; numtrans];
@@ -282,23 +323,36 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
         if !aggref.aggdistinct.is_nil() || !aggref.aggorder.is_nil() {
             return Ok(None);
         }
-        if !node.trans_typ[transno].byval {
-            return Ok(None);
-        }
         let Some(shape) = ::syscache_seams::lookup_pg_aggregate_shape::call(aggref.aggfnoid)?
         else {
             return Ok(None);
         };
-        if shape.aggcombinefn == 0
-            || !crate::merge::COMBINE_WHITELIST.contains(&shape.aggcombinefn)
-        {
+        if shape.aggcombinefn == 0 {
             return Ok(None);
         }
+        let kind = if aggref.aggtranstype == INTERNALOID {
+            if shape.aggcombinefn != COMBINE_POLY {
+                return Ok(None);
+            }
+            SinkCombineKind::PolyInt128
+        } else if aggref.aggtranstype == INT8ARRAYOID {
+            if shape.aggcombinefn != COMBINE_INT4_AVG {
+                return Ok(None);
+            }
+            SinkCombineKind::AvgInt8
+        } else if node.trans_typ[transno].byval
+            && crate::merge::COMBINE_WHITELIST.contains(&shape.aggcombinefn)
+        {
+            SinkCombineKind::Byval
+        } else {
+            return Ok(None);
+        };
         let flinfo = ::fmgr_core::fmgr_info(shape.aggcombinefn)?;
         let resolved = SinkCombineFn {
             func: flinfo.fn_addr,
             strict: flinfo.fn_strict,
             collation: aggref.inputcollid,
+            kind,
         };
         match &out[transno] {
             // Shared transno: both aggrefs resolved the same combine by the
@@ -316,14 +370,27 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
     Ok(Some(combines))
 }
 
-/// C advance_combine over two byval state blocks (`combine_one_par`'s byval
-/// leg): strict adopt-or-skip, else one bare fn-pointer call. `dst` is the
-/// bucket table's block (single writer — the claimed partition); `src` feeds
+/// Whether any transno's state is byref (PolyInt128 / AvgInt8): the worker
+/// drain adds the aggcontext subtree to its budget accounting exactly when
+/// this holds (byref states live there, not in the table rows).
+pub fn sink_combines_byref(combines: &[SinkCombineFn]) -> bool {
+    combines.iter().any(|c| c.kind != SinkCombineKind::Byval)
+}
+
+/// C advance_combine over two state blocks (`combine_one_par`'s thread-
+/// native discipline): strict adopt-or-skip, then — Byval — one bare
+/// fn-pointer call, or — the byref classes — the combinefn's exact
+/// arithmetic core run natively (the fmgr fns demand an agg context to
+/// allocate their NULL-dst state; the sink adopts the src pointer instead,
+/// identical field values, consumed exactly once). `dst` is the bucket
+/// table's block (single writer — the claimed partition); `src` feeds
 /// exactly once.
 ///
 /// # Safety
-/// Both blocks hold `combines.len()` live `AggPerGroup`s; byval transvalues
-/// only (phase-1 admission).
+/// Both blocks hold `combines.len()` live `AggPerGroup`s; non-null byref
+/// transvalues are live states (worker aggcontexts, alive through the
+/// combine — `drive_pinned` holds every helper to RG settlement), uniquely
+/// reachable through their one feeding source.
 pub unsafe fn sink_combine_states(
     combines: &[SinkCombineFn],
     dst: *mut AggPerGroup,
@@ -332,7 +399,7 @@ pub unsafe fn sink_combine_states(
     for (transno, c) in combines.iter().enumerate() {
         // SAFETY: caller contract.
         let (d, s) = unsafe { (&mut *dst.add(transno), &*src.add(transno)) };
-        if c.strict {
+        if c.strict || c.kind != SinkCombineKind::Byval {
             if s.trans_value_is_null {
                 continue;
             }
@@ -343,17 +410,74 @@ pub unsafe fn sink_combine_states(
                 continue;
             }
         }
-        let mut fcinfo = LocalFcinfo::<2>::fresh(c.collation);
-        fcinfo.args[0] =
-            NullableDatum { value: d.trans_value, isnull: d.trans_value_is_null };
-        fcinfo.args[1] =
-            NullableDatum { value: s.trans_value, isnull: s.trans_value_is_null };
-        let value = (c.func)(None, &mut fcinfo)?;
-        d.trans_value = value;
-        d.trans_value_is_null = fcinfo.isnull;
-        d.no_trans_value = false;
+        match c.kind {
+            SinkCombineKind::Byval => {
+                let mut fcinfo = LocalFcinfo::<2>::fresh(c.collation);
+                fcinfo.args[0] =
+                    NullableDatum { value: d.trans_value, isnull: d.trans_value_is_null };
+                fcinfo.args[1] =
+                    NullableDatum { value: s.trans_value, isnull: s.trans_value_is_null };
+                let value = (c.func)(None, &mut fcinfo)?;
+                d.trans_value = value;
+                d.trans_value_is_null = fcinfo.isnull;
+                d.no_trans_value = false;
+            }
+            // int8_avg_combine's HAVE_INT128 core (numeric.c), the merge's
+            // combine_one_par arm verbatim. sum_x2 never accumulates: the
+            // admitted combinefn (2785) pairs with avg/sum, whose transfns
+            // never set calc_sum_x2.
+            SinkCombineKind::PolyInt128 => unsafe {
+                // SAFETY: non-null internal transvalues are live
+                // Int128AggStates (caller contract).
+                let dp = &mut *(d.trans_value.as_usize()
+                    as *mut ::adt_numeric::aggregates::Int128AggState);
+                let sp = &*(s.trans_value.as_usize()
+                    as *const ::adt_numeric::aggregates::Int128AggState);
+                if sp.n > 0 {
+                    dp.n += sp.n;
+                    dp.sum_x += sp.sum_x;
+                    if dp.calc_sum_x2 {
+                        dp.sum_x2 += sp.sum_x2;
+                    }
+                }
+            },
+            // int4_avg_combine's core (numeric.c:6832): element adds over
+            // the int8[2] {count,sum} transarray.
+            SinkCombineKind::AvgInt8 => unsafe {
+                // SAFETY: non-null _int8 transvalues are live aggcontext
+                // images (caller contract); layout validated per read.
+                let (sc, ss) = crate::compact::int8_avg_trans_read(s.trans_value)?;
+                let dd = int8_avg_trans_data_mut(d.trans_value)?;
+                *dd += sc;
+                *dd.add(1) += ss;
+            },
+        }
     }
     Ok(())
+}
+
+/// Mutable {count,sum} pointer into a live, MAXALIGNed int8[2] transarray
+/// image (the aggcontext form — sink states never ride tuple-queue-packed
+/// short headers). Validation mirrors `int8_avg_trans_read`'s 4B-U arm.
+///
+/// # Safety
+/// `d` is a non-null int8[2] transvalue datum (live aggcontext image),
+/// uniquely reachable by the caller.
+unsafe fn int8_avg_trans_data_mut(d: Datum) -> PgResult<*mut i64> {
+    use ::types_tuple::varatt;
+    const ARR_OVERHEAD_NONULLS_1: usize = 24;
+    const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
+    let p = d.as_usize() as *mut u8;
+    // SAFETY: caller contract — live varlena image.
+    unsafe {
+        if !varatt::varatt_is_4b_u(p) || varatt::varsize_4b(p) != INT8_TRANSARRAY_SIZE {
+            return Err(sink_shape_error("malformed int8[2] transarray in a sink combine"));
+        }
+        if p.add(8).cast::<i32>().read() != 0 {
+            return Err(sink_shape_error("null-bearing int8[2] transarray in a sink combine"));
+        }
+        Ok(p.add(ARR_OVERHEAD_NONULLS_1).cast::<i64>())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +648,16 @@ pub enum SinkEmitCol {
     MultiComp { off: u8, width: u8 },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
+    /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
+    /// transarray → `ops::int64_avg_div` NUMERIC image into the buf arena
+    /// (`BatchEmitCol::AvgInt8`'s exact core).
+    AvgInt8 { transno: u32 },
+    /// `avg(int8)` (finalfn `numeric_poly_avg` 3389): Int128AggState →
+    /// `aggregates::numeric_poly_avg` image into the buf arena.
+    AvgInt128 { transno: u32 },
+    /// `sum(int8)` (finalfn `numeric_poly_sum` 3388): Int128AggState →
+    /// `aggregates::numeric_poly_sum` image into the buf arena.
+    SumInt128 { transno: u32 },
 }
 
 pub struct SinkEmitPlan {
@@ -531,9 +665,11 @@ pub struct SinkEmitPlan {
     pub cols: Vec<SinkEmitCol>,
 }
 
-/// The identity-emit qualification (leader side, donor `build_emit_plan`
-/// extended with Reduced derived keys). `None` = the shape needs the
-/// finalize/project interpreter — phase 1 refuses the sink then.
+/// The emit qualification (leader side, donor `build_emit_plan` extended
+/// with Reduced derived keys, Multi components, and the finalize-at-emit
+/// numeric-avg vocabulary — `batch_emit_resolve`'s exact finalfn gates).
+/// `None` = the shape needs the general finalize/project interpreter — the
+/// sink refuses then (the HAVING/non-identity car).
 pub fn sink_build_emit_plan(
     node: &AggStateData<'_>,
     key: &SinkKeySpec,
@@ -542,11 +678,25 @@ pub fn sink_build_emit_plan(
         return None;
     }
     for pa in node.peragg.iter() {
-        if pa.finalfn.is_some()
-            || !pa.direct_args.is_empty()
-            || !node.trans_typ[pa.transno as usize].byval
-        {
+        if !pa.direct_args.is_empty() {
             return None;
+        }
+        match pa.finalfn.as_ref() {
+            // Raw-transvalue emission requires a byval word; INTERNAL is
+            // byval-but-pointer — refuse (batch_emit_resolve's gate).
+            None => {
+                if !node.trans_typ[pa.transno as usize].byval
+                    || pa.aggref.aggtranstype == INTERNALOID
+                {
+                    return None;
+                }
+            }
+            // The batched finalize vocabulary: byte-identical native cores.
+            Some(f) => match (f.fn_oid, pa.aggref.aggtranstype) {
+                (FINALFN_INT8_AVG, t) if t == INT8ARRAYOID => {}
+                (FINALFN_POLY_AVG | FINALFN_POLY_SUM, t) if t == INTERNALOID => {}
+                _ => return None,
+            },
         }
     }
     let ph = node.perhash.as_ref()?;
@@ -594,7 +744,17 @@ pub fn sink_build_emit_plan(
             if a.aggno < 0 || a.aggno as usize >= node.peragg.len() {
                 return None;
             }
-            cols.push(SinkEmitCol::Agg { transno: node.peragg[a.aggno as usize].transno });
+            let pa = &node.peragg[a.aggno as usize];
+            let col = match pa.finalfn.as_ref() {
+                None => SinkEmitCol::Agg { transno: pa.transno },
+                Some(f) => match f.fn_oid {
+                    FINALFN_INT8_AVG => SinkEmitCol::AvgInt8 { transno: pa.transno },
+                    FINALFN_POLY_AVG => SinkEmitCol::AvgInt128 { transno: pa.transno },
+                    FINALFN_POLY_SUM => SinkEmitCol::SumInt128 { transno: pa.transno },
+                    _ => return None,
+                },
+            };
+            cols.push(col);
             continue;
         }
         return None;
@@ -602,19 +762,25 @@ pub fn sink_build_emit_plan(
     Some(SinkEmitPlan { width: key.width(), cols })
 }
 
-/// One bucket's fully-projected output rows: row-major, stride `cols.len()`,
-/// byval datums only — self-contained across threads and past the helpers'
-/// teardown.
+/// One bucket's fully-projected output rows: row-major, stride `cols.len()`.
+/// Datums are byval OR point into the buf's OWN `arena` (finalized NUMERIC
+/// images, 8-aligned) — self-contained across threads and past the helpers'
+/// teardown either way. Moving the struct never moves the arena's heap
+/// buffer; the arena is never resized after the emit's fix-up pass.
 #[derive(Default)]
 pub struct SinkEmitBuf {
     pub values: Vec<Datum>,
     pub nulls: Vec<bool>,
     pub nrows: usize,
+    /// Byref payload arena (finalized varlena images the values point into).
+    pub arena: Vec<u8>,
 }
 
 impl SinkEmitBuf {
     pub fn bytes(&self) -> usize {
-        self.values.capacity() * core::mem::size_of::<Datum>() + self.nulls.capacity()
+        self.values.capacity() * core::mem::size_of::<Datum>()
+            + self.nulls.capacity()
+            + self.arena.capacity()
     }
 }
 
@@ -628,12 +794,35 @@ fn key_datum(width: u8, k: i64) -> Datum {
 }
 
 /// Finalize+project one merged bucket (rows in insertion order — the merge's
-/// first-seen order) into a [`SinkEmitBuf`].
-pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
+/// first-seen order) into a [`SinkEmitBuf`]. Byref outputs (the numeric-avg
+/// finalize vocabulary) materialize into the buf's own arena: images land in
+/// `arena` during the row loop and the datums are fixed up to point into it
+/// once the arena's length is final — nothing worker-owned survives in the
+/// published buf.
+pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<SinkEmitBuf> {
     let natts = plan.cols.len();
     let n = t.nrows();
     let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
     let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
+    let mut arena: Vec<u8> = Vec::new();
+    // (values index, arena offset) fix-ups, resolved after the arena stops
+    // growing (Vec growth may move the heap buffer).
+    let mut fixups: Vec<(usize, usize)> = Vec::new();
+    let mut push_image = |values: &mut Vec<Datum>,
+                          nulls: &mut Vec<bool>,
+                          arena: &mut Vec<u8>,
+                          fixups: &mut Vec<(usize, usize)>,
+                          img: &[u8]| {
+        // 8-align every image (varlena consumers may read 4-byte headers +
+        // aligned payloads).
+        let pad = (8 - arena.len() % 8) % 8;
+        arena.resize(arena.len() + pad, 0);
+        let off = arena.len();
+        arena.extend_from_slice(img);
+        fixups.push((values.len(), off));
+        values.push(Datum::null());
+        nulls.push(false);
+    };
     for row in 0..n {
         // Single/Reduced tables: kw[0] IS the canonical i64 key (Int repr);
         // Multi tables: kw is the packed key image (1 or 2 words). None =
@@ -694,10 +883,64 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
                     values.push(pg.trans_value);
                     nulls.push(pg.trans_value_is_null);
                 },
+                // fc_int8_avg's exact core: strict (NULL trans → NULL),
+                // count == 0 → NULL, else the int64_avg_div image.
+                // SAFETY: non-null _int8 transvalue is a live merged image
+                // (combine contract).
+                SinkEmitCol::AvgInt8 { transno } => unsafe {
+                    let pg = &*states.add(transno as usize);
+                    if pg.trans_value_is_null {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    } else {
+                        let (count, sum) =
+                            crate::compact::int8_avg_trans_read(pg.trans_value)?;
+                        if count == 0 {
+                            values.push(Datum::null());
+                            nulls.push(true);
+                        } else {
+                            let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
+                            push_image(
+                                &mut values, &mut nulls, &mut arena, &mut fixups,
+                                img.as_bytes(),
+                            );
+                        }
+                    }
+                },
+                // numeric_poly_avg / numeric_poly_sum's exact cores over the
+                // merged Int128AggState (NULL trans → None → NULL).
+                // SAFETY: as AvgInt8 — live merged state, sole reader.
+                SinkEmitCol::AvgInt128 { transno } | SinkEmitCol::SumInt128 { transno } => unsafe {
+                    let pg = &*states.add(transno as usize);
+                    let state = (!pg.trans_value_is_null).then(|| {
+                        &*(pg.trans_value.as_usize()
+                            as *const ::adt_numeric::aggregates::Int128AggState)
+                    });
+                    let img = match *c {
+                        SinkEmitCol::AvgInt128 { .. } => {
+                            ::adt_numeric::aggregates::numeric_poly_avg(state)?
+                        }
+                        _ => ::adt_numeric::aggregates::numeric_poly_sum(state)?,
+                    };
+                    match img {
+                        Some(img) => push_image(
+                            &mut values, &mut nulls, &mut arena, &mut fixups,
+                            img.as_bytes(),
+                        ),
+                        None => {
+                            values.push(Datum::null());
+                            nulls.push(true);
+                        }
+                    }
+                },
             }
         }
     }
-    SinkEmitBuf { values, nulls, nrows: n }
+    // Arena is final — resolve the byref datums.
+    for (i, off) in fixups {
+        values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
+    }
+    Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
 }
 
 /// Sanity error for engagement paths that must never see a non-single-word
@@ -855,6 +1098,14 @@ pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
         .map_or(0, |ch| ch.table.mem_used())
 }
 
+/// The node's aggcontext footprint — the byref state classes (PolyInt128 /
+/// AvgInt8) live THERE, not in the table rows, so byref-bearing sink drains
+/// add this to their budget accounting (the backstop's own mem formula).
+pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used()
+}
+
 // ---------------------------------------------------------------------------
 // Leader-side adopted emit (the published sink output as the Agg's source).
 // ---------------------------------------------------------------------------
@@ -907,7 +1158,9 @@ pub fn agg_sink_emit_next<'mcx>(
         }
     };
     let Some((bucket, row)) = next else {
-        node.sink_emit = None;
+        // KEEP the drained state (its bufs' arenas back byref datums already
+        // handed out this scan — C's aggcontext lifetime analog); it drops
+        // at rescan/teardown through agg_sink_reset_emit.
         node.agg_done = true;
         return Ok(None);
     };
@@ -1001,8 +1254,8 @@ mod tests {
             Ok(Datum::from_i64(a.max(b)))
         }
         vec![
-            SinkCombineFn { func: add, strict: true, collation: Oid::from(0u8) },
-            SinkCombineFn { func: larger, strict: true, collation: Oid::from(0u8) },
+            SinkCombineFn { func: add, strict: true, collation: Oid::from(0u8), kind: SinkCombineKind::Byval },
+            SinkCombineFn { func: larger, strict: true, collation: Oid::from(0u8), kind: SinkCombineKind::Byval },
         ]
     }
 
@@ -1154,7 +1407,7 @@ mod tests {
                 SinkEmitCol::Agg { transno: 1 },
             ],
         };
-        let buf = sink_emit_bucket(&plan, &t);
+        let buf = sink_emit_bucket(&plan, &t).unwrap();
         assert_eq!(buf.nrows, 2);
         // Row 0 = key 41: [41, 40, 5, 9].
         assert_eq!(buf.values[0].as_i32(), 41);
@@ -1166,6 +1419,133 @@ mod tests {
         assert!(buf.nulls[4] && buf.nulls[5]);
         assert_eq!(buf.values[6].as_i64(), 2);
         assert_eq!(buf.values[7].as_i64(), 1);
+    }
+
+    // A minimal MAXALIGNed int8[2] {count,sum} transarray image (4B-U,
+    // 24-byte overhead, no null bitmap) — the aggcontext form.
+    #[repr(C, align(8))]
+    struct Int8TransArray {
+        hdr: [u8; 24],
+        data: [i64; 2],
+    }
+
+    fn mk_transarray(count: i64, sum: i64) -> Box<Int8TransArray> {
+        let mut a = Box::new(Int8TransArray { hdr: [0; 24], data: [count, sum] });
+        let size: u32 = 40u32 << 2; // varatt 4B-U header: len << 2
+        a.hdr[0..4].copy_from_slice(&size.to_le_bytes());
+        a.hdr[4..8].copy_from_slice(&1i32.to_le_bytes()); // ndim
+        a.hdr[8..12].copy_from_slice(&0i32.to_le_bytes()); // dataoffset (no nulls)
+        a
+    }
+
+    #[test]
+    fn byref_combine_and_finalize_emit() {
+        use ::adt_numeric::aggregates::Int128AggState;
+        // Transno 0: PolyInt128 (avg(int8)); transno 1: AvgInt8 (avg(int4)).
+        let combines = vec![
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: false,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::PolyInt128,
+            },
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: true,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::AvgInt8,
+            },
+        ];
+        assert!(sink_combines_byref(&combines));
+
+        let mut d_poly = Int128AggState { calc_sum_x2: false, n: 3, sum_x: 30, sum_x2: 0 };
+        let s_poly = Int128AggState { calc_sum_x2: false, n: 2, sum_x: 12, sum_x2: 0 };
+        let d_arr = mk_transarray(4, 100);
+        let s_arr = mk_transarray(6, 44);
+
+        let mut dst = [
+            AggPerGroup {
+                trans_value: Datum::from_usize(&mut d_poly as *mut _ as usize),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            AggPerGroup {
+                trans_value: Datum::from_usize(&*d_arr as *const _ as usize),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+        ];
+        let src = [
+            AggPerGroup {
+                trans_value: Datum::from_usize(&s_poly as *const _ as usize),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            AggPerGroup {
+                trans_value: Datum::from_usize(&*s_arr as *const _ as usize),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+        ];
+        unsafe {
+            sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap();
+        }
+        assert_eq!(d_poly.n, 5);
+        assert_eq!(d_poly.sum_x, 42);
+        assert_eq!(d_arr.data, [10, 144]);
+
+        // NULL dst adopts the src pointer (both byref kinds).
+        let mut dst2 = [
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+        ];
+        unsafe {
+            sink_combine_states(&combines, dst2.as_mut_ptr(), src.as_ptr()).unwrap();
+        }
+        assert_eq!(dst2[0].trans_value.as_usize(), &s_poly as *const _ as usize);
+        assert!(!dst2[0].trans_value_is_null);
+
+        // Finalize-at-emit: one row whose 2 pergroups are the merged states;
+        // outputs must be the finalfn cores' exact images, self-contained in
+        // the buf arena.
+        let mut t = mk_table(4);
+        let pr = t.probe_int(7, t.hash_key_int(7));
+        unsafe {
+            core::ptr::copy_nonoverlapping(dst.as_ptr(), pr.states.cast::<AggPerGroup>(), 2);
+        }
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::AvgInt128 { transno: 0 },
+                SinkEmitCol::AvgInt8 { transno: 1 },
+            ],
+        };
+        let buf = sink_emit_bucket(&plan, &t).unwrap();
+        assert_eq!(buf.nrows, 1);
+        assert_eq!(buf.values[0].as_i64(), 7);
+        let expect_poly =
+            ::adt_numeric::aggregates::numeric_poly_avg(Some(&d_poly)).unwrap().unwrap();
+        let expect_arr = ::adt_numeric::ops::int64_avg_div(144, 10).unwrap();
+        for (v, expect) in
+            [(buf.values[1], expect_poly.as_bytes()), (buf.values[2], expect_arr.as_bytes())]
+        {
+            let p = v.as_usize();
+            // The datum points into the buf's OWN arena.
+            let lo = buf.arena.as_ptr() as usize;
+            assert!(p >= lo && p + expect.len() <= lo + buf.arena.len());
+            let got = unsafe { core::slice::from_raw_parts(p as *const u8, expect.len()) };
+            assert_eq!(got, expect);
+        }
+        assert!(!buf.nulls[1] && !buf.nulls[2]);
     }
 
     #[test]
@@ -1182,7 +1562,7 @@ mod tests {
                 SinkEmitCol::Agg { transno: 0 },
             ],
         };
-        let buf = sink_emit_bucket(&plan, &t);
+        let buf = sink_emit_bucket(&plan, &t).unwrap();
         assert_eq!(buf.nrows, 1);
         assert_eq!(buf.values[0].as_i32(), -7);
         assert_eq!(buf.values[1].as_i16(), 300);
@@ -1222,7 +1602,7 @@ mod tests {
                 SinkEmitCol::Agg { transno: 0 },
             ],
         };
-        let buf2 = sink_emit_bucket(&plan2, &t2);
+        let buf2 = sink_emit_bucket(&plan2, &t2).unwrap();
         assert_eq!(buf2.nrows, 1);
         assert_eq!(buf2.values[0].as_i64(), -123456789);
         assert_eq!(buf2.values[1].as_i32(), 54321);
