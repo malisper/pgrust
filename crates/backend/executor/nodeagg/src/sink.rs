@@ -4552,9 +4552,9 @@ mod tests {
         bump_canon(&mut w2, Some(9), b"zzz", 7);
         bump_canon(&mut w2, Some(1), b"banana", 20);
         bump_canon(&mut w2, Some(1), b"apple", 30);
-        let h1 = SinkTableHandle(w1);
+        let mut h1 = SinkTableHandle(w1);
         let part1 = h1.partition_remainder();
-        let h2 = SinkTableHandle(w2);
+        let mut h2 = SinkTableHandle(w2);
         let part2 = h2.partition_remainder();
         let locals = [
             SinkLocalView {
