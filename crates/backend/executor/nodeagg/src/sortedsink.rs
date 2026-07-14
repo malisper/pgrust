@@ -138,8 +138,13 @@ impl SortedEmitAcc {
                     spec[c] as usize
                 }
             };
-            // 8-align (varlena consumers may read 4-byte headers + aligned
-            // payloads; fixed byref types may be int64-aligned).
+            // 8-align the OFFSET (varlena consumers may read 4-byte headers
+            // + aligned payloads; fixed byref types may be int64-aligned).
+            // The arena BASE relies on the global allocator returning
+            // >=8-aligned blocks for byte allocations — the same contract
+            // sink.rs's SinkEmitBuf arena ships on (mimalloc guarantees it);
+            // a strict-alignment port would give both arenas word-typed
+            // backing in one move.
             let pad = (8 - self.arena.len() % 8) % 8;
             self.arena.resize(self.arena.len() + pad, 0);
             let off = self.arena.len();
@@ -240,17 +245,24 @@ pub fn agg_sorted_sink_reset(node: &mut AggStateData<'_>) {
     node.sorted_sink_emit = None;
 }
 
-/// Leader-side stitch prologue: begin the boundary group with `first` as its
-/// representative tuple — `agg_sorted_group_begin`'s prologue WITHOUT the
-/// first-row transition program (the absorbed partial already includes every
-/// row of the group). The caller follows with
-/// `runtime_partial::agg_sorted_absorb_partial` + `agg_sorted_emit`.
-pub fn agg_sorted_stitch_begin<'mcx>(
+/// Leader-side stitch prologue: begin the boundary group with a
+/// representative tuple RECONSTRUCTED FROM ITS KEY DATUMS (`keys[k]` at
+/// 0-based outer column `cols[k]`, every other column NULL — legal because
+/// the arm's admission proved proj/qual reference only grouping columns) —
+/// `agg_sorted_group_begin`'s prologue WITHOUT the first-row transition
+/// program (the absorbed partial already includes every row of the group).
+/// The caller follows with `runtime_partial::agg_sorted_absorb_partial` +
+/// `agg_sorted_emit`. The minimal tuple forms directly into
+/// `persort.first_slot` (slot-owned; the store frees the previous image) —
+/// no per-engagement scratch slot exists.
+pub fn agg_sorted_stitch_begin_keys<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-    first: ExecSlotId,
+    keys: &[(Datum, bool)],
+    cols: &[u16],
 ) -> PgResult<()> {
     debug_assert_eq!(node.plan.aggstrategy, crate::AGG_SORTED);
+    debug_assert_eq!(keys.len(), cols.len());
     let mcx = estate.es_query_cxt;
     estate.reset_expr_context(node.ps_ExprContext);
     // SAFETY: sole access path to the node during the reset (the sorted
@@ -263,8 +275,23 @@ pub fn agg_sorted_stitch_begin<'mcx>(
     {
         let AggStateData { persort, .. } = node;
         let ps = persort.as_mut().expect("sorted Agg has persort");
-        let outer_slot = estate.slot_mut(first);
-        ::exectuples::exec_copy_slot(&mut ps.first_slot, outer_slot, mcx, mcx)?;
+        let desc = ps
+            .first_slot
+            .base()
+            .tts_tupleDescriptor
+            .clone()
+            .expect("persort slot has a descriptor");
+        let natts = desc.natts as usize;
+        let mut values = vec![Datum::null(); natts];
+        let mut isnull = vec![true; natts];
+        for (k, &(d, n)) in keys.iter().enumerate() {
+            let c = cols[k] as usize;
+            debug_assert!(c < natts);
+            values[c] = d;
+            isnull[c] = n;
+        }
+        let mtup = ::heaptuple::heap_form_minimal_tuple(mcx, &desc, &values, &isnull, 0)?;
+        ::exectuples::exec_store_minimal_tuple_owned(&mut ps.first_slot, mcx, mtup);
     }
     crate::initialize_aggregates(node, estate)?;
     estate.reset_expr_context(node.tmpcontext);

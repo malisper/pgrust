@@ -309,8 +309,20 @@ fn accept_morsel_body(
                     )));
                 };
                 ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, range.start, range.end)?;
-                let rec =
-                    drive_claim(&mut aps.agg, ss, &keys, spec, natts, range, estate)?;
+                // R3 envelope: the per-batch capture check inside
+                // drive_claim sees the Local's ALREADY-RETAINED bytes, so a
+                // whole-boundary claim cannot balloon past the budget before
+                // the post-claim check (review finding, inc-1b).
+                let rec = drive_claim(
+                    &mut aps.agg,
+                    ss,
+                    &keys,
+                    spec,
+                    natts,
+                    range,
+                    sink.budget.saturating_sub(local.bytes),
+                    estate,
+                )?;
                 local.bytes += rec.interior.as_ref().map_or(0, |s| s.bytes());
                 if local.bytes > sink.budget {
                     return Err(AcceptFail::Budget);
@@ -349,6 +361,7 @@ fn drive_claim<'mcx>(
     spec: &SortedByrefSpec,
     natts: usize,
     range: runtime::MorselRange,
+    budget_left: usize,
     estate: &mut EStateData<'mcx>,
 ) -> Result<ClaimRec, AcceptFail> {
     let nkeys = keys.n;
@@ -376,6 +389,12 @@ fn drive_claim<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        // Per-batch capture budget (R3): a whole-boundary claim's interior
+        // capture must not balloon past the Local's remaining envelope —
+        // refuse mid-claim (serial rerun), never exhaust memory first.
+        if acc.as_ref().is_some_and(|a| a.bytes() > budget_left) {
+            return Err(AcceptFail::Budget);
+        }
         let nwords = (n as usize).div_ceil(64);
         // Fail-closed window verdicts: fallback rows and non-datum-ready key
         // lanes are shapes the narrow drive refuses — RG abort → serial
@@ -853,7 +872,15 @@ fn proj_qual_group_vars_only(agg: &::nodeagg::AggStateData<'_>) -> bool {
             match node.node_tag() {
                 NodeTag::T_Var => {
                     let v = node.as_variant::<Var>().expect("tagged Var");
-                    if !self.group.contains(&v.varattno) {
+                    // OUTER, same-level, grouping-column Vars only: the
+                    // boundary representative reconstructs exactly those.
+                    // Anything else (upper-level/correlated/other-relation
+                    // vars — mostly unreachable past the binder/param
+                    // gates, but fail-closed) refuses.
+                    if v.varlevelsup != 0
+                        || v.varno != ::types_nodes::primnodes::OUTER_VAR
+                        || !self.group.contains(&v.varattno)
+                    {
                         self.bad = true;
                         return Ok(true);
                     }
@@ -1020,13 +1047,12 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
     });
-    engage(agg, ss, estate, rt, dop, total_granules, starts, agg_node, sink, &keys, &spec, natts)
+    engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink, &keys, &spec, natts)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn engage<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
@@ -1065,7 +1091,7 @@ fn engage<'mcx>(
 
     xact::EnterParallelMode();
     let engaged = engage_ceremony(
-        agg, ss, estate, rt, dop, total_granules, starts, &payload, &sink, keys, spec, natts,
+        agg, estate, rt, dop, total_granules, starts, &payload, &sink, keys, spec, natts,
     );
     xact::ExitParallelMode();
     engaged
@@ -1079,7 +1105,6 @@ enum EngageOutcome {
 #[allow(clippy::too_many_arguments)]
 fn engage_ceremony<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
@@ -1250,7 +1275,6 @@ fn engage_ceremony<'mcx>(
                 .ok_or_else(|| sink_shape_error("completed sorted sink published nothing"))?;
             let segs = stitch_and_finalize(
                 agg,
-                ss,
                 estate,
                 recs,
                 total_granules,
@@ -1319,7 +1343,6 @@ fn stitch_key_eq(
 #[allow(clippy::too_many_arguments)]
 fn stitch_and_finalize<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     recs: Vec<ClaimRec>,
     total_granules: u64,
@@ -1341,13 +1364,16 @@ fn stitch_and_finalize<'mcx>(
         return Err(sink_shape_error("sorted claim coverage short"));
     }
     let nkeys = sink.nkeys;
-    // A dedicated VIRTUAL slot with the scan descriptor for the boundary
-    // representatives (never the scan's own slot — its kind may not host a
-    // virtual store + copy-out round trip).
-    let scan_slot = {
-        let desc = estate.slot(ss.ss.ss_ScanTupleSlot).base().tts_tupleDescriptor.clone();
-        estate.exec_init_extra_tuple_slot(desc, ::types_slot::TupleSlotKind::Virtual)
-    };
+    // Representative reconstruction inputs: key datums at their 0-based
+    // outer columns, everything else NULL (admission proved proj/qual read
+    // only group columns). The minimal tuple forms directly into
+    // persort.first_slot inside the stitch seam — no per-engagement scratch
+    // slot exists (an extra estate slot per re-engagement would leak across
+    // rescans).
+    let mut key_cols = [0u16; SORTED_FOLD_MAX_KEYS];
+    for k in 0..nkeys {
+        key_cols[k] = keys.cols[k].0;
+    }
     let mut segs: Vec<SortedEmitSeg> = Vec::new();
     let mut bacc: Option<SortedEmitAcc> = None;
     let mut open: Option<BoundaryPartial> = None;
@@ -1355,26 +1381,16 @@ fn stitch_and_finalize<'mcx>(
     macro_rules! emit_boundary {
         ($p:expr) => {{
             let p: BoundaryPartial = $p;
-            // Representative: key datums at their attnos, everything else
-            // NULL (admission proved proj/qual read only group columns).
-            {
-                let mcx = estate.es_query_cxt;
-                let slot = estate.slot_mut(scan_slot);
-                ::exectuples::exec_clear_tuple(slot, mcx);
-                let sb = slot.base_mut();
-                let width = sb.tts_values.len();
-                for i in 0..width {
-                    sb.tts_values[i] = Datum::null();
-                    sb.tts_isnull[i] = true;
-                }
-                for k in 0..nkeys {
-                    let (col, _) = keys.cols[k];
-                    sb.tts_values[col as usize] = Datum::from_u64(p.key[k].0);
-                    sb.tts_isnull[col as usize] = p.key[k].1;
-                }
-                ::exectuples::exec_store_virtual_tuple(slot);
+            let mut kd = [(Datum::null(), false); SORTED_FOLD_MAX_KEYS];
+            for k in 0..nkeys {
+                kd[k] = (Datum::from_u64(p.key[k].0), p.key[k].1);
             }
-            ::nodeagg::sortedsink::agg_sorted_stitch_begin(agg, estate, scan_slot)?;
+            ::nodeagg::sortedsink::agg_sorted_stitch_begin_keys(
+                agg,
+                estate,
+                &kd[..nkeys],
+                &key_cols[..nkeys],
+            )?;
             ::nodeagg::runtime_partial::agg_sorted_absorb_partial(agg, &p.partial)?;
             if let Some(row) = ::nodeagg::agg_sorted_emit(agg, estate)? {
                 let a = bacc.get_or_insert_with(|| SortedEmitAcc::new(natts));
