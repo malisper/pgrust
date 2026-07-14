@@ -50,17 +50,18 @@ pub fn shared_join_admissible(node: &HashJoinState<'_>, hs: &HashState<'_>) -> b
         && ::nodehash::lane_build_hash_admissible(hs)
 }
 
-/// One build-side row into the worker's Local: hash it exactly as the row
+/// The build-side row's (hashvalue, minimal-tuple bytes), handed to `f` —
+/// the M3.5 batch-routing seam: the caller decides Local push vs batch-file
+/// route without this module knowing about spill. Hash exactly as the row
 /// path's `hash_insert_slot` (via [`HashState::eval_build_hash`] — the same
-/// reset + eval), materialize the minimal tuple, push. `Err(BudgetExceeded)`
-/// = the shared envelope crossed (§6): the caller records the refusal and
-/// aborts the RG (R5 whole-attempt rerun).
-pub fn shared_build_accept<'mcx>(
+/// reset + eval); the byte slice is valid only within `f` (it may borrow
+/// the slot's stored image).
+pub fn shared_build_hash_tuple<'mcx, R>(
     hs: &mut HashState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot_id: ExecSlotId,
-    local: &mut JoinBuildLocal,
-) -> PgResult<Result<(), BudgetExceeded>> {
+    f: impl FnOnce(u32, &[u8]) -> PgResult<R>,
+) -> PgResult<R> {
     let hashvalue = hs.eval_build_hash(estate, slot_id)?;
     let query_mcx = estate.es_query_cxt;
     let (slot, scratch_mcx) = estate.slot_and_per_tuple_mcx(slot_id, hs.ps_ExprContext);
@@ -74,7 +75,22 @@ pub fn shared_build_accept<'mcx>(
     };
     // SAFETY: a minimal tuple image is t_len readable bytes.
     let bytes = unsafe { core::slice::from_raw_parts(ptr, t_len as usize) };
-    Ok(local.push(hashvalue, bytes))
+    f(hashvalue, bytes)
+}
+
+/// One build-side row into the worker's Local: hash, materialize the
+/// minimal tuple, push. `Err(BudgetExceeded)` = the shared envelope crossed
+/// (§6): the caller records the refusal and aborts the RG (R5 whole-attempt
+/// rerun) — or, with the M3.5 spill arm on, demotes batch 0 (§5.2).
+pub fn shared_build_accept<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    local: &mut JoinBuildLocal,
+) -> PgResult<Result<(), BudgetExceeded>> {
+    shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
+        Ok(local.push(hashvalue, bytes))
+    })
 }
 
 /// Probe one outer row against the frozen table: `exec_hash_join`'s
@@ -93,24 +109,78 @@ pub fn shared_probe_outer<'mcx>(
     outer_slot: ExecSlotId,
     emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
 ) -> PgResult<()> {
-    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
+    let hashvalue = shared_probe_outer_hash(node, estate, outer_slot)?;
+    probe_after_hash(node, hs, estate, table, outer_slot, hashvalue, emit)
+}
+
+/// The HJ_NEED_NEW_OUTER hash eval alone (keep-nulls semantics baked into
+/// outer_hash_expr at init, per join type — C parity). The M3.5 batched
+/// probe evaluates this once, routes non-resident batches to spill files,
+/// and probes resident rows via [`shared_probe_outer_hashed`].
+pub fn shared_probe_outer_hash<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_slot: ExecSlotId,
+) -> PgResult<u32> {
     let ecxt = node.ps_ExprContext;
     {
         let e = estate.ecxt_mut(ecxt);
         e.reset();
         e.ecxt_outertuple = Some(outer_slot);
     }
-    // Outer-key hash: get_outer_tuple's eval (keep-nulls semantics baked
-    // into outer_hash_expr at init, per join type — C parity).
-    let hashvalue = ::executils::exec_eval_expr_with_subplans_inner_slot(
+    Ok(::executils::exec_eval_expr_with_subplans_inner_slot(
         &mut node.outer_hash_expr,
         estate,
         ecxt,
         outer_slot,
     )?
     .value
-    .as_u32();
+    .as_u32())
+}
 
+/// The slot HashJoin batch reads store saved outer tuples into (C's
+/// hj_OuterTupleSlot — `ExecHashJoinGetSavedTuple`'s target). The M3.5
+/// leaf-probe drive materializes spilled outer records here.
+pub fn shared_saved_outer_slot(node: &HashJoinState<'_>) -> ExecSlotId {
+    node.hj_OuterTupleSlot
+}
+
+/// [`shared_probe_outer`] with a PRECOMPUTED hashvalue (M3.5 batch probes:
+/// the spilled record carries the hash — C's batch-file discipline, never
+/// re-evaluated). Performs the full per-row ExprContext setup itself.
+pub fn shared_probe_outer_hashed<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    outer_slot: ExecSlotId,
+    hashvalue: u32,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    let ecxt = node.ps_ExprContext;
+    {
+        let e = estate.ecxt_mut(ecxt);
+        e.reset();
+        e.ecxt_outertuple = Some(outer_slot);
+    }
+    probe_after_hash(node, hs, estate, table, outer_slot, hashvalue, emit)
+}
+
+/// The HJ_SCAN_BUCKET body after the per-row ExprContext setup — split out
+/// so the composed [`shared_probe_outer`] pays exactly ONE reset per outer
+/// row (the C get_outer_tuple→recheck discipline; the always-on unbatched
+/// probe hot loop must not gain a second reset — dormancy law).
+fn probe_after_hash<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    outer_slot: ExecSlotId,
+    hashvalue: u32,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
+    let ecxt = node.ps_ExprContext;
     let jointype = node.plan.join.jointype;
     let hslot = hs.hash_tuple_slot;
     let mcx = estate.es_query_cxt;
