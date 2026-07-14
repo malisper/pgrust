@@ -1054,6 +1054,34 @@ impl ExtIdMap {
 /// memset (the train-10 Q14 regression, +17%).
 const CLEAR_SPARSE_FACTOR: usize = 16;
 
+/// Engage floor for [`IntSet::insert_batch`]'s prefetch shape: below this
+/// cell-array size the table is cache-resident and the two-pass batch
+/// (hash store + look-ahead hints) is pure overhead — the lanetable
+/// PREFETCH_MIN_TABLE_BYTES reasoning.
+const INTSET_PREFETCH_MIN_BYTES: usize = 1 << 20;
+
+/// Home-cell prefetch distance for the batched insert probe loop (the
+/// lanetable PREFETCH_LOOKAHEAD idiom: issue the row i+d hint while
+/// resolving row i).
+const INTSET_PREFETCH_LOOKAHEAD: usize = 8;
+
+/// Best-effort read prefetch (L1). No-op on targets without a stable idiom.
+#[inline(always)]
+fn prefetch_read<T>(p: *const T) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: prfm is a hint; any address is allowed.
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: prefetch is a hint; any address is allowed.
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(p as *const i8);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let _ = p;
+}
+
 /// Exact i64 set. 8-byte cells (the key itself); 0 is a valid key, tracked
 /// by `has_zero`; the all-zero cell is the empty sentinel.
 pub struct IntSet {
@@ -1103,6 +1131,85 @@ impl IntSet {
                 return true;
             }
             pos = (pos + 1) & self.mask;
+        }
+    }
+
+    /// Batched [`Self::insert`] over a staged key lane: pass 1 hashes every
+    /// key in one tight CRC loop into `hashes` (caller-retained scratch),
+    /// pass 2 probes IN ROW ORDER issuing the home-cell prefetch
+    /// [`INTSET_PREFETCH_LOOKAHEAD`] rows ahead — over a >L2 cell array the
+    /// per-key shape is one serialized DRAM miss per row; the look-ahead
+    /// hint overlaps them. `on_new(k)` fires exactly where a per-key
+    /// `insert(k) == true` would: element-for-element identical, row order
+    /// preserved (the caller's value-array append order is unchanged).
+    ///
+    /// Cache-resident tables (cell array under [`INTSET_PREFETCH_MIN_BYTES`])
+    /// take the plain per-key loop — the extra hash store and hints buy
+    /// nothing there (the lanetable engage-gate reasoning).
+    pub fn insert_batch(
+        &mut self,
+        keys: &[i64],
+        hashes: &mut Vec<u64>,
+        mut on_new: impl FnMut(i64),
+    ) {
+        if self.cells.cap * 8 <= INTSET_PREFETCH_MIN_BYTES {
+            for &k in keys {
+                if self.insert(k) {
+                    on_new(k);
+                }
+            }
+            return;
+        }
+        hashes.clear();
+        hashes.reserve(keys.len());
+        for &k in keys {
+            hashes.push(hash8(k as u64));
+        }
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            // Hoisted raw parts — re-derived after any grow (realloc may
+            // move the cell array; the mask always changes).
+            let ptr = self.cells.ptr.as_ptr();
+            let mask = self.mask;
+            while i < keys.len() {
+                let j = i + INTSET_PREFETCH_LOOKAHEAD;
+                if j < keys.len() {
+                    // SAFETY: j < keys.len() == hashes.len(); masked index.
+                    // Hint only — a pre-grow hint going stale is harmless.
+                    let h = unsafe { *hashes.get_unchecked(j) };
+                    prefetch_read(unsafe { ptr.add((h as usize) & mask) });
+                }
+                // SAFETY: i < keys.len() == hashes.len().
+                let k = unsafe { *keys.get_unchecked(i) };
+                let h = unsafe { *hashes.get_unchecked(i) };
+                i += 1;
+                if k == 0 {
+                    if !self.has_zero {
+                        self.has_zero = true;
+                        on_new(0);
+                    }
+                    continue;
+                }
+                let mut pos = (h as usize) & mask;
+                loop {
+                    // SAFETY: masked cell index into the hoisted array.
+                    let c = unsafe { &mut *ptr.add(pos) };
+                    if *c == k {
+                        break;
+                    }
+                    if *c == 0 {
+                        *c = k;
+                        self.len += 1;
+                        on_new(k);
+                        if self.len * 2 > self.cells.cap {
+                            self.grow();
+                            continue 'rehoist;
+                        }
+                        break;
+                    }
+                    pos = (pos + 1) & mask;
+                }
+            }
         }
     }
 
@@ -1642,5 +1749,59 @@ mod tests {
         assert_eq!((a, b, c, d), (0, 1, 2, 3));
         assert_eq!(m.insert_or_get(b"alpha"), (0, false));
         assert_eq!(m.len(), 4);
+    }
+
+    /// `insert_batch` must be element-for-element identical to a per-key
+    /// `insert` loop: same new-key sequence in row order, across the small
+    /// (plain-loop) and engaged (hash pass + look-ahead prefetch) regimes,
+    /// grow boundaries, duplicates, and the zero key.
+    #[test]
+    fn intset_insert_batch_matches_per_key() {
+        let mut s = 0xB504_F333_F9DE_6484u64;
+        let mut lcg = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s
+        };
+        // ~150K rows over ~100K distinct values (dups sprinkled), zeros
+        // interleaved — enough NEW keys to cross INTSET_PREFETCH_MIN_BYTES
+        // (engage at cap > 128K cells) and several grow() calls in-batch.
+        let mut keys: Vec<i64> = Vec::with_capacity(150_000);
+        for i in 0..150_000usize {
+            if i % 977 == 0 {
+                keys.push(0);
+            } else if i % 3 == 0 && i > 0 {
+                keys.push(keys[(lcg() as usize) % i]); // duplicate of an earlier row
+            } else {
+                keys.push((lcg() % 120_000) as i64);
+            }
+        }
+        let mut batched = IntSet::new();
+        let mut perkey = IntSet::new();
+        let mut hashes = Vec::new();
+        let mut new_b: Vec<i64> = Vec::new();
+        let mut new_p: Vec<i64> = Vec::new();
+        for chunk in keys.chunks(4096) {
+            batched.insert_batch(chunk, &mut hashes, |k| new_b.push(k));
+            for &k in chunk {
+                if perkey.insert(k) {
+                    new_p.push(k);
+                }
+            }
+        }
+        assert_eq!(new_b, new_p, "new-key sequence must match the per-key loop");
+        assert_eq!(batched.len, perkey.len);
+        assert_eq!(batched.has_zero, perkey.has_zero);
+        // Full replay: everything is now a duplicate in BOTH sets — proves
+        // the batched build left every probe chain findable post-grow.
+        for chunk in keys.chunks(4096) {
+            batched.insert_batch(chunk, &mut hashes, |k| panic!("dup {k} reported new (batched)"));
+            for &k in chunk {
+                assert!(!perkey.insert(k), "dup {k} reported new (per-key)");
+            }
+        }
+        // Cross-replay: batch into the per-key set and vice versa.
+        for chunk in keys.chunks(4096) {
+            perkey.insert_batch(chunk, &mut hashes, |k| panic!("dup {k} reported new (cross)"));
+        }
     }
 }
