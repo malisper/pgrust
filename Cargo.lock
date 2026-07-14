@@ -17819,6 +17819,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vacuum_morsels"
+version = "0.0.0"
+dependencies = [
+ "runtime",
+ "types_core",
+]
+
+[[package]]
 name = "vacuum_seams"
 version = "0.0.0"
 dependencies = [
