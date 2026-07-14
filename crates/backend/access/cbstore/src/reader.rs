@@ -133,6 +133,36 @@ pub struct FooterStitch {
     pub dir: Vec<(u64, u32)>,
 }
 
+// Reader-side opens (want_sums=false) read the footer SECTIONED: only the
+// sections the parse materializes are pread (prelude + RG directory + chunk
+// directory + ndv, sorted flags + cluster key, the v7 stitch section, and
+// the 16-byte tail). The sums / length-stats / zero-count bodies — the bulk
+// of a v7 footer (nrgs x GRANULES_PER_RG x {nlencols,ncols} entries,
+// ~15-23MB at 100M rows vs ~6MB of materialized sections) — stay on disk,
+// exactly where their consumers already read them lazily off the mmap
+// (Part::rg_sum / granule_len_stats / granule_zerocnt). The whole-body CRC
+// cannot be computed over a sectioned read, so the lazy path validates the
+// tail magic + body-length words plus every structural bound instead — the
+// same trust model as the chunk payloads, which carry no per-chunk CRC.
+// PGRUST_CBSTORE_FOOTER_EAGER=1 restores the historical whole-body
+// read + CRC (byte-identical A/B and paranoia switch). The writer's
+// reopen-append path (want_sums=true) always reads + CRC-validates the
+// whole body.
+fn footer_eager() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_CBSTORE_FOOTER_EAGER").is_ok_and(|v| v == "1" || v == "on")
+    })
+}
+
+// PGRUST_CBSTORE_FOOTER_DEBUG=1: one CBFOOTER| line per footer read to
+// stderr (bytes read vs body length, lazy/eager, wall us) — the read-path
+// lane's decomposition channel.
+fn footer_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_CBSTORE_FOOTER_DEBUG").is_ok_and(|v| v == "1"))
+}
+
 pub fn read_footer_rgs(
     file: &mut SegFile,
     footer_off: u64,
@@ -140,6 +170,7 @@ pub fn read_footer_rgs(
     version: u32,
     want_sums: bool,
 ) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
+    let t0 = footer_debug().then(std::time::Instant::now);
     let total_len = file.total_len();
     let pre_len = if version >= CB_VERSION_V7 { 8 + ncols } else { 8 };
     if footer_off < CB_HEADER_LEN
@@ -172,11 +203,54 @@ pub fn read_footer_rgs(
             "cbstore: corrupt part (footer body out of bounds)".to_string(),
         )));
     }
+    // vec![0; n] allocates zeroed (fresh anonymous pages for footers this
+    // large): sections the lazy path skips are never written OR read by the
+    // parse, so their pages are never faulted in — the allocation costs
+    // nothing beyond the mapped range actually pread into.
     let mut buf = vec![0u8; body_len];
-    file.read_exact_at(&mut buf, footer_off)?;
-    parse_footer(&buf, nrgs, ncols, version, want_sums).map(|(rgs, ndv, sorted, ckey, lenflags, stitch)| {
-        (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags, stitch)
-    })
+    let lazy = !want_sums && !footer_eager();
+    let mut bytes_read = body_len;
+    if lazy {
+        // Materialized-section ranges, footer-relative, ascending and
+        // disjoint (each start = previous end + the skipped section's len):
+        //   [0, prefix_end)                prelude + RG dir + chunk dir + ndv
+        //   sums skipped
+        //   [sorted_off, +sorted+ckey)     v5 sorted flags + v6 cluster key
+        //   lenstats skipped
+        //   [stitch_off, +stitch_len)      v7 stitch gndv + blob directory
+        //   zerocnt skipped
+        //   [body_len-16, body_len)        len | crc | magic tail
+        let prefix_end = lay.pre_len + nrgs * 24 + nrgs * ncols * 24 + lay.ndv_len;
+        let sorted_off = prefix_end + lay.sums_len;
+        let stitch_off = lay.stitch_off(nrgs, ncols, nlencols);
+        let ranges = [
+            (0usize, prefix_end),
+            (sorted_off, sorted_off + lay.sorted_len + lay.ckey_len),
+            (stitch_off, stitch_off + lay.stitch_len(nrgs, ncols, version)),
+            (body_len - 16, body_len),
+        ];
+        bytes_read = 0;
+        for &(s, e) in &ranges {
+            if e > s {
+                file.read_exact_at(&mut buf[s..e], footer_off + s as u64)?;
+                bytes_read += e - s;
+            }
+        }
+    } else {
+        file.read_exact_at(&mut buf, footer_off)?;
+    }
+    let out = parse_footer_checked(&buf, nrgs, ncols, version, want_sums, !lazy).map(
+        |(rgs, ndv, sorted, ckey, lenflags, stitch)| {
+            (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags, stitch)
+        },
+    );
+    if let Some(t0) = t0 {
+        eprintln!(
+            "CBFOOTER|read|body_len={body_len}|bytes_read={bytes_read}|lazy={lazy}|us={}",
+            t0.elapsed().as_micros()
+        );
+    }
+    out
 }
 
 pub fn parse_footer(
@@ -186,10 +260,24 @@ pub fn parse_footer(
     version: u32,
     want_sums: bool,
 ) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
+    parse_footer_checked(buf, nrgs, ncols, version, want_sums, true)
+}
+
+// check_crc=false is the sectioned lazy read (read_footer_rgs): the skipped
+// section bytes are zeros, so the whole-body CRC cannot match by
+// construction — the tail magic + body-length words are still validated.
+fn parse_footer_checked(
+    buf: &[u8],
+    nrgs: usize,
+    ncols: usize,
+    version: u32,
+    want_sums: bool,
+    check_crc: bool,
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
     let tail = buf.len() - 16;
     if get_u32(buf, tail + 12) != CB_FOOTER_MAGIC
         || get_u64(buf, tail) != buf.len() as u64
-        || get_u32(buf, tail + 8) != crc32c(&buf[..tail])
+        || (check_crc && get_u32(buf, tail + 8) != crc32c(&buf[..tail]))
     {
         return Err(Box::new(PgError::error("cbstore: corrupt footer".to_string())));
     }
@@ -379,8 +467,8 @@ pub struct Part {
     // is RG_FLAG_CLUSTERED.
     pub cluster_key: Vec<u16>,
     // File offset of the v4 per-RG sums section (0 = none): sums stay on
-    // disk, CRC-validated with the footer at open, and are read through the
-    // mmap only when a metadata-sum consumer asks (rg_sum).
+    // disk (the sectioned lazy open never reads them) and are read through
+    // the mmap only when a metadata-sum consumer asks (rg_sum).
     sums_off: u64,
     // v7 per-granule length-stats section (0 = none), consumed lazily like
     // sums. lenrank maps a column to its dense flagged-column rank (-1 =
@@ -1555,6 +1643,57 @@ mod tests {
     fn tmp(name: &str) -> String {
         let p = std::env::temp_dir().join(format!("cbstore-footer-{}-{}", std::process::id(), name));
         p.to_str().unwrap().to_string()
+    }
+
+    // The sectioned lazy read (want_sums=false, the reader default) must
+    // materialize exactly the sections the eager whole-body read does, at
+    // every on-disk version.
+    #[test]
+    fn footer_lazy_sectioned_read_matches_eager() {
+        for version in
+            [CB_VERSION_V1, CB_VERSION_V2, CB_VERSION_V4, CB_VERSION_V5, CB_VERSION_V6, CB_VERSION]
+        {
+            let path = tmp(&format!("lazy-parity-v{version}"));
+            let ndv = [7, 0, 12_345_678];
+            let sorted = [1u8, 0, 1];
+            write_part_v(&path, CB_HEADER_LEN, &[100, 200, 50], 3, version, &ndv, &sorted);
+            let mut file = SegFile::open_rw(&path).unwrap();
+            let (l_rgs, l_end, l_ndv, l_sorted, l_ckey, l_lenflags, l_stitch) =
+                read_footer_rgs(&mut file, CB_HEADER_LEN, 3, version, false).unwrap();
+            let (e_rgs, e_end, e_ndv, e_sorted, e_ckey, e_lenflags, e_stitch) =
+                read_footer_rgs(&mut file, CB_HEADER_LEN, 3, version, true).unwrap();
+            assert_eq!(l_end, e_end);
+            assert_eq!(l_ndv, e_ndv);
+            assert_eq!(l_sorted, e_sorted);
+            assert_eq!(l_ckey, e_ckey);
+            assert_eq!(l_lenflags, e_lenflags);
+            assert_eq!(l_stitch.gndv, e_stitch.gndv);
+            assert_eq!(l_stitch.dir, e_stitch.dir);
+            assert_eq!(l_rgs.len(), e_rgs.len());
+            for (l, e) in l_rgs.iter().zip(&e_rgs) {
+                assert_eq!(
+                    (l.file_off, l.nrows, l.xmin, l.flags, &l.chunks),
+                    (e.file_off, e.nrows, e.xmin, e.flags, &e.chunks)
+                );
+                // The lazy sections stay on disk (mmap consumers).
+                assert!(l.sums.is_empty() && l.lenstats.is_empty() && l.zerocnt.is_empty());
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    // The lazy path skips the whole-body CRC but must still reject a torn
+    // tail (magic or body-length word).
+    #[test]
+    fn footer_lazy_rejects_torn_tail() {
+        let path = tmp("lazy-torn-tail");
+        write_part_v(&path, CB_HEADER_LEN, &[100], 2, CB_VERSION, &[5, 9], &[1, 0]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let n = bytes.len();
+        bytes[n - 1] ^= 0xff; // clobber the CBFT magic
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(part_footer_rows(&path, 2).is_err());
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
