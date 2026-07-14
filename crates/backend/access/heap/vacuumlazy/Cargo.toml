@@ -53,8 +53,8 @@ parallel = { path = "../../transam/parallel" }
 table = { path = "../../table/table" }
 latch = { path = "../../../storage/ipc/latch" }
 autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 
 [dev-dependencies]
-smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
