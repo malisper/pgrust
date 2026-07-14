@@ -154,6 +154,26 @@ pub const CHUNK_FLAG_BLOOM: u16 = 2;
 // ChunkView::at section offsets on every sorted-dict chunk).
 pub const CHUNK_FLAG_DICT_SORTED: u16 = 4;
 
+// ChunkHeader.flags bit: the Lz4Dict blob region is SUB-FRAMED — split at
+// entry boundaries (byte-sorted order UNCHANGED; codes stay rank order)
+// into independently decompressible frames, so a reader can materialize
+// only the frames containing requested codes (the survivor gather/store
+// path) instead of the whole arena. The blob region after the dict_off
+// table replaces the single `u32 raw_len | u32 comp_len | bytes` frame
+// with:
+//   u32 nframes
+//   nframes x (u32 raw_len | u32 comp_len)   -- frame directory
+//   frame bytes back-to-back (comp_len == raw_len marks a stored-raw
+//   frame), region 4-padded at the end
+// `dict_off` offsets stay offsets into the CONCATENATED decompressed blob
+// (frame f covers raw [sum raw_len[..f], +raw_len[f])); an entry never
+// straddles a frame edge (the writer cuts at entry boundaries only). Like
+// the DeltaFor precedent this is flag-versioning, not a CB_VERSION bump:
+// frozen banks are never rewritten and new banks get new keys, so no
+// pre-frames reader ever sees the bit. Write-side arm:
+// PGRUST_CBSTORE_DICT_FRAMES=1 (default off).
+pub const CHUNK_FLAG_DICT_FRAMED: u16 = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Encoding {

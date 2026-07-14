@@ -173,9 +173,48 @@ pub(crate) struct CodecCtx {
     pub zstd_level: i32,
     /// intcodec: DeltaFor may be considered for this column's chunks.
     pub delta: bool,
+    /// Sub-granule dict frames (CHUNK_FLAG_DICT_FRAMED): split compressed
+    /// dict blobs at entry boundaries into `dict_frame_target`-raw-byte
+    /// frames so readers can materialize per touched frame. Off by default
+    /// (frozen-bank layouts unchanged); armed by PGRUST_CBSTORE_DICT_FRAMES=1
+    /// at ingest (experimental bank cuts).
+    pub dict_frames: bool,
+    /// Target RAW bytes per dict frame (PGRUST_CBSTORE_DICT_FRAME_KB,
+    /// default 128 KiB). Blobs at or under one target stay single-frame
+    /// legacy Lz4Dict.
+    pub dict_frame_target: usize,
+}
+
+// Write-side sub-granule dict-frame arm (see CHUNK_FLAG_DICT_FRAMED).
+pub(crate) fn dict_frames_env() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_CBSTORE_DICT_FRAMES").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+pub(crate) fn dict_frame_target_env() -> usize {
+    static KB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *KB.get_or_init(|| {
+        std::env::var("PGRUST_CBSTORE_DICT_FRAME_KB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&kb| kb > 0)
+            .unwrap_or(128)
+    }) * 1024
 }
 
 impl CodecCtx {
+    pub(crate) fn new(choice: CodecChoice, zstd_level: i32, delta: bool) -> CodecCtx {
+        CodecCtx {
+            choice,
+            zstd_level,
+            delta,
+            dict_frames: dict_frames_env(),
+            dict_frame_target: dict_frame_target_env(),
+        }
+    }
+
     pub(crate) fn compress(&self, codec: Codec, data: &[u8]) -> Vec<u8> {
         match codec {
             Codec::Lz4 => lz4_flex::compress(data),
@@ -240,7 +279,7 @@ pub(crate) fn frame_len(comp_len: usize) -> usize {
 pub(crate) fn test_codec_ctx() -> CodecCtx {
     // delta off: the pre-intcodec encoder tests pin For/Raw/Const shapes;
     // DeltaFor coverage lives in the dedicated intcodec tests.
-    CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false }
+    CodecCtx::new(CodecChoice::Auto, ZSTD_LEVEL_DEFAULT, false)
 }
 
 // intcodec ingest counters (gate observability, text_gate posture).
@@ -665,11 +704,7 @@ impl CbWriter {
                 body.push(0);
             }
             let chunk_off = body.len() as u64;
-            let cc = CodecCtx {
-                choice: self.opts.codec[c],
-                zstd_level: self.opts.zstd_level,
-                delta: self.opts.delta[c],
-            };
+            let cc = CodecCtx::new(self.opts.codec[c], self.opts.zstd_level, self.opts.delta[c]);
             let (min, max) = match b {
                 ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
                 ColBuilder::Text(tb) => {
@@ -1334,8 +1369,51 @@ fn encode_text_chunk(
         debug_assert_eq!(dict_blob.len(), dict_blob_len);
         let head_len = align4(n * code_w) + ndv * 4;
         let picked = cc.pick(&dict_blob, false);
-        let comp = picked.map(|c| cc.compress(c, &dict_blob)).unwrap_or_default();
-        let comp_blob_len = frame_len(comp.len());
+        // Sub-granule frame plan (CHUNK_FLAG_DICT_FRAMED): entry-boundary
+        // cuts every ~dict_frame_target RAW bytes, byte-sorted order
+        // untouched. None = single-frame legacy layout (arm off, no codec
+        // win, or the blob fits one target).
+        let frames: Option<Vec<(u32, Vec<u8>)>> = (cc.dict_frames
+            && picked.is_some()
+            && dict_blob_len > cc.dict_frame_target)
+            .then(|| {
+                let codec = picked.unwrap();
+                let mut frames: Vec<(u32, Vec<u8>)> = Vec::new(); // (raw_len, stored)
+                let mut lo = 0usize;
+                let mut acc = 0usize;
+                let push = |lo: usize, hi: usize, frames: &mut Vec<(u32, Vec<u8>)>| {
+                    let raw = &dict_blob[lo..hi];
+                    let comp = cc.compress(codec, raw);
+                    // Incompressible guard: comp_len == raw_len marks a
+                    // stored-raw frame (a compressed frame is strictly
+                    // shorter by this arm).
+                    let stored = if comp.len() < raw.len() { comp } else { raw.to_vec() };
+                    frames.push(((hi - lo) as u32, stored));
+                };
+                for &(_, len) in &order {
+                    acc += align4(VARLENA_IMG_HDR + len as usize);
+                    if acc - lo >= cc.dict_frame_target {
+                        push(lo, acc, &mut frames);
+                        lo = acc;
+                    }
+                }
+                if lo < dict_blob_len {
+                    push(lo, dict_blob_len, &mut frames);
+                }
+                frames
+            })
+            .filter(|f| f.len() > 1);
+        let comp = if frames.is_none() {
+            picked.map(|c| cc.compress(c, &dict_blob)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let comp_blob_len = match &frames {
+            Some(f) => {
+                align4(4 + 8 * f.len() + f.iter().map(|(_, s)| s.len()).sum::<usize>())
+            }
+            None => frame_len(comp.len()),
+        };
         let use_comp = picked.is_some()
             && (head_len + comp_blob_len) * 10 <= (head_len + dict_blob_len) * 9;
         let (encoding, codec, stored_blob_len) = if use_comp {
@@ -1347,7 +1425,8 @@ fn encode_text_chunk(
         ChunkHeader {
             encoding,
             width: code_w as u8,
-            flags: CHUNK_FLAG_DICT_SORTED,
+            flags: CHUNK_FLAG_DICT_SORTED
+                | if use_comp && frames.is_some() { CHUNK_FLAG_DICT_FRAMED } else { 0 },
             ngranules,
             aux: ndv as i64,
             payload_len,
@@ -1386,9 +1465,25 @@ fn encode_text_chunk(
         }
         if use_comp {
             let start = body.len();
-            put_u32(body, dict_blob_len as u32);
-            put_u32(body, comp.len() as u32);
-            body.extend_from_slice(&comp);
+            match &frames {
+                Some(f) => {
+                    // Framed region: u32 nframes | per-frame (u32 raw_len |
+                    // u32 comp_len) | frames back-to-back | pad4.
+                    put_u32(body, f.len() as u32);
+                    for (raw_len, stored) in f {
+                        put_u32(body, *raw_len);
+                        put_u32(body, stored.len() as u32);
+                    }
+                    for (_, stored) in f {
+                        body.extend_from_slice(stored);
+                    }
+                }
+                None => {
+                    put_u32(body, dict_blob_len as u32);
+                    put_u32(body, comp.len() as u32);
+                    body.extend_from_slice(&comp);
+                }
+            }
             while body.len() - start != comp_blob_len {
                 body.push(0);
             }
@@ -2033,7 +2128,7 @@ mod codec_tests {
         let n = GRANULE_ROWS * 2 + GRANULE_ROWS / 2;
         let vals: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + (i % 97) * 3).collect();
         for choice in [CodecChoice::Lz4, CodecChoice::Zstd] {
-            let cc = CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
+            let cc = CodecCtx::new(choice, ZSTD_LEVEL_DEFAULT, false);
             let mut body = Vec::new();
             let (min, max) =
                 encode_int_chunk(&mut body, &vals, n.div_ceil(GRANULE_ROWS) as u32, &cc);
@@ -2076,7 +2171,7 @@ mod codec_tests {
     fn plain_choice_writes_v5_shape() {
         let n = GRANULE_ROWS;
         let vals: Vec<i64> = (0..n as i64).map(|i| i / 64).collect();
-        let cc = CodecCtx { choice: CodecChoice::Plain, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
+        let cc = CodecCtx::new(CodecChoice::Plain, ZSTD_LEVEL_DEFAULT, false);
         let mut body = Vec::new();
         encode_int_chunk(&mut body, &vals, 1, &cc);
         let cv = ChunkView::at(&body, 0, n as u32);
@@ -2097,7 +2192,7 @@ mod codec_tests {
             tb.offs.push((tb.blob.len() as u32, r.len() as u32));
             tb.blob.extend_from_slice(r);
         }
-        let cc = CodecCtx { choice: CodecChoice::Zstd, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
+        let cc = CodecCtx::new(CodecChoice::Zstd, ZSTD_LEVEL_DEFAULT, false);
         let mut body = Vec::new();
         encode_text_chunk(&mut body, &tb, 1, &cc, None);
         let cv = ChunkView::at(&body, 0, rows.len() as u32);
@@ -2164,7 +2259,7 @@ mod intcodec_tests {
     use crate::reader::ChunkView;
 
     fn delta_ctx(choice: CodecChoice) -> CodecCtx {
-        CodecCtx { choice, zstd_level: ZSTD_LEVEL_DEFAULT, delta: true }
+        CodecCtx::new(choice, ZSTD_LEVEL_DEFAULT, true)
     }
 
     fn decode_ints(body: &[u8], nrows: usize) -> Vec<i64> {
@@ -2298,7 +2393,7 @@ mod intcodec_tests {
     fn ingest_kill_switch_pins_plain() {
         let n = GRANULE_ROWS;
         let vals: Vec<i64> = (0..n as i64).map(|i| i * 1000).collect();
-        let cc = CodecCtx { choice: CodecChoice::Auto, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false };
+        let cc = CodecCtx::new(CodecChoice::Auto, ZSTD_LEVEL_DEFAULT, false);
         let (body, ..) = encode(&vals, &cc);
         let cv = ChunkView::at(&body, 0, n as u32);
         assert_ne!(cv.hdr.encoding, Encoding::DeltaFor);
@@ -2511,7 +2606,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false }, None);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), None);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -2526,10 +2621,219 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx { choice: CodecChoice::Lz4, zstd_level: ZSTD_LEVEL_DEFAULT, delta: false }, None);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), None);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
         assert_eq!(decode_all(&body, n), rows);
+    }
+}
+
+#[cfg(test)]
+mod dict_frames_tests {
+    use super::*;
+    use crate::reader::ChunkView;
+    use std::collections::BTreeSet;
+
+    fn frames_cc(target: usize) -> CodecCtx {
+        CodecCtx {
+            choice: CodecChoice::Lz4,
+            zstd_level: ZSTD_LEVEL_DEFAULT,
+            delta: false,
+            dict_frames: true,
+            dict_frame_target: target,
+        }
+    }
+
+    fn tb(rows: &[Vec<u8>]) -> TextBuilder {
+        let mut tb = TextBuilder { offs: Vec::new(), blob: Vec::new() };
+        for r in rows {
+            tb.offs.push((tb.blob.len() as u32, r.len() as u32));
+            tb.blob.extend_from_slice(r);
+        }
+        tb
+    }
+
+    // Uniform-length compressible entries: ndv controls the frame count
+    // exactly (entries align4 to the same stored size).
+    fn dict_rows(n: usize, ndv: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                format!("searchterm-{:05}-cccccccccccccccccccccccccccc", i % ndv).into_bytes()
+            })
+            .collect()
+    }
+
+    fn sorted_entries(rows: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        rows.iter().cloned().collect::<BTreeSet<_>>().into_iter().collect()
+    }
+
+    fn encode(rows: &[Vec<u8>], cc: &CodecCtx) -> Vec<u8> {
+        let mut body = Vec::new();
+        let ng = rows.len().div_ceil(GRANULE_ROWS) as u32;
+        encode_text_chunk(&mut body, &tb(rows), ng, cc, None);
+        body
+    }
+
+    fn decode_all(body: &[u8], n: usize) -> Vec<Vec<u8>> {
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        let cv = ChunkView::at(body, 0, n as u32);
+        let (mut out, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut got = Vec::with_capacity(n);
+        for g in 0..hdr.ngranules as usize {
+            cv.decode_granule(g, &mut out, &mut dict, &mut arena);
+            for d in &out {
+                got.push(crate::varlena_bytes(*d).unwrap().to_vec());
+            }
+        }
+        got
+    }
+
+    // Framed write engages (flag bit 8) and the EAGER decode path
+    // (decode_granule / build_dict) round-trips byte-for-byte, matching the
+    // unframed control.
+    #[test]
+    fn framed_write_eager_decode_roundtrip() {
+        let n = GRANULE_ROWS + 11;
+        let rows = dict_rows(n, 600);
+        let framed = encode(&rows, &frames_cc(4096));
+        let control =
+            encode(&rows, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false));
+        let fh = ChunkHeader::decode(&framed[..CB_CHUNK_HEADER_LEN]);
+        let ch = ChunkHeader::decode(&control[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(fh.encoding, Encoding::Lz4Dict, "premise: dict + codec win");
+        assert_ne!(fh.flags & CHUNK_FLAG_DICT_FRAMED, 0, "framed flag set");
+        assert_eq!(ch.flags & CHUNK_FLAG_DICT_FRAMED, 0, "control unframed");
+        assert_eq!(decode_all(&framed, n), rows);
+        assert_eq!(decode_all(&control, n), rows);
+    }
+
+    // Default arm (CodecCtx::new, env unset): the framed bit never appears
+    // — frozen-bank byte behavior.
+    #[test]
+    fn frames_off_by_default() {
+        let n = GRANULE_ROWS;
+        let rows = dict_rows(n, 600);
+        let body =
+            encode(&rows, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false));
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(hdr.encoding, Encoding::Lz4Dict);
+        assert_eq!(hdr.flags & CHUNK_FLAG_DICT_FRAMED, 0);
+    }
+
+    // Blob within one frame target: stays single-frame legacy layout even
+    // with the arm on.
+    #[test]
+    fn small_blob_stays_legacy() {
+        let n = GRANULE_ROWS;
+        let rows = dict_rows(n, 40);
+        let body = encode(&rows, &frames_cc(64 * 1024));
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(hdr.encoding, Encoding::Lz4Dict);
+        assert_eq!(hdr.flags & CHUNK_FLAG_DICT_FRAMED, 0);
+        assert_eq!(decode_all(&body, n), rows);
+    }
+
+    // Lazy decode: pointer table up front (no frame materializes at build),
+    // per-code ensures in a shuffled out-of-order walk, every ensured entry
+    // byte-identical; ensure_all completes the arena identically; the
+    // granule gather reproduces the rows.
+    #[test]
+    fn lazy_out_of_order_ensures_match_eager() {
+        let n = GRANULE_ROWS + 11;
+        let ndv = 600;
+        let rows = dict_rows(n, ndv);
+        let entries = sorted_entries(&rows);
+        let body = encode(&rows, &frames_cc(4096));
+        let cv = ChunkView::at(&body, 0, n as u32);
+        let (mut codes, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut lazy = None;
+        assert!(cv.decode_granule_codes(0, &mut codes, &mut dict, &mut arena, &mut lazy));
+        let lazy = lazy.expect("framed chunk builds a lazy dict");
+        assert!(!lazy.all_done(), "no frame materializes at build");
+        assert_eq!(dict.len(), ndv);
+        for k in 0..ndv {
+            let code = (k * 397) % ndv;
+            lazy.ensure_code(code as u32);
+            assert_eq!(
+                crate::varlena_bytes(dict[code]).unwrap(),
+                &entries[code][..],
+                "code {code}"
+            );
+        }
+        lazy.ensure_all();
+        assert!(lazy.all_done());
+        for (code, e) in entries.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(dict[code]).unwrap(), &e[..]);
+        }
+        for (i, &c) in codes.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(dict[c as usize]).unwrap(), &rows[i][..]);
+        }
+    }
+
+    // Pad-spill hazard: a TINY final frame (one entry, < OUT_PAD bytes)
+    // materialized FIRST, then its predecessors — a predecessor's in-place
+    // wild-write window overlaps the done successor, forcing the
+    // scratch+copy path; the successor's bytes must survive.
+    #[test]
+    fn tiny_done_successor_survives_predecessor_ensure() {
+        let n = GRANULE_ROWS;
+        // 52B aligned images, target 4096 -> 79 entries per cut; ndv =
+        // 3*79 + 1 leaves a single-entry (52B, < 64B OUT_PAD) final frame.
+        let ndv = 3 * 79 + 1;
+        let rows = dict_rows(n, ndv);
+        let entries = sorted_entries(&rows);
+        let body = encode(&rows, &frames_cc(4096));
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_ne!(hdr.flags & CHUNK_FLAG_DICT_FRAMED, 0, "premise: framed");
+        let cv = ChunkView::at(&body, 0, n as u32);
+        let (mut codes, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut lazy = None;
+        assert!(cv.decode_granule_codes(0, &mut codes, &mut dict, &mut arena, &mut lazy));
+        let lazy = lazy.expect("framed chunk builds a lazy dict");
+        for code in (0..ndv).rev() {
+            lazy.ensure_code(code as u32);
+            assert_eq!(
+                crate::varlena_bytes(dict[code]).unwrap(),
+                &entries[code][..],
+                "code {code}"
+            );
+        }
+        for (code, e) in entries.iter().enumerate() {
+            assert_eq!(crate::varlena_bytes(dict[code]).unwrap(), &e[..], "recheck {code}");
+        }
+    }
+
+    // Stored-raw frames (incompressible byte-sorted tail region) round-trip
+    // on both the eager and lazy paths.
+    #[test]
+    fn stored_raw_frames_roundtrip() {
+        let n = GRANULE_ROWS;
+        let mut vals: Vec<Vec<u8>> = dict_rows(n / 2, 300);
+        for i in 0..n / 2 {
+            let mut e = b"zz-".to_vec();
+            let mut x = (i % 97) as u64 ^ 0x9e37_79b9_7f4a_7c15;
+            for _ in 0..48 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                e.push((x >> 33) as u8);
+            }
+            vals.push(e);
+        }
+        let body = encode(&vals, &frames_cc(2048));
+        let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
+        assert_eq!(hdr.encoding, Encoding::Lz4Dict, "premise: dict + codec win");
+        assert_ne!(hdr.flags & CHUNK_FLAG_DICT_FRAMED, 0, "premise: framed");
+        assert_eq!(decode_all(&body, n), vals);
+        let entries = sorted_entries(&vals);
+        let cv = ChunkView::at(&body, 0, n as u32);
+        let (mut codes, mut dict, mut arena) = (Vec::new(), Vec::new(), Vec::new());
+        let mut lazy = None;
+        assert!(cv.decode_granule_codes(0, &mut codes, &mut dict, &mut arena, &mut lazy));
+        let lazy = lazy.expect("framed chunk builds a lazy dict");
+        for k in 0..entries.len() {
+            let code = (k * 397) % entries.len();
+            lazy.ensure_code(code as u32);
+            assert_eq!(crate::varlena_bytes(dict[code]).unwrap(), &entries[code][..]);
+        }
     }
 }
 
