@@ -163,6 +163,20 @@ pub(super) fn ea_fill_scan_node(
     let Ok(ix) = usize::try_from(plan_node_id) else { return };
     let Some(i) = estate.es_instrumentation.get_mut(ix) else { return };
     i.ntuples += rows.survived as f64;
-    i.nfiltered1 += (rows.scanned - rows.survived) as f64;
+    i.nfiltered1 += rows.scanned.saturating_sub(rows.survived) as f64;
+    i.nloops += 1.0;
+}
+
+/// A bypassed pass-through member node (the distinct arm's Sort): rows out =
+/// rows in, no filter arms; timing fields untouched (§3 — never divide a
+/// fused pipeline's time onto members).
+pub(super) fn ea_fill_passthrough_node(
+    estate: &mut EStateData<'_>,
+    plan_node_id: i32,
+    rows_out: u64,
+) {
+    let Ok(ix) = usize::try_from(plan_node_id) else { return };
+    let Some(i) = estate.es_instrumentation.get_mut(ix) else { return };
+    i.ntuples += rows_out as f64;
     i.nloops += 1.0;
 }
