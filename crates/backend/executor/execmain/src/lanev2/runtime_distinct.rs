@@ -60,7 +60,7 @@ use ::nodeagg::{
     pd_bucket_precount, pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table,
     pd_merge_bucket_refs, pd_route_value_records, pd_spill_record_width, pd_table_from_spill,
     PdBucketMerger, PdEmitBucket, PdEmitRecipe, PdFeed, PdHandedTable, PdMerged, PdSinkLocal,
-    PdSpec, PD_SINK_GROUP_PARTS,
+    PdSpec, PdTopnCand, PdTopnSpec, PD_SINK_GROUP_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -121,6 +121,12 @@ pub(super) struct RuntimeDistinctShared {
     /// table. Chosen once at admission — one engagement-level mode, so the
     /// out cells hold one variant uniformly.
     paremit: Option<Arc<PdEmitRecipe>>,
+    /// Kernel-2 bounded selection (pardistinct.rs topn section doc): Some =
+    /// every paremit combine claim materializes only its partition's
+    /// top-`bound` candidates and the leader emits the truncate-merged
+    /// global winners. Resolved once at admission beside the recipe (never
+    /// armed without `paremit`); a `None` is the full drain exactly.
+    topn: Option<PdTopnSpec>,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
@@ -226,8 +232,8 @@ impl RuntimeDistinctShared {
     /// or the merged table itself (adopt mode, unchanged).
     fn finish_combine(&self, m: PdMerged<'static>) -> PgResult<DstCombined> {
         if let Some(r) = &self.paremit {
-            let b = pd_emit_bucket(&self.spec, r, &m)?;
-            return Ok(DstCombined::Emit(b));
+            let (b, cands) = pd_emit_bucket(&self.spec, r, &m, self.topn.as_ref())?;
+            return Ok(DstCombined::Emit(b, cands));
         }
         Ok(DstCombined::Merged(m))
     }
@@ -236,7 +242,8 @@ impl RuntimeDistinctShared {
 /// One combine claim's retained output (variant uniform per engagement).
 enum DstCombined {
     Merged(PdMerged<'static>),
-    Emit(PdEmitBucket),
+    /// Paremit bucket + (topn-armed only) its candidate list.
+    Emit(PdEmitBucket, Option<Vec<PdTopnCand>>),
 }
 
 impl DstCombined {
@@ -244,15 +251,22 @@ impl DstCombined {
     fn mem_bytes(&self) -> usize {
         match self {
             DstCombined::Merged(m) => m.mem_bytes(),
-            DstCombined::Emit(b) => b.mem_bytes(),
+            DstCombined::Emit(b, cands) => {
+                b.mem_bytes()
+                    + cands.as_ref().map_or(0, |c| {
+                        c.len() * core::mem::size_of::<PdTopnCand>()
+                    })
+            }
         }
     }
 }
 
-/// The finalize-published result the leader consumes.
+/// The finalize-published result the leader consumes. The paremit
+/// candidate lists are bucket-aligned; `Some` iff the engagement armed the
+/// bounded selection (uniform per engagement, like the mode itself).
 enum DstPublished {
     Merged(PdMerged<'static>),
-    Emit(Vec<PdEmitBucket>),
+    Emit(Vec<PdEmitBucket>, Option<Vec<Vec<PdTopnCand>>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -398,10 +412,14 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         // protocol check fires) rather than unwinding into the runtime
         // (finalize runs outside the claim catch_unwind wrappers).
         let mut bufs: Vec<PdEmitBucket> = Vec::new();
+        let mut bufcands: Vec<Option<Vec<PdTopnCand>>> = Vec::new();
         let mut merged_cells: Vec<PdMerged<'static>> = Vec::new();
         for c in cells {
             match c {
-                DstCombined::Emit(b) => bufs.push(b),
+                DstCombined::Emit(b, cands) => {
+                    bufs.push(b);
+                    bufcands.push(cands);
+                }
                 DstCombined::Merged(m) => merged_cells.push(m),
             }
         }
@@ -410,9 +428,22 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             if !merged_cells.is_empty() {
                 return;
             }
+            // Uniform-mode invariant, selection face: topn-armed
+            // engagements carry a candidate list on EVERY bucket (the
+            // recipe and spec are fixed pre-submit). Fail CLOSED on a
+            // violation, as above.
+            let cands = if self.topn.is_some() {
+                if bufcands.iter().any(Option::is_none) {
+                    return;
+                }
+                Some(bufcands.into_iter().map(|c| c.expect("checked")).collect())
+            } else {
+                debug_assert!(bufcands.iter().all(Option::is_none));
+                None
+            };
             // Paremit mode: publish the ordered buckets themselves (bucket
             // position is a non-surface — the leader merge orders rows).
-            DstPublished::Emit(bufs)
+            DstPublished::Emit(bufs, cands)
         } else {
             debug_assert!(bufs.is_empty(), "paremit cell in an adopt engagement");
             if !bufs.is_empty() {
@@ -1324,6 +1355,103 @@ fn distinct_paremit_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0"))
 }
 
+/// `PGRUST_RUNTIME_DISTINCT_TOPN` kill switch (default ON): 0/off = the
+/// paremit full drain everywhere (pre-kernel-2 behavior exactly — the A/B
+/// attribution and rollback channel; results byte-identical either way by
+/// the winners superset lemma, pardistinct.rs topn section doc).
+fn distinct_topn_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// Kernel-2 admission — arm the distinct sink's bounded selection from the
+/// PLAN-SIDE consumer shape: the leader pstmt's root must be exactly
+/// `Limit(COUNT-option, Const count, no offset) → Sort(single int8-kernel
+/// order key) → THIS Agg`, and the order column must resolve to a
+/// state-comparable, never-NULL paremit column (count(DISTINCT x) — the
+/// merged set's value count — or count(*)/count(x)'s sidecar word;
+/// sum(int2/4) can be SQL-NULL, whose rank depends on NULLS placement, so
+/// it stays the full drain: no mid-combine decline face exists at all).
+///
+/// Plan reads only, before any build state exists; every refusal is the
+/// paremit full drain (never a lane refusal, never a plan change). The
+/// exec-time bound the serial arm sees is the same plan Const (Limit's
+/// `ExecSetTupleBound` pushes count+offset; offset-bearing shapes refuse
+/// here, so bound == count).
+fn distinct_topn_arm(
+    agg: &::nodeagg::AggStateData<'_>,
+    estate: &EStateData<'_>,
+    spec: &PdSpec,
+    cols: &[::nodeagg::PdParemitCol],
+) -> Option<PdTopnSpec> {
+    use ::nodeagg::{PdParemitCol, PdTopnKey};
+    let decline = |why: &str| {
+        lane_trace(&format!("runtime-distinct topn: declined ({why})"));
+        None
+    };
+    if !distinct_topn_enabled() {
+        return None;
+    }
+    // --- Consumer shape: root Limit → Sort → this Agg (the CB q14 class).
+    let pstmt = estate.es_plannedstmt?;
+    let root = pstmt.planTree?;
+    let limit = root.as_limit()?;
+    if limit.limitOption != ::types_nodes::nodes_enums::LimitOption::LIMIT_OPTION_COUNT {
+        return decline("limit option");
+    }
+    if limit.limitOffset.is_some() {
+        return decline("limit offset");
+    }
+    let count = limit.limitCount?.as_const()?;
+    if count.constisnull {
+        return decline("LIMIT ALL");
+    }
+    let Ok(bound) = u32::try_from(count.constvalue.as_i64()) else {
+        return decline("bound range");
+    };
+    if bound == 0 || bound > ::nodeagg::sink::SINK_TOPN_MAX_BOUND {
+        return decline("bound cap");
+    }
+    let sort = limit.plan.lefttree?.as_sort()?;
+    let agg_node = sort.plan.lefttree?.as_agg()?;
+    if agg_node as *const _ as usize != agg.plan as *const _ as usize {
+        return decline("sort child not this Agg");
+    }
+    // --- Order key: single column, int8 kernel operator, resolving to a
+    // never-NULL paremit column (tie-break law: the selection total order's
+    // secondary key is the GROUP order, which single-column consumers
+    // cannot contradict).
+    if sort.numCols != 1 || sort.sortColIdx.is_empty() {
+        return decline("multi-column order");
+    }
+    let oc = sort.sortColIdx[0];
+    if oc < 1 || (oc as usize) > cols.len() {
+        return decline("order column resno");
+    }
+    let opfn = ::lsyscache::get_opcode(sort.sortOperators[0]).ok()?;
+    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn) {
+        Some(::execexpr::CmpOp::Int8Gt) => true,
+        Some(::execexpr::CmpOp::Int8Lt) => false,
+        _ => return decline("order operator kernel"),
+    };
+    let key = match cols[(oc - 1) as usize] {
+        PdParemitCol::SetCount(si) => PdTopnKey::SetCount(si),
+        PdParemitCol::Vocab { transno, sum: false } => {
+            let vi = spec.vocab.iter().position(|v| v.transno == transno)?;
+            PdTopnKey::VocabCount(vi)
+        }
+        // Key columns are not order values; sum can be NULL (doc above).
+        _ => return decline("order column not state-comparable"),
+    };
+    lane_trace(&format!("runtime-distinct topn: armed (bound={bound})"));
+    Some(PdTopnSpec { key, desc, bound })
+}
+
 // ---------------------------------------------------------------------------
 // Leader-side engagement. Arming layering (kill switch + DOP option + lane
 // master) lives in guc_tables::runtime_pool::runtime_distinct_pool_dop —
@@ -1476,6 +1604,13 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if paremit.is_some() {
         lane_trace("runtime-distinct: paremit armed");
     }
+    // Kernel-2 bounded selection (topn section doc): plan-side consumer
+    // resolution, armed only beside a live paremit recipe (the selection
+    // rides the ordered emit buckets). A None is the paremit full drain.
+    let topn = match (&paremit, paremit_cols.as_deref()) {
+        (Some(_), Some(cols)) => distinct_topn_arm(agg, estate, &spec, cols),
+        _ => None,
+    };
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
@@ -1546,7 +1681,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, order, paremit, scan_node, ea)
+    engage(
+        agg, estate, rt, dop, total_granules, starts, spec, order, paremit, topn, scan_node, ea,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1560,6 +1697,7 @@ fn engage<'mcx>(
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
     paremit: Option<Arc<PdEmitRecipe>>,
+    topn: Option<PdTopnSpec>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     ea: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -1603,6 +1741,7 @@ fn engage<'mcx>(
         eflags: estate.es_top_eflags,
         spec: Arc::clone(&spec),
         paremit,
+        topn,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         exited: AtomicUsize::new(0),
@@ -1875,7 +2014,7 @@ fn engage_ceremony<'mcx>(
             }
             let groups = match &published {
                 DstPublished::Merged(m) => m.ngroups,
-                DstPublished::Emit(bufs) => bufs.iter().map(|b| b.nrows).sum(),
+                DstPublished::Emit(bufs, _) => bufs.iter().map(|b| b.nrows).sum(),
             };
             lane_trace(&format!("runtime-distinct: complete, groups={groups}"));
             // EA-on-morsels merge (clean Completed only): fold every
@@ -1931,7 +2070,7 @@ fn engage_ceremony<'mcx>(
                     )?;
                     Ok(Some(super::hashgroup_emit(agg, estate)?))
                 }
-                DstPublished::Emit(bufs) => {
+                DstPublished::Emit(bufs, cands) => {
                     // PAREMIT adoption: rows were finalized, projected, and
                     // ordered inside the combine claims; the leader's tail
                     // is the cross-bucket merge + a datum memcpy per pull.
@@ -1945,7 +2084,29 @@ fn engage_ceremony<'mcx>(
                         )));
                     };
                     trace_feed("runtime distinct sink paremit emit engaged");
-                    let st = ::nodeagg::pd_paremit_state(recipe, bufs)?;
+                    // Kernel-2 winner direction: truncate-merge the
+                    // partition candidate lists to the global winner set;
+                    // the merge then emits winners alone, in group order.
+                    let topn = match (&payload.topn, &cands) {
+                        (Some(t), Some(c)) => Some((&c[..], t.bound)),
+                        (None, None) => None,
+                        _ => {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime distinct topn arming/candidate mismatch",
+                            )))
+                        }
+                    };
+                    let st = ::nodeagg::pd_paremit_state(recipe, bufs, topn)?;
+                    if let Some(w) = st.kept_rows() {
+                        let mat: usize = cands
+                            .as_ref()
+                            .map(|c| c.iter().map(Vec::len).sum())
+                            .unwrap_or(0);
+                        lane_trace(&format!(
+                            "runtime-distinct: topn composed (winners={w})                              mode=winners-only materialized={mat}"
+                        ));
+                    }
                     ::nodeagg::agg_pdemit_install(agg, st);
                     Ok(Some(super::pdemit_emit(agg, estate)?))
                 }
