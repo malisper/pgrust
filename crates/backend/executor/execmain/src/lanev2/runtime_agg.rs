@@ -872,12 +872,22 @@ fn sink_cap_override() -> Option<u32> {
 /// unchanged, and the seal/accept budget checks still refuse crossings).
 /// PGRUST_RUNTIME_AGG_CAP overrides to a fixed cap (the A/B arm; 65536 =
 /// the old behavior).
-fn sink_cap_for(state_bytes: usize, budget: usize) -> u32 {
+fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
     if let Some(c) = sink_cap_override() {
         return c;
     }
     let entry = 16u64 + 8 + state_bytes as u64 + 16;
-    ((budget as u64 / 2) / entry.max(1)).clamp(1 << 16, u32::MAX as u64 / 2) as u32
+    // BOTH admission bounds (compact_admission / agg_hash_compact_sink_
+    // admissible): capped-numgroups must satisfy est_bytes <= budget/2 AND
+    // numgroups <= ngroups_limit/2 — a cap above either manufactures
+    // refusals the fixed 64K cap never hit (round-3 battery: count-only
+    // high-NDV shapes flipped admit->refuse because the mem-derived cap
+    // 74898 crossed ngroups_limit/2 ~73.7k at default work_mem). The 64K
+    // floor keeps heavy-state shapes exactly at the old cap (their old
+    // verdict, admit or refuse, is reproduced verbatim).
+    let mem_bound = (budget as u64 / 2) / entry.max(1);
+    let cap = mem_bound.min(ngroups_limit / 2);
+    cap.clamp(1 << 16, u32::MAX as u64 / 2) as u32
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
@@ -1037,7 +1047,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
-    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap_for(state_bytes, budget)) {
+    let Some(ngroups_limit) = ::nodeagg::sink::agg_sink_ngroups_limit(agg) else {
+        return Ok(false);
+    };
+    if !::nodeagg::agg_hash_compact_sink_admissible(
+        agg,
+        sink_cap_for(state_bytes, budget, ngroups_limit),
+    ) {
         refuse("worker compact arm would refuse under the sink budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -1099,7 +1115,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let sink = Arc::new(AggSink {
         drain,
         red,
-        cap: sink_cap_for(state_bytes, budget),
+        cap: sink_cap_for(state_bytes, budget, ngroups_limit),
         budget,
         key_words: 1,
         state_bytes,
