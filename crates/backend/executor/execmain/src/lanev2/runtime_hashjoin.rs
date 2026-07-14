@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodeagg::runtime_partial::{
-    agg_runtime_combine, agg_runtime_export_partial, agg_runtime_partial_admissible,
+    agg_runtime_combine, agg_runtime_export_partial_into, agg_runtime_partial_admissible,
     exec_agg_runtime_partials, RuntimePartial,
 };
 use ::nodehashjoin::shared_build::{
@@ -213,7 +213,7 @@ impl runtime::ParallelSink for JoinBuildSink {
         PARTITIONS as u64
     }
 
-    fn combine(&self, part: u64, locals: &[JoinBuildLocal]) {
+    fn combine(&self, part: u64, _worker: usize, locals: &[JoinBuildLocal]) {
         if self.failed() {
             return;
         }
@@ -428,9 +428,13 @@ fn probe_morsel_body(
                     )?;
                 }
             }
-            let partial = agg_runtime_export_partial(agg)?;
+            // API drift shim (bench-mt16-composite): the composed tree's
+            // export is the retained-capacity `_into` variant (m2-integration
+            // std-collections audit); same overwrite discipline as before —
+            // clear-before-fill, last export authoritative.
             let slot = worker - payload.pins_base;
-            *payload.partials[slot].lock().unwrap_or_else(|p| p.into_inner()) = Some(partial);
+            let mut g = payload.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+            agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
             Ok(())
         })
     })
@@ -502,9 +506,13 @@ fn fill_morsel_body(
             // Cumulative partial export (same slot as the probe morsels —
             // the worker's agg accumulates across both phases; overwrite
             // discipline keeps the last export authoritative).
-            let partial = agg_runtime_export_partial(agg)?;
+            // API drift shim (bench-mt16-composite): the composed tree's
+            // export is the retained-capacity `_into` variant (m2-integration
+            // std-collections audit); same overwrite discipline as before —
+            // clear-before-fill, last export authoritative.
             let slot = worker - payload.pins_base;
-            *payload.partials[slot].lock().unwrap_or_else(|p| p.into_inner()) = Some(partial);
+            let mut g = payload.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+            agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
             Ok(())
         })
     })
