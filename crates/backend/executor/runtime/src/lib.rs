@@ -284,7 +284,22 @@ impl Runtime {
     /// last-worker-out finalization protocol, abort drain, completion — is
     /// the ordinary runtime machinery.
     pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, 0);
+        self.submit_pinned_with_affinity(spec, 0)
+    }
+
+    /// [`Runtime::submit_pinned`] with a leader-session affinity token
+    /// (M5-4 × M5-1 integration seam): pinned RGs bypass the stride pick
+    /// today (pool workers never claim from them), so the token is inert
+    /// but RECORDED on the RG's slot — when §2.3 db-pinned pool binding
+    /// retires pinned submission into [`Runtime::submit`], the affinity
+    /// plumbing is already in place and the equal-pass tiebreak engages
+    /// with no arm-side change. Token 0 ⇔ no affinity.
+    pub fn submit_pinned_with_affinity(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 

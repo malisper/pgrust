@@ -2277,10 +2277,10 @@ fn engage_ceremony<'mcx>(
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: qid,
             tasksets: vec![accept, combine],
-        });
+        }, router::session_affinity_token());
         payload
             .rg
             .set(rg.downgrade())
