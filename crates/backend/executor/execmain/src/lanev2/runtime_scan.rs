@@ -1693,7 +1693,10 @@ fn standing_wait(
     waiter: &runtime::CompletionWaiter,
 ) -> PgResult<StandingWait> {
     let shared = payload.pcxt_shared.get().expect("pcxt shared set before standing_wait");
-    let Some(entry) = parallel::standing::try_engage(shared, dop.max(0) as usize) else {
+    parallel::gtrace("l.publish.begin");
+    let engaged = parallel::standing::try_engage(shared, dop.max(0) as usize);
+    parallel::gtrace("l.publish.end");
+    let Some(entry) = engaged else {
         return Ok(StandingWait::Fallback);
     };
     // Leader-unwind containment: PRIVATE_SHUTDOWN completes the standing
@@ -1712,7 +1715,9 @@ fn standing_wait(
     loop {
         if let Some(o) = waiter.try_wait() {
             take_slot();
+            parallel::gtrace("l.close.begin");
             parallel::standing::close_and_await(&entry);
+            parallel::gtrace("l.close.end");
             if !traced {
                 lane_trace(&format!(
                     "runtime-scan: engaged standing dop={} granules={total_granules}",
