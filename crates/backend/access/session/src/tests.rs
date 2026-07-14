@@ -327,7 +327,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      WORKER_EXEC slots 4-6/9-10 (bound-helper drive slot, torn down
     //      with the drive, non-session TLS — the binder owns all session
     //      state movement).
-    assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 475, re-pinned at m5-integration (M5-0/1 router merged) —
+    //   14. executor/execmain/src/lanev2/router.rs DUMP (the
+    //      DumpOnThreadExit guard armed by arm_dump_on_thread_exit) — the
+    //      M5-1 telemetry dump-on-exit hook: a drop guard whose only act
+    //      is writing the process-global router counters to
+    //      m5-router-stats.<pid>.tsv when the backend thread exits, and
+    //      only when PGRUST_LANE_V2_STATS is armed. Pure telemetry
+    //      bookkeeping, no session identity, no state movement — the
+    //      stats.rs dump-on-exit discipline; same argument as the worker
+    //      pool-loop block (slot 7).
+    assert_eq!(count_tree(crates), 475, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
