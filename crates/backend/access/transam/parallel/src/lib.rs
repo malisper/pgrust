@@ -21,6 +21,11 @@ mod query_task_guard;
 pub mod standing;
 
 pub use query_task_guard::QueryTaskBindingGuard;
+// Ceremony-v2 (notes/runtime-ceremony2.md): deferred first-touch binding +
+// sticky session-affine retention for standing runtime executors.
+pub use query_task_guard::{
+    lazy_bind_enabled, sticky_bind_enabled, sticky_parked, DeferredQueryTaskBinding,
+};
 
 #[cfg(debug_assertions)]
 pub use query_task_guard::{

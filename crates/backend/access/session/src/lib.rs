@@ -323,6 +323,31 @@ pub fn SessionEnvelopeBoundaryIssue() -> Option<&'static str> {
     bound_state_issue()
 }
 
+/// Ceremony-v2 sticky task binding (parallel::query_task_guard): a standing
+/// runtime executor parked BETWEEN engagements of the SAME session
+/// deliberately retains its `SessionGucBinding` (the applied query pin), so
+/// the live-binding condition above is not a leak there — it is the keyed
+/// retention itself. Every OTHER boundary condition must still hold at
+/// sticky park and sticky resume: envelope depth, pending interrupts, and
+/// the full bound-state sweep (transaction/snapshot/GUC-nesting/error-stack
+/// cleanliness). A dirty boundary demotes the park to the full unbind and
+/// refuses the resume. The retention is keyed (leader identity + GUC pin
+/// Arc) and evicted by the binder before any FOREIGN session's engagement
+/// can bind — SESSION_BOUND accounting stays exact: exactly one live
+/// binding, always the keyed session's.
+pub fn SessionEnvelopeBoundaryIssueForRetainedBind() -> Option<&'static str> {
+    if ENVELOPE_DEPTH.get() != 0 {
+        return Some("session envelope binding is still live");
+    }
+    if init_small::globals::InterruptPending()
+        || init_small::globals::QueryCancelPending()
+        || init_small::globals::ProcDiePending()
+    {
+        return Some("interrupt or cancellation is pending");
+    }
+    bound_state_issue()
+}
+
 fn validate_entry_boundary() -> PgResult<()> {
     if guc::store::session_bound() {
         return Err(prerequisite_error("legacy SessionGucBinding is still live"));

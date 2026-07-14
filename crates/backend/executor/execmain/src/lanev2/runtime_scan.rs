@@ -205,6 +205,26 @@ struct WorkerExec {
 thread_local! {
     static WORKER_EXEC: std::cell::RefCell<Option<WorkerExec>> =
         const { std::cell::RefCell::new(None) };
+    /// CEREMONY-V2 lazy bind: the deferred binding for the drive currently
+    /// running on this thread. Installed by helper_drive_lazy before
+    /// drive_pinned, consumed by morsel_body's first touch, taken back and
+    /// finished after the drive on every structured path.
+    static LAZY_CTX: std::cell::RefCell<Option<LazyCtx>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct LazyCtx {
+    binding: parallel::DeferredQueryTaskBinding,
+    /// A FATAL (exit-committed unwind) caught inside the first-touch bind:
+    /// run_morsel is infallible by contract (an escaping unwind would
+    /// strand the participant's pin), so the exit is stashed here and
+    /// resumed by helper_drive_lazy AFTER the drive settles and the
+    /// binding is finished.
+    exit_unwind: Option<Box<dyn std::any::Any + Send>>,
+    /// This worker's own bind/build failed (recorded + RG aborted): later
+    /// morsels short-circuit and the post-drive unbind takes the abort
+    /// path, exactly the eager wrap's error discipline.
+    bind_failed: bool,
 }
 
 impl runtime::TaskSetWork for RuntimeScanShared {
@@ -238,7 +258,59 @@ impl runtime::TaskSetWork for RuntimeScanShared {
 }
 
 impl RuntimeScanShared {
+    /// CEREMONY-V2 first touch: on this worker's FIRST claimed morsel of a
+    /// lazy drive, perform the session bind (sticky resume or full bind —
+    /// preceded by the standing channel's deferred visibility) and build
+    /// the executor. Errors are ordinary morsel errors (recorded + RG
+    /// abort — a claimed range cannot be handed back); exit-committed
+    /// unwinds are stashed for the post-drive rethrow (run_morsel must not
+    /// unwind).
+    fn ensure_bound_first_touch(&self) -> PgResult<()> {
+        if WORKER_EXEC.with(|cell| cell.borrow().is_some()) {
+            return Ok(());
+        }
+        LAZY_CTX.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(ctx) = slot.as_mut() else {
+                // Not a lazy drive (entry-task path builds up front): the
+                // legacy missing-executor error below reports it.
+                return Ok(());
+            };
+            if ctx.bind_failed {
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime scan worker bind failed (recorded upstream)",
+                )));
+            }
+            parallel::gtrace("w.firsttouch.begin");
+            let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
+                ctx.binding.bind_now()?;
+                self.started.fetch_add(1, Ordering::SeqCst);
+                build_worker_exec(self)
+            }));
+            parallel::gtrace("w.firsttouch.end");
+            match r {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    ctx.bind_failed = true;
+                    Err(e)
+                }
+                Err(unwind) => {
+                    ctx.bind_failed = true;
+                    if parallel::standing::is_exit_unwind(&*unwind) {
+                        ctx.exit_unwind = Some(unwind);
+                    }
+                    Err(Box::new(PgError::new(
+                        ERROR,
+                        "runtime scan worker panicked in the first-touch bind",
+                    )))
+                }
+            }
+        })
+    }
+
     fn morsel_body(&self, worker: usize, range: runtime::MorselRange) -> PgResult<()> {
+        self.ensure_bound_first_touch()?;
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -477,7 +549,7 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
         // (or aborted) RG for nothing.
         return;
     }
-    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, false)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
     }
@@ -487,7 +559,7 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
     ));
 }
 
-fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShared>) {
+fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShared>, sticky: bool) {
     let _ = shared;
     // F1 fail-closed accounting: a helper that cannot participate must NEVER
     // vanish silently — every early exit below counts itself as a refusal
@@ -503,6 +575,119 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
+    if parallel::lazy_bind_enabled() {
+        return helper_drive_lazy(payload, target, &rg, sticky);
+    }
+    helper_drive_eager(payload, target, &rg)
+}
+
+/// CEREMONY-V2 lazy drive (notes/runtime-ceremony2.md): enter the pinned
+/// drive UNBOUND; the session bind (sticky resume or full bind) + executor
+/// build happen at this worker's FIRST morsel claim (morsel_body's
+/// first-touch, the sink layer's fork-on-first-touch precedent). A
+/// participant that never claims work pays neither. validate() runs
+/// pre-drive so refusals keep today's fail-closed non-participation
+/// surface; a bind ERROR after a claim is a real query error (the claimed
+/// range cannot be handed back).
+fn helper_drive_lazy(
+    payload: &Arc<RuntimeScanShared>,
+    target: &Arc<parallel::ParallelShared>,
+    rg: &runtime::RgHandle,
+    sticky: bool,
+) {
+    let binding = match parallel::DeferredQueryTaskBinding::new(target, sticky) {
+        Ok(b) => b,
+        Err(e) => {
+            // Sticky eviction failure: fail-closed non-participation
+            // (pre-claim; the RG is untouched by this worker).
+            lane_trace(&format!(
+                "runtime-scan: helper refused (sticky eviction failed: {})",
+                e.message()
+            ));
+            payload.refused.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+    };
+    if let Err(e) = binding.validate() {
+        // Binder validate() refusal: fail-closed non-participation. The
+        // leader detects the nobody-participates case and falls back to
+        // the serial arm.
+        lane_trace(&format!(
+            "runtime-scan: helper bind refused: {}",
+            e.message()
+        ));
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    // Process-wide lane lease: pin-board lanes are shared across every
+    // concurrently-engaged query; exhaustion = fail-closed non-participation.
+    let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-scan: helper refused (no external lane)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let mut local = lane.local();
+    LAZY_CTX.with(|slot| {
+        // A stale ctx can only remain if a previous drive escaped its
+        // structured cleanup (a drive_pinned panic — already a protocol
+        // invariant break). Drop it: its guard (if any) was reclaimed by
+        // DeferredQueryTaskBinding::new's stale-guard containment above.
+        let _stale = slot.borrow_mut().replace(LazyCtx {
+            binding,
+            exit_unwind: None,
+            bind_failed: false,
+        });
+    });
+    let _outcome = payload.rt.drive_pinned(&mut local, rg);
+    parallel::gtrace("w.qtb.body.end");
+    emit_wfin("bound", lane.ordinal(), &local, rg);
+    let ctx = LAZY_CTX
+        .with(|slot| slot.borrow_mut().take())
+        .expect("lazy bind ctx present after the drive");
+    if ctx.binding.resumed_sticky() {
+        lane_trace("runtime-scan: sticky resume");
+    }
+    if ctx.binding.is_bound() {
+        // Teardown mode per drive_bound: self-error takes the release path
+        // and the binder's transaction-ABORT unbind cleans up.
+        let self_errored = ctx.bind_failed
+            || WORKER_EXEC
+                .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+        let teardown = catch_unwind(AssertUnwindSafe(|| teardown_worker_exec(!self_errored)));
+        let commit = !self_errored && matches!(teardown, Ok(Ok(())));
+        // The binding ALWAYS completes here (sticky park on the clean path,
+        // full unbind otherwise) before any error/panic propagates.
+        let finish = ctx.binding.finish(commit);
+        match teardown {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => payload.fail(e),
+            Err(unwind) => {
+                // The driver's catch layer records the panic; exit-committed
+                // unwinds keep dying (standing rethrows them to the glue).
+                std::panic::resume_unwind(unwind);
+            }
+        }
+        if let Err(e) = finish {
+            payload.fail(e);
+        }
+        // Post-drive, the RG always has an outcome (drive_pinned returns on
+        // one): no closed-generation cleanup drive is needed here.
+    }
+    if let Some(unwind) = ctx.exit_unwind {
+        // A FATAL landed inside the first-touch bind: the worker must die.
+        // Cleanup is done (nothing was bound); rethrow to the exit glue.
+        std::panic::resume_unwind(unwind);
+    }
+}
+
+/// The M1/M2 eager drive (PGRUST_RUNTIME_LAZYBIND=0): one binder wrap
+/// around lane lease + executor build + pinned drive — byte-for-byte the
+/// pre-ceremony-v2 path.
+fn helper_drive_eager(
+    payload: &Arc<RuntimeScanShared>,
+    target: &Arc<parallel::ParallelShared>,
+    rg: &runtime::RgHandle,
+) {
     // Process-wide lane lease: pin-board lanes are shared across every
     // concurrently-engaged query; exhaustion = fail-closed non-participation.
     let Some(lane) = payload.rt.acquire_external_lane() else {
@@ -515,7 +700,7 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, lane.ordinal(), &mut local, &rg)
+        drive_bound(payload, lane.ordinal(), &mut local, rg)
     });
     match bound {
         Ok(()) => {}
@@ -532,7 +717,7 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShar
                 // post-drive errors find it already complete and skip.
                 if rg.try_outcome().is_none() {
                     rg.abort();
-                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                    let _ = payload.rt.drive_pinned(&mut local, rg);
                 }
             } else {
                 // Binder validate() refusal: fail-closed non-participation.
@@ -688,28 +873,14 @@ fn emit_lfin(
     );
 }
 
-/// Count the source's hard-boundary regions (row groups on cbstore; 1 on
-/// boundary-free sources like heap). LFIN reporting only — called under
-/// wfin_enabled(); a binary search per region on cbstore geometry.
-fn source_boundary_count(source: &dyn runtime::MorselSource) -> usize {
-    let total = source.total_granules();
-    let mut n = 0usize;
-    let mut at = 0u64;
-    while at < total {
-        at = source.next_boundary_after(at).max(at + 1);
-        n += 1;
-    }
-    n
-}
-
-fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+fn build_worker_exec(payload: &RuntimeScanShared) -> PgResult<()> {
     parallel::gtrace("w.exec.build.begin");
     let r = build_worker_exec_inner(payload);
     parallel::gtrace("w.exec.build.end");
     r
 }
 
-fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
     WORKER_EXEC.with(|cell| -> PgResult<()> {
         // Defensive: stale state from an aborted previous drive would alias
         // a freed leader arena.
@@ -1858,7 +2029,10 @@ fn standing_wait(
     waiter: &runtime::CompletionWaiter,
 ) -> PgResult<StandingWait> {
     let shared = payload.pcxt_shared.get().expect("pcxt shared set before standing_wait");
-    let Some(entry) = parallel::standing::try_engage(shared, dop.max(0) as usize) else {
+    parallel::gtrace("l.publish.begin");
+    let engaged = parallel::standing::try_engage(shared, dop.max(0) as usize);
+    parallel::gtrace("l.publish.end");
+    let Some(entry) = engaged else {
         return Ok(StandingWait::Fallback);
     };
     // Leader-unwind containment: PRIVATE_SHUTDOWN completes the standing
@@ -1877,7 +2051,9 @@ fn standing_wait(
     loop {
         if let Some(o) = waiter.try_wait() {
             take_slot();
+            parallel::gtrace("l.close.begin");
             parallel::standing::close_and_await(&entry);
+            parallel::gtrace("l.close.end");
             if !traced {
                 lane_trace(&format!(
                     "runtime-scan: engaged standing dop={} granules={total_granules}",
@@ -1980,7 +2156,10 @@ fn standing_wait(
 fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
     let Some(private) = shared.private() else { return };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
-    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    // sticky=true: standing gang workers may retain the session bind
+    // between same-session engagements (ceremony-v2; launched/wpool
+    // helpers must always park boundary-clean, hence false above).
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, true)));
     if let Err(unwind) = r {
         payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(
