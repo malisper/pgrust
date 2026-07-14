@@ -532,3 +532,144 @@ fn io_token_multi_registrant_all_unparked() {
         registrant.join().unwrap();
     });
 }
+
+// ---------------------------------------------------------------------------
+// M1 §2.9 wait protocol (IoTokenCore::wait_with): the reap/park/complete
+// races behind bufmgr WaitIO's uring arm. The "ring" is modeled as one
+// atomic state bit (CQE consumed / buffer state settled) — completers set
+// state THEN complete the token, exactly reap_locked's order; the parker
+// runs the production protocol with model park primitives.
+// ---------------------------------------------------------------------------
+
+use waiter::io::IoWaitOutcome;
+
+/// Model park: a real block on the slot core (the LoomClock never times
+/// out, so this only returns on a delivered notify).
+fn model_park(slot: &Arc<Slot>) -> ParkResult {
+    slot.park_core(None, None, &CLOCK)
+}
+
+/// Model park with the cadence already elapsed: a latched notify still wins
+/// (Notified), otherwise the park returns Recheck immediately — models the
+/// recheck backstop firing.
+fn model_park_cadence_elapsed(slot: &Arc<Slot>) -> ParkResult {
+    slot.park_core(None, Some(0), &CLOCK)
+}
+
+#[test]
+fn uring_wait_reap_park_complete_race_never_hangs() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 1));
+
+        // The reaping thread (owner boundary reap or foreign blocking
+        // reap): buffer/ring state settles BEFORE the token completes.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            let io = Arc::clone(&io);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+                complete_all(&io);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            || model_park(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            || unreachable!("untimed model park never rechecks"),
+        );
+        // Ordering contract: however the wait exits, the settled state must
+        // be visible (reap_locked runs completions before complete()).
+        match outcome {
+            IoWaitOutcome::AlreadyCompleted | IoWaitOutcome::Completed => {
+                assert_eq!(state_done.load(Ordering::Acquire), 1);
+            }
+            other => unreachable!("model cannot reach {other:?}"),
+        }
+        reaper.join().unwrap();
+    });
+}
+
+#[test]
+fn uring_wait_dropped_completion_recheck_backstop() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 2));
+
+        // FAULT: the reaper consumes the CQE (state settles) but the token
+        // completion is dropped — the PGRUST_TEST_URING_DROP_TOKEN_COMPLETE
+        // shape. No unpark will ever arrive.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let reap_state = Arc::clone(&state_done);
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            // Cadence-elapsed park: Recheck fires (no completer wake exists).
+            || model_park_cadence_elapsed(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            // Degraded targeted reap: the waiter consumes the CQE itself
+            // (idempotent with the racing reaper in the real ring — the
+            // ring mutex + done bit serialize; here the store is idempotent
+            // by construction).
+            || reap_state.store(1, Ordering::Release),
+        );
+        match outcome {
+            // Backstop observed the settled state after the lost wake…
+            IoWaitOutcome::StateSettled
+            // …or the cadence beat the reaper and the waiter reaped itself.
+            | IoWaitOutcome::Reaped => {}
+            other => unreachable!("dropped completion cannot deliver {other:?}"),
+        }
+        assert_eq!(state_done.load(Ordering::Acquire), 1, "IO must be home");
+        reaper.join().unwrap();
+    });
+}
+
+#[test]
+fn uring_wait_backstop_races_live_completer() {
+    loom::model(|| {
+        let state_done = Arc::new(AtomicI32::new(0));
+        let io = Arc::new(IoTokenCore::<ModelHandle>::new(1, 3));
+
+        // Healthy completer racing a waiter whose cadence fires anyway
+        // (spurious recheck): every interleaving must terminate with the
+        // state home and never a false StateSettled.
+        let reaper = {
+            let state_done = Arc::clone(&state_done);
+            let io = Arc::clone(&io);
+            thread::spawn(move || {
+                state_done.store(1, Ordering::Release);
+                complete_all(&io);
+            })
+        };
+
+        let slot = fresh_slot();
+        let tok = slot.issue_token();
+        let reap_state = Arc::clone(&state_done);
+        let outcome = io.wait_with(
+            (Arc::clone(&slot), tok),
+            || model_park_cadence_elapsed(&slot),
+            || state_done.load(Ordering::Acquire) == 1,
+            || reap_state.store(1, Ordering::Release),
+        );
+        match outcome {
+            IoWaitOutcome::AlreadyCompleted
+            | IoWaitOutcome::Completed
+            | IoWaitOutcome::StateSettled => {
+                assert_eq!(state_done.load(Ordering::Acquire), 1);
+            }
+            IoWaitOutcome::Reaped => {} // waiter drove it home itself
+        }
+        reaper.join().unwrap();
+    });
+}

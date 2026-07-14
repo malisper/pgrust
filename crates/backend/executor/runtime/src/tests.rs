@@ -701,3 +701,169 @@ fn external_lane_leases_are_exclusive() {
     let again = rt.acquire_external_lane().expect("released lane reusable");
     assert_eq!(again.ordinal(), MAX_EXTERNAL_LANES - 1);
 }
+
+// ---- M1 §2.9: uring worker-loop duties (rings, boundary reap, IoGuard seams)
+
+/// Counting stand-ins for aio_uring's seam impls. aio_uring is not linked
+/// into this test binary, so the slots are ours to install (once —
+/// process-global; assertions below are deltas/floors because parallel
+/// tests' pools also drive them).
+mod uring_stub {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static RING_INITS: AtomicU64 = AtomicU64::new(0);
+    pub static RING_TEARDOWNS: AtomicU64 = AtomicU64::new(0);
+    pub static BOUNDARY_REAPS: AtomicU64 = AtomicU64::new(0);
+    pub const RING_ID: i32 = 7;
+
+    pub fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            aio_seams::uring_worker_ring_init::set(|| {
+                RING_INITS.fetch_add(1, Ordering::SeqCst);
+                RING_ID
+            });
+            aio_seams::uring_worker_ring_teardown::set(|| {
+                RING_TEARDOWNS.fetch_add(1, Ordering::SeqCst);
+            });
+            aio_seams::uring_boundary_reap::set(|| {
+                BOUNDARY_REAPS.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+    }
+}
+
+/// Worker start creates + registers the ring with the runtime worker
+/// struct; worker exit tears it down and clears the registration; the loop
+/// boundary-reaps at task boundaries.
+#[test]
+fn worker_loop_ring_lifecycle_and_boundary_reap() {
+    uring_stub::install();
+    let inits0 = uring_stub::RING_INITS.load(Ordering::SeqCst);
+    let teardowns0 = uring_stub::RING_TEARDOWNS.load(Ordering::SeqCst);
+
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    // Ring registration: every worker (standbys included) publishes its
+    // ring id at loop entry.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while (0..rt.nthreads()).any(|w| rt.worker_ring(w).is_none()) {
+        assert!(std::time::Instant::now() < deadline, "ring registration timed out");
+        std::thread::yield_now();
+    }
+    for w in 0..rt.nthreads() {
+        assert_eq!(rt.worker_ring(w), Some(uring_stub::RING_ID as u32));
+    }
+    assert!(uring_stub::RING_INITS.load(Ordering::SeqCst) >= inits0 + 3);
+
+    // Boundary reaping: run an RG; every task boundary reaps, so the count
+    // must move while the query executes.
+    let reaps0 = uring_stub::BOUNDARY_REAPS.load(Ordering::SeqCst);
+    let total = 4_096u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (_h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+    assert!(
+        uring_stub::BOUNDARY_REAPS.load(Ordering::SeqCst) > reaps0,
+        "task boundaries must reap"
+    );
+
+    // Worker exit: teardown runs, registration clears.
+    pool.shutdown();
+    assert!(uring_stub::RING_TEARDOWNS.load(Ordering::SeqCst) >= teardowns0 + 3);
+    for w in 0..rt.nthreads() {
+        assert_eq!(rt.worker_ring(w), None, "exit must clear the ring registration");
+    }
+}
+
+/// The §2.8/§2.9 IoGuard seam pair: a pool worker blocking inside a task
+/// donates its permit through `io_permit_release` (a standby absorbs the
+/// core — with ONE permit, the second granule can only run while the first
+/// holder is inside the released section; the test deadlocks if the wiring
+/// is broken) and reacquires on `io_permit_reacquire`. Non-workers get
+/// `false` (the no-permit contract).
+#[test]
+fn io_permit_seams_donate_core_to_standby() {
+    uring_stub::install();
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 1, // exactly one execution permit
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+
+    struct BlockingIoWork {
+        inner: Arc<SyntheticWork>,
+        release_seen: Arc<AtomicBool>,
+        tx: Mutex<std::sync::mpsc::Sender<()>>,
+        rx: Mutex<std::sync::mpsc::Receiver<()>>,
+        blocked_once: AtomicBool,
+    }
+    impl TaskSetWork for BlockingIoWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if range.start == 0 && !self.blocked_once.swap(true, Ordering::SeqCst) {
+                // Declared blocking section via the seams (what aio_uring's
+                // genuinely-pending wait does): release, block, reacquire.
+                assert!(
+                    aio_seams::io_permit_release::call(),
+                    "a permit-holding worker must be allowed to release"
+                );
+                self.release_seen.store(true, Ordering::SeqCst);
+                // Blocked: the ONLY permit is free; granule 1 must run.
+                self.rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("peer granule must run while we block");
+                aio_seams::io_permit_reacquire::call();
+            } else {
+                // The peer granule: only reachable on the donated permit.
+                self.tx.lock().unwrap().send(()).unwrap();
+            }
+            self.inner.run_morsel(worker, range);
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    let total = 2u64;
+    let inner = SyntheticWork::new(total, None, 0);
+    let release_seen = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let work = Arc::new(BlockingIoWork {
+        inner: Arc::clone(&inner),
+        release_seen: Arc::clone(&release_seen),
+        tx: Mutex::new(tx),
+        rx: Mutex::new(rx),
+        blocked_once: AtomicBool::new(false),
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let (_h, waiter) = rt.submit(QuerySpec {
+        query_id: 9,
+        tasksets: vec![TaskSetSpec {
+            // c0=1: granule-sized morsels, so granules 0 and 1 are separate
+            // claims and can land on different workers.
+            source: Arc::new(SyntheticMorselSource::new(total).with_c0(1)),
+            work,
+            deps: vec![],
+        }],
+    });
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    pool.shutdown();
+    inner.assert_all_executed_once();
+    assert!(release_seen.load(Ordering::SeqCst));
+
+    // Contract: a thread that is not a permit-holding pool worker must get
+    // false (and must then NOT call reacquire).
+    assert!(!aio_seams::io_permit_release::call());
+}

@@ -1286,6 +1286,7 @@ dependencies = [
  "types_error",
  "types_resowner",
  "types_storage",
+ "waiter",
  "waitevent_seams",
  "waiteventset",
  "xact_seams",
@@ -14161,6 +14162,7 @@ dependencies = [
 name = "runtime"
 version = "0.0.0"
 dependencies = [
+ "aio_seams",
  "init_small",
  "loom",
  "parallel",
