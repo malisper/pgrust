@@ -64,16 +64,38 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // anything a worker could still be parked on. Inert unless registered; on
 // this tree only the binder substrate e2e registers them (the runtime
 // pool/scheduler lane owns the production park).
-static POST_TASK_PARK: std::sync::OnceLock<fn(&ParallelShared)> = std::sync::OnceLock::new();
-static PRIVATE_SHUTDOWN: std::sync::OnceLock<fn(&(dyn Any + Send + Sync))> =
-    std::sync::OnceLock::new();
+// MULTI-REGISTRANT (M2 reconciliation of both lanes' independent fixes):
+// several runtime arms coexist (M1 runtime-scan, the M2 agg + distinct sink
+// arms), each with its own private-payload type — a single OnceLock slot
+// silently dropped the second arm's hook (its helpers would park as no-ops
+// and wedge the leader's wait). Every hook downcasts the context's private
+// payload and no-ops on foreign types, so calling every registrant in
+// registration order is correct by construction. Registration is append-only
+// and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
+// written once per arm per process, read per worker task.
+static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
-    let _ = POST_TASK_PARK.set(f);
+    let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
+    }
 }
 
 pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
-    let _ = PRIVATE_SHUTDOWN.set(f);
+    let mut v = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
+    }
+}
+
+fn post_task_park_hooks() -> Vec<fn(&ParallelShared)> {
+    POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn private_shutdown_hooks() -> Vec<fn(&(dyn Any + Send + Sync))> {
+    PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 pub enum WorkerMessage {
@@ -462,6 +484,57 @@ pub fn with_query_task_binding<T>(
     query_task_guard::with_query_task_binding(shared, body)
 }
 
+/// The binder's SESSION-state policy inputs, probed from the same sources
+/// `InitializeParallelDSM` serializes (temp namespace, serializable xact,
+/// pending invalidations) — the M1 runtime-scan leader's fail-closed
+/// admission reads this BEFORE creating a context: any set flag refuses
+/// engagement, because `validate()` (query_task_guard.rs) would refuse the
+/// bind on every helper anyway. `has_params` stays the caller's: params are
+/// executor state the leader already knows.
+pub fn query_task_policy_probe() -> QueryTaskBindingPolicy {
+    let (temp_ns, temp_toast_ns) = catalog_namespace::GetTempNamespaceState();
+    QueryTaskBindingPolicy {
+        has_params: false,
+        temp_state: temp_ns != InvalidOid || temp_toast_ns != InvalidOid,
+        serializable: xact::IsolationUsesXactSnapshot()
+            || predicate_seams::share_serializable_xact::call() != 0,
+        pending_invalidations: inval::TransactionHasPendingInvalidationMessages(),
+    }
+}
+
+/// One bounded leader latch wait + reset (the WaitForParallelWorkersToFinish
+/// wait quantum, recheck-cadence-bounded): the M1 runtime-scan leader's
+/// submit-and-park loop parks here between its completion/message/interrupt
+/// re-polls. An Err is a RAISED cancel disposition (statement_timeout /
+/// pg_cancel_backend delivered at the latch sleep, the thread model's signal
+/// delivery point) — the caller must abort + drain its RG and propagate
+/// (F1 chaos finding: swallowing it made every leader park loop
+/// uncancellable).
+pub fn wait_parallel_finish_quantum() -> PgResult<()> {
+    wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH)
+}
+
+/// True when every launched worker's underlying bgworker task has ENDED
+/// (thread exited, died, or parked back to the pool). The M1 runtime-scan
+/// leader's liveness probe: all stopped while the pinned RG is incomplete
+/// means nobody will ever finish the submitted work (helpers died pre-hook
+/// — e.g. an init-path panic-to-ERROR — leaves no channel message after
+/// Terminate and no refusal count). During normal hook driving the tasks
+/// are still BGWH_STARTED, so this cannot false-positive mid-drive.
+pub fn parallel_workers_all_stopped(id: ParallelContextId) -> bool {
+    let n = with_pcxt(id, |p| p.workers.len());
+    for i in 0..n {
+        let handle = with_pcxt(id, |p| p.workers.get(i).and_then(|w| w.bgwhandle));
+        let Some(handle) = handle else { continue };
+        match bgworker::GetBackgroundWorkerPid(&handle).0 {
+            bgworker::BgwHandleStatus::BGWH_STOPPED
+            | bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
     with_pcxt(id, |p| p.nworkers_launched)
 }
@@ -638,7 +711,7 @@ pub fn WaitForParallelWorkersToAttach(id: ParallelContextId) -> PgResult<()> {
         if all_known {
             return Ok(());
         }
-        wait_on_my_latch(WAIT_EVENT_BGWORKER_STARTUP);
+        wait_on_my_latch(WAIT_EVENT_BGWORKER_STARTUP)?;
     }
 }
 
@@ -646,7 +719,7 @@ const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
 const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 32;
 
-fn wait_on_my_latch(wait_event: u32) {
+fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = g::MyLatch().expect("parallel leader without MyLatch");
     // Both callers are recheck loops (worker attach/finish state), and the
     // wakes they rely on are the same cross-thread SetLatch delivery the
@@ -654,9 +727,20 @@ fn wait_on_my_latch(wait_event: u32) {
     // shared recheck cadence so a lost wake costs one period, not forever
     // (shm_mq stall.rs rationale; a timeout return is a legal spurious wake
     // because the caller re-polls before re-blocking).
+    //
+    // PROPAGATE the wait result (F1 chaos finding, defect layer 2b): in the
+    // thread model the latch sleep is the signal delivery point — WaitLatch
+    // runs drain_thread_signals(), so a raised statement-timeout/cancel
+    // disposition surfaces HERE as an Err. Discarding it (`let _ =`)
+    // CONSUMED the one-shot cancel and threw it away; the subsequent
+    // check_for_interrupts saw nothing and every arm's leader park loop
+    // became uncancellable. On Err the latch is deliberately NOT reset: the
+    // raise aborts the ceremony, and a leftover set latch only costs one
+    // spurious wake on the next wait.
     let mut d = shm_mq::stall::StallDetector::new();
-    let _ = shm_mq::stall::wait_latch_reporting(latch, wait_event, &mut d, &mut |_| {});
+    shm_mq::stall::wait_latch_reporting(latch, wait_event, &mut d, &mut |_| {})?;
     latch::ResetLatch(latch);
+    Ok(())
 }
 
 fn mark_known_attached(id: ParallelContextId, i: usize) {
@@ -721,7 +805,7 @@ pub fn WaitForParallelWorkersToFinish(id: ParallelContextId) -> PgResult<()> {
             }
         }
 
-        wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH);
+        wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH)?;
     }
 
     if let Some(shared) = with_pcxt(id, |p| p.shared.clone()) {
@@ -762,9 +846,10 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
 
-    // Release parked helpers BEFORE waiting for worker exit below.
-    if let Some(f) = PRIVATE_SHUTDOWN.get() {
-        if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+    // Release parked helpers BEFORE waiting for worker exit below. Every
+    // registered hook runs; each no-ops on foreign payload types.
+    if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+        for f in private_shutdown_hooks() {
             f(&*p);
         }
     }
@@ -1084,7 +1169,7 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
     // releases it (DestroyParallelContext at the latest). A hook panic must
     // not corrupt the already-sent outcome.
     if outcome.is_ok() {
-        if let Some(f) = POST_TASK_PARK.get() {
+        for f in post_task_park_hooks() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
         }
     }

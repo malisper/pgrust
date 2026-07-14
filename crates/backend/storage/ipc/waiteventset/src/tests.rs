@@ -257,3 +257,40 @@ fn rekey_reissues_waiter_token_and_routes_survive() {
     assert_eq!(occurred[0].events, WL_LATCH_SET);
     FreeWaitEventSet(set);
 }
+
+// Chaos F2: C's "static, never freed" sets (LatchWaitSet, FeBeWaitSet) are
+// reclaimed by process death; a session THREAD's death reclaims nothing, so
+// the thread-top WaitEventSetReleaseGuard must close every set still
+// registered. The external-fd accounting is thread-local, so it observes the
+// backend free (close + ReleaseExternalFD) deterministically.
+#[test]
+fn release_guard_frees_this_threads_sets() {
+    std::thread::spawn(|| {
+        setup_backend();
+        let baseline = fd::vfd::num_external_fds();
+
+        let guard = WaitEventSetReleaseGuard::new();
+        let first = CreateWaitEventSet(2).unwrap();
+        let _second = CreateWaitEventSet(3).unwrap();
+        assert_eq!(fd::vfd::num_external_fds(), baseline + 2);
+
+        // A set explicitly freed before the guard must not be released twice
+        // by the sweep (Option::take empties the slot).
+        let third = CreateWaitEventSet(1).unwrap();
+        FreeWaitEventSet(third);
+        assert_eq!(fd::vfd::num_external_fds(), baseline + 2);
+
+        drop(guard);
+        assert_eq!(fd::vfd::num_external_fds(), baseline);
+
+        // The registry is emptied wholesale: a later create starts over at
+        // the first slot, and freeing a pre-sweep handle is a no-op.
+        FreeWaitEventSet(first);
+        assert_eq!(fd::vfd::num_external_fds(), baseline);
+        let reused = CreateWaitEventSet(1).unwrap();
+        assert_eq!(reused, first);
+        FreeWaitEventSet(reused);
+    })
+    .join()
+    .unwrap();
+}

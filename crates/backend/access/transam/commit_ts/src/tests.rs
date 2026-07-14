@@ -175,6 +175,10 @@ fn disabled_module_arms_and_error_texts() {
     setup();
     deactivate();
 
+    // Order-independence: earlier tests in this binary may have recorded
+    // inserts (the activate-path test clears at ITS start, not its end).
+    XLOG_INSERTS.lock().unwrap().clear();
+
     // No-op writers while inactive.
     TransactionTreeSetCommitTsData(100, &[101, 102], 42, 0).unwrap();
     ExtendCommitTs(FirstNormalTransactionId).unwrap();

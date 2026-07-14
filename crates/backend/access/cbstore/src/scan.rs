@@ -2,7 +2,7 @@
 //! staging for the page-batch executor drive (docs/design/cbstore-impl.md §7.3).
 
 use ::datum::Datum;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 use ::types_slot::SlotData;
 
 pub use ::tableam_vocab::{ZoneCmp, ZoneQual, ZoneVerdict};
@@ -346,6 +346,12 @@ pub struct CbScanDescData<'mcx> {
     rg_checked: bool,
     decoded: bool,
     granule_rows: usize,
+    // Granule-range drive (runtime morsels, M1 scan pipelines): exclusive
+    // end granule WITHIN the positioned row group. While Some, the scan
+    // serves exactly `set_granule_range`'s claim — it never claims another
+    // RG (the range is the claim; morsel contract: a claim never crosses a
+    // row-group/dict-epoch boundary) and returns 0 at the range end.
+    range_end: Option<usize>,
     // Per-1024-row block admission mask for the decoded granule (bit b =
     // block b may contain qual matches); windows in cleared blocks are
     // skipped without staging.
@@ -504,6 +510,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             rg_checked: false,
             decoded: false,
             granule_rows: 0,
+            range_end: None,
             block_mask: !0,
             block_zm_enabled: !env_off("CBSTORE_DISABLE_BLOCK_ZM"),
             bloom_enabled: !env_off("CBSTORE_DISABLE_BLOOM"),
@@ -552,6 +559,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     // Parallel rescan additionally resets the shared cursor via
     // table_parallelscan_reinitialize (leader-only, before worker relaunch).
     pub fn reset_position(&mut self) {
+        self.range_end = None;
         self.rg_claimed = false;
         self.serial_next = 0;
         self.granule = 0;
@@ -574,6 +582,68 @@ impl<'mcx> CbScanDescData<'mcx> {
                 ad.reverted = false;
             }
         }
+    }
+
+    /// Part-global granule geometry for the runtime morsel source (M1 scan
+    /// pipelines): (total granules, row-group start prefix sums — the hard
+    /// morsel boundaries, since row group == dictionary epoch). None = empty
+    /// table. The starts vector is returned BY VALUE (nrgs+1 u64s) so the
+    /// Send+Sync morsel source never carries the thread-bound Rc<Part>.
+    pub fn granule_geometry(&self) -> Option<(u64, Vec<u64>)> {
+        let part = self.part.as_ref()?;
+        Some((part.total_granules(), part.granule_starts().to_vec()))
+    }
+
+    /// Position the scan on the absolute-granule range [g0, g1) — a runtime
+    /// morsel claim. The range must lie inside ONE row group (the runtime's
+    /// boundary-clamped claims guarantee it: a claim never splits a granule
+    /// and never crosses a row-group/dictionary-epoch edge), so the per-RG
+    /// visibility gate, dict memos, and zone pruning apply to the whole
+    /// claim exactly as the physical-order drive applies them.
+    ///
+    /// After this call, `next_window`/`getnextslot` serve exactly the
+    /// granules of the claim and report exhaustion at `g1` — the caller
+    /// re-arms with the next claim. The per-RG check state is carried over
+    /// when successive claims land in the same row group (same-verdict
+    /// pure predicates; re-checking would only repeat work).
+    pub fn set_granule_range(&mut self, g0: u64, g1: u64) -> PgResult<()> {
+        debug_assert!(self.adaptive.is_none(), "granule-range drive vs adaptive drive");
+        let Some(part) = self.part.as_ref() else {
+            return Err(Box::new(PgError::error(
+                "cbstore: granule range on an empty part".to_string(),
+            )));
+        };
+        if g0 >= g1 || g1 > part.total_granules() {
+            return Err(Box::new(PgError::error(format!(
+                "cbstore: invalid granule range [{g0}, {g1}) of {}",
+                part.total_granules()
+            ))));
+        }
+        let (rg, g_in_rg) = part.locate_granule(g0);
+        let rg_granules =
+            (part.rgs[rg].nrows as usize).div_ceil(GRANULE_ROWS);
+        let len = (g1 - g0) as usize;
+        if g_in_rg + len > rg_granules {
+            return Err(Box::new(PgError::error(format!(
+                "cbstore: granule range [{g0}, {g1}) crosses a row-group boundary"
+            ))));
+        }
+        // Same-RG carry-over: keep the rg_checked verdict (pure per-RG
+        // predicate — same snapshot, same footer, same answer) when
+        // successive claims land in the same row group; everything at
+        // granule grain resets per claim.
+        if !(self.rg_claimed && self.rg == rg) {
+            self.rg = rg;
+            self.rg_checked = false;
+        }
+        self.rg_claimed = true;
+        self.granule = g_in_rg;
+        self.decoded = false;
+        self.win = 0;
+        self.staged_rows = 0;
+        self.row_cursor = 0;
+        self.range_end = Some(g_in_rg + len);
+        Ok(())
     }
 
     /// Arm zone-ordered adaptive traversal on column `col` (0-based).
@@ -1099,6 +1169,11 @@ impl<'mcx> CbScanDescData<'mcx> {
         let nrgs = part.rgs.len();
         loop {
             if !self.rg_claimed {
+                // Granule-range drive: the range IS the claim — its end (or
+                // a whole-claim prune below) is exhaustion, never a new RG.
+                if self.range_end.is_some() {
+                    return Ok(0);
+                }
                 self.rg = self.claim_next_rg();
                 self.rg_claimed = true;
                 self.granule = 0;
@@ -1117,13 +1192,24 @@ impl<'mcx> CbScanDescData<'mcx> {
             let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
             if !self.rg_checked {
                 if !self.rg_visible(self.rg)? || !self.rg_zone_ok(self.rg) {
-                    self.granules_pruned += ngranules as u64;
+                    // Ranged: charge only the claim's granules (the rest of
+                    // the RG belongs to other claims, each pruned on its own
+                    // set_granule_range re-entry — rg_checked resets there).
+                    self.granules_pruned += match self.range_end {
+                        Some(end) => (end - self.granule) as u64,
+                        None => ngranules as u64,
+                    };
                     self.rg_claimed = false;
                     continue;
                 }
                 self.rg_checked = true;
             }
-            if self.granule >= ngranules {
+            if self.granule >= self.range_end.unwrap_or(usize::MAX).min(ngranules) {
+                // Ranged exhaustion keeps the RG claim so a contiguous next
+                // claim in the same row group carries the rg_checked verdict.
+                if self.range_end.is_some() {
+                    return Ok(0);
+                }
                 self.rg_claimed = false;
                 continue;
             }
