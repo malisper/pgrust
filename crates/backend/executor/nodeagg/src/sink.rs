@@ -42,7 +42,10 @@
 
 use ::datum::{Datum, NullableDatum};
 use ::execexpr::AggPerGroup;
-use ::lanetable::{EntryLayout, HashKind, KeyRepr, LaneAggTable};
+use ::lanetable::{EntryLayout, HashKind, KeyRepr};
+// Re-exported for the runtime combine-split's leaf emit (execmain names the
+// fragment table type without a direct lanetable dependency).
+pub use ::lanetable::LaneAggTable;
 use ::types_core::Oid;
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_fmgr::{LocalFcinfo, PGFunction};
@@ -1317,14 +1320,69 @@ impl SinkEmitBuf {
             + self.nulls.capacity()
             + self.arena.capacity()
     }
+}
 
-    /// Append another bucket-emit (the M3.5 combine-split path emits one
-    /// buf per sub-partition and concatenates — group order across
-    /// sub-partitions is a non-surface under the order-free posture).
-    pub fn append(&mut self, other: SinkEmitBuf) {
-        self.values.extend(other.values);
-        self.nulls.extend(other.nulls);
-        self.nrows += other.nrows;
+/// Cross-table emit ACCUMULATOR (the M3.5 combine-split path emits one
+/// table per sub-partition and concatenates — group order across
+/// sub-partitions is a non-surface under the order-free posture). Fix-ups
+/// stay UNRESOLVED until [`SinkEmitAcc::finish`], so byref outputs (numeric
+/// finalize images, text tails) from every absorbed table land in ONE arena
+/// and the datums resolve against its final heap buffer. The former
+/// `SinkEmitBuf::append` copied resolved datums while dropping the source
+/// buf's arena — a use-after-free for any byref emit column on the split
+/// path (winners-phase2 finding; word-keyed spill shapes CAN carry
+/// AvgInt8/AvgInt128 numeric images).
+#[derive(Default)]
+pub struct SinkEmitAcc {
+    values: Vec<Datum>,
+    nulls: Vec<bool>,
+    nrows: usize,
+    arena: Vec<u8>,
+    fixups: Vec<(usize, usize)>,
+}
+
+impl SinkEmitAcc {
+    /// Rows accumulated so far (the winners-only split path remaps its
+    /// fragment candidates against this base before each absorb).
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Finalize+project EVERY row of `t` (insertion order — the merge's
+    /// first-seen order), appending to the accumulator.
+    pub fn emit_table(&mut self, plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<()> {
+        let n = t.nrows();
+        self.values.reserve(n * plan.cols.len());
+        self.nulls.reserve(n * plan.cols.len());
+        for row in 0..n {
+            emit_row(plan, t, row, &mut self.values, &mut self.nulls, &mut self.arena, &mut self.fixups)?;
+        }
+        self.nrows += n;
+        Ok(())
+    }
+
+    /// Finalize+project ONLY `rows` of `t` (ascending, unique — the
+    /// winners-only compact discipline of [`sink_emit_bucket_rows`]),
+    /// appending to the accumulator. Row `rows[i]` becomes accumulator row
+    /// `base + i` where `base` was `self.nrows()` before the call.
+    pub fn emit_rows(&mut self, plan: &SinkEmitPlan, t: &LaneAggTable, rows: &[u32]) -> PgResult<()> {
+        debug_assert!(rows.windows(2).all(|w| w[0] < w[1]), "rows sorted+unique");
+        self.values.reserve(rows.len() * plan.cols.len());
+        self.nulls.reserve(rows.len() * plan.cols.len());
+        for &row in rows {
+            emit_row(plan, t, row as usize, &mut self.values, &mut self.nulls, &mut self.arena, &mut self.fixups)?;
+        }
+        self.nrows += rows.len();
+        Ok(())
+    }
+
+    /// The arena is final — resolve the byref datums and seal the buf.
+    pub fn finish(self) -> SinkEmitBuf {
+        let SinkEmitAcc { mut values, nulls, nrows, arena, fixups } = self;
+        for (i, off) in fixups {
+            values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
+        }
+        SinkEmitBuf { values, nulls, nrows, arena }
     }
 }
 
@@ -1550,20 +1608,9 @@ fn emit_row(
 /// once the arena's length is final — nothing worker-owned survives in the
 /// published buf.
 pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<SinkEmitBuf> {
-    let natts = plan.cols.len();
-    let n = t.nrows();
-    let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
-    let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
-    let mut arena: Vec<u8> = Vec::new();
-    let mut fixups: Vec<(usize, usize)> = Vec::new();
-    for row in 0..n {
-        emit_row(plan, t, row, &mut values, &mut nulls, &mut arena, &mut fixups)?;
-    }
-    // Arena is final — resolve the byref datums.
-    for (i, off) in fixups {
-        values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
-    }
-    Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
+    let mut acc = SinkEmitAcc::default();
+    acc.emit_table(plan, t)?;
+    Ok(acc.finish())
 }
 
 /// WINNERS-ONLY compact materializer (topn-winners-only inc-3): finalize+
@@ -1580,21 +1627,9 @@ pub fn sink_emit_bucket_rows(
     t: &LaneAggTable,
     rows: &[u32],
 ) -> PgResult<SinkEmitBuf> {
-    debug_assert!(rows.windows(2).all(|w| w[0] < w[1]), "rows sorted+unique");
-    let natts = plan.cols.len();
-    let n = rows.len();
-    let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
-    let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
-    let mut arena: Vec<u8> = Vec::new();
-    let mut fixups: Vec<(usize, usize)> = Vec::new();
-    for &row in rows {
-        emit_row(plan, t, row as usize, &mut values, &mut nulls, &mut arena, &mut fixups)?;
-    }
-    // Arena is final — resolve the byref datums.
-    for (i, off) in fixups {
-        values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
-    }
-    Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
+    let mut acc = SinkEmitAcc::default();
+    acc.emit_rows(plan, t, rows)?;
+    Ok(acc.finish())
 }
 
 /// SINGLE-LOCAL PASS-THROUGH emit (dop1-tax fix 3, class b): when the
@@ -2163,6 +2198,29 @@ pub fn sink_topn_merge(lists: &[Vec<SinkTopnCand>], bound: usize) -> Vec<(u16, u
         }
     }
     winners
+}
+
+/// SPLIT×SELECTION (winners-phase2): merge the per-FRAGMENT candidate lists
+/// of one split partition into that partition's local candidate list, in the
+/// selection total order, truncated to `bound`. Correctness is the design's
+/// partition-local superset lemma applied one level deeper: split fragments
+/// partition the partition's groups DISJOINTLY (sub-bucket hash routing), so
+/// a group in the partition's top-`bound` is beaten by fewer than `bound`
+/// groups in its own fragment and therefore survives its fragment's
+/// top-`bound` list — the union of fragment lists is a superset of the
+/// partition's top-`bound`, and the truncate-merge recovers exactly it.
+/// Full candidates (not `(bucket, row)` pairs) survive: the result feeds the
+/// finalize truncate-merge like any in-memory partition's list. Fragment
+/// lists are ≤bound each and fragments are few — concat+sort is inside any
+/// envelope that matters.
+pub fn sink_topn_merge_fragments(
+    lists: Vec<Vec<SinkTopnCand>>,
+    bound: usize,
+) -> Vec<SinkTopnCand> {
+    let mut all: Vec<SinkTopnCand> = lists.into_iter().flatten().collect();
+    all.sort_unstable();
+    all.truncate(bound);
+    all
 }
 
 // ---------------------------------------------------------------------------
@@ -3902,6 +3960,160 @@ mod tests {
                     assert_eq!(compact.nrows, rows.len());
                     for (c, &fi) in cands.iter().zip(&orig) {
                         assert_rows_equal(plan, &full, fi as usize, &compact, c.row as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    // -- Split×selection (winners-phase2) --------------------------------
+
+    #[test]
+    fn emit_acc_concat_matches_per_table_and_owns_arena() {
+        // The combine-split concatenation through SinkEmitAcc: rows equal
+        // the per-table emits, and every byref datum points into the
+        // FINISHED buf's own arena (the former SinkEmitBuf::append copied
+        // resolved datums while dropping the source arena — use-after-free
+        // for byref emit columns; this is its regression pin, on the
+        // arena-copying MultiText shape).
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(0),
+            cols: vec![SinkEmitCol::MultiText, SinkEmitCol::Agg { transno: 0 }],
+        };
+        let corpus = bytes_corpus();
+        let (a, b) = corpus.split_at(corpus.len() / 2);
+        let mut bufs: Vec<SinkEmitBuf> = Vec::new();
+        let mut acc = SinkEmitAcc::default();
+        for frag in [a, b] {
+            let mut t = mk_bytes_table(64);
+            for (i, key) in frag.iter().enumerate() {
+                bump_bytes(&mut t, Some(key.as_slice()), i as i64 + 1, 0);
+            }
+            bufs.push(sink_emit_bucket(&plan, &t).unwrap());
+            acc.emit_table(&plan, &t).unwrap();
+        }
+        let got = acc.finish();
+        assert_eq!(got.nrows, bufs.iter().map(|b| b.nrows).sum::<usize>());
+        let natts = plan.cols.len();
+        let arena = got.arena.as_ptr() as usize..got.arena.as_ptr() as usize + got.arena.len();
+        let mut ci = 0usize;
+        for buf in &bufs {
+            for fi in 0..buf.nrows {
+                assert_rows_equal(&plan, buf, fi, &got, ci);
+                // Ownership pin: the text datum resolves into GOT's arena.
+                let v = got.values[ci * natts];
+                assert!(
+                    arena.contains(&v.as_usize()),
+                    "byref datum must point into the finished buf's own arena"
+                );
+                ci += 1;
+            }
+        }
+    }
+
+    /// Disjoint fragment tables of one key space (the combine-split's
+    /// sub-partitions) + the whole table they partition. Fragment 0 carries
+    /// the NULL group (the split's NULL mini-combine leaf).
+    fn split_fragments(nfrags: usize) -> (Vec<LaneAggTable>, LaneAggTable) {
+        let mut whole = mk_table(64);
+        let mut frags: Vec<LaneAggTable> = (0..nfrags).map(|_| mk_table(64)).collect();
+        for k in 0..150i64 {
+            bump(&mut whole, Some(k), k % 7 + 1, k);
+            bump(&mut frags[(k % nfrags as i64) as usize], Some(k), k % 7 + 1, k);
+        }
+        bump(&mut whole, None, 3, 0);
+        bump(&mut frags[0], None, 3, 0);
+        (frags, whole)
+    }
+
+    #[test]
+    fn fragment_merge_matches_whole_partition_selection() {
+        // The split×selection lemma at unit altitude: per-fragment
+        // top-`bound` lists (disjoint sub-partitions), truncate-merged,
+        // select EXACTLY the whole partition's top-`bound` in the selection
+        // total order — candidates survive the split because a partition
+        // winner is beaten by fewer than `bound` groups in its own
+        // fragment (the design's superset lemma one level deeper).
+        let (frags, whole) = split_fragments(3);
+        for desc in [false, true] {
+            for bound in [1u32, 7, 10, 100, 200] {
+                let spec = SinkTopnSpec { transno: 0, desc, bound };
+                let want: Vec<(u64, bool, [u64; 2])> =
+                    sink_topn_candidates(&whole, &spec, 3)
+                        .expect("no NULL order keys")
+                        .iter()
+                        .map(|c| (c.badness, c.null_key, c.kw))
+                        .collect();
+                let lists: Vec<Vec<SinkTopnCand>> = frags
+                    .iter()
+                    .map(|t| sink_topn_candidates(t, &spec, 3).expect("no NULL order keys"))
+                    .collect();
+                let got: Vec<(u64, bool, [u64; 2])> =
+                    sink_topn_merge_fragments(lists, bound as usize)
+                        .iter()
+                        .map(|c| (c.badness, c.null_key, c.kw))
+                        .collect();
+                assert_eq!(got, want, "desc={desc} bound={bound}");
+            }
+        }
+    }
+
+    #[test]
+    fn fragment_winners_only_emit_remap_end_to_end() {
+        // The runtime split-leaf discipline end-to-end at unit level:
+        // per fragment select → sort rows → remap against the accumulator
+        // base → emit only those rows; after the fragment merge, every
+        // surviving candidate's accumulator row must carry ITS group (key
+        // column datum equals the candidate's key words) with the whole
+        // table's values (compared against the whole-table full emit).
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        let (frags, whole) = split_fragments(3);
+        let full = sink_emit_bucket(&plan, &whole).unwrap();
+        // Whole-table row index by key (NULL group under i64::MIN).
+        let mut by_key = std::collections::HashMap::new();
+        for row in 0..whole.nrows() {
+            by_key.insert(whole.row_key_int(row).unwrap_or(i64::MIN), row);
+        }
+        let natts = plan.cols.len();
+        for desc in [false, true] {
+            for bound in [1u32, 7, 10, 100] {
+                let spec = SinkTopnSpec { transno: 0, desc, bound };
+                let mut acc = SinkEmitAcc::default();
+                let mut lists: Vec<Vec<SinkTopnCand>> = Vec::new();
+                for t in &frags {
+                    let mut cands =
+                        sink_topn_candidates(t, &spec, 3).expect("no NULL order keys");
+                    let mut rows: Vec<u32> = cands.iter().map(|c| c.row).collect();
+                    rows.sort_unstable();
+                    let base = acc.nrows() as u32;
+                    for c in &mut cands {
+                        c.row = base + rows.binary_search(&c.row).expect("own row") as u32;
+                    }
+                    acc.emit_rows(&plan, t, &rows).unwrap();
+                    lists.push(cands);
+                }
+                let winners = sink_topn_merge_fragments(lists, bound as usize);
+                let buf = acc.finish();
+                assert_eq!(winners.len(), (bound as usize).min(whole.nrows()));
+                for w in &winners {
+                    let key = if w.null_key { i64::MIN } else { w.kw[0] as i64 };
+                    let fi = by_key[&key];
+                    assert_rows_equal(&plan, &full, fi, &buf, w.row as usize);
+                    // The key column datum IS the candidate's group.
+                    let ci = w.row as usize * natts;
+                    if w.null_key {
+                        assert!(buf.nulls[ci]);
+                    } else {
+                        assert_eq!(buf.values[ci].as_i64(), key);
                     }
                 }
             }

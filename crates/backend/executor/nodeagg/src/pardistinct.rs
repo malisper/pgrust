@@ -1720,6 +1720,437 @@ impl PdSinkMerged {
 }
 
 // ===========================================================================
+// PAREMIT — emission-in-combine for the runtime distinct sink (m2-sinks §6
+// applied to donor B; the winners-phase2 q14 car). For ADMITTED shapes —
+// a pure column shuffle of group keys and identity-finalized aggregate
+// results (`pd_paremit_cols` in lib.rs; the merge.rs `build_emit_plan`
+// precedent, which is how this sink's paremit worked BEFORE the adopt
+// generalization centralized emission on the leader) — each COMBINE claim
+// materializes its partition's fully-projected output rows in the plan
+// Sort's prefix order, and the leader's emit collapses to a cross-bucket
+// ordered merge + a datum memcpy per row. The adopt tail's bucket concat,
+// rep synthesis, full-table order_groups, and per-group finalize/project
+// (the measured ~1.4s-of-1.7s serial floor at q14@10M rt16, 835k groups)
+// all move into the parallel combine phase.
+//
+// Byte identity vs the adopt arm:
+//  (a) group ORDER — per-bucket `order_groups` + the leader merge run the
+//      SAME comparator (`hashgrouped::cmp_group_rows`, one authority, same
+//      collation): group keys are distinct and the prefix order is total,
+//      so the sorted sequence is unique — identical whether the full group
+//      set is sorted at adopt or merged from disjoint sorted buckets.
+//  (b) key DATUMS — the same 4B-header text varlena images and
+//      width-matched int datums `agg_hashgroup_adopt_merged` synthesizes.
+//  (c) aggregate RESULTS — count(DISTINCT) = the merged exact set's value
+//      count (`DistinctSet::value_count`: n strict int8inc_any replays
+//      from initcond '0' add exactly n; the at-most-one NULL strict-skips,
+//      contributing 0); vocab count/sum materialize exactly as the adopt
+//      override writes them; the admitted aggregates carry no finalfn
+//      (identity finalize), so the materialized datum IS the emitted one.
+//  (d) no HAVING on admitted shapes ⇒ one row per group — the adopt
+//      emit's exact row set.
+// ===========================================================================
+
+use crate::hashgrouped::{cmp_group_rows, order_groups, HashGroupOrderKey, HgKeyKind};
+
+/// One projected output column of a paremit engagement, resolved against
+/// the engagement's [`PdSpec`] (see [`pd_paremit_recipe`]).
+#[derive(Clone, Copy, Debug)]
+pub enum PdEmitCol {
+    /// Group key component `i` (`spec.key_atts` order = grpColIdx order).
+    Key(usize),
+    /// count(DISTINCT x): the merged exact set's non-null value count
+    /// (set index = `pertrans_sort` slot = `spec.sets` index).
+    SetCount(usize),
+    /// count(*) / count(x) vocab final: `acc`, never NULL (initcond '0').
+    VocabCount(usize),
+    /// sum(int2/int4) vocab final: `acc`, NULL iff `count == 0` (the
+    /// non-strict null-initval law the adopt override mirrors).
+    VocabSum(usize),
+}
+
+/// The leader-side tlist analysis' column vocabulary (spec-independent —
+/// derived by `pd_paremit_cols` before the engagement's `PdSpec` exists,
+/// so the economics tier can price the paremit shape; resolved into
+/// [`PdEmitCol`] by [`pd_paremit_recipe`] once the spec is derived).
+#[derive(Clone, Copy, Debug)]
+pub enum PdParemitCol {
+    Key(usize),
+    /// count(DISTINCT): `pertrans_sort` slot index (== `spec.sets` index —
+    /// `pd_derive_spec` builds sets in `pertrans_sort` order, one per slot).
+    SetCount(usize),
+    /// Non-distinct vocab aggregate, keyed by transno until the spec's
+    /// vocab table exists. `sum` = the SumInt NULL-iff-count-0 law.
+    Vocab { transno: u32, sum: bool },
+}
+
+/// The leader-derived paremit recipe (plain data; workers build ordered
+/// per-partition emit buckets from it during COMBINE).
+pub struct PdEmitRecipe {
+    pub cols: Vec<PdEmitCol>,
+    /// The plan Sort's prefix order over the group keys — the adopt arm's
+    /// `order_spec`, cloned (the ONE ordering authority).
+    pub order: Vec<HashGroupOrderKey>,
+    pub key_kinds: Vec<PdKeyKind>,
+}
+
+impl PdEmitRecipe {
+    #[inline]
+    fn nkeys(&self) -> usize {
+        self.key_kinds.len()
+    }
+
+    /// Comparator kinds: only the Text/int distinction matters for
+    /// `cmp_group_rows` (int key words are sign-extended values; width is
+    /// a datum-synthesis concern).
+    fn hg_kinds(&self) -> Vec<HgKeyKind> {
+        self.key_kinds
+            .iter()
+            .map(|k| match k {
+                PdKeyKind::Bytes => HgKeyKind::Text,
+                PdKeyKind::Int(_) => HgKeyKind::Int64,
+            })
+            .collect()
+    }
+}
+
+/// Resolve the tlist analysis against the derived spec. `None` is a
+/// fail-closed adopt fallback (structurally unreachable: `pd_derive_spec`
+/// covers every transno as a set or a vocab entry).
+pub fn pd_paremit_recipe(
+    spec: &PdSpec,
+    cols: &[PdParemitCol],
+    order: &[HashGroupOrderKey],
+) -> Option<PdEmitRecipe> {
+    let mut out = Vec::with_capacity(cols.len());
+    for c in cols {
+        out.push(match *c {
+            PdParemitCol::Key(i) => PdEmitCol::Key(i),
+            PdParemitCol::SetCount(si) => {
+                if si >= spec.sets.len() {
+                    return None;
+                }
+                PdEmitCol::SetCount(si)
+            }
+            PdParemitCol::Vocab { transno, sum } => {
+                let vi = spec.vocab.iter().position(|v| v.transno == transno)?;
+                if sum {
+                    PdEmitCol::VocabSum(vi)
+                } else {
+                    PdEmitCol::VocabCount(vi)
+                }
+            }
+        });
+    }
+    Some(PdEmitRecipe {
+        cols: out,
+        order: order.to_vec(),
+        key_kinds: spec.key_kinds.clone(),
+    })
+}
+
+/// One partition's fully-projected output rows in the plan Sort's prefix
+/// order — row-major datums (stride `natts`), self-contained: text datums
+/// point into the bucket's OWN `arena` (4B-header varlena images, live
+/// past worker teardown; moving the struct never moves the Vec's heap
+/// buffer, and the arena is never resized after the fix-up pass). The
+/// `keys`/`keynulls` sidecar carries the group key words (text = packed
+/// span over the CONTENT bytes inside `arena` — each image's header sits
+/// 4 bytes before its span) for the leader's ordered merge.
+#[derive(Default)]
+pub struct PdEmitBucket {
+    pub nrows: usize,
+    pub natts: usize,
+    pub values: Vec<Datum>,
+    pub nulls: Vec<bool>,
+    keys: Vec<i64>,
+    keynulls: Vec<u32>,
+    arena: Vec<u8>,
+}
+
+// SAFETY: owned plain data; the datums are byval words or pointers into the
+// bucket's own arena (the `PdHandedTable` self-contained-buffer argument).
+unsafe impl Send for PdEmitBucket {}
+unsafe impl Sync for PdEmitBucket {}
+
+impl PdEmitBucket {
+    /// Retained CONTENT bytes (R3 accounting — len-based, matching
+    /// `PdMerged::mem_bytes`'s convention; see that doc for why not
+    /// capacities).
+    pub fn mem_bytes(&self) -> usize {
+        self.values.len() * core::mem::size_of::<Datum>()
+            + self.nulls.len()
+            + self.keys.len() * 8
+            + self.keynulls.len() * 4
+            + self.arena.len()
+    }
+}
+
+/// COMBINE-claim tail (paremit mode): order one merged partition's groups
+/// by the plan Sort's prefix and materialize the projected rows. Runs on
+/// the combine worker; the merged partition (and its sets) drop with the
+/// claim — only this compact bucket is retained.
+pub fn pd_emit_bucket(
+    spec: &PdSpec,
+    recipe: &PdEmitRecipe,
+    m: &PdMerged<'_>,
+) -> PgResult<PdEmitBucket> {
+    let nkeys = recipe.nkeys();
+    debug_assert_eq!(nkeys, spec.nkeys());
+    let nsort = spec.sets.len();
+    let nvocab = spec.vocab.len();
+    let natts = recipe.cols.len();
+    let n = m.ngroups;
+    let kinds = recipe.hg_kinds();
+    let order = order_groups(
+        &m.keys,
+        &m.keynulls,
+        &recipe.order,
+        nkeys,
+        &kinds,
+        &m.key_arena,
+        n,
+    )?;
+    let mut out = PdEmitBucket {
+        nrows: n,
+        natts,
+        values: Vec::with_capacity(n * natts),
+        nulls: Vec::with_capacity(n * natts),
+        keys: Vec::with_capacity(n * nkeys),
+        keynulls: Vec::with_capacity(n),
+        arena: Vec::new(),
+    };
+    // Datum fix-ups for arena-backed images, resolved once the arena stops
+    // growing (Vec growth may move the heap buffer — the sink.rs
+    // `push_image` discipline).
+    let mut fixups: Vec<(usize, usize)> = Vec::new();
+    // Per-row text image offsets (arena offset of the varlena HEADER),
+    // indexed by key component; rebuilt each row.
+    let mut img_offs = vec![usize::MAX; nkeys];
+    for &g in &order {
+        let g = g as usize;
+        let knull = m.keynulls[g];
+        out.keynulls.push(knull);
+        // Sidecar pass: every key component gets a merge-comparable word —
+        // text content lands in the bucket arena ONCE per (group, text
+        // key), whether or not the projection references it (the order
+        // spec may sort on unprojected keys).
+        for (i, kind) in recipe.key_kinds.iter().enumerate() {
+            if knull & (1 << i) != 0 {
+                img_offs[i] = usize::MAX;
+                out.keys.push(0);
+                continue;
+            }
+            let w = m.keys[g * nkeys + i];
+            match kind {
+                PdKeyKind::Int(_) => {
+                    img_offs[i] = usize::MAX;
+                    out.keys.push(w);
+                }
+                PdKeyKind::Bytes => {
+                    let (off, len) = unpack_span(w);
+                    // 8-align the image (varlena consumers read 4-byte
+                    // headers + aligned payloads).
+                    let pad = (8 - out.arena.len() % 8) % 8;
+                    out.arena.resize(out.arena.len() + pad, 0);
+                    let img_off = out.arena.len();
+                    out.arena.extend_from_slice(
+                        &::types_tuple::varatt::set_varsize_4b_word((len + 4) as u32)
+                            .to_ne_bytes(),
+                    );
+                    out.arena.extend_from_slice(&m.key_arena[off..off + len]);
+                    img_offs[i] = img_off;
+                    // Span over the CONTENT (header + 4) — what the merge
+                    // comparator reads.
+                    out.keys.push(pack_span(img_off + 4, len));
+                }
+            }
+        }
+        for c in &recipe.cols {
+            match *c {
+                PdEmitCol::Key(i) => {
+                    if knull & (1 << i) != 0 {
+                        out.values.push(Datum::null());
+                        out.nulls.push(true);
+                        continue;
+                    }
+                    let w = m.keys[g * nkeys + i];
+                    match recipe.key_kinds[i] {
+                        // Width-matched int datums — adopt's synthesis.
+                        PdKeyKind::Int(PdInt::I16) => {
+                            out.values.push(Datum::from_i16(w as i16));
+                            out.nulls.push(false);
+                        }
+                        PdKeyKind::Int(PdInt::I32) => {
+                            out.values.push(Datum::from_i32(w as i32));
+                            out.nulls.push(false);
+                        }
+                        PdKeyKind::Int(PdInt::I64) => {
+                            out.values.push(Datum::from_i64(w));
+                            out.nulls.push(false);
+                        }
+                        PdKeyKind::Bytes => {
+                            debug_assert_ne!(img_offs[i], usize::MAX);
+                            fixups.push((out.values.len(), img_offs[i]));
+                            out.values.push(Datum::null());
+                            out.nulls.push(false);
+                        }
+                    }
+                }
+                PdEmitCol::SetCount(si) => {
+                    // The set IS the count (module-section doc, point c);
+                    // a group whose set never materialized (only-NULL or
+                    // no input values) counts 0 — initcond '0' + zero
+                    // non-strict-skipped replays.
+                    let count = m.dsets[g * nsort + si]
+                        .as_ref()
+                        .map_or(0, DistinctSet::value_count);
+                    out.values.push(Datum::from_i64(count as i64));
+                    out.nulls.push(false);
+                }
+                PdEmitCol::VocabCount(vi) => {
+                    let acc = m.states[g * 2 * nvocab + 2 * vi];
+                    out.values.push(Datum::from_i64(acc));
+                    out.nulls.push(false);
+                }
+                PdEmitCol::VocabSum(vi) => {
+                    // int2/4_sum: NULL iff no non-null input ever arrived
+                    // (the adopt override's exact arm).
+                    let acc = m.states[g * 2 * nvocab + 2 * vi];
+                    let cnt = m.states[g * 2 * nvocab + 2 * vi + 1];
+                    if cnt > 0 {
+                        out.values.push(Datum::from_i64(acc));
+                        out.nulls.push(false);
+                    } else {
+                        out.values.push(Datum::null());
+                        out.nulls.push(true);
+                    }
+                }
+            }
+        }
+    }
+    // Arena is final — resolve the image datums.
+    for (i, off) in fixups {
+        out.values[i] = Datum::from_usize(out.arena[off..].as_ptr() as usize);
+    }
+    Ok(out)
+}
+
+/// Leader-side paremit emit state: the published buckets + a binary
+/// min-heap of non-empty bucket indices keyed by each bucket's current
+/// head row under the recipe order. Comparisons are fallible (varstr_cmp
+/// collation seams), so the heap sifts are hand-rolled.
+pub struct PdParemitState {
+    buckets: Vec<PdEmitBucket>,
+    cursors: Vec<usize>,
+    heap: Vec<u32>,
+    order: Vec<HashGroupOrderKey>,
+    kinds: Vec<HgKeyKind>,
+    nkeys: usize,
+    pub natts: usize,
+}
+
+impl PdParemitState {
+    /// Row-major datum block of the row `pd_paremit_next` returned.
+    #[inline]
+    pub fn row(&self, bucket: usize, row: usize) -> (&[Datum], &[bool]) {
+        let b = &self.buckets[bucket];
+        let base = row * b.natts;
+        (&b.values[base..base + b.natts], &b.nulls[base..base + b.natts])
+    }
+
+    /// Retained content bytes (the teardown-release floor's input).
+    pub fn mem_bytes(&self) -> usize {
+        self.buckets.iter().map(PdEmitBucket::mem_bytes).sum()
+    }
+
+    fn cmp_heads(&self, a: u32, b: u32) -> PgResult<core::cmp::Ordering> {
+        let (ba, bb) = (&self.buckets[a as usize], &self.buckets[b as usize]);
+        let ord = cmp_group_rows(
+            &self.order,
+            self.nkeys,
+            &self.kinds,
+            (&ba.keys, &ba.keynulls, &ba.arena, self.cursors[a as usize]),
+            (&bb.keys, &bb.keynulls, &bb.arena, self.cursors[b as usize]),
+        )?;
+        // Distinct groups partition disjointly across buckets: a cross-
+        // bucket tie on the full prefix would mean a duplicated group.
+        debug_assert_ne!(ord, core::cmp::Ordering::Equal, "group in two buckets");
+        Ok(ord)
+    }
+
+    fn sift_down(&mut self, mut i: usize) -> PgResult<()> {
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut best = i;
+            if l < self.heap.len()
+                && self.cmp_heads(self.heap[l], self.heap[best])? == core::cmp::Ordering::Less
+            {
+                best = l;
+            }
+            if r < self.heap.len()
+                && self.cmp_heads(self.heap[r], self.heap[best])? == core::cmp::Ordering::Less
+            {
+                best = r;
+            }
+            if best == i {
+                return Ok(());
+            }
+            self.heap.swap(i, best);
+            i = best;
+        }
+    }
+}
+
+/// Build the leader emit state (heapify over non-empty buckets).
+pub fn pd_paremit_state(
+    recipe: &PdEmitRecipe,
+    buckets: Vec<PdEmitBucket>,
+) -> PgResult<PdParemitState> {
+    let natts = recipe.cols.len();
+    let heap: Vec<u32> = buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.nrows > 0)
+        .map(|(i, _)| i as u32)
+        .collect();
+    let cursors = vec![0usize; buckets.len()];
+    let mut st = PdParemitState {
+        buckets,
+        cursors,
+        heap,
+        order: recipe.order.clone(),
+        kinds: recipe.hg_kinds(),
+        nkeys: recipe.nkeys(),
+        natts,
+    };
+    if !st.heap.is_empty() {
+        for i in (0..st.heap.len() / 2).rev() {
+            st.sift_down(i)?;
+        }
+    }
+    Ok(st)
+}
+
+/// Next row in the global prefix order: `(bucket, row)` into
+/// [`PdParemitState::row`], or `None` at end of stream.
+pub fn pd_paremit_next(st: &mut PdParemitState) -> PgResult<Option<(usize, usize)>> {
+    let Some(&top) = st.heap.first() else { return Ok(None) };
+    let b = top as usize;
+    let row = st.cursors[b];
+    st.cursors[b] += 1;
+    if st.cursors[b] >= st.buckets[b].nrows {
+        let last = st.heap.len() - 1;
+        st.heap.swap(0, last);
+        st.heap.pop();
+    }
+    if !st.heap.is_empty() {
+        st.sift_down(0)?;
+    }
+    Ok(Some((b, row)))
+}
+
+// ===========================================================================
 // M3.5 accept-side spill surface (docs/design/m3.5-spill.md §4, inc-3a).
 // ADDITIVE ONLY: the builder's own Mcx-bound spill machinery (`evict_sets`
 // / distinctset `SpillState`) is untouched — the sink Locals still carry
@@ -2827,5 +3258,325 @@ mod tests {
             let merged = pd_concat_buckets(&spec, buckets);
             assert_eq!(canon_b(&spec, &direct), canon_b(&spec, &merged), "depth {depth}");
         }
+    }
+
+    // --- PAREMIT (fleet-run: the known local nodeagg test-binary link
+    // limitation) ---------------------------------------------------------
+
+    /// pg_catalog "C" collation — statically known-C, so the comparator's
+    /// varstr_cmp rides the catalog-free memcmp fast path in units.
+    const C_COLL: Oid = 950;
+
+    fn paremit_spec(key_kinds: Vec<PdKeyKind>, nsets: usize, vocab: Vec<PdVocab>) -> PdSpec {
+        PdSpec {
+            key_atts: (0..key_kinds.len() as u16).collect(),
+            key_kinds,
+            vocab,
+            sets: (0..nsets)
+                .map(|_| PdSetSpec { att: 0, kind: DistinctKeyKind::Int64 })
+                .collect(),
+            max_att: 8,
+            worker_budget: usize::MAX,
+        }
+    }
+
+    /// Bucket build vs the adopt reference: `order_groups` over the same
+    /// merged partition IS the adopt arm's ordering authority, and the
+    /// datum vocabulary (width-matched ints, 4B-header text images, set
+    /// value counts, vocab count/sum with the NULL-iff-count-0 law) must
+    /// match `agg_hashgroup_adopt_merged`'s materialization exactly.
+    #[test]
+    fn paremit_bucket_matches_adopt_reference() {
+        use crate::hashgrouped::HashGroupOrderKey;
+        let spec = paremit_spec(
+            vec![PdKeyKind::Bytes, PdKeyKind::Int(PdInt::I32)],
+            1,
+            vec![
+                PdVocab { transno: 1, kind: PdVocabKind::CountStar },
+                PdVocab { transno: 2, kind: PdVocabKind::SumInt { att: 3, kind: PdInt::I16 } },
+            ],
+        );
+        // 5 groups: empty text, multi-byte UTF-8, NULL text key, NULL int
+        // key, plain — with set faces {values, empty+seen_null, None} and
+        // a cnt=0 sum (NULL law).
+        let texts: [&[u8]; 5] = [b"", "h\u{e9}llo".as_bytes(), b"", b"abc", b"zz"];
+        let ints: [i64; 5] = [1, 2, 3, 0, 5];
+        let keynulls: [u32; 5] = [0, 0, 0b01, 0b10, 0];
+        let mut key_arena = Vec::new();
+        let mut keys = Vec::new();
+        for g in 0..5 {
+            if keynulls[g] & 1 != 0 {
+                keys.push(0);
+            } else {
+                let off = key_arena.len();
+                key_arena.extend_from_slice(texts[g]);
+                keys.push(pack_span(off, texts[g].len()));
+            }
+            keys.push(if keynulls[g] & 2 != 0 { 0 } else { ints[g] });
+        }
+        let mut dsets: Vec<Option<DistinctSet<'static>>> = Vec::new();
+        let mut s0 = DistinctSet::new();
+        for v in [10i64, 20, 10, 30] {
+            s0.insert_i64(v);
+        }
+        dsets.push(Some(s0)); // 3 distinct values
+        let mut s1 = DistinctSet::new();
+        s1.seen_null = true; // strict-skip: counts 0
+        dsets.push(Some(s1));
+        dsets.push(None); // never-materialized set: counts 0
+        let mut s3 = DistinctSet::new();
+        s3.insert_i64(7);
+        dsets.push(Some(s3));
+        dsets.push(Some(DistinctSet::new()));
+        // (acc, cnt) pairs, stride 4: CountStar then SumInt; group 3's sum
+        // saw no non-null input (cnt=0 → NULL).
+        let states = vec![
+            4, 4, 100, 4, // g0
+            1, 1, -7, 1, // g1
+            2, 2, 0, 2, // g2
+            3, 3, 0, 0, // g3: sum NULL
+            1, 1, 8, 1, // g4
+        ];
+        let m: PdMerged<'static> =
+            PdMerged { ngroups: 5, keys, key_arena, keynulls: keynulls.to_vec(), states, dsets };
+        let order_spec = vec![
+            HashGroupOrderKey { key_idx: 0, desc: false, nulls_first: false, collation: C_COLL },
+            HashGroupOrderKey { key_idx: 1, desc: true, nulls_first: true, collation: 0 },
+        ];
+        let recipe = pd_paremit_recipe(
+            &spec,
+            &[
+                PdParemitCol::Key(0),
+                PdParemitCol::Key(1),
+                PdParemitCol::SetCount(0),
+                PdParemitCol::Vocab { transno: 1, sum: false },
+                PdParemitCol::Vocab { transno: 2, sum: true },
+            ],
+            &order_spec,
+        )
+        .expect("recipe resolves");
+        let b = pd_emit_bucket(&spec, &recipe, &m).expect("bucket builds");
+        assert_eq!(b.nrows, 5);
+        assert_eq!(b.natts, 5);
+        // The adopt reference order over the same partition.
+        let kinds = recipe.hg_kinds();
+        let order =
+            order_groups(&m.keys, &m.keynulls, &recipe.order, 2, &kinds, &m.key_arena, 5)
+                .expect("reference order");
+        let expect_counts: [i64; 5] = [3, 0, 0, 1, 0];
+        for (row, &g) in order.iter().enumerate() {
+            let g = g as usize;
+            assert_eq!(b.keynulls[row], m.keynulls[g], "keynulls follow the order");
+            let base = row * 5;
+            // Key(0) text: 4B-header image whose content equals the source
+            // bytes; the sidecar span points at the content, the datum 4
+            // bytes earlier at the header.
+            if m.keynulls[g] & 1 == 0 {
+                let (off, len) = unpack_span(b.keys[row * 2]);
+                assert_eq!(&b.arena[off..off + len], texts[g]);
+                assert_eq!(
+                    u32::from_ne_bytes(b.arena[off - 4..off].try_into().unwrap()),
+                    ::types_tuple::varatt::set_varsize_4b_word((len + 4) as u32)
+                );
+                assert_eq!(
+                    b.values[base].as_usize(),
+                    b.arena[off - 4..].as_ptr() as usize,
+                    "text datum points at its own arena image"
+                );
+                assert!(!b.nulls[base]);
+            } else {
+                assert!(b.nulls[base]);
+            }
+            // Key(1) int32: width-matched datum.
+            if m.keynulls[g] & 2 == 0 {
+                assert_eq!(b.values[base + 1].as_i32(), ints[g] as i32);
+                assert!(!b.nulls[base + 1]);
+            } else {
+                assert!(b.nulls[base + 1]);
+            }
+            // count(DISTINCT) = value count, never NULL.
+            assert_eq!(b.values[base + 2].as_i64(), expect_counts[g]);
+            assert!(!b.nulls[base + 2]);
+            // CountStar = acc, never NULL.
+            assert_eq!(b.values[base + 3].as_i64(), m.states[g * 4]);
+            assert!(!b.nulls[base + 3]);
+            // SumInt: NULL iff cnt == 0.
+            if m.states[g * 4 + 3] > 0 {
+                assert_eq!(b.values[base + 4].as_i64(), m.states[g * 4 + 2]);
+                assert!(!b.nulls[base + 4]);
+            } else {
+                assert!(b.nulls[base + 4]);
+            }
+        }
+    }
+
+    /// K-way merge oracle: the leader's cross-bucket merge over per-bucket
+    /// `order_groups`-sorted rows must equal `order_groups` over the
+    /// CONCATENATED group set (the adopt arm's exact sequence) — int keys
+    /// with a NULL under nulls_first + DESC, and text keys across
+    /// bucket-local arenas under "C" collation.
+    #[test]
+    fn paremit_merge_matches_whole_order() {
+        use crate::hashgrouped::HashGroupOrderKey;
+        // --- int case: 31 distinct keys (one NULL), DESC, nulls_first.
+        let spec = paremit_spec(
+            vec![PdKeyKind::Int(PdInt::I64)],
+            0,
+            vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
+        );
+        let order_spec = vec![HashGroupOrderKey {
+            key_idx: 0,
+            desc: true,
+            nulls_first: true,
+            collation: 0,
+        }];
+        let recipe = pd_paremit_recipe(
+            &spec,
+            &[PdParemitCol::Key(0), PdParemitCol::Vocab { transno: 0, sum: false }],
+            &order_spec,
+        )
+        .expect("recipe resolves");
+        let all_keys: Vec<i64> = (0..31).map(|i| (i * 37 % 61) - 30).collect();
+        let mut buckets = Vec::new();
+        let mut cat_keys = Vec::new();
+        let mut cat_nulls = Vec::new();
+        for bi in 0..3usize {
+            let mut keys = Vec::new();
+            let mut keynulls = Vec::new();
+            for (i, &k) in all_keys.iter().enumerate() {
+                if i % 3 != bi {
+                    continue;
+                }
+                let isnull = i == 7;
+                keys.push(if isnull { 0 } else { k });
+                keynulls.push(u32::from(isnull));
+                cat_keys.push(if isnull { 0 } else { k });
+                cat_nulls.push(u32::from(isnull));
+            }
+            let n = keys.len();
+            let m: PdMerged<'static> = PdMerged {
+                ngroups: n,
+                keys,
+                key_arena: Vec::new(),
+                keynulls,
+                states: vec![1; n * 2],
+                dsets: Vec::new(),
+            };
+            buckets.push(pd_emit_bucket(&spec, &recipe, &m).expect("bucket"));
+        }
+        let kinds = recipe.hg_kinds();
+        let whole = order_groups(
+            &cat_keys,
+            &cat_nulls,
+            &recipe.order,
+            1,
+            &kinds,
+            &[],
+            cat_keys.len(),
+        )
+        .expect("whole order");
+        let expect: Vec<(bool, i64)> = whole
+            .iter()
+            .map(|&g| (cat_nulls[g as usize] != 0, cat_keys[g as usize]))
+            .collect();
+        let mut st = pd_paremit_state(&recipe, buckets).expect("state");
+        let mut got = Vec::new();
+        while let Some((b, row)) = pd_paremit_next(&mut st).expect("next") {
+            let (values, nulls) = st.row(b, row);
+            got.push((nulls[0], if nulls[0] { 0 } else { values[0].as_i64() }));
+        }
+        assert_eq!(got, expect);
+
+        // --- text case: distinct strings across two bucket-local arenas.
+        let tspec = paremit_spec(
+            vec![PdKeyKind::Bytes],
+            0,
+            vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
+        );
+        let torder = vec![HashGroupOrderKey {
+            key_idx: 0,
+            desc: false,
+            nulls_first: false,
+            collation: C_COLL,
+        }];
+        let trecipe = pd_paremit_recipe(
+            &tspec,
+            &[PdParemitCol::Key(0), PdParemitCol::Vocab { transno: 0, sum: false }],
+            &torder,
+        )
+        .expect("recipe resolves");
+        let words: [&[u8]; 8] = [
+            b"zebra",
+            b"",
+            "\u{e9}clair".as_bytes(),
+            b"apple",
+            b"apples",
+            b"Zebra",
+            b"mid",
+            b"appl",
+        ];
+        let mut tbuckets = Vec::new();
+        let mut cat_keys = Vec::new();
+        let mut cat_arena = Vec::new();
+        let mut cat_nulls = Vec::new();
+        for bi in 0..2usize {
+            let mut keys = Vec::new();
+            let mut arena = Vec::new();
+            for (i, w) in words.iter().enumerate() {
+                if i % 2 != bi {
+                    continue;
+                }
+                let off = arena.len();
+                arena.extend_from_slice(w);
+                keys.push(pack_span(off, w.len()));
+                let coff = cat_arena.len();
+                cat_arena.extend_from_slice(w);
+                cat_keys.push(pack_span(coff, w.len()));
+                cat_nulls.push(0);
+            }
+            let n = keys.len();
+            let m: PdMerged<'static> = PdMerged {
+                ngroups: n,
+                keys,
+                key_arena: arena,
+                keynulls: vec![0; n],
+                states: vec![1; n * 2],
+                dsets: Vec::new(),
+            };
+            tbuckets.push(pd_emit_bucket(&tspec, &trecipe, &m).expect("bucket"));
+        }
+        let tkinds = trecipe.hg_kinds();
+        let whole = order_groups(
+            &cat_keys,
+            &cat_nulls,
+            &trecipe.order,
+            1,
+            &tkinds,
+            &cat_arena,
+            cat_keys.len(),
+        )
+        .expect("whole order");
+        let expect: Vec<Vec<u8>> = whole
+            .iter()
+            .map(|&g| {
+                let (off, len) = unpack_span(cat_keys[g as usize]);
+                cat_arena[off..off + len].to_vec()
+            })
+            .collect();
+        let mut st = pd_paremit_state(&trecipe, tbuckets).expect("state");
+        let mut got = Vec::new();
+        while let Some((b, row)) = pd_paremit_next(&mut st).expect("next") {
+            let (values, nulls) = st.row(b, row);
+            assert!(!nulls[0]);
+            // Read back through the varlena datum: 4B header + content.
+            let ptr = values[0].as_usize() as *const u8;
+            // SAFETY: the datum points into the state's live bucket arena.
+            let hdr = unsafe { core::ptr::read_unaligned(ptr.cast::<u32>()) };
+            let len = (::types_tuple::varatt::varsize_4b_word(hdr) as usize) - 4;
+            let content =
+                unsafe { core::slice::from_raw_parts(ptr.add(4), len) };
+            got.push(content.to_vec());
+        }
+        assert_eq!(got, expect);
     }
 }
