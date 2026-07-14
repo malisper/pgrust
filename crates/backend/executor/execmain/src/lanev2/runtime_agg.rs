@@ -51,9 +51,10 @@ use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
     sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
     sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
-    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, SinkCombineFn, SinkEmitBuf,
-    SinkEmitPlan, SinkKeySpec, SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand,
-    SinkTopnSpec, SINK_NBUCKETS, SINK_NULL_BUCKET,
+    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, sink_topn_merge_fragments,
+    LaneAggTable, SinkCombineFn, SinkEmitAcc, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
+    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand, SinkTopnSpec, SINK_NBUCKETS,
+    SINK_NULL_BUCKET,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -140,12 +141,14 @@ struct AggSink {
     /// degrade to the full drain (correct either way — winners are a drain
     /// filter, never a data transform).
     topn_degraded: AtomicBool,
-    /// Top-N materialization mode (topn-winners-only inc-2), meaningful only
-    /// when `topn` is armed. Resolved by the §3.2 ladder: leader admission
-    /// (spill-armed / kill switch → FullDrain) then SEAL (pass-through shape
-    /// → FullDrain) — IMMUTABLE once the first combine claim runs (SEAL
-    /// happens-before every combine by last-worker-out). Encoded as
-    /// `TOPN_MODE_*` in an AtomicU8 because SEAL writes through `&self`.
+    /// Top-N materialization mode (topn-winners-only inc-2; winners-phase2
+    /// lifts the spill-armed exclusion), meaningful only when `topn` is
+    /// armed. Resolved by the §3.2 ladder: leader admission (kill switch, or
+    /// spill-armed under `WINNERS_SPILL=0`, → FullDrain) then SEAL
+    /// (pass-through shape → FullDrain) — IMMUTABLE once the first combine
+    /// claim runs (SEAL happens-before every combine by last-worker-out).
+    /// Encoded as `TOPN_MODE_*` in an AtomicU8 because SEAL writes through
+    /// `&self`.
     topn_mode: AtomicU8,
     /// WinnersOnly selection declined (NULL/pending order transvalue): the
     /// whole attempt is REFUSED → R5 serial rerun (demote=refusal doctrine;
@@ -261,11 +264,19 @@ impl TopnMode {
     }
 }
 
-/// §3.2 step 1 — leader-admission mode resolution: spill-armed engagements
-/// keep FullDrain (phase-1 H3 exclusion: the m35 combine-split emits
-/// piecemeal and keeps its free degrade), as does the kill switch.
-fn resolve_topn_mode_admission(spill_armed: bool, winners_enabled: bool) -> TopnMode {
-    if spill_armed || !winners_enabled {
+/// §3.2 step 1 — leader-admission mode resolution. PHASE 2 (winners-phase2,
+/// split×selection): spill-armed engagements now resolve WinnersOnly too —
+/// the m35 combine-split composes with the selection (per-fragment candidate
+/// lists, merged before truncation; see `split_leaf_emit`), so the phase-1
+/// H3 exclusion is lifted. `PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL=0`
+/// restores the phase-1 arm exactly (spill-armed → FullDrain — the A/B
+/// attribution channel); the kill switch still forces FullDrain everywhere.
+fn resolve_topn_mode_admission(
+    spill_armed: bool,
+    winners_enabled: bool,
+    winners_spill_enabled: bool,
+) -> TopnMode {
+    if !winners_enabled || (spill_armed && !winners_spill_enabled) {
         TopnMode::FullDrain
     } else {
         TopnMode::WinnersOnly
@@ -293,6 +304,19 @@ fn topn_winners_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL` (default ON): 0/off restores the
+/// ratified phase-1 spill-armed exclusion (spill-armed engagements ride
+/// FullDrain) — the winners-phase2 A/B and rollback channel.
+fn topn_winners_spill_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL").as_deref(),
             Ok("0") | Ok("off")
         )
     })
@@ -612,28 +636,48 @@ impl runtime::ParallelSink for AggSink {
                 let Some(set) = &self.spill_set else {
                     return Ok(CombineOutcome::OverBudget);
                 };
-                // Top-N composition: the split emits sub-partition tables
-                // piecemeal (no single merged table to select on) — an armed
-                // spec degrades globally to the full drain. Winners-only
-                // phase-1 exclusion (§3.3): the split requires the spill arm,
-                // and spill-armed engagements resolve FullDrain at admission,
-                // so this degrade is always mode-consistent.
-                if self.topn.is_some() {
-                    debug_assert_eq!(
-                        self.topn_mode(),
-                        TopnMode::FullDrain,
-                        "combine-split implies the spill arm, which resolves FullDrain"
-                    );
+                // Top-N × split composition (winners-phase2 §split×selection):
+                //  * WinnersOnly — each split LEAF (a disjoint sub-partition
+                //    of this partition's groups) runs the selection on its
+                //    own merged fragment table and materializes ONLY its
+                //    candidates; the fragment candidate lists merge BEFORE
+                //    truncation into this partition's local list (superset
+                //    lemma one level deeper — sink_topn_merge_fragments).
+                //    A leaf decline REFUSES the attempt (R5), same as the
+                //    in-memory WinnersOnly arm — rows are already gone from
+                //    other claims' compact bufs.
+                //  * FullDrain — decision-1 verbatim: the split emits
+                //    piecemeal with no selection, and the armed spec
+                //    degrades globally to the plain full drain.
+                let winners_split =
+                    self.topn.is_some() && self.topn_mode() == TopnMode::WinnersOnly;
+                if self.topn.is_some() && !winners_split {
                     self.topn_degraded.store(true, Ordering::Release);
                 }
-                let mut out = SinkEmitBuf::default();
-                if !split_views_and_emit(self, b, set, locals, &mut out)? {
-                    return Ok(CombineOutcome::OverBudget);
+                let mut sel = winners_split.then(|| SplitSel {
+                    spec: self.topn.as_ref().expect("winners split has a spec"),
+                    part: part as u16,
+                    lists: Vec::new(),
+                });
+                let mut acc = SinkEmitAcc::default();
+                match split_views_and_emit(self, b, set, locals, &mut acc, &mut sel)? {
+                    SplitOutcome::DepthCap => return Ok(CombineOutcome::OverBudget),
+                    SplitOutcome::Declined => return Ok(CombineOutcome::TopnDeclined),
+                    SplitOutcome::Done => {}
+                }
+                if let Some(sel) = sel {
+                    let bound = sel.spec.bound as usize;
+                    // SAFETY: partition `part` is claimed exactly once
+                    // (runtime contract); this is its single writer.
+                    unsafe {
+                        *self.topn_cands[part as usize].get() =
+                            sink_topn_merge_fragments(sel.lists, bound);
+                    }
                 }
                 // R3: the split result is retained emit content like any
                 // other combine result — meter it (retain_bucket is the
                 // single writer of the claimed partition's slot).
-                self.retain_bucket(part, out, locals.len())?;
+                self.retain_bucket(part, acc.finish(), locals.len())?;
                 return Ok(CombineOutcome::Done);
             }
             // In-memory path: rebuild each Local's spilled face for this
@@ -1204,18 +1248,93 @@ pub(super) fn stream_part_rows(
     }
 }
 
+/// Split verdicts, threaded up the recursion.
+enum SplitOutcome {
+    Done,
+    /// Depth-cap overflow — the caller refuses (OverBudget → R5 rerun).
+    DepthCap,
+    /// A split leaf's winners-only selection declined (fault injection; the
+    /// NULL-order decline is structurally unreachable on cbstore feeds) —
+    /// the caller refuses through the topn channel (R5 rerun).
+    Declined,
+}
+
+/// Split×selection context (winners-phase2): the per-FRAGMENT candidate
+/// lists of one split partition, collected across leaves and truncate-merged
+/// by the caller into the partition's local candidate list.
+struct SplitSel<'a> {
+    spec: &'a SinkTopnSpec,
+    part: u16,
+    lists: Vec<Vec<SinkTopnCand>>,
+}
+
+/// One split LEAF's emit: winners-only (`sel` Some) selects the fragment
+/// table's candidates first and materializes ONLY those rows — candidate
+/// `row` payloads remapped to the accumulator's compact indices (fragment
+/// rows land at `acc.nrows() + i` in `emit_rows`'s ascending order) — while
+/// FullDrain (`sel` None) materializes the whole fragment. Returns false on
+/// a selection decline. Counters mirror the in-memory arm: `cand_rows`
+/// counts MATERIALIZED candidates (so the `mat_rows == cand_rows` compact-
+/// materialization law holds on split shapes too; the partition's stored
+/// list is truncated separately by the fragment merge).
+fn split_leaf_emit(
+    sink: &AggSink,
+    t: &LaneAggTable,
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<bool> {
+    let ctr = sink.topn.is_some();
+    let Some(s) = sel else {
+        let t0 = ctr.then(std::time::Instant::now);
+        acc.emit_table(&sink.emit, t)?;
+        if let Some(t0) = t0 {
+            sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            sink.topn_ctr.mat_rows.fetch_add(t.nrows() as u64, Ordering::Relaxed);
+        }
+        return Ok(true);
+    };
+    let ts = std::time::Instant::now();
+    let selected = if topn_fault_decline() {
+        None // leg fault injection: the unreachable decline, split leaf form
+    } else {
+        sink_topn_candidates(t, s.spec, s.part)
+    };
+    sink.topn_ctr.select_ns.fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let Some(mut cands) = selected else {
+        return Ok(false);
+    };
+    let mut rows: Vec<u32> = cands.iter().map(|c| c.row).collect();
+    rows.sort_unstable();
+    let base = acc.nrows() as u32;
+    for c in &mut cands {
+        c.row = base
+            + rows
+                .binary_search(&c.row)
+                .expect("candidate row present in its own row set") as u32;
+    }
+    let t0 = std::time::Instant::now();
+    acc.emit_rows(&sink.emit, t, &rows)?;
+    sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    sink.topn_ctr.mat_rows.fetch_add(rows.len() as u64, Ordering::Relaxed);
+    sink.topn_ctr.cand_rows.fetch_add(cands.len() as u64, Ordering::Relaxed);
+    s.lists.push(cands);
+    Ok(true)
+}
+
 /// inc-2b top level: route every face of over-budget partition `b` into a
 /// depth-1 sub-bucket file, then combine each sub-partition (recursing where
-/// still too big), emitting into `out`. Returns false on depth-cap overflow
-/// (the caller refuses → R5 serial rerun). NULL faces never route — they
-/// merge through one bounded mini-combine at the end.
+/// still too big), emitting each leaf into `acc` (winners-only leaves emit
+/// candidates only — `split_leaf_emit`). NULL faces never route — they merge
+/// through one bounded mini-combine at the end (a leaf like any other: the
+/// NULL group rides the selection's null tier).
 fn split_views_and_emit(
     sink: &AggSink,
     b: usize,
     set: &Arc<::spillset::SpillSet>,
     locals: &[AggSinkLocal],
-    out: &mut SinkEmitBuf,
-) -> PgResult<bool> {
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<SplitOutcome> {
     sink.combine_splits.fetch_add(1, Ordering::Relaxed);
     sink.split_depth_max.fetch_max(1, Ordering::Relaxed);
     let state_words = sink.state_bytes / 8;
@@ -1254,16 +1373,24 @@ fn split_views_and_emit(
         }
     }
     router.flush()?;
-    if !split_subparts_and_emit(sink, b, set, &router.file, 1, out)? {
-        return Ok(false);
+    match split_subparts_and_emit(sink, b, set, &router.file, 1, acc, sel)? {
+        SplitOutcome::Done => {}
+        other => return Ok(other),
     }
     if !null_runs.is_empty() {
         // The NULL group: one bounded mini-combine over its blocks only.
+        let ctr = sink.topn.is_some();
+        let t0 = ctr.then(std::time::Instant::now);
         let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
-        out.append(sink_emit_bucket(&sink.emit, &t)?);
+        if let Some(t0) = t0 {
+            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if !split_leaf_emit(sink, &t, acc, sel)? {
+            return Ok(SplitOutcome::Declined);
+        }
     }
-    Ok(true)
+    Ok(SplitOutcome::Done)
 }
 
 /// Combine each sub-partition of a routed split file; sub-partitions still
@@ -1274,8 +1401,9 @@ fn split_subparts_and_emit(
     set: &Arc<::spillset::SpillSet>,
     file: &::spillset::SpillFile,
     depth: u32,
-    out: &mut SinkEmitBuf,
-) -> PgResult<bool> {
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<SplitOutcome> {
     let state_words = sink.state_bytes / 8;
     let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
     for s in 0..SINK_NBUCKETS {
@@ -1286,15 +1414,16 @@ fn split_subparts_and_emit(
         let rows = blen / row_bytes;
         if est_table_bytes(sink, rows) > sink.budget {
             if depth + 1 > spill_split_depth_cap() {
-                return Ok(false);
+                return Ok(SplitOutcome::DepthCap);
             }
             sink.combine_splits.fetch_add(1, Ordering::Relaxed);
             sink.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
             let mut router = SubRouter::new(sink, set, b, depth + 1);
             stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
             router.flush()?;
-            if !split_subparts_and_emit(sink, b, set, &router.file, depth + 1, out)? {
-                return Ok(false);
+            match split_subparts_and_emit(sink, b, set, &router.file, depth + 1, acc, sel)? {
+                SplitOutcome::Done => {}
+                other => return Ok(other),
             }
             continue;
         }
@@ -1308,10 +1437,17 @@ fn split_subparts_and_emit(
             runs: &[],
             remainder: None,
         }];
+        let ctr = sink.topn.is_some();
+        let t0 = ctr.then(std::time::Instant::now);
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
-        out.append(sink_emit_bucket(&sink.emit, &t)?);
+        if let Some(t0) = t0 {
+            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if !split_leaf_emit(sink, &t, acc, sel)? {
+            return Ok(SplitOutcome::Declined);
+        }
     }
-    Ok(true)
+    Ok(SplitOutcome::Done)
 }
 
 /// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
@@ -2735,10 +2871,17 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         topn,
         topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
         topn_degraded: AtomicBool::new(false),
-        // §3.2 step 1 (meaningful only when `topn` armed): spill-armed
-        // engagements and the kill switch keep decision-1 FullDrain.
+        // §3.2 step 1 (meaningful only when `topn` armed): the kill switch
+        // keeps decision-1 FullDrain; spill-armed engagements compose
+        // (phase 2 split×selection) unless WINNERS_SPILL=0 restores the
+        // phase-1 exclusion.
         topn_mode: AtomicU8::new(
-            resolve_topn_mode_admission(spill_set.is_some(), topn_winners_enabled()).encode(),
+            resolve_topn_mode_admission(
+                spill_set.is_some(),
+                topn_winners_enabled(),
+                topn_winners_spill_enabled(),
+            )
+            .encode(),
         ),
         topn_refused: AtomicBool::new(false),
         topn_ctr: TopnCounters::default(),
@@ -3185,13 +3328,17 @@ mod topn_mode_tests {
     /// never ride it — covered by the e2e tranche's adopt legs.)
     #[test]
     fn mode_resolution_matrix() {
-        // Admission: spill-armed → FullDrain regardless of the switch.
-        assert_eq!(resolve_topn_mode_admission(true, true), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_admission(true, false), TopnMode::FullDrain);
-        // Kill switch off → FullDrain.
-        assert_eq!(resolve_topn_mode_admission(false, false), TopnMode::FullDrain);
-        // Product default: armed, spill-disarmed, switch on → WinnersOnly.
-        assert_eq!(resolve_topn_mode_admission(false, true), TopnMode::WinnersOnly);
+        // Kill switch off → FullDrain regardless of everything else.
+        assert_eq!(resolve_topn_mode_admission(true, false, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, false, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, false, false), TopnMode::FullDrain);
+        // Phase 2 (split×selection): spill-armed engagements compose.
+        assert_eq!(resolve_topn_mode_admission(true, true, true), TopnMode::WinnersOnly);
+        // WINNERS_SPILL=0 restores the ratified phase-1 exclusion exactly.
+        assert_eq!(resolve_topn_mode_admission(true, true, false), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, true, false), TopnMode::WinnersOnly);
+        // Product default: armed, spill-disarmed, switches on → WinnersOnly.
+        assert_eq!(resolve_topn_mode_admission(false, true, true), TopnMode::WinnersOnly);
         // SEAL: the pass-through census (1 Local, no runs, no spill face)
         // forces FullDrain; a widened engagement keeps the admission mode.
         assert_eq!(
