@@ -1273,6 +1273,168 @@ pub fn agg_hashgroup_accept_batch_row(
     HgBatchRow::Absorbed(hg.mem() <= hg.budget)
 }
 
+/// Where a batched span stopped (q9q10-serial lane increment 2).
+pub enum HgSpanStop {
+    /// Every candidate row in `[pos, n)` absorbed (`absorbed` = fast rows;
+    /// sel-dead rows are skipped and counted nowhere, as in the per-row leg).
+    Done { absorbed: u32 },
+    /// Rows `[pos, at)` absorbed; row `at` needs the per-row path (probe
+    /// miss — group creation defers the row as its representative — or a
+    /// forced-fallback bit). The caller emits + accepts row `at`, then
+    /// re-enters at `at + 1`.
+    NeedSlot { at: u32, absorbed: u32 },
+    /// The shared budget crossed AFTER row `at` was fully absorbed — the
+    /// caller degrades (exactly `HgBatchRow::Absorbed(false)`), and the
+    /// remaining rows ride the per-row post-degrade path.
+    Budget { at: u32, absorbed: u32 },
+}
+
+/// Batched span accept: process staged rows `[pos, n)` in ONE call with the
+/// loop-invariant state hoisted — no per-row hashgroup deref, no per-row
+/// `switch_to` (set parks and vocab folds write the STORAGE arrays directly
+/// under the `cur == None` invariant established by the entry `switch_out`),
+/// no per-row call marshaling. Semantics are the per-row
+/// [`agg_hashgroup_accept_batch_row`] loop, byte-for-byte: same row order,
+/// same group-creation order (the stop/resume protocol keeps probe misses
+/// at their exact positions), same per-row shared-budget accounting and
+/// degrade point.
+///
+/// `views` carries one `(values, isnull)` cell-pointer pair per column in
+/// shape order: `nkeys` grouping keys, then `nargs` DISTINCT args, then the
+/// arg-bearing fold-vocab cells. `sel`/`fb` are the staged window's
+/// whole-qual and forced-fallback bitmap words.
+///
+/// # Safety
+/// Every pointer pair in `views` must span `n` staged rows and stay valid
+/// for the duration of the call (the lanev2 staged-window snapshot
+/// contract); `sel`/`fb` must cover bit `n - 1`.
+pub unsafe fn agg_hashgroup_accept_batch_span(
+    node: &mut AggStateData<'_>,
+    views: &[(*const Datum, *const bool)],
+    nargs: usize,
+    sel: Option<&[u64]>,
+    fb: &[u64],
+    pos: u32,
+    n: u32,
+) -> HgSpanStop {
+    debug_assert!(matches!(
+        node.hashgroup.as_deref(),
+        Some(HashGroupedState { phase: HgPhase::Building, .. })
+    ));
+    // Establish the storage invariant: no group's state loaded in the node.
+    switch_out(node);
+    let AggStateData { hashgroup, pertrans_sort, .. } = node;
+    let hg = hashgroup.as_deref_mut().expect("hashgroup state");
+    debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
+    let nkeys = hg.nkeys;
+    let nsort = hg.nsort;
+    let nvocab = hg.vocab.len();
+    debug_assert_eq!(views.len(), nkeys + nargs + hg_fold_cells(&hg.vocab));
+    let mut words = [0i64; 32];
+    let mut absorbed = 0u32;
+    for i in pos..n {
+        let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
+        if let Some(s) = sel {
+            if s[w] & bit == 0 {
+                continue; // qual-filtered (exact whole-qual verdict)
+            }
+        }
+        if fb[w] & bit != 0 {
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        }
+        let ii = i as usize;
+        let mut nulls = 0u32;
+        for j in 0..nkeys {
+            let (v, nl) = views[j];
+            // SAFETY: caller contract — `views` spans `n` staged rows.
+            let (d, isnull) = unsafe { (*v.add(ii), *nl.add(ii)) };
+            if isnull {
+                nulls |= 1 << j;
+                words[j] = 0;
+                continue;
+            }
+            words[j] = match hg.key_kinds[j] {
+                HgKeyKind::Int16 => d.as_i16() as i64,
+                HgKeyKind::Int32 => d.as_i32() as i64,
+                HgKeyKind::Int64 => d.as_i64(),
+                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
+            };
+        }
+        let h = hg.key_hash(&words[..nkeys], nulls);
+        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
+        let Some(g) = found else {
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        };
+        let c = g as usize;
+        // Set parks, straight into storage (cur == None invariant).
+        let mut sets = 0usize;
+        for (j, ps) in pertrans_sort.iter().enumerate() {
+            debug_assert!(ps.dset.is_none(), "cur == None: every set is in storage");
+            let kind = ps.set_kind.expect("batch shape: set-mode pertrans");
+            let (v, nl) = views[nkeys + j];
+            // SAFETY: caller contract, as above.
+            let (d, isnull) = unsafe { (*v.add(ii), *nl.add(ii)) };
+            let dset = hg.dsets[c * nsort + j].get_or_insert_with(DistinctSet::new);
+            if isnull {
+                dset.seen_null = true;
+            } else {
+                match kind {
+                    DistinctKeyKind::Int16 => dset.insert_i64(d.as_i16() as i64),
+                    DistinctKeyKind::Int32 => dset.insert_i64(d.as_i32() as i64),
+                    DistinctKeyKind::Int64 => dset.insert_i64(d.as_i64()),
+                    DistinctKeyKind::Bytes => unreachable!("batch shape excludes byte sets"),
+                }
+            }
+            sets += dset.mem_bytes();
+        }
+        hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
+        hg.set_mem[c] = sets;
+        // Vocab folds (mixed-shape admission), sidecar words.
+        if nvocab != 0 {
+            let base = c * 2 * nvocab;
+            let mut fi = nkeys + nargs;
+            for (vi, v) in hg.vocab.iter().enumerate() {
+                let (acc, cnt) = (base + 2 * vi, base + 2 * vi + 1);
+                match v.kind {
+                    crate::pardistinct::PdVocabKind::CountStar => hg.fold[acc] += 1,
+                    crate::pardistinct::PdVocabKind::CountAny { .. } => {
+                        let (_, nl) = views[fi];
+                        fi += 1;
+                        // SAFETY: caller contract, as above.
+                        if !unsafe { *nl.add(ii) } {
+                            hg.fold[acc] += 1;
+                        }
+                    }
+                    crate::pardistinct::PdVocabKind::SumInt { kind, .. }
+                    | crate::pardistinct::PdVocabKind::AvgInt { kind, .. } => {
+                        let (vv, nl) = views[fi];
+                        fi += 1;
+                        // SAFETY: caller contract, as above.
+                        let (d, isnull) = unsafe { (*vv.add(ii), *nl.add(ii)) };
+                        if !isnull {
+                            hg.fold[acc] += kind.read(d);
+                            hg.fold[cnt] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        absorbed += 1;
+        if hg.mem() > hg.budget {
+            return HgSpanStop::Budget { at: i, absorbed };
+        }
+    }
+    HgSpanStop::Done { absorbed }
+}
+
+/// Number of staged fold cells a vocab consumes (arg-bearing entries only).
+pub fn hg_fold_cells(vocab: &[crate::pardistinct::PdVocab]) -> usize {
+    vocab
+        .iter()
+        .filter(|v| !matches!(v.kind, crate::pardistinct::PdVocabKind::CountStar))
+        .count()
+}
+
 /// Merge the sidecar fold words into the REAL per-group transition states —
 /// once, with no group loaded (post `switch_out`): at build finish (after
 /// the deferred-rep replay advanced `pergroup` through the program) or at
