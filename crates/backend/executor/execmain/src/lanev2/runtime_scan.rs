@@ -1,9 +1,16 @@
 //! M1 RUNTIME SCAN PIPELINES — the first real pipeline on the morsel
 //! runtime (docs/design/parallelism-redesign-2026-07.md §2.1/§2.2/§5-M1).
 //!
-//! Shape: a SERIAL-plan plain Agg over a cbstore SeqScan (COUNT/plain-agg
-//! fold shapes with optional PREWHERE quals — the lane's simplest fold
-//! pipelines), executed as ONE runtime TaskSet at DOP N. The plan surface
+//! Shape: a SERIAL-plan plain Agg over a cbstore OR heap SeqScan
+//! (COUNT/plain-agg fold shapes with optional PREWHERE/kernel quals — the
+//! lane's simplest fold pipelines), executed as ONE runtime TaskSet at DOP
+//! N. The morsel source dispatches on the table AM: cbstore granules with
+//! row-group hard boundaries ([`CbstoreGranuleSource`]) or heap block
+//! ranges with none ([`HeapBlockSource`] — C's
+//! table_block_parallelscan_nextpage chunked claim, runtime-adaptive).
+//! Heap visibility is per tuple inside the page batch, under the leader
+//! snapshot the task binding restores — exactly a C parallel seq scan
+//! worker's check. The plan surface
 //! stays the serial plan (force-plans discipline: EXPLAIN unchanged, no
 //! planner change); engagement is FORCED/explicit:
 //!
@@ -41,7 +48,8 @@
 //! whitelisted kinds only; no params (extern or exec); binder policy
 //! sources empty (no temp namespace, not serializable, no pending invals);
 //! parallel-safe scan expressions; MVCC snapshot; not already in parallel
-//! mode / a parallel worker; cbstore scan admitted by the lane gate;
+//! mode / a parallel worker; a cbstore or plain heap scan admitted by the
+//! lane gate; fold-mode shapes prove the fold prefix arms on the leader;
 //! first-class dynamic gates (EPQ / instrumented / backward) via
 //! `seq_scan_fusible`. If every launched helper refuses the bind before
 //! any granule is claimed, the leader aborts the (untouched) RG and falls
@@ -217,17 +225,12 @@ impl RuntimeScanShared {
                             "runtime scan worker outer node is not a SeqScan",
                         )));
                     };
-                    if !::nodeseqscan::seq_scan_cb_set_granule_range(
+                    ::nodeseqscan::seq_scan_set_morsel_range(
                         ss,
                         estate,
                         range.start,
                         range.end,
-                    )? {
-                        return Err(Box::new(PgError::new(
-                            ERROR,
-                            "runtime scan worker scan is not cbstore",
-                        )));
-                    }
+                    )?;
                     match mode {
                         DriveMode::Fold => {
                             super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
@@ -449,6 +452,17 @@ fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                                 estate,
                                 super::ScanFeedShape::FoldPrefix { agg: &aps.agg },
                             )?;
+                            // The fold drain reads staged lane columns; the
+                            // leader proved this exact arm on ITS scan (the
+                            // decide probe / the engagement probe), so an
+                            // unarmed worker prefix is a divergence, not a
+                            // shape refusal.
+                            if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime scan worker fold prefix failed to arm",
+                                )));
+                            }
                             super::arm_fold_len_lanes(&aps.agg, ss);
                         }
                         DriveMode::Census => {
@@ -670,6 +684,36 @@ impl runtime::MorselSource for CbstoreGranuleSource {
     }
 }
 
+/// Block-range morsel source over a heap relation (M1 heap source, the
+/// parallelism redesign's "heap morsels are block ranges"): granule = ONE
+/// block, C's `table_block_parallelscan_nextpage` claim unit at its finest —
+/// the runtime's duration-adaptive sizing builds the multi-block runs C
+/// precomputes as chunks, and the last-worker photo-finish replaces C's
+/// end-of-scan chunk ramp-down. Heap has no dictionary epochs, so there are
+/// no interior hard boundaries (`next_boundary_after` = the trait default:
+/// total). Visibility is per tuple inside the page batch
+/// (`page_collect_tuples` under the task-bound leader snapshot — exactly a
+/// C parallel seq scan worker's check), not a source property.
+struct HeapBlockSource {
+    /// rs_nblocks at the leader's scan start (the C parallel-scan contract:
+    /// blocks appended after scan start are not visited; their tuples are
+    /// invisible to the scan snapshot anyway).
+    nblocks: u64,
+}
+
+impl runtime::MorselSource for HeapBlockSource {
+    fn total_granules(&self) -> u64 {
+        self.nblocks
+    }
+
+    /// A heap block stages ~50-250 tuples (vs 8,192/granule on cbstore).
+    /// Seed the ramp at 16 blocks (128KB, a few thousand rows — tens of µs
+    /// on fold shapes): same probe-morsel sizing intent as cbstore's C0=2.
+    fn startup_c0(&self) -> u64 {
+        16
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Leader-side parallel-safety walk (executor-side, fail-closed): the scan's
 // qual + targetlist may run on helpers, so every function they invoke must
@@ -772,7 +816,10 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     let Some(rt) = runtime::global() else { return Ok(None) };
 
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    if !seq_scan_fusible(ss, estate)?
+        || !(is_cb || ::nodeseqscan::seq_scan_is_heap(ss))
+    {
         return Ok(None);
     }
     if !agg_runtime_partial_admissible(agg) {
@@ -780,10 +827,25 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return Ok(None);
     }
     // Census shapes (fold plan reads no columns) engage only with a qual:
-    // the bare count(*) is the Meta/footer arm's, and a qual-less census
-    // scan would stage nothing for the per-row drive.
+    // cbstore's bare count(*) is the Meta/footer arm's, heap's is the fused
+    // storeless batch advance's (O(pages) serially — a per-row parallel
+    // drive would lose), and a qual-less census scan would stage nothing
+    // for the per-row drive either way.
     if ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
         && ss.ss.qual.is_none()
+    {
+        return Ok(None);
+    }
+    // Fold-mode shapes must have an armable fold prefix on this scan:
+    // cbstore proved it at decide time (only the Fold choice reaches here
+    // with a column-reading plan); heap arrives through the Refuse choice,
+    // which conflates the census shape with fold-not-ready (projected scan
+    // or unarmable prefix). The probe is decide's identical idempotent arm
+    // — free for an already-armed cbstore scan, decisive for heap. The
+    // worker-side arm re-verifies (divergence is an error, not a wrong
+    // answer).
+    if drive_mode(agg) == DriveMode::Fold
+        && (ss.ss.ps_ProjInfo.is_some() || !super::probe_arm_fold_prefix(agg, ss, estate)?)
     {
         return Ok(None);
     }
@@ -842,11 +904,25 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return Ok(None);
     }
 
-    // --- Geometry: enough granules to be worth a gang.
-    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
-    else {
-        return Ok(None);
+    // --- Geometry: enough granules to be worth a gang. The source is the
+    // AM's morsel geometry: cbstore absolute granules with row-group hard
+    // boundaries, heap block ranges with none. (The floor is granule-
+    // denominated, so its meaning is per-AM: ~8,192 rows/granule on
+    // cbstore, one ~8KB block on heap — both env-tunable through the same
+    // knob because the e2e floors force it anyway.)
+    let source: Arc<dyn runtime::MorselSource> = if is_cb {
+        let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+        else {
+            return Ok(None);
+        };
+        Arc::new(CbstoreGranuleSource { starts })
+    } else {
+        let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(ss, estate)? else {
+            return Ok(None);
+        };
+        Arc::new(HeapBlockSource { nblocks })
     };
+    let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
         return Ok(None);
     }
@@ -855,7 +931,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts)
+    engage(agg, estate, rt, dop, total_granules, source)
 }
 
 fn engage<'mcx>(
@@ -864,7 +940,7 @@ fn engage<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: Arc<dyn runtime::MorselSource>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -900,7 +976,7 @@ fn engage<'mcx>(
     // the transaction, which destroys live contexts and resets the mode
     // (AtEOXact_Parallel — the Gather discipline).
     xact::EnterParallelMode();
-    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload);
+    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, source, &payload);
     xact::ExitParallelMode();
     engaged
 }
@@ -915,7 +991,7 @@ fn engage_ceremony<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: Arc<dyn runtime::MorselSource>,
     payload: &Arc<RuntimeScanShared>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_scan_main", dop)?;
@@ -943,7 +1019,6 @@ fn engage_ceremony<'mcx>(
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
         // Submit the pinned RG before launch: helpers find work immediately.
-        let source = Arc::new(CbstoreGranuleSource { starts });
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
