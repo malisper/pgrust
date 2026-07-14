@@ -418,6 +418,20 @@ pub fn lane_limit_admissible(node: &LimitState<'_>) -> bool {
     node.limitOption == LimitOption::LIMIT_OPTION_COUNT
 }
 
+/// The window's total input-row bound (offset + count) for the LIMIT-k-no-
+/// ORDER group-admission freeze (band-2a q18 class): `Some` only for a
+/// plain-COUNT window with a computed positive count and a non-negative
+/// offset. Call AFTER the prologue (the LIMIT_INITIAL recompute evaluated
+/// the expressions). Saturating: an absurd offset+count simply exceeds every
+/// arming ceiling downstream.
+pub fn lane_limit_total_bound(node: &LimitState<'_>) -> Option<i64> {
+    (node.limitOption == LimitOption::LIMIT_OPTION_COUNT
+        && !node.noCount
+        && node.count > 0
+        && node.offset >= 0)
+        .then(|| node.count.saturating_add(node.offset))
+}
+
 /// Per-call prologue, mirroring `exec_limit`'s forward entry exactly: C's
 /// ExecLimit CHECK_FOR_INTERRUPTS, then the LIMIT_INITIAL recompute — which
 /// evaluates the OFFSET/LIMIT expressions (raising C's negative-value errors)

@@ -768,6 +768,12 @@ pub fn agg_hash_compact_armed(node: &AggStateData<'_>) -> bool {
     node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some())
 }
 
+/// Live group count of the armed compact table (`None` = not armed). The
+/// freeze install election reads this after each batch.
+pub fn agg_hash_compact_ngroups(node: &AggStateData<'_>) -> Option<usize> {
+    node.perhash.as_ref()?.compact.as_ref().map(|ch| ch.table.nrows())
+}
+
 /// One staged batch through the compact table: canonicalize the key lane to
 /// i64 per the kernel width, batch-probe (hash inside the table — the PG
 /// hash functions are bypassed entirely; internal tables carry no semantic
