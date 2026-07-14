@@ -576,12 +576,17 @@ pub(crate) fn WalSndWait(socket_events: u32, timeout: c_long, wait_event: u32) -
     // ModifyWaitEvent(FeBeWaitSet, FeBeWaitSetSocketPos, socket_events, NULL).
     pqcomm::pq_modify_fe_be_wait_set_socket(socket_events)?;
 
-    // Prepare to sleep on the per-kind CV so WalSndWakeup() can wake us
-    // efficiently. (The failover standby-confirmation CV is P4.)
+    // Prepare to sleep on the matching CV so WalSndWakeup() — or a physical
+    // walsender's PhysicalWakeupLogicalWalSnd when we wait for the
+    // synchronized_standby_slots standbys — can wake us (walsender.c:3760).
     let ctl = crate::WalSndCtl();
-    let cv = match crate::my_kind() {
-        ReplicationKind::REPLICATION_KIND_PHYSICAL => &ctl.wal_flush_cv,
-        ReplicationKind::REPLICATION_KIND_LOGICAL => &ctl.wal_replay_cv,
+    let cv = if wait_event == crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION {
+        &ctl.wal_confirm_rcv_cv
+    } else {
+        match crate::my_kind() {
+            ReplicationKind::REPLICATION_KIND_PHYSICAL => &ctl.wal_flush_cv,
+            ReplicationKind::REPLICATION_KIND_LOGICAL => &ctl.wal_replay_cv,
+        }
     };
     condition_variable::ConditionVariablePrepareToSleep(cv);
 

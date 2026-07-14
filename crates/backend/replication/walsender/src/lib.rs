@@ -1167,8 +1167,9 @@ fn SendTimeLineHistory(mcx: mcx::Mcx<'_>, cmd: TimeLineHistoryCmd) -> PgResult<(
 // WaitForStandbyConfirmation's wait loop (slot.c:2843, hosted here because
 // WalSndCtl->wal_confirm_rcv_cv lives in this crate; slot.c's early exits run
 // in the slot crate before the seam call).
+pub(crate) const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = 0x0900_0000 | 12; // IPC section
+
 fn wait_for_standby_confirmation_loop(wait_for_lsn: types_core::XLogRecPtr) -> PgResult<()> {
-    const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = 0x0900_0000 | 12; // IPC section
 
     condition_variable::ConditionVariablePrepareToSleep(&WalSndCtl().wal_confirm_rcv_cv);
 

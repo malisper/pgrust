@@ -8009,6 +8009,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "xlogreader",
+ "xlogrecovery_seams",
 ]
 
 [[package]]
