@@ -18024,6 +18024,7 @@ dependencies = [
  "syscache_seams",
  "timestamp_seams",
  "transam_xlog",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_guc",
