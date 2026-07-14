@@ -204,9 +204,13 @@ impl Drop for EnvelopeBind {
         v::bgwriter_lru_multiplier.write(self.prev_guc.lru_multiplier);
         v::bgwriter_flush_after.write(self.prev_guc.flush_after);
         v::track_io_timing.write(self.prev_guc.track_io_timing);
-        // Drain + delete the per-cycle owner (a clean cycle leaves it
-        // empty — pins are balanced within one round; the error leg's
-        // abort_cleanup already ReleaseAuxProcessResources'd through it).
+        // Restore the owner cells FIRST (ResourceOwnerDelete asserts the
+        // deleted owner is not current), then drain + delete the per-cycle
+        // owner (a clean cycle leaves it empty — pins are balanced within
+        // one round; the error leg's abort_cleanup already released
+        // through it).
+        resowner::SetAuxProcessResourceOwner(self.prev_aux_owner);
+        resowner::SetCurrentResourceOwner(self.prev_cur_owner);
         use types_resowner::ResourceReleasePhase::{
             RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS, RESOURCE_RELEASE_LOCKS,
         };
@@ -220,8 +224,6 @@ impl Drop for EnvelopeBind {
             }
         }
         resowner::ResourceOwnerDelete(self.cycle_owner);
-        resowner::SetAuxProcessResourceOwner(self.prev_aux_owner);
-        resowner::SetCurrentResourceOwner(self.prev_cur_owner);
         miscinit::SetMyBackendType(self.prev_btype);
         g::SetMyLatch(self.prev_latch);
         lmgr_proc::unbind_task_proc(self.prev_task_proc);
