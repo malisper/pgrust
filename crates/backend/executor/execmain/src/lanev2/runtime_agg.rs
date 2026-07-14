@@ -165,6 +165,13 @@ struct AggSink {
     /// across all workers (worker-time, not wall — divide by the engaged
     /// DOP for a critical-path estimate).
     topn_ctr: TopnCounters,
+    /// LIMIT-k-no-ORDER group-admission freeze (band-2a q18 class; see the
+    /// sink.rs section doc): armed only on the Mk drain from a bare
+    /// Limit-over-Agg bound; structurally never co-armed with `topn`.
+    /// Workers install/consult it through [`scan_mk_batch`]; the combine
+    /// filters merged buckets to set members; seal/passthrough/adopt fast
+    /// paths are skipped once FROZEN (their tables may carry stragglers).
+    freeze: Option<Arc<::nodeagg::sink::SinkFreeze>>,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -499,7 +506,13 @@ impl runtime::ParallelSink for AggSink {
         // the drain is serial-faithful AND cache-linear), no combine work,
         // no emit materialization. Memory: the table was charged during
         // accept; no partition index is ever built.
-        if self.adopt_shape {
+        // Freeze composition: a FROZEN engagement's tables can carry
+        // pre-freeze straggler groups (undercounted past the freeze point) —
+        // the wholesale table hand-off cannot filter them, so it stands
+        // down and the combine's member filter runs instead. An armed-but-
+        // never-frozen freeze dropped nothing — the adopt stays valid.
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        if self.adopt_shape && !frozen {
             if let [l] = &mut *locals {
                 if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
                     let t = l.table.take().expect("checked Some");
@@ -572,8 +585,13 @@ impl runtime::ParallelSink for AggSink {
             // takes the merge arm below; no plan/DOP special-casing.
             // M3.5 composition: a spilled face disqualifies the arm too —
             // spilled epochs live on the Local's file, not its table.
+            // Freeze composition: a FROZEN engagement's Local tables can
+            // carry pre-freeze stragglers — the pass-through emits verbatim
+            // and cannot filter, so it stands down (the merge arm below
+            // runs the member filter; frozen tables are tiny).
+            let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
             if let [l] = locals {
-                if l.runs.is_empty() && l.spill.is_none() {
+                if l.runs.is_empty() && l.spill.is_none() && !frozen {
                     if let (Some(t), Some(p)) = (&l.table, &l.part) {
                         // Top-N composition (m3-sort-b car 1) selects on the
                         // MERGED table; the pass-through never builds one, so
@@ -636,6 +654,15 @@ impl runtime::ParallelSink for AggSink {
                 let Some(set) = &self.spill_set else {
                     return Ok(CombineOutcome::OverBudget);
                 };
+                // Freeze composition: the split emits sub-partition tables
+                // piecemeal and cannot run the member filter — a FROZEN
+                // engagement refuses instead (unreachable by arithmetic:
+                // frozen tables hold <= bound + first-batch stragglers,
+                // orders below any budget; fail-closed, never
+                // silent-wrong).
+                if self.freeze.as_ref().is_some_and(|f| f.frozen()) {
+                    return Ok(CombineOutcome::OverBudget);
+                }
                 // Top-N × split composition (winners-phase2 §split×selection):
                 //  * WinnersOnly — each split LEAF (a disjoint sub-partition
                 //    of this partition's groups) runs the selection on its
@@ -732,6 +759,30 @@ impl runtime::ParallelSink for AggSink {
                 self.topn_ctr
                     .build_ns
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+            // Freeze member filter (band-2a q18): a FROZEN engagement emits
+            // ONLY set members — pre-freeze stragglers are undercounted
+            // past the freeze point and must never leave the sink. Rows
+            // ascend (sink_emit_bucket_rows contract). Structurally
+            // disjoint from the topn arm below (never co-armed).
+            if let Some(fz) = &self.freeze {
+                if let Some(entries) = fz.entries() {
+                    let shape = self
+                        .mk
+                        .as_ref()
+                        .expect("freeze arms only on the Mk drain");
+                    let rows = ::nodeagg::sink::sink_freeze_member_rows(
+                        &merged,
+                        self.key_words,
+                        shape,
+                        entries,
+                    );
+                    fz.note_stragglers((merged.nrows() - rows.len()) as u64);
+                    let buf =
+                        ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
+                    self.retain_bucket(part, buf, locals.len())?;
+                    return Ok(CombineOutcome::Done);
+                }
             }
             // Combine-phase top-N (car 1 + the winners-only amendment):
             // select this partition's winners on the merged raw states
@@ -1804,7 +1855,17 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
-            if !super::scan_mk_batch(agg, ss, mk, mks, idxs, groups, n, estate)? {
+            if !super::scan_mk_batch(
+                agg,
+                ss,
+                mk,
+                mks,
+                idxs,
+                groups,
+                n,
+                sink.freeze.as_deref(),
+                estate,
+            )? {
                 let demotable = mk
                     .shape
                     .comps
@@ -2445,6 +2506,17 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
     all_int || runtime_agg_text_enabled()
 }
 
+/// `PGRUST_RUNTIME_AGG_FREEZE` kill switch (default ON): the LIMIT-k-no-
+/// ORDER group-admission freeze (band-2a q18 class). Off, bare-Limit bounds
+/// are ignored and those engagements run the plain full drain exactly as
+/// before the car.
+fn agg_freeze_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Engagement floor (granules) — below it helper launches are pure overhead.
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
@@ -2490,6 +2562,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: Option<&super::ExprKeyState>,
     topn: Option<SinkTopnSpec>,
+    freeze_bound: Option<u32>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -2856,6 +2929,38 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         None
     };
+    // LIMIT-k-no-ORDER group-admission freeze (band-2a q18): armed only on
+    // the unprojected Mk drain — the one worker feed carrying the filter
+    // hooks — with a small bound, no composed top-N (structurally exclusive:
+    // topn derives from a Sort consumer, the bound from a bare Limit), a
+    // non-nullable all-Int/one-Intern image (Numeric components demote
+    // mid-build, which the membership filter must never race), and the kill
+    // switch on. Declines keep the plain full drain, byte-identically.
+    let freeze = match freeze_bound {
+        Some(b)
+            if drain == SinkDrain::Mk
+                && topn.is_none()
+                && agg_freeze_enabled()
+                && b >= 1
+                && b <= ::nodeagg::sink::SINK_FREEZE_MAX_BOUND
+                && mk.as_ref().is_some_and(|s| {
+                    !s.nullable
+                        && s.comps.iter().all(|c| {
+                            !matches!(c.kind, ::nodeagg::MkCompKind::Numeric { .. })
+                        })
+                }) =>
+        {
+            lane_trace(&format!("runtime-agg freeze: armed (bound={b})"));
+            Some(Arc::new(::nodeagg::sink::SinkFreeze::new(b)))
+        }
+        Some(b) => {
+            lane_trace(&format!(
+                "runtime-agg freeze: declined (bound={b}; drain/shape/switch gate)"
+            ));
+            None
+        }
+        None => None,
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -2885,6 +2990,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         ),
         topn_refused: AtomicBool::new(false),
         topn_ctr: TopnCounters::default(),
+        freeze,
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -3247,6 +3353,21 @@ fn engage_ceremony<'mcx>(
                             c.select_ns.load(Ordering::Relaxed) / 1_000,
                             c.emit_ns.load(Ordering::Relaxed) / 1_000,
                         ));
+                    }
+                    // Freeze evidence line (e2e legs grep this): FROZEN
+                    // engagements emit exactly `bound` member groups.
+                    if let Some(fz) = &sink.freeze {
+                        if fz.frozen() {
+                            lane_trace(&format!(
+                                "runtime-agg freeze: engaged bound={} dropped_rows={} \
+                                 stragglers={}",
+                                fz.bound(),
+                                fz.dropped(),
+                                fz.stragglers()
+                            ));
+                        } else {
+                            lane_trace("runtime-agg freeze: armed, never froze (full drain)");
+                        }
                     }
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }

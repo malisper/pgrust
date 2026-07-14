@@ -447,6 +447,231 @@ fn sink_partition_remainder_canon(ch: &crate::compact::CompactHash) -> SinkPart 
 }
 
 // ---------------------------------------------------------------------------
+// LIMIT-k-no-ORDER group-admission FREEZE (band-kernels-2a, ClickBench q18
+// class): `GROUP BY ... LIMIT k` with NO ORDER BY needs only k groups with
+// EXACT aggregates — the ratified q18 PASS-TIE membership class (count-gated:
+// rowcount equal, values exact for whichever groups emit). The law:
+//  * OPEN: every worker admits groups normally (nothing is ever dropped).
+//  * INSTALL: the first worker whose live compact table holds >= bound
+//    groups wins a CAS election and publishes those groups' CANONICAL key
+//    bytes as the frozen set. ANY bound groups are a valid set — every row
+//    of every group present anywhere has been counted so far (no drops
+//    before FROZEN), and set members keep counting after.
+//  * FROZEN: workers drop rows whose key is NOT in the set BEFORE the table
+//    probe (the per-row build cost collapses to a tiny membership check);
+//    rows of set members flow exactly as before, so members' aggregates are
+//    exact over ALL their input rows.
+//  * COMBINE: pre-freeze straggler groups (admitted before their owner
+//    observed FROZEN) are UNDERCOUNTED from the freeze point on — the
+//    combine filters every merged bucket to set members only, so stragglers
+//    never emit. Total emitted rows == bound (when >= bound groups exist;
+//    otherwise the freeze never installs and the drain is the plain full
+//    drain, byte-identical).
+// Mutual exclusion with the composed top-N is structural: the topn spec is
+// derived only from a bounded Sort consumer; the freeze bound only from a
+// bare Limit-over-Agg (no Sort) — both never arm together.
+// ---------------------------------------------------------------------------
+
+/// Freeze bound ceiling: entry masks ride a u64 in the worker filter, and
+/// the class only pays off for small k (q18 is LIMIT 10). Larger bounds
+/// decline at arming and keep the full drain.
+pub const SINK_FREEZE_MAX_BOUND: u32 = 64;
+
+const FREEZE_OPEN: u8 = 0;
+const FREEZE_INSTALLING: u8 = 1;
+const FREEZE_FROZEN: u8 = 2;
+const FREEZE_DISABLED: u8 = 3;
+
+/// The engagement-shared freeze control: bound + install election + the
+/// published canonical key set. One per sink engagement (leader-armed),
+/// shared by every worker through the sink.
+pub struct SinkFreeze {
+    bound: u32,
+    /// OPEN -> INSTALLING (CAS, the election) -> FROZEN (Release publish).
+    /// DISABLED = an install could not extract (fail-open: no drops ever
+    /// happen, the drain stays full — correct, just unoptimized).
+    state: core::sync::atomic::AtomicU8,
+    /// Canonical key bytes per entry (the seal/flush encoding — see
+    /// [`canon_row_bytes`]; word-keyed Multi shapes use the packed image's
+    /// `packed_bytes` little-endian bytes). Written ONLY by the installer
+    /// between the CAS and the FROZEN store; read only at/after FROZEN
+    /// (Acquire pairs with the Release store).
+    set: core::cell::UnsafeCell<Vec<Vec<u8>>>,
+    /// Rows dropped by worker filters (observability).
+    dropped: core::sync::atomic::AtomicU64,
+    /// Straggler groups filtered at combine (observability).
+    stragglers: core::sync::atomic::AtomicU64,
+}
+
+// SAFETY: `set` is written only by the single CAS-elected installer before
+// the FROZEN Release store, and read only after an Acquire load observes
+// FROZEN — a happens-before edge orders every read after the last write.
+unsafe impl Sync for SinkFreeze {}
+
+impl SinkFreeze {
+    pub fn new(bound: u32) -> SinkFreeze {
+        debug_assert!(bound >= 1 && bound <= SINK_FREEZE_MAX_BOUND);
+        SinkFreeze {
+            bound,
+            state: core::sync::atomic::AtomicU8::new(FREEZE_OPEN),
+            set: core::cell::UnsafeCell::new(Vec::new()),
+            dropped: core::sync::atomic::AtomicU64::new(0),
+            stragglers: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn bound(&self) -> u32 {
+        self.bound
+    }
+
+    /// The frozen canonical set, or None while OPEN/INSTALLING/DISABLED.
+    #[inline]
+    pub fn entries(&self) -> Option<&[Vec<u8>]> {
+        if self.state.load(core::sync::atomic::Ordering::Acquire) == FREEZE_FROZEN {
+            // SAFETY: FROZEN observed with Acquire — the installer's writes
+            // happened-before; nobody writes after FROZEN.
+            Some(unsafe { &*self.set.get() })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn frozen(&self) -> bool {
+        self.state.load(core::sync::atomic::Ordering::Acquire) == FREEZE_FROZEN
+    }
+
+    /// Election: exactly one caller wins the right to install. The winner
+    /// MUST follow with [`Self::publish`] or [`Self::disable`].
+    pub fn try_begin_install(&self) -> bool {
+        self.state
+            .compare_exchange(
+                FREEZE_OPEN,
+                FREEZE_INSTALLING,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Installer-only: publish the canonical set and flip FROZEN.
+    pub fn publish(&self, entries: Vec<Vec<u8>>) {
+        debug_assert_eq!(entries.len(), self.bound as usize);
+        // SAFETY: single writer by the CAS election; no reader until the
+        // Release store below.
+        unsafe { *self.set.get() = entries };
+        self.state.store(FREEZE_FROZEN, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Installer-only: the extraction failed — fail OPEN forever (no drops
+    /// ever happen; the engagement drains fully, correct but unoptimized).
+    pub fn disable(&self) {
+        self.state.store(FREEZE_DISABLED, core::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
+    pub fn note_dropped(&self, n: u64) {
+        if n > 0 {
+            self.dropped.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn note_stragglers(&self, n: u64) {
+        if n > 0 {
+            self.stragglers.fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn stragglers(&self) -> u64 {
+        self.stragglers.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Extract the first `bound` insertion-order groups of the ARMED compact
+/// Multi table as canonical key bytes (the install source). `None` when the
+/// table is not an armed Multi shape or holds fewer than `bound` groups.
+/// ANY `bound` groups form a valid frozen set (see the section doc) — the
+/// first rows are simply the cheapest to name.
+pub fn sink_freeze_extract(node: &AggStateData<'_>, bound: u32) -> Option<Vec<Vec<u8>>> {
+    let ph = node.perhash.as_ref()?;
+    sink_freeze_extract_ch(ph.compact.as_ref()?, bound)
+}
+
+/// [`sink_freeze_extract`] over the armed compact state itself (split for
+/// the unit tests, which build [`crate::compact::CompactHash`] directly).
+pub(crate) fn sink_freeze_extract_ch(
+    ch: &crate::compact::CompactHash,
+    bound: u32,
+) -> Option<Vec<Vec<u8>>> {
+    let crate::compact::CompactKeySpec::Multi(shape) = &ch.key else { return None };
+    if shape.nullable || ch.table.nrows() < bound as usize {
+        return None;
+    }
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(bound as usize);
+    match compact_canon_shape(ch) {
+        Some(shape) => {
+            let intern = ch.intern.as_ref()?;
+            let mut canon: Vec<u8> = Vec::with_capacity(64);
+            for i in 0..bound as usize {
+                canon_row_bytes(&ch.table, shape, intern, i, &mut canon);
+                out.push(canon.clone());
+            }
+        }
+        None => {
+            // Word-keyed Multi shape: the canonical bytes are the packed
+            // image's little-endian `packed_bytes` prefix (value-derived —
+            // identical on every worker).
+            for i in 0..bound as usize {
+                let words = mk_words_of(&ch.table, shape, i);
+                let mut flat = [0u8; 16];
+                flat[..8].copy_from_slice(&words[0].to_le_bytes());
+                flat[8..].copy_from_slice(&words[1].to_le_bytes());
+                out.push(flat[..shape.packed_bytes as usize].to_vec());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Combine-side membership filter: the merged bucket table's rows whose
+/// canonical key bytes are in the frozen set, ascending row order (the
+/// [`sink_emit_bucket_rows`] contract). `key_words == 0` = bytes-mode table
+/// (rows key on canonical byte strings); word modes reconstruct the image
+/// prefix per row.
+pub fn sink_freeze_member_rows(
+    t: &LaneAggTable,
+    key_words: usize,
+    shape: &MkShape,
+    entries: &[Vec<u8>],
+) -> Vec<u32> {
+    let set: std::collections::HashSet<&[u8]> =
+        entries.iter().map(|e| e.as_slice()).collect();
+    let mut out: Vec<u32> = Vec::new();
+    let mut scratch = [0u8; 8];
+    for i in 0..t.nrows() {
+        let member = if key_words == 0 {
+            t.row_key_bytes(i, &mut scratch).is_some_and(|b| set.contains(b))
+        } else {
+            let words = mk_words_of(t, shape, i);
+            let mut flat = [0u8; 16];
+            flat[..8].copy_from_slice(&words[0].to_le_bytes());
+            flat[8..].copy_from_slice(&words[1].to_le_bytes());
+            set.contains(&flat[..shape.packed_bytes as usize])
+        };
+        if member {
+            out.push(i as u32);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // M3.5 spill record contract (docs/design/m3.5-spill.md §3): a spilled
 // bucket segment is interleaved row-major u64 native-endian words —
 // `key_words` canonical key words then `state_words` state words per row.
@@ -4118,5 +4343,153 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- LIMIT-k-no-ORDER group-admission freeze (band-2a q18) -------------
+
+    /// SinkFreeze state machine: election is exclusive, entries visible
+    /// only after publish, disable fails open.
+    #[test]
+    fn freeze_state_machine() {
+        let fz = SinkFreeze::new(3);
+        assert!(!fz.frozen());
+        assert!(fz.entries().is_none());
+        assert!(fz.try_begin_install(), "first election wins");
+        assert!(!fz.try_begin_install(), "second election loses");
+        assert!(fz.entries().is_none(), "no entries mid-install");
+        fz.publish(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert!(fz.frozen());
+        assert_eq!(fz.entries().unwrap().len(), 3);
+        assert!(!fz.try_begin_install(), "frozen never re-elects");
+
+        let dz = SinkFreeze::new(2);
+        assert!(dz.try_begin_install());
+        dz.disable();
+        assert!(!dz.frozen());
+        assert!(dz.entries().is_none());
+        assert!(!dz.try_begin_install(), "disabled never re-elects");
+    }
+
+    /// Extraction + membership + subset emit, end to end at the sink unit
+    /// level over the canonical (int8, text) shape: freeze on worker 1's
+    /// first two groups, combine both workers' faces, filter every bucket —
+    /// exactly the two member groups emit, with their FULL cross-worker
+    /// combined counts; stragglers never emit.
+    #[test]
+    fn freeze_member_filter_end_to_end() {
+        // Worker 1: (1,apple) (1,banana) (2,apple) — install source.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w1, Some(1), b"apple", 1);
+        bump_canon(&mut w1, Some(1), b"banana", 2);
+        bump_canon(&mut w1, Some(2), b"apple", 3);
+        let entries = sink_freeze_extract_ch(&w1, 2).expect("extractable");
+        assert_eq!(entries.len(), 2);
+        // Under-bound tables refuse extraction.
+        assert!(sink_freeze_extract_ch(&w1, 4).is_none());
+        // Worker 2 counts more rows of the members (different intern ids)
+        // plus stragglers.
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w2, Some(9), b"zzz", 7);
+        bump_canon(&mut w2, Some(1), b"banana", 20);
+        bump_canon(&mut w2, Some(1), b"apple", 30);
+        let h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+        let h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(h2.remainder_view(&part2)),
+            },
+        ];
+        let combines = test_combines();
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(12),
+            cols: vec![
+                SinkEmitCol::MultiComp { off: 0, width: 8 },
+                SinkEmitCol::MultiText,
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        let shape = canon_shape_int8_text();
+        let mut seen: std::collections::HashMap<(i64, Vec<u8>), i64> =
+            std::collections::HashMap::new();
+        let mut stragglers = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let t = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            let rows = sink_freeze_member_rows(&t, 0, &shape, &entries);
+            assert!(rows.windows(2).all(|w| w[0] < w[1]), "ascending rows");
+            stragglers += t.nrows() - rows.len();
+            let full = sink_emit_bucket(&plan, &t).unwrap();
+            let buf = sink_emit_bucket_rows(&plan, &t, &rows).unwrap();
+            assert_eq!(buf.nrows, rows.len());
+            for (ci, &fi) in rows.iter().enumerate() {
+                // Subset emit == full emit at the original indices.
+                for c in 0..3usize {
+                    let (fv, fn_) = (
+                        full.values[fi as usize * 3 + c],
+                        full.nulls[fi as usize * 3 + c],
+                    );
+                    let (cv, cn) = (buf.values[ci * 3 + c], buf.nulls[ci * 3 + c]);
+                    assert_eq!(fn_, cn);
+                    if c == 1 {
+                        assert_eq!(emit_text(&full, fv), emit_text(&buf, cv));
+                    } else {
+                        assert_eq!(fv.as_i64(), cv.as_i64());
+                    }
+                }
+                let k = buf.values[ci * 3].as_i64();
+                let text = emit_text(&buf, buf.values[ci * 3 + 1]);
+                let c = buf.values[ci * 3 + 2].as_i64();
+                assert!(seen.insert((k, text), c).is_none(), "member in two buckets");
+            }
+        }
+        // Exactly the two members, full cross-worker counts; the (2,apple)
+        // and (9,zzz) stragglers were filtered.
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[&(1, b"apple".to_vec())], 31, "1 + 30 across workers");
+        assert_eq!(seen[&(1, b"banana".to_vec())], 22, "2 + 20 across workers");
+        assert_eq!(stragglers, 2);
+    }
+
+    /// Word-keyed Multi shapes: canonical entries are the packed image's LE
+    /// prefix; the member filter reconstructs and matches them.
+    #[test]
+    fn freeze_member_filter_word_mode() {
+        let shape = MkShape {
+            comps: vec![
+                crate::compact::MkComp { att: 0, off: 0, kind: MkCompKind::Int { width: 4 } },
+                crate::compact::MkComp { att: 1, off: 4, kind: MkCompKind::Int { width: 2 } },
+            ],
+            packed_bytes: 6,
+            nullable: false,
+            two_words: false,
+        };
+        // Packed images as the mk feed would build them (LE component
+        // packing of (int4, int2) pairs, negative values included).
+        let pack = |a: i32, b: i16| -> i64 {
+            ((a as u32 as u64) | (((b as u16 as u64) & 0xFFFF) << 32)) as i64
+        };
+        let mut t = mk_table(16);
+        for (a, b, c) in [(7, -1i16, 5i64), (-3, 2, 6), (100, 0, 7)] {
+            bump(&mut t, Some(pack(a, b)), c, 0);
+        }
+        let ch = crate::compact::compact_hash_for_tests(
+            t,
+            crate::compact::CompactKeySpec::Multi(shape.clone()),
+            None,
+        );
+        let entries = sink_freeze_extract_ch(&ch, 2).expect("extractable");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.len() == 6), "6-byte LE image prefix");
+        let rows = sink_freeze_member_rows(&ch.table, 1, &shape, &entries);
+        assert_eq!(rows, vec![0, 1], "first two insertion rows are the members");
     }
 }
