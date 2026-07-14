@@ -483,9 +483,12 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
 
 /// Ticketless warm-up: connect an unconnected worker to the engagement's
 /// database (procarray bracket included — connected-but-parked workers
-/// stay invisible to CountOtherDBBackends). Failures are non-fatal here:
-/// the worker just stays cold (a later ticket retries and counts its
-/// refusal); exit-committed unwinds keep unwinding to the glue.
+/// stay invisible to CountOtherDBBackends). A FAILED connect is
+/// thread-fatal (see `connect_failed_die`): InitPostgres may have claimed
+/// shared identity (the sinval slot is claimed early) before failing, and
+/// only this thread's exit-callback drain can release it — surviving
+/// half-connected poisons the slot for the server's life. Exit-committed
+/// unwinds keep unwinding to the glue.
 fn warm_connect(entry: &Arc<StandingEngagement>) {
     if init_small::globals::MyDatabaseId() != InvalidOid
         || entry.shared.database_id == InvalidOid
@@ -528,6 +531,7 @@ fn warm_connect(entry: &Arc<StandingEngagement>) {
                 WARNING,
                 format!("standing executor warm-up connect failed: {}", e.message()),
             );
+            connect_failed_die();
         }
         Err(payload) => {
             if is_exit_unwind(&*payload) {
@@ -537,8 +541,25 @@ fn warm_connect(entry: &Arc<StandingEngagement>) {
                 WARNING,
                 "standing executor warm-up connect panicked".to_string(),
             );
+            connect_failed_die();
         }
     }
+}
+
+/// A gang worker's InitPostgres failed (Err or a caught generic panic): the
+/// thread may hold PARTIALLY-CLAIMED shared identity — SharedInvalBackendInit
+/// claims the sinval slot early in the connect, and any later failure
+/// (ProcSignalInit, the startup transaction, CheckMyDatabase, an assert)
+/// returns with the slot claimed under this thread's pid. In C a bgworker
+/// connect failure is FATAL and proc_exit's callback chain releases whatever
+/// was claimed; the pre-fix "stay cold and retry" arm instead self-collided
+/// forever ("sinval slot for backend N is already in use by process <own
+/// pid>" on every retry — INBOX-standing-gang-dev-wedge item 3, poisoning
+/// every later standing warm-up). Die the way C does: the glue's deferred
+/// drain releases identity against live shared memory and the slot respawns
+/// on the next engagement.
+fn connect_failed_die() -> ! {
+    ipc::proc_exit(1, init_small::globals::MyProcPid())
 }
 
 /// The board still shows an engagement we cannot serve (no ticket / wrong
@@ -603,15 +624,30 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
                     WARNING,
                     format!("standing executor connect failed: {}", e.message()),
                 );
+                // Refuse the ticket for the leader's accounting, then die:
+                // the failed InitPostgres may hold a partially-claimed
+                // identity (sinval slot) only an exit drain releases (see
+                // connect_failed_die). The DetachGuard drops on the unwind.
                 entry.refused.fetch_add(1, SeqCst);
-                return;
+                drop(detach);
+                connect_failed_die();
             }
             Err(payload) => {
                 // FATAL-shaped connect failure: refuse the ticket, detach
-                // (guard), and keep the exit unwinding to the glue.
+                // (guard), and keep the exit unwinding to the glue. A
+                // generic (non-exit) panic converts to the same thread-fatal
+                // exit as the Err arm — half-connected survival is the
+                // sinval-slot self-poison.
                 entry.refused.fetch_add(1, SeqCst);
                 drop(detach);
-                resume_unwind(payload);
+                if is_exit_unwind(&*payload) {
+                    resume_unwind(payload);
+                }
+                let _ = elog::elog(
+                    WARNING,
+                    "standing executor connect panicked".to_string(),
+                );
+                connect_failed_die();
             }
         }
         in_procarray = true; // InitPostgres's InitProcessPhase2 added us.
