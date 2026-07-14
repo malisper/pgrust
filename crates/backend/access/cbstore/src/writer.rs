@@ -319,20 +319,109 @@ enum ColBuilder {
 /// the column is not dict-encoded — a partial global code space would break
 /// the part-scope facts consumers rely on.
 struct StitchCol {
-    ids: HashMap<Box<[u8]>, u32>,
+    ids: HashMap<Box<[u8]>, u32, DictBuild>,
     rg_maps: Vec<Vec<u32>>,
     poisoned: bool,
 }
 
 impl StitchCol {
     fn new() -> StitchCol {
-        StitchCol { ids: HashMap::new(), rg_maps: Vec::new(), poisoned: false }
+        StitchCol {
+            ids: HashMap::with_hasher(DictBuild::new()),
+            rg_maps: Vec::new(),
+            poisoned: false,
+        }
     }
 
     fn poison(&mut self) {
         self.poisoned = true;
-        self.ids = HashMap::new();
+        self.ids = HashMap::with_hasher(DictBuild::new());
         self.rg_maps = Vec::new();
+    }
+}
+
+// ---- PGRUST_CBSTORE_FASTHASH (load-speed prototype, DEFAULT OFF) -----------
+// The ingest dictionary passes (per-RG dict build + the v7 stitch intern
+// table) hash every text value through std's SipHash — measured ~8% of the
+// 10M ClickBench COPY wall (load-speed lane perf, 2026-07-14). The maps only
+// DEDUP: dict order is byte-sorted after the build and stitch ids are
+// re-ranked byte-sorted at finish(), so the hasher never reaches the on-disk
+// bytes — output is byte-identical either way. FASTHASH=1 swaps in an
+// FxHash-style multiply-mix byte hasher (dedup-grade quality is sufficient;
+// a collision only costs a memcmp probe).
+fn fasthash_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_CBSTORE_FASTHASH").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+const FXK: u64 = 0x517cc1b727220a95;
+
+enum DictHasher {
+    Sip(std::collections::hash_map::DefaultHasher),
+    Fast(u64),
+}
+
+impl std::hash::Hasher for DictHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        match self {
+            DictHasher::Sip(h) => h.finish(),
+            DictHasher::Fast(h) => {
+                // final avalanche (murmur3 fmix64) so hashbrown's bucket bits
+                // (low) and control byte (high 7) both see mixed entropy
+                let mut v = *h;
+                v ^= v >> 33;
+                v = v.wrapping_mul(0xff51afd7ed558ccd);
+                v ^ (v >> 33)
+            }
+        }
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        match self {
+            DictHasher::Sip(h) => std::hash::Hasher::write(h, bytes),
+            DictHasher::Fast(h) => {
+                let mut chunks = bytes.chunks_exact(8);
+                for c in &mut chunks {
+                    let w = u64::from_le_bytes(c.try_into().unwrap());
+                    *h = (h.rotate_left(5) ^ w).wrapping_mul(FXK);
+                }
+                let r = chunks.remainder();
+                if !r.is_empty() {
+                    let mut buf = [0u8; 8];
+                    buf[..r.len()].copy_from_slice(r);
+                    // fold the tail length in so "ab" and "ab\0" differ
+                    buf[7] ^= r.len() as u8;
+                    *h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(FXK);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DictBuild {
+    fast: bool,
+    sip: std::collections::hash_map::RandomState,
+}
+
+impl DictBuild {
+    fn new() -> DictBuild {
+        DictBuild { fast: fasthash_enabled(), sip: std::collections::hash_map::RandomState::new() }
+    }
+}
+
+impl std::hash::BuildHasher for DictBuild {
+    type Hasher = DictHasher;
+    #[inline]
+    fn build_hasher(&self) -> DictHasher {
+        if self.fast {
+            DictHasher::Fast(0)
+        } else {
+            DictHasher::Sip(std::hash::BuildHasher::build_hasher(&self.sip))
+        }
     }
 }
 
@@ -1292,7 +1381,8 @@ fn encode_text_chunk(
     let n = tb.offs.len();
 
     // Dictionary pass over the row set.
-    let mut dict: HashMap<&[u8], u32> = HashMap::with_capacity(1024);
+    let mut dict: HashMap<&[u8], u32, DictBuild> =
+        HashMap::with_capacity_and_hasher(1024, DictBuild::new());
     let mut order: Vec<(u32, u32)> = Vec::new();
     let mut codes: Vec<u32> = Vec::with_capacity(n);
     let mut dict_blob_len = 0usize;
