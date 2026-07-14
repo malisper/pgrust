@@ -636,6 +636,17 @@ impl Scheduler {
                 local.drive.tasks += 1;
                 let mut sizer = TaskSizer::new(self.params, ts.c0);
                 let mut exhausted = false;
+                // Per-task observability accumulators (dop1-tax fix 5):
+                // morsel/granule/cpu counters are EXACT but flushed to the
+                // shared relaxed atomics once per TASK, not per morsel —
+                // the counts are observability (snapshots, trace, stride
+                // accounting inputs), never safety; nothing reads them at
+                // sub-task granularity. Budget/flush metering (the sink
+                // lanes' safety accounting) lives operator-side and is
+                // untouched.
+                let mut t_morsels = 0u64;
+                let mut t_granules = 0u64;
+                let mut t_cpu_ns = 0u64;
                 loop {
                     // Morsel-boundary cancel point (Leis-style): an abort is
                     // observed within one morsel.
@@ -677,15 +688,20 @@ impl Scheduler {
                     }
                     local.drive.last_end_ns = t1;
                     sizer.observe(&ts.sizer, granules, dt);
-                    // INERT stride accounting (M5 reads this).
-                    ts.rg.cpu_consumed_ns.fetch_add(dt, Ordering::Relaxed);
-                    RuntimeStats::tick(&self.stats.morsels_claimed);
-                    RuntimeStats::tick(&ts.rg.stats.morsels_claimed);
-                    RuntimeStats::add(&self.stats.granules_executed, granules);
-                    RuntimeStats::add(&ts.rg.stats.granules_executed, granules);
+                    t_morsels += 1;
+                    t_granules += granules;
+                    t_cpu_ns += dt;
                     if sizer.task_done() {
                         break;
                     }
+                }
+                if t_morsels > 0 {
+                    // INERT stride accounting (M5 reads this).
+                    ts.rg.cpu_consumed_ns.fetch_add(t_cpu_ns, Ordering::Relaxed);
+                    RuntimeStats::add(&self.stats.morsels_claimed, t_morsels);
+                    RuntimeStats::add(&ts.rg.stats.morsels_claimed, t_morsels);
+                    RuntimeStats::add(&self.stats.granules_executed, t_granules);
+                    RuntimeStats::add(&ts.rg.stats.granules_executed, t_granules);
                 }
                 // Armed-outcome discipline: a worker's task ends
                 // successfully even when it drained an abort — failure is
