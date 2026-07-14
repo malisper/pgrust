@@ -2373,6 +2373,18 @@ pub fn agg_sink_emit_unstarted(node: &AggStateData<'_>) -> bool {
     node.sink_emit.as_ref().is_some_and(|st| st.bucket == 0 && st.pos == 0)
 }
 
+/// Take the composed top-N winner list off the adopted emit state (the
+/// batched drain's winner-directed put — topn-winners-only amendment: the
+/// winner list IS the drain in BOTH selection modes, so the batched sort
+/// feed emits the identical row sequence as the cursor drain's composed
+/// path instead of re-selecting tie members in the bounded heap). `None` =
+/// no composition (or degraded) — the caller walks the buckets as before.
+/// Taking (not borrowing) keeps the caller free to re-borrow the node per
+/// row; the drain consumes the state wholesale afterwards.
+pub fn agg_sink_emit_take_winners(node: &mut AggStateData<'_>) -> Option<Vec<(u16, u32)>> {
+    node.sink_emit.as_mut().and_then(|st| st.winners.take())
+}
+
 /// Store row `row` of bucket `b` into the node's result slot (the
 /// agg_sink_emit_next body, cursor-free). Caller drives bucket/row order.
 pub fn agg_sink_emit_block_row<'mcx>(
