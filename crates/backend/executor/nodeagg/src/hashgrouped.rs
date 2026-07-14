@@ -381,16 +381,21 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 }
 
 /// The RUNTIME DISTINCT SINK's economics twin of
-/// [`agg_hashgroup_economical`] (distinct-bytes car). The serial density
-/// tier (rows/group >= 8) priced the SERIAL hashgroup build against the
-/// narrow sort's adjacent dedup; the sink's build is DOP-parallel over
-/// morsel claims, so near-unique group keys — CB q14's ~2 rows/group
-/// SearchPhrase class, the donor-B conversion — are exactly its targets.
-/// The budget-fit term is UNCHANGED (group tables never spill; only set
-/// values do): estimated groups must fit the per-Local budget with 2x
-/// slack. Density reads its own threshold
-/// (`PGRUST_RUNTIME_DISTINCT_MINRPG`, default 1.0 — tier effectively off;
-/// the measurement channel for a re-priced value).
+/// [`agg_hashgroup_economical`] (distinct-bytes car). The budget-fit term
+/// is UNCHANGED (group tables never spill; only set values do): estimated
+/// groups must fit the per-Local budget with 2x slack. Density reads its
+/// own threshold (`PGRUST_RUNTIME_DISTINCT_MINRPG`) — MEASURED 2026-07-14
+/// (job pgrust-m0-accept-1784045139-06ee, 10M v7u bank, wm=1GB,
+/// condcache=on): with the tier at 1.0 the near-unique CB-q14 class
+/// (SearchPhrase text key, ~1.6 rows/group, 835k merged groups) ENGAGES
+/// with full parity + morsel-elastic disturb (4.7%) but LOSES —
+/// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
+/// the leader-side adopt/emit tail (concat + rep synthesis + order +
+/// per-group emit over 835k groups) dominates, the q19@10M
+/// "emit/combine-bound near-unique" class. Default therefore stays at
+/// the serial-calibrated 8.0 — near-unique shapes keep their serial/def
+/// arms until a parallel-emit car exists; the env knob is the
+/// measurement channel (this run's evidence came through it).
 pub fn agg_hashgroup_economical_sink(
     node: &AggStateData<'_>,
     force: bool,
@@ -407,7 +412,7 @@ pub fn agg_hashgroup_economical_sink(
             std::env::var("PGRUST_RUNTIME_DISTINCT_MINRPG")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0)
+                .unwrap_or(8.0)
         })
     }
     let est_groups = (node.plan.numGroups as f64).max(1.0);
