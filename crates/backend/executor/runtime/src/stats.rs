@@ -66,6 +66,9 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     /// (M5-4: the pick preferred a slot whose leader session the worker is
     /// sticky-bound to over an equal-pass lower-index slot).
     affinity_tiebreaks,
+    /// M5-5 decaying priorities: priority updates applied (one per RG per
+    /// crossed decay quantum until the RG reaches the p_min floor).
+    priority_decays,
     /// M5+1 pipeline-DAG dispatch: dependency-satisfied pipelines published
     /// into ADDITIONAL slots (beyond the RG's first/reused slot) — the
     /// independent-subtree overlap the increment buys.
