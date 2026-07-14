@@ -89,6 +89,11 @@ pub fn ServerLoop() -> PgResult<i32> {
     // only when) PGRUST_RUNTIME=1 (redesign §2.1 fixed pool; default OFF =
     // zero threads, zero behavior change — the M0 kill-switch contract).
     let _ = launch_backend::rtpool::start_if_enabled();
+    // M2 pool-binding: wire the STANDING runtime executor gang (boot
+    // captures + spawner install; threads spawn lazily at first
+    // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_
+    // POOLBIND=0 as the increment kill — the pool's layering above.
+    launch_backend::rtgang::install_if_enabled();
     ConfigurePostmasterWaitSet(true)?;
     let mut last_lockfile_recheck_time = now_secs();
     let mut last_touch_time = last_lockfile_recheck_time;
