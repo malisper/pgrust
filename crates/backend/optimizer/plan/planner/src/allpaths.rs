@@ -1673,6 +1673,15 @@ pub(crate) fn generate_useful_gather_paths(
         return Ok(());
     }
 
+    // M5-3 coverage-keyed suppression (m5_suppress, design §2.3): under
+    // pgrust.parallel_engine=runtime a COVERED shape gets no Gather/Gather
+    // Merge anywhere in its plan — the serial-shaped plan reaches the
+    // executor and the runtime router engages it. Uncovered shapes (and
+    // every query under the default legacy engine) fall through unchanged.
+    if crate::m5_suppress::m5_suppress_gather(run)? {
+        return Ok(());
+    }
+
     generate_gather_paths(run, rel, override_rows)?;
 
     let useful_pathkeys_list = get_useful_pathkeys_for_relation(run, rel, true)?;

@@ -1831,6 +1831,12 @@ fn create_partial_grouping_paths<'mcx>(
 
 // gather_grouping_paths (planner.c).
 fn gather_grouping_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
+    // M5-3 (§2.3): a covered shape's partially-grouped rel gets neither the
+    // plain/sorted Gathers (the generate_useful_gather_paths gate) nor the
+    // grouped Gather Merges below — the whole upper stays serial-shaped.
+    if crate::m5_suppress::m5_suppress_gather(run)? {
+        return Ok(());
+    }
     let groupby_pathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey> = {
         let n = run.root.num_groupby_pathkeys as usize;
         let take = if run.root.group_pathkeys.len() > n { n } else { run.root.group_pathkeys.len() };
@@ -3023,9 +3029,13 @@ fn create_ordered_paths<'mcx>(
     // generate_gather_paths made a plain Gather and order-preserving Gather
     // Merges already; what remains is sorting a partial path (fully or
     // incrementally) and putting a Gather Merge on top.
+    // M5-3 (§2.3): suppressed under engine=runtime for covered shapes,
+    // like every other Gather/Gather Merge construction site.
+    let m5_suppress = crate::m5_suppress::m5_suppress_gather(run)?;
     if run.root.rel(ordered_rel).consider_parallel
         && !run.root.sort_pathkeys.is_empty()
         && !run.root.rel(input_rel).partial_pathlist.is_empty()
+        && !m5_suppress
     {
         let cheapest_partial_path = run.root.rel(input_rel).partial_pathlist[0];
         let partials =
