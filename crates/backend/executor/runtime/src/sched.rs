@@ -146,6 +146,21 @@ fn markers_enabled() -> bool {
     })
 }
 
+/// Claim-coalescing target for whole-boundary sources (dop1-tax fix 1):
+/// a claim spans up to `PGRUST_RUNTIME_COALESCE_EPOCHS / active_workers`
+/// epochs (default 8 → ×8 at DOP1, ×4 at 2, ×2 at 3-4, off at ≥5). `1` (or
+/// `0`) disables coalescing — the inc-2 one-epoch-per-claim behavior, the
+/// A/B arm. Read once.
+fn coalesce_epochs() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_COALESCE_EPOCHS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(8)
+    })
+}
+
 /// One worker's accumulated participation in one published task set.
 struct WfinStat {
     seq: u64,
@@ -414,6 +429,7 @@ impl Scheduler {
         // (the M2 sink plumbing) is armed before the first claim can land.
         rg.tasksets[index].work.bind_generation(rg.generation());
         let whole_claims = rg.tasksets[index].source.whole_boundary_claims();
+        let coalesce = whole_claims && rg.tasksets[index].source.coalesce_claims();
         let ts = Arc::new(TaskSetRt {
             rg,
             index,
@@ -426,6 +442,7 @@ impl Scheduler {
             finalized: AtomicBool::new(false),
             c0,
             whole_claims,
+            coalesce,
         });
         if self.trace {
             self.trace(&format!(
@@ -619,6 +636,17 @@ impl Scheduler {
                 local.drive.tasks += 1;
                 let mut sizer = TaskSizer::new(self.params, ts.c0);
                 let mut exhausted = false;
+                // Per-task observability accumulators (dop1-tax fix 5):
+                // morsel/granule/cpu counters are EXACT but flushed to the
+                // shared relaxed atomics once per TASK, not per morsel —
+                // the counts are observability (snapshots, trace, stride
+                // accounting inputs), never safety; nothing reads them at
+                // sub-task granularity. Budget/flush metering (the sink
+                // lanes' safety accounting) lives operator-side and is
+                // untouched.
+                let mut t_morsels = 0u64;
+                let mut t_granules = 0u64;
+                let mut t_cpu_ns = 0u64;
                 loop {
                     // Morsel-boundary cancel point (Leis-style): an abort is
                     // observed within one morsel.
@@ -660,15 +688,20 @@ impl Scheduler {
                     }
                     local.drive.last_end_ns = t1;
                     sizer.observe(&ts.sizer, granules, dt);
-                    // INERT stride accounting (M5 reads this).
-                    ts.rg.cpu_consumed_ns.fetch_add(dt, Ordering::Relaxed);
-                    RuntimeStats::tick(&self.stats.morsels_claimed);
-                    RuntimeStats::tick(&ts.rg.stats.morsels_claimed);
-                    RuntimeStats::add(&self.stats.granules_executed, granules);
-                    RuntimeStats::add(&ts.rg.stats.granules_executed, granules);
+                    t_morsels += 1;
+                    t_granules += granules;
+                    t_cpu_ns += dt;
                     if sizer.task_done() {
                         break;
                     }
+                }
+                if t_morsels > 0 {
+                    // INERT stride accounting (M5 reads this).
+                    ts.rg.cpu_consumed_ns.fetch_add(t_cpu_ns, Ordering::Relaxed);
+                    RuntimeStats::add(&self.stats.morsels_claimed, t_morsels);
+                    RuntimeStats::add(&ts.rg.stats.morsels_claimed, t_morsels);
+                    RuntimeStats::add(&self.stats.granules_executed, t_granules);
+                    RuntimeStats::add(&ts.rg.stats.granules_executed, t_granules);
                 }
                 // Armed-outcome discipline: a worker's task ends
                 // successfully even when it drained an abort — failure is
@@ -716,7 +749,41 @@ impl Scheduler {
             // dictionary/memo state (the measured q21 DOP15 +78% busy
             // inflation). The sizer still observes for phase/stats.
             let end = if ts.whole_claims {
-                bound
+                // Claim coalescing (dop1-tax fix 1): at LOW live width the
+                // per-claim drive re-entry (scan reposition + drain prologue
+                // + partial export, ~30-45µs each on q21-class shapes) is
+                // the dominant DOP-1 tax — span SEVERAL epochs per claim and
+                // let the work body iterate per-epoch segments (one dict
+                // snapshot per segment; the epoch rules hold inside the
+                // claim). Width signal: `ts.active_workers`, already loaded
+                // above for the photo-finish W — the taskset's own live
+                // participant count, zero extra cost, and (unlike the pool's
+                // running count) it counts EXTERNAL pinned-drive lanes,
+                // which is what actually executes M1/M2 engagements. The
+                // factor decays to 1 as workers join, so a mid-query DOP
+                // widening naturally reverts to single-epoch claims; gating
+                // on the Default phase keeps the FIRST claims (Startup ramp,
+                // before the gang's joins are all visible) single-epoch —
+                // no stale-width giant claim can front-run a widening.
+                // Photo-finish (Shutdown) sizing is untouched.
+                let mut end = bound;
+                if ts.coalesce && decision == SizingDecision::Default {
+                    let factor = coalesce_epochs() / workers;
+                    if factor > 1 {
+                        // Fair-share clamp: never claim past this worker's
+                        // 1/W share of the remainder — late tail claims
+                        // shrink toward one epoch as remaining work runs
+                        // out, preserving the ≤1-task finish-spread posture.
+                        let fair_end = cur + ((total - cur) / workers).max(1);
+                        for _ in 1..factor {
+                            if end >= total || end >= fair_end {
+                                break;
+                            }
+                            end = ts.source().next_boundary_after(end).min(total);
+                        }
+                    }
+                }
+                end
             } else {
                 cur.saturating_add(want).min(bound).max(cur + 1)
             };

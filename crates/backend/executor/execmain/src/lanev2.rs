@@ -4444,6 +4444,23 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        // Runtime-sink adopted emit (dop1-tax fix 4): the agg's build was
+        // the parallel sink and it now holds published per-bucket EmitBufs
+        // of finalized byval datums — drain them into the sort in
+        // per-bucket BLOCKS (sort_lane_put_batch) instead of the per-row
+        // cursor pull below. Same rows, same order, same slot contents;
+        // only pull ceremony is hoisted (the DOP-1 tax ledger's ~35ms
+        // EmitBuf drain line — the serial arm's own batchemit shortcut is
+        // what the sink was forfeiting here). Kill switch: the same
+        // PGRUST_LANE_V2_BATCHEMIT=0 layer as the compact batchemit.
+        if batch_emit_enabled()
+            && ::nodeagg::sink::agg_sink_emitting(&aps.agg)
+            && ::nodeagg::sink::agg_sink_emit_unstarted(&aps.agg)
+        {
+            lane_trace("sink emit batched drain armed");
+            sort_feed_sink_batched(state, &mut aps.agg, outer_desc, estate)?;
+            return Ok(true);
+        }
         // Batched finalize+emit off the compact table (lane-v2 batchemit):
         // resolved AFTER the build (the compact table must exist), composes
         // with the emit-side top-N boundary cut when that also arms. Non-
@@ -5490,6 +5507,136 @@ impl<'mcx> ::nodesort::SortLaneBatchFeed<'mcx> for BatchEmitFeed<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<::executils::ExecSlotId>> {
         ::nodeagg::batch_emit_row(self.agg, estate, self.plan, i).map(Some)
+    }
+}
+
+/// The sink-emit batched drain (dop1-tax fix 4): the agg adopted the
+/// runtime sink's published per-bucket EmitBufs (finalized, identity-
+/// projected byval datums). Feed them into the just-begun tuplesort in
+/// per-bucket blocks — row-for-row the same stream, order and slot
+/// contents as the per-row cursor drain (`agg_sink_emit_next` under
+/// `sort_feed`), with the per-produce pull ceremony hoisted — COMPOSED
+/// with the emit-side top-N boundary cut (`topn_emit_arm`): on the
+/// admitted `GROUP BY … ORDER BY count-agg LIMIT k` shape the sort key is
+/// output column `sortColIdx[0]`, a bare int8 Aggref whose EMITTED datum
+/// equals the raw transvalue (`topn_emit_resolve`'s proof), so the
+/// boundary compare runs straight off the EmitBuf datum and a
+/// boundary-rejected row skips its whole slot build + tuplesort put —
+/// exactly the rows the bounded heap would compare-and-discard (the
+/// `sort_feed_agg_topn` invariant, verbatim; ties and NULLs always pass).
+/// This is what the SERIAL arm's batchemit shortcut does for its compact
+/// table — the sink was forfeiting both the batching AND the cut (the
+/// DOP-1 tax ledger's ~35ms EmitBuf drain line: 16.4ms of that was
+/// heap_form_minimal_tuple over EVERY group; the cut is what makes it
+/// ~k tuples).
+fn sort_feed_sink_batched<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    let spec = topn_emit_arm(sort, agg);
+    // The armed spec's sort key as an EMIT column: sortColIdx is 1-based
+    // over the agg's output tlist = the EmitBuf's column order.
+    let key_col = spec.map(|_| (sort.plan.sortColIdx[0] - 1) as usize);
+    let mut emitted: u64 = 0;
+    let mut skipped: u64 = 0;
+    for b in 0..::nodeagg::sink::SINK_NBUCKETS {
+        let n = ::nodeagg::sink::agg_sink_emit_bucket_len(agg, b)
+            .expect("sink emit state adopted");
+        if n == 0 {
+            continue;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        match key_col {
+            None => {
+                // Unbounded (or unadmitted) sort: the plain batched put.
+                ::nodesort::sort_lane_put_batch(
+                    sort,
+                    estate,
+                    0,
+                    n as u32,
+                    false,
+                    &mut SinkEmitFeed { agg, bucket: b },
+                )?;
+                emitted += n as u64;
+            }
+            Some(kc) => {
+                // Chunk-hoisted boundary (under-skips only: the boundary
+                // tightens monotonically, so a stale snapshot only lets
+                // through rows the tuplesort re-judges itself).
+                let spec = spec.expect("key_col implies spec");
+                let mut row = 0usize;
+                while row < n {
+                    let chunk_end = (row + 1024).min(n);
+                    let cut = match ::nodesort::sort_lane_topk_boundary(sort) {
+                        Some((bnd, false)) => Some(bnd.as_i64()),
+                        // Heap not yet full, or a NULL boundary (rank
+                        // depends on NULLS placement): unfiltered.
+                        _ => None,
+                    };
+                    for r in row..chunk_end {
+                        if let Some(bound) = cut {
+                            let (v, isnull) =
+                                ::nodeagg::sink::agg_sink_emit_datum(agg, b, r, kc);
+                            // Strictly worse on the leading key = a row the
+                            // full bounded heap discards regardless of later
+                            // keys; ties/NULLs pass (comparator authority).
+                            if !isnull
+                                && (if spec.desc {
+                                    v.as_i64() < bound
+                                } else {
+                                    v.as_i64() > bound
+                                })
+                            {
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                        let slot = ::nodeagg::sink::agg_sink_emit_block_row(
+                            agg, estate, b, r,
+                        );
+                        ::nodesort::sort_lane_put(sort, estate, slot)?;
+                        emitted += 1;
+                    }
+                    row = chunk_end;
+                }
+            }
+        }
+    }
+    if stats::armed() {
+        if spec.is_some() {
+            stats::tick_topnemit_groups(emitted + skipped, skipped);
+        }
+    }
+    ::nodeagg::sink::agg_sink_emit_drained(agg);
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(())
+}
+
+/// `SortLaneBatchFeed` face of the sink-emit drain: position `i` is row `i`
+/// of the current bucket's EmitBuf, built into the agg's result slot.
+struct SinkEmitFeed<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    bucket: usize,
+}
+
+impl<'mcx> ::nodesort::SortLaneBatchFeed<'mcx> for SinkEmitFeed<'_, 'mcx> {
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<::executils::ExecSlotId>> {
+        Ok(Some(::nodeagg::sink::agg_sink_emit_block_row(
+            self.agg,
+            estate,
+            self.bucket,
+            i as usize,
+        )))
     }
 }
 

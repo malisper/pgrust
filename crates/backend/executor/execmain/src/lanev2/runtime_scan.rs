@@ -113,6 +113,13 @@ pub(super) struct RuntimeScanShared {
     failed: AtomicBool,
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
+    /// Row-group start prefix sums (the morsel source's hard boundaries),
+    /// shared with [`CbstoreGranuleSource`]: a COALESCED claim (sched.rs
+    /// dop1-tax fix 1 — several epochs per claim at low live width) is
+    /// segmented at these edges inside `morsel_body`, so `set_granule_range`
+    /// still sees single-RG ranges and every kernel invocation sees one
+    /// dictionary snapshot. Set once at engage, before any claim.
+    rg_starts: OnceLock<Arc<Vec<u64>>>,
     /// inc-2 bind-once: helpers drive from the ENTRY TASK (already fully
     /// bound by parallel_worker_body — a strict superset of the query-task
     /// binder's bind) instead of re-binding at POST_TASK_PARK. The hook
@@ -237,24 +244,57 @@ impl RuntimeScanShared {
                             "runtime scan worker outer node is not a SeqScan",
                         )));
                     };
-                    ::nodeseqscan::seq_scan_set_morsel_range(
-                        ss,
-                        estate,
-                        range.start,
-                        range.end,
-                    )?;
-                    match mode {
-                        DriveMode::Fold => {
-                            super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                    // A COALESCED claim spans several row groups (sched.rs
+                    // dop1-tax fix 1): cbstore claims are segmented at the
+                    // RG edges (`rg_starts`) so every positioned range sees
+                    // a single dictionary epoch (set_morsel_range's cbstore
+                    // single-RG contract) and every kernel batch one
+                    // dictionary snapshot. Heap sources have no interior
+                    // boundaries and never coalesce (no rg_starts): the
+                    // loop degenerates to one positioned range. Cancel
+                    // observability stays at epoch grain: an abort/failure
+                    // observed between segments stops the claim (aborted
+                    // generations need not execute every granule — the RG
+                    // outcome is discarded).
+                    let starts = self.rg_starts.get();
+                    let mut seg = range.start;
+                    while seg < range.end {
+                        let seg_end = match starts {
+                            Some(starts) => {
+                                let bound = match starts.binary_search(&seg) {
+                                    Ok(i) => starts[i + 1],
+                                    Err(i) => starts[i],
+                                };
+                                bound.min(range.end)
+                            }
+                            None => range.end,
+                        };
+                        ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, seg, seg_end)?;
+                        match mode {
+                            DriveMode::Fold => {
+                                super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                            }
+                            DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
                         }
-                        DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
+                        seg = seg_end;
+                        if seg < range.end
+                            && (self.failed.load(Ordering::SeqCst)
+                                || self
+                                    .rg
+                                    .get()
+                                    .and_then(|w| w.upgrade())
+                                    .is_some_and(|rg| rg.is_aborted()))
+                        {
+                            break;
+                        }
                     }
-                    // Cumulative partial export (in place): the worker's
-                    // LAST morsel's export — which precedes its settle, and
-                    // therefore RG completion — is the one the leader reads.
-                    // The slot's partial is reused across morsels (retained
-                    // capacity; a fresh Vec per morsel was a malloc+free
-                    // pair on the engaged path — m2-integration audit).
+                    // Cumulative partial export (in place), ONCE per claim:
+                    // the worker's LAST claim's export — which precedes its
+                    // settle, and therefore RG completion — is the one the
+                    // leader reads. The slot's partial is reused across
+                    // morsels (retained capacity; a fresh Vec per morsel was
+                    // a malloc+free pair on the engaged path —
+                    // m2-integration audit).
                     let slot = worker - self.pins_base;
                     let mut g =
                         self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
@@ -695,7 +735,14 @@ fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                         DriveMode::Census => {
                             // Census shape: row-feed staging (kernel-qual
                             // selection bitmap / PREWHERE when the qual has
-                            // kernel shape; stitched tiers on).
+                            // kernel shape; stitched tiers on) — the same
+                            // staging the SERIAL q21-class drive uses (the
+                            // lane refuses census and the Volcano pull runs
+                            // over the prewhere-staged scan). A qual-only
+                            // restage was tried here (dop1-tax inc-2 first
+                            // cut) and REVERTED: LIKE quals are not
+                            // cmp-const clauses, so it armed NO bitmap and
+                            // the drain fell to the per-row path.
                             super::arm_scan_staging(
                                 ss,
                                 estate,
@@ -912,8 +959,13 @@ fn census_drain<'mcx>(
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
 pub(super) struct CbstoreGranuleSource {
-    /// Row-group start prefix sums (len nrgs+1; last = total).
-    pub(super) starts: Vec<u64>,
+    /// Row-group start prefix sums (len nrgs+1; last = total). Shared with
+    /// the engagement payload (`rg_starts`): morsel_body segments coalesced
+    /// claims at the same edges the source publishes.
+    pub(super) starts: Arc<Vec<u64>>,
+    /// True only when the consuming work body subdivides multi-epoch claims
+    /// (the scan arm's morsel_body). See `coalesce_claims`.
+    pub(super) coalesce: bool,
 }
 
 impl runtime::MorselSource for CbstoreGranuleSource {
@@ -951,6 +1003,18 @@ impl runtime::MorselSource for CbstoreGranuleSource {
         !*SPLIT.get_or_init(|| {
             std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
         })
+    }
+
+    /// dop1-tax fix 1: the SCAN arm's morsel_body subdivides a coalesced
+    /// claim at these RG edges (one `set_granule_range` + drain per epoch
+    /// segment), so multi-epoch claims are legal here — the per-claim drive
+    /// re-entry (~30-45µs) amortizes across the claim's epochs at low live
+    /// width. The DISTINCT sink shares this source TYPE but feeds claims
+    /// straight into `set_granule_range`; it opts out via `coalesce` at
+    /// construction. Factor/kill-switch: PGRUST_RUNTIME_COALESCE_EPOCHS
+    /// (sched.rs; 1 disables).
+    fn coalesce_claims(&self) -> bool {
+        self.coalesce
     }
 }
 
@@ -1183,18 +1247,34 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // nrgs rides along for the WFIN/LFIN diagnostic channel only: cbstore
     // row-group (= dictionary epoch) count; heap has no interior hard
     // boundaries, so it honestly reports 0.
-    let (source, nrgs): (Arc<dyn runtime::MorselSource>, usize) = if is_cb {
+    // rg_starts additionally rides to the engagement payload (cbstore only):
+    // morsel_body segments COALESCED claims at the same RG edges the source
+    // publishes (dop1-tax fix 1). Heap has no interior boundaries and no
+    // dictionary epochs — nothing to segment, nothing to coalesce.
+    let (source, nrgs, rg_starts): (
+        Arc<dyn runtime::MorselSource>,
+        usize,
+        Option<Arc<Vec<u64>>>,
+    ) = if is_cb {
         let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
         else {
             return Ok(None);
         };
         let nrgs = starts.len().saturating_sub(1);
-        (Arc::new(CbstoreGranuleSource { starts }), nrgs)
+        let starts = Arc::new(starts);
+        (
+            Arc::new(CbstoreGranuleSource {
+                starts: Arc::clone(&starts),
+                coalesce: true,
+            }),
+            nrgs,
+            Some(starts),
+        )
     } else {
         let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(ss, estate)? else {
             return Ok(None);
         };
-        (Arc::new(HeapBlockSource { nblocks }), 0)
+        (Arc::new(HeapBlockSource { nblocks }), 0, None)
     };
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
@@ -1205,9 +1285,10 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, nrgs, source)
+    engage(agg, estate, rt, dop, total_granules, nrgs, source, rg_starts)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn engage<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1216,6 +1297,7 @@ fn engage<'mcx>(
     total_granules: u64,
     nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
+    rg_starts: Option<Arc<Vec<u64>>>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -1244,9 +1326,18 @@ fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        rg_starts: OnceLock::new(),
         drive_at_entry: entry_drive_enabled(),
         standing: Mutex::new(None),
     });
+    // Set BEFORE any claim can run (submit happens inside engage_ceremony):
+    // morsel_body expects the edges whenever the source coalesces (cbstore).
+    if let Some(starts) = rg_starts {
+        payload
+            .rg_starts
+            .set(starts)
+            .unwrap_or_else(|_| unreachable!("rg_starts set once"));
+    }
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context
     // lifetime (CreateParallelContext asserts it); an error unwind aborts
