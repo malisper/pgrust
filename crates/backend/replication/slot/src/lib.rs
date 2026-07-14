@@ -334,7 +334,10 @@ pub fn ReplicationSlotCreate(
                 .errmsg("cannot enable failover for a replication slot created on the standby")
                 .finish(loc("ReplicationSlotCreate"));
         }
-        if persistency == RS_TEMPORARY {
+        // Failover-enabled temporary slots are only allowed during slot
+        // synchronization (slotsync creates RS_TEMPORARY synced slots that
+        // must retain the remote's failover flag).
+        if persistency == RS_TEMPORARY && !syncing_replication_slots() {
             return ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot enable failover for a temporary replication slot")
