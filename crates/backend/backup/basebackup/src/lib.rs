@@ -70,9 +70,12 @@ fn S_ISLNK(m: u32) -> bool { m & S_IFMT == S_IFLNK }
 
 const O_RDONLY: i32 = 0;
 
-// static bool backup_started_in_recovery (basebackup.c file-static).
+// basebackup.c file-statics: backup_started_in_recovery, noverify_checksums,
+// total_checksum_failures.
 thread_local! {
     static BACKUP_STARTED_IN_RECOVERY: Cell<bool> = const { Cell::new(false) };
+    static NOVERIFY_CHECKSUMS: Cell<bool> = const { Cell::new(false) };
+    static TOTAL_CHECKSUM_FAILURES: Cell<i64> = const { Cell::new(0) };
 }
 
 // excludeDirContents[] — contents excluded, empty dir kept.
@@ -389,6 +392,8 @@ fn refuse(feature: &str) -> PgResult<()> {
 
 fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOptions> {
     let mut opt = BasebackupOptions::default();
+    NOVERIFY_CHECKSUMS.with(|c| c.set(false));
+
     let (mut o_label, mut o_progress, mut o_checkpoint, mut o_nowait) = (false, false, false, false);
     let (mut o_wal, mut o_incremental, mut o_maxrate, mut o_tsmap) = (false, false, false, false);
     let (mut o_noverify, mut o_manifest, mut o_manifest_cksums) = (false, false, false);
@@ -463,7 +468,8 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             }
             "verify_checksums" => {
                 if o_noverify { dup_err(name)?; }
-                let _ = opt_bool(o)?; // backup-time checksum verification deferred
+                let verify = opt_bool(o)?;
+                NOVERIFY_CHECKSUMS.with(|c| c.set(!verify));
                 o_noverify = true;
             }
             "manifest" => {
@@ -673,6 +679,7 @@ fn perform_base_backup<'mcx>(
     state.bytes_total_is_valid = false;
 
     BACKUP_STARTED_IN_RECOVERY.with(|c| c.set(transam_xlog::RecoveryInProgress()));
+    TOTAL_CHECKSUM_FAILURES.with(|c| c.set(0));
 
     let mut manifest = BackupManifestInfo::zeroed();
     InitializeBackupManifest(mcx, &mut manifest, opt.manifest, opt.manifest_checksum_type)?;
@@ -742,7 +749,7 @@ fn perform_base_backup<'mcx>(
                             .finish(loc("perform_base_backup"));
                     }
                 };
-                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, &mut manifest)?;
+                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, None, &mut manifest)?;
             } else {
                 let archive_name = format!("{oid}.tar");
                 bbsink_begin_archive(sink, state, &archive_name)?;
@@ -938,7 +945,7 @@ fn perform_base_backup<'mcx>(
                         .finish(loc("perform_base_backup"));
                 }
             };
-            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, &mut manifest)?;
+            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, None, &mut manifest)?;
 
             // Unconditionally mark file as archived.
             let done_path = transam_xlog::StatusFilePath(fname, ".done");
@@ -967,6 +974,23 @@ fn perform_base_backup<'mcx>(
     bbsink_end_backup(sink, state, endptr, endtli)?;
 
     FreeBackupManifest(&mut manifest);
+
+    let total_checksum_failures = TOTAL_CHECKSUM_FAILURES.with(Cell::get);
+    if total_checksum_failures != 0 {
+        if total_checksum_failures > 1 {
+            let _ = ereport(WARNING)
+                .errmsg_plural(
+                    format!("{total_checksum_failures} total checksum verification failure"),
+                    format!("{total_checksum_failures} total checksum verification failures"),
+                    total_checksum_failures as u64,
+                )
+                .finish(loc("perform_base_backup"));
+        }
+        return ereport(ERROR)
+            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errmsg("checksum verification failure during base backup")
+            .finish(loc("perform_base_backup"));
+    }
 
     sink_support::basebackup_progress_done();
     Ok(())
@@ -1002,6 +1026,71 @@ fn xlog_from_file_name(fname: &str, wal_segsz: i32) -> (TimeLineID, u64) {
     let log = u64::from_str_radix(&fname[8..16], 16).unwrap_or(0);
     let seg = u64::from_str_radix(&fname[16..24], 16).unwrap_or(0);
     (tli, log * per_id + seg)
+}
+
+// verify_page_checksum (basebackup.c:104): None = page OK (new page, page
+// newer than the backup start, or checksum matches); Some(calculated) on a
+// mismatch.
+fn verify_page_checksum(page: &[u8], start_lsn: XLogRecPtr, blkno: u32) -> Option<u16> {
+    // PageIsNew: pd_upper == 0.
+    let pd_upper = u16::from_ne_bytes([page[14], page[15]]);
+    // PageGetLSN: pd_lsn = { xlogid u32, xrecoff u32 }.
+    let lsn = ((u32::from_ne_bytes(page[0..4].try_into().unwrap()) as u64) << 32)
+        | u32::from_ne_bytes(page[4..8].try_into().unwrap()) as u64;
+    if pd_upper == 0 || lsn >= start_lsn {
+        return None;
+    }
+    let checksum = pg_checksum_page(page, blkno);
+    let pd_checksum = u16::from_ne_bytes([page[8], page[9]]);
+    if pd_checksum == checksum {
+        None
+    } else {
+        Some(checksum)
+    }
+}
+
+// pg_checksum_page (storage/checksum_impl.h): FNV-1a-derived block checksum
+// computed with pd_checksum treated as zero (same algorithm as bufmgr's
+// PageSetChecksumInplace).
+fn pg_checksum_page(page: &[u8], blkno: u32) -> u16 {
+    const N_SUMS: usize = 32;
+    const FNV_PRIME: u32 = 16777619;
+    const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = [
+        0x5B1F36E9, 0xB8525960, 0x02AB50AA, 0x1DE66D2A, 0x79FF467A, 0x9BB9F8A3, 0x217E7CD2,
+        0x83E13D2C, 0xF8D4474F, 0xE39EB970, 0x42C6AE16, 0x993216FA, 0x7B093B5D, 0x98DAFF3C,
+        0xF718902A, 0x0B1C9CDB, 0xE58F764B, 0x187636BC, 0x5D7B3BB1, 0xE73DE7DE, 0x92BEC979,
+        0xCCA6C0B2, 0x304A0979, 0x85AA43D4, 0x783125BB, 0x6CA8EAA2, 0xE407EAC6, 0x4B5CFC3E,
+        0x9FBF8C76, 0x15CA20BE, 0xF2CA9FD3, 0x959BD756,
+    ];
+    #[inline(always)]
+    fn comp(sum: &mut u32, value: u32) {
+        let tmp = *sum ^ value;
+        *sum = tmp.wrapping_mul(FNV_PRIME) ^ (tmp >> 17);
+    }
+    let blcksz = types_core::BLCKSZ;
+    debug_assert_eq!(page.len(), blcksz);
+    let mut sums = CHECKSUM_BASE_OFFSETS;
+    let rows = blcksz / (4 * N_SUMS);
+    for row in 0..rows {
+        for (lane, sum) in sums.iter_mut().enumerate() {
+            let off = (row * N_SUMS + lane) * 4;
+            // pd_checksum (bytes 8..10) is computed as zero.
+            let v = if off == 8 {
+                u32::from_ne_bytes([0, 0, page[10], page[11]])
+            } else {
+                u32::from_ne_bytes(page[off..off + 4].try_into().unwrap())
+            };
+            comp(sum, v);
+        }
+    }
+    for _ in 0..2 {
+        for sum in sums.iter_mut() {
+            comp(sum, 0);
+        }
+    }
+    let mut checksum: u32 = sums.into_iter().fold(0, |a, s| a ^ s);
+    checksum ^= blkno;
+    (checksum % 65535 + 1) as u16
 }
 
 fn fstat_fd(fd: i32, path: &str) -> PgResult<LstatInfo> {
@@ -1150,13 +1239,15 @@ fn sendDir_spc(
         // try to parse the filename.
         let mut is_relation_file = false;
         let mut relfilenumber: u32 = 0;
+        let mut segno_of: u32 = 0;
         let mut rel_fork = types_core::ForkNumber::MAIN_FORKNUM;
         if is_relation_dir {
-            if let Some((num, fork, _segno)) =
+            if let Some((num, fork, segno)) =
                 fd::reinit::parse_filename_for_nontemp_relation(&d_name)
             {
                 is_relation_file = true;
                 relfilenumber = num;
+                segno_of = segno;
                 rel_fork = fork;
             }
         }
@@ -1235,7 +1326,12 @@ fn sendDir_spc(
             }
         } else if S_ISREG(statbuf.mode) {
             let tarfilename = &pathbuf[basepathlen as usize + 1..];
-            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, spcoid, manifest)?;
+            let relfile = if is_relation_file {
+                Some((relfilenumber, segno_of))
+            } else {
+                None
+            };
+            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, spcoid, relfile, manifest)?;
             if sent {
                 size += statbuf.size;
                 size += tar_padding_bytes_required(statbuf.size as usize) as i64;
@@ -1259,6 +1355,9 @@ fn sendFile(
     statbuf: &LstatInfo,
     missing_ok: bool,
     spcoid: Oid,
+    // Some((relfilenumber, segno)) when the caller parsed a relation
+    // filename in a relation directory (checksum verification surface).
+    relfile: Option<(u32, u32)>,
     manifest: &mut BackupManifestInfo,
 ) -> PgResult<bool> {
     let mut ctx = checksum_init(manifest.checksum_type(), readfilename)?;
@@ -1277,6 +1376,17 @@ fn sendFile(
 
     _tarWriteHeader(sink, state, tarfilename, None, statbuf)?;
 
+    // If we weren't told not to verify checksums, and checksums are enabled
+    // for this cluster, and this is a relation file, verify per-block.
+    let mut verify_checksum = !NOVERIFY_CHECKSUMS.with(Cell::get)
+        && transam_xlog::DataChecksumsEnabled()
+        && relfile.is_some();
+    let segno = relfile.map(|(_, s)| s).unwrap_or(0);
+    let mut checksum_failures: i32 = 0;
+    let mut blkno: u32 = 0;
+    const BLCKSZ: usize = types_core::BLCKSZ;
+    const RELSEG_SIZE: u32 = (1024 * 1024 * 1024) / BLCKSZ as u32;
+
     let mut bytes_done: i64 = 0;
     loop {
         if bytes_done >= statbuf.size {
@@ -1284,7 +1394,7 @@ fn sendFile(
         }
         let want = sink.buffer_length().min((statbuf.size - bytes_done) as usize);
         // SAFETY: buf is a live writable slice; fd is an open regular file.
-        let cnt = {
+        let mut cnt = {
             let buf = sink.buffer_slice_mut(want);
             unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), bytes_done as libc::off_t) }
         };
@@ -1294,9 +1404,83 @@ fn sendFile(
                 .errmsg(format!("could not read file \"{readfilename}\""))
                 .finish(loc("sendFile")).map(|()| false);
         }
+
+        // read_file_data_into_buffer's per-block verification (basebackup.c).
+        if verify_checksum && cnt > 0 && (cnt as usize % BLCKSZ) == 0 {
+            let nblocks = cnt as usize / BLCKSZ;
+            let abs_base = blkno + segno * RELSEG_SIZE;
+            for i in 0..nblocks {
+                let expected = {
+                    let buf = sink.buffer_slice(cnt as usize);
+                    verify_page_checksum(
+                        &buf[i * BLCKSZ..(i + 1) * BLCKSZ],
+                        state.startptr,
+                        abs_base + i as u32,
+                    )
+                };
+                let Some(_) = expected else { continue };
+
+                // Retry the block once: a torn concurrent write may finish
+                // and update the page LSN so we then skip it.
+                let reread_cnt = {
+                    let buf = sink.buffer_slice_mut(cnt as usize);
+                    unsafe {
+                        libc::pread(
+                            fd,
+                            buf[i * BLCKSZ..].as_mut_ptr().cast(),
+                            BLCKSZ,
+                            bytes_done as libc::off_t + (i * BLCKSZ) as libc::off_t,
+                        )
+                    }
+                };
+                if reread_cnt == 0 {
+                    // Concurrent truncation: keep only the processed blocks.
+                    cnt = (BLCKSZ * i) as isize;
+                    break;
+                }
+                let (expected, actual) = {
+                    let buf = sink.buffer_slice(cnt as usize);
+                    let page = &buf[i * BLCKSZ..(i + 1) * BLCKSZ];
+                    (
+                        verify_page_checksum(page, state.startptr, abs_base + i as u32),
+                        u16::from_ne_bytes([page[8], page[9]]),
+                    )
+                };
+                let Some(expected) = expected else { continue };
+
+                checksum_failures += 1;
+                if checksum_failures <= 5 {
+                    let _ = ereport(WARNING)
+                        .errmsg(format!(
+                            "checksum verification failed in file \"{readfilename}\", block {}: calculated {:X} but expected {:X}",
+                            abs_base + i as u32, expected, actual
+                        ))
+                        .finish(loc("sendFile"));
+                }
+                if checksum_failures == 5 {
+                    let _ = ereport(WARNING)
+                        .errmsg(format!(
+                            "further checksum verification failures in file \"{readfilename}\" will not be reported"
+                        ))
+                        .finish(loc("sendFile"));
+                }
+            }
+        }
+
+        // Block-level checksums can't be verified on a partial read.
+        if verify_checksum && cnt > 0 && (cnt as usize % BLCKSZ) != 0 {
+            let _ = ereport(WARNING)
+                .errmsg(format!(
+                    "could not verify checksum in file \"{readfilename}\", block {blkno}: read buffer size {cnt} and page size {BLCKSZ} differ"
+                ))
+                .finish(loc("sendFile"));
+            verify_checksum = false;
+        }
+
         if cnt == 0 {
             break; // concurrent truncation
         }
+        blkno += (cnt as usize / BLCKSZ) as u32;
         let chunk = sink.buffer_slice(cnt as usize).to_vec();
         checksum_update(&mut ctx, &chunk)?;
         bbsink_archive_contents(sink, state, cnt as usize)?;
@@ -1315,6 +1499,22 @@ fn sendFile(
 
     _tarWritePadding(sink, state, bytes_done as usize)?;
     fd::CloseTransientFile(fd);
+
+    if checksum_failures > 1 {
+        // pgstat checksum-failure reporting is monitoring-only and deferred.
+        let _ = ereport(WARNING)
+            .errmsg_plural(
+                format!(
+                    "file \"{readfilename}\" has a total of {checksum_failures} checksum verification failure"
+                ),
+                format!(
+                    "file \"{readfilename}\" has a total of {checksum_failures} checksum verification failures"
+                ),
+                checksum_failures as u64,
+            )
+            .finish(loc("sendFile"));
+    }
+    TOTAL_CHECKSUM_FAILURES.with(|c| c.set(c.get() + checksum_failures as i64));
 
     AddFileToBackupManifest(manifest, spcoid, tarfilename.as_bytes(), statbuf.size, statbuf.mtime, &mut ctx)?;
     Ok(true)
