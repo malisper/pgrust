@@ -93,10 +93,6 @@ pub struct BgWriterJob {
     child_slot: i32,
     /// Set by startup() (aux PGPROC acquisition); INVALID before.
     procno: AtomicI32,
-    /// The job's aux resource owner (created on the dispatcher at
-    /// startup); the envelope bind points the executing worker's
-    /// CurrentResourceOwner/AuxProcessResourceOwner cells at it.
-    aux_owner: Mutex<types_resowner::ResourceOwner>,
     state: Mutex<JobState>,
     overlay: Mutex<Overlay>,
 }
@@ -107,7 +103,6 @@ impl BgWriterJob {
             pid,
             child_slot,
             procno: AtomicI32::new(INVALID_PROC_NUMBER),
-            aux_owner: Mutex::new(types_resowner::ResourceOwner::NULL),
             state: Mutex::new(JobState {
                 inner: BgWriterState::new(),
                 armed: false,
@@ -148,17 +143,24 @@ struct EnvelopeBind {
     prev_btype: types_core::BackendType,
     prev_cur_owner: types_resowner::ResourceOwner,
     prev_aux_owner: types_resowner::ResourceOwner,
+    /// Per-cycle resource owner created in THE WORKER'S arena (resowner
+    /// arenas are thread-local — a dispatcher-created owner handle is not
+    /// portable across threads; found live: "stale ResourceOwner (slot
+    /// out of range)", fleet job ...-261e). Released + deleted at unbind;
+    /// C-equivalent because the aux owner's cycle-time content (buffer
+    /// pins) is balanced within one BgBufferSync round.
+    cycle_owner: types_resowner::ResourceOwner,
     prev_guc: Overlay,
 }
 
 impl EnvelopeBind {
-    fn bind(
-        pid: pid_t,
-        procno: ProcNumber,
-        aux_owner: types_resowner::ResourceOwner,
-        overlay: &Overlay,
-    ) -> EnvelopeBind {
+    fn bind(pid: pid_t, procno: ProcNumber, overlay: &Overlay) -> EnvelopeBind {
         use guc_tables::vars as v;
+        let cycle_owner = resowner::ResourceOwnerCreate(
+            types_resowner::ResourceOwner::NULL,
+            "BgWriterJobCycle",
+        )
+        .expect("cycle resource owner");
         let prev = EnvelopeBind {
             prev_pid: g::MyProcPid(),
             prev_procno: g::MyProcNumber(),
@@ -167,6 +169,7 @@ impl EnvelopeBind {
             prev_btype: miscinit::GetMyBackendType(),
             prev_cur_owner: resowner::CurrentResourceOwner(),
             prev_aux_owner: resowner::AuxProcessResourceOwner(),
+            cycle_owner,
             prev_guc: Overlay {
                 delay_ms: v::BgWriterDelay.read(),
                 lru_maxpages: v::bgwriter_lru_maxpages.read(),
@@ -180,10 +183,10 @@ impl EnvelopeBind {
         g::SetMyLatch(Some(LatchHandle::proc(procno)));
         miscinit::SetMyBackendType(types_core::BackendType::BgWriter);
         // Buffer pins and the error leg's ReleaseAuxProcessResources
-        // route through the job's aux resource owner (found live: worker
+        // route through the per-cycle owner (found live: worker
         // ResourceOwnerEnlarge on the NULL owner, fleet job ...-24fb).
-        resowner::SetCurrentResourceOwner(aux_owner);
-        resowner::SetAuxProcessResourceOwner(aux_owner);
+        resowner::SetCurrentResourceOwner(cycle_owner);
+        resowner::SetAuxProcessResourceOwner(cycle_owner);
         v::BgWriterDelay.write(overlay.delay_ms);
         v::bgwriter_lru_maxpages.write(overlay.lru_maxpages);
         v::bgwriter_lru_multiplier.write(overlay.lru_multiplier);
@@ -201,6 +204,22 @@ impl Drop for EnvelopeBind {
         v::bgwriter_lru_multiplier.write(self.prev_guc.lru_multiplier);
         v::bgwriter_flush_after.write(self.prev_guc.flush_after);
         v::track_io_timing.write(self.prev_guc.track_io_timing);
+        // Drain + delete the per-cycle owner (a clean cycle leaves it
+        // empty — pins are balanced within one round; the error leg's
+        // abort_cleanup already ReleaseAuxProcessResources'd through it).
+        use types_resowner::ResourceReleasePhase::{
+            RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS, RESOURCE_RELEASE_LOCKS,
+        };
+        for phase in [
+            RESOURCE_RELEASE_BEFORE_LOCKS,
+            RESOURCE_RELEASE_LOCKS,
+            RESOURCE_RELEASE_AFTER_LOCKS,
+        ] {
+            if let Err(e) = resowner::ResourceOwnerRelease(self.cycle_owner, phase, false, true) {
+                elog::emit_error_report_for(&e);
+            }
+        }
+        resowner::ResourceOwnerDelete(self.cycle_owner);
         resowner::SetAuxProcessResourceOwner(self.prev_aux_owner);
         resowner::SetCurrentResourceOwner(self.prev_cur_owner);
         miscinit::SetMyBackendType(self.prev_btype);
@@ -258,19 +277,27 @@ impl BgJob for BgWriterJob {
         // CreateAuxProcessResourceOwner's fresh-lifecycle asserts.
         resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
         resowner::SetAuxProcessResourceOwner(types_resowner::ResourceOwner::NULL);
-        let init = if CHILD_INITED.get() {
-            miscinit::InitProcessGlobals(self.pid);
-            Ok(())
+        let first_lifecycle = !CHILD_INITED.get();
+        if first_lifecycle {
+            if let Err(e) = miscinit::InitPostmasterChild(self.pid) {
+                self.announce(1 << 8);
+                return Err(e);
+            }
+            CHILD_INITED.set(true);
         } else {
-            miscinit::InitPostmasterChild(self.pid).map(|()| CHILD_INITED.set(true))
-        };
-        if let Err(e) = init {
-            self.announce(1 << 8);
-            return Err(e);
+            miscinit::InitProcessGlobals(self.pid);
         }
         g::SetMyPMChildSlot(self.child_slot);
         miscinit::SetMyBackendType(types_core::BackendType::BgWriter);
-        if let Err(e) = auxprocess::AuxiliaryProcessMainCommon() {
+        // First lifecycle runs the full aux main prelude; relaunches run
+        // its per-lifecycle half only (BaseInit's InitFileAccess etc. are
+        // once-per-thread: "call me only once").
+        let prelude = if first_lifecycle {
+            auxprocess::AuxiliaryProcessMainCommon()
+        } else {
+            auxprocess::AuxiliaryProcessRejoinCommon()
+        };
+        if let Err(e) = prelude {
             // C fatal_exit parity: proc_exit(1) RUNS THE EXIT CALLBACKS —
             // whatever partial identity was acquired (aux PGPROC, beentry,
             // procsignal slot) must be released or every relaunch inherits
@@ -282,7 +309,6 @@ impl BgJob for BgWriterJob {
             return Err(e);
         }
         self.procno.store(g::MyProcNumber(), Ordering::Release);
-        *self.aux_owner.lock().unwrap() = resowner::CurrentResourceOwner();
 
         {
             use procsignal::ThreadSignalHandler::{Ignore, Simple};
@@ -368,8 +394,7 @@ impl BgJob for BgWriterJob {
         let overlay = *self.overlay.lock().unwrap();
         let mut st = self.state.lock().unwrap();
         let procno = self.procno();
-        let aux_owner = *self.aux_owner.lock().unwrap();
-        let _bind = EnvelopeBind::bind(self.pid, procno, aux_owner, &overlay);
+        let _bind = EnvelopeBind::bind(self.pid, procno, &overlay);
         let delay = Duration::from_millis(overlay.delay_ms.max(1) as u64);
 
         if st.hibernating {
