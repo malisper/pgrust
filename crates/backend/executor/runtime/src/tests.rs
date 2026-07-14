@@ -975,6 +975,93 @@ fn external_lane_leases_are_exclusive() {
     assert_eq!(again.ordinal(), MAX_EXTERNAL_LANES - 1);
 }
 
+/// DOP-192 readiness smoke: 192 concurrent EXTERNAL pinned drivers — every
+/// helper leases a real lane (the production path, exercising the widened
+/// multi-word lease mask past the old 64-lane ceiling) and drives one
+/// pinned RG to completion. Threads multiplex on however many cores the
+/// host has; correctness (exactly-once, single finalize) must hold.
+#[test]
+fn pinned_rg_192_external_drivers_exactly_once() {
+    const DRIVERS: usize = 192;
+    assert!(DRIVERS <= MAX_EXTERNAL_LANES, "test premise: lanes cover dop-192");
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 4,
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let total = 50_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (handle, waiter) = rt.submit_pinned(spec_one(
+        &work,
+        Arc::new(SyntheticMorselSource::with_boundaries(total, 8)),
+    ));
+    let mut joins = Vec::new();
+    for _ in 0..DRIVERS {
+        let rt2 = Arc::clone(&rt);
+        let h = handle.clone();
+        joins.push(std::thread::spawn(move || {
+            let lane = rt2.acquire_external_lane().expect("192 lanes must be available");
+            let mut local = lane.local();
+            rt2.drive_pinned(&mut local, &h)
+        }));
+    }
+    for j in joins {
+        assert_eq!(j.join().unwrap(), RgOutcome::Completed);
+    }
+    assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+}
+
+/// DOP-192 readiness smoke: a 192-worker POOL (declared workers far above
+/// the host's cores — the threads multiplex) runs a submitted RG
+/// exactly-once. Pool sizing has no hard cap; this pins that at 192.
+#[test]
+fn pool_192_workers_exactly_once() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 192,
+        standbys: 2,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let total = 50_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (_h, waiter) =
+        rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    pool.shutdown();
+}
+
+/// DOP-192 readiness K-sweep: "K" here = the standby count (the §2.8
+/// permit model; the M5 stride fields are inert). 64 standbys against 8
+/// permits — far past the tested K=2 — must park cleanly and never break
+/// exactly-once or finalize-once.
+#[test]
+fn pool_k64_standbys_exactly_once() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 8,
+        standbys: 64,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let total = 50_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (_h, waiter) =
+        rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    pool.shutdown();
+}
+
 // ---- M1 §2.9: uring worker-loop duties (rings, boundary reap, IoGuard seams)
 
 /// Counting stand-ins for aio_uring's seam impls. aio_uring is not linked
