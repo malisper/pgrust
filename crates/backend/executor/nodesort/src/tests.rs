@@ -597,3 +597,61 @@ fn refsort_reset_for_refeed_clears_state_and_refusal_sticks() {
     sort_lane_finish(&mut node, &mut estate).unwrap();
     assert!(sort_lane_next(&mut node, &mut estate).unwrap().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// for_each_put: the skip-mask put iterator must visit EXACTLY the positions
+// the plain pos..n loop would offer to an emit that answers None on
+// bit-cleared rows — same positions, same order — for arbitrary masks,
+// pos offsets and ragged tails. (The sort feed's put-stream identity.)
+// ---------------------------------------------------------------------------
+#[test]
+fn for_each_put_matches_plain_loop_on_set_bits() {
+    // Deterministic xorshift; no external deps.
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..500 {
+        let n: u32 = match case % 5 {
+            0 => 1,
+            1 => 63,
+            2 => 64,
+            3 => 65,
+            _ => (rng() % (64 * exectuples::SOA_BM_WORDS as u64 - 1) + 1) as u32,
+        };
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let mut words = [0u64; exectuples::SOA_BM_WORDS];
+        for w in words.iter_mut() {
+            *w = match case % 4 {
+                0 => 0,
+                1 => !0,
+                _ => rng(),
+            };
+        }
+        // Producer contract: bits at/past n are zero.
+        for i in n..(64 * exectuples::SOA_BM_WORDS as u32) {
+            words[(i / 64) as usize] &= !(1u64 << (i % 64));
+        }
+        let expected: Vec<u32> = (pos..n)
+            .filter(|&i| words[(i / 64) as usize] & (1u64 << (i % 64)) != 0)
+            .collect();
+        let mut got = Vec::new();
+        for_each_put(Some(&words), pos, n, |i| {
+            got.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, expected, "case {case} n={n} pos={pos}");
+        // None mask = the plain loop.
+        let mut all = Vec::new();
+        for_each_put(None, pos, n, |i| {
+            all.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(all, (pos..n).collect::<Vec<_>>());
+    }
+}
