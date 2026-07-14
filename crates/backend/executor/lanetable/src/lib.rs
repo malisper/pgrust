@@ -63,29 +63,38 @@ pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 /// serialgap2: vdso/clock_gettime/Timespec::now lines). A fixed distance
 /// covers the whole batch with zero measurement overhead.
 ///
-/// Distance = 24 (C3 lane, 2026-07-13, notes/hot-c3-probe-prefetch.md):
-/// same-pod restart-arm ladder on the v7u 10M bank read Q16/Q36 serial
-/// 8→16 = −7%, 16→24 = −2.6%, 24→32 = flat — at 8 the hint lands only
-/// ~8 hit-iterations (~tens of ns) before use, short of DRAM latency;
-/// the plateau starts at ~24. Salt8/i128 10M-group probes (Q32/Q33) are
-/// bandwidth-floored and read flat across the whole ladder.
-/// PGRUST_LANE_V2_PROBE_LOOKAHEAD overrides at boot (0 = no in-loop
-/// hints) — the A/B channel that measured this table.
-pub const PREFETCH_LOOKAHEAD: usize = 24;
+/// The distance is PER RUN SHAPE (C3 lane, 2026-07-13,
+/// notes/hot-c3-probe-prefetch.md):
+/// - Inline16 (one 16 B slot line resolves the compare):
+///   [`PREFETCH_LOOKAHEAD_INLINE`] = 24. Same-pod restart-arm ladder on
+///   the v7u 10M bank read Q16/Q36 serial 8→16 = −7%, 16→24 = −2.6%,
+///   24→32 = flat — at 8 the hint lands only ~8 hit-iterations (~tens
+///   of ns) before use, short of DRAM latency; the plateau starts ~24.
+/// - Salt8 / Int128 (entry line + dependent row line per probe):
+///   [`PREFETCH_LOOKAHEAD`] = 8. The same ladder read the 2-key i128
+///   class WORSE at 24 (same-pod Q32 +4.4%, Q15 +2.0%, Q31 +1.8%): the
+///   demand stream is already two lines deep per row, and a longer
+///   speculative hint stream competes for the same fill buffers.
+/// PGRUST_LANE_V2_PROBE_LOOKAHEAD overrides BOTH at boot (0 = no
+/// in-loop hints) — the A/B channel that measured these tables.
+pub const PREFETCH_LOOKAHEAD: usize = 8;
+
+/// Inline16-run look-ahead (see [`PREFETCH_LOOKAHEAD`]).
+pub const PREFETCH_LOOKAHEAD_INLINE: usize = 24;
 
 /// Runtime channel for the engaged look-ahead distance
-/// (`PGRUST_LANE_V2_PROBE_LOOKAHEAD`; default [`PREFETCH_LOOKAHEAD`], 0 =
-/// no in-loop hints). Read once, loaded into a register per batch — zero
-/// hot-loop cost. C3 probe-prefetch A/B channel.
+/// (`PGRUST_LANE_V2_PROBE_LOOKAHEAD`; default = the caller's per-shape
+/// constant, 0 = no in-loop hints). Read once, loaded into a register
+/// per batch — zero hot-loop cost. C3 probe-prefetch A/B channel.
 #[inline]
-fn probe_lookahead() -> usize {
-    static LA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *LA.get_or_init(|| {
+fn probe_lookahead(shape_default: usize) -> usize {
+    static LA: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    LA.get_or_init(|| {
         std::env::var("PGRUST_LANE_V2_PROBE_LOOKAHEAD")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(PREFETCH_LOOKAHEAD)
     })
+    .unwrap_or(shape_default)
 }
 
 // C3 lane note (2026-07-13, notes/hot-c3-probe-prefetch.md): a two-stage
@@ -836,8 +845,14 @@ impl LaneAggTable {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
         let sw = if INLINE { 2 } else { 1 };
-        // C3 channel (a register for the whole run): slot-line hint distance.
-        let la = probe_lookahead();
+        // C3 channel (a register for the whole run): per-shape slot-line
+        // hint distance (Inline16 resolves in the slot; Salt8 pays a
+        // dependent row line — see PREFETCH_LOOKAHEAD).
+        let la = probe_lookahead(if INLINE {
+            PREFETCH_LOOKAHEAD_INLINE
+        } else {
+            PREFETCH_LOOKAHEAD
+        });
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             // Hoisted raw parts (re-derived after every insert — see
@@ -1209,8 +1224,8 @@ impl LaneAggTable {
     ) {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
-        // C3 channel (see probe_fold_hashed_run).
-        let la = probe_lookahead();
+        // C3 channel (see probe_fold_hashed_run; Int128 is Salt8-only).
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD);
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             let bp: *mut EntrySet = match &mut self.buckets {
