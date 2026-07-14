@@ -1161,9 +1161,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     };
     let Some(state_bytes) = ::nodeagg::sink::agg_sink_state_bytes(agg) else {
+        refuse("state bytes (no compact-hosting perhash)");
         return Ok(false);
     };
     let Some(budget) = ::nodeagg::sink::agg_sink_hash_mem_limit(agg) else {
+        refuse("hash mem limit unavailable");
         return Ok(false);
     };
     // F1 root cause (chaos-battery): the WORKER arm re-runs the compact
@@ -1187,7 +1189,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse("extern params");
         return Ok(false);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refuse("no planned stmt");
+        return Ok(false);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         refuse("exec params");
         return Ok(false);
@@ -1197,6 +1202,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
+        refuse("non-MVCC snapshot");
         return Ok(false);
     }
     let policy = parallel::query_task_policy_probe();
@@ -1209,7 +1215,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     // Worker plan root: the Agg subtree's Node in the leader plan tree.
-    let Some(root) = leader_pstmt.planTree else { return Ok(false) };
+    let Some(root) = leader_pstmt.planTree else {
+        refuse("no plan tree");
+        return Ok(false);
+    };
     let Some(agg_node) = find_agg_node(root, agg.plan) else {
         refuse("agg node not in plan tree");
         return Ok(false);
@@ -1224,6 +1233,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let Some((total_granules, starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
+        refuse("granule geometry unavailable (no columnar part)");
         return Ok(false);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
