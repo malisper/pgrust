@@ -1051,9 +1051,17 @@ fn split_subparts_and_emit(
 /// fixed-width prefix deform is unarmable — UserID past varlena columns).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DictFeed {
-    /// Consume the dict CODES directly (CH LowCardinality-style): per-epoch
-    /// code -> live compact-table state cache, one table probe per distinct
-    /// (epoch, code) instead of per row.
+    /// Keep the dict-group registration and admit. MEASURED FINDING
+    /// (q16-columnar-feed lane): cbstore NEVER dict-encodes INT chunks
+    /// (`encode_int_chunk`: Const/For/Raw/DeltaFor only — Encoding::Dict is
+    /// the varlena encoder's arm), and the K2 sink admits int keys only
+    /// (`agg_sink_key_width`), so dict windows cannot reach this drain
+    /// today: every window fills decoded Datums and the plain keys path
+    /// runs. The dict-window branch (`sink_dict_batch` — CH
+    /// LowCardinality-style per-epoch code -> state cache) is the
+    /// fail-closed guard that makes keeping the registration SOUND (a dict
+    /// window's key Datum cells are stale by the set_dict_lane contract),
+    /// and the ready lane if int dict encoding ever lands.
     Code,
     /// Dict-free columnar re-arm (the q5-serial precedent): rebuild the
     /// scan staging with NO dict registration so windows fill decoded
