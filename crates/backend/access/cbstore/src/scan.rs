@@ -1712,6 +1712,27 @@ impl<'mcx> CbScanDescData<'mcx> {
         if cd.is_dict {
             let codes = &cd.codes[self.staged_lo..self.staged_lo + n];
             if soa.dict_want(0) {
+                // v7 stitch: same publication discipline as
+                // `batch_deform_col` — local -> part-global codes for
+                // (rg, key) when present, length-consistent with the dict,
+                // and the scan's stitch identity armed (scan_uid != 0).
+                // Consumers (the distinct-set dict memo) fail open to
+                // per-epoch keying on a null stitch.
+                let stitch = if self.scan_uid != 0 {
+                    self.part
+                        .as_ref()
+                        .and_then(|p| p.stitch(self.rg, key))
+                        .filter(|s| s.len() == cd.dict.len())
+                } else {
+                    None
+                };
+                let gndv = self
+                    .part
+                    .as_ref()
+                    .map(|p| p.stitch_gndv(key))
+                    .filter(|&g| stitch.is_some() && g <= u32::MAX as u64)
+                    .unwrap_or(0);
+                let stitch = if gndv != 0 { stitch } else { None };
                 soa.set_dict_lane(
                     0,
                     ::exectuples::SoaDictLane {
@@ -1721,11 +1742,9 @@ impl<'mcx> CbScanDescData<'mcx> {
                             ndict: cd.dict.len() as u32,
                             epoch: self.rg as u64,
                             sorted: cd.dict_sorted,
-                            // Varkey feed publishes no stitch (consumers of
-                            // this lane fail open to per-epoch keying).
-                            stitch: std::ptr::null(),
-                            gndv: 0,
-                            gepoch: 0,
+                            stitch: stitch.map_or(std::ptr::null(), |s| s.as_ptr()),
+                            gndv: gndv as u32,
+                            gepoch: if stitch.is_some() { self.scan_uid } else { 0 },
                         },
                     },
                 );

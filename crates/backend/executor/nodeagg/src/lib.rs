@@ -72,15 +72,16 @@ pub use compact::{
 pub use codedgroup::{
     agg_codedgroup_accept_batch, agg_codedgroup_admissible, agg_codedgroup_begin,
     agg_codedgroup_economical, agg_codedgroup_emit_next, agg_codedgroup_emitting,
-    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_next_replay,
-    agg_codedgroup_reset, CgAccept,
+    agg_codedgroup_finish_build, agg_codedgroup_key_arg_atts, agg_codedgroup_mode_global,
+    agg_codedgroup_next_replay, agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
-    agg_hashgroup_accept, agg_hashgroup_admissible, agg_hashgroup_adopt_merged,
-    agg_hashgroup_begin, agg_hashgroup_economical, agg_hashgroup_emit_next,
-    agg_hashgroup_emitting, agg_hashgroup_finish_build, agg_hashgroup_next_rep,
-    agg_hashgroup_reset, agg_hashgroup_residual_active, agg_hashgroup_set_residual,
-    agg_hashgroup_state_active, agg_hashgroup_text_key_count, HashGroupOrderKey,
+    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_admissible,
+    agg_hashgroup_adopt_merged, agg_hashgroup_batch_shape, agg_hashgroup_begin,
+    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
+    agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
+    agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
+    agg_hashgroup_text_key_count, HashGroupOrderKey, HgBatchRow,
 };
 pub use ::execgrouping::GroupKeyKind;
 
@@ -4567,35 +4568,53 @@ pub fn agg_plain_distinct_insert_bytes_batch<'mcx>(
 /// One staged batch of the direct-feed drive, DICT-CODED text keys (the
 /// cbstore zero-decode dict lane): `codes` are the batch's per-row u32 codes
 /// into `dict` (the row group's decoded-Datum dictionary; NULL-free by the
-/// dict-lane contract), and `memo` is the caller's EPOCH-SCOPED per-code
-/// dedup bitmap (≥ dict.len() bits, cleared by the caller whenever the dict
-/// epoch changes). A memo hit means this code's value was already FED this
-/// scan-epoch — to the in-memory set, a spill tape, or the degraded
-/// tuplesort — all of which dedup exactly, so skipping the repeat insert is
-/// value-invisible: the distinct-value multiset each consumer sees is
-/// unchanged. The memo NEVER substitutes codes for set elements — the set
-/// stores the full content bytes (epoch-scoped ids are not stable across
-/// row groups, so ids-as-elements would break exactness; ids only serve as
-/// a per-epoch insert filter).
+/// dict-lane contract), and `memo` is the caller's IDENTITY-SCOPED per-code
+/// dedup bitmap (cleared by the caller whenever the memo identity changes).
+/// Without a stitch the identity is the dict epoch and the memo is indexed
+/// by local code (≥ dict.len() bits). With `stitch` (`Some`, the v7
+/// part-global dictionary): the identity is the scan-stable gepoch, the
+/// memo is indexed by PART-GLOBAL code (`stitch[local]`, ≥ gndv bits) and
+/// never clears at epoch rolls — each distinct string is detoasted +
+/// hashed + inserted once per part instead of once per row group. A memo
+/// hit means this code's value was already FED this identity — to the
+/// in-memory set, a spill tape, or the degraded tuplesort — all of which
+/// dedup exactly, so skipping the repeat insert is value-invisible: the
+/// distinct-value multiset each consumer sees is unchanged (this holds
+/// across a mid-identity degrade too: every memo-marked value was fed to a
+/// structure the degrade replays). The memo NEVER substitutes codes for set
+/// elements — the set stores the full content bytes (codes, global or
+/// local, are scan-scoped identities, so ids-as-elements would break
+/// exactness; ids only serve as an insert filter).
 pub fn agg_plain_distinct_insert_dict_batch<'mcx>(
     node: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     codes: &[u32],
     dict: &[Datum],
+    stitch: Option<&[u32]>,
     memo: &mut [u64],
 ) -> PgResult<()> {
     debug_assert!(agg_plain_distinct_direct_shape(node));
-    debug_assert!(memo.len() * 64 >= dict.len());
+    debug_assert!(stitch.is_none_or(|s| s.len() == dict.len()));
+    debug_assert!(stitch.is_some() || memo.len() * 64 >= dict.len());
+    // Memo bit index for a local code: part-global when stitched (bitmap
+    // indexed 0..gndv, never reset across row groups), local otherwise.
+    let bit = |c: u32| -> usize {
+        match stitch {
+            Some(s) => s[c as usize] as usize,
+            None => c as usize,
+        }
+    };
     let tmp = node.tmpcontext;
     let ps = &mut node.pertrans_sort[0];
     debug_assert_eq!(ps.set_kind, Some(distinctset::DistinctKeyKind::Bytes));
     if ps.dset_degraded {
-        // Degraded group: feed each epoch-new value once (the sort's drain
-        // re-dedups; feeding one representative per value is the same
+        // Degraded group: feed each identity-new value once (the sort's
+        // drain re-dedups; feeding one representative per value is the same
         // distinct multiset the per-row feed produces).
         let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
         for &c in codes {
-            let (w, b) = (c as usize / 64, c as usize % 64);
+            let i = bit(c);
+            let (w, b) = (i / 64, i % 64);
             if memo[w] >> b & 1 == 0 {
                 memo[w] |= 1 << b;
                 sort.putdatum(dict[c as usize], false)?;
@@ -4605,7 +4624,8 @@ pub fn agg_plain_distinct_insert_dict_batch<'mcx>(
     }
     let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
     for &c in codes {
-        let (w, b) = (c as usize / 64, c as usize % 64);
+        let i = bit(c);
+        let (w, b) = (i / 64, i % 64);
         if memo[w] >> b & 1 == 0 {
             memo[w] |= 1 << b;
             // SAFETY: dict entries are live decoded text varlena images
