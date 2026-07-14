@@ -1129,6 +1129,11 @@ fn sink_dict_batch<'mcx>(
         dgs.ident = Some(ident);
         dgs.slots.clear();
         dgs.slots.resize(size, None);
+        lane_trace(&format!(
+            "sink dict-group {} {} (n={size})",
+            if global { "gepoch" } else { "epoch" },
+            ident.1
+        ));
     }
     debug_assert!(dgs.slots.len() >= size, "dict size is fixed per identity");
     // PENDING sentinel: marks a code queued in THIS batch's miss list. A
