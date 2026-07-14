@@ -52,6 +52,7 @@ use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_scan::{exprs_parallel_safe, CbstoreGranuleSource};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible};
@@ -809,49 +810,75 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_hashjoin_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::HashJoin);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    // Done-repulls (the post-completion pull that exits via agg_is_done
+    // below) are not offers — see the scan arm's identical gate.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+    }
+    // M5-1 refusal funnel: every admission exit names its gate for the
+    // router's consolidated taxonomy (previously silent early returns).
+    fn refuse(reason: &'static str) {
+        router::tick_refused(ArmClass::HashJoin, reason);
+    }
 
     // --- Node shape: HashJoin over two lane-fusible cbstore SeqScans; a
     // fresh (untouched) join; phase-1 join types; subplan/param-free exprs.
     let crate::procnode::PlanStateNode::SeqScan(outer_ss) = &mut *hj.outer else {
+        refuse("outer-not-seqscan");
         return Ok(None);
     };
     let hash = &mut *hj.hash;
     let crate::procnode::PlanStateNode::SeqScan(inner_ss) = &mut *hash.child else {
+        refuse("inner-not-seqscan");
         return Ok(None);
     };
     if !shared_join_admissible(&hj.state, &hash.state) {
         stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("join-shape");
         return Ok(None);
     }
     if !::nodehashjoin::lane_join_untouched(&hj.state, &hash.state) {
+        refuse("join-touched");
         return Ok(None);
     }
     if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        refuse("partials-not-order-insensitive-exact");
         return Ok(None);
     }
     if !seq_scan_fusible(outer_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(outer_ss) {
+        refuse("outer-scan-not-fusible");
         return Ok(None);
     }
     if !seq_scan_fusible(inner_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(inner_ss) {
+        refuse("inner-scan-not-fusible");
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
+        refuse("instrumented-or-epq");
         return Ok(None);
     }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refuse("in-parallel-mode");
         return Ok(None);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refuse("params");
         return Ok(None);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refuse("no-plannedstmt");
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refuse("params");
         return Ok(None);
     }
     // Agg must be the plan root; its child the HashJoin; the join's children
@@ -890,6 +917,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         || !exprs_parallel_safe(join_plan.join.plan.qual.iter())?
         || !exprs_parallel_safe(join_plan.join.plan.targetlist.iter())?
     {
+        refuse("exprs-not-parallel-safe");
         return Ok(None);
     }
     if !estate
@@ -897,6 +925,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
+        refuse("non-mvcc-snapshot");
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
@@ -905,6 +934,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
+        refuse("binder-policy");
         return Ok(None);
     }
 
@@ -919,6 +949,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     if nbatch > 1 {
         lane_trace("runtime-hashjoin: REFUSED (estimated nbatch > 1) — serial arm");
         stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("estimated-multi-batch");
         return Ok(None);
     }
 
@@ -927,14 +958,17 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     let Some((outer_granules, outer_starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(outer_ss, estate)?
     else {
+        refuse("geometry");
         return Ok(None);
     };
     let Some((_inner_granules, inner_starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(inner_ss, estate)?
     else {
+        refuse("geometry");
         return Ok(None);
     };
     if outer_granules < min_granules().max(2 * dop as u64) {
+        refuse("tiny-input-floor");
         return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
@@ -949,7 +983,10 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             | ::types_nodes::JoinType::JOIN_RIGHT_ANTI
     );
 
-    engage(
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
+    let r = engage(
         agg,
         estate,
         rt,
@@ -959,7 +996,12 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         inner_starts,
         space_allowed,
         fill_inner,
-    )
+    )?;
+    router::tick(
+        ArmClass::HashJoin,
+        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
 }
 
 #[allow(clippy::too_many_arguments)]

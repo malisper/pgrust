@@ -63,6 +63,7 @@ use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea, trace_feed};
@@ -1167,6 +1168,9 @@ fn refused(
     node_id: i32,
     reason: &'static str,
 ) {
+    // M5-1: every distinct-arm refusal feeds the router's consolidated
+    // taxonomy alongside the trace / EA transparency line.
+    router::tick_refused(ArmClass::Distinct, reason);
     lane_trace(&format!("runtime-distinct: refused ({reason})"));
     if ea {
         estate.runtime_ea_record_refusal(node_id, "distinct", reason);
@@ -1188,7 +1192,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_distinct_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Distinct);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
@@ -1198,6 +1204,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if *rd_shape_refused {
         return Ok(None);
     }
+    router::tick(ArmClass::Distinct, ArmCounter::Offered);
     lane_trace("runtime-distinct: probed");
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
@@ -1225,6 +1232,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     }
     if estate.es_epq_active {
+        router::tick_refused(ArmClass::Distinct, "epq");
         return Ok(None);
     }
     // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
@@ -1426,9 +1434,18 @@ fn engage<'mcx>(
     });
 
     xact::EnterParallelMode();
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::Distinct, ArmCounter::Engaged);
     let engaged =
         engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, spec, order);
     xact::ExitParallelMode();
+    if let Ok(r) = &engaged {
+        router::tick(
+            ArmClass::Distinct,
+            if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        );
+    }
     engaged
 }
 
@@ -1451,6 +1468,10 @@ fn engage_ceremony<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_distinct_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
+    // SinkProbe surface (M5-1, the §3.5 lane_trace remainder): captured out
+    // of the ceremony body and reported at RG completion.
+    let mut sink_probe: Option<Arc<runtime::SinkProbe>> = None;
+    let probe_out = &mut sink_probe;
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
@@ -1473,13 +1494,14 @@ fn engage_ceremony<'mcx>(
             starts: Arc::new(starts),
             coalesce: false,
         });
-        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
+        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
             runtime::sealed_sink_tasksets(
                 Arc::clone(payload),
                 source,
                 rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
                 0,
             );
+        *probe_out = Some(probe);
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
@@ -1635,6 +1657,12 @@ fn engage_ceremony<'mcx>(
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
+
+    // SinkProbe report (M5-1): stale_locals_dropped / combine_refusals now
+    // have a surface — router counters + a lane_trace line per engagement.
+    if let Some(probe) = &sink_probe {
+        router::sink_probe_complete(ArmClass::Distinct, probe);
+    }
 
     match outcome {
         EngageOutcome::Fallback => {
