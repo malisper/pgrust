@@ -17,6 +17,7 @@ use types_nodes::{Node, NodeTag};
 use crate::format::{
     append, ExplainCloseGroup, ExplainIndentText, ExplainOpenGroup, ExplainPropertyBool,
     ExplainPropertyFloat, ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
+    ExplainPropertyUInteger,
 };
 use define::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
@@ -940,6 +941,20 @@ pub fn ExplainNode<'mcx>(
     } else {
         execmain_seams::query_desc_instrument::call(es.qd, plan.plan_node_id)
     };
+    // EA-on-morsels reports for this node (fetched once; the annotation
+    // block below reuses it). A pipe whose root is NOT this node marks this
+    // node as a bypassed MEMBER: its Instrumentation rows are exact but its
+    // timing fields are deliberately zero — printing them would fake a time
+    // (ea-morsels.md §7), so the actual-line drops its time= segment and
+    // the member marker line explains where the time lives.
+    let runtime_ea_pipes = if es.analyze && !es.qd.is_null() {
+        execmain_seams::query_desc_runtime_ea_pipeline::call(es.qd, plan.plan_node_id)
+    } else {
+        None
+    };
+    let ea_member = runtime_ea_pipes
+        .as_ref()
+        .is_some_and(|ps| ps.iter().any(|p| p.root_node_id != plan.plan_node_id));
     let save_workers_state = es.workers_state.take();
     let worker_instrument = if es.analyze && !es.hide_workers && !es.qd.is_null() {
         execmain_seams::query_desc_worker_instrument::call(es.qd, plan.plan_node_id)
@@ -970,12 +985,12 @@ pub fn ExplainNode<'mcx>(
             let rows = i.ntuples / nloops;
             if es.format == EXPLAIN_FORMAT_TEXT {
                 append!(es, " (actual ");
-                if es.timing {
+                if es.timing && !ea_member {
                     append!(es, "time={startup_ms:.3}..{total_ms:.3} ");
                 }
                 append!(es, "rows={rows:.2} loops={nloops:.0})");
             } else {
-                if es.timing {
+                if es.timing && !ea_member {
                     ExplainPropertyFloat("Actual Startup Time", Some("ms"), startup_ms, 3, es);
                     ExplainPropertyFloat("Actual Total Time", Some("ms"), total_ms, 3, es);
                 }
@@ -1456,6 +1471,199 @@ pub fn ExplainNode<'mcx>(
     if es.buffers {
         if let Some(i) = &instrument {
             crate::show_buffer_usage(es, &i.bufusage);
+        }
+    }
+
+    // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): the
+    // runtime admission walk's verdict for a node that did not engage.
+    // Records exist ONLY on armed + instrumented walks — unarmed sessions
+    // (every existing gate: the C-diff explain e2e, regress) print nothing
+    // and stay byte-identical.
+    if es.analyze && !es.qd.is_null() {
+        if let Some(refs) =
+            execmain_seams::query_desc_runtime_ea_refusals::call(es.qd, plan.plan_node_id)
+        {
+            if es.format == EXPLAIN_FORMAT_TEXT {
+                crate::format::ExplainIndentText(es);
+                append!(es, "runtime: refused (");
+                for (i, (arm, reason)) in refs.iter().enumerate() {
+                    if i > 0 {
+                        append!(es, "; ");
+                    }
+                    append!(es, "{arm}: {reason}");
+                }
+                append!(es, ")\n");
+            } else {
+                for (arm, reason) in &refs {
+                    crate::format::ExplainPropertyText(
+                        "Runtime Refused",
+                        &format!("{arm}: {reason}"),
+                        es,
+                    );
+                }
+            }
+        }
+    }
+
+    // EA-on-morsels pipeline blocks (docs/design/ea-morsels.md §4): the
+    // engaged runtime pipeline reports at measured granularity — the full
+    // block on the pipeline's breaker (root) node, a marker line on
+    // bypassed member nodes. Reports exist ONLY on armed + instrumented
+    // engagements (same emission-gate law as the refusal line); TIMING OFF
+    // reports carry no time-derived lines (zero is not a time).
+    if es.analyze && !es.qd.is_null() {
+        if let Some(pipes) = &runtime_ea_pipes {
+            let mut member_marked = false;
+            for p in pipes {
+                if p.root_node_id == plan.plan_node_id {
+                    let role = p.role.to_ascii_uppercase();
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        let (arm, ti, tc) = (p.arm, p.taskset_index, p.taskset_count);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "Runtime Pipeline: {arm} (task set {ti}/{tc} {role})\n");
+                        let workers = p.workers;
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Workers: {workers} participated\n");
+                        let (claims, granules) = (p.claims, p.granules);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Morsels: {claims} claims, {granules} granules");
+                        // TIMER mode only (zero is not a time — §7).
+                        if p.last_end_ns != 0 && p.claims != 0 {
+                            let avg_ms = p.busy_ns as f64 / p.claims as f64 / 1e6;
+                            let spread_ms =
+                                p.last_end_ns.saturating_sub(p.min_last_end_ns) as f64 / 1e6;
+                            append!(es, ", avg {avg_ms:.3}ms, spread {spread_ms:.3}ms");
+                        }
+                        append!(es, "\n");
+                        let (rs, rf, np) = (p.rows_scanned, p.rows_survived, p.partials);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Rows: {rs} scanned -> {rf} filtered -> {np} partials\n");
+                        let (pruned, bloom, meta, windows) =
+                            (p.prune[1], p.prune[2], p.prune[3], p.prune[6]);
+                        crate::format::ExplainIndentText(es);
+                        append!(
+                            es,
+                            "  Scan: {pruned} granules pruned ({bloom} bloom), \
+                             {meta} meta-answered, {windows} windows staged\n"
+                        );
+                        // TIMER mode only: wall/cpu/DOP/stalls at PIPELINE
+                        // granularity — the measured boundary (§4).
+                        if p.last_end_ns != 0 && p.first_start_ns != 0 {
+                            let wall_ns = p.last_end_ns.saturating_sub(p.first_start_ns);
+                            if wall_ns != 0 {
+                                let wall_ms = wall_ns as f64 / 1e6;
+                                let cpu_ms = p.busy_ns as f64 / 1e6;
+                                let dop = p.busy_ns as f64 / wall_ns as f64;
+                                let stall_ms = ((p.workers as u64 * wall_ns)
+                                    .saturating_sub(p.busy_ns))
+                                    as f64
+                                    / 1e6;
+                                crate::format::ExplainIndentText(es);
+                                append!(
+                                    es,
+                                    "  Time: wall {wall_ms:.3}ms, cpu {cpu_ms:.3}ms, \
+                                     effective DOP {dop:.1}, stalls {stall_ms:.3}ms\n"
+                                );
+                            }
+                        }
+                    } else {
+                        crate::format::ExplainOpenGroup(
+                            "Runtime Pipeline",
+                            Some("Runtime Pipeline"),
+                            true,
+                            es,
+                        );
+                        crate::format::ExplainPropertyText("Arm", p.arm, es);
+                        crate::format::ExplainPropertyText("Role", &role, es);
+                        ExplainPropertyUInteger("Task Set", None, p.taskset_index as u64, es);
+                        ExplainPropertyUInteger("Task Sets", None, p.taskset_count as u64, es);
+                        ExplainPropertyUInteger("Workers", None, p.workers as u64, es);
+                        ExplainPropertyUInteger("Claims", None, p.claims, es);
+                        ExplainPropertyUInteger("Granules", None, p.granules, es);
+                        ExplainPropertyUInteger("Rows Scanned", None, p.rows_scanned, es);
+                        ExplainPropertyUInteger("Rows Filtered", None, p.rows_survived, es);
+                        ExplainPropertyUInteger("Partials", None, p.partials, es);
+                        ExplainPropertyUInteger("Granules Pruned", None, p.prune[1], es);
+                        ExplainPropertyUInteger("Bloom Pruned", None, p.prune[2], es);
+                        ExplainPropertyUInteger("Meta Answered", None, p.prune[3], es);
+                        ExplainPropertyUInteger("Windows Staged", None, p.prune[6], es);
+                        // TIMER mode only (absent under TIMING OFF — zero
+                        // is not a time, §7).
+                        if p.last_end_ns != 0 && p.first_start_ns != 0 && p.claims != 0 {
+                            let wall_ns = p.last_end_ns.saturating_sub(p.first_start_ns);
+                            ExplainPropertyFloat(
+                                "Avg Morsel Time",
+                                Some("ms"),
+                                p.busy_ns as f64 / p.claims as f64 / 1e6,
+                                3,
+                                es,
+                            );
+                            ExplainPropertyFloat(
+                                "Finish Spread",
+                                Some("ms"),
+                                p.last_end_ns.saturating_sub(p.min_last_end_ns) as f64 / 1e6,
+                                3,
+                                es,
+                            );
+                            if wall_ns != 0 {
+                                ExplainPropertyFloat(
+                                    "Wall Time",
+                                    Some("ms"),
+                                    wall_ns as f64 / 1e6,
+                                    3,
+                                    es,
+                                );
+                                ExplainPropertyFloat(
+                                    "CPU Time",
+                                    Some("ms"),
+                                    p.busy_ns as f64 / 1e6,
+                                    3,
+                                    es,
+                                );
+                                ExplainPropertyFloat(
+                                    "Effective DOP",
+                                    None,
+                                    p.busy_ns as f64 / wall_ns as f64,
+                                    1,
+                                    es,
+                                );
+                                ExplainPropertyFloat(
+                                    "Stall Time",
+                                    Some("ms"),
+                                    ((p.workers as u64 * wall_ns).saturating_sub(p.busy_ns))
+                                        as f64
+                                        / 1e6,
+                                    3,
+                                    es,
+                                );
+                            }
+                        }
+                        crate::format::ExplainCloseGroup(
+                            "Runtime Pipeline",
+                            Some("Runtime Pipeline"),
+                            true,
+                            es,
+                        );
+                    }
+                } else if !member_marked {
+                    member_marked = true;
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        crate::format::ExplainIndentText(es);
+                        let arm = p.arm;
+                        append!(
+                            es,
+                            "runtime: member of {arm} pipeline \
+                             (times at pipeline granularity)\n"
+                        );
+                    } else {
+                        crate::format::ExplainPropertyText(
+                            "Runtime Member",
+                            &format!("{} pipeline (times at pipeline granularity)", p.arm),
+                            es,
+                        );
+                    }
+                }
+            }
         }
     }
 

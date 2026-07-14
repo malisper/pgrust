@@ -16,7 +16,7 @@ use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
     AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
-    IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
+    IncrementalSortInfo, Instrumentation, RuntimeEaPipeline, TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
@@ -720,6 +720,17 @@ pub struct EStateData<'mcx> {
     pub es_instrument: i32,
     // Keyed by plan_node_id (C: per-PlanState); empty when es_instrument == 0.
     pub es_instrumentation: PgVec<'mcx, Instrumentation>,
+    // EA-on-morsels refusal transparency (docs/design/ea-morsels.md §6): one
+    // record per (node, arm) the runtime admission walk refused while
+    // instrumented AND armed. Empty on every unarmed/uninstrumented path —
+    // the EXPLAIN emission gate is "records exist", which keeps unarmed EA
+    // output byte-identical to C.
+    pub es_runtime_ea_refusals: PgVec<'mcx, RuntimeEaRefusal>,
+    // EA-on-morsels pipeline reports (ea-morsels.md §4): one per engaged
+    // runtime pipeline phase, pushed by the arm's leader merge on a clean
+    // Completed outcome. Same emission-gate law as the refusals: empty on
+    // every unarmed/uninstrumented path.
+    pub es_runtime_ea_pipelines: PgVec<'mcx, RuntimeEaPipeline>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
@@ -837,7 +848,40 @@ pub fn ensure_epq_subs<'a, 'mcx>(
     subs.as_mut().expect("just ensured")
 }
 
+/// EA-on-morsels refusal record (docs/design/ea-morsels.md §6): the runtime
+/// admission walk's verdict for an instrumented, armed node that did not
+/// engage. Static vocabulary only — reasons are the walk's own refuse
+/// strings / RefuseReason names; never formatted at record time.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeEaRefusal {
+    pub plan_node_id: i32,
+    pub arm: &'static str,
+    pub reason: &'static str,
+}
+
 impl<'mcx> EStateData<'mcx> {
+    /// Record a runtime-EA refusal (cold: instrumented+armed refusals only).
+    /// Dedup on (node, arm): refused shapes re-walk admission per call and
+    /// must not accrete duplicate lines; first reason wins (it is the
+    /// admission walk's first failing gate, the one C-order determinism
+    /// gives us).
+    #[cold]
+    pub fn runtime_ea_record_refusal(
+        &mut self,
+        plan_node_id: i32,
+        arm: &'static str,
+        reason: &'static str,
+    ) {
+        if self
+            .es_runtime_ea_refusals
+            .iter()
+            .any(|r| r.plan_node_id == plan_node_id && r.arm == arm)
+        {
+            return;
+        }
+        self.es_runtime_ea_refusals.push(RuntimeEaRefusal { plan_node_id, arm, reason });
+    }
+
     /// `InstrCountFiltered1` (execnodes.h); idx is the node's
     /// es_instrumentation slot, None when not instrumented.
     #[inline]
@@ -916,6 +960,8 @@ impl<'mcx> EStateData<'mcx> {
             es_top_eflags: 0,
             es_instrument: 0,
             es_instrumentation: PgVec::new_in(mcx),
+            es_runtime_ea_refusals: PgVec::new_in(mcx),
+            es_runtime_ea_pipelines: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
@@ -1395,6 +1441,8 @@ const _: () = assert!(!core::mem::needs_drop::<Option<ParamExecData>>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, IncrementalSortInfo)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
+const _: () = assert!(!core::mem::needs_drop::<RuntimeEaRefusal>());
+const _: () = assert!(!core::mem::needs_drop::<RuntimeEaPipeline>());
 mcx::forget_safe_struct!(
     EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked, relsubs_rowmark, origslot },
     EStateData<'_> {
@@ -1416,7 +1464,9 @@ mcx::forget_safe_struct!(
         es_aux_contexts,
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
-        es_param_exec_vals, es_instrumentation, es_agg_instrumentation,
+        es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
+        es_runtime_ea_pipelines,
+        es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
         es_hash_instrumentation, es_index_instrumentation,
         es_bitmap_instrumentation, es_worker_instrument,

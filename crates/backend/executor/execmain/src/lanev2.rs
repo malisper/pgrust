@@ -38,6 +38,7 @@ mod exprkey;
 mod runtime_agg;
 mod runtime_distinct;
 mod runtime_hashjoin;
+mod runtime_instr;
 mod runtime_scan;
 mod runtime_sort;
 mod push;
@@ -676,6 +677,29 @@ fn seq_scan_fusible<'mcx>(
     Ok(v)
 }
 
+/// EA-on-morsels fusibility (docs/design/ea-morsels.md §6, E4): the RUNTIME
+/// arms' admission proxy under EXPLAIN ANALYZE. The leader's node carries an
+/// instr slot (so `seq_scan_fusible` memoizes REFUSE — correct for the
+/// serial lane, whose batched drive would skip the per-node instrument
+/// wrappers), but the runtime's WORKER executors are built uninstrumented,
+/// so for runtime admission the Instrumented gate — and ONLY that gate — is
+/// vacuous. Evaluates the same dynamic gates + the same call-invariant
+/// refuse-set with the instrument check skipped; touches neither the
+/// memoized serial verdict nor the engagement stat counters (the runtime
+/// arm ticks its own). Cold: runs once per engagement attempt.
+#[cold]
+pub(super) fn seq_scan_fusible_runtime_ea<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(false);
+    }
+    Ok(seq_scan_refuse_reason_ex(ss, estate, true)?.is_none())
+}
+
 /// The call-invariant half of the SeqScan refuse-set: plan shape, init-time
 /// eflags, parallel wiring, instrumentation, and AM page-batch support.
 /// `None` = admitted; `Some(reason)` = refused (the caller ticks accounting).
@@ -683,10 +707,22 @@ fn seq_scan_refuse_reason<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<RefuseReason>> {
+    seq_scan_refuse_reason_ex(ss, estate, false)
+}
+
+/// `ignore_instrument`: the EA-on-morsels arm evaluates fusibility FOR ITS
+/// UNINSTRUMENTED WORKERS — every other gate applies identically (the E4
+/// rule: EA may never change the admission verdict except the instrument
+/// gate itself).
+fn seq_scan_refuse_reason_ex<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ignore_instrument: bool,
+) -> PgResult<Option<RefuseReason>> {
     if !ss.batch_allowed() {
         return Ok(Some(RefuseReason::ScrollMark));
     }
-    if ss.ss.instr_idx.is_some() {
+    if !ignore_instrument && ss.ss.instr_idx.is_some() {
         return Ok(Some(RefuseReason::Instrumented));
     }
     match ss.variant() {
@@ -1561,6 +1597,53 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
+        // EA-on-morsels (ea-morsels.md §5, inc-1b): under EXPLAIN ANALYZE
+        // the scan-side fusibility memo refuses (the leader node carries an
+        // instr slot), but the runtime agg sink's workers run uninstrumented
+        // executors. Mirror the uninstrumented decision (E4: same lane
+        // choice, same breaker admissibility, only the instrument gate
+        // vacated) and give the sink its admission walk. Once a build was
+        // adopted, keep draining through the lane's own retrieve — the sink
+        // emit has no interpreter leg. A hash table built by the interpreter
+        // (engagement refused earlier) means the interpreter owns the node:
+        // never engage after that.
+        if runtime_instr::ea_active(estate)
+            && ::nodeagg::agg_hash_breaker_admissible(agg)
+            && seq_scan_fusible_runtime_ea(ss, estate)?
+        {
+            let c = match *choice {
+                Some(c) => c,
+                None => {
+                    let c = decide_agg_lane(agg, ss, xk, estate)?;
+                    *choice = Some(c);
+                    c
+                }
+            };
+            if c == AggLaneChoice::Fold {
+                if ::nodeagg::agg_is_done(agg) {
+                    return Ok(Some(None));
+                }
+                let engaged = ::nodeagg::sink::agg_sink_emitting(agg)
+                    || (!::nodeagg::agg_hash_table_filled(agg)
+                        && runtime_agg::try_engage_hashagg_runtime(
+                            agg,
+                            ss,
+                            xk.as_deref(),
+                            None,
+                            estate,
+                        )?);
+                if engaged {
+                    let mut root = RootAdapter::new(None);
+                    return Ok(Some(pull_step(
+                        agg,
+                        &mut HashAggSource,
+                        &mut HashAggEmit,
+                        &mut root,
+                        estate,
+                    )?));
+                }
+            }
+        }
         return Ok(None);
     }
     let c = match *choice {
@@ -2170,6 +2253,28 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // Scan-side refuse-set: the Phase-1 gate verbatim (dynamic EPQ/direction
     // gates re-checked per call; structural verdict memoized on the node).
     if !seq_scan_fusible(ss, estate)? {
+        // EA-on-morsels (docs/design/ea-morsels.md §5): the serial lane
+        // refuses instrumented scans (its batched drive bypasses the
+        // per-node instrument wrappers), but the RUNTIME arm's workers run
+        // uninstrumented executors — so under EXPLAIN ANALYZE the runtime
+        // arm still gets its walk, gated on the SAME lane choice the
+        // uninstrumented run computes (E4: EA may never change the
+        // engagement decision except the instrument gate itself).
+        if runtime_instr::ea_active(estate) {
+            let c = match *choice {
+                Some(c) => c,
+                None => {
+                    let c = decide_plain_agg_lane(agg, ss, estate)?;
+                    *choice = Some(c);
+                    c
+                }
+            };
+            if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
+                if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+                    return Ok(Some(r));
+                }
+            }
+        }
         return Ok(None);
     }
     let c = match *choice {
@@ -2576,11 +2681,35 @@ fn agg_plain_fold_feed<'mcx>(
 /// loop per claimed granule range): drives `seq_scan_next_pagebatch` to
 /// exhaustion — the whole scan on the serial feed; exactly the positioned
 /// claim on a granule-ranged scan — folding into the CURRENT pergroups.
-/// Byte-path-identical to the pre-split body (pure extraction).
+/// Byte-path-identical to the pre-split body (pure extraction; the EA=false
+/// instantiation compiles every tally out — the serial machine code is the
+/// pre-split machine code).
 fn agg_plain_fold_drain<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    agg_plain_fold_drain_impl::<false>(agg, ss, estate, &mut Default::default())
+}
+
+/// EA-on-morsels drain (docs/design/ea-morsels.md §2): identical fold, plus
+/// the row-funnel tally — window-grain popcounts on the bitmap paths, a
+/// per-survivor increment where a per-row emit already happened. Runtime
+/// workers only; never on a serial path.
+pub(super) fn agg_plain_fold_drain_ea<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tally: &mut runtime_instr::EaRowTally,
+) -> PgResult<()> {
+    agg_plain_fold_drain_impl::<true>(agg, ss, estate, tally)
+}
+
+fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    tally: &mut runtime_instr::EaRowTally,
 ) -> PgResult<()> {
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
@@ -2604,6 +2733,9 @@ fn agg_plain_fold_drain<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        if EA {
+            tally.scanned += n as u64;
+        }
         let nwords = (n as usize).div_ceil(64);
         // Guarded plans: prove the batch over every staged non-fallback row —
         // a superset of the rows the fold will touch — before any fold (same
@@ -2656,6 +2788,9 @@ fn agg_plain_fold_drain<'mcx>(
         if demote {
             for i in 0..n {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if EA {
+                        tally.survived += 1;
+                    }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
             }
@@ -2679,11 +2814,19 @@ fn agg_plain_fold_drain<'mcx>(
                     fallback[nwords - 1] &= (1u64 << (n % 64)) - 1;
                 }
             }
+            if EA {
+                // Window-grain: the selected non-fallback rows all fold.
+                tally.survived +=
+                    rows[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
+            }
             for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
                 while bits != 0 {
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
                     if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        if EA {
+                            tally.survived += 1;
+                        }
                         ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                     }
                 }
@@ -2693,6 +2836,9 @@ fn agg_plain_fold_drain<'mcx>(
                 let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
                     continue;
                 };
+                if EA {
+                    tally.survived += 1;
+                }
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i))
                 {
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
@@ -4732,6 +4878,38 @@ fn sort_feed_if_needed<'mcx>(
 /// matches no scan arm. The admitted checks are all init-stable, so the
 /// verdict is memoizable; the caller re-checks the dynamic EPQ/direction
 /// gates per call.
+/// EA-on-morsels sort-side verdict (ea-morsels.md §5, E4): the serial
+/// verdict with ONLY the instrument gates vacated — under EXPLAIN ANALYZE
+/// the child is an `Instrumented` wrapper (peeled here for the check) and
+/// the SeqScan refuse-set runs through `seq_scan_fusible_runtime_ea`. Every
+/// other child kind refuses (the distinct runtime admits SeqScan children
+/// only, and the serial arms that would own the rest cannot run under EA).
+/// Touches neither the serial `lane_fusible` memo nor the stat counters.
+#[cold]
+fn sort_refuse_reason_runtime_ea<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<RefuseReason>> {
+    if s.state.randomAccess {
+        return Ok(Some(RefuseReason::RandomAccess));
+    }
+    let child = match &mut *s.outer {
+        crate::procnode::PlanStateNode::Instrumented(w) => &mut w.inner,
+        o => o,
+    };
+    match child {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            Ok(if seq_scan_fusible_runtime_ea(ss, estate)? {
+                None
+            } else {
+                Some(RefuseReason::ChildScanRefused)
+            })
+        }
+        crate::procnode::PlanStateNode::Agg(_) => Ok(Some(RefuseReason::ChildNotLaneOwned)),
+        _ => Ok(Some(RefuseReason::NonScanChild)),
+    }
+}
+
 fn sort_refuse_reason<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -7466,6 +7644,100 @@ fn codedgroup_drive<'mcx>(
 /// to the per-tuple `exec_agg` over `exec_sort`, byte-safely — see the
 /// section doc on call-boundary state compatibility).
 #[inline]
+/// EA-on-morsels entry for the DISTINCT sink arm (ea-morsels.md §5,
+/// inc-1b): under EXPLAIN ANALYZE the ordinary dispatch cannot reach the
+/// runtime distinct probe (Instrumented wrappers + the sort fusibility
+/// memo), so procnode's EA hook calls this dedicated walk. It mirrors ONLY
+/// the gates the uninstrumented run evaluates on the
+/// try_own_sorted_agg_over_sort path down to the probe (E4: no gate
+/// differs except instrument checks), with zero side effects unless the
+/// session is ARMED (an unarmed EA session must not even arm set-mode).
+/// The sticky set-mode force is value-safe on the per-tuple interpreter
+/// fallback by the arming contract (nodeagg force_distinct_set doc).
+pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Armed-only, before any side effect (two placeholder GUC lookups).
+    if ::guc_tables::runtime_pool::runtime_distinct_pool_dop() <= 0
+        || !runtime::runtime_enabled()
+    {
+        return Ok(None);
+    }
+    // Mid-emit resume of a prior EA-engaged build (the serial top's
+    // hashgroup resume, verbatim — the sink adopts through hashgroup emit;
+    // the bypassed Sort must never be fed from the consumed scan).
+    if ::nodeagg::agg_hashgroup_emitting(agg) {
+        return Ok(Some(hashgroup_emit(agg, estate)?));
+    }
+    // Dynamic per-call gates (serial arm verbatim; no stat ticks — the EA
+    // walk never perturbs the serial cadence).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    // The grouped narrow-distinct decision (serial arm verbatim).
+    let plain_admissible = ::nodeagg::agg_sorted_lane_admissible(agg);
+    let mut narrow: Option<usize> = None;
+    if !plain_admissible || ::nodeagg::agg_distinct_set_forced(agg) {
+        let sp = s.state.plan;
+        let k = ::nodeagg::agg_plan_group_cols(agg).len();
+        let ok = ::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+            && !s.state.sort_done()
+            && !s.state.bounded
+            && k >= 1
+            && (sp.numCols as usize) > k
+            && sp.sortColIdx.len() >= k
+            && {
+                let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+                let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            };
+        if ok {
+            narrow = Some(k);
+        }
+    }
+    let Some(k) = narrow else { return Ok(None) };
+    // Sort-side verdict, instrument gates vacated (serial memo untouched).
+    if sort_refuse_reason_runtime_ea(s, estate)?.is_some() {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
+    if state.sort_done() {
+        // The interpreter (or a serial arm) already consumed the feed on an
+        // earlier call — it owns the node; never engage after (E4/agg-arm
+        // discipline).
+        return Ok(None);
+    }
+    ::postgres_seams::check_for_interrupts::call()?;
+    // Arm set-mode BEFORE any input (serial site verbatim; sticky, and
+    // value-safe on the per-tuple fallback per the arming doc).
+    ::nodeagg::agg_sorted_force_distinct_set(agg);
+    // Peel the wrapper for the probe: the runtime's workers run
+    // uninstrumented; the bypassed nodes' Instrumentation is written from
+    // the merged partials on clean completion.
+    let outer: &mut crate::procnode::PlanStateNode<'mcx> = match &mut **outer {
+        crate::procnode::PlanStateNode::Instrumented(w) => &mut w.inner,
+        o => o,
+    };
+    runtime_distinct::try_own_sorted_distinct_runtime(
+        agg,
+        state,
+        outer,
+        outer_desc,
+        rd_shape_refused,
+        k,
+        estate,
+    )
+}
+
 pub fn try_own_sorted_agg_over_sort<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     s: &mut crate::procnode::SortNode<'mcx>,
