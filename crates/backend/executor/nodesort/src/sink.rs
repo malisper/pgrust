@@ -135,11 +135,13 @@ pub struct WideEntry {
 impl WideEntry {
     /// `keys` = per-key (widened i64, isnull) observations in sort-key
     /// order; `flags` = the plan's per-key (desc, nulls_first). Lengths
-    /// equal, `2..=TOPN_MAX_KEYS` (arity 1 is `TopnEntry`'s domain).
+    /// equal, `1..=TOPN_MAX_KEYS` (the top-N HEAP uses `TopnEntry` at
+    /// arity 1 — cheaper entry; the full-sort run entries use WideEntry
+    /// at every arity, m3-sort-b shape b).
     #[inline]
     pub fn encode(keys: &[(i64, bool)], flags: &[(bool, bool)], rowref: u64) -> WideEntry {
         debug_assert!(keys.len() == flags.len());
-        debug_assert!((2..=TOPN_MAX_KEYS).contains(&keys.len()));
+        debug_assert!((1..=TOPN_MAX_KEYS).contains(&keys.len()));
         debug_assert!(rowref <= TOPN_MAX_ROWREF);
         let mut packed = [0u128; TOPN_MAX_KEYS];
         for (i, (&(k, n), &(d, nf))) in keys.iter().zip(flags).enumerate() {

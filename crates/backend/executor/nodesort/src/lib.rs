@@ -32,6 +32,7 @@ mod tests;
 // (key, rowref) heap on the rule-2 total order + the winner merge. Pure
 // data structures — the runtime SealedParallelSink impl over them lives at
 // the engagement seam (execmain lanev2/runtime_sort.rs, inc-2).
+pub mod fullsort;
 pub mod sink;
 
 pub struct SortState<'mcx> {

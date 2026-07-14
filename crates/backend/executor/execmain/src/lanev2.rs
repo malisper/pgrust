@@ -3101,10 +3101,14 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
     // build byte-identically. `sink_topn` (m3-sort-b car 1): the sort feed's
     // resolved combine-phase top-N spec — None from the other chains.
-    if c == AggLaneChoice::Fold
-        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), sink_topn, estate)?
-    {
-        return Ok(());
+    if c == AggLaneChoice::Fold {
+        if runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), sink_topn, estate)? {
+            return Ok(());
+        }
+    } else if sink_topn.is_some() {
+        // Composition diagnosis channel: an armed topn spec never reaches
+        // the sink when the agg's lane choice is the per-row feed.
+        lane_trace("runtime-agg: not tried (lane choice != fold)");
     }
     // One OWNED tick per lane-owned hash-agg build event (the gate's
     // aggbuild floor counts builds, not calls) — fold-fed and per-row
