@@ -448,7 +448,30 @@ pub fn agg_hash_compact_try_arm_mk(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    try_arm_mk_n(node, nullable, dict_att, 2)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    try_arm_mk_n(node, nullable, atts, 2)
+}
+
+/// [`agg_hash_compact_try_arm_mk`] over a SET of Intern (text) components
+/// (band-2a CaseDict, q40 class): every att in `intern_atts` packs as a
+/// 4-byte intern id through the SHARED intern pool (ids only distinguish
+/// equal bytes, so one pool serves any number of components; read-back maps
+/// each component id through the same reverse map). SERIAL-ONLY admission:
+/// the M2 sink's canonical-bytes machinery caps Intern components at ONE
+/// (single text tail), so multi-intern shapes refuse the sink upstream.
+pub fn agg_hash_compact_try_arm_mk_multi(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    intern_atts: &[u16],
+) -> CompactArm {
+    try_arm_mk_n(node, nullable, intern_atts, 2)
 }
 
 /// [`agg_hash_compact_try_arm_mk`] with the arity gate relaxed to ONE
@@ -461,19 +484,27 @@ pub fn agg_hash_compact_try_arm_mk1(
     node: &mut AggStateData<'_>,
     dict_att: Option<u16>,
 ) -> CompactArm {
-    try_arm_mk_n(node, false, dict_att, 1)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    try_arm_mk_n(node, false, atts, 1)
 }
 
 fn try_arm_mk_n(
     node: &mut AggStateData<'_>,
     nullable: bool,
-    dict_att: Option<u16>,
+    intern_atts: &[u16],
     min_keys: usize,
 ) -> CompactArm {
     if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
         return CompactArm::Armed;
     }
-    let (shape, numgroups) = match mk_admit_n(node, nullable, dict_att, min_keys) {
+    let (shape, numgroups) = match mk_admit_n(node, nullable, intern_atts, min_keys) {
         Ok(admitted) => admitted,
         Err(verdict) => return verdict,
     };
@@ -527,7 +558,25 @@ pub fn agg_hash_compact_mk_admit(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> Result<(MkShape, u64), CompactArm> {
-    mk_admit_n(node, nullable, dict_att, 2)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    mk_admit_n(node, nullable, atts, 2)
+}
+
+/// [`agg_hash_compact_mk_admit`] over a SET of Intern components — the
+/// probe half of [`agg_hash_compact_try_arm_mk_multi`].
+pub fn agg_hash_compact_mk_admit_multi(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    intern_atts: &[u16],
+) -> Result<(MkShape, u64), CompactArm> {
+    mk_admit_n(node, nullable, intern_atts, 2)
 }
 
 /// [`agg_hash_compact_mk_admit`]'s single-key relaxation — the probe half of
@@ -536,13 +585,21 @@ pub fn agg_hash_compact_mk_admit1(
     node: &mut AggStateData<'_>,
     dict_att: Option<u16>,
 ) -> Result<(MkShape, u64), CompactArm> {
-    mk_admit_n(node, false, dict_att, 1)
+    let buf;
+    let atts: &[u16] = match dict_att {
+        Some(a) => {
+            buf = [a];
+            &buf
+        }
+        None => &[],
+    };
+    mk_admit_n(node, false, atts, 1)
 }
 
 fn mk_admit_n(
     node: &mut AggStateData<'_>,
     nullable: bool,
-    dict_att: Option<u16>,
+    intern_atts: &[u16],
     min_keys: usize,
 ) -> Result<(MkShape, u64), CompactArm> {
     if !compact_enabled() {
@@ -579,7 +636,7 @@ fn mk_admit_n(
             // (cbstore) or its runtime NULL-demote pre-check (slot streams);
             // nullable shapes route NULL through the null-bitmap byte (bit
             // set, value bits zero) without touching the intern table.
-            ::execgrouping::GroupKeyKind::TextRaw if dict_att == Some(input_att) => {
+            ::execgrouping::GroupKeyKind::TextRaw if intern_atts.contains(&input_att) => {
                 MkCompKind::Intern
             }
             // The canonical-form numeric key kind (keypack module doc);
