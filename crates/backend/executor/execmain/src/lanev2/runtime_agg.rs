@@ -46,9 +46,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
 use ::nodeagg::sink::{
-    sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_partition_remainder,
-    sink_resolve_combines, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
-    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS,
+    sink_bucket_row_count, sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket,
+    sink_null_only_run, sink_partition_remainder, sink_resolve_combines, sink_run_from_spill,
+    sink_run_spill_bucket, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
+    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS, SINK_NULL_BUCKET,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -63,13 +64,24 @@ use super::{lane_trace, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
 // ---------------------------------------------------------------------------
 
 /// Per-worker sink Local: flushed runs + the owned compact table between
-/// morsels (+ its SEAL partition).
+/// morsels (+ its SEAL partition) + the M3.5 spill state (created lazily at
+/// the first budget crossing when the spill arm is enabled).
 #[derive(Default)]
 pub(super) struct AggSinkLocal {
     runs: Vec<SinkRun>,
     run_bytes: usize,
     table: Option<SinkTableHandle>,
     part: Option<SinkPart>,
+    spill: Option<AggSpillState>,
+}
+
+/// A Local's spill face: its single-writer spill file (epochs of
+/// bucket-contiguous run records) plus the spilled epochs' NULL-group
+/// blocks, which never touch the file (design §3). Plain data between
+/// events; rides the Local through SEAL like everything else.
+struct AggSpillState {
+    file: ::spillset::SpillFile,
+    null_blocks: Vec<Vec<u64>>,
 }
 
 /// Per-(pipe, worker) WFIN accounting.
@@ -128,6 +140,12 @@ struct AggSink {
     /// A Local crossed its memory budget: not an error — the leader falls
     /// back to the serial arm (R5 whole-attempt rerun).
     budget_refused: AtomicBool,
+    /// M3.5 spill arm: the engagement's spill set (None = spill disabled →
+    /// budget crossings refuse exactly as before).
+    spill_set: Option<Arc<::spillset::SpillSet>>,
+    /// Spill observability (gate-record counters, R4 line).
+    spill_epochs: AtomicU64,
+    spilled_bytes: AtomicU64,
     /// WFIN accounting, indexed by worker slot (pin-board lane).
     wfin: Vec<[WfinPipe; 2]>,
 }
@@ -178,7 +196,7 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         let t0 = std::time::Instant::now();
-        let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, worker, range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(AcceptFail::Budget)) => {
@@ -219,10 +237,36 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         let t0 = std::time::Instant::now();
-        let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
+        let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<CombineOutcome> {
+            let b = part as usize;
+            // M3.5 §3: rebuild each Local's spilled face for this bucket —
+            // open-by-name on THIS thread (the file is frozen: combine
+            // deps-follows accept), one synthesized run per Local plus its
+            // in-memory NULL blocks in the NULL bucket.
+            let state_words = self.state_bytes / 8;
+            let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
+            for l in locals {
+                let mut v: Vec<SinkRun> = Vec::new();
+                if let Some(sp) = &l.spill {
+                    let ctx = ::mcx::MemoryContext::new("m35-agg-spill-read");
+                    if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
+                        let bytes = r.read_to_end()?;
+                        r.close()?;
+                        v.push(sink_run_from_spill(b, self.key_words, state_words, &bytes)?);
+                    }
+                    if b == SINK_NULL_BUCKET {
+                        for nb in &sp.null_blocks {
+                            v.push(sink_null_only_run(self.key_words, state_words, nb.clone()));
+                        }
+                    }
+                }
+                synth.push(v);
+            }
             let views: Vec<SinkLocalView<'_>> = locals
                 .iter()
-                .map(|l| SinkLocalView {
+                .zip(synth.iter())
+                .map(|(l, s)| SinkLocalView {
+                    spilled: s,
                     runs: &l.runs,
                     remainder: match (&l.table, &l.part) {
                         (Some(t), Some(p)) => Some((t.table(), p)),
@@ -230,8 +274,22 @@ impl runtime::ParallelSink for AggSink {
                     },
                 })
                 .collect();
+            // Pre-build size check (M3.5 §3): a partition whose merged
+            // table would cross the per-Local budget refuses BEFORE
+            // allocating (recursive sub-split is the chartered inc-2b —
+            // refusal keeps memory bounded until it lands). Rows here are
+            // an over-count (duplicates across faces merge), so this only
+            // ever refuses conservatively.
+            let rows = sink_bucket_row_count(b, &views);
+            let est = rows
+                .saturating_mul(self.key_words * 8 + self.state_bytes + 32)
+                .saturating_mul(3)
+                / 2;
+            if est > self.budget {
+                return Ok(CombineOutcome::OverBudget);
+            }
             let merged = sink_combine_bucket(
-                part as usize,
+                b,
                 self.key_words,
                 self.state_bytes,
                 &views,
@@ -241,10 +299,14 @@ impl runtime::ParallelSink for AggSink {
             // SAFETY: partition `part` is claimed exactly once (runtime
             // contract); this is its single writer.
             unsafe { *self.out_emit[part as usize].get() = buf };
-            Ok(())
+            Ok(CombineOutcome::Done)
         }));
         match r {
-            Ok(Ok(())) => {}
+            Ok(Ok(CombineOutcome::Done)) => {}
+            Ok(Ok(CombineOutcome::OverBudget)) => {
+                lane_trace("runtime-agg: combine partition over budget (inc-2b recursion pending) — serial rerun");
+                self.refuse_budget();
+            }
             Ok(Err(e)) => self.fail(e),
             Err(_panic) => {
                 self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
@@ -272,6 +334,11 @@ impl runtime::ParallelSink for AggSink {
             .collect();
         *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(bufs);
     }
+}
+
+enum CombineOutcome {
+    Done,
+    OverBudget,
 }
 
 enum AcceptFail {
@@ -342,6 +409,7 @@ fn mark_self_errored() {
 fn accept_morsel_body(
     sink: &AggSink,
     local: &mut AggSinkLocal,
+    worker: usize,
     range: runtime::MorselRange,
 ) -> Result<(), AcceptFail> {
     WORKER_EXEC.with(|cell| -> Result<(), AcceptFail> {
@@ -390,7 +458,8 @@ fn accept_morsel_body(
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
                 let drained = sink_drain_range(
-                    sink, local, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot, estate,
+                    sink, local, worker, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot,
+                    estate,
                 );
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
@@ -403,6 +472,49 @@ fn accept_morsel_body(
     })
 }
 
+/// M3.5 accept-side spill (design §3): write the Local's accumulated runs
+/// to its spill file as ONE epoch — buckets 0..255 contiguous (each run's
+/// bucket rows are already counting-sorted), NULL blocks kept in memory —
+/// then drop the runs. Runs on the owning worker thread only; the BufFile
+/// handle lives inside this event (open-per-event, §2 amendment).
+fn spill_epoch(
+    sink: &AggSink,
+    local: &mut AggSinkLocal,
+    set: &Arc<::spillset::SpillSet>,
+    worker: usize,
+) -> Result<(), Box<PgError>> {
+    let sp = local.spill.get_or_insert_with(|| AggSpillState {
+        file: ::spillset::SpillFile::new(
+            Arc::clone(set),
+            ::spillset::SpillSet::file_name("agg", 0, worker),
+            SINK_NBUCKETS as u32,
+        ),
+        null_blocks: Vec::new(),
+    });
+    let before = sp.file.spilled_bytes();
+    let ctx = ::mcx::MemoryContext::new("m35-agg-spill-write");
+    let mut w = sp.file.begin_epoch(ctx.mcx())?;
+    let mut buf: Vec<u8> = Vec::with_capacity(256 * 1024);
+    for b in 0..SINK_NBUCKETS {
+        buf.clear();
+        for run in &local.runs {
+            sink_run_spill_bucket(run, b, &mut buf);
+        }
+        w.write_part(b as u32, &buf)?;
+    }
+    w.finish()?;
+    for mut run in local.runs.drain(..) {
+        if let Some(nb) = run.null_states.take() {
+            sp.null_blocks.push(nb);
+        }
+    }
+    local.run_bytes = 0;
+    sink.spill_epochs.fetch_add(1, Ordering::Relaxed);
+    sink.spilled_bytes
+        .fetch_add(sp.file.spilled_bytes() - before, Ordering::Relaxed);
+    Ok(())
+}
+
 /// The narrow sink drain over the positioned claim: per staged page batch —
 /// cap-flush check, survivor collection, canonical key gather, compact
 /// batch probe (never the C table), whole-batch fold.
@@ -410,6 +522,7 @@ fn accept_morsel_body(
 fn sink_drain_range<'mcx>(
     sink: &AggSink,
     local: &mut AggSinkLocal,
+    worker: usize,
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     k2s: &mut ScanK2Scratch,
@@ -434,7 +547,15 @@ fn sink_drain_range<'mcx>(
             local.run_bytes += run.bytes();
             local.runs.push(run);
             if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) > sink.budget {
-                return Err(AcceptFail::Budget);
+                // M3.5: the crossing SPILLS when the arm is enabled (the
+                // accumulated runs go to the Local's file as one epoch);
+                // disabled = today's R5 refusal exactly.
+                match &sink.spill_set {
+                    Some(set) => {
+                        spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?
+                    }
+                    None => return Err(AcceptFail::Budget),
+                }
             }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -534,7 +655,7 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, &mut local, &rg)
+        drive_bound(payload, &mut local, &rg, worker)
     });
     match bound {
         Ok(()) => {}
@@ -571,12 +692,49 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
     }
 }
 
+/// M3.5 P1 substrate probe (env-gated, inc-2 opening move): prove on a
+/// REAL binder-bound helper thread that the fd substrate supports the spill
+/// design — create a FileSet segment, write an epoch, read it back on this
+/// thread, verify bytes. Emits one marker line the e2e tranche parses.
+fn spill_substrate_probe(payload: &Arc<RuntimeAggShared>, worker: usize) {
+    if std::env::var("PGRUST_SPILL_SUBSTRATE_PROBE").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(set) = payload.sink.spill_set.as_ref() else {
+        eprintln!("M35|SPILLPROBE|worker={worker}|ok=0|why=no-spill-set");
+        return;
+    };
+    let r = (|| -> PgResult<bool> {
+        let ctx = ::mcx::MemoryContext::new("m35-spill-probe");
+        let mut f = ::spillset::SpillFile::new(
+            Arc::clone(set),
+            ::spillset::SpillSet::file_name("probe", 0, worker),
+            4,
+        );
+        let payload_bytes: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let mut w = f.begin_epoch(ctx.mcx())?;
+        w.write_part(1, &payload_bytes)?;
+        w.finish()?;
+        let Some(mut r) = f.read_part(ctx.mcx(), 1)? else { return Ok(false) };
+        let got = r.read_to_end()?;
+        r.close()?;
+        Ok(got == payload_bytes)
+    })();
+    match r {
+        Ok(true) => eprintln!("M35|SPILLPROBE|worker={worker}|ok=1"),
+        Ok(false) => eprintln!("M35|SPILLPROBE|worker={worker}|ok=0|why=mismatch"),
+        Err(e) => eprintln!("M35|SPILLPROBE|worker={worker}|ok=0|why={}", e.message()),
+    }
+}
+
 fn drive_bound(
     payload: &Arc<RuntimeAggShared>,
     local: &mut runtime::WorkerLocal,
     rg: &runtime::RgHandle,
+    worker: usize,
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
+    spill_substrate_probe(payload, worker);
     let _outcome = payload.rt.drive_pinned(local, rg);
     let self_errored =
         WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
@@ -805,6 +963,14 @@ fn sink_cap() -> u32 {
     })
 }
 
+/// M3.5 spill arm kill switch: ON by default when the sink engages
+/// (refusal→engagement is the charter); `PGRUST_RUNTIME_AGG_SPILL=0`
+/// restores the phase-1 budget refusal exactly.
+fn agg_spill_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
+}
+
 /// Engagement floor (granules) — below it helper launches are pure overhead.
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
@@ -1009,6 +1175,21 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
 
     // --- Engage.
+    // M3.5 spill arm: ON by default when the sink engages (this is the
+    // refusal→engagement charter); PGRUST_RUNTIME_AGG_SPILL=0 restores the
+    // phase-1 refusal exactly. SpillSet creation is leader-side (fd
+    // substrate guaranteed); a creation failure fail-closes to refusal.
+    let spill_set = if agg_spill_enabled() {
+        match ::spillset::SpillSet::create() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                lane_trace("runtime-agg: spill set creation failed — spill disarmed");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -1025,6 +1206,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
+        spill_set,
+        spill_epochs: AtomicU64::new(0),
+        spilled_bytes: AtomicU64::new(0),
         wfin: (0..rt.nthreads() + runtime::MAX_EXTERNAL_LANES)
             .map(|_| [WfinPipe::default(), WfinPipe::default()])
             .collect(),
@@ -1206,6 +1390,14 @@ fn engage_ceremony<'mcx>(
                 })?;
             let natts = sink.emit.cols.len();
             let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
+            let spill_epochs = sink.spill_epochs.load(Ordering::Relaxed);
+            if spill_epochs > 0 {
+                // The R4 spill-rate observability line (e2e + gate records).
+                lane_trace(&format!(
+                    "runtime-agg: SPILLED epochs={spill_epochs} bytes={}",
+                    sink.spilled_bytes.load(Ordering::Relaxed)
+                ));
+            }
             lane_trace(&format!("runtime-agg: complete, groups={rows}"));
             ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
             Ok(true)
