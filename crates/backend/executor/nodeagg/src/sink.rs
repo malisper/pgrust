@@ -1908,6 +1908,18 @@ impl SinkTableHandle {
 
 /// Move the armed compact state OUT of the executor (end of a morsel drain:
 /// the Local owns it until the next morsel / SEAL). `None` = not armed.
+/// Mark the node's armed compact table as RUNTIME-SINK-owned (idempotent;
+/// no-op when no compact table is armed). Gates the batch-tail canonical
+/// hashing — the serial lane shares the compact table and must not pay for
+/// hashes it never consumes.
+pub fn agg_sink_mark_sink_mode(node: &mut AggStateData<'_>) {
+    if let Some(ph) = node.perhash.as_mut() {
+        if let Some(ch) = ph.compact.as_mut() {
+            ch.sink_mode = true;
+        }
+    }
+}
+
 pub fn agg_sink_take_table(node: &mut AggStateData<'_>) -> Option<SinkTableHandle> {
     node.perhash.as_mut()?.compact.take().map(SinkTableHandle)
 }
