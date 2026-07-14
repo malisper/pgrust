@@ -93,6 +93,10 @@ struct CbScanInfo {
     /// Columns the scan reads (qual + targetlist Vars; whole row when a
     /// whole-row Var appears). Only these columns' chunks decode.
     needed: Vec<bool>,
+    /// The QUAL's own column contribution alone (whole-row-in-qual forces
+    /// all) — the floor `seq_scan_cb_narrow_needed` may not shrink below:
+    /// the exact per-row qual must keep reading real cells.
+    qual_needed: Vec<bool>,
     /// Zone-map-mappable `Var CMP Const` conjuncts of the scan qual
     /// (advisory pruning only; the executor still evaluates the full qual
     /// on surviving rows).
@@ -3257,6 +3261,13 @@ fn cb_scan_info<'mcx>(
     for n in node.scan.plan.qual.iter() {
         cx.visit(n)?;
     }
+    // Snapshot the qual-only contribution (the narrow-needed floor). A
+    // whole-row Var inside the qual forces every column here too.
+    let qual_needed: Vec<bool> = if cx.wholerow {
+        vec![true; natts]
+    } else {
+        cx.needed.clone()
+    };
     // Exact consumed-column set (SeqScan::cb_scan_cols, pgrust-only): the
     // planner's pre-physical-tlist read set. `use_physical_tlist` hands most
     // scans a whole-row tlist — free on heap (lazy deform), catastrophic
@@ -3313,7 +3324,32 @@ fn cb_scan_info<'mcx>(
         },
         _ => None,
     };
-    Ok(CbScanInfo { needed: cx.needed, zone, zero_qual })
+    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual })
+}
+
+/// M3 runtime-sort key-only staged accept (docs/design/m3-sort.md inc-4
+/// lever 1): narrow this cbstore scan's needed column set to the qual's own
+/// columns ∪ `keep` (0-based attnos). ONLY for executors whose consumers
+/// provably never read any other column from this scan's outputs — the
+/// runtime sort WORKER emits nothing but (key, rowref); winners are
+/// re-gathered by the LEADER under its own full needed set. Unneeded cells
+/// in per-row emit slots read as NULL (the `gather_row` law) — callers must
+/// not let them escape. Call BEFORE the first drive; an already-open scan
+/// desc gets the narrowed set re-pushed (decoders re-derive via the needed
+/// epoch). False = not a cbstore scan (no-op).
+pub fn seq_scan_cb_narrow_needed(node: &mut SeqScanState<'_>, keep: &[u16]) -> bool {
+    let Some(cb) = node.cb_scan.as_deref_mut() else { return false };
+    let mut needed = cb.qual_needed.clone();
+    for &a in keep {
+        if (a as usize) < needed.len() {
+            needed[a as usize] = true;
+        }
+    }
+    cb.needed = needed;
+    if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
+        ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
+    }
+    true
 }
 
 // Zone-mappable scan-qual conjunct: a top-level `Var CMP Const` OpExpr of

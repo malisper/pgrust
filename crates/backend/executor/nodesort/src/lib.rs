@@ -28,6 +28,12 @@ fn cfi() -> PgResult<()> {
 #[cfg(test)]
 mod tests;
 
+// M3 top-N sink kernels (docs/design/m3-sort.md §3): the POD bounded
+// (key, rowref) heap on the rule-2 total order + the winner merge. Pure
+// data structures — the runtime SealedParallelSink impl over them lives at
+// the engagement seam (execmain lanev2/runtime_sort.rs, inc-2).
+pub mod sink;
+
 pub struct SortState<'mcx> {
     pub plan: &'mcx Sort<'mcx>,
     pub ps_ResultTupleDesc: Option<Rc<TupleDescData<'static>>>,
@@ -598,6 +604,35 @@ pub fn sort_lane_refsort_push_winner<'mcx>(
 /// Buffered winner count (trace/verification aid).
 pub fn sort_lane_refsort_winners(node: &SortState<'_>) -> usize {
     node.refsort_out.len()
+}
+
+/// Runtime top-N adoption face, begin leg (m3-sort inc-2,
+/// docs/design/m3-sort.md §4): the runtime sink merged the winner
+/// (key, rowref) list off-node — mark the node refsort-served with NO
+/// narrow tuplesort so the caller can buffer the gathered winners
+/// (`sort_lane_refsort_push_winner`) and flip the emit face on
+/// (`sort_lane_runtime_topn_done`). Same emit face
+/// (`sort_lane_next` → `refsort_pop`) and the same reset/rescan/end
+/// lifecycle as the serial refsort (every `refsort_clear` path covers
+/// this state; `tuplesortstate` simply stays `None`).
+pub fn sort_lane_runtime_topn_begin(node: &mut SortState<'_>) {
+    debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
+    debug_assert!(node.bounded && node.bound > 0 && !node.randomAccess);
+    debug_assert!(!node.datumSort, "runtime top-N refuses datum sorts (refsort census)");
+    node.refsort = true;
+    node.refsort_out.clear();
+}
+
+/// Runtime top-N adoption face, finish leg: flip the breaker's Feed→Emit
+/// phase after the winners are buffered — `sort_lane_finish`'s tail
+/// without a tuplesort (no performsort exists; the EXPLAIN sort-stats
+/// write is unreachable because the runtime arm refuses instrumented
+/// runs).
+pub fn sort_lane_runtime_topn_done(node: &mut SortState<'_>) {
+    debug_assert!(node.refsort);
+    node.sort_Done = true;
+    node.bounded_Done = node.bounded;
+    node.bound_Done = node.bound;
 }
 
 /// Refsort emit face: pop the next gathered winner into `ps_ResultTupleSlot`
