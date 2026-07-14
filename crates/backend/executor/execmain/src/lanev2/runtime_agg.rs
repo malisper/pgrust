@@ -131,6 +131,11 @@ struct AggSink {
     /// The accept-phase instrument merge, written at finalize (last-worker-
     /// out) from the sealed Locals; leader reads on clean Completed only.
     ea_instr: Mutex<Option<super::runtime_instr::InstrumentMerged>>,
+    /// TIMER mode (inc-3): one clock pair per claim against `ea_epoch`
+    /// (shared engagement origin — cross-worker comparable). false in ROWS
+    /// mode and on every non-EA path: zero clock reads.
+    ea_timer: bool,
+    ea_epoch: std::time::Instant,
 }
 
 // SAFETY: out_emit cells are written only by the exclusive claimer of their
@@ -377,6 +382,9 @@ fn accept_morsel_body(
     local: &mut AggSinkLocal,
     range: runtime::MorselRange,
 ) -> Result<(), AcceptFail> {
+    // TIMER mode: the claim's clock pair (§5 — the ONLY TIMING ON cost).
+    let ea_t0 = (sink.ea_timer && sink.ea_scan_node.is_some())
+        .then(|| sink.ea_epoch.elapsed().as_nanos() as u64);
     WORKER_EXEC.with(|cell| -> Result<(), AcceptFail> {
         let mut b = cell.borrow_mut();
         let Some(ex) = b.as_mut() else {
@@ -434,6 +442,10 @@ fn accept_morsel_body(
                     // IS the running total (prune fold, ea-morsels.md §1).
                     if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
                         local.instr.prune = c;
+                    }
+                    if let Some(t0) = ea_t0 {
+                        let t1 = sink.ea_epoch.elapsed().as_nanos() as u64;
+                        super::runtime_instr::ea_claim_time(&mut local.instr, t0, t1);
                     }
                 }
                 // Reclaim on EVERY path — the Local owns the table between
@@ -953,10 +965,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(false);
     }
-    // Instrument MODE gate (inc-1): EXPLAIN (ANALYZE, TIMING OFF) —
-    // INSTRUMENT_ROWS exactly — engages; TIMER waits for the inc-3 clock
-    // pair, BUFFERS for threaded buffer accounting.
-    if ea && !super::runtime_instr::ea_rows_only(estate) {
+    // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
+    // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
+    // engage; BUFFERS/WAL combinations refuse until threaded.
+    if ea && !super::runtime_instr::ea_mode_admissible(estate) {
         refuse(estate, true, node_id, super::runtime_instr::ea_mode_refuse_reason(estate));
         return Ok(false);
     }
@@ -1148,6 +1160,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         combined_bytes: AtomicUsize::new(0),
         ea_scan_node,
         ea_instr: Mutex::new(None),
+        ea_timer: ea && super::runtime_instr::ea_timer(estate),
+        ea_epoch: std::time::Instant::now(),
     });
     engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink)
 }

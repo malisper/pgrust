@@ -154,6 +154,11 @@ pub struct RuntimeEaPipeline {
     pub busy_ns: u64,
     pub first_start_ns: u64,
     pub last_end_ns: u64,
+    /// min over workers' last_end (finish spread = last_end - this).
+    pub min_last_end_ns: u64,
+    /// min/max per-claim wall ns.
+    pub morsel_min_ns: u64,
+    pub morsel_max_ns: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

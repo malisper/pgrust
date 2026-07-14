@@ -70,10 +70,15 @@ pub(super) struct InstrumentPartial {
     // --- TIMING ON (inc-3) — zero and never written under TIMING OFF. ---
     /// Sum of per-claim wall ns.
     pub busy_ns: u64,
-    /// Monotonic ns of the worker's first claim start (0 = unset).
+    /// Engagement-epoch ns of the worker's first claim start (0 = unset;
+    /// real values clamped >= 1). One shared epoch per engagement makes
+    /// these comparable across workers.
     pub first_start_ns: u64,
-    /// Monotonic ns of the worker's last claim end.
+    /// Engagement-epoch ns of the worker's last claim end.
     pub last_end_ns: u64,
+    /// Min/max per-claim wall ns (0 = unset; real minima clamped >= 1).
+    pub morsel_min_ns: u64,
+    pub morsel_max_ns: u64,
 }
 
 impl InstrumentPartial {
@@ -98,6 +103,12 @@ pub(super) struct InstrumentMerged {
     pub first_start_ns: u64,
     /// max over workers' last_end_ns (0 when timing off).
     pub last_end_ns: u64,
+    /// min over workers' last_end_ns (0 when timing off) — the WFIN finish
+    /// spread is `last_end_ns - min_last_end_ns`.
+    pub min_last_end_ns: u64,
+    /// min/max over per-claim wall ns (0 when timing off).
+    pub morsel_min_ns: u64,
+    pub morsel_max_ns: u64,
 }
 
 pub(super) fn merge<'a>(
@@ -122,8 +133,37 @@ pub(super) fn merge<'a>(
             m.first_start_ns = p.first_start_ns;
         }
         m.last_end_ns = m.last_end_ns.max(p.last_end_ns);
+        if p.last_end_ns != 0
+            && (m.min_last_end_ns == 0 || p.last_end_ns < m.min_last_end_ns)
+        {
+            m.min_last_end_ns = p.last_end_ns;
+        }
+        if p.morsel_min_ns != 0
+            && (m.morsel_min_ns == 0 || p.morsel_min_ns < m.morsel_min_ns)
+        {
+            m.morsel_min_ns = p.morsel_min_ns;
+        }
+        m.morsel_max_ns = m.morsel_max_ns.max(p.morsel_max_ns);
     }
     m
+}
+
+/// Fold one claim's clock pair (engagement-epoch ns) into the worker's
+/// partial. TIMER mode only — the ONLY cost TIMING ON adds is the two
+/// monotonic reads that produced t0/t1 (one pair per CLAIM, never per
+/// row/window — ea-morsels.md §5).
+pub(super) fn ea_claim_time(ip: &mut InstrumentPartial, t0: u64, t1: u64) {
+    let dt = t1.saturating_sub(t0);
+    ip.busy_ns += dt;
+    if ip.first_start_ns == 0 {
+        ip.first_start_ns = t0.max(1);
+    }
+    ip.last_end_ns = t1.max(1);
+    let dt1 = dt.max(1);
+    if ip.morsel_min_ns == 0 || dt1 < ip.morsel_min_ns {
+        ip.morsel_min_ns = dt1;
+    }
+    ip.morsel_max_ns = ip.morsel_max_ns.max(dt1);
 }
 
 /// Instrumented at all? (EXPLAIN ANALYZE in any mode.)
@@ -132,12 +172,22 @@ pub(super) fn ea_active(estate: &EStateData<'_>) -> bool {
     estate.es_instrument != 0
 }
 
-/// The inc-1 admissible mode: EXPLAIN (ANALYZE, TIMING OFF) without
-/// BUFFERS/WAL — INSTRUMENT_ROWS exactly. TIMER joins at inc-3
-/// (ea-morsels.md §5); BUFFERS refuses until buffer accounting is threaded.
+/// Admissible instrument modes (ea-morsels.md §5): EXPLAIN (ANALYZE,
+/// TIMING OFF) = INSTRUMENT_ROWS exactly (inc-1), and EXPLAIN (ANALYZE,
+/// BUFFERS OFF) = INSTRUMENT_TIMER exactly (inc-3 — note PG18 defaults
+/// BUFFERS ON, so bare EXPLAIN ANALYZE is TIMER|BUFFERS and still
+/// refuses). Any BUFFERS/WAL combination refuses until buffer accounting
+/// is threaded.
 #[inline]
-pub(super) fn ea_rows_only(estate: &EStateData<'_>) -> bool {
+pub(super) fn ea_mode_admissible(estate: &EStateData<'_>) -> bool {
     estate.es_instrument == INSTRUMENT_ROWS
+        || estate.es_instrument == ::types_core::instrument::INSTRUMENT_TIMER
+}
+
+/// TIMER mode: the engagement takes one clock pair per claim.
+#[inline]
+pub(super) fn ea_timer(estate: &EStateData<'_>) -> bool {
+    estate.es_instrument == ::types_core::instrument::INSTRUMENT_TIMER
 }
 
 /// The refusal reason for an instrument mode the runtime does not admit.
@@ -145,8 +195,9 @@ pub(super) fn ea_mode_refuse_reason(estate: &EStateData<'_>) -> &'static str {
     if estate.es_instrument & ::types_core::instrument::INSTRUMENT_BUFFERS != 0 {
         "instrumented-buffers"
     } else {
-        // TIMER (or WAL, which EXPLAIN rejects loudly upstream).
-        "instrumented-timing"
+        // WAL-class combinations (EXPLAIN rejects WAL-without-ANALYZE
+        // loudly upstream; anything else unrecognized refuses honestly).
+        "instrumented-mode"
     }
 }
 
@@ -215,5 +266,8 @@ pub(super) fn ea_pipeline_report(
         busy_ns: m.busy_ns,
         first_start_ns: m.first_start_ns,
         last_end_ns: m.last_end_ns,
+        min_last_end_ns: m.min_last_end_ns,
+        morsel_min_ns: m.morsel_min_ns,
+        morsel_max_ns: m.morsel_max_ns,
     }
 }
