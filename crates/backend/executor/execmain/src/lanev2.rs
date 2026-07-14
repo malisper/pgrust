@@ -3025,6 +3025,16 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                 // `ndict` dict entries (the fill's contract; the stitch spans
                 // `ndict` u32s per the Part::stitch length check); consumed
                 // before the next window stages.
+                // Lazy sub-framed dict: the insert reads entry bytes for
+                // this window's novel codes through the raw `dict` slice —
+                // ensure the window's codes up front (no-op once
+                // materialized / on unframed dicts).
+                if t.lazy_ensure.is_some() {
+                    for i in pos as usize..n as usize {
+                        // SAFETY: the lane covers the staged window's rows.
+                        t.ensure_code(unsafe { *lane.codes.add(i) });
+                    }
+                }
                 let (codes, dict, stitch) = unsafe {
                     (
                         core::slice::from_raw_parts(lane.codes, n as usize),

@@ -4,6 +4,9 @@
 use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
 
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 use crate::format::*;
 use crate::segfile::{SegFile, SegMap};
 use crate::writer::FooterRg;
@@ -773,6 +776,207 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
     }
 }
 
+// ---- sub-granule dict frames (CHUNK_FLAG_DICT_FRAMED) ---------------------
+
+// Cumulative observability counters (CBSCAN debug line / A-B attribution):
+// lazy tables built, frames those tables carry, frames actually
+// decompressed, whole-table ensure sweeps.
+pub static DICT_LAZY_BUILDS: AtomicU64 = AtomicU64::new(0);
+pub static DICT_FRAMES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static DICT_FRAMES_ENSURED: AtomicU64 = AtomicU64::new(0);
+pub static DICT_ENSURE_ALLS: AtomicU64 = AtomicU64::new(0);
+
+/// (lazy_builds, frames_total, frames_ensured, ensure_alls) — process
+/// cumulative.
+pub fn dict_frame_stats() -> (u64, u64, u64, u64) {
+    (
+        DICT_LAZY_BUILDS.load(Relaxed),
+        DICT_FRAMES_TOTAL.load(Relaxed),
+        DICT_FRAMES_ENSURED.load(Relaxed),
+        DICT_ENSURE_ALLS.load(Relaxed),
+    )
+}
+
+// Read-side lazy kill switch: PGRUST_CBSTORE_DICT_LAZY=0 materializes framed
+// dict chunks eagerly at build (byte-identical arena; A/B attribution of the
+// lazy term). Default on.
+pub(crate) fn dict_lazy_read() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("PGRUST_CBSTORE_DICT_LAZY") {
+        Ok(v) => !matches!(v.trim(), "off" | "0" | "false"),
+        Err(_) => true,
+    })
+}
+
+// Parse the framed blob region: cumulative raw / stored offsets (nframes+1
+// each) + the frames-data base offset within `blob`.
+fn parse_framed_dict(blob: &[u8]) -> (Vec<u32>, Vec<u32>, usize) {
+    let nframes = get_u32(blob, 0) as usize;
+    let mut raw_off = Vec::with_capacity(nframes + 1);
+    let mut comp_off = Vec::with_capacity(nframes + 1);
+    let (mut r, mut c) = (0u32, 0u32);
+    raw_off.push(0);
+    comp_off.push(0);
+    for f in 0..nframes {
+        r += get_u32(blob, 4 + f * 8);
+        c += get_u32(blob, 8 + f * 8);
+        raw_off.push(r);
+        comp_off.push(c);
+    }
+    (raw_off, comp_off, 4 + nframes * 8)
+}
+
+/// Lazy sub-framed dictionary arena (one per (scan, RG, column) while the
+/// per-RG dict table is cached): the dict Datum table is published at build
+/// (pointers into `buf` at the dict_off offsets — the framed layout keeps
+/// offsets into the CONCATENATED raw blob), but a frame's bytes materialize
+/// only on the first `ensure_code`/`ensure_frame`/`ensure_all` that needs
+/// them. CONTRACT (the lazy seam): a dict entry's BYTES may be read only
+/// after an ensure covering its code; every publish surface either ensures
+/// per requested code (`ColDecode::datum`, the value gathers,
+/// `SoaDictTable::datum`) or sweeps (`ensure_all` before whole-dict memo
+/// fills / blob kernels / binary searches).
+///
+/// Single-threaded by construction (per-scan decode state; Cell tracking);
+/// `src`/`entry_off` point into the Part mmap the scan pins; `buf`'s heap
+/// allocation is stable after build (never resized), so published Datums
+/// stay valid exactly as long as the legacy arena's.
+pub struct DictLazy {
+    // Backing allocation (capacity = total_raw + OUT_PAD bytes, len stays 0:
+    // frames materialize through `buf_ptr`; unread gaps stay uninitialized
+    // and are unreachable under the ensure contract).
+    #[allow(dead_code)]
+    buf: Vec<u64>,
+    buf_ptr: *mut u8,
+    nframes: u32,
+    ndict: u32,
+    // Cumulative offsets, nframes+1 each: frame f covers raw
+    // [raw_off[f], raw_off[f+1]) and stored bytes [comp_off[f], comp_off[f+1])
+    // (comp len == raw len marks a stored-raw frame).
+    raw_off: Vec<u32>,
+    comp_off: Vec<u32>,
+    src: *const u8,
+    codec: Codec,
+    // dict_off table (u32 LE raw-blob offset per code) in the mmap.
+    entry_off: *const u8,
+    done: Vec<Cell<u64>>,
+    ndone: Cell<u32>,
+}
+
+impl DictLazy {
+    #[inline]
+    pub fn all_done(&self) -> bool {
+        self.ndone.get() == self.nframes
+    }
+
+    /// The published arena base (dict[code] == base + dict_off[code]).
+    #[inline]
+    pub fn base(&self) -> usize {
+        self.buf_ptr as usize
+    }
+
+    /// Materialize the frame holding `code`'s entry bytes. Cheap once all
+    /// frames are done (one load + compare).
+    #[inline]
+    pub fn ensure_code(&self, code: u32) {
+        if self.all_done() {
+            return;
+        }
+        debug_assert!(code < self.ndict);
+        // SAFETY: entry_off spans ndict u32s of the pinned mmap (build).
+        let off = unsafe {
+            u32::from_le_bytes(
+                core::slice::from_raw_parts(self.entry_off.add(code as usize * 4), 4)
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        // Entries never straddle a frame edge (writer cuts at entry
+        // boundaries), so the owning frame is the last one starting at or
+        // before `off`.
+        let f = self.raw_off.partition_point(|&r| r <= off) - 1;
+        self.ensure_frame(f);
+    }
+
+    pub fn ensure_frame(&self, f: usize) {
+        let (w, b) = (f / 64, 1u64 << (f % 64));
+        if self.done[w].get() & b != 0 {
+            return;
+        }
+        let raw_lo = self.raw_off[f] as usize;
+        let raw_hi = self.raw_off[f + 1] as usize;
+        let raw_len = raw_hi - raw_lo;
+        let comp_lo = self.comp_off[f] as usize;
+        let comp_len = self.comp_off[f + 1] as usize - comp_lo;
+        // SAFETY: the frame directory came off the chunk (the payload
+        // file-trust posture everywhere in this module); src spans the
+        // frames region of the pinned mmap.
+        let src = unsafe { core::slice::from_raw_parts(self.src.add(comp_lo), comp_len) };
+        if comp_len == raw_len {
+            // Stored-raw frame (writer incompressible guard).
+            // SAFETY: buf carries total_raw + OUT_PAD capacity; raw_hi <=
+            // total_raw.
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), self.buf_ptr.add(raw_lo), raw_len)
+            };
+        } else {
+            // In-place decompress wild-writes up to OUT_PAD past raw_hi
+            // (lz4dec contract). Allowed only when no already-materialized
+            // frame owns bytes in that spill span (tiny successor frames can
+            // put more than one frame inside OUT_PAD); otherwise decompress
+            // to scratch and copy exactly raw_len.
+            let mut spill_clear = true;
+            let mut g = f + 1;
+            while g < self.nframes as usize
+                && (self.raw_off[g] as usize) < raw_hi + crate::lz4dec::OUT_PAD
+            {
+                if self.done[g / 64].get() & (1u64 << (g % 64)) != 0 {
+                    spill_clear = false;
+                    break;
+                }
+                g += 1;
+            }
+            if spill_clear {
+                // SAFETY: raw_lo + raw_len + OUT_PAD <= total_raw + OUT_PAD
+                // (buf capacity).
+                let dst = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        self.buf_ptr.add(raw_lo),
+                        raw_len + crate::lz4dec::OUT_PAD,
+                    )
+                };
+                decompress_frame_into(self.codec, src, dst, raw_len);
+            } else {
+                let mut scratch = vec![0u8; raw_len + crate::lz4dec::OUT_PAD];
+                decompress_frame_into(self.codec, src, &mut scratch, raw_len);
+                // SAFETY: as above; exactly raw_len bytes land in place.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        scratch.as_ptr(),
+                        self.buf_ptr.add(raw_lo),
+                        raw_len,
+                    )
+                };
+            }
+        }
+        self.done[w].set(self.done[w].get() | b);
+        self.ndone.set(self.ndone.get() + 1);
+        DICT_FRAMES_ENSURED.fetch_add(1, Relaxed);
+    }
+
+    /// Materialize every frame (whole-dict sweeps: memo fills, blob kernels,
+    /// rank binary searches, legacy borrowed lanes).
+    pub fn ensure_all(&self) {
+        if self.all_done() {
+            return;
+        }
+        DICT_ENSURE_ALLS.fetch_add(1, Relaxed);
+        for f in 0..self.nframes as usize {
+            self.ensure_frame(f);
+        }
+    }
+}
+
 pub struct ChunkView<'a> {
     part: &'a [u8],
     pub hdr: ChunkHeader,
@@ -872,7 +1076,9 @@ impl<'a> ChunkView<'a> {
     // Build the RG's dictionary Datum table once (keyed on dict.is_empty();
     // the caller clears it at RG boundaries). Lz4Dict decompresses the blob
     // into `arena` — the dict table (and every published Datum) points there
-    // for as long as the dict_rg cache holds.
+    // for as long as the dict_rg cache holds. Framed chunks (sub-granule
+    // frames) materialize FULLY here — this is the eager path; the lane
+    // scan's codes decode goes through `build_dict_lazy`.
     fn build_dict(&self, dict: &mut Vec<Datum>, arena: &mut Vec<u64>) {
         if !dict.is_empty() {
             return;
@@ -884,11 +1090,42 @@ impl<'a> ChunkView<'a> {
         let off_tab = &p[codes_len..codes_len + ndv * 4];
         let blob = &p[codes_len + ndv * 4..];
         let blob_base = if self.hdr.encoding == Encoding::Lz4Dict {
-            let raw_len = get_u32(blob, 0) as usize;
-            let comp_len = get_u32(blob, 4) as usize;
-            let dst = arena_frame(arena, raw_len);
-            decompress_frame_into(self.hdr.frame_codec(), &blob[8..8 + comp_len], dst, raw_len);
-            dst.as_ptr() as usize
+            if self.hdr.flags & CHUNK_FLAG_DICT_FRAMED != 0 {
+                // Whole-blob contiguous fast path: ascending in-place frame
+                // decompresses — frame f's wild spill (<= OUT_PAD) lands in
+                // not-yet-written successor bytes, and every frame's region
+                // is fully written by its own step.
+                let (raw_off, comp_off, data) = parse_framed_dict(blob);
+                let total = *raw_off.last().unwrap() as usize;
+                let dst = arena_frame(arena, total);
+                for f in 0..raw_off.len() - 1 {
+                    let (rlo, rhi) = (raw_off[f] as usize, raw_off[f + 1] as usize);
+                    let (clo, chi) = (comp_off[f] as usize, comp_off[f + 1] as usize);
+                    let src = &blob[data + clo..data + chi];
+                    if chi - clo == rhi - rlo {
+                        dst[rlo..rhi].copy_from_slice(src);
+                    } else {
+                        decompress_frame_into(
+                            self.hdr.frame_codec(),
+                            src,
+                            &mut dst[rlo..],
+                            rhi - rlo,
+                        );
+                    }
+                }
+                dst.as_ptr() as usize
+            } else {
+                let raw_len = get_u32(blob, 0) as usize;
+                let comp_len = get_u32(blob, 4) as usize;
+                let dst = arena_frame(arena, raw_len);
+                decompress_frame_into(
+                    self.hdr.frame_codec(),
+                    &blob[8..8 + comp_len],
+                    dst,
+                    raw_len,
+                );
+                dst.as_ptr() as usize
+            }
         } else {
             blob.as_ptr() as usize
         };
@@ -899,20 +1136,84 @@ impl<'a> ChunkView<'a> {
         }
     }
 
+    /// Lazy dict build for framed chunks (CHUNK_FLAG_DICT_FRAMED): publish
+    /// the Datum pointer table over an unmaterialized arena + the DictLazy
+    /// ensure state; NO frame decompresses here. false = not a framed chunk
+    /// (or lazy reads killed) — the caller takes the eager `build_dict`.
+    /// Same dict.is_empty() rebuild key as `build_dict`.
+    fn build_dict_lazy(
+        &self,
+        dict: &mut Vec<Datum>,
+        lazy: &mut Option<Box<DictLazy>>,
+    ) -> bool {
+        if self.hdr.encoding != Encoding::Lz4Dict
+            || self.hdr.flags & CHUNK_FLAG_DICT_FRAMED == 0
+            || !dict_lazy_read()
+        {
+            return false;
+        }
+        if !dict.is_empty() {
+            debug_assert!(lazy.is_some());
+            return true;
+        }
+        let ndv = self.hdr.aux as usize;
+        let w = self.hdr.width as usize;
+        let p = self.payload();
+        let codes_len = align4(self.nrows as usize * w);
+        let off_tab = &p[codes_len..codes_len + ndv * 4];
+        let blob = &p[codes_len + ndv * 4..];
+        let (raw_off, comp_off, data) = parse_framed_dict(blob);
+        let nframes = raw_off.len() - 1;
+        let total = *raw_off.last().unwrap() as usize;
+        let words = (total + crate::lz4dec::OUT_PAD).div_ceil(8);
+        let mut buf: Vec<u64> = Vec::with_capacity(words);
+        let buf_ptr = buf.as_mut_ptr().cast::<u8>();
+        let dl = Box::new(DictLazy {
+            buf,
+            buf_ptr,
+            nframes: nframes as u32,
+            ndict: ndv as u32,
+            raw_off,
+            comp_off,
+            src: blob[data..].as_ptr(),
+            codec: self.hdr.frame_codec(),
+            entry_off: off_tab.as_ptr(),
+            done: (0..nframes.div_ceil(64)).map(|_| Cell::new(0)).collect(),
+            ndone: Cell::new(0),
+        });
+        DICT_LAZY_BUILDS.fetch_add(1, Relaxed);
+        DICT_FRAMES_TOTAL.fetch_add(nframes as u64, Relaxed);
+        let base = dl.base();
+        dict.reserve(ndv);
+        for c in off_tab.chunks_exact(4) {
+            let o = u32::from_le_bytes(c.try_into().unwrap()) as usize;
+            dict.push(Datum::from_usize(base + o));
+        }
+        *lazy = Some(dl);
+        true
+    }
+
     /// Dict-lane decode of granule g: the granule's codes widened to u32
     /// into `codes` (no per-row dictionary gather) + the RG dict table.
     /// false = the chunk is not dict-encoded (caller decodes Datums).
+    /// Framed chunks build the dict LAZILY (`lazy` set; entry bytes
+    /// materialize per ensured frame); everything else builds eagerly and
+    /// clears `lazy`.
     pub fn decode_granule_codes(
         &self,
         g: usize,
         codes: &mut Vec<u32>,
         dict: &mut Vec<Datum>,
         arena: &mut Vec<u64>,
+        lazy: &mut Option<Box<DictLazy>>,
     ) -> bool {
         if !matches!(self.hdr.encoding, Encoding::Dict | Encoding::Lz4Dict) {
             return false;
         }
-        self.build_dict(dict, arena);
+        if !self.build_dict_lazy(dict, lazy) {
+            *lazy = None;
+            self.build_dict(dict, arena);
+        }
         let n = self.granule_rows(g);
         let lo = g * GRANULE_ROWS;
         let p = self.payload();
@@ -1696,7 +1997,8 @@ mod tests {
             let mut arena = Vec::new();
             let mut got = Vec::new();
             for g in 0..cv.hdr.ngranules as usize {
-                assert!(cv.decode_granule_codes(g, &mut codes, &mut dict, &mut arena));
+                let mut lazy = None;
+                assert!(cv.decode_granule_codes(g, &mut codes, &mut dict, &mut arena, &mut lazy));
                 got.extend_from_slice(&codes);
             }
             assert_eq!(got, expected, "dict codes width {width}");

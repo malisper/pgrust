@@ -42,6 +42,11 @@ struct ColDecode {
     // the lane executor's dict-memo tier reads codes+dict zero-decode.
     codes: Vec<u32>,
     is_dict: bool,
+    // Sub-granule dict frames (CHUNK_FLAG_DICT_FRAMED): the lazy ensure
+    // state for the CURRENT dict table — `dict` points into its arena and
+    // entry BYTES materialize per ensured frame. None = fully-materialized
+    // dict (unframed chunk / lazy reads killed). Rebuilt with `dict`.
+    lazy: Option<Box<crate::reader::DictLazy>>,
     // CHUNK_FLAG_DICT_SORTED: codes are byte-rank order (dict range preds).
     dict_sorted: bool,
     // Text-blob contiguity (likeband blob kernel): the decoded granule's
@@ -120,6 +125,7 @@ fn new_col_decode() -> ColDecode {
         arena: Vec::new(),
         codes: Vec::new(),
         is_dict: false,
+        lazy: None,
         dict_sorted: false,
         contig_text: false,
         gkey: NONE_KEY,
@@ -174,7 +180,8 @@ fn decode_col(part: &Part, rg: usize, g: usize, c: usize, cd: &mut ColDecode) ->
     }
     let dict_was_empty = cd.dict.is_empty();
     let chunk = part.chunk(rg, c);
-    cd.is_dict = chunk.decode_granule_codes(g, &mut cd.codes, &mut cd.dict, &mut cd.arena);
+    cd.is_dict =
+        chunk.decode_granule_codes(g, &mut cd.codes, &mut cd.dict, &mut cd.arena, &mut cd.lazy);
     cd.dict_sorted = cd.is_dict && chunk.hdr.flags & CHUNK_FLAG_DICT_SORTED != 0;
     cd.contig_text = false;
     if !cd.is_dict {
@@ -193,7 +200,14 @@ impl ColDecode {
     #[inline]
     fn datum(&self, row: usize) -> Datum {
         if self.is_dict {
-            self.dict[self.codes[row] as usize]
+            let code = self.codes[row];
+            // Lazy sub-framed dict: the published Datum's bytes must exist
+            // before any consumer dereferences them (store_slot / gather_row
+            // per-row publishes).
+            if let Some(l) = &self.lazy {
+                l.ensure_code(code);
+            }
+            self.dict[code as usize]
         } else {
             self.datums[row]
         }
@@ -215,6 +229,34 @@ struct GatherScratch {
 /// across rescans). Slices live until the granule's next decode of a
 /// different (rg, granule) key — granule-long, covering every window staged
 /// from it.
+// ---- lazy sub-framed dict seam (CHUNK_FLAG_DICT_FRAMED) --------------------
+// The SoaDictTable-facing ensure thunks: `p` is the publishing scan's live
+// DictLazy for the staged window (same lifetime as the published `dict`
+// pointer). Published only while frames remain unmaterialized — a fully-done
+// table publishes a null seam (zero per-datum overhead).
+unsafe fn dict_lazy_ensure_code(p: *const (), code: u32) {
+    // SAFETY: seam contract above.
+    unsafe { &*(p as *const crate::reader::DictLazy) }.ensure_code(code)
+}
+
+unsafe fn dict_lazy_ensure_all(p: *const ()) {
+    // SAFETY: seam contract above.
+    unsafe { &*(p as *const crate::reader::DictLazy) }.ensure_all()
+}
+
+type LazySeam = (*const (), Option<unsafe fn(*const (), u32)>, Option<unsafe fn(*const ())>);
+
+fn lazy_seam(lazy: &Option<Box<crate::reader::DictLazy>>) -> LazySeam {
+    match lazy {
+        Some(l) if !l.all_done() => (
+            (&**l as *const crate::reader::DictLazy).cast(),
+            Some(dict_lazy_ensure_code as unsafe fn(*const (), u32)),
+            Some(dict_lazy_ensure_all as unsafe fn(*const ())),
+        ),
+        _ => (std::ptr::null(), None, None),
+    }
+}
+
 pub struct CbDictLane<'a> {
     pub codes: &'a [u32],
     pub dict: &'a [Datum],
@@ -1608,6 +1650,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                     .filter(|&g| stitch.is_some() && g <= u32::MAX as u64)
                     .unwrap_or(0);
                 let stitch = if gndv != 0 { stitch } else { None };
+                let (lazy, lazy_ensure, lazy_ensure_all) = lazy_seam(&cd.lazy);
                 soa.set_dict_lane(
                     c,
                     ::exectuples::SoaDictLane {
@@ -1620,15 +1663,31 @@ impl<'mcx> CbScanDescData<'mcx> {
                             stitch: stitch.map_or(std::ptr::null(), |s| s.as_ptr()),
                             gndv: gndv as u32,
                             gepoch: if stitch.is_some() { self.scan_uid } else { 0 },
+                            lazy,
+                            lazy_ensure,
+                            lazy_ensure_all,
                         },
                     },
                 );
                 return;
             }
             // No dict-lane consumer for this column: one-instruction
-            // escape, gather dict[code] into the Datum cells.
-            for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
-                *out = cd.dict[code as usize];
+            // escape, gather dict[code] into the Datum cells. Published
+            // pointer Datums may be dereferenced by ANY later consumer, so
+            // a lazy sub-framed dict ensures each gathered code's bytes
+            // here (all-done tables take the plain loop).
+            match &cd.lazy {
+                Some(l) if !l.all_done() => {
+                    for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
+                        l.ensure_code(code);
+                        *out = cd.dict[code as usize];
+                    }
+                }
+                _ => {
+                    for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
+                        *out = cd.dict[code as usize];
+                    }
+                }
             }
         } else {
             soa.col_values_mut(c).copy_from_slice(self.staged_col(c));
@@ -1676,6 +1735,10 @@ impl<'mcx> CbScanDescData<'mcx> {
             // kind); rebuilt only when the dictionary changes.
             let key = (cd.dict_rg, chars as u8 + 1);
             if cd.len_memo_key != key {
+                // Whole-dict sweep: materialize a lazy sub-framed dict.
+                if let Some(l) = &cd.lazy {
+                    l.ensure_all();
+                }
                 cd.len_memo.clear();
                 cd.len_memo.reserve(cd.dict.len());
                 for &d in &cd.dict {
@@ -1733,6 +1796,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                     .filter(|&g| stitch.is_some() && g <= u32::MAX as u64)
                     .unwrap_or(0);
                 let stitch = if gndv != 0 { stitch } else { None };
+                let (lazy, lazy_ensure, lazy_ensure_all) = lazy_seam(&cd.lazy);
                 soa.set_dict_lane(
                     0,
                     ::exectuples::SoaDictLane {
@@ -1745,13 +1809,28 @@ impl<'mcx> CbScanDescData<'mcx> {
                             stitch: stitch.map_or(std::ptr::null(), |s| s.as_ptr()),
                             gndv: gndv as u32,
                             gepoch: if stitch.is_some() { self.scan_uid } else { 0 },
+                            lazy,
+                            lazy_ensure,
+                            lazy_ensure_all,
                         },
                     },
                 );
                 return;
             }
-            for (out, &code) in soa.col_values_mut(0).iter_mut().zip(codes) {
-                *out = cd.dict[code as usize];
+            // Same published-pointer contract as `batch_deform_col`'s
+            // gather: ensure each gathered code on lazy dicts.
+            match &cd.lazy {
+                Some(l) if !l.all_done() => {
+                    for (out, &code) in soa.col_values_mut(0).iter_mut().zip(codes) {
+                        l.ensure_code(code);
+                        *out = cd.dict[code as usize];
+                    }
+                }
+                _ => {
+                    for (out, &code) in soa.col_values_mut(0).iter_mut().zip(codes) {
+                        *out = cd.dict[code as usize];
+                    }
+                }
             }
         } else {
             soa.col_values_mut(0).copy_from_slice(self.staged_col(key));
@@ -1780,6 +1859,11 @@ impl<'mcx> CbScanDescData<'mcx> {
         let cd = &self.cols[c];
         if !cd.is_dict || cd.gkey != (self.rg as u32, self.granule as u32) {
             return None;
+        }
+        // The borrowed CbDictLane carries no lazy seam — materialize fully
+        // (the seam-carrying channel is `staged_codes_lane`).
+        if let Some(l) = &cd.lazy {
+            l.ensure_all();
         }
         Some(CbDictLane {
             codes: &cd.codes[self.staged_lo..self.staged_lo + self.staged_rows],
@@ -1816,19 +1900,26 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// gather's values fill (`batch_deform_col`'s `cd.dict[code]`).
     #[inline]
     pub fn staged_codes_lane(&self, c: usize) -> Option<::exectuples::SoaDictLane> {
-        let lane = self.staged_dict_lane(c)?;
+        let cd = &self.cols[c];
+        if !cd.is_dict || cd.gkey != (self.rg as u32, self.granule as u32) {
+            return None;
+        }
+        let (lazy, lazy_ensure, lazy_ensure_all) = lazy_seam(&cd.lazy);
         Some(::exectuples::SoaDictLane {
-            codes: lane.codes.as_ptr(),
+            codes: cd.codes[self.staged_lo..self.staged_lo + self.staged_rows].as_ptr(),
             table: ::exectuples::SoaDictTable {
-                dict: lane.dict.as_ptr(),
-                ndict: lane.dict.len() as u32,
-                epoch: lane.epoch,
-                sorted: lane.sorted,
+                dict: cd.dict.as_ptr(),
+                ndict: cd.dict.len() as u32,
+                epoch: self.rg as u64,
+                sorted: cd.dict_sorted,
                 // The dict-code side channel publishes no stitch (its
                 // consumers key on the per-RG epoch).
                 stitch: std::ptr::null(),
                 gndv: 0,
                 gepoch: 0,
+                lazy,
+                lazy_ensure,
+                lazy_ensure_all,
             },
         })
     }
