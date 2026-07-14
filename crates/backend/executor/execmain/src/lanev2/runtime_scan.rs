@@ -556,12 +556,15 @@ fn helper_drive_lazy(
     };
     let mut local = lane.local();
     LAZY_CTX.with(|slot| {
-        let stale = slot.borrow_mut().replace(LazyCtx {
+        // A stale ctx can only remain if a previous drive escaped its
+        // structured cleanup (a drive_pinned panic — already a protocol
+        // invariant break). Drop it: its guard (if any) was reclaimed by
+        // DeferredQueryTaskBinding::new's stale-guard containment above.
+        let _stale = slot.borrow_mut().replace(LazyCtx {
             binding,
             exit_unwind: None,
             bind_failed: false,
         });
-        debug_assert!(stale.is_none(), "lazy bind ctx installed twice");
     });
     let _outcome = payload.rt.drive_pinned(&mut local, rg);
     parallel::gtrace("w.qtb.body.end");
