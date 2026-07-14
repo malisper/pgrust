@@ -1320,16 +1320,18 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     // Direct storeless-count drive: its own (higher) floor — the serial
     // fused advance is O(pages); parallel pays only on a big heap.
-    if drive_mode(agg, ss) == DriveMode::StorelessCount {
-        if total_granules < rowdrive_min_blocks() {
-            return Ok(None);
-        }
-        // Observability (e2e tranche): a following "engaged" line at this
-        // query is a DIRECT-DRIVE engagement.
-        lane_trace(&format!("runtime-scan: rowdrive admit blocks={total_granules}"));
+    let rowdrive = drive_mode(agg, ss) == DriveMode::StorelessCount;
+    if rowdrive && total_granules < rowdrive_min_blocks() {
+        return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
+    }
+    if rowdrive {
+        // Observability (e2e tranche; after the done-pull early-return so
+        // one engagement traces once): a following "engaged" line at this
+        // query is a DIRECT-DRIVE engagement.
+        lane_trace(&format!("runtime-scan: rowdrive admit blocks={total_granules}"));
     }
 
     // --- Engage.
