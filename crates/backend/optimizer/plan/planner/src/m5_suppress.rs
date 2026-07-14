@@ -561,6 +561,15 @@ fn classify_join_covered(
     je: &types_nodes::primnodes::JoinExpr<'_>,
 ) -> PgResult<bool> {
     use types_nodes::JoinType;
+    // Refusal diagnostics (PGRUST_M5_SUPPRESS_TRACE=1): the join probe's
+    // guards are planner-choice-shaped and worth naming when they refuse —
+    // the suppression tranche's leg-1 failures are undiagnosable without.
+    fn refuse_join(why: &str) -> PgResult<bool> {
+        if trace_armed() {
+            eprintln!("m5-suppress: join probe refused ({why})");
+        }
+        Ok(false)
+    }
     // Plain one-row aggregation only (the arm drives a plain agg sink):
     // no grouping, no DISTINCT, no ORDER BY/LIMIT decoration.
     if !parse.hasAggs
@@ -570,7 +579,7 @@ fn classify_join_covered(
         || parse.limitCount.is_some()
         || parse.limitOffset.is_some()
     {
-        return Ok(false);
+        return refuse_join("not a plain one-row aggregation");
     }
     // Phase-1 + right join families the walk admits (semi/anti arrive via
     // sublinks, prefiltered upstream).
@@ -578,45 +587,49 @@ fn classify_join_covered(
         je.jointype,
         JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT | JoinType::JOIN_FULL
     ) {
-        return Ok(false);
+        return refuse_join("join family");
     }
     // Both arms plain cbstore relations (no nested joins: the
     // multi-build-side SQL shapes are the m5p1 admission gap, uncovered).
     let mut sides = [0usize; 2];
     for (i, arg) in [je.larg, je.rarg].into_iter().enumerate() {
-        let Some(rtr) = arg.as_range_tbl_ref() else { return Ok(false) };
+        let Some(rtr) = arg.as_range_tbl_ref() else {
+            return refuse_join("nested join tree (multi-build-side gap)");
+        };
         sides[i] = rtr.rtindex as usize;
     }
     let [rti_l, rti_r] = sides;
     let mut relids = [0u32; 2];
     for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
-            return Ok(false);
+            return refuse_join("side not a plain RTE");
         };
         if rte.rtekind != RTEKind::RTE_RELATION
             || rte.relkind != types_rel::RELKIND_RELATION
             || rte.inh
             || rte.tablesample.is_some()
         {
-            return Ok(false);
+            return refuse_join("side not a plain relation");
         }
         relids[i] = rte.relid;
         let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
-            return Ok(false);
+            return refuse_join("side has no RelOptInfo yet");
         };
         let rel = run.root.rel(rel_id);
         if rel.amflags & AMFLAG_CBSTORE == 0 {
-            return Ok(false);
+            return refuse_join("side not cbstore");
         }
         // Unindexed-only guard (see the fn doc): an index on either side
         // lets the costing pick serial merge/NL shapes the walk refuses.
         if !rel.indexlist.is_empty() {
-            return Ok(false);
+            return refuse_join("side has indexes");
         }
         // nbatch==1 on this side's estimate (whichever side the planner
         // hashes must fit): the flipped row is hashjoin-nbatch1; larger
         // builds keep Gather until the spill row's own flip.
-        let Some(pt_id) = rel.pathtarget_id else { return Ok(false) };
+        let Some(pt_id) = rel.pathtarget_id else {
+            return refuse_join("side has no pathtarget yet");
+        };
         let width = run.root.pathtarget(pt_id).width;
         let dop = guc_tables::runtime_pool::runtime_dop();
         let (_, nbatch, _, _) = ::nodehash::exec_choose_hash_table_size_full(
@@ -627,14 +640,14 @@ fn classify_join_covered(
             dop.max(1),
         );
         if nbatch > 1 {
-            return Ok(false);
+            return refuse_join("nbatch estimate > 1 (hashjoin-multibatch-spill row unflipped)");
         }
     }
     // >=1 hashjoinable int-family equi clause between the two sides in the
     // JOIN quals (top-level AND terms only).
     let mut has_equi = false;
     let quals: Vec<Node<'_>> = match je.quals {
-        None => return Ok(false),
+        None => return refuse_join("no join quals"),
         Some(q) => match q.as_bool_expr() {
             Some(be)
                 if matches!(be.boolop, types_nodes::primnodes::BoolExprType::AND_EXPR) =>
@@ -663,7 +676,7 @@ fn classify_join_covered(
         }
     }
     if !has_equi {
-        return Ok(false);
+        return refuse_join("no hashjoinable int-family equi clause");
     }
     // Emit discipline: every non-junk tlist entry is a whitelisted plain
     // aggregate whose args live on either joined rel (count(*) included).
@@ -671,12 +684,12 @@ fn classify_join_covered(
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
         if !is_whitelisted_agg_2rti(tle.expr, rti_l, rti_r, PLAIN_FOLD_AGGS) {
-            return Ok(false);
+            return refuse_join("tlist entry not a whitelisted plain agg");
         }
         n += 1;
     }
     if n == 0 {
-        return Ok(false);
+        return refuse_join("empty tlist");
     }
     finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0)
 }
