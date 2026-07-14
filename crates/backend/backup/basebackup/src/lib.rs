@@ -1612,12 +1612,17 @@ fn strncmp(a: &str, b: &str, n: usize) -> i32 {
     0
 }
 
-// File-permission / identity globals (basebackup uses these for injected files).
+// File-permission globals for injected files (backup_label, tablespace_map,
+// .done markers) and symlink-to-directory conversions: read fd's file_perm
+// globals — the exact values the server's own file creation uses. (The
+// init_small data_directory_mode copy read stale 0700 in walsender threads;
+// pg_basebackup extracts these members with the TAR HEADER modes, so a stale
+// header broke the group-permission leg of pg_basebackup/010 subtest 83.)
 fn pg_file_create_mode() -> u32 {
-    init_small::globals::data_directory_mode() as u32 & 0o666
+    fd::vfd::pg_file_create_mode()
 }
 fn pg_dir_create_mode() -> u32 {
-    init_small::globals::data_directory_mode() as u32
+    fd::vfd::pg_dir_create_mode()
 }
 fn geteuid() -> u32 {
     // SAFETY: geteuid never fails.
