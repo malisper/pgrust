@@ -113,7 +113,22 @@ struct AggSink {
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
     /// finalize's published output (leader consumes after completion).
-    published: Mutex<Option<Vec<SinkEmitBuf>>>,
+    published: Mutex<Option<SinkPublished>>,
+    /// TRUE TABLE ADOPT (dop1-tax2 inc-1) shape gate, fixed at construction:
+    /// every emit column byval AND no byref combine state class — a byref
+    /// transvalue points into a WORKER aggcontext, which dies with the
+    /// helpers; byref shapes keep the EmitBuf arms (whose arena copy is what
+    /// makes them self-contained).
+    adopt_shape: bool,
+    /// Seal-time hand-off: the single sealed Local's table + SEAL partition.
+    /// Set only when the LIVE seal census admits (exactly one sealed Local,
+    /// zero flushed runs, adopt_shape) — every combine claim then no-ops and
+    /// finalize publishes the table wholesale (the ledger's literal "adopt
+    /// its table (pointer hand-off)").
+    adopted: Mutex<Option<(SinkTableHandle, SinkPart)>>,
+    /// Lock-free mirror of `adopted` for the per-claim combine check
+    /// (written once at SEAL, which happens-before every combine claim).
+    adopted_flag: AtomicBool,
     /// Abort/observability control (shared with the engagement payload).
     rg: OnceLock<runtime::WeakRgHandle>,
     failed: AtomicBool,
@@ -138,6 +153,16 @@ struct AggSink {
 // partition (the runtime's exactly-once combine claim) and read only by
 // finalize, which happens-after every combine by last-worker-out.
 unsafe impl Sync for AggSink {}
+
+/// What finalize hands the leader.
+enum SinkPublished {
+    /// Combine-materialized per-bucket EmitBufs (the general arm).
+    Emit(Vec<SinkEmitBuf>),
+    /// TRUE TABLE ADOPT: the single sealed Local's whole table + SEAL
+    /// partition — no partition merge ran, no re-insert, no EmitBuf
+    /// materialization; the leader drains the table directly.
+    Table(SinkTableHandle, SinkPart),
+}
 
 impl AggSink {
     fn fail(&self, e: Box<PgError>) {
@@ -237,6 +262,25 @@ impl runtime::ParallelSink for AggSink {
                 }
             }
         }
+        // TRUE TABLE ADOPT decision (dop1-tax2 inc-1) — LIVE STATE at SEAL:
+        // the sealed-Local census is final here (last-worker-out; a widened
+        // engagement forked ≥2 Locals and takes the merge/pass-through
+        // combine arms). Exactly one sealed Local with zero flushed runs
+        // and an all-byval shape: hand its table + SEAL partition to
+        // finalize wholesale. Every combine claim then no-ops (nothing to
+        // merge, nothing to materialize) and the leader drains the table
+        // directly — forming rows only for boundary-cut survivors. Memory
+        // is already charged (the loop above); nothing new is retained.
+        if self.adopt_shape {
+            if let [l] = locals {
+                if l.runs.is_empty() && l.table.is_some() && l.part.is_some() {
+                    let t = l.table.take().expect("checked Some");
+                    let p = l.part.take().expect("checked Some");
+                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some((t, p));
+                    self.adopted_flag.store(true, Ordering::SeqCst);
+                }
+            }
+        }
     }
 
     fn partitions(&self) -> u64 {
@@ -245,6 +289,13 @@ impl runtime::ParallelSink for AggSink {
 
     fn combine(&self, part: u64, _worker: usize, locals: &[AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        // TRUE TABLE ADOPT: seal took the single Local's table — there is
+        // nothing to merge and nothing to materialize; finalize publishes
+        // the table itself. (Set at SEAL, which happens-before every
+        // combine claim; SeqCst pairs with the seal store.)
+        if self.adopted_flag.load(Ordering::SeqCst) {
             return;
         }
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
@@ -303,11 +354,24 @@ impl runtime::ParallelSink for AggSink {
         }
     }
 
-    /// Publish: move the 256 emit buffers out (O(partitions), the §6
-    /// contract). Locals drop with the plumbing right after.
+    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
+    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
+    /// Locals drop with the plumbing right after.
     fn finalize(&self, _locals: &[AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        if self.adopted_flag.load(Ordering::SeqCst) {
+            if let Some((t, p)) =
+                self.adopted.lock().unwrap_or_else(|g| g.into_inner()).take()
+            {
+                *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(SinkPublished::Table(t, p));
+                return;
+            }
+            // Unreachable by construction (flag implies content); fall
+            // through fail-closed to the buf publish (empty → leader errors
+            // on "published nothing"-class checks rather than wedging).
         }
         let bufs: Vec<SinkEmitBuf> = self
             .out_emit
@@ -318,7 +382,7 @@ impl runtime::ParallelSink for AggSink {
                 unsafe { std::mem::take(&mut *c.get()) }
             })
             .collect();
-        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(bufs);
+        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(SinkPublished::Emit(bufs));
     }
 }
 
@@ -1251,6 +1315,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // --- Engage.
     let key_words = mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 });
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
+    // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
+    // the adopted table's rows must be self-contained past helper teardown
+    // (a byref transvalue points into a worker aggcontext).
+    let adopt_shape =
+        ::nodeagg::sink::sink_emit_plan_all_byval(&emit) && !byref_states;
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -1265,6 +1334,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         emit,
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
+        adopt_shape,
+        adopted: Mutex::new(None),
+        adopted_flag: AtomicBool::new(false),
         rg: OnceLock::new(),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
@@ -1482,7 +1554,7 @@ fn engage_ceremony<'mcx>(
             Ok(false)
         }
         EngageOutcome::Completed => {
-            let bufs = sink
+            let published = sink
                 .published
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -1491,9 +1563,25 @@ fn engage_ceremony<'mcx>(
                     ::nodeagg::sink::sink_shape_error("completed sink published nothing")
                 })?;
             let natts = sink.emit.cols.len();
-            let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
-            lane_trace(&format!("runtime-agg: complete, groups={rows}"));
-            ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+            match published {
+                SinkPublished::Emit(bufs) => {
+                    let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
+                    lane_trace(&format!("runtime-agg: complete, groups={rows}"));
+                    ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+                }
+                SinkPublished::Table(table, part) => {
+                    let rows = part.idx.len() + usize::from(part.has_null);
+                    lane_trace(&format!(
+                        "runtime-agg: complete (table adopt), groups={rows}"
+                    ));
+                    ::nodeagg::sink::agg_sink_adopt_table(
+                        agg,
+                        table,
+                        part,
+                        sink.emit.clone(),
+                    );
+                }
+            }
             Ok(true)
         }
     }

@@ -668,6 +668,7 @@ pub enum SinkEmitCol {
     SumInt128 { transno: u32 },
 }
 
+#[derive(Clone)]
 pub struct SinkEmitPlan {
     pub width: u8,
     pub cols: Vec<SinkEmitCol>,
@@ -1187,22 +1188,210 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 
 // ---------------------------------------------------------------------------
 // Leader-side adopted emit (the published sink output as the Agg's source).
+// Two backings behind one drain interface:
+//   Bufs — combine-materialized per-bucket EmitBufs (the general arm);
+//   Table — TRUE TABLE ADOPT (dop1-tax2 inc-1): the single sealed Local's
+//   whole table + SEAL partition index, published by finalize WITHOUT any
+//   emit materialization. Rows are formed on demand at drain time (byval
+//   emit plans only — a byref transvalue points into a WORKER aggcontext,
+//   which dies with the helpers; byref shapes keep the EmitBuf arms, whose
+//   arena copy is exactly what makes them self-contained).
 // ---------------------------------------------------------------------------
 
-/// The leader's adopted parallel emit state: published per-bucket
-/// identity-projected rows, drained bucket 0..255 in insertion order.
+/// Every emit column projects a byval datum (no arena materialization):
+/// the TABLE-ADOPT shape gate.
+pub fn sink_emit_plan_all_byval(plan: &SinkEmitPlan) -> bool {
+    plan.cols.iter().all(|c| {
+        matches!(
+            c,
+            SinkEmitCol::Key
+                | SinkEmitCol::Derived(_)
+                | SinkEmitCol::MultiComp { .. }
+                | SinkEmitCol::Agg { .. }
+        )
+    })
+}
+
+/// One emit column of table row `row`, formed directly from the adopted
+/// table (byval kinds only — `sink_emit_plan_all_byval` gates adoption).
+/// The `Agg` arm is the ledger's "transvalue read via the resolved transno":
+/// the datum IS the raw transvalue, no copy, no arena.
+#[inline]
+fn table_emit_datum(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    row: usize,
+    col: usize,
+) -> (Datum, bool) {
+    match plan.cols[col] {
+        SinkEmitCol::Key => match t.row_key_int(row) {
+            Some(k) => (key_datum(plan.width, k), false),
+            None => (Datum::null(), true),
+        },
+        SinkEmitCol::Derived(d) => match t.row_key_int(row) {
+            Some(k) => (key_datum(plan.width, d.eval(k)), false),
+            None => (Datum::null(), true),
+        },
+        SinkEmitCol::MultiComp { off, width } => match row_key_words(t, row) {
+            Some(w) => {
+                let image = (w[0] as u128) | ((w[1] as u128) << 64);
+                let bits = (image >> (off as u32 * 8)) as u64;
+                let sh = 64 - width as u32 * 8;
+                let v = if sh == 0 { bits as i64 } else { ((bits << sh) as i64) >> sh };
+                (key_datum(width, v), false)
+            }
+            None => (Datum::null(), true),
+        },
+        // SAFETY: the row's state block holds numtrans pergroups (adopted
+        // table config = the sink's state_bytes); transno < numtrans by
+        // plan construction. Byval transvalues only (adoption gate).
+        SinkEmitCol::Agg { transno } => unsafe {
+            let pg =
+                &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(transno as usize);
+            (pg.trans_value, pg.trans_value_is_null)
+        },
+        // Byref finalize kinds never reach a table-backed drain:
+        // sink_emit_plan_all_byval refuses adoption (and the debug_assert
+        // in agg_sink_adopt_table re-checks).
+        SinkEmitCol::AvgInt8 { .. }
+        | SinkEmitCol::AvgInt128 { .. }
+        | SinkEmitCol::SumInt128 { .. } => {
+            unreachable!("byref emit column in a table-backed sink drain")
+        }
+    }
+}
+
+/// The drain source behind [`SinkEmitState`].
+enum SinkEmitSrc {
+    /// Combine-materialized per-bucket rows.
+    Bufs(Vec<SinkEmitBuf>),
+    /// The adopted single-Local table: rows addressed bucket-by-bucket
+    /// through the SEAL partition index — the same rows in the same order
+    /// the pass-through emit would have materialized (insertion order per
+    /// bucket; the out-of-band NULL group row LAST in `SINK_NULL_BUCKET`).
+    Table {
+        table: SinkTableHandle,
+        part: SinkPart,
+        plan: SinkEmitPlan,
+        /// The NULL group's table row, resolved once at adopt.
+        null_row: Option<u32>,
+    },
+}
+
+/// The leader's adopted parallel emit state, drained bucket 0..255 in
+/// insertion order.
 pub struct SinkEmitState {
-    pub bufs: Vec<SinkEmitBuf>,
-    pub natts: usize,
+    src: SinkEmitSrc,
+    natts: usize,
     bucket: usize,
     pos: usize,
+}
+
+impl SinkEmitState {
+    /// Bucket `b`'s row count.
+    #[inline]
+    fn bucket_len(&self, b: usize) -> usize {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => bufs[b].nrows,
+            SinkEmitSrc::Table { part, null_row, .. } => {
+                (part.starts[b + 1] - part.starts[b]) as usize
+                    + usize::from(b == SINK_NULL_BUCKET && null_row.is_some())
+            }
+        }
+    }
+
+    /// The adopted table row behind (bucket, drain position) — partition
+    /// rows in SEAL order, the NULL row last in its bucket.
+    #[inline]
+    fn table_row(part: &SinkPart, null_row: Option<u32>, b: usize, row: usize) -> usize {
+        let lo = part.starts[b] as usize;
+        let hi = part.starts[b + 1] as usize;
+        if lo + row < hi {
+            part.idx[lo + row] as usize
+        } else {
+            debug_assert!(b == SINK_NULL_BUCKET && row == hi - lo);
+            null_row.expect("drain position past bucket end without a NULL row") as usize
+        }
+    }
+
+    /// One column datum of drain position (b, row).
+    #[inline]
+    fn row_datum(&self, b: usize, row: usize, col: usize) -> (Datum, bool) {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => {
+                let buf = &bufs[b];
+                let i = row * self.natts + col;
+                (buf.values[i], buf.nulls[i])
+            }
+            SinkEmitSrc::Table { table, part, plan, null_row } => {
+                let trow = Self::table_row(part, *null_row, b, row);
+                table_emit_datum(plan, table.table(), trow, col)
+            }
+        }
+    }
+
+    /// Fill one drained row's datums/nulls (the slot-store body).
+    #[inline]
+    fn fill_row(&self, b: usize, row: usize, values: &mut [Datum], nulls: &mut [bool]) {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => {
+                let buf = &bufs[b];
+                debug_assert!(row < buf.nrows);
+                let base = row * self.natts;
+                values[..self.natts].copy_from_slice(&buf.values[base..base + self.natts]);
+                nulls[..self.natts].copy_from_slice(&buf.nulls[base..base + self.natts]);
+            }
+            SinkEmitSrc::Table { table, part, plan, null_row } => {
+                let trow = Self::table_row(part, *null_row, b, row);
+                for c in 0..self.natts {
+                    let (v, isnull) = table_emit_datum(plan, table.table(), trow, c);
+                    values[c] = v;
+                    nulls[c] = isnull;
+                }
+            }
+        }
+    }
 }
 
 /// Adopt the published emit set; subsequent [`agg_sink_emit_next`] calls
 /// drain it. The Agg becomes a pure Source (its build never ran).
 pub fn agg_sink_adopt_emit(node: &mut AggStateData<'_>, bufs: Vec<SinkEmitBuf>, natts: usize) {
     debug_assert_eq!(bufs.len(), SINK_NBUCKETS);
-    node.sink_emit = Some(Box::new(SinkEmitState { bufs, natts, bucket: 0, pos: 0 }));
+    node.sink_emit = Some(Box::new(SinkEmitState {
+        src: SinkEmitSrc::Bufs(bufs),
+        natts,
+        bucket: 0,
+        pos: 0,
+    }));
+}
+
+/// TRUE TABLE ADOPT (dop1-tax2 inc-1): adopt the published single-Local
+/// table + SEAL partition wholesale — zero emit materialization; the drain
+/// forms rows on demand (survivors only, under the consumers' boundary
+/// cut). Byval emit plans only (the adoption gate — re-checked here).
+pub fn agg_sink_adopt_table(
+    node: &mut AggStateData<'_>,
+    table: SinkTableHandle,
+    part: SinkPart,
+    plan: SinkEmitPlan,
+) {
+    debug_assert!(sink_emit_plan_all_byval(&plan), "table adopt over a byref emit plan");
+    // Resolve the out-of-band NULL group row once (single O(n) sweep —
+    // the pass-through emit's scan, hoisted out of the drain).
+    let null_row = if part.has_null {
+        let t = table.table();
+        (0..t.nrows()).find(|&r| t.row_key_int(r).is_none()).map(|r| r as u32)
+    } else {
+        None
+    };
+    debug_assert_eq!(part.has_null, null_row.is_some());
+    let natts = plan.cols.len();
+    node.sink_emit = Some(Box::new(SinkEmitState {
+        src: SinkEmitSrc::Table { table, part, plan, null_row },
+        natts,
+        bucket: 0,
+        pos: 0,
+    }));
 }
 
 /// Mid-emit resume marker for the lane dispatch.
@@ -1225,8 +1414,7 @@ pub fn agg_sink_emit_next<'mcx>(
             if st.bucket >= SINK_NBUCKETS {
                 break None;
             }
-            let b = &st.bufs[st.bucket];
-            if st.pos >= b.nrows {
+            if st.pos >= st.bucket_len(st.bucket) {
                 st.bucket += 1;
                 st.pos = 0;
                 continue;
@@ -1238,21 +1426,19 @@ pub fn agg_sink_emit_next<'mcx>(
     };
     let Some((bucket, row)) = next else {
         // KEEP the drained state (its bufs' arenas back byref datums already
-        // handed out this scan — C's aggcontext lifetime analog); it drops
+        // handed out this scan — C's aggcontext lifetime analog; the adopted
+        // table backs handed-out transvalue datums the same way); it drops
         // at rescan/teardown through agg_sink_reset_emit.
         node.agg_done = true;
         return Ok(None);
     };
     let st = node.sink_emit.as_ref().expect("sink emit state adopted");
     let natts = st.natts;
-    let buf = &st.bufs[bucket];
-    let base = row * natts;
     let slot = estate.slot_mut(node.ps_ResultTupleSlot);
     ::exectuples::exec_clear_tuple(slot, mcx);
     {
         let sb = slot.base_mut();
-        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
-        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+        st.fill_row(bucket, row, &mut sb.tts_values[..natts], &mut sb.tts_isnull[..natts]);
     }
     ::exectuples::exec_store_virtual_tuple(slot);
     Ok(Some(node.ps_ResultTupleSlot))
@@ -1265,15 +1451,15 @@ pub fn agg_sink_reset_emit(node: &mut AggStateData<'_>) {
 
 // ---------------------------------------------------------------------------
 // Batched drain of the adopted emit (dop1-tax fix 4): a consuming breaker
-// (the lane's agg→sort feed) drains the published EmitBufs in per-bucket
-// BLOCKS instead of pulling one row per produce through the emit cursor —
-// same rows, same order (bucket 0..255, insertion order within), same slot
+// (the lane's agg→sort feed) drains the published rows in per-bucket BLOCKS
+// instead of pulling one row per produce through the emit cursor — same
+// rows, same order (bucket 0..255, insertion order within), same slot
 // contents as agg_sink_emit_next; only the per-row pull ceremony is hoisted.
 // ---------------------------------------------------------------------------
 
 /// Bucket `b`'s row count in the adopted emit state (`None` = not adopted).
 pub fn agg_sink_emit_bucket_len(node: &AggStateData<'_>, b: usize) -> Option<usize> {
-    node.sink_emit.as_ref().map(|st| st.bufs[b].nrows)
+    node.sink_emit.as_ref().map(|st| st.bucket_len(b))
 }
 
 /// True while the adopted emit cursor has not advanced — the batched drain
@@ -1294,28 +1480,24 @@ pub fn agg_sink_emit_block_row<'mcx>(
     let mcx = estate.es_query_cxt;
     let st = node.sink_emit.as_ref().expect("sink emit state adopted");
     let natts = st.natts;
-    let buf = &st.bufs[b];
-    debug_assert!(row < buf.nrows);
-    let base = row * natts;
     let slot = estate.slot_mut(node.ps_ResultTupleSlot);
     ::exectuples::exec_clear_tuple(slot, mcx);
     {
         let sb = slot.base_mut();
-        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
-        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+        st.fill_row(b, row, &mut sb.tts_values[..natts], &mut sb.tts_isnull[..natts]);
     }
     ::exectuples::exec_store_virtual_tuple(slot);
     node.ps_ResultTupleSlot
 }
 
 /// One emitted-column datum of row `row` in bucket `b` (the batched drain's
-/// boundary-cut key read — no slot build for rows the cut will skip).
+/// boundary-cut key read — no slot build for rows the cut will skip; on a
+/// table-backed drain this reads the raw transvalue straight off the
+/// adopted table).
 #[inline]
 pub fn agg_sink_emit_datum(node: &AggStateData<'_>, b: usize, row: usize, col: usize) -> (Datum, bool) {
     let st = node.sink_emit.as_ref().expect("sink emit state adopted");
-    let buf = &st.bufs[b];
-    let i = row * st.natts + col;
-    (buf.values[i], buf.nulls[i])
+    st.row_datum(b, row, col)
 }
 
 /// End of a batched drain: the adopted state is consumed exactly as the
@@ -1789,6 +1971,61 @@ mod tests {
                 .all(|((g, w), &null)| null || g.as_i64() == w.as_i64());
             assert!(eq, "bucket {b} datums diverge");
             total_rows += got.nrows;
+        }
+        assert_eq!(total_rows, 2001);
+    }
+
+    /// TRUE TABLE ADOPT oracle (dop1-tax2 inc-1): the table-backed drain's
+    /// per-position addressing (`SinkEmitState::table_row`) + on-demand
+    /// column forming (`table_emit_datum`) reproduce the pass-through
+    /// emit's rows byte-for-byte (values, nulls, order) for every bucket
+    /// including the NULL group's — and the pass-through is itself oracled
+    /// against the merge arm above, closing the chain to the general path.
+    #[test]
+    fn table_drain_matches_passthrough_emit() {
+        let mut t = mk_table(64);
+        for k in 0..2000 {
+            bump(&mut t, Some(k), 1, 3 * k + 1);
+        }
+        bump(&mut t, None, 4, 11);
+        let part = sink_partition_remainder(&t);
+        assert!(part.has_null);
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        assert!(sink_emit_plan_all_byval(&plan));
+        let natts = plan.cols.len();
+        // The adopt-time NULL row resolution, verbatim.
+        let null_row =
+            (0..t.nrows()).find(|&r| t.row_key_int(r).is_none()).map(|r| r as u32);
+        assert!(null_row.is_some());
+        let mut total_rows = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let want = sink_emit_bucket_passthrough(&plan, &t, &part, b).unwrap();
+            let lo = part.starts[b] as usize;
+            let hi = part.starts[b + 1] as usize;
+            let n = hi - lo + usize::from(b == SINK_NULL_BUCKET && null_row.is_some());
+            assert_eq!(n, want.nrows, "bucket {b} row count");
+            for row in 0..n {
+                let trow = SinkEmitState::table_row(&part, null_row, b, row);
+                for c in 0..natts {
+                    let (v, isnull) = table_emit_datum(&plan, &t, trow, c);
+                    assert_eq!(isnull, want.nulls[row * natts + c], "bucket {b} row {row} col {c} null");
+                    if !isnull {
+                        assert_eq!(
+                            v.as_i64(),
+                            want.values[row * natts + c].as_i64(),
+                            "bucket {b} row {row} col {c} datum"
+                        );
+                    }
+                }
+            }
+            total_rows += n;
         }
         assert_eq!(total_rows, 2001);
     }
