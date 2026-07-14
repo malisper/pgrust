@@ -1028,8 +1028,9 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
         TableScanDesc::Heap(h) => heap::scan_end(h),
         TableScanDesc::Cbstore(mut c) => {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
+                let (dfb, dft, dfe, dfa) = ::cbstore::dict_frame_stats();
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}|dictlazy_builds={dfb}|dict_frames={dft}|dict_frames_ensured={dfe}|dict_ensure_alls={dfa}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
@@ -1454,9 +1455,25 @@ pub fn table_scan_batch_deform<'mcx>(
     soa: &mut ::exectuples::SoaBatch<'_>,
     qual_col_only: Option<u16>,
 ) {
+    table_scan_batch_deform_sel(scan, plan, soa, qual_col_only, None)
+}
+
+/// `table_scan_batch_deform` under an optional PREWHERE selection (the
+/// survivor-window COMPLETING deform): `sel` narrows lazy sub-framed dict
+/// ensures to selected rows (cbstore only; cell writes identical, heap
+/// ignores it — its deform has no lazy bytes).
+pub fn table_scan_batch_deform_sel<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    qual_col_only: Option<u16>,
+    sel: Option<&[u64]>,
+) {
     match scan {
         TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa(h, plan, soa, qual_col_only),
-        TableScanDesc::Cbstore(c) => c.batch_deform(plan.ncols() as usize, soa, qual_col_only),
+        TableScanDesc::Cbstore(c) => {
+            c.batch_deform(plan.ncols() as usize, soa, qual_col_only, sel)
+        }
     }
 }
 

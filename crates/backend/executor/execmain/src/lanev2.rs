@@ -977,6 +977,14 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     fn rowref_base(&self) -> Option<u64> {
         ::nodeseqscan::seq_scan_batch_rowref_base(self.node)
     }
+
+    #[inline]
+    fn live_sel(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.node)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
+    }
 }
 
 // ===========================================================================
@@ -3057,6 +3065,16 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                 // `ndict` dict entries (the fill's contract; the stitch spans
                 // `ndict` u32s per the Part::stitch length check); consumed
                 // before the next window stages.
+                // Lazy sub-framed dict: the insert reads entry bytes for
+                // this window's novel codes through the raw `dict` slice —
+                // ensure the window's codes up front (no-op once
+                // materialized / on unframed dicts).
+                if t.lazy_ensure.is_some() {
+                    for i in pos as usize..n as usize {
+                        // SAFETY: the lane covers the staged window's rows.
+                        t.ensure_code(unsafe { *lane.codes.add(i) });
+                    }
+                }
                 let (codes, dict, stitch) = unsafe {
                     (
                         core::slice::from_raw_parts(lane.codes, n as usize),
@@ -3073,6 +3091,26 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                     stitch,
                     &mut self.dict_memo,
                 );
+            }
+        }
+        // Lane-sliced int-key consume (hot-gap C2, the q5 class): read the
+        // staged key lane as WHOLE SLICES — no per-row emit_key call — and
+        // let nodeagg run one null scan per window before the batched set
+        // insert. Same rows, same order, same cells `emit_key` reads (the
+        // loop below stays the authority for windows with fallback rows;
+        // cbstore stages none).
+        if !self.key_bytes {
+            if let Some((vals, isnull, fb)) = emit.topk_key_lane(n) {
+                if fb.iter().all(|&w| w == 0) {
+                    return ::nodeagg::agg_plain_distinct_insert_lane_batch(
+                        self.agg,
+                        estate,
+                        &vals[pos as usize..],
+                        &isnull[pos as usize..],
+                        &mut self.ints,
+                        &mut self.hashes,
+                    );
+                }
             }
         }
         // Direct staged-key feed (page-level CFI in the staging fetch —
@@ -4203,12 +4241,31 @@ fn scan_mk_batch<'mcx>(
     if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
         return Ok(false);
     }
+    // SURVIVOR-LESS PREWHERE-lane window: skip BEFORE the packability
+    // pre-check below reads every staged row's cells (the q14 codedgroup
+    // precedent — condcache-census lane). A condition-cache hit whose
+    // cached verdicts are all-fail legitimately skips the survivor deform
+    // (nodeseqscan's cond_hit arm; multi-clause all-fail miss windows too),
+    // so NO cell of the window is live — the pre-check would read stale
+    // datums and could spuriously DISARM the compact table for the whole
+    // remaining build over a window that has nothing to pack or fold on any
+    // path. The conservative lane selection is exactly the completing
+    // deform's own trigger domain (requal bits included), so "no bits" ==
+    // "no deform ran" == "nothing survives". Non-lane stagings (varkey /
+    // kernel prefix) deform every staged row up front and skip nothing.
+    if let Some(lsel) = ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+        if lsel.iter().all(|&w| w == 0) {
+            return Ok(true);
+        }
+    }
     // Numeric components: per-VALUE packability over the WHOLE batch BEFORE
     // the per-row emit — an unpackable value (range / non-minimal display
     // scale, keypack module doc) migrates to the C table and the caller
     // routes this batch through the arrival leg, so the qual still runs
     // exactly once per row. Checking a superset of the survivors is sound
-    // (pack legality is per-value, effect-free).
+    // (pack legality is per-value, effect-free; survivor lane windows
+    // complete the deform for every staged row, so the cells are live — the
+    // survivor-less lane window was skipped above).
     let numeric_packable = {
         let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
             .expect("multi-key feed requires the armed SoA");
@@ -6253,6 +6310,12 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
             fn emit_rowref(&self, i: u32) -> Option<u64> {
                 self.rrbase.map(|b| b + i as u64)
             }
+            #[inline(always)]
+            fn live_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+                // The cut mask is exactly this feed's skip contract: a
+                // cleared bit answers `emit`/`emit_key` with None above.
+                self.sel.copied()
+            }
         }
         // Streaming top-k cutoff: once the bounded heap is full, discard the
         // batch's cannot-make-top-k rows (strictly worse than the k-th
@@ -6267,6 +6330,21 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         if let Some(tk) = self.topk.as_mut() {
             filtered = tk.batch_mask(self.sort, &*emit, pos, n)?;
         }
+        // Fold the feed's qual-survivor snapshot into the skip mask: a
+        // qual-cleared bit is a row whose `emit` returns None with no
+        // observable effect (`BatchEmit::live_sel`), so cutting it is
+        // put-stream-identical — and lets the put loop skip the whole
+        // per-row emit ceremony word-wise for selective quals.
+        let filtered = match (filtered, emit.live_sel()) {
+            (Some(mut t), Some(q)) => {
+                for (w, qw) in t.iter_mut().zip(q.iter()) {
+                    *w &= *qw;
+                }
+                Some(t)
+            }
+            (Some(t), None) => Some(t),
+            (None, q) => q,
+        };
         match filtered {
             Some(sel) => ::nodesort::sort_lane_put_batch(
                 self.sort,
@@ -7011,6 +7089,39 @@ fn distincthash_batch_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_FOLD` kill switch (default ON): mixed-shape
+/// admission into the batched fast leg — plain exact-integer vocabulary
+/// transitions (count(*)/count(x)/sum(int2/4)/avg(int2/4), the pardistinct
+/// vocab) fold in sidecar words beside the DISTINCT set parks (Q10-class:
+/// sums alongside the COUNT DISTINCT). Off, mixed shapes keep the per-row
+/// transition program exactly as before (the historical all-set-mode batch
+/// gate) — the A/B attribution channel for the fold delta.
+fn distincthash_fold_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_FOLD").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_LANE_V2_DISTINCTHASH_SPAN` kill switch (default ON): the span
+/// form of the batched fast leg — one nodeagg call per staged run with the
+/// loop-invariant state hoisted and no per-row group switch
+/// (`agg_hashgroup_accept_batch_span`). Off, the per-row
+/// `agg_hashgroup_accept_batch_row` loop stands — the A/B attribution
+/// channel for the span delta; results are byte-identical either way.
+fn distincthash_span_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_SPAN").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -7088,12 +7199,14 @@ fn hashgroup_order_spec(
 /// further row goes straight to the sort (the narrow-sort arm's feed,
 /// resumed mid-stream; section doc).
 /// Scan-column map for the batched fast leg (`agg_hashgroup_batch_shape`
-/// order): the grouping keys' and the per-pertrans DISTINCT args' 0-based
-/// SCAN columns — every mapped outer column proved a bare Var, so the
-/// staged scan cell IS the projected outer cell.
+/// order): the grouping keys', the per-pertrans DISTINCT args', and the
+/// arg-bearing fold-vocab entries' 0-based SCAN columns — every mapped
+/// outer column proved a bare Var, so the staged scan cell IS the projected
+/// outer cell.
 struct HgBatchCols {
     key_cols: Vec<u16>,
     arg_cols: Vec<u16>,
+    fold_cols: Vec<u16>,
 }
 
 struct HashGroupDistinctSink<'a, 'mcx> {
@@ -7176,12 +7289,16 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             // projects into a slot and never restages (the dict-lane feed
             // relies on the same window-stability contract); the pointers
             // are consumed before this call returns.
-            let nc = cols.key_cols.len() + cols.arg_cols.len();
+            let nc = cols.key_cols.len() + cols.arg_cols.len() + cols.fold_cols.len();
             let mut views: Vec<(*const ::datum::Datum, *const bool)> = Vec::with_capacity(nc);
             let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
             let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
-            for (ci, &col) in
-                cols.key_cols.iter().chain(cols.arg_cols.iter()).enumerate()
+            for (ci, &col) in cols
+                .key_cols
+                .iter()
+                .chain(cols.arg_cols.iter())
+                .chain(cols.fold_cols.iter())
+                .enumerate()
             {
                 let Some((vals, nulls, fallback, sel)) = emit.refsort_key_batch(col, n)
                 else {
@@ -7202,9 +7319,70 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
             // per-row check inside `emit`).
             ::postgres_seams::check_for_interrupts::call()?;
             let nk = cols.key_cols.len();
+            let na = cols.arg_cols.len();
+            // Span form (default): one nodeagg call per run of fast-hosted
+            // rows — hoisted state, no per-row switch, no marshaling. The
+            // per-row loop below is the SPAN=0 control (byte-identical).
+            if distincthash_span_enabled() {
+                let mut i = pos;
+                while i < n && !self.degraded {
+                    // SAFETY: per the snapshot contract above — every view
+                    // spans `n` staged rows and the window is stable for
+                    // the whole batch; fb/selw cover bit n-1.
+                    let stop = unsafe {
+                        ::nodeagg::agg_hashgroup_accept_batch_span(
+                            self.agg,
+                            &views,
+                            na,
+                            selw.as_ref().map(|s| &s[..]),
+                            &fb,
+                            i,
+                            n,
+                        )
+                    };
+                    match stop {
+                        ::nodeagg::HgSpanStop::Done { absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            i = n;
+                        }
+                        ::nodeagg::HgSpanStop::NeedSlot { at, absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            self.slow_rows += 1;
+                            // Probe miss / forced fallback: materialize the
+                            // row and run the per-row accept (byte-identical
+                            // creation order + rep bytes).
+                            if let Some(slot) = emit.emit(at, estate)? {
+                                self.accept(slot, estate)?;
+                            }
+                            i = at + 1;
+                        }
+                        ::nodeagg::HgSpanStop::Budget { at, absorbed } => {
+                            self.fast_rows += absorbed as u64;
+                            self.degrade_impl(estate)?;
+                            i = at + 1;
+                        }
+                    }
+                }
+                // Post-degrade remainder: the exact per-row path.
+                for j in i..n {
+                    let w = (j / 64) as usize;
+                    let bit = 1u64 << (j % 64);
+                    if let Some(s) = &selw {
+                        if s[w] & bit == 0 {
+                            continue; // qual-filtered
+                        }
+                    }
+                    self.slow_rows += 1;
+                    if let Some(slot) = emit.emit(j, estate)? {
+                        self.accept(slot, estate)?;
+                    }
+                }
+                return Ok(());
+            }
             let mut keyd = [::datum::Datum::null(); 32];
             let mut keyn = [false; 32];
             let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
+            let mut folds: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.fold_cols.len()];
             for i in pos..n {
                 let w = (i / 64) as usize;
                 let bit = 1u64 << (i % 64);
@@ -7229,8 +7407,11 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         keyd[j] = *v.add(i as usize);
                         keyn[j] = *nl.add(i as usize);
                     }
-                    for (j, &(v, nl)) in views[nk..].iter().enumerate() {
+                    for (j, &(v, nl)) in views[nk..nk + na].iter().enumerate() {
                         args[j] = (*v.add(i as usize), *nl.add(i as usize));
+                    }
+                    for (j, &(v, nl)) in views[nk + na..].iter().enumerate() {
+                        folds[j] = (*v.add(i as usize), *nl.add(i as usize));
                     }
                 }
                 match ::nodeagg::agg_hashgroup_accept_batch_row(
@@ -7238,6 +7419,7 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     &keyd[..nk],
                     &keyn[..nk],
                     &args,
+                    &folds,
                 ) {
                     ::nodeagg::HgBatchRow::Absorbed(true) => self.fast_rows += 1,
                     ::nodeagg::HgBatchRow::Absorbed(false) => {
@@ -7289,7 +7471,7 @@ impl<'mcx> HashGroupDistinctSink<'_, 'mcx> {
         while let Some(slot) = ::nodeagg::agg_hashgroup_next_rep(self.agg) {
             ::nodesort::sort_lane_put_slot(self.sort, mcx, slot)?;
         }
-        ::nodeagg::agg_hashgroup_set_residual(self.agg);
+        ::nodeagg::agg_hashgroup_set_residual(self.agg)?;
         self.degraded = true;
         Ok(())
     }
@@ -7359,26 +7541,44 @@ fn try_hashgroup_build<'mcx>(
     // (identity for bare scans; through the projection classification
     // otherwise — the staged scan cell is then the projected outer cell).
     let batch = if distincthash_batch_enabled() {
-        ::nodeagg::agg_hashgroup_batch_shape(agg).and_then(|(katts, aatts)| {
-            let map = |att: u16| -> Option<u16> {
-                match ss.ss.ps_ProjInfo.as_ref() {
-                    None => Some(att),
-                    Some(p) => {
-                        let cols = p.pi_state.scan_proj_cols()?;
-                        if (att as usize) >= cols.n as usize {
-                            return None;
-                        }
-                        match cols.cols[att as usize] {
-                            ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
-                            _ => None,
+        ::nodeagg::agg_hashgroup_batch_shape(agg, distincthash_fold_enabled()).and_then(
+            |shape| {
+                let map = |att: u16| -> Option<u16> {
+                    match ss.ss.ps_ProjInfo.as_ref() {
+                        None => Some(att),
+                        Some(p) => {
+                            let cols = p.pi_state.scan_proj_cols()?;
+                            if (att as usize) >= cols.n as usize {
+                                return None;
+                            }
+                            match cols.cols[att as usize] {
+                                ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                                _ => None,
+                            }
                         }
                     }
+                };
+                let key_cols: Option<Vec<u16>> =
+                    shape.key_atts.iter().map(|&a| map(a)).collect();
+                let arg_cols: Option<Vec<u16>> =
+                    shape.set_args.iter().map(|&a| map(a)).collect();
+                let fold_cols: Option<Vec<u16>> =
+                    shape.fold_atts.iter().map(|&a| map(a)).collect();
+                let cols = HgBatchCols {
+                    key_cols: key_cols?,
+                    arg_cols: arg_cols?,
+                    fold_cols: fold_cols?,
+                };
+                // Arm the sidecar vocab only once the whole column map held
+                // (a fold-armed build whose batch never engages would waste
+                // the per-group sidecar words for nothing).
+                if !shape.vocab.is_empty() {
+                    trace_feed("hash-grouped distinct fold vocab armed");
+                    ::nodeagg::agg_hashgroup_arm_fold(agg, shape.vocab);
                 }
-            };
-            let key_cols: Option<Vec<u16>> = katts.iter().map(|&a| map(a)).collect();
-            let arg_cols: Option<Vec<u16>> = aatts.iter().map(|&a| map(a)).collect();
-            Some(HgBatchCols { key_cols: key_cols?, arg_cols: arg_cols? })
-        })
+                Some(cols)
+            },
+        )
     } else {
         None
     };
@@ -7394,6 +7594,7 @@ fn try_hashgroup_build<'mcx>(
             .key_cols
             .iter()
             .chain(b.arg_cols.iter())
+            .chain(b.fold_cols.iter())
             .map(|&c| c as i32 + 1)
             .max()
             .unwrap_or(0);
@@ -7684,6 +7885,46 @@ fn codedgroup_drive<'mcx>(
             }
             continue;
         }
+        // Slot-free survivor collection FIRST (`scan_collect_survivors`'
+        // Bitmap/All arms, minus the projection gate the admission made
+        // moot); one per-batch ExprContext reset stands in for the emit's
+        // per-row cadence (the coded absorb allocates no per-tuple memory).
+        // A ZERO-SURVIVOR staged window skips BEFORE the lane admission
+        // below: a condition-cache hit whose cached verdicts are all-fail
+        // legitimately skips the survivor deform (no dict lane is ever
+        // published for the window — nodeseqscan's cond_hit arm), and the
+        // window carries nothing to absorb either way. Requiring the lane
+        // there demoted the WHOLE remaining scan to the narrow sort on the
+        // first all-fail hit (the official condcache arm's Q14 1.19 s vs
+        // 0.55 s). Zero survivors also implies zero fallback bits (fallback
+        // rows OR their bits into the selection), so the fallback-free
+        // admission is vacuously met.
+        let survivors_decidable = ss.ss.qual.is_none()
+            || ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss).is_some();
+        if survivors_decidable {
+            rows.clear();
+            estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
+            match ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss) {
+                None => rows.extend(0..n),
+                Some(sel) => {
+                    let nwords = (n as usize).div_ceil(64);
+                    let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
+                    for w in 0..nwords {
+                        let mut bits = sel[w];
+                        if w == nwords - 1 {
+                            bits &= tail_mask;
+                        }
+                        while bits != 0 {
+                            rows.push(w as u32 * 64 + bits.trailing_zeros());
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+            }
+            if rows.is_empty() {
+                continue;
+            }
+        }
         // Window admission: a dict-answered SORTED key lane (byte order ==
         // code order — the merge's foundation) over a fallback-free batch,
         // with the whole qual decided by the staged bitmap (per-row emit
@@ -7696,8 +7937,6 @@ fn codedgroup_drive<'mcx>(
                 soa.is_some_and(|s| s.fallback_words().iter().all(|&w| w == 0)),
             )
         };
-        let survivors_decidable = ss.ss.qual.is_none()
-            || ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss).is_some();
         let Some(lane) = lane.filter(|_| all_lane && survivors_decidable) else {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;
@@ -7709,32 +7948,6 @@ fn codedgroup_drive<'mcx>(
             }
             continue;
         };
-        // Slot-free survivor collection (`scan_collect_survivors`' Bitmap/
-        // All arms, minus the projection gate the admission made moot); one
-        // per-batch ExprContext reset stands in for the emit's per-row
-        // cadence (the coded absorb allocates no per-tuple memory).
-        rows.clear();
-        estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
-        match ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss) {
-            None => rows.extend(0..n),
-            Some(sel) => {
-                let nwords = (n as usize).div_ceil(64);
-                let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
-                for w in 0..nwords {
-                    let mut bits = sel[w];
-                    if w == nwords - 1 {
-                        bits &= tail_mask;
-                    }
-                    while bits != 0 {
-                        rows.push(w as u32 * 64 + bits.trailing_zeros());
-                        bits &= bits - 1;
-                    }
-                }
-            }
-        }
-        if rows.is_empty() {
-            continue;
-        }
         let (consumed, keep) = {
             let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                 .expect("dict window implies the armed SoA");
@@ -12478,7 +12691,7 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     };
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc, false) else {
         return Ok(None);
     };
     // v1 economics: engage the grouped arm only when the DISTINCT sets are
@@ -12527,7 +12740,7 @@ pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     };
     let crate::procnode::PlanStateNode::Sort(s) = &*gm.outer else { unreachable!() };
     let desc = s.outer_desc.as_ref().expect("gated non-None").clone();
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc) else {
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, &desc, false) else {
         return Ok(None);
     };
     debug_assert_eq!(spec.nkeys(), 0);

@@ -243,6 +243,18 @@ pub(super) trait BatchEmit<'mcx> {
     fn rowref_base(&self) -> Option<u64> {
         None
     }
+
+    /// Survivor-bit snapshot of the CURRENT staged batch's qual selection:
+    /// a CLEARED bit means `emit(i)` returns `None` with no observable
+    /// side effect (the staged qual verdict already rejected row i without
+    /// running the original qual — the PREWHERE selection contract; requal
+    /// and fallback rows carry SET bits), so a batch-feeding sink may skip
+    /// cleared rows without the `emit` call. Weaker than a qual-verdict
+    /// lane: SET bits may still be filtered by `emit` itself. Default
+    /// `None` = no live bitmap; every position must go through `emit`.
+    fn live_sel(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3

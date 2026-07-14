@@ -357,6 +357,20 @@ pub fn ReattachRetainedBackend() -> PgResult<()> {
     Ok(())
 }
 
+/// Debug invariant (InitPostgres's warm arm): the retained slot was
+/// reattached for THIS task — cached procno matches MyProcNumber and the
+/// slot's procPid was refreshed to the task's pid (ReattachRetainedBackend
+/// ran after InitProcessGlobals assigned it).
+pub fn RetainedSlotIsCurrent() -> bool {
+    let my = MyProcNumber();
+    if my < 0 || LOCAL.with(|st| st.my_procno.get()) != my {
+        return false;
+    }
+    let seg = current_seg();
+    (my as usize) < seg.slots
+        && seg.proc_states()[my as usize].procPid.load(Relaxed) == MyProcPid()
+}
+
 pub fn CleanupInvalidationState() -> PgResult<()> {
     let seg = current_seg();
     let my = MyProcNumber();

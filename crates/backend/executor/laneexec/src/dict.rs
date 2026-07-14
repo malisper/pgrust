@@ -561,6 +561,10 @@ fn eval_dict_lane(
         return eval_dict_lane_lazy(cl, lane, codes, dict, sv);
     }
     if cl.memo_epoch != Some(lane.table.epoch) {
+        // Whole-dict reads follow (rank binary search / contains sweep /
+        // per-entry memo fill): materialize a lazy sub-framed dict up front.
+        // Once per epoch — the same total decompress the eager build paid.
+        lane.table.ensure_all();
         cl.range = if lane.table.sorted { prefix_code_range(cl, dict)? } else { None };
         if cl.range.is_some() {
             if cl.memo_epoch.is_none() {
@@ -658,6 +662,9 @@ fn eval_dict_lane_lazy(
             1 => true,
             2 => false,
             _ => {
+                // Lazy sub-framed dict: materialize this code's entry bytes
+                // (the regex memo deliberately avoids whole-dict fills).
+                lane.table.ensure_code(code as u32);
                 let s = inline_varlena_payload(dict[code]).ok_or_else(non_inline_lane_datum)?;
                 let m = regex_match(
                     cl.op,

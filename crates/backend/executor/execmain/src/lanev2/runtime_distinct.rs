@@ -3,9 +3,11 @@
 //! docs/design/parallelism-redesign-2026-07.md §2.2/§5-M2).
 //!
 //! Shape: the SERIAL-plan grouped distinct pipeline `Agg(AGG_SORTED) ← Sort
-//! ← SeqScan(cbstore)` (the ClickBench Q9/Q10 class), executed as one
-//! SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
-//! PREWHERE → per-worker `PdBuilder` partial: compact int group keys,
+//! ← SeqScan(cbstore)` (the ClickBench Q9/Q10 class — and, with the
+//! distinct-bytes car, the text-group-key q14 donor-B class), executed as
+//! one SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
+//! PREWHERE → per-worker `PdBuilder` partial: compact int group keys +
+//! canonical-bytes text keys (content identity, arena spans),
 //! (acc,count) vocab words, exact `DistinctSet`s) → SEAL (parallel
 //! per-worker freeze into `PdHandedTable`s) → COMBINE (256 group-partition
 //! bucket-claim merges — disjoint partitions, single writer per output
@@ -346,7 +348,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             .iter()
             .filter_map(|c| unsafe { (*c.get()).take() })
             .collect();
-        let merged = pd_concat_buckets(buckets);
+        let merged = pd_concat_buckets(&self.spec, buckets);
         *self.merged.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
     }
 }
@@ -390,15 +392,27 @@ impl RuntimeDistinctShared {
         // refuses conservatively. Estimate: values cost ~16B each in a
         // merged set (i64 + probe slot), spilled values are transiently
         // held TWICE (synth table + merged output), groups carry the
-        // fixed per-group block; 3/2 headroom on the value term.
-        let width = pd_spill_record_width(&self.spec) as u64;
+        // fixed per-group block; 3/2 headroom on the value term. Bytes-key
+        // specs (distinct-bytes car): records are variable-width, so the
+        // row count divides by the MINIMUM width (over-counts rows —
+        // conservative), and the merged bucket's key arena is bounded by
+        // the in-memory key-content pre-count (×2: merged output + one
+        // transient synth table).
+        let bytes_mode = ::nodeagg::pd_spill_bytes_mode(&self.spec);
+        let width = if bytes_mode {
+            ::nodeagg::pd_spill_min_record_width(&self.spec) as u64
+        } else {
+            pd_spill_record_width(&self.spec) as u64
+        };
         let spilled_vals = (spilled_bytes / width) as usize;
         let mut groups = 0usize;
         let mut inmem_vals = 0usize;
+        let mut inmem_key_bytes = 0usize;
         for s in sealed {
-            let (g, v) = pd_bucket_precount(&self.spec, &s.table, b);
+            let (g, v, kb) = pd_bucket_precount(&self.spec, &s.table, b);
             groups += g;
             inmem_vals += v;
+            inmem_key_bytes += kb;
         }
         let per_group = self.spec.nkeys() * 8
             + 2 * self.spec.vocab.len() * 8
@@ -408,7 +422,8 @@ impl RuntimeDistinctShared {
             .saturating_mul(16)
             .saturating_mul(3)
             / 2
-            + groups.saturating_mul(per_group);
+            + groups.saturating_mul(per_group)
+            + inmem_key_bytes.saturating_mul(2);
         if est > self.spec.worker_budget {
             // inc-3b: recursive COMBINE-SPLIT by value hash — the estimate
             // over-counts cross-epoch/cross-Local duplicates, and the split
@@ -423,7 +438,8 @@ impl RuntimeDistinctShared {
             // bucket is a superset of the in-memory merge and must fit to
             // be emitted at all.
             let est_inmem = inmem_vals.saturating_mul(16).saturating_mul(3) / 2
-                + groups.saturating_mul(per_group);
+                + groups.saturating_mul(per_group)
+                + inmem_key_bytes;
             if est_inmem > self.spec.worker_budget {
                 return Ok(DstCombine::OverBudget);
             }
@@ -471,13 +487,12 @@ impl RuntimeDistinctShared {
     ) -> PgResult<DstCombine> {
         self.combine_splits.fetch_add(1, Ordering::Relaxed);
         self.split_depth_max.fetch_max(1, Ordering::Relaxed);
-        let width = pd_spill_record_width(&self.spec);
-        // Route every Local's partition-b records (row-aligned streaming;
+        // Route every Local's partition-b records (record-aligned streaming;
         // torn records fail closed) into the depth-1 slice file.
         let mut router = DstSubRouter::new(self, set, b, 1);
         for s in sealed {
             let Some(f) = &s.spill else { continue };
-            super::runtime_agg::stream_part_rows(f, b as u32, width, |chunk| {
+            stream_part_dst(&self.spec, f, b as u32, |chunk| {
                 router.absorb(&self.spec, chunk)
             })?;
         }
@@ -509,7 +524,15 @@ impl RuntimeDistinctShared {
         groups: usize,
         per_group: usize,
     ) -> PgResult<bool> {
-        let width = pd_spill_record_width(&self.spec);
+        // Bytes-key specs: variable-width records — rows divide by the
+        // MINIMUM width (over-counts rows → conservative slice estimates;
+        // the raw slice bytes term below bounds the synth arena).
+        let bytes_mode = ::nodeagg::pd_spill_bytes_mode(&self.spec);
+        let width = if bytes_mode {
+            ::nodeagg::pd_spill_min_record_width(&self.spec)
+        } else {
+            pd_spill_record_width(&self.spec)
+        };
         let budget = self.spec.worker_budget;
         for sl in 0..DST_SPLIT_SLICES {
             // Abort responsiveness: a split is the longest single combine
@@ -535,7 +558,8 @@ impl RuntimeDistinctShared {
             // though its deduplicated table would fit — the inc-2b
             // limitation, value-inverted (ledger item: streaming replay).
             let est_slice = rows.saturating_mul(16).saturating_mul(3) / 2
-                + rows.min(groups).saturating_mul(per_group);
+                + rows.min(groups).saturating_mul(per_group)
+                + if bytes_mode { blen } else { 0 };
             if est_slice > budget {
                 if depth + 1 > distinct_split_depth_cap() {
                     return Ok(false);
@@ -543,7 +567,7 @@ impl RuntimeDistinctShared {
                 self.combine_splits.fetch_add(1, Ordering::Relaxed);
                 self.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
                 let mut router = DstSubRouter::new(self, set, b, depth + 1);
-                super::runtime_agg::stream_part_rows(file, sl as u32, width, |chunk| {
+                stream_part_dst(&self.spec, file, sl as u32, |chunk| {
                     router.absorb(&self.spec, chunk)
                 })?;
                 router.flush()?;
@@ -596,6 +620,73 @@ fn distinct_split_depth_cap() -> u32 {
             .unwrap_or(3)
             .clamp(1, 6)
     })
+}
+
+/// Stream one spill partition's records to `f`, RECORD-ALIGNED: int-mode
+/// specs ride the fixed-width `stream_part_rows` chunker verbatim;
+/// bytes-key specs (distinct-bytes car) parse the self-describing `rec_len`
+/// prefixes and carry the partial tail across reads, so `f` only ever sees
+/// whole records (the router's parse contract). Fail-closed on torn tails
+/// and malformed lengths.
+fn stream_part_dst(
+    spec: &PdSpec,
+    file: &::spillset::SpillFile,
+    part: u32,
+    mut f: impl FnMut(&[u8]) -> PgResult<()>,
+) -> PgResult<()> {
+    if !::nodeagg::pd_spill_bytes_mode(spec) {
+        let width = pd_spill_record_width(spec);
+        return super::runtime_agg::stream_part_rows(file, part, width, |chunk| f(chunk));
+    }
+    let min_width = ::nodeagg::pd_spill_min_record_width(spec);
+    let ctx = ::mcx::MemoryContext::new("m35-dst-split-read");
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let mut buf: Vec<u8> = vec![0u8; 1 << 20];
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            // One record larger than the buffer: grow (bounded by the
+            // spill writer's own epoch buffering; a corrupt rec_len fails
+            // the length checks below before unbounded growth).
+            buf.resize(buf.len() * 2, 0);
+        }
+        let n = rd.read(&mut buf[filled..])?;
+        if n == 0 {
+            rd.close()?;
+            if filled != 0 {
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "torn distinct bytes spill record (partial tail) in split stream",
+                )));
+            }
+            return Ok(());
+        }
+        filled += n;
+        // Longest prefix of COMPLETE records.
+        let mut usable = 0usize;
+        loop {
+            if filled - usable < 8 {
+                break;
+            }
+            let rec_len =
+                u64::from_ne_bytes(buf[usable..usable + 8].try_into().unwrap()) as usize;
+            if rec_len < min_width || rec_len % 8 != 0 {
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "torn distinct bytes spill record (rec_len) in split stream",
+                )));
+            }
+            if filled - usable < rec_len {
+                break;
+            }
+            usable += rec_len;
+        }
+        if usable > 0 {
+            f(&buf[..usable])?;
+            buf.copy_within(usable..filled, 0);
+            filled -= usable;
+        }
+    }
 }
 
 /// Bounded value-slice router (inc-3b, the agg SubRouter's twin): records
@@ -1087,7 +1178,9 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
                 *cell.borrow_mut() = Some(WorkerExec {
                     qd,
                     tmp,
-                    reset_tmp: payload.spec.any_bytes_set(),
+                    // Bytes anywhere (set values or the distinct-bytes car's
+                    // text group keys): the per-row detoast scratch resets.
+                    reset_tmp: payload.spec.any_bytes(),
                     errored: std::cell::Cell::new(false),
                     instr: Default::default(),
                 });
@@ -1246,12 +1339,16 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(None);
     }
-    // Agg-side admission: the hash-grouped arm's integer-key/exact-set
-    // vocabulary and its density economics (a refusal falls back to the
+    // Agg-side admission: the hash-grouped arm's int/text-key exact-set
+    // vocabulary and the SINK economics tier (a refusal falls back to the
     // serial arms, byte-identically). Vocab shapes (Q10 companions) are
-    // ADMITTED — see the module doc.
+    // ADMITTED — see the module doc. The sink reads its own density tier
+    // (`agg_hashgroup_economical_sink`): the serial 8×-rows-per-group
+    // refusal priced the SERIAL hashgroup build vs the narrow sort, but
+    // near-unique text shapes (CB q14, ~2 rows/group) are exactly this
+    // arm's DOP-parallel conversion targets — the budget-fit term stays.
     if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical(
+        || !::nodeagg::agg_hashgroup_economical_sink(
             agg,
             super::pardistinct_force(),
             sort.plan.plan.plan_rows,
@@ -1269,7 +1366,15 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "no outer desc");
         return Ok(None);
     };
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc) else {
+    // admit_text_keys = true (distinct-bytes car): `agg_hashgroup_admissible`
+    // above proved `group_eq_representational` texteq under a deterministic
+    // collation for every text/varchar grouping column — byte equality IS
+    // the grouping operator's verdict, so the canonical-bytes key image is
+    // sound here. The Gather-era arms keep passing false (leader-side twin
+    // of the same gate: no surface without a bytes-comparable image ever
+    // sees a bytes key — the m2-sinks §1 rule-5 selection-order totality
+    // law's admission discipline).
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc, true) else {
         refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);

@@ -1064,7 +1064,12 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
 pub fn seq_scan_batch_gather_dict(node: &mut SeqScanState<'_>, c: usize) {
     if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
         if let Some(b) = node.batch_soa.as_deref_mut() {
-            gather_or_len(sd, &mut b.soa, c);
+            // The expr-key feed's consumers read SELECTED rows only
+            // (`xk.rows` off the armed bitmap) — the PREWHERE stale-cell
+            // contract; narrow lazy dict ensures to them when armed.
+            let sel = (b.qual_armed && !b.lane_requal && b.nwords > 0)
+                .then(|| &b.sel[..b.nwords as usize]);
+            gather_or_len(sd, &mut b.soa, c, sel);
         }
     }
 }
@@ -1079,9 +1084,15 @@ fn gather_or_len(
     scandesc: &mut ::tableam::TableScanDesc<'_>,
     soa: &mut ::exectuples::SoaBatch<'_>,
     c: usize,
+    sel: Option<&[u64]>,
 ) {
     match soa.len_want(c) {
-        0 => soa.gather_dict_lane(c),
+        0 => match sel {
+            // PREWHERE stale-cell contract: lazy sub-framed dicts ensure
+            // selected rows only (identical cell writes).
+            Some(sel) => soa.gather_dict_lane_sel(c, sel),
+            None => soa.gather_dict_lane(c),
+        },
         k => {
             ::tableam::table_scan_batch_fill_len(
                 scandesc,
@@ -1242,13 +1253,28 @@ fn arm_key_soa<'mcx>(
     let (plan, varkey) =
         match ::exectuples::SoaDeformPlan::try_new(mcx, atts, attnum as usize + 1) {
             Some(plan) => (plan, None),
-            None => {
-                let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize)
-                else {
-                    return false;
-                };
-                (::exectuples::SoaDeformPlan::unused(mcx), Some(vk))
-            }
+            None => match ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize) {
+                Some(vk) => (::exectuples::SoaDeformPlan::unused(mcx), Some(vk)),
+                None => {
+                    // cbstore columnar key staging (the q5-class refusal): a
+                    // FIXED-WIDTH key sitting past a varlena column — the
+                    // heap fixed-width-prefix proof refuses and the varkey
+                    // pass wants a varlena key. The cbstore window deform
+                    // fills per column with no offset chain (the virtual
+                    // plan, likeband precedent), and a keyed batch stages
+                    // ONLY the key column (`.or(b.key_col)` at
+                    // `seq_scan_next_pagebatch`'s tail) — one decoded key
+                    // lane per window. Heap scans keep the refusal (their
+                    // deform walks the offset chain).
+                    if node.cb_scan.is_none() {
+                        return false;
+                    }
+                    match ::exectuples::SoaDeformPlan::columnar(mcx, attnum as usize + 1) {
+                        Some(plan) => (plan, None),
+                        None => return false,
+                    }
+                }
+            },
         };
     let soa_cols = if varkey.is_some() { 1 } else { plan.ncols() };
     let key_read_col = if varkey.is_some() { 0 } else { attnum };
@@ -1682,6 +1708,22 @@ pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option
     (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
 }
 
+/// Skip-side view of the CURRENT staged batch's selection bitmap: a bit
+/// CLEARED here is a row `seq_scan_batch_fetch` rejects on its first
+/// compare with no other observable effect — a definitive rejection even
+/// for hybrid requal quals (`lane_requal` re-runs the full qual on SET
+/// bits only; fallback rows carry SET bits by the staging OR). Batch
+/// consumers may therefore skip cleared rows without the `emit` call.
+/// Unlike `seq_scan_batch_qual_sel`, this answers only "which rows can
+/// `emit` possibly yield", NEVER "which rows pass the whole qual" — so it
+/// may serve under `lane_requal`. Gated on `nwords > 0` (the emit fast
+/// lane's own this-batch-has-live-bits guard). `None` = no live bitmap:
+/// every row must go through `emit`.
+pub fn seq_scan_batch_skip_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    (b.qual_armed && b.nwords > 0).then_some(&b.sel[..b.nwords as usize])
+}
+
 /// Declare the drive BITS-ONLY (dop1-tax2 inc-2): the consumer reads the
 /// selection bitmap (and per-row fallback emits off the store path) and
 /// NEVER the staged SoA cells — the runtime census drive (`census_drain`:
@@ -1925,10 +1967,25 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 if cond_hit {
                     b.soa.begin(n);
                     if !b.bits_only && b.sel[..nwords].iter().any(|&w| w != 0) {
-                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        // Survivor-window COMPLETING deform: the armed lane
+                        // owns the qual, consumers read SELECTED rows only
+                        // (stale-cell contract) — lazy sub-framed dicts
+                        // ensure survivors' codes only.
+                        ::tableam::table_scan_batch_deform_sel(
+                            scandesc,
+                            &b.plan,
+                            &mut b.soa,
+                            None,
+                            Some(&b.sel[..nwords]),
+                        );
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }
@@ -1972,10 +2029,23 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                         // re-answer as lanes and gather below — except a
                         // registered dict-code consumer's column, whose
                         // codes the dict-group feed reads directly).
-                        ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
+                        // Lazy sub-framed dicts ensure SELECTED rows only
+                        // (the armed lane's stale-cell contract).
+                        ::tableam::table_scan_batch_deform_sel(
+                            scandesc,
+                            &b.plan,
+                            &mut b.soa,
+                            None,
+                            Some(&b.sel[..nwords]),
+                        );
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }
@@ -1986,9 +2056,16 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                     // the Raw cells); every other consumer gathers exactly
                     // as before.
                     if !b.bits_only {
+                        // Post-eval gather: sel is decided — lazy sub-framed
+                        // dicts ensure selected rows only.
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
-                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                                gather_or_len(
+                                    scandesc,
+                                    &mut b.soa,
+                                    c as usize,
+                                    Some(&b.sel[..nwords]),
+                                );
                             }
                         }
                     }

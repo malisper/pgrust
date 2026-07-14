@@ -70,13 +70,64 @@ pub enum PdInt {
 
 impl PdInt {
     #[inline]
-    fn read(self, d: Datum) -> i64 {
+    pub(crate) fn read(self, d: Datum) -> i64 {
         match self {
             PdInt::I16 => d.as_i16() as i64,
             PdInt::I32 => d.as_i32() as i64,
             PdInt::I64 => d.as_i64(),
         }
     }
+}
+
+/// One group-key component's representation (distinct-bytes car). `Int`
+/// stores the sign-extended value in the key word — word equality is the
+/// grouping operator's equality. `Bytes` is a text/varchar column under a
+/// DETERMINISTIC collation (the CALLER's admission proved
+/// `group_eq_representational` texteq — byte equality is the grouping
+/// operator's verdict; `pd_derive_spec` only emits it under its
+/// `admit_text_keys` flag): the key word packs an `(arena offset << 32) |
+/// len` span over the owning table's `key_arena`, and the CANONICAL
+/// cross-worker identity is the content bytes themselves (span words are
+/// Local-relative and never compared across tables).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdKeyKind {
+    Int(PdInt),
+    Bytes,
+}
+
+/// Pack an arena span into a key word (the hashgrouped arm's convention).
+/// Offsets stay < 4GiB structurally: the arena is metered against the
+/// worker budget (well under 4GiB) and a single row overshoots by at most
+/// one detoasted value.
+#[inline]
+fn pack_span(off: usize, len: usize) -> i64 {
+    debug_assert!(off <= u32::MAX as usize && len <= u32::MAX as usize);
+    (((off as u64) << 32) | len as u64) as i64
+}
+
+#[inline]
+fn unpack_span(word: i64) -> (usize, usize) {
+    ((word as u64 >> 32) as usize, (word as u64 & 0xffff_ffff) as usize)
+}
+
+/// Chain a byte string into a running key hash: splitmix64 over 8-byte LE
+/// chunks (zero-padded tail) then the length — value-derived (identical
+/// across workers, independent of any table-internal state), injective in
+/// combination with the fixed component order. The m2-coverage-c3 agg
+/// sink's `sink_hash_bytes` discipline.
+#[inline]
+fn hash_chain_bytes(mut h: u64, b: &[u8]) -> u64 {
+    let mut it = b.chunks_exact(8);
+    for c in it.by_ref() {
+        h = mix64(h ^ u64::from_le_bytes(c.try_into().unwrap()));
+    }
+    let rem = it.remainder();
+    if !rem.is_empty() {
+        let mut w = [0u8; 8];
+        w[..rem.len()].copy_from_slice(rem);
+        h = mix64(h ^ u64::from_le_bytes(w));
+    }
+    mix64(h ^ (b.len() as u64) ^ 0x5851_f42d_4c95_7f2d)
 }
 
 /// One NON-distinct transition in the worker vocabulary. Every vocab state
@@ -120,7 +171,7 @@ const PD_GROUP_PARTS: usize = 256;
 /// The leader-derived build recipe workers run. Everything is plain data.
 pub struct PdSpec {
     pub key_atts: Vec<u16>,
-    pub key_kinds: Vec<PdInt>,
+    pub key_kinds: Vec<PdKeyKind>,
     pub vocab: Vec<PdVocab>,
     pub sets: Vec<PdSetSpec>,
     /// 1 + the largest referenced 0-based attno (slot_getsomeattrs bound).
@@ -141,6 +192,20 @@ impl PdSpec {
     pub fn any_bytes_set(&self) -> bool {
         self.sets.iter().any(|s| matches!(s.kind, DistinctKeyKind::Bytes))
     }
+
+    /// Any canonical-bytes GROUP KEY component (distinct-bytes car).
+    #[inline]
+    pub fn has_bytes_keys(&self) -> bool {
+        self.key_kinds.iter().any(|k| matches!(k, PdKeyKind::Bytes))
+    }
+
+    /// Bytes anywhere (keys or sets) — the worker feed's per-row detoast
+    /// scratch reset gate.
+    #[inline]
+    pub fn any_bytes(&self) -> bool {
+        self.has_bytes_keys() || self.any_bytes_set()
+    }
+
 }
 
 // ===========================================================================
@@ -245,6 +310,68 @@ const INIT_TABLE: usize = 64;
 /// Fixed per-group overhead estimate (table slot, hash, vec headers).
 const GROUP_FIXED_COST: usize = 48;
 
+/// Byte-content source for a probing key's bytes components (int-only
+/// specs pass [`KeySrc::None`], which is never consulted).
+enum KeySrc<'a> {
+    None,
+    /// `(buf, spans)`: `spans[i]` spans `buf` for bytes component i (the
+    /// accept path's per-row staging).
+    Staged(&'a [u8], &'a [(u32, u32)]),
+    /// A (possibly foreign) table's `(key words, arena)`: bytes component
+    /// words carry packed spans over the arena (merge / spill replay).
+    Table(&'a [i64], &'a [u8]),
+}
+
+impl KeySrc<'_> {
+    #[inline]
+    fn bytes(&self, i: usize) -> &[u8] {
+        match self {
+            KeySrc::None => &[],
+            KeySrc::Staged(buf, spans) => {
+                let (o, l) = spans[i];
+                &buf[o as usize..(o + l) as usize]
+            }
+            KeySrc::Table(words, arena) => {
+                let (o, l) = unpack_span(words[i]);
+                &arena[o..o + l]
+            }
+        }
+    }
+}
+
+/// Stage the current row's bytes-key content into the probe buffers. The
+/// detoast copy lands in the caller's per-tuple context (reset per row);
+/// the staging copy detaches every slot lifetime before the probe.
+fn stage_bytes_keys(
+    spec: &PdSpec,
+    estate: &mut EStateData<'_>,
+    id: ExecSlotId,
+    tmp: EcxtId,
+    nulls: u32,
+    buf: &mut Vec<u8>,
+    spans: &mut Vec<(u32, u32)>,
+) -> PgResult<()> {
+    buf.clear();
+    spans.clear();
+    spans.resize(spec.nkeys(), (0, 0));
+    for (i, (&att, kind)) in spec.key_atts.iter().zip(spec.key_kinds.iter()).enumerate() {
+        if !matches!(kind, PdKeyKind::Bytes) || nulls & (1 << i) != 0 {
+            continue;
+        }
+        let value = estate.slot_mut(id).base().tts_values[att as usize];
+        // SAFETY: non-null live text/varchar varlena (the leader's
+        // admission proved the column type); detoast copies land in
+        // per-tuple memory.
+        let v = unsafe {
+            ::types_fmgr::datum_varlena_packed(value, estate.ecxt(tmp).per_tuple_mcx())
+        }?;
+        let off = buf.len();
+        buf.extend_from_slice(v.data());
+        spans[i] = (off as u32, (buf.len() - off) as u32);
+    }
+    Ok(())
+}
+
 /// Feed verdict: `Crossed` = the shared budget crossed AFTER this row was
 /// fully absorbed — a worker freezes + degrades; the leader evicts sets.
 #[derive(PartialEq, Eq)]
@@ -258,8 +385,18 @@ pub struct PdBuilder<'mcx> {
     /// Open addressing: slot -> group index + 1; 0 = empty. Pow2 len.
     table: Vec<u32>,
     hashes: Vec<u64>,
-    /// Group g's key words at [g*nkeys ..] (sign-extended).
+    /// Group g's key words at [g*nkeys ..] (sign-extended ints, or packed
+    /// arena spans for bytes components).
     keys: Vec<i64>,
+    /// Bytes-key content (packed spans in `keys` index into this).
+    key_arena: Vec<u8>,
+    /// Per-row staging for the CURRENT row's bytes-key content (probe
+    /// side): `probe_spans[i]` spans `probe_buf` for bytes key component i.
+    /// Rewritten per row; meaningless for int/NULL components. Copying into
+    /// the staging buffer detaches every slot/detoast lifetime before the
+    /// probe (the hashgrouped arm's discipline).
+    probe_buf: Vec<u8>,
+    probe_spans: Vec<(u32, u32)>,
     keynulls: Vec<u32>,
     /// Group g's vocab state at [g*2*nvocab ..]: (acc, count) pairs.
     states: Vec<i64>,
@@ -284,11 +421,15 @@ pub struct PdBuilder<'mcx> {
 
 impl<'mcx> PdBuilder<'mcx> {
     pub fn new(spec: Arc<PdSpec>, budget: usize, mcx: Option<Mcx<'mcx>>) -> Self {
+        let nprobe = spec.nkeys();
         PdBuilder {
             spec,
             table: vec![0u32; INIT_TABLE],
             hashes: Vec::new(),
             keys: Vec::new(),
+            key_arena: Vec::new(),
+            probe_buf: Vec::new(),
+            probe_spans: vec![(0, 0); nprobe],
             keynulls: Vec::new(),
             states: Vec::new(),
             dsets: Vec::new(),
@@ -310,7 +451,10 @@ impl<'mcx> PdBuilder<'mcx> {
 
     #[inline]
     fn mem(&self) -> usize {
-        self.base_mem + self.total_set_mem
+        // The key arena is GROUP IDENTITY (like base_mem): it never spills
+        // and never resets, so a crossing it drives is group-table-dominated
+        // for the spill worthwhileness gate — exactly right.
+        self.base_mem + self.total_set_mem + self.key_arena.capacity()
     }
 
     pub fn mem_bytes(&self) -> usize {
@@ -334,8 +478,42 @@ impl<'mcx> PdBuilder<'mcx> {
         self.table = table;
     }
 
-    fn probe(&self, words: &[i64], nulls: u32, h: u64) -> (Option<u32>, usize) {
+    /// Does group `g`'s key equal the probing key (`words` + bytes content
+    /// via `src`)? Int-only specs take the word-slice compare verbatim;
+    /// bytes components compare CONTENT (the canonical identity — span
+    /// words are table-relative and never compared directly).
+    #[inline]
+    fn group_keys_match(&self, g: usize, words: &[i64], src: &KeySrc<'_>) -> bool {
         let nkeys = self.spec.nkeys();
+        let gw = &self.keys[g * nkeys..(g + 1) * nkeys];
+        if !self.spec.has_bytes_keys() {
+            return gw == words;
+        }
+        for (i, kind) in self.spec.key_kinds.iter().enumerate() {
+            match kind {
+                PdKeyKind::Int(_) => {
+                    if gw[i] != words[i] {
+                        return false;
+                    }
+                }
+                PdKeyKind::Bytes => {
+                    let (off, len) = unpack_span(gw[i]);
+                    if &self.key_arena[off..off + len] != src.bytes(i) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn probe(
+        &self,
+        words: &[i64],
+        nulls: u32,
+        h: u64,
+        src: &KeySrc<'_>,
+    ) -> (Option<u32>, usize) {
         let mask = self.table.len() - 1;
         let mut slot = (h as usize) & mask;
         loop {
@@ -345,7 +523,7 @@ impl<'mcx> PdBuilder<'mcx> {
                     let g = (e - 1) as usize;
                     if self.hashes[g] == h
                         && self.keynulls[g] == nulls
-                        && &self.keys[g * nkeys..(g + 1) * nkeys] == words
+                        && self.group_keys_match(g, words, src)
                     {
                         return (Some(e - 1), slot);
                     }
@@ -355,11 +533,38 @@ impl<'mcx> PdBuilder<'mcx> {
         }
     }
 
-    fn create_group(&mut self, words: &[i64], nulls: u32, h: u64, slot_idx: usize) -> u32 {
+    fn create_group(
+        &mut self,
+        words: &[i64],
+        nulls: u32,
+        h: u64,
+        slot_idx: usize,
+        src: &KeySrc<'_>,
+    ) -> u32 {
         let g = self.ngroups() as u32;
         self.hashes.push(h);
         self.keynulls.push(nulls);
-        self.keys.extend_from_slice(words);
+        if !self.spec.has_bytes_keys() {
+            self.keys.extend_from_slice(words);
+        } else {
+            // Bytes components: copy content into OUR arena and store the
+            // re-based span word; NULL components keep word 0 / empty span.
+            for (i, kind) in self.spec.key_kinds.iter().enumerate() {
+                match kind {
+                    PdKeyKind::Int(_) => self.keys.push(words[i]),
+                    PdKeyKind::Bytes => {
+                        if nulls & (1 << i) != 0 {
+                            self.keys.push(0);
+                        } else {
+                            let b = src.bytes(i);
+                            let off = self.key_arena.len();
+                            self.key_arena.extend_from_slice(b);
+                            self.keys.push(pack_span(off, b.len()));
+                        }
+                    }
+                }
+            }
+        }
         self.states.extend(core::iter::repeat(0i64).take(2 * self.spec.vocab.len()));
         for _ in 0..self.spec.sets.len() {
             self.dsets.push(DistinctSet::new());
@@ -374,6 +579,33 @@ impl<'mcx> PdBuilder<'mcx> {
             self.grow();
         }
         g
+    }
+
+    /// The row-side key hash: canonical (value-derived, identical across
+    /// workers). Int-only specs keep [`key_hash`] verbatim; bytes specs
+    /// chain component-wise — int words through the same mixer, bytes
+    /// components by CONTENT ([`hash_chain_bytes`]). The top-8 bits are the
+    /// combine partition law, so this must agree between accept, spill
+    /// replay, and every merge face.
+    #[inline]
+    fn row_hash(spec: &PdSpec, words: &[i64], nulls: u32, src: &KeySrc<'_>) -> u64 {
+        if !spec.has_bytes_keys() {
+            return key_hash(words, nulls);
+        }
+        let mut h = (nulls as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        for (i, kind) in spec.key_kinds.iter().enumerate() {
+            match kind {
+                PdKeyKind::Int(_) => h = mix64(h ^ (words[i] as u64)),
+                PdKeyKind::Bytes => {
+                    if nulls & (1 << i) != 0 {
+                        h = mix64(h ^ 0xdead_beef_0bad_cafe);
+                    } else {
+                        h = hash_chain_bytes(h, src.bytes(i));
+                    }
+                }
+            }
+        }
+        h
     }
 
     /// Feed one row from the (deformed) scan slot. `tmp` is a per-row-reset
@@ -394,11 +626,10 @@ impl<'mcx> PdBuilder<'mcx> {
         // workers (the __aarch64_ldadd8_relax/_rel flat-profile signature).
         // Disjoint field borrows below make the clone unnecessary.
         let max_att = self.spec.max_att;
-        let slot = estate.slot_mut(id);
-        exectuples::slot_getsomeattrs(slot, max_att);
-        let g = {
-            let base = slot.base();
-            let mut nulls = 0u32;
+        exectuples::slot_getsomeattrs(estate.slot_mut(id), max_att);
+        let mut nulls = 0u32;
+        {
+            let base = estate.slot_mut(id).base();
             for (i, (&att, &kind)) in
                 self.spec.key_atts.iter().zip(self.spec.key_kinds.iter()).enumerate()
             {
@@ -406,19 +637,54 @@ impl<'mcx> PdBuilder<'mcx> {
                     nulls |= 1 << i;
                     words[i] = 0;
                 } else {
-                    words[i] = kind.read(base.tts_values[att as usize]);
+                    words[i] = match kind {
+                        PdKeyKind::Int(k) => k.read(base.tts_values[att as usize]),
+                        // Bytes components probe by CONTENT (staged below);
+                        // the group word is table-relative and written at
+                        // create time.
+                        PdKeyKind::Bytes => 0,
+                    };
                 }
             }
+        }
+        let g = (if !self.spec.has_bytes_keys() {
             let h = key_hash(&words[..nkeys], nulls);
-            let (found, slot_idx) = self.probe(&words[..nkeys], nulls, h);
-            let g = match found {
+            let (found, slot_idx) = self.probe(&words[..nkeys], nulls, h, &KeySrc::None);
+            match found {
                 Some(g) => g,
-                None => self.create_group(&words[..nkeys], nulls, h, slot_idx),
+                None => self.create_group(&words[..nkeys], nulls, h, slot_idx, &KeySrc::None),
+            }
+        } else {
+            // Detach the staging buffers from `self` so the KeySrc borrow
+            // and the &mut self create can coexist; restored below (an
+            // error path only loses buffer capacity).
+            let mut pbuf = core::mem::take(&mut self.probe_buf);
+            let mut pspans = core::mem::take(&mut self.probe_spans);
+            let staged =
+                stage_bytes_keys(&self.spec, estate, id, tmp, nulls, &mut pbuf, &mut pspans);
+            if let Err(e) = staged {
+                self.probe_buf = pbuf;
+                self.probe_spans = pspans;
+                return Err(e);
+            }
+            let g = {
+                let src = KeySrc::Staged(&pbuf, &pspans);
+                let h = Self::row_hash(&self.spec, &words[..nkeys], nulls, &src);
+                let (found, slot_idx) = self.probe(&words[..nkeys], nulls, h, &src);
+                match found {
+                    Some(g) => g,
+                    None => self.create_group(&words[..nkeys], nulls, h, slot_idx, &src),
+                }
             };
-            let gi = g as usize;
-            // Vocab transitions (spec/states are disjoint fields).
+            self.probe_buf = pbuf;
+            self.probe_spans = pspans;
+            g
+        }) as usize;
+        // Vocab transitions (spec/states are disjoint fields).
+        if !self.spec.vocab.is_empty() {
+            let base = estate.slot_mut(id).base();
             let spec = &self.spec;
-            let st = &mut self.states[gi * 2 * spec.vocab.len()..];
+            let st = &mut self.states[g * 2 * spec.vocab.len()..];
             for (vi, v) in spec.vocab.iter().enumerate() {
                 let (acc, cnt) = (2 * vi, 2 * vi + 1);
                 match v.kind {
@@ -436,8 +702,7 @@ impl<'mcx> PdBuilder<'mcx> {
                     }
                 }
             }
-            gi
-        };
+        }
         // Distinct-set collects (after the immutable-borrow block: bytes
         // inserts may need the estate for detoast).
         let nsets = self.spec.sets.len();
@@ -542,10 +807,11 @@ impl<'mcx> PdBuilder<'mcx> {
             let words = &t.keys[g * nkeys..(g + 1) * nkeys];
             let nulls = t.keynulls[g];
             let h = t.hashes[g];
-            let (found, slot_idx) = self.probe(words, nulls, h);
+            let src = KeySrc::Table(words, &t.key_arena);
+            let (found, slot_idx) = self.probe(words, nulls, h, &src);
             let dst = match found {
                 Some(d) => d,
-                None => self.create_group(words, nulls, h, slot_idx),
+                None => self.create_group(words, nulls, h, slot_idx, &src),
             } as usize;
             // Vocab: pairwise add (count/sum reassociation unobservable).
             for vi in 0..2 * nvocab {
@@ -684,6 +950,7 @@ impl<'mcx> PdBuilder<'mcx> {
         Ok(PdHandedTable {
             ngroups: n,
             keys: core::mem::take(&mut self.keys),
+            key_arena: core::mem::take(&mut self.key_arena),
             keynulls: core::mem::take(&mut self.keynulls),
             hashes: core::mem::take(&mut self.hashes),
             states: core::mem::take(&mut self.states),
@@ -705,6 +972,7 @@ impl<'mcx> PdBuilder<'mcx> {
         PdMerged {
             ngroups: self.ngroups(),
             keys: self.keys,
+            key_arena: self.key_arena,
             keynulls: self.keynulls,
             states: self.states,
             dsets: self.dsets.into_iter().map(Some).collect(),
@@ -742,6 +1010,8 @@ pub struct PdPartition {
 pub struct PdHandedTable {
     pub ngroups: usize,
     keys: Vec<i64>,
+    /// Bytes-key content (spans packed in `keys`; empty for int-only specs).
+    key_arena: Vec<u8>,
     keynulls: Vec<u32>,
     hashes: Vec<u64>,
     states: Vec<i64>,
@@ -774,6 +1044,7 @@ impl PdHandedTable {
 
     pub fn mem_bytes(&self) -> usize {
         self.keys.len() * 8
+            + self.key_arena.len()
             + self.keynulls.len() * 4
             + self.hashes.len() * 8
             + self.states.len() * 8
@@ -795,6 +1066,9 @@ unsafe impl Sync for PdHandedTable {}
 pub struct PdMerged<'mcx> {
     pub ngroups: usize,
     pub keys: Vec<i64>,
+    /// Bytes-key content (spans packed in `keys`; empty for int-only
+    /// specs). The emit adoption materializes text datums from it.
+    pub key_arena: Vec<u8>,
     pub keynulls: Vec<u32>,
     /// (acc, count) pairs, stride 2*nvocab.
     pub states: Vec<i64>,
@@ -813,6 +1087,7 @@ impl PdMerged<'_> {
     /// shared with the accept-phase budget.
     pub fn mem_bytes(&self) -> usize {
         self.keys.len() * 8
+            + self.key_arena.len()
             + self.keynulls.len() * 4
             + self.states.len() * 8
             + self.dsets.len() * core::mem::size_of::<Option<DistinctSet<'_>>>()
@@ -827,6 +1102,7 @@ impl PdMerged<'static> {
         PdMerged {
             ngroups: self.ngroups,
             keys: self.keys,
+            key_arena: self.key_arena,
             keynulls: self.keynulls,
             states: self.states,
             dsets: self.dsets.into_iter().map(|d| d.map(DistinctSet::unspilled_into)).collect(),
@@ -906,6 +1182,7 @@ impl<'s> PdBucketMerger<'s> {
             out: PdMerged {
                 ngroups: 0,
                 keys: Vec::new(),
+                key_arena: Vec::new(),
                 keynulls: Vec::new(),
                 states: Vec::new(),
                 dsets: Vec::new(),
@@ -916,11 +1193,14 @@ impl<'s> PdBucketMerger<'s> {
     }
 
     /// Merge bucket `b` of `t` into the output — the donor loop body
-    /// verbatim.
+    /// verbatim (bytes-key components compare and copy CONTENT: span words
+    /// are table-relative, so the output re-packs spans over its own arena).
     pub fn absorb(&mut self, t: &PdHandedTable, b: usize) {
         let nkeys = self.spec.nkeys();
         let nvocab = self.spec.vocab.len();
         let nsets = self.spec.sets.len();
+        let has_bytes = self.spec.has_bytes_keys();
+        let key_kinds = &self.spec.key_kinds;
         let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
@@ -938,7 +1218,26 @@ impl<'s> PdBucketMerger<'s> {
                         let d = out.ngroups;
                         out.ngroups += 1;
                         hashes.push(h);
-                        out.keys.extend_from_slice(words);
+                        if !has_bytes {
+                            out.keys.extend_from_slice(words);
+                        } else {
+                            for (i, kind) in key_kinds.iter().enumerate() {
+                                match kind {
+                                    PdKeyKind::Int(_) => out.keys.push(words[i]),
+                                    PdKeyKind::Bytes => {
+                                        if nulls & (1 << i) != 0 {
+                                            out.keys.push(0);
+                                        } else {
+                                            let (o, l) = unpack_span(words[i]);
+                                            let noff = out.key_arena.len();
+                                            out.key_arena
+                                                .extend_from_slice(&t.key_arena[o..o + l]);
+                                            out.keys.push(pack_span(noff, l));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         out.keynulls.push(nulls);
                         out.states.extend(core::iter::repeat(0i64).take(2 * nvocab));
                         for _ in 0..nsets {
@@ -962,10 +1261,27 @@ impl<'s> PdBucketMerger<'s> {
                     }
                     e2 => {
                         let d = (e2 - 1) as usize;
-                        if hashes[d] == h
-                            && out.keynulls[d] == nulls
-                            && &out.keys[d * nkeys..(d + 1) * nkeys] == words
-                        {
+                        let keys_eq = hashes[d] == h && out.keynulls[d] == nulls && {
+                            let dw = &out.keys[d * nkeys..(d + 1) * nkeys];
+                            if !has_bytes {
+                                dw == words
+                            } else {
+                                key_kinds.iter().enumerate().all(|(i, kind)| match kind {
+                                    PdKeyKind::Int(_) => dw[i] == words[i],
+                                    PdKeyKind::Bytes => {
+                                        if nulls & (1 << i) != 0 {
+                                            true
+                                        } else {
+                                            let (od, ld) = unpack_span(dw[i]);
+                                            let (ot, lt) = unpack_span(words[i]);
+                                            out.key_arena[od..od + ld]
+                                                == t.key_arena[ot..ot + lt]
+                                        }
+                                    }
+                                })
+                            }
+                        };
+                        if keys_eq {
                             break d;
                         }
                         slot = (slot + 1) & mask;
@@ -996,6 +1312,7 @@ impl<'s> PdBucketMerger<'s> {
     /// absorb; no directory estimate can see through duplicates, this can).
     pub fn mem_bytes(&self) -> usize {
         self.out.keys.capacity() * 8
+            + self.out.key_arena.capacity()
             + self.out.keynulls.capacity() * 4
             + self.out.states.capacity() * 8
             + self.hashes.capacity() * 8
@@ -1042,6 +1359,7 @@ pub fn pd_parallel_merge_grouped(
                 core::cell::UnsafeCell::new(PdMerged {
                     ngroups: 0,
                     keys: Vec::new(),
+                    key_arena: Vec::new(),
                     keynulls: Vec::new(),
                     states: Vec::new(),
                     dsets: Vec::new(),
@@ -1062,19 +1380,44 @@ pub fn pd_parallel_merge_grouped(
     let mut merged = PdMerged {
         ngroups: 0,
         keys: Vec::new(),
+        key_arena: Vec::new(),
         keynulls: Vec::new(),
         states: Vec::new(),
         dsets: Vec::new(),
     };
     for cell in ctx.out {
-        let m = cell.into_inner();
-        merged.ngroups += m.ngroups;
-        merged.keys.extend(m.keys);
-        merged.keynulls.extend(m.keynulls);
-        merged.states.extend(m.states);
-        merged.dsets.extend(m.dsets);
+        concat_merged_into(spec, &mut merged, cell.into_inner());
     }
     merged
+}
+
+/// Append one bucket's merged output onto the accumulating result. Bytes-
+/// key span words are ARENA-RELATIVE, so they re-base onto the combined
+/// arena as the bucket's content is appended (int-only specs take the
+/// plain extends).
+fn concat_merged_into(spec: &PdSpec, merged: &mut PdMerged<'static>, m: PdMerged<'static>) {
+    let nkeys = spec.nkeys();
+    if spec.has_bytes_keys() && !m.keys.is_empty() {
+        let base = merged.key_arena.len();
+        let mut keys = m.keys;
+        for g in 0..m.ngroups {
+            for (i, kind) in spec.key_kinds.iter().enumerate() {
+                if matches!(kind, PdKeyKind::Bytes) && m.keynulls[g] & (1 << i) == 0 {
+                    let (o, l) = unpack_span(keys[g * nkeys + i]);
+                    keys[g * nkeys + i] = pack_span(base + o, l);
+                }
+            }
+        }
+        merged.keys.extend(keys);
+        merged.key_arena.extend(m.key_arena);
+    } else {
+        merged.keys.extend(m.keys);
+        merged.key_arena.extend(m.key_arena);
+    }
+    merged.ngroups += m.ngroups;
+    merged.keynulls.extend(m.keynulls);
+    merged.states.extend(m.states);
+    merged.dsets.extend(m.dsets);
 }
 
 // --- plain (single-group) parallel union over element partitions ----------
@@ -1171,7 +1514,7 @@ pub fn pd_parallel_merge_plain<'m>(
         let seen_null = tables.iter().any(|t| t.set_null[j]);
         dsets.push(Some(DistinctSet::from_values(spec.sets[j].kind, ints, blob, spans, seen_null)));
     }
-    PdMerged { ngroups: 1, keys: Vec::new(), keynulls: Vec::new(), states: Vec::new(), dsets }
+    PdMerged { ngroups: 1, keys: Vec::new(), key_arena: Vec::new(), keynulls: Vec::new(), states: Vec::new(), dsets }
 }
 
 // ===========================================================================
@@ -1334,20 +1677,17 @@ pub fn pd_merge_bucket_refs(
 /// Concatenate per-bucket merge outputs (bucket order) into the one merged
 /// result — the grouped parallel merge's tail, exposed for the sink's
 /// finalize.
-pub fn pd_concat_buckets(buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
+pub fn pd_concat_buckets(spec: &PdSpec, buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
     let mut merged = PdMerged {
         ngroups: 0,
         keys: Vec::new(),
+        key_arena: Vec::new(),
         keynulls: Vec::new(),
         states: Vec::new(),
         dsets: Vec::new(),
     };
     for m in buckets {
-        merged.ngroups += m.ngroups;
-        merged.keys.extend(m.keys);
-        merged.keynulls.extend(m.keynulls);
-        merged.states.extend(m.states);
-        merged.dsets.extend(m.dsets);
+        concat_merged_into(spec, &mut merged, m);
     }
     merged
 }
@@ -1388,29 +1728,63 @@ impl PdSinkMerged {
 // byte contract the caller writes to a spillset file: group keys, vocab
 // words, and `seen_null` stay in memory and ride the Local through SEAL.
 //
-// Record contract (fixed width per spec, native-endian — the DistinctSet
-// int law, raw i64 words): one record per (group, set, value) =
+// Record contract, INT mode (fixed width per spec, native-endian — the
+// DistinctSet int law, raw i64 words): one record per (group, set, value) =
 //   [keynulls u64][key word i64 × nkeys][set index u64][value i64]
 // NULLs NEVER touch the file: group-key null bits ride the keynulls word
 // (part of the group identity, not a value), and set NULL presence rides
 // the in-memory `seen_null` (the distinctset frozen rule).
 //
-// Partition law: top-8 bits of the group-key hash (`hash >> 56`) — EXACTLY
-// the counting-sort partition freeze() builds and the bucket merge reads,
-// so a spilled record replays into the same combine partition that claims
-// its group.
+// Record contract, BYTES mode (distinct-bytes car — engaged iff
+// `spec.has_bytes_keys()`; variable width, self-describing, 8-aligned):
+//   [rec_len u64][keynulls u64][set index u64][value i64]
+//   [key word i64 × nkeys (bytes components ZEROED — the c3 canonical-image
+//    discipline: content identifies, table-relative spans never spill)]
+//   [per bytes component, ascending, non-NULL only: len u64 + content,
+//    zero-padded to 8]
+// `rec_len` is the whole record (multiple of 8), so files stay 8-aligned
+// and a record-aligned streamer can carry partial tails. The VALUE sits at
+// the fixed offset 24 in both the parse and the value-hash router. The
+// canonical key image (zeroed words + length-prefixed tails in component
+// order) is injective: fixed-width prefix + length-prefixed tails.
+//
+// Partition law (both modes): top-8 bits of the group-key hash
+// (`hash >> 56`, canonical `row_hash` — content-derived for bytes keys) —
+// EXACTLY the counting-sort partition freeze() builds and the bucket merge
+// reads, so a spilled record replays into the same combine partition that
+// claims its group. Spill/replay AUTHORITY is insertion order per the m3.5
+// design; set-insert idempotence makes replay order immaterial.
 // ===========================================================================
 
-/// Byte width of one spilled (group, set, value) record for `spec`.
+/// Whether `spec` spills through the BYTES record format (variable width).
+pub fn pd_spill_bytes_mode(spec: &PdSpec) -> bool {
+    spec.has_bytes_keys()
+}
+
+/// Byte width of one spilled (group, set, value) record for `spec` — INT
+/// mode only (bytes-mode records are variable-width; see
+/// [`pd_spill_min_record_width`]).
 pub fn pd_spill_record_width(spec: &PdSpec) -> usize {
+    debug_assert!(!pd_spill_bytes_mode(spec));
     (spec.nkeys() + 3) * 8
+}
+
+/// Lower bound on a bytes-mode record's width (header + key words): a
+/// conservative row-count divisor for directory-only size estimates
+/// (`bytes / min_width` OVER-counts rows — refusals stay conservative).
+pub fn pd_spill_min_record_width(spec: &PdSpec) -> usize {
+    32 + spec.nkeys() * 8
 }
 
 impl PdBuilder<'_> {
     /// Fail-closed shape gate: only grouped int-set builders spill exactly.
     /// Plain/element-partition shapes (nkeys == 0), bytes sets, and anything
     /// touching the leader's Mcx-bound machinery refuse (the caller falls
-    /// through to the phase-1 Crossed abort → serial rerun).
+    /// through to the phase-1 Crossed abort → serial rerun). Bytes GROUP
+    /// KEYS are eligible (distinct-bytes car: the bytes record format
+    /// carries the canonical key image — this resolves the m35 inc-3a flag
+    /// that bytes-mode runs were unrepresentable); bytes SET VALUES still
+    /// refuse (the value word is the routing axis and stays i64).
     fn spill_eligible(&self) -> bool {
         self.spec.nkeys() > 0
             && !self.spec.sets.is_empty()
@@ -1477,22 +1851,60 @@ impl PdBuilder<'_> {
             idx[cur[b] as usize] = g as u32;
             cur[b] += 1;
         }
+        let bytes_mode = pd_spill_bytes_mode(&self.spec);
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+        // BYTES mode: the canonical key image (zeroed-span key words +
+        // length-prefixed content tails) is built ONCE per group and shared
+        // by all its value records (arena-batched: one scratch, no per-value
+        // re-walk of the arena).
+        let mut img: Vec<u8> = Vec::new();
         for p in 0..PD_GROUP_PARTS {
             buf.clear();
             for &g in &idx[starts[p] as usize..starts[p + 1] as usize] {
                 let g = g as usize;
-                let nulls = (self.keynulls[g] as u64).to_ne_bytes();
+                let gnulls = self.keynulls[g];
+                let nulls = (gnulls as u64).to_ne_bytes();
                 let keys = &self.keys[g * nkeys..(g + 1) * nkeys];
+                let rec_len = if bytes_mode {
+                    img.clear();
+                    for (i, kind) in self.spec.key_kinds.iter().enumerate() {
+                        match kind {
+                            PdKeyKind::Int(_) => img.extend_from_slice(&keys[i].to_ne_bytes()),
+                            PdKeyKind::Bytes => img.extend_from_slice(&0i64.to_ne_bytes()),
+                        }
+                    }
+                    for (i, kind) in self.spec.key_kinds.iter().enumerate() {
+                        if !matches!(kind, PdKeyKind::Bytes) || gnulls & (1 << i) != 0 {
+                            continue;
+                        }
+                        let (off, len) = unpack_span(keys[i]);
+                        img.extend_from_slice(&(len as u64).to_ne_bytes());
+                        img.extend_from_slice(&self.key_arena[off..off + len]);
+                        while img.len() % 8 != 0 {
+                            img.push(0);
+                        }
+                    }
+                    (32 + img.len()) as u64
+                } else {
+                    0
+                };
                 for j in 0..nsets {
                     let jw = (j as u64).to_ne_bytes();
                     for &v in self.dsets[g * nsets + j].ints() {
-                        buf.extend_from_slice(&nulls);
-                        for &w in keys {
-                            buf.extend_from_slice(&w.to_ne_bytes());
+                        if bytes_mode {
+                            buf.extend_from_slice(&rec_len.to_ne_bytes());
+                            buf.extend_from_slice(&nulls);
+                            buf.extend_from_slice(&jw);
+                            buf.extend_from_slice(&v.to_ne_bytes());
+                            buf.extend_from_slice(&img);
+                        } else {
+                            buf.extend_from_slice(&nulls);
+                            for &w in keys {
+                                buf.extend_from_slice(&w.to_ne_bytes());
+                            }
+                            buf.extend_from_slice(&jw);
+                            buf.extend_from_slice(&v.to_ne_bytes());
                         }
-                        buf.extend_from_slice(&jw);
-                        buf.extend_from_slice(&v.to_ne_bytes());
                     }
                 }
             }
@@ -1574,6 +1986,9 @@ pub fn pd_table_from_spill(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHande
     if nkeys == 0 || nsets == 0 {
         return Err(pd_internal("distinct spill replay on a non-grouped spec"));
     }
+    if pd_spill_bytes_mode(spec) {
+        return pd_table_from_spill_bytes(spec, bytes);
+    }
     let width = pd_spill_record_width(spec);
     if bytes.len() % width != 0 {
         return Err(pd_internal("torn distinct spill record (partial row)"));
@@ -1601,12 +2016,82 @@ pub fn pd_table_from_spill(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHande
         off += 8;
         let nulls = nulls as u32;
         let h = key_hash(&words, nulls);
-        let (found, slot) = b.probe(&words, nulls, h);
+        let (found, slot) = b.probe(&words, nulls, h, &KeySrc::None);
         let g = match found {
             Some(g) => g,
-            None => b.create_group(&words, nulls, h, slot),
+            None => b.create_group(&words, nulls, h, slot, &KeySrc::None),
         } as usize;
         b.dsets[g * nsets + j].insert_i64(v);
+    }
+    b.freeze()
+}
+
+/// Bytes-mode replay twin of [`pd_table_from_spill`]: parses the
+/// variable-width canonical-image records (length-prefixed key content
+/// tails), rebuilds groups by CONTENT through the same donor kernel, and
+/// freezes. Fail-closed on any torn or internally inconsistent record.
+fn pd_table_from_spill_bytes(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHandedTable> {
+    let nkeys = spec.nkeys();
+    let nsets = spec.sets.len();
+    let min_width = pd_spill_min_record_width(spec);
+    let mut b = PdBuilder::new(Arc::clone(spec), usize::MAX, None);
+    let mut words = vec![0i64; nkeys];
+    // Staged spans over the record's own tail bytes (KeySrc::Staged).
+    let mut spans = vec![(0u32, 0u32); nkeys];
+    let mut off = 0usize;
+    while off < bytes.len() {
+        if bytes.len() - off < 8 {
+            return Err(pd_internal("torn distinct spill record (bytes header)"));
+        }
+        let rd = |o: usize| u64::from_ne_bytes(bytes[o..o + 8].try_into().unwrap());
+        let rec_len = rd(off) as usize;
+        if rec_len < min_width || rec_len % 8 != 0 || rec_len > bytes.len() - off {
+            return Err(pd_internal("torn distinct spill record (bytes rec_len)"));
+        }
+        let rec = &bytes[off..off + rec_len];
+        let nulls = u64::from_ne_bytes(rec[8..16].try_into().unwrap());
+        if nkeys < 64 && nulls >= (1u64 << nkeys) {
+            return Err(pd_internal("corrupt distinct spill record (keynulls)"));
+        }
+        let j = u64::from_ne_bytes(rec[16..24].try_into().unwrap()) as usize;
+        if j >= nsets {
+            return Err(pd_internal("corrupt distinct spill record (set index)"));
+        }
+        let v = i64::from_ne_bytes(rec[24..32].try_into().unwrap());
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = i64::from_ne_bytes(rec[32 + i * 8..40 + i * 8].try_into().unwrap());
+        }
+        // Parse the length-prefixed content tails (component order).
+        let nulls = nulls as u32;
+        let mut t = 32 + nkeys * 8;
+        for (i, kind) in spec.key_kinds.iter().enumerate() {
+            spans[i] = (0, 0);
+            if !matches!(kind, PdKeyKind::Bytes) || nulls & (1 << i) != 0 {
+                continue;
+            }
+            if rec_len - t < 8 {
+                return Err(pd_internal("torn distinct spill record (bytes tail)"));
+            }
+            let len = u64::from_ne_bytes(rec[t..t + 8].try_into().unwrap()) as usize;
+            let padded = len.div_ceil(8) * 8;
+            if rec_len - t - 8 < padded {
+                return Err(pd_internal("torn distinct spill record (bytes tail length)"));
+            }
+            spans[i] = ((t + 8) as u32, len as u32);
+            t += 8 + padded;
+        }
+        if t != rec_len {
+            return Err(pd_internal("corrupt distinct spill record (bytes tail residue)"));
+        }
+        let src = KeySrc::Staged(rec, &spans);
+        let h = PdBuilder::row_hash(spec, &words, nulls, &src);
+        let (found, slot) = b.probe(&words, nulls, h, &src);
+        let g = match found {
+            Some(g) => g,
+            None => b.create_group(&words, nulls, h, slot, &src),
+        } as usize;
+        b.dsets[g * nsets + j].insert_i64(v);
+        off += rec_len;
     }
     b.freeze()
 }
@@ -1633,12 +2118,34 @@ pub fn pd_route_value_records(
     if !(1..=6).contains(&depth) {
         return Err(pd_internal("distinct value-slice depth out of range"));
     }
+    let shift = 64 - 8 * depth;
+    if pd_spill_bytes_mode(spec) {
+        // BYTES mode: variable-width records; the value sits at the fixed
+        // offset 24 and the whole record routes intact. The caller streams
+        // RECORD-ALIGNED chunks (fail-closed here on any torn tail).
+        let min_width = pd_spill_min_record_width(spec);
+        let mut off = 0usize;
+        while off < bytes.len() {
+            if bytes.len() - off < min_width {
+                return Err(pd_internal("torn distinct spill record (bytes) in split"));
+            }
+            let rec_len =
+                u64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap()) as usize;
+            if rec_len < min_width || rec_len % 8 != 0 || rec_len > bytes.len() - off {
+                return Err(pd_internal("torn distinct spill record (bytes rec_len) in split"));
+            }
+            let v = u64::from_ne_bytes(bytes[off + 24..off + 32].try_into().unwrap());
+            let s = ((mix64(v) >> shift) & 0xFF) as usize;
+            out[s].extend_from_slice(&bytes[off..off + rec_len]);
+            off += rec_len;
+        }
+        return Ok(());
+    }
     let width = pd_spill_record_width(spec);
     if bytes.len() % width != 0 {
         return Err(pd_internal("torn distinct spill record (partial row) in split"));
     }
     let voff = width - 8;
-    let shift = 64 - 8 * depth;
     let mut off = 0usize;
     while off < bytes.len() {
         let v = u64::from_ne_bytes(bytes[off + voff..off + width].try_into().unwrap());
@@ -1650,25 +2157,39 @@ pub fn pd_route_value_records(
 }
 
 /// Combine-side pre-count of one bucket's IN-MEMORY faces: (groups, set
-/// values). Together with the spill directory's `part_len`, this is
-/// everything the conservative over-budget refusal reads — nothing touches
-/// disk before the decision. Groups are an upper bound on the merged
-/// bucket's output groups: spilled records never introduce a group the
-/// in-memory tables lack (group creation happens at accept; the epoch reset
-/// clears only set values).
-pub fn pd_bucket_precount(spec: &PdSpec, t: &PdHandedTable, bucket: usize) -> (usize, usize) {
-    let Some(parts) = t.parts.as_ref() else { return (0, 0) };
+/// values, key-content bytes). Together with the spill directory's
+/// `part_len`, this is everything the conservative over-budget refusal
+/// reads — nothing touches disk before the decision. Groups are an upper
+/// bound on the merged bucket's output groups: spilled records never
+/// introduce a group the in-memory tables lack (group creation happens at
+/// accept; the epoch reset clears only set values). Key-content bytes
+/// (bytes-key specs only) bound the merged bucket's arena the same way.
+pub fn pd_bucket_precount(
+    spec: &PdSpec,
+    t: &PdHandedTable,
+    bucket: usize,
+) -> (usize, usize, usize) {
+    let Some(parts) = t.parts.as_ref() else { return (0, 0, 0) };
     let nsets = spec.sets.len();
+    let nkeys = spec.nkeys();
     let (s, e) = (parts.starts[bucket] as usize, parts.starts[bucket + 1] as usize);
     let mut vals = 0usize;
+    let mut key_bytes = 0usize;
     for &g in &parts.idx[s..e] {
         let g = g as usize;
         for j in 0..nsets {
             let si = g * nsets + j;
             vals += (t.set_int_offs[si + 1] - t.set_int_offs[si]) as usize;
         }
+        if spec.has_bytes_keys() {
+            for (i, kind) in spec.key_kinds.iter().enumerate() {
+                if matches!(kind, PdKeyKind::Bytes) && t.keynulls[g] & (1 << i) == 0 {
+                    key_bytes += unpack_span(t.keys[g * nkeys + i]).1;
+                }
+            }
+        }
     }
-    (e - s, vals)
+    (e - s, vals, key_bytes)
 }
 
 #[cfg(test)]
@@ -1716,7 +2237,7 @@ mod tests {
     fn spill_test_spec() -> Arc<PdSpec> {
         Arc::new(PdSpec {
             key_atts: vec![0, 1],
-            key_kinds: vec![PdInt::I64, PdInt::I32],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64), PdKeyKind::Int(PdInt::I32)],
             vocab: vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
             sets: vec![
                 PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 },
@@ -1732,10 +2253,10 @@ mod tests {
     fn feed(b: &mut PdBuilder<'static>, keys: &[i64], nulls: u32, j: usize, v: Option<i64>) {
         let nsets = b.spec.sets.len();
         let h = key_hash(keys, nulls);
-        let (found, slot) = b.probe(keys, nulls, h);
+        let (found, slot) = b.probe(keys, nulls, h, &KeySrc::None);
         let g = match found {
             Some(g) => g,
-            None => b.create_group(keys, nulls, h, slot),
+            None => b.create_group(keys, nulls, h, slot, &KeySrc::None),
         } as usize;
         b.states[g * 2 * b.spec.vocab.len()] += 1; // CountStar
         match v {
@@ -1801,6 +2322,7 @@ mod tests {
         let t2 = build_worker(&spec, 5).freeze().unwrap();
         let tables = [t1, t2];
         let direct = pd_concat_buckets(
+            &spec,
             (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
         );
 
@@ -1831,7 +2353,7 @@ mod tests {
                 let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
                 // Undo the double CountStar bump: subtract before refeeding.
                 let h = key_hash(&k, nulls);
-                let (found, _) = b.probe(&k, nulls, h);
+                let (found, _) = b.probe(&k, nulls, h, &KeySrc::None);
                 let g = found.expect("group exists from epoch 1") as usize;
                 b.states[g * 2 * spec.vocab.len()] -= 1;
                 feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
@@ -1851,7 +2373,7 @@ mod tests {
                 remainders.iter().chain(synth.iter()).collect();
             buckets.push(pd_merge_bucket_refs(&spec, &refs, bkt));
         }
-        let merged = pd_concat_buckets(buckets);
+        let merged = pd_concat_buckets(&spec, buckets);
 
         assert_eq!(canon(&spec, &direct), canon(&spec, &merged));
 
@@ -1903,6 +2425,7 @@ mod tests {
         let t2 = build_worker(&spec, 5).freeze().unwrap();
         let tables = [t1, t2];
         let direct = pd_concat_buckets(
+            &spec,
             (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
         );
 
@@ -1924,7 +2447,7 @@ mod tests {
                 let k = [(i * 13 + salt) % 37, ((i * 7 + salt) % 11) as i64];
                 let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
                 let h = key_hash(&k, nulls);
-                let (found, _) = b.probe(&k, nulls, h);
+                let (found, _) = b.probe(&k, nulls, h, &KeySrc::None);
                 let g = found.expect("group exists from epoch 1") as usize;
                 b.states[g * 2 * spec.vocab.len()] -= 1;
                 feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
@@ -1974,7 +2497,7 @@ mod tests {
                 }
                 buckets.push(merger.finish());
             }
-            let merged = pd_concat_buckets(buckets);
+            let merged = pd_concat_buckets(&spec, buckets);
             assert_eq!(canon(&spec, &direct), canon(&spec, &merged), "depth {depth}");
         }
     }
@@ -2001,5 +2524,308 @@ mod tests {
         let expect = (mix64(77i64 as u64) >> 56) as usize;
         assert_eq!(out[expect].len(), width);
         assert_eq!(out.iter().map(|s| s.len()).sum::<usize>(), width);
+    }
+
+    // --- distinct-bytes car: canonical-bytes GROUP KEYS (spill record v2,
+    // bytes-mode replay/route, arena-rebased concat) — fleet-run ----------
+
+    fn bytes_test_spec() -> Arc<PdSpec> {
+        // key 0 = text (canonical bytes), key 1 = int32 — the q14 class
+        // (text group key + COUNT(DISTINCT int8)) plus an int companion
+        // exercising the mixed canonical image; one int64 set + CountStar.
+        Arc::new(PdSpec {
+            key_atts: vec![0, 1],
+            key_kinds: vec![PdKeyKind::Bytes, PdKeyKind::Int(PdInt::I32)],
+            vocab: vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
+            sets: vec![PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 }],
+            max_att: 3,
+            worker_budget: usize::MAX,
+        })
+    }
+
+    /// Feed one (text-key group, value) into a builder — the accept
+    /// kernel's staging discipline (probe by CONTENT, create copies into
+    /// the builder's own arena).
+    fn feed_b(b: &mut PdBuilder<'static>, text: &[u8], k1: i64, nulls: u32, v: Option<i64>) {
+        let spec = Arc::clone(&b.spec);
+        let words = [0i64, k1];
+        let spans = [(0u32, if nulls & 1 != 0 { 0 } else { text.len() as u32 }), (0, 0)];
+        let src = KeySrc::Staged(text, &spans);
+        let h = PdBuilder::row_hash(&spec, &words, nulls, &src);
+        let (found, slot) = b.probe(&words, nulls, h, &src);
+        let g = match found {
+            Some(g) => g,
+            None => b.create_group(&words, nulls, h, slot, &src),
+        } as usize;
+        b.states[g * 2 * spec.vocab.len()] += 1;
+        match v {
+            Some(v) => b.dsets[g].insert_i64(v),
+            None => b.dsets[g].seen_null = true,
+        }
+    }
+
+    /// Deterministic text corpus: 41 keys of varied length (empty string
+    /// included — a legal canonical tail), NULL text keys, NULL int keys.
+    fn bytes_key_of(i: i64, salt: i64) -> Vec<u8> {
+        let k = (i * 13 + salt) % 41;
+        match k % 5 {
+            0 => Vec::new(), // empty text
+            1 => format!("k{k}").into_bytes(),
+            2 => format!("phrase-{k}-{}", "x".repeat((k % 11) as usize)).into_bytes(),
+            3 => format!("long-{}", "abcdefgh".repeat(1 + (k % 4) as usize)).into_bytes(),
+            _ => format!("\u{00e9}clair-{k}").into_bytes(), // multi-byte UTF-8
+        }
+    }
+
+    fn build_worker_b(spec: &Arc<PdSpec>, salt: i64) -> PdBuilder<'static> {
+        let mut b = PdBuilder::new(Arc::clone(spec), usize::MAX, None);
+        for i in 0..4000i64 {
+            let text = bytes_key_of(i, salt);
+            let k1 = (i * 7 + salt) % 11;
+            let nulls = match (i + salt) % 29 {
+                0 => 1u32, // NULL text key
+                7 => 2u32, // NULL int key
+                _ => 0u32,
+            };
+            feed_b(&mut b, &text, k1, nulls, Some((i * 104729 + salt) % 2500));
+            if (i + salt) % 41 == 0 {
+                feed_b(&mut b, &text, k1, nulls, None); // seen_null face
+            }
+        }
+        b
+    }
+
+    /// Canonical view keyed by CONTENT (arena-independent): per group the
+    /// text bytes, int word, nulls, states, per-set sorted values +
+    /// seen_null.
+    fn canon_b(
+        spec: &PdSpec,
+        m: &PdMerged<'_>,
+    ) -> Vec<(Vec<u8>, i64, u32, Vec<i64>, Vec<(Vec<i64>, bool)>)> {
+        let nkeys = spec.nkeys();
+        let nsets = spec.sets.len();
+        let nvocab = spec.vocab.len();
+        let mut rows: Vec<_> = (0..m.ngroups)
+            .map(|g| {
+                let (off, len) = unpack_span(m.keys[g * nkeys]);
+                let text = if m.keynulls[g] & 1 != 0 {
+                    b"<NULL>".to_vec()
+                } else {
+                    m.key_arena[off..off + len].to_vec()
+                };
+                let sets = (0..nsets)
+                    .map(|j| {
+                        let d = m.dsets[g * nsets + j].as_ref().unwrap();
+                        let mut vals = d.ints().to_vec();
+                        vals.sort_unstable();
+                        (vals, d.seen_null)
+                    })
+                    .collect();
+                (
+                    text,
+                    m.keys[g * nkeys + 1],
+                    m.keynulls[g],
+                    m.states[g * 2 * nvocab..(g + 1) * 2 * nvocab].to_vec(),
+                    sets,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Bytes-mode spill -> replay -> merge EQUALS the direct never-spilled
+    /// merge on every bucket, across an epoch-reset boundary (epoch 2
+    /// includes cross-epoch duplicate values AND brand-new groups that
+    /// exist only in the in-memory remainder).
+    #[test]
+    fn bytes_key_spill_roundtrip_merge_equivalence() {
+        let spec = bytes_test_spec();
+
+        // Reference: direct merge of two never-spilled workers, epoch 2
+        // rows included.
+        let mut direct_tables = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker_b(&spec, salt);
+            for i in 0..500i64 {
+                let text = bytes_key_of(i * 3, salt + 100);
+                feed_b(&mut b, &text, (i + salt) % 7, 0, Some(i % 173));
+            }
+            direct_tables.push(b.freeze().unwrap());
+        }
+        let direct = pd_concat_buckets(
+            &spec,
+            (0..PD_GROUP_PARTS)
+                .map(|bk| pd_merge_bucket(&spec, &direct_tables, bk))
+                .collect(),
+        );
+
+        // Spill arm: same content — epoch 1 spilled (bytes-mode records),
+        // values reset, epoch 2 fed in-memory (duplicates + new groups).
+        let mut spilled: Vec<std::collections::HashMap<u32, Vec<u8>>> = Vec::new();
+        let mut remainders: Vec<PdHandedTable> = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker_b(&spec, salt);
+            assert!(b.spill_eligible(), "bytes keys are spill-eligible");
+            assert!(pd_spill_bytes_mode(&spec));
+            let mut parts: std::collections::HashMap<u32, Vec<u8>> = Default::default();
+            let mut last_p: i64 = -1;
+            b.spill_emit(&mut |pt, bytes| {
+                assert!((pt as i64) > last_p, "partitions ascend");
+                last_p = pt as i64;
+                assert_eq!(bytes.len() % 8, 0, "bytes-mode records stay 8-aligned");
+                parts.entry(pt).or_default().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            b.spill_reset_values();
+            // Epoch 2: duplicate values for existing groups (undo the extra
+            // CountStar bump so vocab words match the reference) + NEW
+            // groups only the remainder carries.
+            for i in 0..500i64 {
+                let text = bytes_key_of(i * 3, salt + 100);
+                feed_b(&mut b, &text, (i + salt) % 7, 0, Some(i % 173));
+            }
+            spilled.push(parts);
+            remainders.push(b.freeze().unwrap());
+        }
+        let mut buckets = Vec::with_capacity(PD_GROUP_PARTS);
+        for bkt in 0..PD_GROUP_PARTS {
+            let mut synth: Vec<PdHandedTable> = Vec::new();
+            for parts in &spilled {
+                if let Some(bytes) = parts.get(&(bkt as u32)) {
+                    synth.push(pd_table_from_spill(&spec, bytes).unwrap());
+                }
+            }
+            let refs: Vec<&PdHandedTable> = remainders.iter().chain(synth.iter()).collect();
+            buckets.push(pd_merge_bucket_refs(&spec, &refs, bkt));
+        }
+        let merged = pd_concat_buckets(&spec, buckets);
+
+        assert_eq!(canon_b(&spec, &direct), canon_b(&spec, &merged));
+        assert!(direct.ngroups > 40, "corpus produced a real group population");
+
+        // Pre-count sanity: groups bound + key-bytes term populated.
+        let mut groups = 0usize;
+        let mut key_bytes = 0usize;
+        for t in &remainders {
+            for bkt in 0..PD_GROUP_PARTS {
+                let (g, _, kb) = pd_bucket_precount(&spec, t, bkt);
+                groups += g;
+                key_bytes += kb;
+            }
+        }
+        assert!(groups >= direct.ngroups);
+        assert!(key_bytes > 0);
+    }
+
+    /// Torn / corrupt BYTES-mode records fail closed (never a silent wrong
+    /// answer): bad rec_len, truncated tail, corrupt set index, keynulls
+    /// out of range, tail-length inconsistency; empty and single-record
+    /// images are fine.
+    #[test]
+    fn bytes_key_torn_records_fail_closed() {
+        let spec = bytes_test_spec();
+        // A well-formed single-group, single-value image via the emitter.
+        let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
+        feed_b(&mut b, b"hello", 3, 0, Some(42));
+        let mut img: Vec<u8> = Vec::new();
+        b.spill_emit(&mut |_p, bytes| {
+            img.extend_from_slice(bytes);
+            Ok(())
+        })
+        .unwrap();
+        let min_w = pd_spill_min_record_width(&spec);
+        assert!(img.len() >= min_w + 8, "one record with a nonempty tail");
+        assert!(pd_table_from_spill(&spec, &img).is_ok());
+        assert!(pd_table_from_spill(&spec, &[]).is_ok());
+        // Torn: trailing garbage byte-count (not covered by rec_len).
+        let mut torn = img.clone();
+        torn.extend_from_slice(&[0u8; 4]);
+        assert!(pd_table_from_spill(&spec, &torn).is_err());
+        // Corrupt rec_len: too small / unaligned / past the buffer.
+        for bad in [8u64, (min_w as u64) + 1, (img.len() as u64) + 8] {
+            let mut r = img.clone();
+            r[..8].copy_from_slice(&bad.to_ne_bytes());
+            assert!(pd_table_from_spill(&spec, &r).is_err(), "rec_len {bad}");
+        }
+        // Corrupt set index.
+        let mut r = img.clone();
+        r[16..24].copy_from_slice(&u64::MAX.to_ne_bytes());
+        assert!(pd_table_from_spill(&spec, &r).is_err());
+        // Keynulls out of range.
+        let mut r = img.clone();
+        r[8..16].copy_from_slice(&(1u64 << 63).to_ne_bytes());
+        assert!(pd_table_from_spill(&spec, &r).is_err());
+        // Tail length inconsistent with rec_len.
+        let tail_len_off = 32 + spec.nkeys() * 8;
+        let mut r = img.clone();
+        r[tail_len_off..tail_len_off + 8].copy_from_slice(&1000u64.to_ne_bytes());
+        assert!(pd_table_from_spill(&spec, &r).is_err());
+        // The router fails closed on the same shapes.
+        let mut out: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+        assert!(pd_route_value_records(&spec, &torn, 1, &mut out).is_err());
+        let mut r = img.clone();
+        r[..8].copy_from_slice(&8u64.to_ne_bytes());
+        assert!(pd_route_value_records(&spec, &r, 1, &mut out).is_err());
+    }
+
+    /// Bytes-mode value routing: totals preserved, every record has exactly
+    /// one home slice, split merge (in-memory once + slices in sequence)
+    /// equals the direct merge — depths 1 and 2.
+    #[test]
+    fn bytes_key_split_slice_merge_invariance() {
+        let spec = bytes_test_spec();
+        let t1 = build_worker_b(&spec, 0).freeze().unwrap();
+        let t2 = build_worker_b(&spec, 5).freeze().unwrap();
+        let tables = [t1, t2];
+        let direct = pd_concat_buckets(
+            &spec,
+            (0..PD_GROUP_PARTS).map(|bk| pd_merge_bucket(&spec, &tables, bk)).collect(),
+        );
+
+        let mut spilled: Vec<std::collections::HashMap<u32, Vec<u8>>> = Vec::new();
+        let mut remainders: Vec<PdHandedTable> = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker_b(&spec, salt);
+            let mut parts: std::collections::HashMap<u32, Vec<u8>> = Default::default();
+            b.spill_emit(&mut |pt, bytes| {
+                parts.entry(pt).or_default().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            b.spill_reset_values();
+            spilled.push(parts);
+            remainders.push(b.freeze().unwrap());
+        }
+
+        for depth in [1u32, 2] {
+            let mut buckets = Vec::with_capacity(PD_GROUP_PARTS);
+            for bkt in 0..PD_GROUP_PARTS {
+                let mut bytes = Vec::new();
+                for parts in &spilled {
+                    if let Some(bb) = parts.get(&(bkt as u32)) {
+                        bytes.extend_from_slice(bb);
+                    }
+                }
+                let mut slices: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+                pd_route_value_records(&spec, &bytes, depth, &mut slices).unwrap();
+                assert_eq!(slices.iter().map(|s| s.len()).sum::<usize>(), bytes.len());
+                let mut merger = PdBucketMerger::new(&spec);
+                for t in &remainders {
+                    merger.absorb(t, bkt);
+                }
+                for sl in &slices {
+                    if sl.is_empty() {
+                        continue;
+                    }
+                    let synth = pd_table_from_spill(&spec, sl).unwrap();
+                    merger.absorb(&synth, bkt);
+                }
+                buckets.push(merger.finish());
+            }
+            let merged = pd_concat_buckets(&spec, buckets);
+            assert_eq!(canon_b(&spec, &direct), canon_b(&spec, &merged), "depth {depth}");
+        }
     }
 }

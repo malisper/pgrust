@@ -163,7 +163,12 @@ fn table_key_words(t: &LaneAggTable) -> usize {
     match t.repr() {
         KeyRepr::Int => 1,
         KeyRepr::Int128 => 2,
-        KeyRepr::Bytes => unreachable!("sink admission refuses byte-key tables (C2 car)"),
+        // Canonical bytes-keyed tables (c3) never take the word-mode key
+        // paths: flush/spill are disarmed for canonical shapes (the word-
+        // mode fixed-width record cannot round-trip key bytes — the
+        // train-13 m35 x c3 composition gate) and partition/emit/topn all
+        // dispatch on repr.
+        KeyRepr::Bytes => unreachable!("bytes-keyed table on a word-mode key path"),
     }
 }
 
@@ -173,7 +178,8 @@ fn row_key_words(t: &LaneAggTable, i: usize) -> Option<[u64; 2]> {
     match t.repr() {
         KeyRepr::Int => t.row_key_int(i).map(|k| [k as u64, 0]),
         KeyRepr::Int128 => t.row_key_i128(i),
-        KeyRepr::Bytes => unreachable!("sink admission refuses byte-key tables (C2 car)"),
+        // See table_key_words: bytes-keyed callers dispatch on repr first.
+        KeyRepr::Bytes => unreachable!("bytes-keyed table on a word-mode key path"),
     }
 }
 
@@ -1140,6 +1146,12 @@ pub enum SinkEmitCol {
     /// in the buf arena — byte-identical to the packed first-arrival datum
     /// by the keypack canonicality gates.
     MultiNumeric { off: u8, width: u8 },
+    /// A constant tlist entry (the q35 `SELECT 1, URL, ...` class): the
+    /// plan's Const datum, emitted verbatim on every row. Byval-only by
+    /// admission (a byref image would need per-row arena copies — refused
+    /// fail-closed), so nothing worker- or query-arena-owned crosses to the
+    /// leader; NULL consts ride the isnull flag.
+    ConstByval { value: Datum, isnull: bool },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
     /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
@@ -1260,6 +1272,20 @@ pub fn sink_build_emit_plan(
                 },
             };
             cols.push(col);
+            continue;
+        }
+        if let Some(c) = te.expr.as_const() {
+            // Const tlist entry (q35's `SELECT 1, URL, ...` class): byval
+            // images only — the emit-buf and table drains copy the datum
+            // verbatim per row; a byref const would need arena
+            // materialization (refuse fail-closed, as before this arm).
+            if !c.constbyval && !c.constisnull {
+                return None;
+            }
+            cols.push(SinkEmitCol::ConstByval {
+                value: if c.constisnull { Datum::null() } else { c.constvalue },
+                isnull: c.constisnull,
+            });
             continue;
         }
         return None;
@@ -1463,6 +1489,11 @@ fn emit_row(
                 values.push(pg.trans_value);
                 nulls.push(pg.trans_value_is_null);
             },
+            // Plan-owned byval datum, copied verbatim (admission gate).
+            SinkEmitCol::ConstByval { value, isnull } => {
+                values.push(value);
+                nulls.push(isnull);
+            }
             // fc_int8_avg's exact core: strict (NULL trans → NULL),
             // count == 0 → NULL, else the int64_avg_div image.
             // SAFETY: non-null _int8 transvalue is a live merged image
@@ -1625,8 +1656,22 @@ pub fn agg_sink_plan_shape_ok(node: &AggStateData<'_>) -> bool {
 /// (bounded Local discipline) and the runtime backstop fails closed instead
 /// of migrating. Must run BEFORE `agg_hash_compact_try_arm*`.
 pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
+    agg_sink_set_cap_spill(node, cap, false);
+}
+
+/// [`agg_sink_set_cap`] with the M3.5 spill-armed admission flag: when the
+/// engagement carries a live spill arm, the compact admission gates skip
+/// the ESTIMATE-based SpillRisk refusal for word-keyed shapes (a budget
+/// crossing degrades to spill epochs, not an error) — the q33@100M hmm=2
+/// cliff was a pure estimate refusal that the landed spill arm could have
+/// absorbed. Canonical bytes-keyed (Intern-bearing) shapes keep the
+/// phase-1 refusal regardless (their runs are not spillable); the mk
+/// admission checks that per shape. Leader probes and worker arms MUST
+/// pass the same flag (the F1 leader/worker-verdict invariant).
+pub fn agg_sink_set_cap_spill(node: &mut AggStateData<'_>, cap: u32, spill_ok: bool) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = Some(cap);
+        ph.sink_spill_ok = spill_ok;
     }
 }
 
@@ -1637,6 +1682,7 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
 pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = None;
+        ph.sink_spill_ok = false;
     }
 }
 
@@ -1821,6 +1867,46 @@ pub fn agg_sink_flush_if_due(
     }
 }
 
+/// LIVE bytes of a word-keyed sink table: entry line (16 B at ≤0.5 fill),
+/// key words, and the state block per live row — the compact spill gate's
+/// own per-entry arithmetic, applied to `nrows` instead of retained
+/// capacity. Used by the spill-armed pressure/backstop accounting only.
+pub(crate) fn sink_table_live_bytes(t: &LaneAggTable) -> usize {
+    t.nrows() * (16 + 8 * table_key_words(t) + t.state_bytes())
+}
+
+/// Force-flush the armed table into a run NOW, regardless of the cap
+/// (`None` = empty table, nothing to flush). The budget-pressure spill law
+/// (mt16-cliffs, the q33@100M hmm=2 cliff): when half-limit pressure trips
+/// on a spill-armed engagement, the drain flushes the bounded table through
+/// this and spills the accumulated runs as one epoch instead of refusing —
+/// the mem-leg pressure is table-driven there, and the flush drains it.
+/// Same canonical-twin + intern-reset semantics as [`agg_sink_flush_if_due`]
+/// (the caller MUST honor the reset flag identically).
+pub fn agg_sink_flush_now(node: &mut AggStateData<'_>) -> Option<(SinkRun, bool)> {
+    let ph = node.perhash.as_mut()?;
+    let hash_mem_limit = ph.hash_mem_limit;
+    let ch = ph.compact.as_mut()?;
+    if ch.table.len() == 0 {
+        return None;
+    }
+    if compact_canon_shape(ch).is_some() {
+        let run = sink_flush_table_canon(ch);
+        let reset_intern = ch
+            .intern
+            .as_ref()
+            .is_some_and(|t| t.mem_used() > hash_mem_limit / 4);
+        if reset_intern {
+            if let Some(t) = ch.intern.as_mut() {
+                t.reset();
+            }
+        }
+        Some((run, reset_intern))
+    } else {
+        Some((sink_flush_table(&mut ch.table), false))
+    }
+}
+
 /// Half-limit budget PRESSURE (the compact backstop's own condition plus
 /// headroom): the sink drain refuses on `true` (RG abort → serial rerun)
 /// BEFORE the backstop's sink-mode belt would raise its hard error — the
@@ -1831,7 +1917,18 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     let Some(ch) = ph.compact.as_ref() else { return false };
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used();
-    let mem = ch.table.mem_used()
+    // Spill-armed sink builds count the table's LIVE rows, not its retained
+    // capacity: `LaneAggTable::reset` (the flush) keeps capacity, so
+    // capacity-based accounting re-trips permanently after the first
+    // pressure flush and the spill law could never drain the pressure. The
+    // retained capacity is the bounded flush-cycle working set (≤ the cap's
+    // sizing, inside the R3 full-budget envelope), not growth.
+    let table_mem = if ph.sink_cap.is_some() && ph.sink_spill_ok {
+        sink_table_live_bytes(&ch.table)
+    } else {
+        ch.table.mem_used()
+    };
+    let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):
@@ -1880,12 +1977,23 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 // the plain full drain with zero data loss, no abort, no rerun.
 //
 // Selection total order (the rule-2 analog for agg groups): (badness,
-// null-key tier, canonical key words). Group keys are globally unique
-// (hash-partitioned, one bucket each; the NULL group is unique), so the
-// order is total and the winner set is a PURE FUNCTION OF THE DATA —
-// independent of worker claim order and of bucket geometry. Against C /
-// the serial relaxed arm the boundary tie group is the ratified
-// count-gated class (the q31/q32/q33 precedent).
+// null-key tier, canonical key image). The key image is repr-comparable:
+// word tables use the canonical key words, canonical-bytes tables (the
+// m2-coverage-c3 text car) use the canonical key BYTES themselves. Group
+// keys are globally unique (hash-partitioned, one bucket each; the NULL
+// group is unique), so the order is total and the winner set is a PURE
+// FUNCTION OF THE DATA — independent of worker claim order and of bucket
+// geometry. Against C / the serial relaxed arm the boundary tie group is
+// the ratified count-gated class (the q31/q32/q33 precedent).
+//
+// SELECTION-ORDER TOTALITY LAW (train-14 P0, topn x bytes — the mt16 v4
+// stop finding): every key representation the sink ADMITS must carry a
+// repr-comparable image in this selection order; a car that adds a key
+// repr without extending the image vocabulary must DEGRADE the top-N at
+// leader-side admission, before any worker arms it. (Train-13 composed
+// c3's bytes tables with sort-b's word-only selection and covered
+// spill x bytes and spill x topn but not topn x bytes — every text
+// `GROUP BY .. ORDER BY count DESC LIMIT` panicked at combine.)
 // ---------------------------------------------------------------------------
 
 /// The armed combine-phase top-N: `transno`'s raw int8 transvalue is the
@@ -1904,13 +2012,23 @@ pub const SINK_TOPN_MAX_BOUND: u32 = 1 << 16;
 /// One winner candidate. FIELD ORDER IS THE SELECTION TOTAL ORDER (derived
 /// lexicographic Ord): badness first (monotone-worse image of the order key
 /// under the direction), then the null-group tier, then the canonical key
-/// words — unique per group, so two candidates never compare equal before
-/// the payload fields.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// image — unique per group, so two candidates never compare equal before
+/// the payload fields. Word tables carry the key words in `kw` (and an
+/// empty, allocation-free `key_bytes`); canonical-bytes tables carry the
+/// key bytes in `key_bytes` (and `kw = [0, 0]`) — one engagement's
+/// candidates are always same-repr, so the two vocabularies never
+/// interleave in a compare that matters.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SinkTopnCand {
     badness: u64,
     null_key: bool,
     kw: [u64; 2],
+    /// Canonical key BYTES (c3 bytes-keyed tables): the repr-comparable
+    /// selection image where no fixed-width key words exist. Owned — the
+    /// merged partition table dies with its combine claim, but candidates
+    /// live to the finalize truncate-merge. Allocated only for rows that
+    /// actually enter the bounded heap (<= bound + improvements).
+    key_bytes: Box<[u8]>,
     /// Payload: the winner's home bucket + row index in that bucket's emit
     /// buffer (`sink_emit_bucket` iterates merged rows 0..n in table order,
     /// so the selection row index IS the buf row index).
@@ -1929,9 +2047,11 @@ pub fn sink_topn_candidates(
 ) -> Option<Vec<SinkTopnCand>> {
     let n = t.nrows();
     let k = (spec.bound as usize).min(n);
+    let bytes_repr = t.repr() == KeyRepr::Bytes;
     // Max-heap: the WORST kept candidate on top; strict-better replacement.
     let mut heap: std::collections::BinaryHeap<SinkTopnCand> =
         std::collections::BinaryHeap::with_capacity(k.saturating_add(1));
+    let mut scratch = [0u8; 8];
     for row in 0..n {
         // SAFETY: row < nrows; the row's state block holds the merged
         // AggPerGroup array (combine contract); transno bounds-checked by
@@ -1943,16 +2063,42 @@ pub fn sink_topn_candidates(
             return None;
         }
         let badness = crate::compact::topkfin_badness(pg.trans_value.as_i64(), spec.desc);
-        let (null_key, kw) = match row_key_words(t, row) {
-            Some(w) => (false, w),
-            None => (true, [0, 0]),
+        // Borrowed key image — the owned candidate (bytes copy) is built
+        // only when the row actually enters the heap.
+        let (null_key, kw, kb): (bool, [u64; 2], &[u8]) = if bytes_repr {
+            match t.row_key_bytes(row, &mut scratch) {
+                Some(b) => (false, [0, 0], b),
+                None => (true, [0, 0], &[]),
+            }
+        } else {
+            match row_key_words(t, row) {
+                Some(w) => (false, w, &[]),
+                None => (true, [0, 0], &[]),
+            }
         };
-        let cand = SinkTopnCand { badness, null_key, kw, bucket, row: row as u32 };
-        if heap.len() < k {
-            heap.push(cand);
-        } else if heap.peek().is_some_and(|worst| cand < *worst) {
-            heap.pop();
-            heap.push(cand);
+        let keep = if heap.len() < k {
+            true
+        } else {
+            // Strict-better against the worst kept candidate, compared in
+            // the selection total order (field order of SinkTopnCand); the
+            // key image is unique per group so a full tie never happens.
+            heap.peek().is_some_and(|worst| {
+                (badness, null_key, &kw, kb)
+                    < (worst.badness, worst.null_key, &worst.kw, &*worst.key_bytes)
+            })
+        };
+        if keep {
+            if heap.len() >= k {
+                heap.pop();
+            }
+            heap.push(SinkTopnCand {
+                badness,
+                null_key,
+                kw,
+                key_bytes: kb.into(),
+                bucket,
+                row: row as u32,
+            });
         }
     }
     let mut v = heap.into_vec();
@@ -1966,10 +2112,12 @@ pub fn sink_topn_candidates(
 /// the finalize's O(partitions)-ish envelope.
 pub fn sink_topn_merge(lists: &[Vec<SinkTopnCand>], bound: usize) -> Vec<(u16, u32)> {
     use std::cmp::Reverse;
-    let mut heads: std::collections::BinaryHeap<Reverse<(SinkTopnCand, usize)>> =
+    // Borrowed heads: candidates own their bytes key image, so the merge
+    // compares by reference instead of copying list entries around.
+    let mut heads: std::collections::BinaryHeap<Reverse<(&SinkTopnCand, usize)>> =
         std::collections::BinaryHeap::with_capacity(lists.len());
     for (li, l) in lists.iter().enumerate() {
-        if let Some(&c) = l.first() {
+        if let Some(c) = l.first() {
             heads.push(Reverse((c, li)));
         }
     }
@@ -1979,7 +2127,7 @@ pub fn sink_topn_merge(lists: &[Vec<SinkTopnCand>], bound: usize) -> Vec<(u16, u
         let Some(Reverse((c, li))) = heads.pop() else { break };
         winners.push((c.bucket, c.row));
         cursor[li] += 1;
-        if let Some(&next) = lists[li].get(cursor[li]) {
+        if let Some(next) = lists[li].get(cursor[li]) {
             heads.push(Reverse((next, li)));
         }
     }
@@ -2007,6 +2155,7 @@ pub fn sink_emit_plan_all_byval(plan: &SinkEmitPlan) -> bool {
             SinkEmitCol::Key
                 | SinkEmitCol::Derived(_)
                 | SinkEmitCol::MultiComp { .. }
+                | SinkEmitCol::ConstByval { .. }
                 | SinkEmitCol::Agg { .. }
         )
     })
@@ -2050,6 +2199,8 @@ fn table_emit_datum(
                 &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(transno as usize);
             (pg.trans_value, pg.trans_value_is_null)
         },
+        // Plan-owned byval datum, copied verbatim (admission gate).
+        SinkEmitCol::ConstByval { value, isnull } => (value, isnull),
         // Byref emit kinds never reach the table drain: table adoption is
         // gated by sink_emit_plan_all_byval (MultiText/MultiNumeric/Avg*
         // are byref) — fail-soft NULL rather than asserting.
@@ -2350,6 +2501,20 @@ mod tests {
             Some(k) => t.probe_int(k, t.hash_key_int(k as u64)),
             None => t.probe_null(),
         };
+        bump_probe(pr, count, max);
+    }
+
+    // The same two toy transitions over a canonical-bytes key (the c3 text
+    // car's table repr — the topn x bytes composition corpus).
+    fn bump_bytes(t: &mut LaneAggTable, key: Option<&[u8]>, count: i64, max: i64) {
+        let pr = match key {
+            Some(k) => t.probe_bytes(k, t.hash_key_bytes(k)),
+            None => t.probe_null(),
+        };
+        bump_probe(pr, count, max);
+    }
+
+    fn bump_probe(pr: ::lanetable::Probe, count: i64, max: i64) {
         let pg = pr.states.cast::<AggPerGroup>();
         unsafe {
             if pr.is_new {
@@ -3385,5 +3550,165 @@ mod tests {
         assert_eq!(w.len(), 3);
         assert_eq!(w[0], (5, l[0].row));
         assert!(sink_topn_merge(&[l], 0).is_empty());
+    }
+
+    // -- Top-N x canonical-bytes keys (train-14 P0: the topn x c3 panic) -----
+
+    fn mk_bytes_table(hint: usize) -> LaneAggTable {
+        LaneAggTable::with_config(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            hint,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        )
+    }
+
+    /// The c3-class corpus: shared >16-byte prefixes (the ClickBench URL
+    /// shape — every prefix-only image would collide), keys equal through
+    /// byte 16 differing only in length, short (<= 8 B packed-word) keys,
+    /// and the empty canonical key.
+    fn bytes_corpus() -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = (0..40)
+            .map(|i| format!("http://example.com/shared-prefix/{i:03}").into_bytes())
+            .collect();
+        keys.push(b"pppppppppppppppp".to_vec()); // exactly 16
+        keys.push(b"ppppppppppppppppX".to_vec()); // 16-byte prefix tie
+        keys.push(b"ppppppppppppppppXY".to_vec());
+        keys.push(b"a".to_vec());
+        keys.push(b"ab".to_vec());
+        keys.push(b"abcdefgh".to_vec()); // 8-byte packed-word edge
+        keys.push(Vec::new()); // the empty canonical key
+        keys
+    }
+
+    /// Reference selection for bytes tables: full sort under (badness,
+    /// null tier, canonical key bytes), truncated to k. `None` = the NULL
+    /// group.
+    fn topn_reference_bytes(
+        t: &LaneAggTable,
+        spec: &SinkTopnSpec,
+        k: usize,
+    ) -> Vec<Option<Vec<u8>>> {
+        let mut scratch = [0u8; 8];
+        let mut all: Vec<(u64, bool, Vec<u8>)> = (0..t.nrows())
+            .map(|row| {
+                let pg = unsafe {
+                    &*t.row_states(row)
+                        .cast_const()
+                        .cast::<AggPerGroup>()
+                        .add(spec.transno as usize)
+                };
+                assert!(!pg.trans_value_is_null && !pg.no_trans_value);
+                let b = crate::compact::topkfin_badness(pg.trans_value.as_i64(), spec.desc);
+                match t.row_key_bytes(row, &mut scratch) {
+                    Some(kb) => (b, false, kb.to_vec()),
+                    None => (b, true, Vec::new()),
+                }
+            })
+            .collect();
+        all.sort_unstable();
+        all.truncate(k);
+        all.into_iter().map(|(_, nl, kb)| if nl { None } else { Some(kb) }).collect()
+    }
+
+    fn cand_keys_bytes(t: &LaneAggTable, cands: &[SinkTopnCand]) -> Vec<Option<Vec<u8>>> {
+        let mut scratch = [0u8; 8];
+        cands
+            .iter()
+            .map(|c| t.row_key_bytes(c.row as usize, &mut scratch).map(<[u8]>::to_vec))
+            .collect()
+    }
+
+    #[test]
+    fn topn_candidates_bytes_match_reference() {
+        // The mt16 stop-finding shape at unit altitude: a canonical-bytes
+        // (c3 text) table under an armed top-N spec. Pre-fix this hit
+        // row_key_words' Bytes unreachable!; post-fix the selection runs on
+        // the canonical key bytes. Dense count ties force the bytes
+        // tie-break; a NULL group rides along.
+        let mut t = mk_bytes_table(64);
+        for (i, key) in bytes_corpus().iter().enumerate() {
+            for _ in 0..(i % 5 + 1) {
+                bump_bytes(&mut t, Some(key.as_slice()), 1, i as i64);
+            }
+        }
+        bump_bytes(&mut t, None, 3, 0);
+        for desc in [false, true] {
+            for bound in [1u32, 5, 10, 100] {
+                let spec = SinkTopnSpec { transno: 0, desc, bound };
+                let got = sink_topn_candidates(&t, &spec, 0).expect("no NULL order keys");
+                assert_eq!(got.len(), (bound as usize).min(t.nrows()));
+                assert_eq!(
+                    cand_keys_bytes(&t, &got),
+                    topn_reference_bytes(&t, &spec, bound as usize),
+                    "desc={desc} bound={bound}"
+                );
+                // Sorted best-first under the total order.
+                assert!(got.windows(2).all(|w| w[0] < w[1]));
+            }
+        }
+    }
+
+    #[test]
+    fn topn_bytes_winner_set_insertion_order_independent() {
+        // The determinism half of the selection-order totality law: the
+        // winner KEY SET is a pure function of the data — merged-table row
+        // order (worker claim order) must not leak into it, including on
+        // the >16-byte shared-prefix and prefix-tie classes.
+        let keys = bytes_corpus();
+        let count_of = |i: usize| (i % 3 + 1) as i64; // dense badness ties
+        let mut fwd = mk_bytes_table(64);
+        for (i, key) in keys.iter().enumerate() {
+            bump_bytes(&mut fwd, Some(key.as_slice()), count_of(i), 0);
+        }
+        let mut rev = mk_bytes_table(64);
+        for (i, key) in keys.iter().enumerate().rev() {
+            bump_bytes(&mut rev, Some(key.as_slice()), count_of(i), 0);
+        }
+        for desc in [false, true] {
+            for bound in [1u32, 4, 9, 33] {
+                let spec = SinkTopnSpec { transno: 0, desc, bound };
+                let a = cand_keys_bytes(
+                    &fwd,
+                    &sink_topn_candidates(&fwd, &spec, 0).expect("selects"),
+                );
+                let b = cand_keys_bytes(
+                    &rev,
+                    &sink_topn_candidates(&rev, &spec, 0).expect("selects"),
+                );
+                assert_eq!(a, b, "desc={desc} bound={bound}");
+            }
+        }
+    }
+
+    #[test]
+    fn topn_merge_bytes_matches_flat_reference() {
+        // Per-bucket selection + truncate-merge == selection over the
+        // union, for an arbitrary 4-way split of the bytes corpus
+        // (partition independence over the bytes image).
+        let keys = bytes_corpus();
+        let spec = SinkTopnSpec { transno: 0, desc: true, bound: 13 };
+        let mut union = mk_bytes_table(64);
+        let mut parts: Vec<LaneAggTable> = (0..4).map(|_| mk_bytes_table(64)).collect();
+        for (i, key) in keys.iter().enumerate() {
+            let c = (i % 5 + 1) as i64; // dense ties
+            bump_bytes(&mut union, Some(key.as_slice()), c, 0);
+            bump_bytes(&mut parts[(i * 7919) % 4], Some(key.as_slice()), c, 0);
+        }
+        let lists: Vec<Vec<SinkTopnCand>> = parts
+            .iter()
+            .enumerate()
+            .map(|(b, t)| sink_topn_candidates(t, &spec, b as u16).unwrap())
+            .collect();
+        let winners = sink_topn_merge(&lists, spec.bound as usize);
+        let got: Vec<Option<Vec<u8>>> = winners
+            .iter()
+            .map(|&(b, row)| {
+                let mut scratch = [0u8; 8];
+                parts[b as usize].row_key_bytes(row as usize, &mut scratch).map(<[u8]>::to_vec)
+            })
+            .collect();
+        assert_eq!(got, topn_reference_bytes(&union, &spec, spec.bound as usize));
     }
 }
