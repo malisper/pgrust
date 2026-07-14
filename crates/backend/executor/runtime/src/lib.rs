@@ -65,7 +65,7 @@ pub use lifecycle::{
     ForeignParticipationDisabled, Generation, LifecycleState, ParticipantOwner, QueryTaskLifecycle,
     TaskHandle, TaskLifecycle, TaskParticipant,
 };
-pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
+pub use morsel::{MorselRange, MorselSource, StreamSource, SyntheticMorselSource};
 pub use rg::{
     CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork,
     WeakRgHandle,
@@ -389,6 +389,14 @@ impl Runtime {
     /// [`Semaphore::io_section`].
     pub fn execution_permits(&self) -> &Semaphore {
         &self.sched.permits
+    }
+
+    /// Stream-source producer wake: after `StreamSource::publish`/`close`
+    /// (or any stream-fed [`MorselSource`]'s watermark advance), wake parked
+    /// workers so starved claims re-check. Epoch-guarded parks make the
+    /// publish-then-wake sequence lost-wakeup-free.
+    pub fn notify_source_progress(&self) {
+        self.sched.park.wake_all();
     }
 
     /// Park-lot epoch; capture BEFORE worker_step, park on Idle.
