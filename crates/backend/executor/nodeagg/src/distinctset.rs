@@ -105,6 +105,20 @@ fn stringhash_set_enabled() -> bool {
     })
 }
 
+/// C3 probe-prefetch kill switch: PGRUST_LANE_V2_INTSET_BATCH=0 keeps the
+/// staged batch insert on the per-key loop (no hash pass, no look-ahead
+/// prefetch). Both arms are element-for-element identical — this is a pure
+/// perf A/B channel.
+fn intset_batch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_INTSET_BATCH").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
 /// Set size at which a legacy set promotes to the stringhash arm. Default
 /// 56 = INIT_TABLE * 7/8, the legacy table's first grow point (a gated set
 /// never grows legacy — it promotes instead). 0 = promote on first insert
@@ -409,11 +423,21 @@ impl<'mcx> DistinctSet<'mcx> {
     /// in row order with the precomputed hash. Element-for-element identical
     /// to `insert_i64` in the same order.
     pub(crate) fn insert_i64_batch(&mut self, keys: &[i64], hashes: &mut Vec<u64>) {
-        if matches!(self.table, ProbeTab::Int(_)) {
-            // Promoted arm: no precomputed-hash pass (the kernel hashes
-            // in-probe).
-            for &k in keys {
-                self.insert_i64(k);
+        if let ProbeTab::Int(t) = &mut self.table {
+            // Promoted arm: the stringhash batched kernel (pass-1 CRC hash
+            // lane, pass-2 row-order probe with home-cell look-ahead
+            // prefetch) — element-for-element identical to the per-key
+            // loop; the value array (spill/replay/export authority) keeps
+            // row-order appends either way.
+            if intset_batch_enabled() {
+                let ints = &mut self.ints;
+                t.insert_batch(keys, hashes, |k| ints.push(k));
+            } else {
+                for &k in keys {
+                    if t.insert(k) {
+                        self.ints.push(k);
+                    }
+                }
             }
             return;
         }
