@@ -206,6 +206,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // EA-on-morsels (docs/design/ea-morsels.md §6): the runtime admission
+    // walk's refusal records for a node — (arm, reason) pairs. None = no
+    // records, print nothing (records exist ONLY on armed + instrumented
+    // walks, which is the emission gate keeping unarmed EA output C-exact).
+    pub fn query_desc_runtime_ea_refusals(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(&'static str, &'static str)>>
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,

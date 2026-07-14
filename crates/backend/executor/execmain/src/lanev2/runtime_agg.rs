@@ -901,6 +901,16 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
         refuse("instrumented/EPQ");
+        // EA-on-morsels transparency (ea-morsels.md §6): the agg arm's
+        // TIMING OFF un-refusal is the inc-1b car; until then an EA walk
+        // reaching this gate records the honest reason for the EXPLAIN line.
+        if estate.es_instrument != 0 {
+            estate.runtime_ea_record_refusal(
+                agg.plan.plan.plan_node_id,
+                "agg",
+                "instrumented",
+            );
+        }
         return Ok(false);
     }
     if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
