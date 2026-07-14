@@ -258,6 +258,14 @@ pub(super) struct RuntimeSortShared {
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
     started: AtomicUsize,
+    /// Helpers that have EXITED `helper_drive` (every exit path — refused
+    /// bind, errored, drove to completion, panic-unwind — bumps exactly
+    /// once, by drop guard; the m35-spill inc-2c `ExitBump` pattern, ported
+    /// here per the inc-2c FLAG). Liveness reap input: a pinned RG is
+    /// invisible to pool workers, so once `exited >= launched` with the RG
+    /// incomplete, nobody will ever step it — the leader must reap or park
+    /// forever.
+    exited: AtomicUsize,
     /// First worker-phase error (entry-phase errors ride the ordinary
     /// parallel message channel).
     error: Mutex<Option<Box<PgError>>>,
@@ -966,9 +974,30 @@ fn runtime_sort_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeSortShared>) {
     let _ = shared;
-    let Some(target) = payload.pcxt_shared.get() else { return };
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // Every launched helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`;
+    // m35-spill inc-2c port).
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("sort");
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
+    let Some(target) = payload.pcxt_shared.get() else {
+        lane_trace("runtime-sort: helper refused (no pcxt shared)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        lane_trace("runtime-sort: helper refused (rg gone)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
     let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-sort: helper refused (no external lane)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
@@ -984,6 +1013,19 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeSortShar
         Err(e) => {
             if entered.get() {
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader parks on
+                // its recheck cadence until the reap. Drive the closed
+                // generation to completion here (pure protocol cleanup,
+                // the drain_rg discipline); post-drive errors find it
+                // already complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 lane_trace(&format!("runtime-sort: helper bind refused: {}", e.message()));
                 payload.refused.fetch_add(1, Ordering::SeqCst);
@@ -1327,6 +1369,7 @@ fn engage<'mcx>(
         bound,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
+        exited: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         broke: AtomicBool::new(false),
@@ -1430,6 +1473,7 @@ fn engage_ceremony<'mcx>(
         }
 
         // Submit-and-park (the WaitForParallelWorkersToFinish shape).
+        let mut all_exited_seen = false;
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -1449,7 +1493,85 @@ fn engage_ceremony<'mcx>(
                 drain_rg(rt, &rg);
                 return Ok(EngageOutcome::Fallback);
             }
-            parallel::wait_parallel_finish_quantum();
+            // LIVENESS backstop (m1 helper-death fix 5cf96f83d, ported from
+            // runtime_scan.rs — F1 defect layer 2a; this arm lacked it until
+            // the M5-2 consolidation): every launched helper's task has
+            // ENDED (normal hook exit keeps BGWH_STARTED until after the
+            // drive, so this cannot trip mid-drive) yet the RG is incomplete
+            // — helpers died or returned without a channel message and
+            // without driving. Nothing claimed => clean serial fallback;
+            // claimed => reap if possible and surface a real error (with the
+            // arm's budget/contract fallbacks honored first).
+            if parallel::parallel_workers_all_stopped(pcxt) {
+                if let Some(o) = waiter.try_wait() {
+                    break o;
+                }
+                let claimed = rg.stats().tasks_claimed;
+                lane_trace(&format!(
+                    "runtime-sort: helpers all stopped, rg incomplete (claimed={claimed})"
+                ));
+                rg.abort();
+                let drained = drain_rg(rt, &rg);
+                if let Some(e) = payload.take_error() {
+                    return Err(e);
+                }
+                if payload
+                    .full
+                    .as_ref()
+                    .is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
+                {
+                    // (`self::` — the loop-local `refused` count shadows
+                    // the module-level trace fn in the value namespace.)
+                    self::refused("per-participant sort budget crossed at accept");
+                    return Ok(EngageOutcome::Fallback);
+                }
+                if payload.broke.load(Ordering::SeqCst) {
+                    lane_trace("runtime-sort: sink contract break; serial fallback");
+                    return Ok(EngageOutcome::Fallback);
+                }
+                if claimed == 0 && drained {
+                    return Ok(EngageOutcome::Fallback);
+                }
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime sort helpers exited before completing the sort",
+                )));
+            }
+            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
+            // arm class; the agg leg-4d wedge): a pinned RG is invisible to
+            // pool workers, so once every launched helper has exited
+            // without the RG completing, NOBODY will ever step it and the
+            // leader parks forever (the all-stopped probe above cannot see
+            // helpers that exited their drive but parked back to the pool).
+            // Reap: abort + drain the closed generation ourselves; the next
+            // try_wait surfaces Aborted and the existing error/budget/broke/
+            // fallback handling below decides. Two consecutive sightings
+            // before reaping let a mid-settlement completion land first —
+            // belt only: a helper's exit bump happens-after its drive's
+            // completion, and abort + drive_pinned on a completed RG are
+            // benign no-ops.
+            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+                if all_exited_seen && waiter.try_wait().is_none() {
+                    lane_trace(
+                        "runtime-sort: all helpers exited without completing the RG — reaping",
+                    );
+                    rg.abort();
+                    drain_rg(rt, &rg);
+                    continue;
+                }
+                all_exited_seen = true;
+            }
+            // A raised cancel disposition (statement_timeout /
+            // pg_cancel_backend) surfaces from the latch quantum as an Err
+            // (F1 defect layer 2b): abort + drain the RG, then propagate —
+            // exactly the CFI branch above. Discarding it made this park
+            // loop uncancellable (the F1 chaos finding the quantum's
+            // contract documents; fixed at the M5-2 consolidation).
+            if let Err(e) = parallel::wait_parallel_finish_quantum() {
+                rg.abort();
+                drain_rg(rt, &rg);
+                return Err(e);
+            }
         };
 
         if let Some(e) = payload.take_error() {
@@ -1587,15 +1709,33 @@ fn adopt_winners<'mcx>(
 }
 
 /// Reap a pinned RG no helper will drive (abort/fallback paths) — protocol
-/// cleanup driving, not leader work execution (§2.5).
-fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) {
+/// cleanup driving, not leader work execution (§2.5). Abort + BOUNDED drain
+/// (M5-2 consolidation: this arm's drain previously spun UNBOUNDED for an
+/// external lane and could block forever on a dead participant's pin — the
+/// scan/agg/hashjoin arms' bounded shape is the family discipline). True =
+/// the RG completed; false = it could not be completed — the RG and its
+/// slot are deliberately LEAKED (bounded by the slot array; a process
+/// restart resets everything) and the caller must surface an error rather
+/// than wait forever.
+fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
     rg.abort();
-    let lane = loop {
+    // Bounded lane wait (~2s): helper drives settle within a morsel.
+    let mut lane = None;
+    for _ in 0..4000 {
         if let Some(l) = rt.acquire_external_lane() {
-            break l;
+            lane = Some(l);
+            break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let Some(lane) = lane else {
+        lane_trace("runtime-sort: LEAKED pinned RG (no external lane for the drain)");
+        return false;
     };
     let mut local = lane.local();
-    let _ = rt.drive_pinned(&mut local, rg);
+    let drained = rt.try_drain_pinned(&mut local, rg, 4000).is_some();
+    if !drained {
+        lane_trace("runtime-sort: LEAKED pinned RG (drain gave up — dead participant?)");
+    }
+    drained
 }
