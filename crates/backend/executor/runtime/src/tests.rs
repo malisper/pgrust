@@ -1038,6 +1038,30 @@ fn pool_192_workers_exactly_once() {
     pool.shutdown();
 }
 
+/// DOP-192 readiness K-sweep: "K" here = the standby count (the §2.8
+/// permit model; the M5 stride fields are inert). 64 standbys against 8
+/// permits — far past the tested K=2 — must park cleanly and never break
+/// exactly-once or finalize-once.
+#[test]
+fn pool_k64_standbys_exactly_once() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 8,
+        standbys: 64,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let total = 50_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (_h, waiter) =
+        rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    pool.shutdown();
+}
+
 // ---- M1 §2.9: uring worker-loop duties (rings, boundary reap, IoGuard seams)
 
 /// Counting stand-ins for aio_uring's seam impls. aio_uring is not linked
