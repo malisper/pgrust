@@ -1791,16 +1791,17 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<SinkE
     Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
 }
 
-/// ROW-SUBSET materializer: finalize+project ONLY the given table rows
-/// (ascending row order — callers sort their row sets so the emit stays a
-/// single ordered table walk) into a compact self-contained
-/// [`SinkEmitBuf`]. Row `rows[i]` of the table becomes row `i` of the buf.
-/// Byte-compatible with [`sink_emit_bucket`] by construction: the identical
-/// `emit_row` body runs over a row subset, so each emitted row's datums and
-/// arena images equal the full emit's rows at the original indices.
-/// SEAM NOTE (band-2a x topn-winners-phase2): the winners-only lane adds a
-/// function with this exact name, signature and body — on merge, keep ONE
-/// copy (they are contract-identical; both callers stay valid).
+/// ROW-SUBSET materializer (topn-winners-only inc-3 + the band-2a freeze
+/// member filter — ONE shared copy, contract-identical callers): finalize+
+/// project ONLY the given table rows (ascending row order — the caller
+/// sorts its row set so the emit stays a single ordered table walk)
+/// into a compact self-contained [`SinkEmitBuf`]. Row `rows[i]` of the
+/// table becomes row `i` of the buf — winners callers remap their
+/// candidates' `(bucket, row)` payloads to compact indices with the same
+/// ordering. Byte-compatible with [`sink_emit_bucket`] by construction:
+/// the identical `emit_row` body runs over a row subset, so each emitted
+/// row's datums and arena images equal the full emit's rows at the
+/// original indices.
 pub fn sink_emit_bucket_rows(
     plan: &SinkEmitPlan,
     t: &LaneAggTable,
@@ -2691,6 +2692,18 @@ pub fn agg_sink_emit_bucket_len(node: &AggStateData<'_>, b: usize) -> Option<usi
 /// drain (defensive; the lane's consumers never mix the two).
 pub fn agg_sink_emit_unstarted(node: &AggStateData<'_>) -> bool {
     node.sink_emit.as_ref().is_some_and(|st| st.bucket == 0 && st.pos == 0)
+}
+
+/// Take the composed top-N winner list off the adopted emit state (the
+/// batched drain's winner-directed put — topn-winners-only amendment: the
+/// winner list IS the drain in BOTH selection modes, so the batched sort
+/// feed emits the identical row sequence as the cursor drain's composed
+/// path instead of re-selecting tie members in the bounded heap). `None` =
+/// no composition (or degraded) — the caller walks the buckets as before.
+/// Taking (not borrowing) keeps the caller free to re-borrow the node per
+/// row; the drain consumes the state wholesale afterwards.
+pub fn agg_sink_emit_take_winners(node: &mut AggStateData<'_>) -> Option<Vec<(u16, u32)>> {
+    node.sink_emit.as_mut().and_then(|st| st.winners.take())
 }
 
 /// Store row `row` of bucket `b` into the node's result slot (the
@@ -4115,5 +4128,158 @@ mod tests {
         assert!(entries.iter().all(|e| e.len() == 6), "6-byte LE image prefix");
         let rows = sink_freeze_member_rows(&ch.table, 1, &shape, &entries);
         assert_eq!(rows, vec![0, 1], "first two insertion rows are the members");
+    }
+
+    // -- winners-only compact materialization (topn-winners-only inc-3) ----
+
+    /// Row `ci` of `compact` must equal row `fi` of `full` under `plan`:
+    /// byval datums bit-compare; MultiText compares arena payload bytes
+    /// (each buf owns its arena, so pointers never compare).
+    fn assert_rows_equal(
+        plan: &SinkEmitPlan,
+        full: &SinkEmitBuf,
+        fi: usize,
+        compact: &SinkEmitBuf,
+        ci: usize,
+    ) {
+        let natts = plan.cols.len();
+        for (c, col) in plan.cols.iter().enumerate() {
+            let (fv, fn_) = (full.values[fi * natts + c], full.nulls[fi * natts + c]);
+            let (cv, cn) = (compact.values[ci * natts + c], compact.nulls[ci * natts + c]);
+            assert_eq!(fn_, cn, "null flag col {c} (full row {fi} vs compact {ci})");
+            match col {
+                SinkEmitCol::MultiText => {
+                    assert_eq!(
+                        emit_text(full, fv),
+                        emit_text(compact, cv),
+                        "text col {c} (full row {fi} vs compact {ci})"
+                    );
+                }
+                _ => {
+                    if !cn {
+                        assert_eq!(
+                            fv.as_i64(),
+                            cv.as_i64(),
+                            "datum col {c} (full row {fi} vs compact {ci})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn emit_bucket_rows_matches_full_subsets() {
+        // Word repr incl. the NULL group: every subset row of the compact
+        // emit equals the full emit's row at the original index.
+        let mut t = mk_table(64);
+        for k in 0..97i64 {
+            bump(&mut t, Some(k), k % 7 + 1, k);
+        }
+        bump(&mut t, None, 3, 0);
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        let full = sink_emit_bucket(&plan, &t).unwrap();
+        let n = t.nrows() as u32;
+        let subsets: Vec<Vec<u32>> = vec![
+            Vec::new(),
+            vec![0],
+            vec![n - 1],
+            (0..n).filter(|r| r % 3 == 1).collect(),
+            (0..n).collect(),
+        ];
+        for rows in subsets {
+            let compact = sink_emit_bucket_rows(&plan, &t, &rows).unwrap();
+            assert_eq!(compact.nrows, rows.len());
+            for (ci, &fi) in rows.iter().enumerate() {
+                assert_rows_equal(&plan, &full, fi as usize, &compact, ci);
+            }
+        }
+    }
+
+    #[test]
+    fn emit_bucket_rows_matches_full_bytes_arena() {
+        // Bytes repr (c3 text keys — arena-copied MultiText tails): compact
+        // emit's arena images equal the full emit's, row for row.
+        let mut t = mk_bytes_table(64);
+        for (i, key) in bytes_corpus().iter().enumerate() {
+            bump_bytes(&mut t, Some(key.as_slice()), (i % 5 + 1) as i64, 0);
+        }
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(0),
+            cols: vec![SinkEmitCol::MultiText, SinkEmitCol::Agg { transno: 0 }],
+        };
+        let full = sink_emit_bucket(&plan, &t).unwrap();
+        let n = t.nrows() as u32;
+        let rows: Vec<u32> = (0..n).filter(|r| r % 2 == 0).collect();
+        let compact = sink_emit_bucket_rows(&plan, &t, &rows).unwrap();
+        assert_eq!(compact.nrows, rows.len());
+        for (ci, &fi) in rows.iter().enumerate() {
+            assert_rows_equal(&plan, &full, fi as usize, &compact, ci);
+        }
+    }
+
+    /// The winners-only remap contract end-to-end at the sink unit level:
+    /// select candidates, remap their `row` payloads to compact indices
+    /// (sorted-row order), materialize only those rows — every candidate's
+    /// compact row must be byte-equal to the full emit's row at the
+    /// candidate's original table index. Dense-tie key spaces × directions
+    /// × bounds × word/bytes reprs (the design's inc-3 unit).
+    #[test]
+    fn winners_only_remap_matches_full_reference() {
+        // Word repr.
+        let mut tw = mk_table(64);
+        for k in 0..150i64 {
+            bump(&mut tw, Some(k), k % 7 + 1, k);
+        }
+        bump(&mut tw, None, 3, 0);
+        let plan_w = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        // Bytes repr (dense ties over the c3 corpus).
+        let mut tb = mk_bytes_table(64);
+        for (i, key) in bytes_corpus().iter().enumerate() {
+            bump_bytes(&mut tb, Some(key.as_slice()), (i % 5 + 1) as i64, 0);
+        }
+        let plan_b = SinkEmitPlan {
+            width: 8,
+            fixed: Some(0),
+            cols: vec![SinkEmitCol::MultiText, SinkEmitCol::Agg { transno: 0 }],
+        };
+        for (t, plan) in [(&tw, &plan_w), (&tb, &plan_b)] {
+            let full = sink_emit_bucket(plan, t).unwrap();
+            for desc in [false, true] {
+                for bound in [1u32, 7, 10, 100] {
+                    let spec = SinkTopnSpec { transno: 0, desc, bound };
+                    let mut cands =
+                        sink_topn_candidates(t, &spec, 0).expect("no NULL order keys");
+                    let mut rows: Vec<u32> = cands.iter().map(|c| c.row).collect();
+                    rows.sort_unstable();
+                    let orig: Vec<u32> = cands.iter().map(|c| c.row).collect();
+                    for c in &mut cands {
+                        c.row = rows.binary_search(&c.row).expect("candidate row") as u32;
+                    }
+                    let compact = sink_emit_bucket_rows(plan, t, &rows).unwrap();
+                    assert_eq!(compact.nrows, rows.len());
+                    for (c, &fi) in cands.iter().zip(&orig) {
+                        assert_rows_equal(plan, &full, fi as usize, &compact, c.row as usize);
+                    }
+                }
+            }
+        }
     }
 }
