@@ -1989,6 +1989,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_guc",
+ "types_resowner",
  "types_startup",
  "types_storage",
  "waitevent_seams",

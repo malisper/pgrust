@@ -93,6 +93,10 @@ pub struct BgWriterJob {
     child_slot: i32,
     /// Set by startup() (aux PGPROC acquisition); INVALID before.
     procno: AtomicI32,
+    /// The job's aux resource owner (created on the dispatcher at
+    /// startup); the envelope bind points the executing worker's
+    /// CurrentResourceOwner/AuxProcessResourceOwner cells at it.
+    aux_owner: Mutex<types_resowner::ResourceOwner>,
     state: Mutex<JobState>,
     overlay: Mutex<Overlay>,
 }
@@ -103,6 +107,7 @@ impl BgWriterJob {
             pid,
             child_slot,
             procno: AtomicI32::new(INVALID_PROC_NUMBER),
+            aux_owner: Mutex::new(types_resowner::ResourceOwner::NULL),
             state: Mutex::new(JobState {
                 inner: BgWriterState::new(),
                 armed: false,
@@ -141,11 +146,18 @@ struct EnvelopeBind {
     prev_task_proc: ProcNumber,
     prev_latch: Option<LatchHandle>,
     prev_btype: types_core::BackendType,
+    prev_cur_owner: types_resowner::ResourceOwner,
+    prev_aux_owner: types_resowner::ResourceOwner,
     prev_guc: Overlay,
 }
 
 impl EnvelopeBind {
-    fn bind(pid: pid_t, procno: ProcNumber, overlay: &Overlay) -> EnvelopeBind {
+    fn bind(
+        pid: pid_t,
+        procno: ProcNumber,
+        aux_owner: types_resowner::ResourceOwner,
+        overlay: &Overlay,
+    ) -> EnvelopeBind {
         use guc_tables::vars as v;
         let prev = EnvelopeBind {
             prev_pid: g::MyProcPid(),
@@ -153,6 +165,8 @@ impl EnvelopeBind {
             prev_task_proc: lmgr_proc::bind_task_proc(procno),
             prev_latch: g::MyLatch(),
             prev_btype: miscinit::GetMyBackendType(),
+            prev_cur_owner: resowner::CurrentResourceOwner(),
+            prev_aux_owner: resowner::AuxProcessResourceOwner(),
             prev_guc: Overlay {
                 delay_ms: v::BgWriterDelay.read(),
                 lru_maxpages: v::bgwriter_lru_maxpages.read(),
@@ -165,6 +179,11 @@ impl EnvelopeBind {
         g::SetMyProcNumber(procno);
         g::SetMyLatch(Some(LatchHandle::proc(procno)));
         miscinit::SetMyBackendType(types_core::BackendType::BgWriter);
+        // Buffer pins and the error leg's ReleaseAuxProcessResources
+        // route through the job's aux resource owner (found live: worker
+        // ResourceOwnerEnlarge on the NULL owner, fleet job ...-24fb).
+        resowner::SetCurrentResourceOwner(aux_owner);
+        resowner::SetAuxProcessResourceOwner(aux_owner);
         v::BgWriterDelay.write(overlay.delay_ms);
         v::bgwriter_lru_maxpages.write(overlay.lru_maxpages);
         v::bgwriter_lru_multiplier.write(overlay.lru_multiplier);
@@ -182,6 +201,8 @@ impl Drop for EnvelopeBind {
         v::bgwriter_lru_multiplier.write(self.prev_guc.lru_multiplier);
         v::bgwriter_flush_after.write(self.prev_guc.flush_after);
         v::track_io_timing.write(self.prev_guc.track_io_timing);
+        resowner::SetAuxProcessResourceOwner(self.prev_aux_owner);
+        resowner::SetCurrentResourceOwner(self.prev_cur_owner);
         miscinit::SetMyBackendType(self.prev_btype);
         g::SetMyLatch(self.prev_latch);
         lmgr_proc::unbind_task_proc(self.prev_task_proc);
@@ -221,9 +242,22 @@ impl BgJob for BgWriterJob {
         // shmem_exit). Without this, every post-crash relaunch dies at
         // InitAuxiliaryProcess "you already exist" and the postmaster
         // crash-loops hot (observed: fleet job ...-42c3).
+        if g::MyProcNumber() != INVALID_PROC_NUMBER
+            && g::MyLatch() == Some(LatchHandle::proc(g::MyProcNumber()))
+        {
+            // Abandoned lifecycle left the shared latch bound; restore the
+            // thread-local latch through the standard helper (its asserts
+            // require MyProcNumber still set — order before the clears;
+            // NEVER SetMyLatch(None): SwitchToSharedLatch on the next
+            // lifecycle asserts the local latch is current).
+            miscinit::SwitchBackToLocalLatch();
+        }
         let _ = lmgr_proc::bind_task_proc(INVALID_PROC_NUMBER);
         g::SetMyProcNumber(INVALID_PROC_NUMBER);
-        g::SetMyLatch(None);
+        // Owner cells are never cleared by release; a stale value trips
+        // CreateAuxProcessResourceOwner's fresh-lifecycle asserts.
+        resowner::SetCurrentResourceOwner(types_resowner::ResourceOwner::NULL);
+        resowner::SetAuxProcessResourceOwner(types_resowner::ResourceOwner::NULL);
         let init = if CHILD_INITED.get() {
             miscinit::InitProcessGlobals(self.pid);
             Ok(())
@@ -248,6 +282,7 @@ impl BgJob for BgWriterJob {
             return Err(e);
         }
         self.procno.store(g::MyProcNumber(), Ordering::Release);
+        *self.aux_owner.lock().unwrap() = resowner::CurrentResourceOwner();
 
         {
             use procsignal::ThreadSignalHandler::{Ignore, Simple};
@@ -333,7 +368,8 @@ impl BgJob for BgWriterJob {
         let overlay = *self.overlay.lock().unwrap();
         let mut st = self.state.lock().unwrap();
         let procno = self.procno();
-        let _bind = EnvelopeBind::bind(self.pid, procno, &overlay);
+        let aux_owner = *self.aux_owner.lock().unwrap();
+        let _bind = EnvelopeBind::bind(self.pid, procno, aux_owner, &overlay);
         let delay = Duration::from_millis(overlay.delay_ms.max(1) as u64);
 
         if st.hibernating {
