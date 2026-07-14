@@ -314,7 +314,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      serve_ticket, consumed at the first-touch bind, reset in the
     //      serve tail): pure worker-loop bookkeeping, no session identity,
     //      same argument as the io.rs pool-worker block (slot 7).
-    assert_eq!(count_tree(crates), 473, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 474, re-pinned by the m35-spill-joins lane 2026-07 (classification
+    // owed by train-13 car 9 — vacuum-morsels landed the source without
+    // re-pinning, so every TEST_CRATES=ALL battery at the train-13 tip
+    // failed here; flagged to the conductor + the vacuum-morsels lane):
+    //   13. access/heap/vacuumlazy/src/morsels.rs WORKER_CX — the vacuum
+    //      scan morsel drive's per-helper worker-context pointer (a raw
+    //      Cell installed for the drive's duration and cleared before the
+    //      helper exits; the pointee lives on the driving frame). Same
+    //      drive-scoped, torn-down-before-unbind class as the WORKER_EXEC
+    //      slots 4-6/9-10; no session identity — non-session TLS.
+    assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -278,6 +278,11 @@ struct PlanState {
     leaves: Vec<Vec<InnerClaim>>,
     /// Splits pending for the NEXT round.
     pending: Vec<PendingSplit>,
+    /// The shared EMPTY leaf (all zero-tuple batches map to one slot: no
+    /// build rows means sharing merges nothing, and it keeps empty level-0
+    /// batches from eating the leaf cap or — under tight envelopes where
+    /// even the empty-table capacity model refuses — split-recursing).
+    empty_leaf: Option<u16>,
 }
 
 struct PendingSplit {
@@ -424,7 +429,12 @@ impl HjSpill {
             rounds: (0..rounds_max)
                 .map(|_| (0..slots).map(|_| Mutex::new(None)).collect())
                 .collect(),
-            plan: Mutex::new(PlanState { map: None, leaves: Vec::new(), pending: Vec::new() }),
+            plan: Mutex::new(PlanState {
+                map: None,
+                leaves: Vec::new(),
+                pending: Vec::new(),
+                empty_leaf: None,
+            }),
             frozen: OnceLock::new(),
             round_plans: (0..rounds_max).map(|_| OnceLock::new()).collect(),
             outer_plan: OnceLock::new(),
@@ -1227,10 +1237,24 @@ impl runtime::TaskSetWork for FillWork {
             return;
         }
         let Some(table) = self.table() else {
-            // Demoted batch 0 (no table) has nothing to fill; leaf tables
-            // are published by the leaf combine (deps) — absence there with
-            // a live engagement is a shape error.
-            if self.leaf.is_some() {
+            // The ONLY legal absence: a demoted batch 0 (its rows moved to
+            // a leaf; nothing to fill). Everywhere else — unbatched fills
+            // and leaf fills (published by the leaf combine, deps-ordered)
+            // — a missing table is a shape error.
+            let demoted_b0 = self.leaf.is_none()
+                && self
+                    .payload
+                    .spill
+                    .as_ref()
+                    .is_some_and(|sp| sp.batch0_demoted.load(Ordering::SeqCst));
+            let unused_leaf = self.leaf.is_some_and(|leaf| {
+                self.payload
+                    .spill
+                    .as_ref()
+                    .and_then(|sp| sp.frozen.get())
+                    .is_none_or(|fp| leaf >= fp.leaves.len())
+            });
+            if !demoted_b0 && !unused_leaf {
                 self.payload.fail(
                     PgError::new(ERROR, "runtime hash-join fill ran without a published table")
                         .into(),
@@ -1310,6 +1334,26 @@ fn resolve_node(
     next_round: usize,
 ) -> bool {
     let map = st.map.as_mut().expect("plan map exists");
+    if tuples == 0 && bytes == 0 {
+        // Zero build rows: route to the shared empty leaf (probes against
+        // an empty table; LEFT/outer null-fill arms behave exactly as an
+        // empty batch must).
+        let leaf = match st.empty_leaf {
+            Some(l) => l,
+            None => {
+                let leaf = st.leaves.len();
+                if leaf >= spill.leaf_cap {
+                    payload.refuse_budget_traced("spill leaf cap exceeded");
+                    return false;
+                }
+                st.leaves.push(Vec::new());
+                st.empty_leaf = Some(leaf as u16);
+                leaf as u16
+            }
+        };
+        map.set_leaf(node, leaf);
+        return true;
+    }
     if spill.est_fits(bytes, tuples) {
         let leaf = st.leaves.len();
         if leaf >= spill.leaf_cap {
@@ -1577,6 +1621,19 @@ impl LeafBatchSink {
         self.shared.upgrade().is_none_or(|s| s.failed.load(Ordering::SeqCst))
     }
 
+    /// Leaf slots beyond the frozen plan's count are declared-but-unused
+    /// ladder capacity: skip their combine plan/freeze entirely (their
+    /// accept/probe sources are zero-granule already). Reads the frozen
+    /// count, which is set strictly before any leaf set publishes.
+    fn unused(&self) -> bool {
+        self.shared.upgrade().is_none_or(|s| {
+            s.spill
+                .as_ref()
+                .and_then(|sp| sp.frozen.get())
+                .is_none_or(|fp| self.leaf >= fp.leaves.len())
+        })
+    }
+
     fn plan_for(&self, locals: &[JoinBuildLocal]) -> Option<Arc<CombinePlan>> {
         let mut g = lockm(&self.plan);
         if let Some(p) = g.as_ref() {
@@ -1666,7 +1723,7 @@ impl runtime::ParallelSink for LeafBatchSink {
     }
 
     fn combine(&self, part: u64, _worker: usize, locals: &[JoinBuildLocal]) {
-        if self.failed() {
+        if self.failed() || self.unused() {
             return;
         }
         if let Some(plan) = self.plan_for(locals) {
@@ -1675,7 +1732,7 @@ impl runtime::ParallelSink for LeafBatchSink {
     }
 
     fn finalize(&self, locals: &[JoinBuildLocal]) {
-        if self.failed() {
+        if self.failed() || self.unused() {
             return;
         }
         let Some(shared) = self.shared.upgrade() else { return };
@@ -2476,7 +2533,19 @@ fn engage_ceremony<'mcx>(
                         "runtime-hashjoin: all helpers exited without completing the RG — reaping",
                     );
                     rg.abort();
-                    drain_rg(rt, &rg);
+                    if !drain_rg(rt, &rg) {
+                        // The one exit path with no give-up escape would be a
+                        // leader hang: a reap that cannot drain (dead/stuck
+                        // participant) surfaces an error instead of
+                        // re-reaping forever.
+                        if let Some(e) = payload.take_error() {
+                            return Err(e);
+                        }
+                        return Err(Box::new(PgError::new(
+                            ERROR,
+                            "runtime hash-join helpers exited and the RG could not be drained",
+                        )));
+                    }
                     continue;
                 }
                 all_exited_seen = true;

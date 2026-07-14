@@ -110,7 +110,7 @@ pub fn shared_probe_outer<'mcx>(
     emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
 ) -> PgResult<()> {
     let hashvalue = shared_probe_outer_hash(node, estate, outer_slot)?;
-    shared_probe_outer_hashed(node, hs, estate, table, outer_slot, hashvalue, emit)
+    probe_after_hash(node, hs, estate, table, outer_slot, hashvalue, emit)
 }
 
 /// The HJ_NEED_NEW_OUTER hash eval alone (keep-nulls semantics baked into
@@ -157,13 +157,30 @@ pub fn shared_probe_outer_hashed<'mcx>(
     hashvalue: u32,
     emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
 ) -> PgResult<()> {
-    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
     let ecxt = node.ps_ExprContext;
     {
         let e = estate.ecxt_mut(ecxt);
         e.reset();
         e.ecxt_outertuple = Some(outer_slot);
     }
+    probe_after_hash(node, hs, estate, table, outer_slot, hashvalue, emit)
+}
+
+/// The HJ_SCAN_BUCKET body after the per-row ExprContext setup — split out
+/// so the composed [`shared_probe_outer`] pays exactly ONE reset per outer
+/// row (the C get_outer_tuple→recheck discipline; the always-on unbatched
+/// probe hot loop must not gain a second reset — dormancy law).
+fn probe_after_hash<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    outer_slot: ExecSlotId,
+    hashvalue: u32,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
+    let ecxt = node.ps_ExprContext;
     let jointype = node.plan.join.jointype;
     let hslot = hs.hash_tuple_slot;
     let mcx = estate.es_query_cxt;
