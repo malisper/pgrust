@@ -1697,6 +1697,22 @@ pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option
     (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
 }
 
+/// Skip-side view of the CURRENT staged batch's selection bitmap: a bit
+/// CLEARED here is a row `seq_scan_batch_fetch` rejects on its first
+/// compare with no other observable effect — a definitive rejection even
+/// for hybrid requal quals (`lane_requal` re-runs the full qual on SET
+/// bits only; fallback rows carry SET bits by the staging OR). Batch
+/// consumers may therefore skip cleared rows without the `emit` call.
+/// Unlike `seq_scan_batch_qual_sel`, this answers only "which rows can
+/// `emit` possibly yield", NEVER "which rows pass the whole qual" — so it
+/// may serve under `lane_requal`. Gated on `nwords > 0` (the emit fast
+/// lane's own this-batch-has-live-bits guard). `None` = no live bitmap:
+/// every row must go through `emit`.
+pub fn seq_scan_batch_skip_sel<'a>(node: &'a SeqScanState<'_>) -> Option<&'a [u64]> {
+    let b = node.batch_soa.as_deref()?;
+    (b.qual_armed && b.nwords > 0).then_some(&b.sel[..b.nwords as usize])
+}
+
 /// Declare the drive BITS-ONLY (dop1-tax2 inc-2): the consumer reads the
 /// selection bitmap (and per-row fallback emits off the store path) and
 /// NEVER the staged SoA cells — the runtime census drive (`census_drain`:
