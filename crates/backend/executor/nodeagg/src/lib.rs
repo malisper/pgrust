@@ -62,10 +62,11 @@ pub use compact::{
     agg_emit_mark_drained, batch_emit_row, batch_emit_scan_block, batch_emit_set_block,
     topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
-    agg_hash_compact_intern, agg_hash_compact_mk_admit, agg_hash_compact_mk_shape,
+    agg_hash_compact_intern, agg_hash_compact_mk_admit, agg_hash_compact_mk_admit1,
+    agg_hash_compact_mk_shape,
     agg_hash_compact_reduced_admissible,
     agg_hash_compact_sink_admissible, agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk,
-    agg_hash_compact_try_arm_reduced,
+    agg_hash_compact_try_arm_mk1, agg_hash_compact_try_arm_reduced,
     agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
     RedDerived, RedOp, RedShape,
@@ -5371,6 +5372,17 @@ pub fn agg_hash_staged_probe_col(node: &AggStateData<'_>) -> Option<u16> {
     } else {
         None
     }
+}
+
+/// Whether the single staged grouping key probes through the TEXT kernel
+/// (deterministic collation proved at kernel selection) — the M2 sink's
+/// single-text admission input (raw key bytes are canonical across
+/// workers for exactly this kernel). Meaningful only alongside a `Some`
+/// [`agg_hash_staged_probe_col`].
+pub fn agg_hash_staged_probe_is_text(node: &AggStateData<'_>) -> bool {
+    node.perhash
+        .as_ref()
+        .is_some_and(|ph| ph.num_cols == 1 && ph.hashtable.staged_probe_is_text())
 }
 
 /// Multi-key admission input (multikey spike §2.4): the grouping key
