@@ -4758,6 +4758,38 @@ fn sort_feed_if_needed<'mcx>(
 /// matches no scan arm. The admitted checks are all init-stable, so the
 /// verdict is memoizable; the caller re-checks the dynamic EPQ/direction
 /// gates per call.
+/// EA-on-morsels sort-side verdict (ea-morsels.md §5, E4): the serial
+/// verdict with ONLY the instrument gates vacated — under EXPLAIN ANALYZE
+/// the child is an `Instrumented` wrapper (peeled here for the check) and
+/// the SeqScan refuse-set runs through `seq_scan_fusible_runtime_ea`. Every
+/// other child kind refuses (the distinct runtime admits SeqScan children
+/// only, and the serial arms that would own the rest cannot run under EA).
+/// Touches neither the serial `lane_fusible` memo nor the stat counters.
+#[cold]
+fn sort_refuse_reason_runtime_ea<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<RefuseReason>> {
+    if s.state.randomAccess {
+        return Ok(Some(RefuseReason::RandomAccess));
+    }
+    let child = match &mut *s.outer {
+        crate::procnode::PlanStateNode::Instrumented(w) => &mut w.inner,
+        o => o,
+    };
+    match child {
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            Ok(if seq_scan_fusible_runtime_ea(ss, estate)? {
+                None
+            } else {
+                Some(RefuseReason::ChildScanRefused)
+            })
+        }
+        crate::procnode::PlanStateNode::Agg(_) => Ok(Some(RefuseReason::ChildNotLaneOwned)),
+        _ => Ok(Some(RefuseReason::NonScanChild)),
+    }
+}
+
 fn sort_refuse_reason<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -6964,6 +6996,100 @@ fn codedgroup_drive<'mcx>(
 /// to the per-tuple `exec_agg` over `exec_sort`, byte-safely — see the
 /// section doc on call-boundary state compatibility).
 #[inline]
+/// EA-on-morsels entry for the DISTINCT sink arm (ea-morsels.md §5,
+/// inc-1b): under EXPLAIN ANALYZE the ordinary dispatch cannot reach the
+/// runtime distinct probe (Instrumented wrappers + the sort fusibility
+/// memo), so procnode's EA hook calls this dedicated walk. It mirrors ONLY
+/// the gates the uninstrumented run evaluates on the
+/// try_own_sorted_agg_over_sort path down to the probe (E4: no gate
+/// differs except instrument checks), with zero side effects unless the
+/// session is ARMED (an unarmed EA session must not even arm set-mode).
+/// The sticky set-mode force is value-safe on the per-tuple interpreter
+/// fallback by the arming contract (nodeagg force_distinct_set doc).
+pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Armed-only, before any side effect (two placeholder GUC lookups).
+    if ::guc_tables::runtime_pool::runtime_distinct_pool_dop() <= 0
+        || !runtime::runtime_enabled()
+    {
+        return Ok(None);
+    }
+    // Mid-emit resume of a prior EA-engaged build (the serial top's
+    // hashgroup resume, verbatim — the sink adopts through hashgroup emit;
+    // the bypassed Sort must never be fed from the consumed scan).
+    if ::nodeagg::agg_hashgroup_emitting(agg) {
+        return Ok(Some(hashgroup_emit(agg, estate)?));
+    }
+    // Dynamic per-call gates (serial arm verbatim; no stat ticks — the EA
+    // walk never perturbs the serial cadence).
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    // The grouped narrow-distinct decision (serial arm verbatim).
+    let plain_admissible = ::nodeagg::agg_sorted_lane_admissible(agg);
+    let mut narrow: Option<usize> = None;
+    if !plain_admissible || ::nodeagg::agg_distinct_set_forced(agg) {
+        let sp = s.state.plan;
+        let k = ::nodeagg::agg_plan_group_cols(agg).len();
+        let ok = ::nodeagg::agg_sorted_distinct_narrow_admissible(agg)
+            && !s.state.sort_done()
+            && !s.state.bounded
+            && k >= 1
+            && (sp.numCols as usize) > k
+            && sp.sortColIdx.len() >= k
+            && {
+                let mut a: Vec<i16> = sp.sortColIdx[..k].to_vec();
+                let mut b: Vec<i16> = ::nodeagg::agg_plan_group_cols(agg).to_vec();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            };
+        if ok {
+            narrow = Some(k);
+        }
+    }
+    let Some(k) = narrow else { return Ok(None) };
+    // Sort-side verdict, instrument gates vacated (serial memo untouched).
+    if sort_refuse_reason_runtime_ea(s, estate)?.is_some() {
+        return Ok(None);
+    }
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
+    if state.sort_done() {
+        // The interpreter (or a serial arm) already consumed the feed on an
+        // earlier call — it owns the node; never engage after (E4/agg-arm
+        // discipline).
+        return Ok(None);
+    }
+    ::postgres_seams::check_for_interrupts::call()?;
+    // Arm set-mode BEFORE any input (serial site verbatim; sticky, and
+    // value-safe on the per-tuple fallback per the arming doc).
+    ::nodeagg::agg_sorted_force_distinct_set(agg);
+    // Peel the wrapper for the probe: the runtime's workers run
+    // uninstrumented; the bypassed nodes' Instrumentation is written from
+    // the merged partials on clean completion.
+    let outer: &mut crate::procnode::PlanStateNode<'mcx> = match &mut **outer {
+        crate::procnode::PlanStateNode::Instrumented(w) => &mut w.inner,
+        o => o,
+    };
+    runtime_distinct::try_own_sorted_distinct_runtime(
+        agg,
+        state,
+        outer,
+        outer_desc,
+        rd_shape_refused,
+        k,
+        estate,
+    )
+}
+
 pub fn try_own_sorted_agg_over_sort<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     s: &mut crate::procnode::SortNode<'mcx>,

@@ -1623,17 +1623,30 @@ fn agg_arm<'mcx>(
     // unchanged per-tuple instrumented exec below, byte-identically.
     if estate.es_instrument != 0 && crate::lanev2::enabled() {
         if let PlanStateNode::Instrumented(w) = &mut *outer {
-            if let PlanStateNode::SeqScan(ss) = &mut w.inner {
-                if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
-                    agg,
-                    ss,
-                    lane_choice,
-                    lane_stage_slot,
-                    lane_exprkey,
-                    estate,
-                )? {
-                    return Ok(r);
+            match &mut w.inner {
+                PlanStateNode::SeqScan(ss) => {
+                    if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
+                        agg,
+                        ss,
+                        lane_choice,
+                        lane_stage_slot,
+                        lane_exprkey,
+                        estate,
+                    )? {
+                        return Ok(r);
+                    }
                 }
+                PlanStateNode::Sort(s) => {
+                    // The DISTINCT sink's dedicated EA walk (its serial
+                    // dispatch sits behind the sort fusibility memo, which
+                    // rightly refuses instrumented trees).
+                    if let Some(r) =
+                        crate::lanev2::try_own_sorted_distinct_runtime_ea(agg, s, estate)?
+                    {
+                        return Ok(r);
+                    }
+                }
+                _ => {}
             }
         }
     }
