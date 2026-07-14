@@ -119,6 +119,23 @@ pub fn runtime_agg_pool_armed() -> bool {
     runtime_agg_pool_dop() > 0
 }
 
+/// q28-sorted-arm: the ordered-grouped (sorted-agg) runtime arm rides the
+/// SAME `pgrust.runtime_agg_pool` DOP (it is the agg pool's ordered face —
+/// rt16/rta16 arms exercise both) with its own dedicated kill switch:
+/// `PGRUST_RUNTIME_AGG_SORTED=0/off` disarms exactly this arm, leaving the
+/// hashed sink untouched (and `PGRUST_RUNTIME_AGG=0` still kills the family
+/// through the shared DOP read).
+pub fn runtime_agg_sorted_env_ok() -> bool {
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let killed = *KILLED.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SORTED").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    });
+    !killed
+}
+
 // ---------------------------------------------------------------------------
 // M2 distinct-sink arming (m2-distinct-sink lane; entry added at
 // m2-integration): the FORCED/explicit knob for executing serial-plan

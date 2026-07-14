@@ -1806,7 +1806,7 @@ fn min_granules() -> u64 {
 
 /// Find the Node of `agg.plan` inside the leader's plan tree (worker pstmts
 /// root at the Agg subtree; the Agg need not be the leader plan's root).
-fn find_agg_node<'mcx>(
+pub(super) fn find_agg_node<'mcx>(
     root: Node<'mcx>,
     target: *const ::types_nodes::plannodes::Agg<'mcx>,
 ) -> Option<Node<'mcx>> {
