@@ -7652,6 +7652,46 @@ fn codedgroup_drive<'mcx>(
             }
             continue;
         }
+        // Slot-free survivor collection FIRST (`scan_collect_survivors`'
+        // Bitmap/All arms, minus the projection gate the admission made
+        // moot); one per-batch ExprContext reset stands in for the emit's
+        // per-row cadence (the coded absorb allocates no per-tuple memory).
+        // A ZERO-SURVIVOR staged window skips BEFORE the lane admission
+        // below: a condition-cache hit whose cached verdicts are all-fail
+        // legitimately skips the survivor deform (no dict lane is ever
+        // published for the window — nodeseqscan's cond_hit arm), and the
+        // window carries nothing to absorb either way. Requiring the lane
+        // there demoted the WHOLE remaining scan to the narrow sort on the
+        // first all-fail hit (the official condcache arm's Q14 1.19 s vs
+        // 0.55 s). Zero survivors also implies zero fallback bits (fallback
+        // rows OR their bits into the selection), so the fallback-free
+        // admission is vacuously met.
+        let survivors_decidable = ss.ss.qual.is_none()
+            || ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss).is_some();
+        if survivors_decidable {
+            rows.clear();
+            estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
+            match ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss) {
+                None => rows.extend(0..n),
+                Some(sel) => {
+                    let nwords = (n as usize).div_ceil(64);
+                    let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
+                    for w in 0..nwords {
+                        let mut bits = sel[w];
+                        if w == nwords - 1 {
+                            bits &= tail_mask;
+                        }
+                        while bits != 0 {
+                            rows.push(w as u32 * 64 + bits.trailing_zeros());
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+            }
+            if rows.is_empty() {
+                continue;
+            }
+        }
         // Window admission: a dict-answered SORTED key lane (byte order ==
         // code order — the merge's foundation) over a fallback-free batch,
         // with the whole qual decided by the staged bitmap (per-row emit
@@ -7664,8 +7704,6 @@ fn codedgroup_drive<'mcx>(
                 soa.is_some_and(|s| s.fallback_words().iter().all(|&w| w == 0)),
             )
         };
-        let survivors_decidable = ss.ss.qual.is_none()
-            || ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss).is_some();
         let Some(lane) = lane.filter(|_| all_lane && survivors_decidable) else {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;
@@ -7677,32 +7715,6 @@ fn codedgroup_drive<'mcx>(
             }
             continue;
         };
-        // Slot-free survivor collection (`scan_collect_survivors`' Bitmap/
-        // All arms, minus the projection gate the admission made moot); one
-        // per-batch ExprContext reset stands in for the emit's per-row
-        // cadence (the coded absorb allocates no per-tuple memory).
-        rows.clear();
-        estate.ecxt_mut(ss.ss.ps_ExprContext).reset();
-        match ::nodeseqscan::seq_scan_batch_whole_qual_sel(ss) {
-            None => rows.extend(0..n),
-            Some(sel) => {
-                let nwords = (n as usize).div_ceil(64);
-                let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
-                for w in 0..nwords {
-                    let mut bits = sel[w];
-                    if w == nwords - 1 {
-                        bits &= tail_mask;
-                    }
-                    while bits != 0 {
-                        rows.push(w as u32 * 64 + bits.trailing_zeros());
-                        bits &= bits - 1;
-                    }
-                }
-            }
-        }
-        if rows.is_empty() {
-            continue;
-        }
         let (consumed, keep) = {
             let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
                 .expect("dict window implies the armed SoA");
