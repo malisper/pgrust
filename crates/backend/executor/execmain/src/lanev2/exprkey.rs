@@ -1532,51 +1532,80 @@ struct MmState {
 #[allow(clippy::too_many_arguments)]
 /// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
 /// the expr-key feed under SINK constraints — compact table REQUIRED, no
-/// multi-key/dict/code-histogram state, empty str-mm memo. Fails closed if
-/// the batch routed anywhere the compact table cannot host (sticky range-
-/// guard refusal, a per-row route's compact disarm): the sink cannot export
-/// the C tuplehash, so the engagement aborts and the serial arm reruns.
+/// dict/code-histogram state, empty str-mm memo; `mk_shape` = the armed
+/// packed shape for the Multi kind (q19 class), `None` otherwise.
+/// `Ok(false)` = the batch routed anywhere the compact table cannot host
+/// (sticky range-guard refusal, a numeric pack demote's compact disarm):
+/// the sink cannot export the C tuplehash, so the caller REFUSES (RG abort
+/// → serial whole-attempt rerun — a data-borne error then surfaces from the
+/// serial replay with C's exact error identity).
 pub(super) fn exprkey_sink_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: &mut ExprKeyState,
+    mk_shape: Option<&::nodeagg::MkShape>,
     stage_slot: &mut Option<ExecSlotId>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
+) -> PgResult<bool> {
     let mut mm = MmState {
         cols: Vec::new(),
         codes: Vec::new(),
         scratch: ::lanefold::StrMmScratch::default(),
     };
     let mut ch: Option<CodeHistState> = None;
-    exprkey_batch(agg, ss, xk, stage_slot, true, None, idxs, groups, &mut mm, &mut ch, n, estate)?;
-    if xk.refused || !::nodeagg::agg_hash_compact_armed(agg) {
-        return Err(::nodeagg::sink::sink_shape_error(
-            "expr-key batch routed off the compact table (range guard / disarm)",
-        ));
-    }
-    Ok(())
+    exprkey_batch(
+        agg, ss, xk, stage_slot, true, mk_shape, idxs, groups, &mut mm, &mut ch, n, estate,
+    )?;
+    Ok(!xk.refused && ::nodeagg::agg_hash_compact_armed(agg))
+}
+
+/// The sink-admissible key kind of an expr-key decide (runtime_agg's
+/// admission input).
+pub(super) enum SinkXkKind {
+    /// Arith/TsTrunc: single staged int key (compact Single).
+    Single,
+    /// Redundant-key elimination (compact Reduced).
+    Reduced(::nodeagg::RedShape),
+    /// Packed multi-key over the projected scan (q19 class) — the compact
+    /// Multi arm packs it; `dict_input_att` names the TextRaw component's
+    /// tlist attno when one exists (the intern/canonical-bytes lane).
+    Multi { dict_input_att: Option<u16> },
 }
 
 impl ExprKeyState {
-    /// The sink-admissible single-word key spec of this decide (phase 1):
-    /// `Single` for the Arith/TsTrunc kinds, `Reduced` for the redundant-key
-    /// kind; `None` for Dict/Multi (C2/Mk cars). Width from the armed
-    /// staged-probe kernel (the caller's admission reads it off the node).
-    pub(super) fn sink_key_kind(&self) -> Option<Option<::nodeagg::RedShape>> {
+    /// The sink-admissible key kind of this decide: `Single` for Arith/
+    /// TsTrunc, `Reduced` for the redundant-key kind, `Multi` for the packed
+    /// multi-key kind (int/numeric/one-text components — the compact mk
+    /// admission owns the component gates); `None` for Dict (its per-epoch
+    /// code→pergroup map is inherently per-worker C-table state).
+    pub(super) fn sink_key_kind(&self) -> Option<SinkXkKind> {
         match &self.kind {
-            ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(None),
-            ExprKeyKind::Reduced { shape, .. } => Some(Some(shape.clone())),
-            ExprKeyKind::Dict { .. } | ExprKeyKind::Multi(_) => None,
+            ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(SinkXkKind::Single),
+            ExprKeyKind::Reduced { shape, .. } => Some(SinkXkKind::Reduced(shape.clone())),
+            ExprKeyKind::Multi(m) => {
+                Some(SinkXkKind::Multi { dict_input_att: m.dict_input_att })
+            }
+            ExprKeyKind::Dict { .. } => None,
         }
     }
 
     /// Sticky per-build refusal flag (arith trap / range guard).
     pub(super) fn sink_refused(&self) -> bool {
         self.refused
+    }
+
+    /// Invalidate the Multi kind's per-epoch code→intern-id cache. The M2
+    /// sink drain calls this after a flush that RESET the worker's intern
+    /// table (wide-vocabulary bounding) — a cached id would materialize
+    /// the WRONG bytes. No-op for the other kinds.
+    pub(super) fn invalidate_mk_intern_cache(&mut self) {
+        if let ExprKeyKind::Multi(m) = &mut self.kind {
+            m.mks.epoch = None;
+            m.mks.code_ids.clear();
+        }
     }
 }
 
