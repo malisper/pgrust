@@ -482,6 +482,9 @@ impl DictFixture {
                 stitch: std::ptr::null(),
                 gndv: 0,
                 gepoch: 0,
+                lazy: core::ptr::null(),
+                lazy_ensure: None,
+                lazy_ensure_all: None,
             },
         }
     }
