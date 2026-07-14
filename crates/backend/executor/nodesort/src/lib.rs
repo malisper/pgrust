@@ -798,6 +798,58 @@ pub trait SortLaneBatchFeed<'mcx> {
     fn emit_rowref(&self, _i: u32) -> Option<u64> {
         None
     }
+    /// Skip mask for staged positions: a bit-CLEARED position is one whose
+    /// `emit` (and `emit_key`) yields nothing by the feed's contract — the
+    /// batch put loop may skip it without calling either, which is
+    /// put-stream-identical (same rows, same order, same puts). Bits at or
+    /// past the staged row count are zero by the producer's contract.
+    /// `None` (the default) = every position must be offered to `emit`.
+    fn live_words(&self) -> Option<[u64; exectuples::SOA_BM_WORDS]> {
+        None
+    }
+}
+
+/// Iterate the put positions of `pos..n`, skipping bit-cleared positions
+/// when the feed exposes a skip mask (`SortLaneBatchFeed::live_words`).
+/// Word-granular: an all-clear word advances 64 positions in one compare —
+/// the selective-qual sort feed's per-row emit ceremony (ExprContext reset,
+/// CFI, bitmap re-test per row) collapses to one word test per 64 rows.
+#[inline(always)]
+fn for_each_put(
+    live: Option<&[u64; exectuples::SOA_BM_WORDS]>,
+    pos: u32,
+    n: u32,
+    mut f: impl FnMut(u32) -> PgResult<()>,
+) -> PgResult<()> {
+    let Some(words) = live else {
+        for i in pos..n {
+            f(i)?;
+        }
+        return Ok(());
+    };
+    if pos >= n {
+        return Ok(());
+    }
+    let last = ((n - 1) / 64) as usize;
+    let mut w = (pos / 64) as usize;
+    // Mask off bits below `pos` in the first word; bits at/past `n` are
+    // zero by the producer's contract (belt: mask the last word anyway).
+    let mut bits = words[w] & (!0u64 << (pos % 64));
+    loop {
+        if w == last && n % 64 != 0 {
+            bits &= (1u64 << (n % 64)) - 1;
+        }
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            f(i)?;
+        }
+        if w == last {
+            return Ok(());
+        }
+        w += 1;
+        bits = words[w];
+    }
 }
 
 /// Batch-granular feed leg (breaker `BatchSink::accept_batch`): put every
@@ -832,47 +884,48 @@ where
 {
     let mcx = estate.es_query_cxt;
     let ts = node.tuplesortstate.as_mut().expect("sort_lane_put_batch before sort_lane_begin");
+    // Skip mask, fetched once per batch: cleared positions yield nothing
+    // from `emit`/`emit_key` by the feed's contract, so skipping them puts
+    // the identical stream (see `for_each_put`).
+    let live = feed.live_words();
     if node.datumSort {
         if ts.datum_sort_is_byref() {
-            for i in pos..n {
+            for_each_put(live.as_ref(), pos, n, |i| {
                 if direct {
                     if let Some((val, isnull)) = feed.emit_key(i) {
-                        ts.putdatum(val, isnull)?;
-                        continue;
+                        return ts.putdatum(val, isnull);
                     }
                 }
-                let Some(id) = feed.emit(i, estate)? else { continue };
+                let Some(id) = feed.emit(i, estate)? else { return Ok(()) };
                 let slot = estate.slot_mut(id);
                 exectuples::slot_getsomeattrs(slot, 1);
                 let base = slot.base();
-                ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
-            }
+                ts.putdatum(base.tts_values[0], base.tts_isnull[0])
+            })?;
         } else {
             ts.putdatum_batch(|p| {
-                for i in pos..n {
+                for_each_put(live.as_ref(), pos, n, |i| {
                     if direct {
                         if let Some((val, isnull)) = feed.emit_key(i) {
-                            p.put(val, isnull)?;
-                            continue;
+                            return p.put(val, isnull);
                         }
                     }
-                    let Some(id) = feed.emit(i, estate)? else { continue };
+                    let Some(id) = feed.emit(i, estate)? else { return Ok(()) };
                     let slot = estate.slot_mut(id);
                     exectuples::slot_getsomeattrs(slot, 1);
                     let base = slot.base();
-                    p.put(base.tts_values[0], base.tts_isnull[0])?;
-                }
-                Ok(())
+                    p.put(base.tts_values[0], base.tts_isnull[0])
+                })
             })?;
         }
     } else {
-        for i in pos..n {
-            let Some(id) = feed.emit(i, estate)? else { continue };
+        for_each_put(live.as_ref(), pos, n, |i| {
+            let Some(id) = feed.emit(i, estate)? else { return Ok(()) };
             match feed.emit_rowref(i) {
-                Some(rr) => ts.puttupleslot_rowref(estate.slot_mut(id), mcx, rr)?,
-                None => ts.puttupleslot(estate.slot_mut(id), mcx)?,
+                Some(rr) => ts.puttupleslot_rowref(estate.slot_mut(id), mcx, rr),
+                None => ts.puttupleslot(estate.slot_mut(id), mcx),
             }
-        }
+        })?;
     }
     Ok(())
 }

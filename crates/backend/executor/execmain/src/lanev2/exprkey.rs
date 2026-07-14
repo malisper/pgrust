@@ -1679,6 +1679,21 @@ fn exprkey_batch<'mcx>(
             xk.rows.push(i);
         }
     }
+    // ZERO-SURVIVOR staged window: skip BEFORE any lane demand (the q14
+    // codedgroup precedent — condcache-census lane). A condition-cache HIT
+    // whose cached verdicts are all-fail legitimately skips the survivor
+    // deform and dict-lane gather (nodeseqscan's cond_hit arm; multi-clause
+    // all-fail miss windows and zone AllFail folds behave the same), so the
+    // window carries NO live lanes. The Dict leg's dicteval prepare would
+    // see ColView::Missing and demote, DISARMING the compact table for the
+    // whole remaining build — a one-shot degrade triggered by a window that
+    // has nothing to probe, fold, or transition on ANY path (the batched
+    // route and the per-row replay are both no-ops over zero survivors).
+    // The bitmap here is the WHOLE qual's verdict (the `batched` admission
+    // above), so empty selection == truly zero survivors.
+    if xk.rows.is_empty() {
+        return Ok(());
+    }
     // Multi-key packed batches own everything from here (derive → pack →
     // packed probe → fold); the single-key legs below never see them.
     if matches!(xk.kind, ExprKeyKind::Multi(_)) {

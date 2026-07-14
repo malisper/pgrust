@@ -172,7 +172,7 @@ fn drive_scan(
         }
         let (rg, base) = scan.window_ref().expect("window staged");
         assert_eq!(rg, 0, "single-RG fixture");
-        scan.batch_deform(ncols, soa, None);
+        scan.batch_deform(ncols, soa, None, None);
         if let Some(lane) = soa.dict_lane(1) {
             dict_windows += 1;
             // v7 stitch rides the lane: a fresh all-dict part always

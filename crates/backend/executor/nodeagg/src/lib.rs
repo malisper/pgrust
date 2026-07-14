@@ -78,12 +78,13 @@ pub use codedgroup::{
     agg_codedgroup_next_replay, agg_codedgroup_reset, CgAccept,
 };
 pub use hashgrouped::{
-    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_admissible,
-    agg_hashgroup_adopt_merged, agg_hashgroup_batch_shape, agg_hashgroup_begin,
-    agg_hashgroup_economical, agg_hashgroup_emit_next, agg_hashgroup_emitting,
+    agg_hashgroup_accept, agg_hashgroup_accept_batch_row, agg_hashgroup_accept_batch_span,
+    agg_hashgroup_admissible, agg_hashgroup_adopt_merged, agg_hashgroup_arm_fold,
+    agg_hashgroup_batch_shape, agg_hashgroup_begin, agg_hashgroup_economical,
+    agg_hashgroup_economical_sink, agg_hashgroup_emit_next, agg_hashgroup_emitting,
     agg_hashgroup_finish_build, agg_hashgroup_next_rep, agg_hashgroup_reset,
     agg_hashgroup_residual_active, agg_hashgroup_set_residual, agg_hashgroup_state_active,
-    agg_hashgroup_text_key_count, HashGroupOrderKey, HgBatchRow,
+    agg_hashgroup_text_key_count, HashGroupOrderKey, HgBatchRow, HgBatchShape, HgSpanStop,
 };
 pub use ::execgrouping::GroupKeyKind;
 
@@ -611,6 +612,15 @@ struct PerHashData<'mcx> {
     // backstop must never migrate into the C table (the sink cannot export
     // it); the sink drain flushes at the cap instead.
     sink_cap: Option<u32>,
+    // M3.5 spill-armed admission (mt16-cliffs, the q33@100M hmm=2 cliff):
+    // true on a sink build whose engagement carries a live spill arm. The
+    // compact admission gates skip the ESTIMATE-based SpillRisk refusal
+    // then (word-keyed shapes only — a budget crossing degrades to spill
+    // epochs, not an error), keeping the cap-bounded sizing discipline.
+    // Meaningful only while `sink_cap` is Some; canonical bytes-keyed
+    // shapes never see it set (their runs are not spillable — the C2
+    // record-format gap keeps their phase-1 refusal).
+    sink_spill_ok: bool,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1915,6 +1925,7 @@ fn init_perhash<'mcx>(
         compact: None,
         exchange: merge::ExchangeState::Unresolved,
         sink_cap: None,
+        sink_spill_ok: false,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -4517,6 +4528,84 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
     Ok(())
 }
 
+/// One staged window of the direct-feed drive consumed as the scan's KEY
+/// LANE (hot-gap lever C2, the q5 class): `vals`/`isnull` are the staged key
+/// column's value and null lanes for the window's rows, in row order.
+/// Equivalent to `agg_plain_distinct_insert_batch` over the same rows —
+/// NULLs elided value-for-value and folded into the set's one `seen_null` —
+/// with the null scan hoisted to once per window (the all-non-null arm is
+/// one straight datum→i64 pass; cbstore lanes are null-free by the format).
+/// Same batch-granular budget-check/overflow contract; a degraded group
+/// keeps feeding its tuplesort (non-null values in row order + one NULL —
+/// one stands for the window's many, which dedup to one either way).
+pub fn agg_plain_distinct_insert_lane_batch<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    vals: &[Datum],
+    isnull: &[bool],
+    ints: &mut Vec<i64>,
+    hashes: &mut Vec<u64>,
+) -> PgResult<()> {
+    debug_assert!(agg_plain_distinct_direct_shape(node));
+    debug_assert_eq!(vals.len(), isnull.len());
+    let saw_null = isnull.contains(&true);
+    let ps = &mut node.pertrans_sort[0];
+    let kind = ps.set_kind.expect("set-mode pertrans");
+    if ps.dset_degraded {
+        let sort = ps.sortstates[0].as_mut().expect("degraded group has a sortstate");
+        for (&d, &nl) in vals.iter().zip(isnull) {
+            if !nl {
+                sort.putdatum(d, false)?;
+            }
+        }
+        if saw_null {
+            sort.putdatum(Datum::null(), true)?;
+        }
+        return Ok(());
+    }
+    ints.clear();
+    match kind {
+        distinctset::DistinctKeyKind::Int16 => {
+            if saw_null {
+                ints.extend(
+                    vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i16() as i64),
+                );
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i16() as i64));
+            }
+        }
+        distinctset::DistinctKeyKind::Int32 => {
+            if saw_null {
+                ints.extend(
+                    vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i32() as i64),
+                );
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i32() as i64));
+            }
+        }
+        distinctset::DistinctKeyKind::Int64 => {
+            if saw_null {
+                ints.extend(vals.iter().zip(isnull).filter(|&(_, &nl)| !nl).map(|(d, _)| d.as_i64()));
+            } else {
+                ints.extend(vals.iter().map(|d| d.as_i64()));
+            }
+        }
+        distinctset::DistinctKeyKind::Bytes => {
+            unreachable!("bytes keys take agg_plain_distinct_insert_bytes_batch")
+        }
+    }
+    let dset = ps.dset.get_or_insert_with(distinctset::DistinctSet::new);
+    dset.insert_i64_batch(ints, hashes);
+    if saw_null {
+        dset.seen_null = true;
+    }
+    let budget = distinct_set_budget();
+    if dset.over_budget(budget) {
+        distinct_set_overflow(ps, estate.es_query_cxt, budget)?;
+    }
+    Ok(())
+}
+
 /// One staged batch of the direct-feed drive, TEXT keys (the varlena key
 /// staging): `keys` are the batch's NON-NULL key datums in row order — live
 /// text/varchar varlena pointers (in-page on heap, decoded images on
@@ -4744,8 +4833,10 @@ pub fn agg_plain_finish<'mcx>(
 /// both the workers' scans and the GatherMerge stream produce). `None`
 /// refuses: any transition outside the exact-integer vocabulary
 /// (`pardistinct::vocab_kind` — `order_insensitive_exact_transfn` minus the
-/// Int128 family), any non-Var / FILTERed argument, or a non-integer group
-/// key type. Derivation treats presorted entries as set-mode (the arm always
+/// Int128 family), any non-Var / FILTERed argument, or a group key type
+/// outside int2/int4/int8 (+ text/varchar iff `admit_text_keys` — the
+/// distinct-bytes car; see the `key_kind` contract note in the body).
+/// Derivation treats presorted entries as set-mode (the arm always
 /// arms `force_distinct_set` before engaging — but only AFTER every refusal
 /// point, so a refusal leaves the classic path's adjacent-dedup untouched).
 /// Env-gated derive-refusal diagnosis (PGRUST_LANE_V2_TRACE — the lane's
@@ -4764,16 +4855,32 @@ fn pd_derive_trace(msg: &str) {
 pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
+    admit_text_keys: bool,
 ) -> Option<std::sync::Arc<pardistinct::PdSpec>> {
-    use pardistinct::{PdInt, PdSetSpec, PdSpec, PdVocab};
+    use pardistinct::{PdInt, PdKeyKind, PdSetSpec, PdSpec, PdVocab};
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
     const INT8OID: Oid = 20;
+    const TEXTOID: Oid = 25;
+    const VARCHAROID: Oid = 1043;
     let int_kind = |t: Oid| match t {
         INT2OID => Some(PdInt::I16),
         INT4OID => Some(PdInt::I32),
         INT8OID => Some(PdInt::I64),
         _ => None,
+    };
+    // Group-key component kind. `admit_text_keys` is the caller's CONTRACT
+    // that byte equality is the grouping operator's verdict for text
+    // columns (the runtime distinct sink passes it only after
+    // `agg_hashgroup_admissible` proved `group_eq_representational` texteq
+    // under a deterministic collation — bpchar and nondeterministic
+    // collations never pass that admission). The Gather-era arms pass
+    // false: their merge/emit surfaces stay integer-key-only.
+    let key_kind = |t: Oid| -> Option<PdKeyKind> {
+        if let Some(k) = int_kind(t) {
+            return Some(PdKeyKind::Int(k));
+        }
+        (admit_text_keys && matches!(t, TEXTOID | VARCHAROID)).then_some(PdKeyKind::Bytes)
     };
     // The aggregate's single plain-Var argument (0-based outer attno).
     let arg_att = |ar: &::types_nodes::primnodes::Aggref<'_>| -> Option<u16> {
@@ -4796,7 +4903,11 @@ pub fn pd_derive_spec(
             return None;
         }
         key_atts.push((col - 1) as u16);
-        key_kinds.push(int_kind(desc.attr((col - 1) as usize).atttypid)?);
+        let Some(kind) = key_kind(desc.attr((col - 1) as usize).atttypid) else {
+            pd_derive_trace("group key column outside the int/text vocabulary");
+            return None;
+        };
+        key_kinds.push(kind);
         max_att = max_att.max(col as i32);
     }
     if key_atts.len() > 32 {
@@ -4899,9 +5010,10 @@ pub use pardistinct::{
     pd_adopt_registry, pd_bucket_precount, pd_clear_thread_registry, pd_concat_buckets,
     pd_empty_grouped_table, pd_export_registry, pd_merge_bucket, pd_merge_bucket_refs,
     pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_registry_get, pd_registry_insert,
-    pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_record_width,
-    pd_table_from_spill, PdBucketMerger, PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff,
-    PdMerged, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
+    pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode,
+    pd_spill_min_record_width, pd_spill_record_width, pd_table_from_spill, PdBucketMerger,
+    PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff, PdKeyKind, PdMerged, PdSinkLocal,
+    PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
@@ -6351,7 +6463,7 @@ mcx::forget_safe_struct!(
         spill, tapeset, rslot, wslot, tmp_ctx },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill, sink_cap;
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap, sink_spill_ok;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,

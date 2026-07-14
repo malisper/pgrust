@@ -139,6 +139,17 @@ pub struct SoaDictTable {
     /// Scan-unique stitch identity: stable across every RG (and rescan) of
     /// one pinned scan, distinct across scans. 0 iff `stitch` is null.
     pub gepoch: u64,
+    /// LAZY SUB-FRAMED DICTIONARY SEAM (cbstore CHUNK_FLAG_DICT_FRAMED):
+    /// null = every entry's bytes are materialized (the historical
+    /// contract). Non-null = `dict[code]` POINTERS are always valid but a
+    /// code's entry BYTES exist only after an ensure covering it: `datum()`
+    /// / `ensure_code()` ensure per code; any consumer reading entry bytes
+    /// OUTSIDE those accessors (whole-dict sweeps, rank binary searches, raw
+    /// `dict` slices) must call `ensure_all()` first. Same lifetime as
+    /// `dict` (the publisher's staged-window contract).
+    pub lazy: *const (),
+    pub lazy_ensure: Option<unsafe fn(*const (), u32)>,
+    pub lazy_ensure_all: Option<unsafe fn(*const ())>,
 }
 
 impl SoaDictTable {
@@ -167,12 +178,50 @@ impl SoaDictTable {
     }
 
     /// Decode one code. Bounds are the filler's contract (`code < ndict`).
+    /// Lazy sub-framed dicts ensure the code's entry bytes first (the seam
+    /// no-ops on fully-materialized tables — `lazy_ensure` is None).
     #[inline]
     pub fn datum(&self, code: u32) -> Datum {
         debug_assert!(code < self.ndict);
+        self.ensure_code(code);
         // SAFETY: filler contract — `dict` spans `ndict` Datums and outlives
         // the staged window; `code` is in range for every staged row.
         unsafe { *self.dict.add(code as usize) }
+    }
+
+    /// Materialize one code's entry bytes (lazy sub-framed dicts; no-op
+    /// otherwise). For consumers that pass raw `dict` slices onward but know
+    /// the exact codes they will read.
+    #[inline]
+    pub fn ensure_code(&self, code: u32) {
+        if let Some(f) = self.lazy_ensure {
+            // SAFETY: seam contract — `lazy` is the publisher's live ensure
+            // state for this table (window lifetime, like `dict` itself).
+            unsafe { f(self.lazy, code) };
+        }
+    }
+
+    /// Decode one code WITHOUT the lazy ensure. ONLY for cells covered by
+    /// a stale-cell contract (PREWHERE-armed batches: consumers read
+    /// SELECTED rows only — `seq_scan_batch_lane_armed`): the pointer is
+    /// always valid, its BYTES may be unmaterialized.
+    #[inline]
+    pub fn datum_no_ensure(&self, code: u32) -> Datum {
+        debug_assert!(code < self.ndict);
+        // SAFETY: filler contract as `datum` (pointer validity is
+        // ensure-independent).
+        unsafe { *self.dict.add(code as usize) }
+    }
+
+    /// Materialize EVERY entry's bytes (lazy sub-framed dicts; no-op
+    /// otherwise). Required before whole-dict sweeps, rank binary searches,
+    /// or any raw `dict` slice read not covered code-by-code.
+    #[inline]
+    pub fn ensure_all(&self) {
+        if let Some(f) = self.lazy_ensure_all {
+            // SAFETY: seam contract, as `ensure_code`.
+            unsafe { f(self.lazy) };
+        }
     }
 }
 
@@ -377,6 +426,30 @@ impl<'mcx> SoaBatch<'mcx> {
         isnull.fill(false);
         for (i, v) in values.iter_mut().enumerate() {
             *v = lane.datum(i);
+        }
+        self.dict_lanes[c] = None;
+    }
+
+    /// `gather_dict_lane` under a PREWHERE selection (stale-cell contract:
+    /// consumers of this batch read SELECTED rows only): identical cell
+    /// writes, but a lazy sub-framed dict ensures only selected rows'
+    /// codes — unselected cells hold valid POINTERS whose bytes may stay
+    /// unmaterialized. Bit i of `sel` = staged row i selected.
+    pub fn gather_dict_lane_sel(&mut self, c: usize, sel: &[u64]) {
+        let Some(lane) = self.dict_lane(c) else { return };
+        if lane.table.lazy_ensure.is_none() {
+            return self.gather_dict_lane(c);
+        }
+        let n = self.nrows as usize;
+        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        let isnull = &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        isnull.fill(false);
+        for (i, v) in values.iter_mut().enumerate() {
+            let code = lane.code(i);
+            if sel.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) {
+                lane.table.ensure_code(code);
+            }
+            *v = lane.table.datum_no_ensure(code);
         }
         self.dict_lanes[c] = None;
     }

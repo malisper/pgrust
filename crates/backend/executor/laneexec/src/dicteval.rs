@@ -565,8 +565,10 @@ fn prepare_views(
                         match memo[code] {
                             Some(nd) => nd,
                             None => {
-                                // SAFETY: code < ndict by the lane contract.
-                                let entry = unsafe { *lane.table.dict.add(code) };
+                                // Seam-aware read: ensures a lazy sub-framed
+                                // dict entry's bytes (code < ndict by the
+                                // lane contract).
+                                let entry = lane.table.datum(code as u32);
                                 let Some(s) = crate::dict::inline_varlena_payload(entry)
                                 else {
                                     return Ok(Prepared::Demote("non-inline dict entry"));
@@ -612,6 +614,8 @@ fn prepare_views(
 // error surface of its own (eager kernels are non-erroring by proof; any
 // PgResult error here is a seam/representation surprise, not C's error).
 fn fill_eager(p: &mut DictEvalProg, lane: SoaDictLane) -> Result<(), ()> {
+    // Whole-dict sweep: materialize a lazy sub-framed dict up front.
+    lane.table.ensure_all();
     for code in 0..lane.table.ndict as usize {
         // SAFETY: dict covers ndict entries (SoaDictLane contract).
         let entry = unsafe { *lane.table.dict.add(code) };
@@ -673,6 +677,9 @@ mod tests {
                     stitch: std::ptr::null(),
                     gndv: 0,
                     gepoch: 0,
+                    lazy: core::ptr::null(),
+                    lazy_ensure: None,
+                    lazy_ensure_all: None,
                 },
             }
         }

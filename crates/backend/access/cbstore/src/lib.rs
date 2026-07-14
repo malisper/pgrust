@@ -21,6 +21,7 @@ use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
 
 pub use format::ColType;
+pub use reader::dict_frame_stats;
 pub use scan::{
     CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, MetaZeroQual, ZoneCmp, ZoneQual,
 };

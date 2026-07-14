@@ -314,21 +314,40 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      serve_ticket, consumed at the first-touch bind, reset in the
     //      serve tail): pure worker-loop bookkeeping, no session identity,
     //      same argument as the io.rs pool-worker block (slot 7).
-    // 474, re-pinned at m5-liveness (merge-debt catch-up: vacuum_morsels
-    // inc-2 @ 47f9c9bce and the 473 ceremony-v2 pin @ a3a1f0d89 landed via
-    // PARALLEL lanes — neither is the other's ancestor — so main carried
-    // 474 sources against a 473 pin from their merge onward; no M5-2
-    // source touches the census) —
-    //   13. access/heap/vacuumlazy/src/morsels.rs WORKER_CX (the
-    //      vacuum_morsels inc-2 lane) — the vacuum scan worker's
-    //      drive-scoped context pointer (a Cell<*mut VacWorkerCx> installed
-    //      for the run_morsel bodies of the vacuum RG round, cleared when
-    //      the drive frame exits): identical class and argument as the
-    //      WORKER_EXEC slots 4-6/9-10 (bound-helper drive slot, torn down
-    //      with the drive, non-session TLS — the binder owns all session
-    //      state movement).
+    // 474, re-pinned at train-14 (conductor debt fix): three train-13 cars
+    // landed AFTER ceremony2's 473 re-pin and this suite never ran at the
+    // train-13 merged tip (its battery's TEST_CRATES was empty), so the pin
+    // went stale by net +1 — three additions minus two migrations
+    // (transam_xlog/src/write.rs's walwriter slot moved into the auxjob
+    // layer; bufmgr/src/bgwriter_sync.rs's block moved into the bgwriter
+    // job). The additions, all classified non-session:
+    //   13. executor/runtime/src/blocking.rs PERMIT_SEM (m35-spill inc-1) —
+    //      non-null exactly while a PermitThreadReg for the pool worker
+    //      thread lives (the spill blocking-section facade reads it): pool
+    //      thread bookkeeping with no session or task identity, created and
+    //      cleared only by the worker loop — same argument as the io.rs
+    //      pool-worker block (slot 7).
+    //   14. postmaster/auxjob/src/lib.rs THREAD_CHILD_INITED (bgjobs
+    //      identity-seat layer) — once-per-thread aux-child init latch
+    //      (InitPostmasterChild/BaseInit halves) shared across all aux jobs
+    //      hosted by the thread: aux daemons are not sessions; the latch
+    //      never crosses threads and carries no session state.
+    //   15. access/heap/vacuumlazy/src/morsels.rs WORKER_CX (vacuum-morsels)
+    //      — the vacuum SCAN task set's drive-scoped worker context pointer,
+    //      set for one run_morsel drive and cleared on every exit path —
+    //      same drive-scoped class and argument as WORKER_EXEC slots 4-6.
+    // Train-14's own cargo (q5/q22/q14/topn) adds ZERO sources — the
+    // per-file census at the train-13 tip and the train-14 tip is identical.
+    // (Merge reconciliation, train-14 car 6: the m35-spill-joins lane
+    // independently re-pinned 474 attributing the whole drift to morsels.rs
+    // WORKER_CX; this block's net decomposition subsumes it — one pin kept.
+    // m35 inc-4/5's join-batch spill code itself adds no TLS source.
+    // Merge reconciliation, m5-integration-r2: the m5-liveness lane's own
+    // 474 re-pin attributed the whole train-13 drift to morsels.rs
+    // WORKER_CX alone — train-14's fuller +3/−2 decomposition above
+    // subsumes it, same precedent as the m35 pin; one pin kept.)
     // 475, re-pinned at m5-integration (M5-0/1 router merged) —
-    //   14. executor/execmain/src/lanev2/router.rs DUMP (the
+    //   16. executor/execmain/src/lanev2/router.rs DUMP (the
     //      DumpOnThreadExit guard armed by arm_dump_on_thread_exit) — the
     //      M5-1 telemetry dump-on-exit hook: a drop guard whose only act
     //      is writing the process-global router counters to
