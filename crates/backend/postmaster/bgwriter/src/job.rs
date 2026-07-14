@@ -215,6 +215,15 @@ impl BgJob for BgWriterJob {
         }
         ipc::on_exit_reset();
         miscinit::SetProcessingMode(types_core::ProcessingMode::InitProcessing);
+        // Stale-identity clear: a crash-ABANDONED lifecycle leaves the
+        // dispatcher TLS pointing into pre-reset shared memory (the clean
+        // path clears these in AuxiliaryProcKill via teardown's
+        // shmem_exit). Without this, every post-crash relaunch dies at
+        // InitAuxiliaryProcess "you already exist" and the postmaster
+        // crash-loops hot (observed: fleet job ...-42c3).
+        let _ = lmgr_proc::bind_task_proc(INVALID_PROC_NUMBER);
+        g::SetMyProcNumber(INVALID_PROC_NUMBER);
+        g::SetMyLatch(None);
         let init = if CHILD_INITED.get() {
             miscinit::InitProcessGlobals(self.pid);
             Ok(())
@@ -228,7 +237,14 @@ impl BgJob for BgWriterJob {
         g::SetMyPMChildSlot(self.child_slot);
         miscinit::SetMyBackendType(types_core::BackendType::BgWriter);
         if let Err(e) = auxprocess::AuxiliaryProcessMainCommon() {
-            self.announce(1 << 8); // C fatal_exit: proc_exit(1)
+            // C fatal_exit parity: proc_exit(1) RUNS THE EXIT CALLBACKS —
+            // whatever partial identity was acquired (aux PGPROC, beentry,
+            // procsignal slot) must be released or every relaunch inherits
+            // it ("you already exist").
+            if let Err(e2) = ipc::shmem_exit(1) {
+                elog::emit_error_report_for(&e2);
+            }
+            self.announce(1 << 8);
             return Err(e);
         }
         self.procno.store(g::MyProcNumber(), Ordering::Release);
