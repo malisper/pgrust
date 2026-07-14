@@ -1617,8 +1617,12 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
     // Armed offer reached the admission walk (heap shapes ride the scan
-    // arm's entry; they re-class at engagement).
-    router::tick(ArmClass::Scan, ArmCounter::Offered);
+    // arm's entry; they re-class at engagement). Done-repulls (the post-
+    // completion pull that exits via agg_is_done below) are not offers —
+    // without this gate `offered` double-counts every engagement.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::Scan, ArmCounter::Offered);
+    }
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED,
     // so under EXPLAIN ANALYZE every refusal records its reason for the

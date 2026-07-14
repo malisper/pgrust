@@ -772,7 +772,11 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
-    router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+    // Done-repulls (the post-completion pull that exits via agg_is_done
+    // below) are not offers — see the scan arm's identical gate.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+    }
     // M5-1 refusal funnel: every admission exit names its gate for the
     // router's consolidated taxonomy (previously silent early returns).
     fn refuse(reason: &'static str) {
