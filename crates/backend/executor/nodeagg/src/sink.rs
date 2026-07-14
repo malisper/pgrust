@@ -121,18 +121,22 @@ pub fn sink_spill_canon_enabled() -> bool {
     })
 }
 
-/// `PGRUST_RUNTIME_AGG_GIDMERGE` kill switch (default ON): the combine-side
+/// `PGRUST_RUNTIME_AGG_GIDMERGE=1` opt-in (default OFF): the combine-side
 /// GID merge (canon-sink-increments car 2 — per-worker packed-word group ids
-/// short-circuit the canonical bytes probe for repeat arrivals). Off, every
-/// arrival probes canonical bytes exactly as before the car (byte-identical
-/// either way — the map only redirects state combines to the same rows).
+/// short-circuit the canonical bytes probe for repeat arrivals).
+/// MEASURED NO-SHIP at 100M (2026-07-14 A/B, text family q13/15/17/19,
+/// rta16, jobs -2b22 on / -064e off): ON is +10/+10/+19/+32% hot — the
+/// near-unique text classes re-arrive too rarely for map hits to pay for
+/// the per-claim map allocation + the flush-side word fill. The mechanism
+/// stays as the evidence channel; the chartered follow-up is the
+/// text-kernels catalog design (runs carry first-seen id CATALOGS and the
+/// merged table itself goes word-mode — deletes the bytes table entirely
+/// instead of caching around it). Byte-identical either way — the map only
+/// redirects state combines to the same merged rows.
 pub fn sink_gid_merge_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(
-            std::env::var("PGRUST_RUNTIME_AGG_GIDMERGE").as_deref(),
-            Ok("0") | Ok("off")
-        )
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_GIDMERGE").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
@@ -444,6 +448,12 @@ fn canon_row_bytes_append(
 /// ids stay valid). Bucket-major two-pass counting sort by
 /// [`sink_hash_bytes`] over the canonical bytes.
 fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
+    sink_flush_table_canon_impl(ch, sink_gid_merge_enabled())
+}
+
+/// [`sink_flush_table_canon`] with the GID-word fill decision injected (the
+/// unit tests exercise the GID lane regardless of the process env).
+fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) -> SinkRun {
     // The batch tails already hashed every row's canonical image
     // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
     // here is the defensive no-op sweep for the non-batched insert paths.
@@ -506,7 +516,6 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
     // ids included) so the combine can merge repeat arrivals of one
     // (worker, generation, words) triple word-mode instead of re-probing
     // canonical bytes.
-    let gid = sink_gid_merge_enabled();
     let mut gid_words: Vec<u64> = if gid { vec![0; n * 2] } else { Vec::new() };
     for i in 0..n {
         let img =
@@ -1647,6 +1656,19 @@ pub fn sink_combine_bucket(
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
 ) -> PgResult<LaneAggTable> {
+    sink_combine_bucket_impl(b, key_words, state_bytes, locals, combines, sink_gid_merge_enabled())
+}
+
+/// [`sink_combine_bucket`] with the GID-map decision injected (unit tests
+/// exercise the GID lane regardless of the process env).
+fn sink_combine_bucket_impl(
+    b: usize,
+    key_words: usize,
+    state_bytes: usize,
+    locals: &[SinkLocalView<'_>],
+    combines: &[SinkCombineFn],
+    gid_enabled: bool,
+) -> PgResult<LaneAggTable> {
     debug_assert!(b < SINK_NBUCKETS);
     let mut total = 0usize;
     for l in locals {
@@ -1733,7 +1755,7 @@ pub fn sink_combine_bucket(
     // state block (identical arithmetic, identical rows: byte-invisible).
     // The map resets per Local and at every generation boundary; faces
     // without carried words (spill replay) always bytes-probe.
-    let use_gid = key_words == 0 && sink_gid_merge_enabled();
+    let use_gid = key_words == 0 && gid_enabled;
     let mut gmap = GidMap::new(if use_gid { total } else { 0 });
 
     // Canonical remainder scratch (bytes mode only).
@@ -5457,9 +5479,9 @@ mod tests {
         let mut w = canon_worker(canon_shape_int8_text());
         bump_canon(&mut w, Some(1), b"first-gen-a", 1);
         bump_canon(&mut w, Some(2), b"first-gen-b", 2);
-        let run1 = sink_flush_table_canon(&mut w);
+        let run1 = sink_flush_table_canon_impl(&mut w, true);
         bump_canon(&mut w, Some(1), b"first-gen-a", 10);
-        let run2 = sink_flush_table_canon(&mut w);
+        let run2 = sink_flush_table_canon_impl(&mut w, true);
         // Simulate the wide-vocabulary intern reset (agg_sink_flush_now's
         // reset arm): ids restart, the generation bumps.
         w.intern.as_mut().unwrap().reset();
@@ -5467,7 +5489,7 @@ mod tests {
         // Post-reset: "second-gen-a" gets intern id 0 — the SAME packed
         // words as key (1, "first-gen-a") pre-reset.
         bump_canon(&mut w, Some(1), b"second-gen-a", 100);
-        let run3 = sink_flush_table_canon(&mut w);
+        let run3 = sink_flush_table_canon_impl(&mut w, true);
         assert_eq!(run3.gid_gen, 1, "post-reset runs carry the new generation");
         bump_canon(&mut w, Some(1), b"second-gen-a", 1000);
         bump_canon(&mut w, Some(2), b"first-gen-b", 3);
@@ -5490,7 +5512,10 @@ mod tests {
         let drain = |locals: &[SinkLocalView<'_>]| {
             let mut seen = std::collections::HashMap::new();
             for b in 0..SINK_NBUCKETS {
-                let t = sink_combine_bucket(b, 0, STATE_BYTES, locals, &combines).unwrap();
+                // GID lane forced ON (the default is the measured-off
+                // evidence channel; the law under test is byte-invisibility).
+                let t = sink_combine_bucket_impl(b, 0, STATE_BYTES, locals, &combines, true)
+                    .unwrap();
                 let buf = sink_emit_bucket(&plan, &t).unwrap();
                 for row in 0..buf.nrows {
                     let k = buf.values[row * 3].as_i64();
