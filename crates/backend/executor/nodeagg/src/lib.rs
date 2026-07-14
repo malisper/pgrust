@@ -4839,14 +4839,23 @@ fn pd_derive_trace(msg: &str) {
     }
 }
 
+/// `allow_bytes_keys`: admit text/varchar GROUP KEY columns as
+/// `PdKeyKind::Bytes` (band-kernels-1 — the ClickBench q11/q12 grouped
+/// COUNT(DISTINCT) class). Only the runtime distinct SINK passes true: the
+/// Gather-era leader/worker arm keeps the int-only vocabulary (its degrade
+/// and leader-evict paths are priced for int keys; the sink's phase-1
+/// Crossed abort → serial rerun is the bytes-key memory law).
 pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
+    allow_bytes_keys: bool,
 ) -> Option<std::sync::Arc<pardistinct::PdSpec>> {
-    use pardistinct::{PdInt, PdSetSpec, PdSpec, PdVocab};
+    use pardistinct::{PdInt, PdKeyKind, PdSetSpec, PdSpec, PdVocab};
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
     const INT8OID: Oid = 20;
+    const TEXTOID: Oid = 25;
+    const VARCHAROID: Oid = 1043;
     let int_kind = |t: Oid| match t {
         INT2OID => Some(PdInt::I16),
         INT4OID => Some(PdInt::I32),
@@ -4874,7 +4883,15 @@ pub fn pd_derive_spec(
             return None;
         }
         key_atts.push((col - 1) as u16);
-        key_kinds.push(int_kind(desc.attr((col - 1) as usize).atttypid)?);
+        let t = desc.attr((col - 1) as usize).atttypid;
+        key_kinds.push(match int_kind(t) {
+            Some(k) => PdKeyKind::Int(k),
+            None if allow_bytes_keys && matches!(t, TEXTOID | VARCHAROID) => PdKeyKind::Bytes,
+            None => {
+                pd_derive_trace("group key outside the int (+bytes, sink-only) vocabulary");
+                return None;
+            }
+        });
         max_att = max_att.max(col as i32);
     }
     if key_atts.len() > 32 {
@@ -4979,7 +4996,7 @@ pub use pardistinct::{
     pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_registry_get, pd_registry_insert,
     pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_record_width,
     pd_table_from_spill, PdBucketMerger, PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff,
-    PdMerged, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
+    PdKeyKind, PdMerged, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +

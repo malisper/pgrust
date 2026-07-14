@@ -79,6 +79,55 @@ impl PdInt {
     }
 }
 
+/// Group-key column kind (band-kernels-1 text-key extension). `Int` stores
+/// the sign-extended value in the key word (word equality = grouping
+/// equality, the original pardistinct representation). `Bytes` stores the
+/// detoasted CONTENT bytes in the table's key arena, the key word packing
+/// `(arena offset << 32) | len` — the hashgrouped arm's exact span law
+/// (byte equality = deterministic-collation `texteq`, the admission the
+/// caller's `agg_hashgroup_admissible` gate already proved). Key words of
+/// `Bytes` columns are TABLE-LOCAL (arena offsets): every cross-table
+/// compare (merge/absorb) re-stages the content bytes; the value-based
+/// group HASH (int words + folded bytes) is what crosses tables, so the
+/// top-8-bit partition law is representation-independent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdKeyKind {
+    Int(PdInt),
+    Bytes,
+}
+
+/// Pack a key-arena span into a key word (create time; the hashgrouped
+/// pack law — offsets stay < 4GiB structurally: the arena is metered
+/// against the worker budget).
+#[inline]
+fn pd_pack_span(off: usize, len: usize) -> i64 {
+    debug_assert!(off <= u32::MAX as usize && len <= u32::MAX as usize);
+    (((off as u64) << 32) | len as u64) as i64
+}
+
+#[inline]
+fn pd_unpack_span(word: i64) -> (usize, usize) {
+    ((word as u64 >> 32) as usize, (word as u64 & 0xffff_ffff) as usize)
+}
+
+/// Fold a byte string into the running hash, 8 LE bytes per mix round plus
+/// a length round (hashgrouped's `fold_bytes` verbatim; any deterministic
+/// hash is legal — group equality is representational).
+#[inline]
+fn fold_bytes(mut h: u64, b: &[u8]) -> u64 {
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        h = mix64(h ^ u64::from_le_bytes(c.try_into().unwrap()));
+    }
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut last = [0u8; 8];
+        last[..rem.len()].copy_from_slice(rem);
+        h = mix64(h ^ u64::from_le_bytes(last));
+    }
+    mix64(h ^ b.len() as u64)
+}
+
 /// One NON-distinct transition in the worker vocabulary. Every vocab state
 /// is two i64 words: (acc, count). The kinds mirror the
 /// `order_insensitive_exact_transfn` whitelist minus the Int128 family.
@@ -120,7 +169,7 @@ const PD_GROUP_PARTS: usize = 256;
 /// The leader-derived build recipe workers run. Everything is plain data.
 pub struct PdSpec {
     pub key_atts: Vec<u16>,
-    pub key_kinds: Vec<PdInt>,
+    pub key_kinds: Vec<PdKeyKind>,
     pub vocab: Vec<PdVocab>,
     pub sets: Vec<PdSetSpec>,
     /// 1 + the largest referenced 0-based attno (slot_getsomeattrs bound).
@@ -140,6 +189,14 @@ impl PdSpec {
     #[inline]
     pub fn any_bytes_set(&self) -> bool {
         self.sets.iter().any(|s| matches!(s.kind, DistinctKeyKind::Bytes))
+    }
+
+    /// Any bytes-kind GROUP KEY (text/varchar grouping column): the key
+    /// arena is live, cross-table compares re-stage content, and the value
+    /// spill is disarmed (see `spill_eligible`).
+    #[inline]
+    pub fn any_bytes_key(&self) -> bool {
+        self.key_kinds.iter().any(|k| matches!(k, PdKeyKind::Bytes))
     }
 }
 
@@ -261,6 +318,16 @@ pub struct PdBuilder<'mcx> {
     /// Group g's key words at [g*nkeys ..] (sign-extended).
     keys: Vec<i64>,
     keynulls: Vec<u32>,
+    /// Content bytes of `Bytes` group keys (span-packed words; empty for
+    /// int-only specs).
+    key_arena: Vec<u8>,
+    /// Per-row staging of candidate `Bytes` key content (hashgrouped's
+    /// probe_buf law: detoast copies land in per-tuple memory, the staged
+    /// copy here is what probe/create read).
+    probe_buf: Vec<u8>,
+    /// Per key column: (probe_buf offset, len) of the staged candidate
+    /// content (Bytes, non-NULL columns only).
+    probe_spans: Vec<(u32, u32)>,
     /// Group g's vocab state at [g*2*nvocab ..]: (acc, count) pairs.
     states: Vec<i64>,
     /// Group g's sets at [g*nsets ..].
@@ -284,12 +351,16 @@ pub struct PdBuilder<'mcx> {
 
 impl<'mcx> PdBuilder<'mcx> {
     pub fn new(spec: Arc<PdSpec>, budget: usize, mcx: Option<Mcx<'mcx>>) -> Self {
+        let nkeys = spec.nkeys();
         PdBuilder {
             spec,
             table: vec![0u32; INIT_TABLE],
             hashes: Vec::new(),
             keys: Vec::new(),
             keynulls: Vec::new(),
+            key_arena: Vec::new(),
+            probe_buf: Vec::new(),
+            probe_spans: vec![(0u32, 0u32); nkeys],
             states: Vec::new(),
             dsets: Vec::new(),
             set_mem: Vec::new(),
@@ -334,8 +405,42 @@ impl<'mcx> PdBuilder<'mcx> {
         self.table = table;
     }
 
-    fn probe(&self, words: &[i64], nulls: u32, h: u64) -> (Option<u32>, usize) {
+    /// Column-wise equality of group `g` against the staged candidate:
+    /// `Int` keys by word, `Bytes` keys by arena-vs-staging byte compare
+    /// (deterministic-collation texteq — the hashgrouped law). NULL bitmask
+    /// equality is checked by the caller's probe loop.
+    fn keys_equal(&self, g: usize, words: &[i64], nulls: u32) -> bool {
         let nkeys = self.spec.nkeys();
+        let base = g * nkeys;
+        for i in 0..nkeys {
+            match self.spec.key_kinds[i] {
+                PdKeyKind::Bytes => {
+                    if nulls & (1 << i) != 0 {
+                        continue;
+                    }
+                    let (off, len) = pd_unpack_span(self.keys[base + i]);
+                    let (poff, plen) = self.probe_spans[i];
+                    if len != plen as usize
+                        || self.key_arena[off..off + len]
+                            != self.probe_buf[poff as usize..(poff + plen) as usize]
+                    {
+                        return false;
+                    }
+                }
+                PdKeyKind::Int(_) => {
+                    if self.keys[base + i] != words[i] {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Probe against the STAGED candidate: `words` carry int values (Bytes
+    /// columns' words are ignored — their content sits in
+    /// `probe_buf`/`probe_spans`).
+    fn probe(&self, words: &[i64], nulls: u32, h: u64) -> (Option<u32>, usize) {
         let mask = self.table.len() - 1;
         let mut slot = (h as usize) & mask;
         loop {
@@ -345,7 +450,7 @@ impl<'mcx> PdBuilder<'mcx> {
                     let g = (e - 1) as usize;
                     if self.hashes[g] == h
                         && self.keynulls[g] == nulls
-                        && &self.keys[g * nkeys..(g + 1) * nkeys] == words
+                        && self.keys_equal(g, words, nulls)
                     {
                         return (Some(e - 1), slot);
                     }
@@ -355,11 +460,42 @@ impl<'mcx> PdBuilder<'mcx> {
         }
     }
 
+    /// Value-based group hash over the staged candidate (int words mixed,
+    /// Bytes content folded — representation-independent, so partitions and
+    /// hashes agree across tables regardless of arena offsets).
+    fn staged_key_hash(&self, words: &[i64], nulls: u32) -> u64 {
+        let mut h = (nulls as u64) ^ 0x9e37_79b9_7f4a_7c15;
+        for (i, &w) in words.iter().enumerate() {
+            if matches!(self.spec.key_kinds[i], PdKeyKind::Bytes) && nulls & (1 << i) == 0 {
+                let (off, len) = self.probe_spans[i];
+                h = fold_bytes(h, &self.probe_buf[off as usize..(off + len) as usize]);
+            } else {
+                h = mix64(h ^ (w as u64));
+            }
+        }
+        h
+    }
+
     fn create_group(&mut self, words: &[i64], nulls: u32, h: u64, slot_idx: usize) -> u32 {
         let g = self.ngroups() as u32;
+        let nkeys = self.spec.nkeys();
         self.hashes.push(h);
         self.keynulls.push(nulls);
-        self.keys.extend_from_slice(words);
+        let mut arena_added = 0usize;
+        for i in 0..nkeys {
+            match self.spec.key_kinds[i] {
+                PdKeyKind::Bytes if nulls & (1 << i) == 0 => {
+                    let (poff, plen) = self.probe_spans[i];
+                    let off = self.key_arena.len();
+                    self.key_arena.extend_from_slice(
+                        &self.probe_buf[poff as usize..(poff + plen) as usize],
+                    );
+                    arena_added += plen as usize;
+                    self.keys.push(pd_pack_span(off, plen as usize));
+                }
+                _ => self.keys.push(words[i]),
+            }
+        }
         self.states.extend(core::iter::repeat(0i64).take(2 * self.spec.vocab.len()));
         for _ in 0..self.spec.sets.len() {
             self.dsets.push(DistinctSet::new());
@@ -367,6 +503,7 @@ impl<'mcx> PdBuilder<'mcx> {
         self.set_mem.push(0);
         self.table[slot_idx] = g + 1;
         self.base_mem += self.spec.nkeys() * 8
+            + arena_added
             + 2 * self.spec.vocab.len() * 8
             + self.spec.sets.len() * core::mem::size_of::<DistinctSet<'_>>()
             + GROUP_FIXED_COST;
@@ -394,11 +531,17 @@ impl<'mcx> PdBuilder<'mcx> {
         // workers (the __aarch64_ldadd8_relax/_rel flat-profile signature).
         // Disjoint field borrows below make the clone unnecessary.
         let max_att = self.spec.max_att;
-        let slot = estate.slot_mut(id);
-        exectuples::slot_getsomeattrs(slot, max_att);
-        let g = {
+        // Phase A (slot borrow only): int key words + NULL bitmask; Bytes
+        // columns stash the raw datum for phase B (the detoast needs a
+        // per-tuple-memory borrow the slot borrow excludes) — the
+        // hashgrouped two-phase law.
+        let mut text_datums = [Datum::null(); 32];
+        let mut any_text = false;
+        let mut nulls = 0u32;
+        {
+            let slot = estate.slot_mut(id);
+            exectuples::slot_getsomeattrs(slot, max_att);
             let base = slot.base();
-            let mut nulls = 0u32;
             for (i, (&att, &kind)) in
                 self.spec.key_atts.iter().zip(self.spec.key_kinds.iter()).enumerate()
             {
@@ -406,32 +549,73 @@ impl<'mcx> PdBuilder<'mcx> {
                     nulls |= 1 << i;
                     words[i] = 0;
                 } else {
-                    words[i] = kind.read(base.tts_values[att as usize]);
+                    match kind {
+                        PdKeyKind::Int(k) => words[i] = k.read(base.tts_values[att as usize]),
+                        PdKeyKind::Bytes => {
+                            text_datums[i] = base.tts_values[att as usize];
+                            words[i] = 0;
+                            any_text = true;
+                        }
+                    }
                 }
             }
-            let h = key_hash(&words[..nkeys], nulls);
+        }
+        // Phase B: stage Bytes key content (detoast copies land in
+        // per-tuple memory; the staged copy is what probe/create read).
+        if any_text {
+            self.probe_buf.clear();
+            for i in 0..nkeys {
+                if !matches!(self.spec.key_kinds[i], PdKeyKind::Bytes) || nulls & (1 << i) != 0
+                {
+                    continue;
+                }
+                // SAFETY: non-null live text/varchar varlena — the leader's
+                // admission proved the column type.
+                let v = unsafe {
+                    ::types_fmgr::datum_varlena_packed(
+                        text_datums[i],
+                        estate.ecxt(tmp).per_tuple_mcx(),
+                    )
+                }?;
+                let b = v.data();
+                let off = self.probe_buf.len();
+                self.probe_buf.extend_from_slice(b);
+                self.probe_spans[i] = (off as u32, b.len() as u32);
+            }
+        }
+        let g = {
+            let h = if any_text {
+                self.staged_key_hash(&words[..nkeys], nulls)
+            } else {
+                key_hash(&words[..nkeys], nulls)
+            };
             let (found, slot_idx) = self.probe(&words[..nkeys], nulls, h);
             let g = match found {
                 Some(g) => g,
                 None => self.create_group(&words[..nkeys], nulls, h, slot_idx),
             };
             let gi = g as usize;
-            // Vocab transitions (spec/states are disjoint fields).
-            let spec = &self.spec;
-            let st = &mut self.states[gi * 2 * spec.vocab.len()..];
-            for (vi, v) in spec.vocab.iter().enumerate() {
-                let (acc, cnt) = (2 * vi, 2 * vi + 1);
-                match v.kind {
-                    PdVocabKind::CountStar => st[acc] += 1,
-                    PdVocabKind::CountAny { att } => {
-                        if !base.tts_isnull[att as usize] {
-                            st[acc] += 1;
+            // Vocab transitions (spec/states are disjoint fields; the slot
+            // re-borrow is immutable and cheap — attrs already fetched).
+            if !self.spec.vocab.is_empty() {
+                let slot = estate.slot_mut(id);
+                let base = slot.base();
+                let spec = &self.spec;
+                let st = &mut self.states[gi * 2 * spec.vocab.len()..];
+                for (vi, v) in spec.vocab.iter().enumerate() {
+                    let (acc, cnt) = (2 * vi, 2 * vi + 1);
+                    match v.kind {
+                        PdVocabKind::CountStar => st[acc] += 1,
+                        PdVocabKind::CountAny { att } => {
+                            if !base.tts_isnull[att as usize] {
+                                st[acc] += 1;
+                            }
                         }
-                    }
-                    PdVocabKind::SumInt { att, kind } | PdVocabKind::AvgInt { att, kind } => {
-                        if !base.tts_isnull[att as usize] {
-                            st[acc] += kind.read(base.tts_values[att as usize]);
-                            st[cnt] += 1;
+                        PdVocabKind::SumInt { att, kind } | PdVocabKind::AvgInt { att, kind } => {
+                            if !base.tts_isnull[att as usize] {
+                                st[acc] += kind.read(base.tts_values[att as usize]);
+                                st[cnt] += 1;
+                            }
                         }
                     }
                 }
@@ -538,10 +722,27 @@ impl<'mcx> PdBuilder<'mcx> {
         let nkeys = spec.nkeys();
         let nvocab = spec.vocab.len();
         let nsets = spec.sets.len();
+        let any_bytes = spec.any_bytes_key();
         for g in 0..t.ngroups {
             let words = &t.keys[g * nkeys..(g + 1) * nkeys];
             let nulls = t.keynulls[g];
             let h = t.hashes[g];
+            if any_bytes {
+                // Stage the incoming group's Bytes content (words of Bytes
+                // columns are t-arena spans — table-local; probe/create read
+                // the staging, exactly the accept path).
+                self.probe_buf.clear();
+                for i in 0..nkeys {
+                    if !matches!(spec.key_kinds[i], PdKeyKind::Bytes) || nulls & (1 << i) != 0
+                    {
+                        continue;
+                    }
+                    let b = t.key_bytes(words[i]);
+                    let off = self.probe_buf.len();
+                    self.probe_buf.extend_from_slice(b);
+                    self.probe_spans[i] = (off as u32, b.len() as u32);
+                }
+            }
             let (found, slot_idx) = self.probe(words, nulls, h);
             let dst = match found {
                 Some(d) => d,
@@ -686,6 +887,7 @@ impl<'mcx> PdBuilder<'mcx> {
             keys: core::mem::take(&mut self.keys),
             keynulls: core::mem::take(&mut self.keynulls),
             hashes: core::mem::take(&mut self.hashes),
+            key_arena: core::mem::take(&mut self.key_arena),
             states: core::mem::take(&mut self.states),
             set_ints,
             set_int_offs,
@@ -706,6 +908,7 @@ impl<'mcx> PdBuilder<'mcx> {
             ngroups: self.ngroups(),
             keys: self.keys,
             keynulls: self.keynulls,
+            key_arena: self.key_arena,
             states: self.states,
             dsets: self.dsets.into_iter().map(Some).collect(),
         }
@@ -744,6 +947,9 @@ pub struct PdHandedTable {
     keys: Vec<i64>,
     keynulls: Vec<u32>,
     hashes: Vec<u64>,
+    /// Content bytes of `PdKeyKind::Bytes` group keys (span-packed key
+    /// words index into this; empty for int-only specs).
+    key_arena: Vec<u8>,
     states: Vec<i64>,
     set_ints: Vec<i64>,
     set_int_offs: Vec<u32>,
@@ -763,6 +969,13 @@ impl PdHandedTable {
         &self.set_ints[self.set_int_offs[si] as usize..self.set_int_offs[si + 1] as usize]
     }
 
+    /// Content bytes of a span-packed `Bytes` key word.
+    #[inline]
+    fn key_bytes(&self, word: i64) -> &[u8] {
+        let (off, len) = pd_unpack_span(word);
+        &self.key_arena[off..off + len]
+    }
+
     /// Iterate (content, hash) of set `si`'s byte elements.
     fn set_bytes(&self, si: usize) -> impl Iterator<Item = (&[u8], u32)> {
         self.set_spans[self.set_span_offs[si] as usize..self.set_span_offs[si + 1] as usize]
@@ -776,6 +989,7 @@ impl PdHandedTable {
         self.keys.len() * 8
             + self.keynulls.len() * 4
             + self.hashes.len() * 8
+            + self.key_arena.len()
             + self.states.len() * 8
             + self.set_ints.len() * 8
             + self.set_blob.len()
@@ -796,6 +1010,9 @@ pub struct PdMerged<'mcx> {
     pub ngroups: usize,
     pub keys: Vec<i64>,
     pub keynulls: Vec<u32>,
+    /// Content bytes of `Bytes` group keys (span-packed key words index
+    /// into this; empty for int-only specs).
+    pub key_arena: Vec<u8>,
     /// (acc, count) pairs, stride 2*nvocab.
     pub states: Vec<i64>,
     pub(crate) dsets: Vec<Option<DistinctSet<'mcx>>>,
@@ -814,6 +1031,7 @@ impl PdMerged<'_> {
     pub fn mem_bytes(&self) -> usize {
         self.keys.len() * 8
             + self.keynulls.len() * 4
+            + self.key_arena.len()
             + self.states.len() * 8
             + self.dsets.len() * core::mem::size_of::<Option<DistinctSet<'_>>>()
             + self.dsets.iter().flatten().map(|d| d.mem_bytes()).sum::<usize>()
@@ -828,6 +1046,7 @@ impl PdMerged<'static> {
             ngroups: self.ngroups,
             keys: self.keys,
             keynulls: self.keynulls,
+            key_arena: self.key_arena,
             states: self.states,
             dsets: self.dsets.into_iter().map(|d| d.map(DistinctSet::unspilled_into)).collect(),
         }
@@ -907,6 +1126,7 @@ impl<'s> PdBucketMerger<'s> {
                 ngroups: 0,
                 keys: Vec::new(),
                 keynulls: Vec::new(),
+                key_arena: Vec::new(),
                 states: Vec::new(),
                 dsets: Vec::new(),
             },
@@ -915,12 +1135,46 @@ impl<'s> PdBucketMerger<'s> {
         }
     }
 
+    /// Column-wise equality of output group `d` against incoming group
+    /// words (Bytes columns compare content across arenas; Int by word).
+    fn out_keys_equal(
+        spec: &PdSpec,
+        out: &PdMerged<'static>,
+        d: usize,
+        t: &PdHandedTable,
+        words: &[i64],
+        nulls: u32,
+    ) -> bool {
+        let nkeys = spec.nkeys();
+        for i in 0..nkeys {
+            match spec.key_kinds[i] {
+                PdKeyKind::Bytes => {
+                    if nulls & (1 << i) != 0 {
+                        continue;
+                    }
+                    let (ooff, olen) = pd_unpack_span(out.keys[d * nkeys + i]);
+                    if out.key_arena[ooff..ooff + olen] != *t.key_bytes(words[i]) {
+                        return false;
+                    }
+                }
+                PdKeyKind::Int(_) => {
+                    if out.keys[d * nkeys + i] != words[i] {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Merge bucket `b` of `t` into the output — the donor loop body
-    /// verbatim.
+    /// verbatim (Bytes group keys re-span into the output arena on create;
+    /// compares are content-based, so arena offsets never cross tables).
     pub fn absorb(&mut self, t: &PdHandedTable, b: usize) {
         let nkeys = self.spec.nkeys();
         let nvocab = self.spec.vocab.len();
         let nsets = self.spec.sets.len();
+        let spec = self.spec;
         let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
@@ -938,7 +1192,17 @@ impl<'s> PdBucketMerger<'s> {
                         let d = out.ngroups;
                         out.ngroups += 1;
                         hashes.push(h);
-                        out.keys.extend_from_slice(words);
+                        for i in 0..nkeys {
+                            match spec.key_kinds[i] {
+                                PdKeyKind::Bytes if nulls & (1 << i) == 0 => {
+                                    let bts = t.key_bytes(words[i]);
+                                    let off = out.key_arena.len();
+                                    out.key_arena.extend_from_slice(bts);
+                                    out.keys.push(pd_pack_span(off, bts.len()));
+                                }
+                                _ => out.keys.push(words[i]),
+                            }
+                        }
                         out.keynulls.push(nulls);
                         out.states.extend(core::iter::repeat(0i64).take(2 * nvocab));
                         for _ in 0..nsets {
@@ -964,7 +1228,7 @@ impl<'s> PdBucketMerger<'s> {
                         let d = (e2 - 1) as usize;
                         if hashes[d] == h
                             && out.keynulls[d] == nulls
-                            && &out.keys[d * nkeys..(d + 1) * nkeys] == words
+                            && Self::out_keys_equal(spec, out, d, t, words, nulls)
                         {
                             break d;
                         }
@@ -1043,6 +1307,7 @@ pub fn pd_parallel_merge_grouped(
                     ngroups: 0,
                     keys: Vec::new(),
                     keynulls: Vec::new(),
+                    key_arena: Vec::new(),
                     states: Vec::new(),
                     dsets: Vec::new(),
                 })
@@ -1059,22 +1324,7 @@ pub fn pd_parallel_merge_grouped(
         }
     });
     // Concatenate buckets.
-    let mut merged = PdMerged {
-        ngroups: 0,
-        keys: Vec::new(),
-        keynulls: Vec::new(),
-        states: Vec::new(),
-        dsets: Vec::new(),
-    };
-    for cell in ctx.out {
-        let m = cell.into_inner();
-        merged.ngroups += m.ngroups;
-        merged.keys.extend(m.keys);
-        merged.keynulls.extend(m.keynulls);
-        merged.states.extend(m.states);
-        merged.dsets.extend(m.dsets);
-    }
-    merged
+    pd_concat_buckets(spec, ctx.out.into_iter().map(|c| c.into_inner()).collect())
 }
 
 // --- plain (single-group) parallel union over element partitions ----------
@@ -1171,7 +1421,14 @@ pub fn pd_parallel_merge_plain<'m>(
         let seen_null = tables.iter().any(|t| t.set_null[j]);
         dsets.push(Some(DistinctSet::from_values(spec.sets[j].kind, ints, blob, spans, seen_null)));
     }
-    PdMerged { ngroups: 1, keys: Vec::new(), keynulls: Vec::new(), states: Vec::new(), dsets }
+    PdMerged {
+        ngroups: 1,
+        keys: Vec::new(),
+        keynulls: Vec::new(),
+        key_arena: Vec::new(),
+        states: Vec::new(),
+        dsets,
+    }
 }
 
 // ===========================================================================
@@ -1333,21 +1590,41 @@ pub fn pd_merge_bucket_refs(
 
 /// Concatenate per-bucket merge outputs (bucket order) into the one merged
 /// result — the grouped parallel merge's tail, exposed for the sink's
-/// finalize.
-pub fn pd_concat_buckets(buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
+/// finalize. `Bytes` key words are bucket-arena spans, rebased as the
+/// arenas concatenate.
+pub fn pd_concat_buckets(spec: &PdSpec, buckets: Vec<PdMerged<'static>>) -> PdMerged<'static> {
+    let nkeys = spec.nkeys();
+    let any_bytes = spec.any_bytes_key();
     let mut merged = PdMerged {
         ngroups: 0,
         keys: Vec::new(),
         keynulls: Vec::new(),
+        key_arena: Vec::new(),
         states: Vec::new(),
         dsets: Vec::new(),
     };
     for m in buckets {
+        let ng0 = merged.ngroups;
+        let base = merged.key_arena.len();
         merged.ngroups += m.ngroups;
         merged.keys.extend(m.keys);
         merged.keynulls.extend(m.keynulls);
+        merged.key_arena.extend(m.key_arena);
         merged.states.extend(m.states);
         merged.dsets.extend(m.dsets);
+        if any_bytes && base != 0 {
+            for g in ng0..merged.ngroups {
+                for i in 0..nkeys {
+                    if matches!(spec.key_kinds[i], PdKeyKind::Bytes)
+                        && merged.keynulls[g] & (1 << i) == 0
+                    {
+                        let w = &mut merged.keys[g * nkeys + i];
+                        let (off, len) = pd_unpack_span(*w);
+                        *w = pd_pack_span(off + base, len);
+                    }
+                }
+            }
+        }
     }
     merged
 }
@@ -1419,6 +1696,10 @@ impl PdBuilder<'_> {
                 .sets
                 .iter()
                 .all(|s| !matches!(s.kind, DistinctKeyKind::Bytes))
+            // Bytes GROUP KEYS disarm the value spill: the record contract
+            // writes raw key words, and span words are table-local (the
+            // phase-1 Crossed abort → serial rerun keeps every arm exact).
+            && !self.spec.any_bytes_key()
             && self.mcx.is_none()
             && !self.ever_spilled
             && !self.frozen
@@ -1574,6 +1855,9 @@ pub fn pd_table_from_spill(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHande
     if nkeys == 0 || nsets == 0 {
         return Err(pd_internal("distinct spill replay on a non-grouped spec"));
     }
+    // Bytes group keys never spill (spill_eligible); a record stream for
+    // such a spec is structurally impossible.
+    debug_assert!(!spec.any_bytes_key(), "bytes-keyed specs are spill-disarmed");
     let width = pd_spill_record_width(spec);
     if bytes.len() % width != 0 {
         return Err(pd_internal("torn distinct spill record (partial row)"));
@@ -1716,7 +2000,7 @@ mod tests {
     fn spill_test_spec() -> Arc<PdSpec> {
         Arc::new(PdSpec {
             key_atts: vec![0, 1],
-            key_kinds: vec![PdInt::I64, PdInt::I32],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64), PdKeyKind::Int(PdInt::I32)],
             vocab: vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
             sets: vec![
                 PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 },
@@ -1801,6 +2085,7 @@ mod tests {
         let t2 = build_worker(&spec, 5).freeze().unwrap();
         let tables = [t1, t2];
         let direct = pd_concat_buckets(
+            &spec,
             (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
         );
 
@@ -1851,7 +2136,7 @@ mod tests {
                 remainders.iter().chain(synth.iter()).collect();
             buckets.push(pd_merge_bucket_refs(&spec, &refs, bkt));
         }
-        let merged = pd_concat_buckets(buckets);
+        let merged = pd_concat_buckets(&spec, buckets);
 
         assert_eq!(canon(&spec, &direct), canon(&spec, &merged));
 
@@ -1903,6 +2188,7 @@ mod tests {
         let t2 = build_worker(&spec, 5).freeze().unwrap();
         let tables = [t1, t2];
         let direct = pd_concat_buckets(
+            &spec,
             (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
         );
 
@@ -1974,7 +2260,7 @@ mod tests {
                 }
                 buckets.push(merger.finish());
             }
-            let merged = pd_concat_buckets(buckets);
+            let merged = pd_concat_buckets(&spec, buckets);
             assert_eq!(canon(&spec, &direct), canon(&spec, &merged), "depth {depth}");
         }
     }
