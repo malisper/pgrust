@@ -1177,21 +1177,30 @@ pub fn table_scan_cb_granule_geometry(scan: &TableScanDesc<'_>) -> Option<(u64, 
     }
 }
 
-/// Position a cbstore scan on the absolute-granule morsel claim [g0, g1)
-/// (must lie inside one row group -- the runtime clamps claims to the
-/// boundaries `table_scan_cb_granule_geometry` reports). false = heap scan
-/// (no granule address space).
-pub fn table_scan_cb_set_granule_range(
+/// Heap block-range geometry for the runtime morsel source (M1 heap
+/// source): total blocks at scan start = the granule count (granule = one
+/// block; heap has no dictionary epochs, so a heap source has no interior
+/// morsel boundaries). `None` = not a heap scan.
+pub fn table_scan_heap_block_geometry(scan: &TableScanDesc<'_>) -> Option<u64> {
+    match scan {
+        TableScanDesc::Heap(h) => Some(h.rs_nblocks as u64),
+        TableScanDesc::Cbstore(_) => None,
+    }
+}
+
+/// Position the scan on the morsel claim [g0, g1), dispatching on the AM
+/// (the runtime morsel drive): cbstore absolute granules (must lie inside
+/// one row group — the runtime clamps claims to the boundaries
+/// `table_scan_cb_granule_geometry` reports) or heap blocks (any contiguous
+/// in-relation range; heap reports no interior boundaries).
+pub fn table_scan_set_morsel_range(
     scan: &mut TableScanDesc<'_>,
     g0: u64,
     g1: u64,
-) -> PgResult<bool> {
+) -> PgResult<()> {
     match scan {
-        TableScanDesc::Heap(_) => Ok(false),
-        TableScanDesc::Cbstore(c) => {
-            c.set_granule_range(g0, g1)?;
-            Ok(true)
-        }
+        TableScanDesc::Heap(h) => ::heapam::heap_set_block_range(h, g0, g1),
+        TableScanDesc::Cbstore(c) => c.set_granule_range(g0, g1),
     }
 }
 

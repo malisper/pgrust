@@ -3166,17 +3166,41 @@ pub fn seq_scan_cb_granule_geometry<'mcx>(
     ))
 }
 
-/// Position a cbstore scan on the absolute-granule morsel claim [g0, g1)
-/// (whole granules within one row group -- the runtime's boundary-clamped
-/// claim contract). false = not a cbstore scan.
-pub fn seq_scan_cb_set_granule_range<'mcx>(
+/// A plain heap relation drives this scan (runtime heap morsel source gate,
+/// M1 heap source).
+pub fn seq_scan_is_heap(node: &SeqScanState<'_>) -> bool {
+    node.ss
+        .ss_currentRelation
+        .as_ref()
+        .is_some_and(|rel| ::tableam::TableAm::of(rel) == Some(::tableam::TableAm::Heap))
+}
+
+/// Block-range geometry of a heap scan (runtime morsel source, M1 heap
+/// source): total blocks at scan start — the granule count (granule = one
+/// block, no interior boundaries). None = not heap or an empty relation.
+/// Opens the scan descriptor if needed, exactly as the drive would.
+pub fn seq_scan_heap_block_geometry<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<u64>> {
+    node.ensure_scandesc(estate)?;
+    Ok(::tableam::table_scan_heap_block_geometry(
+        node.ss.ss_currentScanDesc.as_ref().unwrap(),
+    )
+    .filter(|&n| n > 0))
+}
+
+/// Position the scan on the morsel claim [g0, g1) (the runtime's
+/// boundary-clamped claim contract), dispatching on the AM: cbstore
+/// absolute granules (whole granules within one row group) or heap blocks.
+pub fn seq_scan_set_morsel_range<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     g0: u64,
     g1: u64,
-) -> PgResult<bool> {
+) -> PgResult<()> {
     node.ensure_scandesc(estate)?;
-    ::tableam::table_scan_cb_set_granule_range(
+    ::tableam::table_scan_set_morsel_range(
         node.ss.ss_currentScanDesc.as_mut().unwrap(),
         g0,
         g1,

@@ -340,17 +340,17 @@ impl RuntimeDistinctShared {
                 x.with_mut(|d| -> PgResult<()> {
                     let estate = &mut d.estate;
                     let ss = distinct_worker_scan(d.planstate.as_mut())?;
-                    if !::nodeseqscan::seq_scan_cb_set_granule_range(
+                    // train-12 composition: the heap lane generalized the
+                    // positioner to AM-dispatched seq_scan_set_morsel_range
+                    // (PgResult<()>); this arm admits only cbstore scans, so
+                    // the former not-cbstore branch is unreachable by
+                    // construction.
+                    ::nodeseqscan::seq_scan_set_morsel_range(
                         ss,
                         estate,
                         range.start,
                         range.end,
-                    )? {
-                        return Err(Box::new(PgError::new(
-                            ERROR,
-                            "runtime distinct worker scan is not cbstore",
-                        )));
-                    }
+                    )?;
                     let mut sink =
                         PdAcceptSink { local, tmp, reset_tmp, crossed: false };
                     let fed = drain_pipeline(
