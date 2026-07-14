@@ -1242,13 +1242,28 @@ fn arm_key_soa<'mcx>(
     let (plan, varkey) =
         match ::exectuples::SoaDeformPlan::try_new(mcx, atts, attnum as usize + 1) {
             Some(plan) => (plan, None),
-            None => {
-                let Some(vk) = ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize)
-                else {
-                    return false;
-                };
-                (::exectuples::SoaDeformPlan::unused(mcx), Some(vk))
-            }
+            None => match ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize) {
+                Some(vk) => (::exectuples::SoaDeformPlan::unused(mcx), Some(vk)),
+                None => {
+                    // cbstore columnar key staging (the q5-class refusal): a
+                    // FIXED-WIDTH key sitting past a varlena column — the
+                    // heap fixed-width-prefix proof refuses and the varkey
+                    // pass wants a varlena key. The cbstore window deform
+                    // fills per column with no offset chain (the virtual
+                    // plan, likeband precedent), and a keyed batch stages
+                    // ONLY the key column (`.or(b.key_col)` at
+                    // `seq_scan_next_pagebatch`'s tail) — one decoded key
+                    // lane per window. Heap scans keep the refusal (their
+                    // deform walks the offset chain).
+                    if node.cb_scan.is_none() {
+                        return false;
+                    }
+                    match ::exectuples::SoaDeformPlan::columnar(mcx, attnum as usize + 1) {
+                        Some(plan) => (plan, None),
+                        None => return false,
+                    }
+                }
+            },
         };
     let soa_cols = if varkey.is_some() { 1 } else { plan.ncols() };
     let key_read_col = if varkey.is_some() { 0 } else { attnum };
