@@ -59,6 +59,12 @@ pub struct SortState<'mcx> {
     // Memoized synthetic 2-col (key, ref) desc — one build per node, reused
     // across rescan re-feeds.
     refsort_desc: Option<Rc<TupleDescData<'static>>>,
+    // Runtime FULL-SORT adoption (m3-sort-b shape b): the sealed runs +
+    // partition outputs published by the runtime sink. When set, the emit
+    // face serves rows straight out of the run buffers in partition order
+    // (the canonical (keys, rowref) total order) — no tuplesort exists.
+    // Cleared with the refsort state on every reset/rescan/end path.
+    runtime_full: Option<Box<fullsort::FullAdopted>>,
 }
 
 /// `ExecInitSort` minus child linkage: the caller (execProcnode's T_Sort arm)
@@ -90,6 +96,7 @@ pub fn exec_init_sort<'mcx>(
         refsort_out: std::collections::VecDeque::new(),
         refsort_refused: false,
         refsort_desc: None,
+        runtime_full: None,
     })
 }
 
@@ -636,6 +643,61 @@ pub fn sort_lane_runtime_topn_done(node: &mut SortState<'_>) {
     node.bound_Done = node.bound;
 }
 
+/// Runtime FULL-SORT adoption face (m3-sort-b shape b): install the
+/// published runs + partition outputs and flip the node to Emit — no
+/// tuplesort exists (the runtime result is the sort). Same reset/rescan/
+/// end lifecycle as the refsort state (`refsort_clear` drops it; the
+/// runtime arm refuses randomAccess/bounded shapes at admission).
+pub fn sort_lane_runtime_full_adopt(
+    node: &mut SortState<'_>,
+    runs: Vec<std::sync::Arc<fullsort::FullRun>>,
+    parts: Vec<Vec<(u16, u32)>>,
+) {
+    debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
+    debug_assert!(!node.bounded && !node.randomAccess);
+    debug_assert!(!node.datumSort, "runtime full sort refuses datum sorts");
+    node.runtime_full = Some(Box::new(fullsort::FullAdopted::new(runs, parts)));
+    node.sort_Done = true;
+    node.bounded_Done = false;
+    node.bound_Done = 0;
+}
+
+/// Adopted-row count (trace/verification aid).
+pub fn sort_lane_runtime_full_rows(node: &SortState<'_>) -> usize {
+    node.runtime_full.as_ref().map_or(0, |f| f.total_rows())
+}
+
+/// Runtime full-sort emit face: the next adopted row as a VIRTUAL tuple in
+/// `ps_ResultTupleSlot` (datum copy; byref cells point into the adopted
+/// run arenas). `None` = drained (clears the slot like the tuplesort drain
+/// leg does).
+fn runtime_full_pop<'mcx>(
+    node: &mut SortState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<ExecSlotId> {
+    let mcx = estate.es_query_cxt;
+    let slot_id = node.ps_ResultTupleSlot;
+    let f = node.runtime_full.as_mut().expect("adopted full sort");
+    match f.next_row() {
+        Some((values, nulls)) => {
+            let natts = values.len();
+            let slot = estate.slot_mut(slot_id);
+            exectuples::exec_clear_tuple(slot, mcx);
+            {
+                let sb = slot.base_mut();
+                sb.tts_values[..natts].copy_from_slice(values);
+                sb.tts_isnull[..natts].copy_from_slice(nulls);
+            }
+            exectuples::exec_store_virtual_tuple(slot);
+            Some(slot_id)
+        }
+        None => {
+            exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
+            None
+        }
+    }
+}
+
 /// Refsort emit face: pop the next gathered winner into `ps_ResultTupleSlot`
 /// (owned store — the slot frees it on the next store/clear). `None` = EOF
 /// (buffer drained; clears the slot like the tuplesort drain leg does).
@@ -663,6 +725,7 @@ fn refsort_pop<'mcx>(
 fn refsort_clear(node: &mut SortState<'_>) {
     node.refsort = false;
     node.refsort_out.clear();
+    node.runtime_full = None;
 }
 
 /// Feed leg (breaker `Sink::accept`): put one outer tuple. Datum sorts take
@@ -903,6 +966,14 @@ pub fn sort_lane_next<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     debug_assert!(node.sort_Done);
+    // Runtime full sort (m3-sort-b shape b): serve the adopted partition
+    // outputs in the canonical order — virtual rows indexing straight into
+    // the sealed run buffers (byref datums point into the runs' arenas,
+    // which live in the node state until reset/rescan/end — the adopted
+    // sink-emit lifetime discipline).
+    if node.runtime_full.is_some() {
+        return Ok(runtime_full_pop(node, estate));
+    }
     // Lane refsort: the narrow (key, ref) tuplesort is NEVER node output —
     // serve the gathered winners, in sorted order, from the buffer.
     if node.refsort {
@@ -1014,5 +1085,6 @@ pub fn sort_result_type(node: &SortState<'_>) -> Rc<TupleDescData<'static>> {
 mcx::forget_safe_struct!(
     SortState<'_> { plan, ps_ResultTupleSlot, randomAccess, bounded, bound,
         sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused;
-        ps_ResultTupleDesc, tuplesortstate, refsort_out, refsort_desc },
+        ps_ResultTupleDesc, tuplesortstate, refsort_out, refsort_desc,
+        runtime_full },
 );

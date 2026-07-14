@@ -243,7 +243,11 @@ pub fn fullsort_partition_merge(
     splitters: &[WideEntry],
     part: usize,
 ) -> Vec<(u16, u32)> {
-    debug_assert!(part <= splitters.len());
+    // A short splitter list (empty input ⇒ zero splitters) leaves the
+    // trailing partitions empty; partition 0 owns everything then.
+    if part > splitters.len() {
+        return Vec::new();
+    }
     let lo = part.checked_sub(1).map(|i| splitters[i]);
     let hi = splitters.get(part).copied();
     // Slice bounds per run.
@@ -393,7 +397,9 @@ mod tests {
         let views: Vec<&[RunEnt]> = vec![&[], &[]];
         assert!(fullsort_splitters(&views, 8).is_empty());
         let sp = fullsort_splitters(&views, 8);
-        for p in 0..1 {
+        // Zero splitters + a full 8-partition claim space: every partition
+        // (including the out-of-range tail) is empty, no panic.
+        for p in 0..8 {
             assert!(fullsort_partition_merge(&views, &sp, p).is_empty());
         }
         // All-identical keys (rowref-only order).
