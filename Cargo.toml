@@ -185,6 +185,7 @@ members = [
     "crates/backend/executor/exectuples_output",
     "crates/backend/executor/execexpr",
     "crates/backend/executor/runtime",
+    "crates/backend/executor/spillset",
     "crates/backend/executor/laneexec",
     "crates/backend/executor/lanefold",
     "crates/backend/executor/lanestitch",
