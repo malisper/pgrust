@@ -67,7 +67,7 @@ pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
 pub use rg::{
     CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
-pub use sched::{Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
+pub use sched::{DriveLocal, Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
 pub use sink::{
     sealed_sink_tasksets, sink_tasksets, ParallelSink, SealedParallelSink, SealedSinkTaskSets,
     SinkProbe, SinkTaskSets,
@@ -403,6 +403,13 @@ impl Runtime {
 
     pub fn stats(&self) -> RuntimeStatsSnapshot {
         self.sched.snapshot()
+    }
+
+    /// Scheduler clock read, ns — the WFIN markers' shared time domain
+    /// (worker morsel timestamps live on this clock; leader-side marks
+    /// must too, or spreads would mix clock bases).
+    pub fn now_ns(&self) -> u64 {
+        self.sched.clock_now_ns()
     }
 }
 

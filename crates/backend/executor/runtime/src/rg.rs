@@ -358,4 +358,9 @@ impl RgHandle {
     pub fn stats(&self) -> crate::stats::RgStatsSnapshot {
         self.rg.stats.snapshot()
     }
+
+    /// The submitting query's id (WFIN marker correlation key).
+    pub fn query_id(&self) -> u64 {
+        self.rg.query_id
+    }
 }

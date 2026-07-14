@@ -159,14 +159,20 @@ unsafe fn text_datum_len(d: Datum, chars: bool) -> i64 {
     }
 }
 
-fn decode_col(part: &Part, rg: usize, g: usize, c: usize, cd: &mut ColDecode) {
+// Returns true when the column's per-RG DICTIONARY was actually (re)built
+// by this call — the drive-scaling observability channel's epoch-rebuild
+// counter (per-worker per-RG dictionary rebuilds are a named suspect;
+// serial scans count here too, so worker totals compare against the serial
+// baseline directly).
+fn decode_col(part: &Part, rg: usize, g: usize, c: usize, cd: &mut ColDecode) -> bool {
     if cd.gkey == (rg as u32, g as u32) {
-        return;
+        return false;
     }
     if cd.dict_rg != rg {
         cd.dict.clear();
         cd.dict_rg = rg;
     }
+    let dict_was_empty = cd.dict.is_empty();
     let chunk = part.chunk(rg, c);
     cd.is_dict = chunk.decode_granule_codes(g, &mut cd.codes, &mut cd.dict, &mut cd.arena);
     cd.dict_sorted = cd.is_dict && chunk.hdr.flags & CHUNK_FLAG_DICT_SORTED != 0;
@@ -180,6 +186,7 @@ fn decode_col(part: &Part, rg: usize, g: usize, c: usize, cd: &mut ColDecode) {
             matches!(chunk.hdr.encoding, Encoding::RawText | Encoding::Lz4Text);
     }
     cd.gkey = (rg as u32, g as u32);
+    cd.is_dict && dict_was_empty
 }
 
 impl ColDecode {
@@ -402,6 +409,13 @@ pub struct CbScanDescData<'mcx> {
     pub rgs_readahead: u64,
     // Granules answered wholesale from v7 footer length stats (never decoded).
     pub granules_meta: u64,
+    // Drive-scaling observability (the runtime WFIN channel): granule-range
+    // re-entries that landed in a NEW row group (per-claim epoch rolls) and
+    // actual per-RG dictionary (re)builds across this scan's columns. Serial
+    // scans count too (decode_col's dict_rg roll), so per-worker totals
+    // compare against the serial baseline directly.
+    pub rg_switches: u64,
+    pub dict_builds: u64,
     // v7 stitch identity for this scan's dict lanes (SoaDictTable::gepoch):
     // process-unique per scan instance, stable across RGs and rescans (the
     // pinned part's stitch content never changes under a live scan). 0 when
@@ -533,6 +547,8 @@ impl<'mcx> CbScanDescData<'mcx> {
             adaptive_probe_reverts: 0,
             rgs_readahead: 0,
             granules_meta: 0,
+            rg_switches: 0,
+            dict_builds: 0,
             scan_uid: next_scan_uid(),
         }
     }
@@ -594,6 +610,12 @@ impl<'mcx> CbScanDescData<'mcx> {
         Some((part.total_granules(), part.granule_starts().to_vec()))
     }
 
+    /// Drive-scaling observability counters (the runtime WFIN channel):
+    /// (rg_switches, dict_builds, granules_scanned, windows_staged).
+    pub fn drive_counters(&self) -> (u64, u64, u64, u64) {
+        (self.rg_switches, self.dict_builds, self.granules_scanned, self.windows_staged)
+    }
+
     /// Position the scan on the absolute-granule range [g0, g1) — a runtime
     /// morsel claim. The range must lie inside ONE row group (the runtime's
     /// boundary-clamped claims guarantee it: a claim never splits a granule
@@ -635,6 +657,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         if !(self.rg_claimed && self.rg == rg) {
             self.rg = rg;
             self.rg_checked = false;
+            self.rg_switches += 1;
         }
         self.rg_claimed = true;
         self.granule = g_in_rg;
@@ -1128,12 +1151,14 @@ impl<'mcx> CbScanDescData<'mcx> {
         let nrows = part.rgs[rg].nrows as usize;
         self.granule_rows = (nrows - g * GRANULE_ROWS).min(GRANULE_ROWS);
         if !self.lazy {
+            let mut built = 0u64;
             for (c, cd) in self.cols.iter_mut().enumerate() {
                 if !self.needed[c] {
                     continue;
                 }
-                decode_col(part, rg, g, c, cd);
+                built += decode_col(part, rg, g, c, cd) as u64;
             }
+            self.dict_builds += built;
             self.all_ready = (rg as u32, g as u32, self.needed_epoch);
         }
         self.decoded = true;
@@ -1148,16 +1173,21 @@ impl<'mcx> CbScanDescData<'mcx> {
             return;
         }
         let part = self.part.as_ref().unwrap();
+        let mut built = 0u64;
         for &c in &self.needed_idx {
-            decode_col(part, self.rg, self.granule, c as usize, &mut self.cols[c as usize]);
+            built +=
+                decode_col(part, self.rg, self.granule, c as usize, &mut self.cols[c as usize])
+                    as u64;
         }
+        self.dict_builds += built;
         self.all_ready = key;
     }
 
     #[inline]
     fn ensure_col(&mut self, c: usize) {
         let part = self.part.as_ref().unwrap();
-        decode_col(part, self.rg, self.granule, c, &mut self.cols[c]);
+        let built = decode_col(part, self.rg, self.granule, c, &mut self.cols[c]);
+        self.dict_builds += built as u64;
     }
 
     /// Stage the next surviving <=WINDOW_ROWS window; 0 = scan exhausted.
@@ -1180,6 +1210,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                 self.win = 0;
                 self.rg_checked = false;
                 self.decoded = false;
+                self.rg_switches += 1;
             }
             // A claimed index beyond this scan's footer horizon is safe to
             // drop: footer publish is ordered before COPY's commit, so every
@@ -1305,6 +1336,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                 self.win = 0;
                 self.rg_checked = false;
                 self.decoded = false;
+                self.rg_switches += 1;
             }
             if self.rg >= nrgs {
                 return Ok(CbGranuleMetaStep::Exhausted);

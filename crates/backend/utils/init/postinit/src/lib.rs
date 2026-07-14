@@ -359,10 +359,18 @@ pub fn InitializeMaxBackends() -> PgResult<()> {
     let max_worker_processes = init_small::globals::max_worker_processes();
     let max_wal_senders = guc_tables::vars::max_wal_senders.read();
 
+    // M2 pool-binding: the standing runtime executor gang's boot-reserved
+    // PGPROCs (parallel::standing; 0 unless PGRUST_RUNTIME=1 — set by the
+    // postmaster before this runs). They widen the bgworker freelist
+    // segment in InitProcGlobal without touching the max_worker_processes
+    // GUC, so registry/parallel-class budgets are unaffected.
+    let runtime_gang = init_small::globals::RuntimeGangProcs();
+
     let max_backends = max_connections
         + av_worker_slots
         + max_worker_processes
         + max_wal_senders
+        + runtime_gang
         + types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
     init_small::globals::SetMaxBackends(max_backends);
 

@@ -211,6 +211,52 @@ fn claims_never_cross_boundaries() {
     }
 }
 
+/// Whole-boundary claims (drive-scaling inc-2): an opted-in source's claims
+/// each run boundary-to-boundary — per-epoch state is never split across
+/// workers, regardless of what the duration-adaptive sizer wants.
+#[test]
+fn whole_boundary_claims_are_boundary_aligned() {
+    struct WholeSource(SyntheticMorselSource);
+    impl MorselSource for WholeSource {
+        fn total_granules(&self) -> u64 {
+            self.0.total_granules()
+        }
+        fn next_boundary_after(&self, start: u64) -> u64 {
+            self.0.next_boundary_after(start)
+        }
+        fn startup_c0(&self) -> u64 {
+            self.0.startup_c0()
+        }
+        fn whole_boundary_claims(&self) -> bool {
+            true
+        }
+    }
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    let total = 3_000u64;
+    let every = 100u64;
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (_h, waiter) = rt.submit(spec_one(
+        &work,
+        Arc::new(WholeSource(SyntheticMorselSource::with_boundaries(total, every))),
+    ));
+
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    work.assert_all_executed_once();
+
+    for r in work.claims.lock().unwrap().iter() {
+        assert!(
+            r.start % every == 0 && (r.end % every == 0 || r.end == total),
+            "claim {r:?} is not boundary-aligned (every {every})"
+        );
+        assert_eq!(r.end, ((r.start / every + 1) * every).min(total));
+    }
+}
+
 // ---- protocol end-to-end over real threads ---------------------------------
 
 /// Full pool: several RGs with dependency-DAG-ordered task sets, real
