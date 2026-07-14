@@ -247,6 +247,45 @@ fn spillset_drop_deletes_files() {
     assert_eq!(count_entries(), 0, "payload drop removed every spill file");
 }
 
+/// M3.5 join batches (inc-4): per-extent claims — `part_extents` enumerates
+/// exactly the committed extents and `read_extent` streams each one alone,
+/// concatenating to the full partition image.
+#[test]
+fn extent_claims_roundtrip() {
+    setup_process();
+    setup_thread();
+    let (_dir, _cwd) = scratch_datadir("extents");
+    let ctx = mcx::MemoryContext::new("spillset-test");
+
+    let set = SpillSet::create().unwrap();
+    let mut f = SpillFile::new(Arc::clone(&set), SpillSet::file_name("hj-in", 0, 1), 4);
+    // Three epochs; part 2 written in epochs 0 and 2 only.
+    for e in 0..3u32 {
+        let mut w = f.begin_epoch(ctx.mcx()).unwrap();
+        w.write_part(1, &pattern(1, e, 3000)).unwrap();
+        if e != 1 {
+            w.write_part(2, &pattern(2, e, 12_000)).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    let xs = f.part_extents(2);
+    assert_eq!(xs.len(), 2, "one extent per contributing epoch");
+    let mut got = Vec::new();
+    for x in &xs {
+        let mut r = f.read_extent(ctx.mcx(), *x).unwrap();
+        assert_eq!(r.total_len(), x.len);
+        got.extend(r.read_to_end().unwrap());
+        r.close().unwrap();
+    }
+    let mut expect = pattern(2, 0, 12_000);
+    expect.extend(pattern(2, 2, 12_000));
+    assert_eq!(got, expect, "extent claims concatenate to the partition image");
+    // And they agree with the whole-partition reader.
+    let mut r = f.read_part(ctx.mcx(), 2).unwrap().unwrap();
+    assert_eq!(r.read_to_end().unwrap(), expect);
+    r.close().unwrap();
+}
+
 /// Empty file: a SpillFile that never crossed a budget creates nothing and
 /// reads as empty.
 #[test]
