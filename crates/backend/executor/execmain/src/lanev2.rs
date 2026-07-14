@@ -4382,6 +4382,23 @@ fn sort_feed_if_needed<'mcx>(
         }
         stats::tick_owned(ShapeClass::SortFeed);
         let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+        // Runtime-sink adopted emit (dop1-tax fix 4): the agg's build was
+        // the parallel sink and it now holds published per-bucket EmitBufs
+        // of finalized byval datums — drain them into the sort in
+        // per-bucket BLOCKS (sort_lane_put_batch) instead of the per-row
+        // cursor pull below. Same rows, same order, same slot contents;
+        // only pull ceremony is hoisted (the DOP-1 tax ledger's ~35ms
+        // EmitBuf drain line — the serial arm's own batchemit shortcut is
+        // what the sink was forfeiting here). Kill switch: the same
+        // PGRUST_LANE_V2_BATCHEMIT=0 layer as the compact batchemit.
+        if batch_emit_enabled()
+            && ::nodeagg::sink::agg_sink_emitting(&aps.agg)
+            && ::nodeagg::sink::agg_sink_emit_unstarted(&aps.agg)
+        {
+            lane_trace("sink emit batched drain armed");
+            sort_feed_sink_batched(state, &mut aps.agg, outer_desc, estate)?;
+            return Ok(true);
+        }
         // Batched finalize+emit off the compact table (lane-v2 batchemit):
         // resolved AFTER the build (the compact table must exist), composes
         // with the emit-side top-N boundary cut when that also arms. Non-
@@ -5308,6 +5325,66 @@ impl<'mcx> ::nodesort::SortLaneBatchFeed<'mcx> for BatchEmitFeed<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<::executils::ExecSlotId>> {
         ::nodeagg::batch_emit_row(self.agg, estate, self.plan, i).map(Some)
+    }
+}
+
+/// The sink-emit batched drain (dop1-tax fix 4): the agg adopted the
+/// runtime sink's published per-bucket EmitBufs (finalized, identity-
+/// projected byval datums). Feed them into the just-begun tuplesort in
+/// per-bucket blocks through `sort_lane_put_batch` — row-for-row the same
+/// stream, order and slot contents as the per-row cursor drain
+/// (`agg_sink_emit_next` under `sort_feed`), with the per-produce pull
+/// ceremony hoisted out of the loop.
+fn sort_feed_sink_batched<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    for b in 0..::nodeagg::sink::SINK_NBUCKETS {
+        let n = ::nodeagg::sink::agg_sink_emit_bucket_len(agg, b)
+            .expect("sink emit state adopted");
+        if n == 0 {
+            continue;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        ::nodesort::sort_lane_put_batch(
+            sort,
+            estate,
+            0,
+            n as u32,
+            false,
+            &mut SinkEmitFeed { agg, bucket: b },
+        )?;
+    }
+    ::nodeagg::sink::agg_sink_emit_drained(agg);
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(())
+}
+
+/// `SortLaneBatchFeed` face of the sink-emit drain: position `i` is row `i`
+/// of the current bucket's EmitBuf, built into the agg's result slot.
+struct SinkEmitFeed<'a, 'mcx> {
+    agg: &'a mut ::nodeagg::AggStateData<'mcx>,
+    bucket: usize,
+}
+
+impl<'mcx> ::nodesort::SortLaneBatchFeed<'mcx> for SinkEmitFeed<'_, 'mcx> {
+    fn emit(
+        &mut self,
+        i: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<::executils::ExecSlotId>> {
+        Ok(Some(::nodeagg::sink::agg_sink_emit_block_row(
+            self.agg,
+            estate,
+            self.bucket,
+            i as usize,
+        )))
     }
 }
 
