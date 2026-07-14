@@ -43,7 +43,7 @@
 
 use core::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
@@ -141,6 +141,28 @@ struct AggSink {
     /// degrade to the full drain (correct either way — winners are a drain
     /// filter, never a data transform).
     topn_degraded: AtomicBool,
+    /// Top-N materialization mode (topn-winners-only inc-2), meaningful only
+    /// when `topn` is armed. Resolved by the §3.2 ladder: leader admission
+    /// (spill-armed / kill switch → FullDrain) then SEAL (pass-through shape
+    /// → FullDrain) — IMMUTABLE once the first combine claim runs (SEAL
+    /// happens-before every combine by last-worker-out). Encoded as
+    /// `TOPN_MODE_*` in an AtomicU8 because SEAL writes through `&self`.
+    topn_mode: AtomicU8,
+    /// WinnersOnly selection declined (NULL/pending order transvalue): the
+    /// whole attempt is REFUSED → R5 serial rerun (demote=refusal doctrine;
+    /// design §3.2 step 3). Fail-closed and count-gated ≈0: the cbstore
+    /// envelope (sort-b decision 6) makes the trigger structurally
+    /// unreachable on every admitted feed.
+    topn_refused: AtomicBool,
+    /// inc-1 winners-only evidence counters (docs/design/topn-winners-only.md
+    /// §6): attribute the combine phase's cost between the merged-table
+    /// build, the selection pass, and the emit materialization, plus the
+    /// materialized-row vs candidate-row split. Populated ONLY when `topn`
+    /// is armed (off-path-free: unarmed engagements read no clocks); read
+    /// once at adopt for the trace line. Nanos are summed raw claim time
+    /// across all workers (worker-time, not wall — divide by the engaged
+    /// DOP for a critical-path estimate).
+    topn_ctr: TopnCounters,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -210,6 +232,105 @@ struct AggSink {
 // finalize, which happens-after every combine by last-worker-out.
 unsafe impl Sync for AggSink {}
 
+/// Top-N materialization modes (topn-winners-only §3.2). `WinnersOnly` is
+/// the product default when the spec arms: each combine claim materializes
+/// ONLY its partition's ≤bound candidate rows; degrade is NOT free, so every
+/// degrade trigger is resolved before the first combine claim and the one
+/// runtime trigger left (NULL order transvalue) is a refusal → R5 serial
+/// rerun. `FullDrain` is the landed decision-1 behavior verbatim (full
+/// buffers, selection = drain filter, mid-combine declines degrade globally)
+/// — the permanent compat/spill/oracle mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TopnMode {
+    WinnersOnly,
+    FullDrain,
+}
+
+const TOPN_MODE_FULL: u8 = 0;
+const TOPN_MODE_WINNERS: u8 = 1;
+
+impl TopnMode {
+    fn decode(v: u8) -> TopnMode {
+        if v == TOPN_MODE_WINNERS { TopnMode::WinnersOnly } else { TopnMode::FullDrain }
+    }
+
+    fn encode(self) -> u8 {
+        match self {
+            TopnMode::WinnersOnly => TOPN_MODE_WINNERS,
+            TopnMode::FullDrain => TOPN_MODE_FULL,
+        }
+    }
+}
+
+/// §3.2 step 1 — leader-admission mode resolution: spill-armed engagements
+/// keep FullDrain (phase-1 H3 exclusion: the m35 combine-split emits
+/// piecemeal and keeps its free degrade), as does the kill switch.
+fn resolve_topn_mode_admission(spill_armed: bool, winners_enabled: bool) -> TopnMode {
+    if spill_armed || !winners_enabled {
+        TopnMode::FullDrain
+    } else {
+        TopnMode::WinnersOnly
+    }
+}
+
+/// §3.2 step 2 — SEAL mode resolution: the single-Local pass-through shape
+/// (exactly one sealed Local, no runs, no spill face) never builds a merged
+/// table, so selection has nothing to run on — resolve FullDrain BEFORE any
+/// combine claim instead of degrading mid-claim. A pure function of the
+/// sealed census (uniform across all 256 claims).
+fn resolve_topn_mode_seal(admission: TopnMode, passthrough_shape: bool) -> TopnMode {
+    if passthrough_shape {
+        TopnMode::FullDrain
+    } else {
+        admission
+    }
+}
+
+/// `PGRUST_RUNTIME_AGG_TOPN_WINNERS` kill switch (default ON): 0/off =
+/// FullDrain everywhere (decision-1 behavior exactly). The outer
+/// `PGRUST_RUNTIME_AGG_TOPN=0` still kills the whole composition.
+fn topn_winners_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// Leg-R fault injection (`PGRUST_RUNTIME_AGG_TOPN_FAULT=decline`): simulate
+/// the NULL-order-transvalue selection decline, which is structurally
+/// unreachable on real cbstore feeds (sort-b decision 6) — the e2e refusal
+/// gate needs a trigger the corpus cannot produce. Read once; consulted only
+/// on topn-armed combine claims (off-path-free).
+fn topn_fault_decline() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_TOPN_FAULT").as_deref() == Ok("decline")
+    })
+}
+
+/// Combine-phase cost-attribution counters for topn-armed engagements
+/// (winners-only inc-1 — the design's stop-rule evidence: what share of the
+/// combine phase is the FULL emit materialization, and how many of the
+/// materialized rows are selection losers). Trace-only observability; no
+/// behavior reads these.
+#[derive(Default)]
+struct TopnCounters {
+    /// Merged-table build time (`sink_combine_bucket`), ns, summed claims.
+    build_ns: AtomicU64,
+    /// Selection pass time (`sink_topn_candidates`), ns, summed claims.
+    select_ns: AtomicU64,
+    /// Emit materialization time (`sink_emit_bucket` / pass-through), ns.
+    emit_ns: AtomicU64,
+    /// Rows materialized through `emit_row` (all merged groups today).
+    mat_rows: AtomicU64,
+    /// Winner-candidate rows selected (≤ 256 × bound) — what winners-only
+    /// materialization would materialize instead.
+    cand_rows: AtomicU64,
+}
+
 /// What finalize hands the leader.
 enum SinkPublished {
     /// Combine-materialized per-bucket EmitBufs (the general arm), plus the
@@ -238,6 +359,28 @@ impl AggSink {
         self.budget_refused.store(true, Ordering::SeqCst);
         self.failed.store(true, Ordering::SeqCst);
         self.abort_rg();
+    }
+
+    /// The armed top-N materialization mode (§3.2). Only consulted when
+    /// `topn` is armed.
+    fn topn_mode(&self) -> TopnMode {
+        TopnMode::decode(self.topn_mode.load(Ordering::Acquire))
+    }
+
+    /// WinnersOnly refusal (NULL/pending order transvalue mid-combine): the
+    /// attempt dies wholesale — same R5 whole-attempt serial-rerun semantics
+    /// as a budget refusal, under its own named reason (observability +
+    /// count-gate ≈0). Never a mid-flight mode flip.
+    fn refuse_topn(&self) {
+        self.topn_refused.store(true, Ordering::SeqCst);
+        self.failed.store(true, Ordering::SeqCst);
+        self.abort_rg();
+    }
+
+    /// Any non-error refusal reason (leader falls back to the serial arm;
+    /// helpers must not convert the aborted drive into a query error).
+    fn refused_any(&self) -> bool {
+        self.budget_refused.load(Ordering::SeqCst) || self.topn_refused.load(Ordering::SeqCst)
     }
 
     fn abort_rg(&self) {
@@ -361,6 +504,23 @@ impl runtime::ParallelSink for AggSink {
                 }
             }
         }
+        // §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2):
+        // the single-Local pass-through shape never builds a merged table,
+        // so an armed selection has nothing to run on. Resolve FullDrain
+        // HERE, before the first combine claim, instead of degrading
+        // mid-claim (the sealed census is final and uniform across claims;
+        // SEAL happens-before every combine by last-worker-out).
+        if self.topn.is_some() {
+            let passthrough = matches!(
+                locals,
+                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+            );
+            let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
+            self.topn_mode.store(mode.encode(), Ordering::Release);
+            if passthrough {
+                lane_trace("runtime-agg topn: pass-through shape at SEAL — mode=full");
+            }
+        }
     }
 
     fn partitions(&self) -> u64 {
@@ -396,16 +556,32 @@ impl runtime::ParallelSink for AggSink {
                         // MERGED table; the pass-through never builds one, so
                         // an armed spec degrades globally to the full drain
                         // (decision 1: winners are a drain filter — a miss
-                        // must never drop groups).
+                        // must never drop groups). Winners-only inc-2: this
+                        // shape is resolved to FullDrain at SEAL (§3.2 step
+                        // 2), so the mid-claim store below only ever runs in
+                        // FullDrain mode — a WinnersOnly sighting here would
+                        // mean partial compact bufs elsewhere.
                         if self.topn.is_some() {
+                            debug_assert_eq!(
+                                self.topn_mode(),
+                                TopnMode::FullDrain,
+                                "pass-through shape must resolve FullDrain at SEAL"
+                            );
                             self.topn_degraded.store(true, Ordering::Release);
                         }
+                        let t0 = self.topn.is_some().then(std::time::Instant::now);
                         let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
                             &self.emit,
                             t.table(),
                             p,
                             part as usize,
                         )?;
+                        if let Some(t0) = t0 {
+                            self.topn_ctr
+                                .emit_ns
+                                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                        }
                         self.retain_bucket(part, buf, locals.len())?;
                         return Ok(CombineOutcome::Done);
                     }
@@ -439,8 +615,16 @@ impl runtime::ParallelSink for AggSink {
                 };
                 // Top-N composition: the split emits sub-partition tables
                 // piecemeal (no single merged table to select on) — an armed
-                // spec degrades globally to the full drain.
+                // spec degrades globally to the full drain. Winners-only
+                // phase-1 exclusion (§3.3): the split requires the spill arm,
+                // and spill-armed engagements resolve FullDrain at admission,
+                // so this degrade is always mode-consistent.
                 if self.topn.is_some() {
+                    debug_assert_eq!(
+                        self.topn_mode(),
+                        TopnMode::FullDrain,
+                        "combine-split implies the spill arm, which resolves FullDrain"
+                    );
                     self.topn_degraded.store(true, Ordering::Release);
                 }
                 let mut out = SinkEmitBuf::default();
@@ -492,6 +676,8 @@ impl runtime::ParallelSink for AggSink {
                     },
                 })
                 .collect();
+            let ctr = self.topn.is_some();
+            let t0 = ctr.then(std::time::Instant::now);
             let merged = sink_combine_bucket(
                 b,
                 self.key_words,
@@ -499,23 +685,95 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
-            // Combine-phase top-N (car 1): select this partition's winners
-            // on the merged raw states BEFORE the emit walks the same rows
-            // (candidate row indices == emit buf row indices — both iterate
-            // table rows 0..n in order). A decline (NULL order transvalue)
-            // degrades globally to the full drain; the buf below stays full
-            // either way.
+            if let Some(t0) = t0 {
+                self.topn_ctr
+                    .build_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+            // Combine-phase top-N (car 1 + the winners-only amendment):
+            // select this partition's winners on the merged raw states
+            // BEFORE any emit walks the rows. Mode dispatch (§3.2, fixed
+            // before the first claim):
+            //  * WinnersOnly — materialize ONLY the ≤bound candidate rows
+            //    (compact buf; candidate `row` remapped to the compact
+            //    index). A decline (NULL order transvalue) REFUSES the
+            //    whole attempt (R5 serial rerun) — rows are already gone
+            //    from other claims' compact bufs, so degrade is not free.
+            //  * FullDrain — decision-1 verbatim: selection is a drain
+            //    filter, the buf stays full, a decline degrades globally.
             if let Some(spec) = &self.topn {
+                if self.topn_mode() == TopnMode::WinnersOnly {
+                    let ts = std::time::Instant::now();
+                    let selected = if topn_fault_decline() {
+                        None // leg-R fault injection: the unreachable decline
+                    } else {
+                        sink_topn_candidates(&merged, spec, part as u16)
+                    };
+                    let Some(mut cands) = selected else {
+                        return Ok(CombineOutcome::TopnDeclined);
+                    };
+                    self.topn_ctr
+                        .select_ns
+                        .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    self.topn_ctr.cand_rows.fetch_add(cands.len() as u64, Ordering::Relaxed);
+                    // Candidate row remap: materialize the candidate rows in
+                    // ascending TABLE order (one ordered emit walk), and
+                    // point each candidate at its compact-buf index. Rows
+                    // are unique (one candidate per group row), so the
+                    // binary search is exact.
+                    let mut rows: Vec<u32> = cands.iter().map(|c| c.row).collect();
+                    rows.sort_unstable();
+                    for c in &mut cands {
+                        c.row = rows
+                            .binary_search(&c.row)
+                            .expect("candidate row present in its own row set")
+                            as u32;
+                    }
+                    // SAFETY: partition `part` is claimed exactly once
+                    // (runtime contract); this is its single writer.
+                    unsafe { *self.topn_cands[part as usize].get() = cands };
+                    let t0 = std::time::Instant::now();
+                    let buf = ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
+                    self.topn_ctr
+                        .emit_ns
+                        .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                    self.retain_bucket(part, buf, locals.len())?;
+                    return Ok(CombineOutcome::Done);
+                }
+                // FullDrain: candidate row indices == full emit buf row
+                // indices (both iterate table rows 0..n in order).
                 if !self.topn_degraded.load(Ordering::Acquire) {
-                    match sink_topn_candidates(&merged, spec, part as u16) {
+                    let ts = std::time::Instant::now();
+                    let selected = if topn_fault_decline() {
+                        None // leg-R fault injection: FullDrain must degrade
+                    } else {
+                        sink_topn_candidates(&merged, spec, part as u16)
+                    };
+                    match selected {
                         // SAFETY: partition `part` is claimed exactly once
                         // (runtime contract); this is its single writer.
-                        Some(c) => unsafe { *self.topn_cands[part as usize].get() = c },
+                        Some(c) => {
+                            self.topn_ctr
+                                .cand_rows
+                                .fetch_add(c.len() as u64, Ordering::Relaxed);
+                            unsafe { *self.topn_cands[part as usize].get() = c }
+                        }
                         None => self.topn_degraded.store(true, Ordering::Release),
                     }
+                    self.topn_ctr
+                        .select_ns
+                        .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
+            let t0 = ctr.then(std::time::Instant::now);
             let buf = sink_emit_bucket(&self.emit, &merged)?;
+            if let Some(t0) = t0 {
+                self.topn_ctr
+                    .emit_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+            }
             self.retain_bucket(part, buf, locals.len())?;
             Ok(CombineOutcome::Done)
         }));
@@ -524,6 +782,15 @@ impl runtime::ParallelSink for AggSink {
             Ok(Ok(CombineOutcome::OverBudget)) => {
                 lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
                 self.refuse_budget();
+            }
+            Ok(Ok(CombineOutcome::TopnDeclined)) => {
+                // Winners-only refusal (§3.2 step 3): fail-closed, count-
+                // gated ≈0 (structurally unreachable on cbstore feeds —
+                // sort-b decision 6). The e2e leg-R gate greps this line.
+                lane_trace(
+                    "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
+                );
+                self.refuse_topn();
             }
             Ok(Err(e)) => self.fail(e),
             Err(_panic) => {
@@ -589,6 +856,8 @@ impl runtime::ParallelSink for AggSink {
 enum CombineOutcome {
     Done,
     OverBudget,
+    /// WinnersOnly selection declined (NULL order transvalue) → refusal.
+    TopnDeclined,
 }
 
 enum AcceptFail {
@@ -650,6 +919,8 @@ struct WorkerExec {
     errored: std::cell::Cell<bool>,
     /// Per-worker reusable drain scratch.
     k2s: ScanK2Scratch,
+    /// Dict-code sink feed cache (DictFeed::Code; K2 drain only).
+    dgs: SinkDictScratch,
     idxs: Vec<u32>,
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     /// ExprKey drain state (SinkDrain::ExprKey only): the worker's own
@@ -695,8 +966,8 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
-        let (k2s, idxs, groups) = (&mut *k2s, &mut *idxs, &mut *groups);
+        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
+        let (k2s, dgs, idxs, groups) = (&mut *k2s, &mut *dgs, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
         crate::querydesc::with_qd(*qd, |q| {
@@ -734,8 +1005,8 @@ fn accept_morsel_body(
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
                 let drained = sink_drain_range(
-                    sink, local, worker, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot,
-                    mk, mks,
+                    sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
+                    stage_slot, mk, mks,
                     estate,
                 );
                 // EA-on-morsels claim fold (EXACT — accumulate in the Local,
@@ -1044,6 +1315,163 @@ fn split_subparts_and_emit(
     Ok(true)
 }
 
+/// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
+/// what the K2 sink does when the scan staging is dict-group armed (the
+/// single-int-key GROUP BY over a dict-encoded cbstore column whose
+/// fixed-width prefix deform is unarmable — UserID past varlena columns).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DictFeed {
+    /// Keep the dict-group registration and admit. MEASURED FINDING
+    /// (q16-columnar-feed lane): cbstore NEVER dict-encodes INT chunks
+    /// (`encode_int_chunk`: Const/For/Raw/DeltaFor only — Encoding::Dict is
+    /// the varlena encoder's arm), and the K2 sink admits int keys only
+    /// (`agg_sink_key_width`), so dict windows cannot reach this drain
+    /// today: every window fills decoded Datums and the plain keys path
+    /// runs. The dict-window branch (`sink_dict_batch` — CH
+    /// LowCardinality-style per-epoch code -> state cache) is the
+    /// fail-closed guard that makes keeping the registration SOUND (a dict
+    /// window's key Datum cells are stale by the set_dict_lane contract),
+    /// and the ready lane if int dict encoding ever lands.
+    Code,
+    /// Dict-free columnar re-arm (the q5-serial precedent): rebuild the
+    /// scan staging with NO dict registration so windows fill decoded
+    /// Datums, then the plain K2 per-row probe drain runs unchanged.
+    Raw,
+    /// Refuse the engagement exactly as before this lane (kill switch).
+    Off,
+}
+
+fn dict_feed_mode() -> DictFeed {
+    static MODE: OnceLock<DictFeed> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
+        Ok("0") | Ok("off") => DictFeed::Off,
+        Ok("raw") => DictFeed::Raw,
+        _ => DictFeed::Code,
+    })
+}
+
+/// Per-worker dict-code sink scratch (DictFeed::Code): the direct-indexed
+/// code -> live compact-table state map, keyed on the serial dict-group
+/// arm's exact identity tuple (is_global, epoch/gepoch). The cached pointers
+/// are LaneAggTable row-state addresses — allocation-stable across inserts
+/// and across the morsel take/put hand-off (chunked row storage; the table
+/// handle moves, its rows do not) — and they die at every sink flush
+/// (`sink_flush_table` resets the table), which must `invalidate` this
+/// scratch exactly like the mk intern-id cache beside it.
+#[derive(Default)]
+pub(super) struct SinkDictScratch {
+    ident: Option<(bool, u64)>,
+    slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    /// This batch's first-appearance-ordered unresolved codes (parallel to
+    /// the miss probe batch).
+    miss_codes: Vec<u32>,
+}
+
+impl SinkDictScratch {
+    fn invalidate(&mut self) {
+        self.ident = None;
+        self.slots.clear();
+    }
+}
+
+/// One dict-answered staged batch through the CODE sink feed: pass 1 marks
+/// each first-appearing unresolved code (first-arrival order preserved:
+/// the miss batch probes in first-appearance order, which is row order),
+/// one compact batch probe resolves all of this batch's misses, pass 2
+/// hands every surviving row its cached state for the whole-batch fold.
+/// Mirrors the serial `scan_dictgroup_batch` against the WORKER's bounded
+/// compact table instead of the global C tuplehash; there is no spill leg
+/// (the sink table never spills — it flushes at the cap, which invalidates
+/// this cache in the drain loop).
+#[allow(clippy::too_many_arguments)]
+fn sink_dict_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    dgs: &mut SinkDictScratch,
+    rows: &[u32],
+    keys: &mut Vec<::datum::Datum>,
+    knull: &mut Vec<bool>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    lane: ::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> Result<(), AcceptFail> {
+    let ndict = lane.table.ndict as usize;
+    let global = lane.table.has_stitch();
+    let (ident, size) = if global {
+        ((true, lane.table.gepoch), lane.table.gndv as usize)
+    } else {
+        ((false, lane.table.epoch), ndict)
+    };
+    if dgs.ident != Some(ident) {
+        dgs.ident = Some(ident);
+        dgs.slots.clear();
+        dgs.slots.resize(size, None);
+        lane_trace(&format!(
+            "sink dict-group {} {} (n={size})",
+            if global { "gepoch" } else { "epoch" },
+            ident.1
+        ));
+    }
+    debug_assert!(dgs.slots.len() >= size, "dict size is fixed per identity");
+    // PENDING sentinel: marks a code queued in THIS batch's miss list. A
+    // dangling NonNull can never equal a live table row address.
+    let pending = core::ptr::NonNull::<::execexpr::AggPerGroup>::dangling();
+    dgs.miss_codes.clear();
+    keys.clear();
+    knull.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        debug_assert!(code < size, "stitch contract: global code < gndv");
+        if dgs.slots[code].is_none() {
+            dgs.slots[code] = Some(pending);
+            dgs.miss_codes.push(code as u32);
+            // NULL discipline: dict codes have no NULL representation and
+            // cbstore stores no NULLs (per-chunk proof) — as the serial arm.
+            keys.push(lane.table.datum(local));
+            knull.push(false);
+        }
+    }
+    if !keys.is_empty() {
+        groups.clear();
+        if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
+            // The sink-mode backstop errors before migrating; belt-and-braces
+            // (the raw K2 leg's exact treatment).
+            return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "worker compact table disarmed mid-build",
+            )));
+        }
+        for (k, &code) in dgs.miss_codes.iter().enumerate() {
+            dgs.slots[code as usize] = Some(groups[k]);
+        }
+    }
+    idxs.clear();
+    groups.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        let pg = dgs.slots[code].expect("every survivor code resolved above");
+        debug_assert!(pg != pending, "pending sentinel must have been installed");
+        idxs.push(i);
+        groups.push(pg);
+    }
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
+    // SAFETY: as the raw K2 sink fold — every probed row is non-fallback
+    // (cbstore stages none; the caller admits all-lane batches only) with
+    // valid lane values for every plan column (the key column is NOT in
+    // `plan.cols`: the dict-group arm refuses that shape, and only that arm
+    // registers the dict lane); the plan is unguarded (sink admission);
+    // each state is a live compact-table row installed by a probe since the
+    // last flush (flushes invalidate this cache before the next batch).
+    unsafe { super::agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(())
+}
+
 /// The narrow sink drain over the positioned claim: per staged page batch —
 /// cap-flush check, survivor collection, canonical key gather, compact
 /// batch probe (never the C table), whole-batch fold.
@@ -1055,6 +1483,7 @@ fn sink_drain_range<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     k2s: &mut ScanK2Scratch,
+    dgs: &mut SinkDictScratch,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     xk: &mut Option<Box<super::ExprKeyState>>,
@@ -1080,6 +1509,9 @@ fn sink_drain_range<'mcx>(
         {
             local.run_bytes += run.bytes();
             local.runs.push(run);
+            // The flush RESET the compact table: every cached code -> state
+            // pointer is a dangling table row — drop the dict-code cache.
+            dgs.invalidate();
             if intern_reset {
                 // The flush RESET the intern table (wide-vocabulary
                 // bounding): every code→intern-id cache is now stale — a
@@ -1126,6 +1558,20 @@ fn sink_drain_range<'mcx>(
         // flush+spill (the aggcontext floor the runs still reference)
         // refuses. Spill-disarmed (canonical/kill-switch) keeps the plain
         // refusal exactly.
+        //
+        // EPOCH SIZING add-on (spill-envelopes lane, on the law above): the
+        // flush already drained the table-driven pressure — the run's bytes
+        // were live table bytes a moment ago, so HOLDING them to the R3
+        // budget crossing (the cap-flush path's own spill law above) keeps
+        // the per-Local envelope intact while cutting FEWER, BIGGER epochs.
+        // The pressure trip sits at the ~half-limit altitude (pinned by the
+        // compact backstop's sink-mode belt — raising it means moving the
+        // belt's hard error), so spill-per-trip wrote one ~(half-limit −
+        // aggctx) run per epoch (q33@100M: 15 × ~400MB per Local); the
+        // budget-crossing law accumulates ~2 trips per epoch — half the
+        // epoch brackets, half the combine-replay extents, same bytes.
+        // PGRUST_RUNTIME_AGG_SPILL_EAGER=1 restores spill-per-trip (the
+        // A/B attribution arm).
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
             match &sink.spill_set {
                 Some(set) => {
@@ -1142,7 +1588,18 @@ fn sink_drain_range<'mcx>(
                             }
                         }
                     }
-                    if !local.runs.is_empty() {
+                    let aggctx = if sink.byref_states {
+                        ::nodeagg::sink::agg_sink_aggctx_mem(agg)
+                    } else {
+                        0
+                    };
+                    if !local.runs.is_empty()
+                        && (agg_spill_eager()
+                            || local.run_bytes
+                                + ::nodeagg::sink::agg_sink_table_mem(agg)
+                                + aggctx
+                                > sink.budget)
+                    {
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
@@ -1231,6 +1688,18 @@ fn sink_drain_range<'mcx>(
         super::scan_collect_survivors(ss, estate, n, rows)?;
         if ea {
             local.instr.rows.survived += rows.len() as u64;
+        }
+        // Dict-answered window under the CODE feed (dict-group staging on a
+        // sink build): group on the u32 codes through the per-epoch cache —
+        // the key column's Datum cells are STALE while the dict lane
+        // answers, so this branch must own every dict window. Raw-answered
+        // windows (non-dict key chunks) take the plain keys path below;
+        // both resolve into the same worker table in the same row order.
+        if let Some(lane) = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .and_then(|soa| soa.dict_lane(key_col))
+        {
+            sink_dict_batch(agg, ss, dgs, rows, keys, knull, idxs, groups, lane, estate)?;
+            continue;
         }
         keys.clear();
         knull.clear();
@@ -1328,10 +1797,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
         Ok(()) => {}
         Err(e) => {
             if entered.get() {
-                // Budget refusals are NOT query errors (the leader falls
-                // back to the serial arm); the Err only routed the binder
-                // through its abort-side cleanup.
-                if !payload.sink.budget_refused.load(Ordering::SeqCst) {
+                // Refusals (budget / topn-winners) are NOT query errors
+                // (the leader falls back to the serial arm); the Err only
+                // routed the binder through its abort-side cleanup.
+                if !payload.sink.refused_any() {
                     payload.sink.fail(e);
                 }
                 // F1 liveness (the wedge mechanism): a helper that errored
@@ -1481,6 +1950,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     qd,
                     errored: std::cell::Cell::new(false),
                     k2s: ScanK2Scratch::default(),
+                    dgs: SinkDictScratch::default(),
                     idxs: Vec::new(),
                     groups: Vec::new(),
                     xk,
@@ -1496,6 +1966,27 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             }
         }
     })
+}
+
+/// DictFeed::Raw: rebuild the scan staging as the dict-FREE columnar arm —
+/// the same offset-free window deform with NO column opted into dict lanes
+/// (`seq_scan_cb_columnar_arm(.., None)`; the q5-serial `arm_key_soa`
+/// precedent generalized to the fold prefix) — so every window fills
+/// decoded Datums and the plain K2 drain runs untouched. Fail-closed: the
+/// re-arm must actually shed the dict registration (a PREWHERE-owned batch
+/// keeps its co-consumers; single-key dict co-arms don't exist on that
+/// path today, but the check is what makes this safe, not the today).
+/// A later serial fallback re-arms dict-group idempotently — the fold
+/// feed's `arm_scan_staging` re-runs its whole ladder.
+fn sink_rearm_dictfree<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(prefix) = super::fused_agg_soa_prefix(agg, ss) else { return false };
+    ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
+        && ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_none()
+        && ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
 }
 
 /// The worker arm's drain-specific state (see [`arm_sink_build`]).
@@ -1634,8 +2125,24 @@ fn arm_sink_build<'mcx>(
     if super::scan_k2_shape(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
+    // Dict-group staging on the K2 build (the q16 class): the same mode
+    // decision the leader made. Code = keep the dict registration (the
+    // drain's dict-window branch consumes the codes); Raw = dict-free
+    // columnar re-arm (windows fill decoded Datums; the plain drain runs);
+    // Off = the pre-lane refusal. Leader/worker verdicts agree because the
+    // mode is a process-wide constant and both sides arm the same store.
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-        return Err(shape_err("dict-group staging on a sink worker"));
+        match dict_feed_mode() {
+            DictFeed::Code => {}
+            DictFeed::Raw => {
+                if !sink_rearm_dictfree(agg, ss, estate) {
+                    return Err(shape_err("dict-free columnar re-arm on a sink worker"));
+                }
+            }
+            DictFeed::Off => {
+                return Err(shape_err("dict-group staging on a sink worker"));
+            }
+        }
     }
     // Spill-armed admission flag mirrors the leader's exactly
     // (spill_set exists only on word-keyed spill-armed engagements).
@@ -1762,6 +2269,15 @@ fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
 fn agg_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
+}
+
+/// EPOCH SIZING A/B arm (spill-envelopes lane): `1` restores the
+/// spill-on-every-pressure-trip behavior (one ~(half-limit − aggctx) run
+/// per epoch); default OFF = pressure-flush runs accumulate to the R3
+/// budget crossing before an epoch is written (fewer, bigger epochs).
+fn agg_spill_eager() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
 }
 
 /// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
@@ -1992,9 +2508,29 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         let k2_int = super::scan_k2_shape(agg, ss, estate).is_some()
             && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
         if k2_int {
+            // Dict-group staging (the q16 class: a single dict-encoded int
+            // key whose fixed-width prefix deform is unarmable). CODE feed:
+            // admit with the dict registration kept — the sink drain's
+            // dict-window branch consumes the codes through the per-epoch
+            // cache. RAW feed: dict-free columnar re-arm, plain K2 drain.
+            // Off: the pre-lane refusal exactly.
             if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-                refuse(estate, ea, node_id, "dict-group staging");
-                return Ok(false);
+                match dict_feed_mode() {
+                    DictFeed::Code => {
+                        lane_trace("runtime-agg: K2 dict-code feed admitted");
+                    }
+                    DictFeed::Raw => {
+                        if !sink_rearm_dictfree(agg, ss, estate) {
+                            refuse(estate, ea, node_id, "dict-free columnar re-arm");
+                            return Ok(false);
+                        }
+                        lane_trace("runtime-agg: K2 dict-free columnar re-arm");
+                    }
+                    DictFeed::Off => {
+                        refuse(estate, ea, node_id, "dict-group staging");
+                        return Ok(false);
+                    }
+                }
             }
             let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
                 refuse(estate, ea, node_id, "key width");
@@ -2211,6 +2747,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         topn,
         topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
         topn_degraded: AtomicBool::new(false),
+        // §3.2 step 1 (meaningful only when `topn` armed): spill-armed
+        // engagements and the kill switch keep decision-1 FullDrain.
+        topn_mode: AtomicU8::new(
+            resolve_topn_mode_admission(spill_set.is_some(), topn_winners_enabled()).encode(),
+        ),
+        topn_refused: AtomicBool::new(false),
+        topn_ctr: TopnCounters::default(),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -2406,6 +2949,13 @@ fn engage_ceremony<'mcx>(
                     stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
                     return Ok(EngageOutcome::Fallback);
                 }
+                if sink.topn_refused.load(Ordering::SeqCst) {
+                    lane_trace(
+                        "runtime-agg: topn-winners refusal — falling back to the serial arm",
+                    );
+                    stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+                    return Ok(EngageOutcome::Fallback);
+                }
                 if claimed == 0 && drained {
                     return Ok(EngageOutcome::Fallback);
                 }
@@ -2454,6 +3004,13 @@ fn engage_ceremony<'mcx>(
         if sink.budget_refused.load(Ordering::SeqCst) {
             // R5 degrade: whole-attempt rerun on the serial arm.
             lane_trace("runtime-agg: budget refusal — falling back to the serial arm");
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+            return Ok(EngageOutcome::Fallback);
+        }
+        if sink.topn_refused.load(Ordering::SeqCst) {
+            // Winners-only refusal: same R5 whole-attempt serial rerun,
+            // its own named trace reason (count-gated ≈0 by the e2e legs).
+            lane_trace("runtime-agg: topn-winners refusal — falling back to the serial arm");
             stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
             return Ok(EngageOutcome::Fallback);
         }
@@ -2545,9 +3102,18 @@ fn engage_ceremony<'mcx>(
                 SinkPublished::Emit(bufs, winners) => {
                     let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
                     match (&winners, &sink.topn) {
+                        // NOTE: "topn composed (winners=N)" is a load-bearing
+                        // token (e2e leg-7 greps) — mode/materialized append
+                        // AFTER the closing paren. Under winners-only,
+                        // `groups=` counts MATERIALIZED rows (the compact
+                        // candidate union), not the true group count.
                         (Some(w), _) => lane_trace(&format!(
-                            "runtime-agg: complete, groups={rows}, topn composed (winners={})",
-                            w.len()
+                            "runtime-agg: complete, groups={rows}, topn composed (winners={}) mode={} materialized={rows}",
+                            w.len(),
+                            match sink.topn_mode() {
+                                TopnMode::WinnersOnly => "winners-only",
+                                TopnMode::FullDrain => "full",
+                            },
                         )),
                         (None, Some(_)) => lane_trace(&format!(
                             "runtime-agg: complete, groups={rows}, topn degraded — full drain"
@@ -2555,6 +3121,21 @@ fn engage_ceremony<'mcx>(
                         (None, None) => {
                             lane_trace(&format!("runtime-agg: complete, groups={rows}"))
                         }
+                    }
+                    // Winners-only inc-1 evidence line (design §6): the
+                    // combine phase's cost decomposition on topn-armed
+                    // engagements. ns are worker-time sums across claims.
+                    if sink.topn.is_some() {
+                        let c = &sink.topn_ctr;
+                        lane_trace(&format!(
+                            "runtime-agg topn counters: mat_rows={} cand_rows={} \
+                             build_us={} select_us={} emit_us={}",
+                            c.mat_rows.load(Ordering::Relaxed),
+                            c.cand_rows.load(Ordering::Relaxed),
+                            c.build_ns.load(Ordering::Relaxed) / 1_000,
+                            c.select_ns.load(Ordering::Relaxed) / 1_000,
+                            c.emit_ns.load(Ordering::Relaxed) / 1_000,
+                        ));
                     }
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }
@@ -2623,5 +3204,46 @@ impl runtime::MorselSource for CbstoreGranuleSource {
 
     fn startup_c0(&self) -> u64 {
         2
+    }
+}
+
+#[cfg(test)]
+mod topn_mode_tests {
+    use super::{resolve_topn_mode_admission, resolve_topn_mode_seal, TopnMode};
+
+    /// §3.2 resolution ladder — the inc-2 mode-resolution matrix:
+    /// spill armed/disarmed × kill switch × pass-through shape. (The adopt
+    /// shape never consults the mode: finalize publishes Table and winners
+    /// never ride it — covered by the e2e tranche's adopt legs.)
+    #[test]
+    fn mode_resolution_matrix() {
+        // Admission: spill-armed → FullDrain regardless of the switch.
+        assert_eq!(resolve_topn_mode_admission(true, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(true, false), TopnMode::FullDrain);
+        // Kill switch off → FullDrain.
+        assert_eq!(resolve_topn_mode_admission(false, false), TopnMode::FullDrain);
+        // Product default: armed, spill-disarmed, switch on → WinnersOnly.
+        assert_eq!(resolve_topn_mode_admission(false, true), TopnMode::WinnersOnly);
+        // SEAL: the pass-through census (1 Local, no runs, no spill face)
+        // forces FullDrain; a widened engagement keeps the admission mode.
+        assert_eq!(
+            resolve_topn_mode_seal(TopnMode::WinnersOnly, true),
+            TopnMode::FullDrain
+        );
+        assert_eq!(
+            resolve_topn_mode_seal(TopnMode::WinnersOnly, false),
+            TopnMode::WinnersOnly
+        );
+        assert_eq!(resolve_topn_mode_seal(TopnMode::FullDrain, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_seal(TopnMode::FullDrain, false), TopnMode::FullDrain);
+    }
+
+    #[test]
+    fn mode_codec_roundtrip() {
+        for m in [TopnMode::WinnersOnly, TopnMode::FullDrain] {
+            assert_eq!(TopnMode::decode(m.encode()), m);
+        }
+        // Unknown encodings decode fail-closed to FullDrain.
+        assert_eq!(TopnMode::decode(97), TopnMode::FullDrain);
     }
 }
