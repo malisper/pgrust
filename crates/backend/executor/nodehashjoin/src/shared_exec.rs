@@ -32,15 +32,21 @@ use crate::shared_build::{BudgetExceeded, FrozenJoinTable, JoinBuildLocal};
 use crate::{eval_probe_qual, project_result, HashJoinState};
 use ::nodehash::HashState;
 
-/// Phase-1 admission, runtime-join side: the four probe-local join types
-/// (right-fill family = inc-3) on top of the serial lane's expression
-/// admission (subplan/param-free quals + projection + hash exprs,
-/// uninstrumented) and the build hash admission.
+/// Runtime-join admission: all eight hash-join types (inc-3 added the
+/// right-fill family) on top of the serial lane's expression admission
+/// (subplan/param-free quals + projection + hash exprs, uninstrumented)
+/// and the build hash admission.
+///
+/// RIGHT_SEMI extra gate (fail-closed): admitted only with NO otherqual.
+/// Its exactly-once emission rides `test_and_set_matched`; WHICH
+/// (outer,inner) pair wins the flag is racy (and scan-order-dependent in
+/// serial C too), so a pair-dependent otherqual deciding emission after
+/// the flag would make the emitted SET attribution-dependent — refuse
+/// rather than reason about planner scoping. (Projection/joinqual are
+/// safe: a semijoin's output scope is the preserved — inner — side.)
 pub fn shared_join_admissible(node: &HashJoinState<'_>, hs: &HashState<'_>) -> bool {
-    matches!(
-        node.plan.join.jointype,
-        JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_SEMI | JoinType::JOIN_ANTI
-    ) && crate::lane_join_admissible(node)
+    (node.plan.join.jointype != JoinType::JOIN_RIGHT_SEMI || node.otherqual.is_none())
+        && crate::lane_join_admissible(node)
         && ::nodehash::lane_build_hash_admissible(hs)
 }
 
@@ -142,6 +148,12 @@ pub fn shared_probe_outer<'mcx>(
         if !key_eq {
             continue;
         }
+        // RIGHT_SEMI: an already-emitted build tuple is skipped BEFORE the
+        // joinqual (HJ_SCAN_BUCKET's has-match skip; racy-stale reads are
+        // fine — the authoritative claim is the test_and_set below).
+        if jointype == JoinType::JOIN_RIGHT_SEMI && cand.matched() {
+            continue;
+        }
         // joinqual (HJ_SCAN_BUCKET's arm, verbatim order).
         let matched = eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, hslot, estate)?;
         if !matched {
@@ -149,8 +161,27 @@ pub fn shared_probe_outer<'mcx>(
             continue;
         }
         matched_outer = true;
+        // Match flag (C sets it for every joinqual match): the fill phase
+        // (RIGHT/FULL/RIGHT_ANTI) reads it after the probe barrier;
+        // RIGHT_SEMI claims it exactly-once here.
+        match jointype {
+            JoinType::JOIN_RIGHT_SEMI => {
+                if !cand.test_and_set_matched() {
+                    continue; // another probe task won this build tuple
+                }
+                // otherqual is None by admission; project + emit once.
+                let out = project_result(node, hslot, estate)?;
+                emit(node, estate, out)?;
+                continue; // keep scanning: other build tuples in this chain
+            }
+            JoinType::JOIN_RIGHT | JoinType::JOIN_FULL | JoinType::JOIN_RIGHT_ANTI => {
+                cand.set_matched();
+            }
+            _ => {}
+        }
         match jointype {
             JoinType::JOIN_ANTI => break, // matched anti-outer emits nothing
+            JoinType::JOIN_RIGHT_ANTI => continue, // mark-only probe
             JoinType::JOIN_SEMI => {
                 let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
                 if pass {
@@ -161,6 +192,7 @@ pub fn shared_probe_outer<'mcx>(
                 }
                 break; // js_single_match: first joinqual match ends the walk
             }
+            JoinType::JOIN_RIGHT_SEMI => unreachable!("handled above"),
             _ => {
                 let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
                 if pass {
@@ -175,14 +207,62 @@ pub fn shared_probe_outer<'mcx>(
             }
         }
     }
-    // HJ_FILL_OUTER_TUPLE: LEFT and ANTI null-fill unmatched outers
-    // (hj_fill_outer covers both; FULL is not phase-1).
+    // HJ_FILL_OUTER_TUPLE: LEFT/FULL/ANTI null-fill unmatched outers
+    // (hj_fill_outer covers all three).
     if !matched_outer && node.hj_fill_outer {
         let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
         estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
         let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, null_inner, estate)?;
         if pass {
             let out = project_result(node, null_inner, estate)?;
+            emit(node, estate, out)?;
+        } else {
+            estate.instr_count_filtered2(node.js_instr);
+        }
+    }
+    Ok(())
+}
+
+/// The right-fill walk (HJ_FILL_INNER_TUPLES over one frozen partition):
+/// never-matched build tuples, null-extended on the outer side, through
+/// otherqual + projection into `emit`. Runs on the FILL task set
+/// (deps=[probe] — the task-set completion barrier is the flag-visibility
+/// edge); partition-exclusive, so no two tasks touch the same tuple.
+/// RIGHT/FULL/RIGHT_ANTI only (RIGHT_SEMI never fills).
+pub fn shared_fill_partition<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    part: u64,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    debug_assert!(node.hj_fill_inner, "fill walk on a non-fill join type");
+    let ecxt = node.ps_ExprContext;
+    let hslot = hs.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    let null_outer = node.hj_NullOuterTupleSlot.expect("null outer slot");
+    for tuple in table.unmatched_in_partition(part) {
+        let payload = tuple.payload();
+        // SAFETY: frozen chunk image, live for the table's lifetime,
+        // word-aligned (the probe-path argument, verbatim).
+        unsafe {
+            let mtup = NonNull::new_unchecked(payload.as_ptr() as *mut MinimalTupleData);
+            exectuples::exec_store_minimal_tuple_ptr(
+                &mut estate.es_tupleTable[hslot.0 as usize],
+                mcx,
+                mtup,
+            );
+        }
+        {
+            let e = estate.ecxt_mut(ecxt);
+            e.reset();
+            e.ecxt_outertuple = Some(null_outer);
+            e.ecxt_innertuple = Some(hslot);
+        }
+        let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
+        if pass {
+            let out = project_result(node, hslot, estate)?;
             emit(node, estate, out)?;
         } else {
             estate.instr_count_filtered2(node.js_instr);
