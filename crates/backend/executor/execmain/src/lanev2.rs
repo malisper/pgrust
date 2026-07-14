@@ -3765,6 +3765,28 @@ fn scan_mk_shape<'mcx>(
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<ScanMk> {
+    scan_mk_admit(agg, ss, estate, true)
+}
+
+/// The probe half of [`scan_mk_shape`] for the M2 sink leader: identical
+/// gates and shape, but the compact table is NOT armed — the leader's
+/// executor only ever adopts the published parallel emit, so arming would
+/// buy a dead group-estimate-sized prealloc (the serial fallback re-runs
+/// the real arm at its own build).
+fn scan_mk_probe<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanMk> {
+    scan_mk_admit(agg, ss, estate, false)
+}
+
+fn scan_mk_admit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    arm: bool,
+) -> Option<ScanMk> {
     if !scan_mk_plan_wanted(agg) {
         return None;
     }
@@ -3818,12 +3840,24 @@ fn scan_mk_shape<'mcx>(
     }
     // Packing admission + table arm (nullable = heap; cbstore rides the
     // no-NULLs per-chunk proof and packs no null byte).
-    match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict_att.filter(|_| is_cb)) {
-        ::nodeagg::CompactArm::Armed => {
-            let shape =
-                ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
-            Some(ScanMk { shape, dict_att: dict_att.filter(|_| is_cb) })
+    let dict = dict_att.filter(|_| is_cb);
+    let verdict = if arm {
+        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict) {
+            ::nodeagg::CompactArm::Armed => {
+                let shape =
+                    ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
+                return Some(ScanMk { shape, dict_att: dict });
+            }
+            v => v,
         }
+    } else {
+        match ::nodeagg::agg_hash_compact_mk_admit(agg, !is_cb, dict) {
+            Ok((shape, _numgroups)) => return Some(ScanMk { shape, dict_att: dict }),
+            Err(v) => v,
+        }
+    };
+    match verdict {
+        ::nodeagg::CompactArm::Armed => unreachable!("armed verdicts returned above"),
         ::nodeagg::CompactArm::KeyKind => refused(RefuseReason::MultiKeyShape),
         ::nodeagg::CompactArm::SpillRisk => refused(RefuseReason::CompactSpillRisk),
         ::nodeagg::CompactArm::Off => None,
