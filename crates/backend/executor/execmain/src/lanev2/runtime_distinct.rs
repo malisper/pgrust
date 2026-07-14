@@ -113,6 +113,10 @@ pub(super) struct RuntimeDistinctShared {
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
     started: AtomicUsize,
+    /// Helpers that have EXITED `helper_drive` (every exit path bumps
+    /// exactly once, by drop guard) — the leader's liveness-reap input
+    /// (inc-2c; see runtime_agg, the identical hole).
+    exited: AtomicUsize,
     /// First worker-phase error (the entry-phase errors ride the ordinary
     /// parallel message channel).
     error: Mutex<Option<Box<PgError>>>,
@@ -819,6 +823,9 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeDistinctShared>) {
     let _ = shared;
+    // Every launched helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`).
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     let Some(target) = payload.pcxt_shared.get() else { return };
     let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
     let Some(lane) = payload.rt.acquire_external_lane() else {
@@ -1190,6 +1197,7 @@ fn engage<'mcx>(
         spec: Arc::clone(&spec),
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
+        exited: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         crossed: AtomicBool::new(false),
@@ -1276,6 +1284,7 @@ fn engage_ceremony<'mcx>(
         ));
 
         // Submit-and-park (the WaitForParallelWorkersToFinish shape).
+        let mut all_exited_seen = false;
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -1296,6 +1305,28 @@ fn engage_ceremony<'mcx>(
                 rg.abort();
                 drain_rg(rt, &rg);
                 return Ok(EngageOutcome::Fallback);
+            }
+            // LIVENESS REAP (inc-2c; the runtime_agg leg-4d wedge class): a
+            // pinned RG is invisible to pool workers, so once every launched
+            // helper has exited without the RG completing (e.g. every
+            // build_worker_exec errored before its drive), nobody will ever
+            // step it. Reap: abort + drain the closed generation ourselves;
+            // the next try_wait surfaces Aborted and the existing error/
+            // crossed/fallback handling below decides. Two consecutive
+            // sightings before reaping let a mid-settlement completion land
+            // first — belt only: a helper's exit bump happens-after its
+            // drive's completion, and abort + drive_pinned on a completed RG
+            // are benign no-ops.
+            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+                if all_exited_seen && waiter.try_wait().is_none() {
+                    lane_trace(
+                        "runtime-distinct: all helpers exited without completing the RG — reaping",
+                    );
+                    rg.abort();
+                    drain_rg(rt, &rg);
+                    continue;
+                }
+                all_exited_seen = true;
             }
             parallel::wait_parallel_finish_quantum();
         };
