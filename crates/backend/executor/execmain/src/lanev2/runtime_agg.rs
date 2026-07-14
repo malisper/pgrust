@@ -154,6 +154,25 @@ impl AggSink {
     fn take_error(&self) -> Option<Box<PgError>> {
         self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
+
+    /// Shared combine tail (merge and pass-through arms): meter the RETAINED
+    /// emit buffer against the admitted envelope (R3, m2-integration audit —
+    /// the emit buffers are the merged result, held until the leader
+    /// drains; the union is bounded by the admitted Locals' content, so a
+    /// crossing is a real accounting surprise → budget refusal, fail-closed)
+    /// and store it in the claimed partition's slot.
+    fn retain_bucket(&self, part: u64, buf: SinkEmitBuf, nlocals: usize) -> PgResult<()> {
+        let retained = buf.bytes();
+        let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
+        if total > self.budget.saturating_mul(nlocals.max(1)) {
+            self.refuse_budget();
+            return Ok(());
+        }
+        // SAFETY: partition `part` is claimed exactly once (runtime
+        // contract); this is its single writer.
+        unsafe { *self.out_emit[part as usize].get() = buf };
+        Ok(())
+    }
 }
 
 impl runtime::ParallelSink for AggSink {
@@ -217,6 +236,27 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<()> {
+            // SINGLE-LOCAL PASS-THROUGH (dop1-tax fix 3): exactly one sealed
+            // Local and zero flushed runs — the merged bucket table would be
+            // a verbatim re-insert of the Local's rows, so emit straight
+            // from its table through the SEAL partition index (no 256-way
+            // rebuild, no double insert; byte-identical order by
+            // construction — see sink_emit_bucket_passthrough). LIVE-STATE
+            // decision: a widened engagement (≥2 Locals) or a flushed Local
+            // takes the merge arm below; no plan/DOP special-casing.
+            if let [l] = locals {
+                if l.runs.is_empty() {
+                    if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                        let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
+                            &self.emit,
+                            t.table(),
+                            p,
+                            part as usize,
+                        );
+                        return self.retain_bucket(part, buf, locals.len());
+                    }
+                }
+            }
             // Std-collections audit note: this views Vec is a per-claim
             // allocation, but the combine morsel space is a FIXED 256
             // partitions x dop-sized views — bounded per engagement,
@@ -240,26 +280,7 @@ impl runtime::ParallelSink for AggSink {
                 &self.combines,
             )?;
             let buf = sink_emit_bucket(&self.emit, &merged);
-            // R3 accounting (m2-integration audit): the emit buffers are the
-            // RETAINED merged result (held until the leader drains) — meter
-            // them against the ADMITTED envelope (forked Locals × per-Local
-            // budget, the same law as the distinct sink): the union is
-            // bounded by the sum of the admitted Locals' content, so this
-            // trips only on real overhead/accounting surprises — fail-closed
-            // and visible without a deterministic refuse-and-rerun cliff for
-            // legitimately admitted dop-wide results (review finding). The
-            // transient per-bucket merge table is bounded by <= dop
-            // concurrent claims of bucket-sized tables and drops here.
-            let retained = buf.bytes();
-            let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
-            if total > self.budget.saturating_mul(locals.len().max(1)) {
-                self.refuse_budget();
-                return Ok(());
-            }
-            // SAFETY: partition `part` is claimed exactly once (runtime
-            // contract); this is its single writer.
-            unsafe { *self.out_emit[part as usize].get() = buf };
-            Ok(())
+            self.retain_bucket(part, buf, locals.len())
         }));
         match r {
             Ok(Ok(())) => {}

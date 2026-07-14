@@ -609,6 +609,55 @@ fn key_datum(width: u8, k: i64) -> Datum {
     }
 }
 
+/// Finalize+project one table row into the emit vectors (the per-row core
+/// of [`sink_emit_bucket`] / [`sink_emit_bucket_passthrough`]).
+#[inline]
+fn emit_row(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    row: usize,
+    values: &mut Vec<Datum>,
+    nulls: &mut Vec<bool>,
+) {
+    let key = t.row_key_int(row);
+    let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
+    for c in &plan.cols {
+        match *c {
+            SinkEmitCol::Key => match key {
+                Some(k) => {
+                    values.push(key_datum(plan.width, k));
+                    nulls.push(false);
+                }
+                None => {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                }
+            },
+            SinkEmitCol::Derived(d) => match key {
+                // Reconstruction is exact by the feed's admission-time
+                // range guard; a NULL representative derives NULL (the
+                // strict ± operators' per-row result).
+                Some(k) => {
+                    values.push(key_datum(plan.width, d.eval(k)));
+                    nulls.push(false);
+                }
+                None => {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                }
+            },
+            // SAFETY: the row's state block holds numtrans pergroups
+            // (bucket-table config = the sink's state_bytes); transno <
+            // numtrans by plan construction. Byval transvalues only.
+            SinkEmitCol::Agg { transno } => unsafe {
+                let pg = &*states.add(transno as usize);
+                values.push(pg.trans_value);
+                nulls.push(pg.trans_value_is_null);
+            },
+        }
+    }
+}
+
 /// Finalize+project one merged bucket (rows in insertion order — the merge's
 /// first-seen order) into a [`SinkEmitBuf`].
 pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
@@ -617,41 +666,47 @@ pub fn sink_emit_bucket(plan: &SinkEmitPlan, t: &LaneAggTable) -> SinkEmitBuf {
     let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
     let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
     for row in 0..n {
-        let key = t.row_key_int(row);
-        let states = t.row_states(row).cast_const().cast::<AggPerGroup>();
-        for c in &plan.cols {
-            match *c {
-                SinkEmitCol::Key => match key {
-                    Some(k) => {
-                        values.push(key_datum(plan.width, k));
-                        nulls.push(false);
-                    }
-                    None => {
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    }
-                },
-                SinkEmitCol::Derived(d) => match key {
-                    // Reconstruction is exact by the feed's admission-time
-                    // range guard; a NULL representative derives NULL (the
-                    // strict ± operators' per-row result).
-                    Some(k) => {
-                        values.push(key_datum(plan.width, d.eval(k)));
-                        nulls.push(false);
-                    }
-                    None => {
-                        values.push(Datum::null());
-                        nulls.push(true);
-                    }
-                },
-                // SAFETY: the row's state block holds numtrans pergroups
-                // (bucket-table config = the sink's state_bytes); transno <
-                // numtrans by plan construction. Byval transvalues only.
-                SinkEmitCol::Agg { transno } => unsafe {
-                    let pg = &*states.add(transno as usize);
-                    values.push(pg.trans_value);
-                    nulls.push(pg.trans_value_is_null);
-                },
+        emit_row(plan, t, row, &mut values, &mut nulls);
+    }
+    SinkEmitBuf { values, nulls, nrows: n }
+}
+
+/// SINGLE-LOCAL PASS-THROUGH emit (dop1-tax fix 3, class b): when the
+/// combine sees exactly one sealed Local with zero flushed runs, bucket `b`'s
+/// merged table would be a verbatim re-insert of the Local's own rows — so
+/// emit STRAIGHT from the Local's table through its SEAL partition index
+/// instead (no per-bucket table build, no double insert). Output is
+/// byte-identical to the merge arm's by construction: the SEAL index lists
+/// bucket rows in insertion order (counting sort over ascending row index),
+/// which is exactly [`sink_combine_bucket`]'s first-seen order for a single
+/// no-runs source, the NULL row last in [`SINK_NULL_BUCKET`] (the merge
+/// arm's absorb order), and a new-key absorb copies state blocks verbatim.
+/// The decision is LIVE STATE (Local count + run count at combine time) —
+/// a widened engagement (≥2 Locals) or a flushed Local takes the merge arm.
+pub fn sink_emit_bucket_passthrough(
+    plan: &SinkEmitPlan,
+    t: &LaneAggTable,
+    part: &SinkPart,
+    b: usize,
+) -> SinkEmitBuf {
+    debug_assert!(b < SINK_NBUCKETS);
+    let natts = plan.cols.len();
+    let lo = part.starts[b] as usize;
+    let hi = part.starts[b + 1] as usize;
+    let with_null = b == SINK_NULL_BUCKET && part.has_null;
+    let n = hi - lo + usize::from(with_null);
+    let mut values: Vec<Datum> = Vec::with_capacity(n * natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
+    for &row in &part.idx[lo..hi] {
+        emit_row(plan, t, row as usize, &mut values, &mut nulls);
+    }
+    if with_null {
+        // The out-of-band NULL group emits LAST in its bucket (the merge
+        // arm's order: runs/remainder rows first, then the NULL absorb).
+        for row in 0..t.nrows() {
+            if t.row_key_int(row).is_none() {
+                emit_row(plan, t, row, &mut values, &mut nulls);
+                break;
             }
         }
     }
@@ -865,6 +920,58 @@ pub fn agg_sink_emit_next<'mcx>(
 /// Drop any adopted emit state (rescan / teardown safety).
 pub fn agg_sink_reset_emit(node: &mut AggStateData<'_>) {
     node.sink_emit = None;
+}
+
+// ---------------------------------------------------------------------------
+// Batched drain of the adopted emit (dop1-tax fix 4): a consuming breaker
+// (the lane's agg→sort feed) drains the published EmitBufs in per-bucket
+// BLOCKS instead of pulling one row per produce through the emit cursor —
+// same rows, same order (bucket 0..255, insertion order within), same slot
+// contents as agg_sink_emit_next; only the per-row pull ceremony is hoisted.
+// ---------------------------------------------------------------------------
+
+/// Bucket `b`'s row count in the adopted emit state (`None` = not adopted).
+pub fn agg_sink_emit_bucket_len(node: &AggStateData<'_>, b: usize) -> Option<usize> {
+    node.sink_emit.as_ref().map(|st| st.bufs[b].nrows)
+}
+
+/// True while the adopted emit cursor has not advanced — the batched drain
+/// starts from row 0 and must never double-emit after a partial per-row
+/// drain (defensive; the lane's consumers never mix the two).
+pub fn agg_sink_emit_unstarted(node: &AggStateData<'_>) -> bool {
+    node.sink_emit.as_ref().is_some_and(|st| st.bucket == 0 && st.pos == 0)
+}
+
+/// Store row `row` of bucket `b` into the node's result slot (the
+/// agg_sink_emit_next body, cursor-free). Caller drives bucket/row order.
+pub fn agg_sink_emit_block_row<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut ::executils::EStateData<'mcx>,
+    b: usize,
+    row: usize,
+) -> ::executils::ExecSlotId {
+    let mcx = estate.es_query_cxt;
+    let st = node.sink_emit.as_ref().expect("sink emit state adopted");
+    let natts = st.natts;
+    let buf = &st.bufs[b];
+    debug_assert!(row < buf.nrows);
+    let base = row * natts;
+    let slot = estate.slot_mut(node.ps_ResultTupleSlot);
+    ::exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let sb = slot.base_mut();
+        sb.tts_values[..natts].copy_from_slice(&buf.values[base..base + natts]);
+        sb.tts_isnull[..natts].copy_from_slice(&buf.nulls[base..base + natts]);
+    }
+    ::exectuples::exec_store_virtual_tuple(slot);
+    node.ps_ResultTupleSlot
+}
+
+/// End of a batched drain: the adopted state is consumed exactly as the
+/// cursor drain's EOF (state dropped, agg_done set — rescans rebuild).
+pub fn agg_sink_emit_drained(node: &mut AggStateData<'_>) {
+    node.sink_emit = None;
+    node.agg_done = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1209,49 @@ mod tests {
         assert!(buf.nulls[4] && buf.nulls[5]);
         assert_eq!(buf.values[6].as_i64(), 2);
         assert_eq!(buf.values[7].as_i64(), 1);
+    }
+
+    /// dop1-tax fix 3 oracle: the single-Local no-runs pass-through emit is
+    /// byte-identical (values, nulls, row order) to the merge arm's emit of
+    /// the same bucket, for every bucket including the NULL group's.
+    #[test]
+    fn passthrough_emit_matches_merge_arm() {
+        let mut t = mk_table(64);
+        for k in 0..2000 {
+            bump(&mut t, Some(k), 1, 3 * k + 1);
+        }
+        bump(&mut t, None, 4, 11);
+        let part = sink_partition_remainder(&t);
+        assert!(part.has_null);
+        let plan = SinkEmitPlan {
+            width: 8,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        let locals =
+            [SinkLocalView { runs: &[], remainder: Some((&t, &part)) }];
+        let combines = test_combines();
+        let mut total_rows = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let merged =
+                sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            let want = sink_emit_bucket(&plan, &merged);
+            let got = sink_emit_bucket_passthrough(&plan, &t, &part, b);
+            assert_eq!(got.nrows, want.nrows, "bucket {b} row count");
+            assert_eq!(got.nulls, want.nulls, "bucket {b} null bitmap");
+            let eq = got
+                .values
+                .iter()
+                .zip(want.values.iter())
+                .zip(got.nulls.iter())
+                .all(|((g, w), &null)| null || g.as_i64() == w.as_i64());
+            assert!(eq, "bucket {b} datums diverge");
+            total_rows += got.nrows;
+        }
+        assert_eq!(total_rows, 2001);
     }
 
     #[test]
