@@ -65,7 +65,8 @@ pub use lifecycle::{
 };
 pub use morsel::{MorselRange, MorselSource, SyntheticMorselSource};
 pub use rg::{
-    CompletionWaiter, QuerySpec, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork, WeakRgHandle,
+    CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork,
+    WeakRgHandle,
 };
 pub use sched::{DriveLocal, Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
 pub use sink::{
@@ -224,7 +225,18 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Submit a MAINTENANCE resource group (M4 background-job cycles,
+    /// docs/design/m4-bgjobs.md §3.4/§3.5): pool-executed like `submit`, but
+    /// preferred by the pick over foreground FIFO order and admitted ahead
+    /// of the wait queue — the minimal starvation floor for GUC-cadence job
+    /// deadlines. Cycle task sets are single-morsel by construction, so the
+    /// preference diverts at most one worker for one cycle body.
+    pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -238,7 +250,7 @@ impl Runtime {
     /// last-worker-out finalization protocol, abort drain, completion — is
     /// the ordinary runtime machinery.
     pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
