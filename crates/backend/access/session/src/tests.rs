@@ -286,7 +286,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      argument as WORKER_EXEC slots 4-6 (built inside the query-task
     //      binding, torn down before unbind on every path, non-session
     //      TLS — the binder owns all session state movement).
-    assert_eq!(count_tree(crates), 470, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 471, re-pinned at train-12 (m3-sort merged): the fifth runtime
+    // engagement arm adds its per-helper executor slot —
+    //   10. executor/execmain/src/lanev2/runtime_sort.rs WORKER_EXEC —
+    //      identical class and argument as slots 4-6/9 (bound-helper
+    //      drive slot inside the query-task binding, torn down before
+    //      unbind on every path, non-session TLS).
+    assert_eq!(count_tree(crates), 471, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -177,3 +177,18 @@ pub fn runtime_hashjoin_pool_dop() -> i32 {
     }
     pool_option_dop("pgrust.runtime_hashjoin_pool")
 }
+
+/// The armed runtime SORT DOP (M3 top-N sink, docs/design/m3-sort.md §9):
+/// `pgrust.runtime_sort_pool` clamped to available cores, or 0 when unarmed.
+/// Same layering as the scan knob — a customized option the planner never
+/// consults; callers additionally gate on `PGRUST_RUNTIME=1` + shape/binder
+/// admission. Deliberately does NOT embed any other arm's kill switch (the
+/// m2-distinct coupling gotcha: `runtime_scan_pool_dop` folds
+/// PGRUST_RUNTIME_SCAN in, so scan-kill disarms its borrowers too) — the
+/// sort arm's own kill (`PGRUST_RUNTIME_SORT`) lives with the arm.
+pub fn runtime_sort_pool_dop() -> i32 {
+    if !crate::backing::pgrust_lane_executor() {
+        return 0;
+    }
+    pool_option_dop("pgrust.runtime_sort_pool")
+}
