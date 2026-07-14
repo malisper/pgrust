@@ -1566,3 +1566,436 @@ fn stride_threaded_pool_mid_flight_shares() {
     }
     pool.shutdown();
 }
+
+// ---- M5+1 pipeline-DAG dispatch (m5-planner §3.6, increment 1) --------------
+//
+// Independent-subtree overlap: every dependency-satisfied task set publishes
+// concurrently, each in its own slot. OFF (the default) is the sequential
+// walk — the whole pre-existing suite runs with the switch off and is the
+// byte-identity evidence; the tests here exercise ON.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DagEv {
+    Claim(usize),
+    Finalize(usize),
+}
+
+/// SyntheticWork wrapped with a shared event log (claim/finalize order —
+/// the overlap and gating oracles).
+struct DagWork {
+    inner: Arc<SyntheticWork>,
+    log: Arc<Mutex<Vec<DagEv>>>,
+    index: usize,
+}
+
+impl TaskSetWork for DagWork {
+    fn run_morsel(&self, w: usize, range: MorselRange) {
+        self.log.lock().unwrap().push(DagEv::Claim(self.index));
+        self.inner.run_morsel(w, range);
+    }
+    fn finalize(&self) {
+        self.inner.finalize();
+        self.log.lock().unwrap().push(DagEv::Finalize(self.index));
+    }
+}
+
+/// Build a QuerySpec from (granules, deps) shapes over a shared event log.
+fn dag_spec(
+    qid: u64,
+    clock: &Arc<VirtualClock>,
+    log: &Arc<Mutex<Vec<DagEv>>>,
+    shapes: &[(u64, &[usize])],
+) -> (QuerySpec, Vec<Arc<SyntheticWork>>) {
+    let mut tasksets = Vec::new();
+    let mut works = Vec::new();
+    for (i, (total, deps)) in shapes.iter().enumerate() {
+        let inner = SyntheticWork::new(*total, Some(Arc::clone(clock)), 1_000);
+        works.push(Arc::clone(&inner));
+        tasksets.push(TaskSetSpec {
+            source: Arc::new(SyntheticMorselSource::new(*total)),
+            work: Arc::new(DagWork { inner, log: Arc::clone(log), index: i }),
+            deps: deps.to_vec(),
+        });
+    }
+    (QuerySpec { query_id: qid, tasksets }, works)
+}
+
+fn first_pos(log: &[DagEv], ev: DagEv) -> Option<usize> {
+    log.iter().position(|e| *e == ev)
+}
+
+/// Admission publishes EVERY dependency-satisfied pipeline concurrently
+/// (multi-build shape: two independent build sides + a gated probe): both
+/// builds occupy slots before any worker steps; the probe is NOT submitted
+/// (occupies nothing) until both builds finalize; a single worker's claims
+/// INTERLEAVE the two builds (the overlap the increment buys).
+#[test]
+fn dag_admission_fans_out_and_gates() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(6_000, &[]), (6_000, &[]), (2_000, &[0, 1])],
+    );
+    let (_h, waiter) = rt.submit(spec);
+
+    // Both independent builds are published at admission; the gated probe
+    // is not (submission gating: unmet deps ⇒ not submitted anywhere).
+    let s = rt.stats();
+    assert_eq!(s.tasksets_published, 2, "both ready pipelines publish at admission");
+    assert_eq!(s.dag_fanout_publishes, 1, "second build fans out into its own slot");
+
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    let log = log.lock().unwrap();
+    let fin0 = first_pos(&log, DagEv::Finalize(0)).unwrap();
+    let fin1 = first_pos(&log, DagEv::Finalize(1)).unwrap();
+    let c0 = first_pos(&log, DagEv::Claim(0)).unwrap();
+    let c1 = first_pos(&log, DagEv::Claim(1)).unwrap();
+    let c2 = first_pos(&log, DagEv::Claim(2)).unwrap();
+    // Overlap: each build claims before the other finalizes (stride
+    // alternation over the query's equal-pass slots).
+    assert!(c0 < fin1 && c1 < fin0, "independent builds must interleave, got {log:?}");
+    // Barrier: the probe's first claim strictly follows BOTH finalizes.
+    assert!(c2 > fin0 && c2 > fin1, "probe ran before its build barriers, got {log:?}");
+}
+
+/// DAG ON with a dependency CHAIN (single live pipeline throughout — the
+/// ClickBench shape class) produces the exact claim sequence the sequential
+/// walk produces: the flatness anchor.
+#[test]
+fn dag_chain_claim_sequence_identical_to_off() {
+    let run = |dag: bool| -> Vec<Vec<Range<u64>>> {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_dag(dag);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (spec, works) =
+            dag_spec(1, &clock, &log, &[(6_000, &[]), (4_000, &[0]), (2_000, &[1])]);
+        let (_h, waiter) = rt.submit(spec);
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        works.iter().map(|w| w.claims.lock().unwrap().clone()).collect()
+    };
+    assert_eq!(run(true), run(false), "chain claims must be identical under DAG dispatch");
+}
+
+/// Slot-capacity deferral: 3 independent pipelines, 2 scheduler slots — the
+/// third publishes only when one of the query's own pipelines finishes (the
+/// RG always retains a slot; nothing strands, nothing deadlocks), and a
+/// QUEUED second query still gets admitted when a slot frees mid-query.
+#[test]
+fn dag_capacity_defers_and_freed_slot_admits_queued() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = RuntimeConfig::new(1);
+    cfg.slots = 2;
+    let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    // Two long builds + a short one + a sink gated on all three.
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(4_000, &[]), (4_000, &[]), (2_000, &[]), (1_000, &[0, 1, 2])],
+    );
+    let (_h, wa) = rt.submit(spec);
+    assert_eq!(rt.stats().tasksets_published, 2, "capacity caps admission fan-out");
+    assert!(rt.stats().dag_ready_deferred >= 1, "third pipeline defers on slot capacity");
+
+    // A second, single-pipeline query queues behind the full slot array and
+    // completes once a slot frees (FIFO admission is not starved by the
+    // multi-pipeline query's deferred pipelines).
+    let b = SyntheticWork::new(1_000, Some(Arc::clone(&clock)), 1_000);
+    let (_hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(1_000))));
+
+    let mut local = rt.worker_local(0);
+    while wa.try_wait().is_none() || wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(wa.wait(), RgOutcome::Completed);
+    assert_eq!(wb.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    b.assert_all_executed_once();
+}
+
+/// §3.6 fairness law with pipeline-RGs live: the QUERY is the fair-share
+/// principal — a query with TWO live pipelines gets the same aggregate CPU
+/// share as single-pipeline peers (its slots advance ONE shared account),
+/// not double. Deterministic K-sweep shape: K-1 single-pipeline queries plus
+/// one two-pipeline query on one virtual-clock worker.
+#[test]
+fn dag_query_level_share_k_sweep() {
+    for k in [2usize, 4, 8] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_dag(true);
+        let total = 400_000u64;
+        let mut handles = Vec::new();
+        let mut waiters = Vec::new();
+        // Query 1: two independent pipelines (never finishes in-window).
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (spec, _works) =
+            dag_spec(1, &clock, &log, &[(total, &[]), (total, &[]), (1, &[0, 1])]);
+        let (h, w) = rt.submit(spec);
+        handles.push(h);
+        waiters.push(w);
+        // Queries 2..=k: single pipeline.
+        for q in 1..k {
+            let w = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) =
+                rt.submit(spec_one(&w, Arc::new(SyntheticMorselSource::new(total))));
+            let _ = q;
+            handles.push(h);
+            waiters.push(waiter);
+        }
+        // 20 task boundaries per SLOT at perfect fairness (k+1 live slots).
+        let mut local = rt.worker_local(0);
+        for _ in 0..(20 * (k + 1)) {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        for w in &waiters {
+            assert!(w.try_wait().is_none(), "K-sweep RGs must all still be active");
+        }
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        let mut max_err = 0f64;
+        for c in &cpus {
+            max_err = max_err.max((*c as f64 - mean).abs() / mean);
+        }
+        // The two-pipeline query's mirror staleness bounds its edge at ~one
+        // task quantum per extra pipeline over the ~20-quanta window.
+        assert!(
+            max_err <= 0.12,
+            "K={k}: query-level share error {max_err:.4} out of band; cpus={cpus:?} \
+             (first query holds TWO live pipelines and must not get 2x)"
+        );
+        eprintln!("dag K-sweep K={k} (query 1 dual-pipeline): max share error {max_err:.4} (cpu ns: {cpus:?})");
+        for h in &handles {
+            h.abort();
+        }
+        for w in &waiters {
+            while w.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+    }
+}
+
+/// Within-query dependency-depth pick (§3.6): at equal pass (two pipelines
+/// published by one fan-out mirror the same account value), the pick
+/// prefers the DEEPER pipeline even from a higher slot index.
+#[test]
+fn dag_depth_priority_pick() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    // Query A occupies slot 0 briefly, then completes and frees it.
+    let a = SyntheticWork::new(500, Some(Arc::clone(&clock)), 1_000);
+    let (_ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(500))));
+    // Query B: root in slot 1; its finalize fans out S (shallow, depth 1)
+    // into freed slot 0 and D (deep, depth 2) into retained slot 1 — both
+    // mirroring the same account (equal pass).
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        2,
+        &clock,
+        &log,
+        &[
+            (1_000, &[]),      // 0 = R (root)
+            (2_000, &[0]),     // 1 = S (shallow: only the sink above)
+            (2_000, &[0]),     // 2 = D (deep: Z then the sink)
+            (1_000, &[2]),     // 3 = Z
+            (500, &[1, 3]),    // 4 = sink
+        ],
+    );
+    let (_hb, wb) = rt.submit(spec);
+
+    let mut local = rt.worker_local(0);
+    // Step 1: equal pass across queries -> scan order picks A; A completes
+    // and frees slot 0. Step 2: forced pick of B's root; it exhausts and
+    // fans out D (retained slot 1) + S (freed slot 0) at equal pass.
+    while wa.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    while first_pos(&log.lock().unwrap(), DagEv::Finalize(0)).is_none() {
+        rt.worker_step(&mut local);
+    }
+    // Step 3: equal pass, same query, shallow in the LOWER slot — the
+    // depth refinement must pick the deeper pipeline first.
+    rt.worker_step(&mut local);
+    {
+        let log = log.lock().unwrap();
+        let cs = first_pos(&log, DagEv::Claim(1));
+        let cd = first_pos(&log, DagEv::Claim(2));
+        assert!(
+            cd.is_some() && cs.is_none(),
+            "deeper pipeline must be picked first at equal pass, got {log:?}"
+        );
+    }
+    assert!(rt.stats().dag_depth_picks >= 1, "depth refinement must have decided the pick");
+    while wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(wb.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+    }
+}
+
+/// Abort with multiple LIVE pipelines: each published pipeline drains
+/// through its own generation-refusal last-out; the LAST one completes the
+/// RG (exactly once, Aborted); gated pipelines never publish; no finalize
+/// work runs.
+#[test]
+fn dag_abort_with_live_siblings() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(50_000, &[]), (50_000, &[]), (1_000, &[0, 1])],
+    );
+    let (h, waiter) = rt.submit(spec);
+    let mut local = rt.worker_local(0);
+    // Run a few tasks on the live builds, then abort mid-flight.
+    for _ in 0..4 {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    }
+    h.abort();
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Aborted);
+    assert_eq!(rt.stats().rgs_aborted, 1);
+    assert_eq!(rt.stats().rgs_completed, 1);
+    for w in &works {
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 0, "aborted RGs never run finalize work");
+    }
+    let log = log.lock().unwrap();
+    assert!(
+        first_pos(&log, DagEv::Claim(2)).is_none(),
+        "the gated sink must never have published on an aborted RG"
+    );
+}
+
+/// PINNED multi-slot drive (the arm execution mode): a pinned RG's external
+/// driver picks among the RG's live pipelines DEEPEST-FIRST, and the whole
+/// DAG completes through pinned stepping alone.
+#[test]
+fn dag_pinned_drive_prefers_deeper_pipeline() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[
+            (2_000, &[]),   // 0 = S (shallow: straight to sink)
+            (2_000, &[]),   // 1 = D (deep: Z then sink)
+            (1_000, &[1]),  // 2 = Z
+            (500, &[0, 2]), // 3 = sink
+        ],
+    );
+    let (h, waiter) = rt.submit_pinned(spec);
+    assert_eq!(rt.stats().tasksets_published, 2, "pinned admission fans out too");
+    let lane = rt.acquire_external_lane().expect("lane");
+    let mut local = lane.local();
+    assert_eq!(rt.drive_pinned(&mut local, &h), RgOutcome::Completed);
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    let log = log.lock().unwrap();
+    let cs = first_pos(&log, DagEv::Claim(0)).unwrap();
+    let cd = first_pos(&log, DagEv::Claim(1)).unwrap();
+    assert!(cd < cs, "pinned driver must start on the deeper pipeline, got {log:?}");
+}
+
+/// Threaded pool end-to-end over the three §3.6 win shapes (multi-build
+/// join, UNION ALL, independent subqueries): completion, exactly-once
+/// execution, dep-ordered finalizes, and real fan-out engagement.
+#[test]
+fn dag_pool_win_shapes_complete() {
+    let shapes: [&[(u64, &[usize])]; 3] = [
+        // multi-build: 3 independent builds + probe gated on all three
+        &[(8_192, &[]), (8_192, &[]), (8_192, &[]), (8_192, &[0, 1, 2])],
+        // UNION ALL: 4 independent branches + a concat sink
+        &[(8_192, &[]), (8_192, &[]), (8_192, &[]), (8_192, &[]), (1_024, &[0, 1, 2, 3])],
+        // independent subqueries: two 2-deep chains joining a final
+        &[(8_192, &[]), (4_096, &[0]), (8_192, &[]), (4_096, &[2]), (2_048, &[1, 3])],
+    ];
+    for (si, shape) in shapes.iter().enumerate() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 2,
+            slots: 16,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_dag(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tasksets = Vec::new();
+        let mut works = Vec::new();
+        for (i, (total, deps)) in shape.iter().enumerate() {
+            let inner = SyntheticWork::new(*total, None, 0);
+            works.push(Arc::clone(&inner));
+            tasksets.push(TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(*total)),
+                work: Arc::new(DagWork { inner, log: Arc::clone(&log), index: i }),
+                deps: deps.to_vec(),
+            });
+        }
+        let (_h, waiter) = rt.submit(QuerySpec { query_id: si as u64 + 1, tasksets });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+        for w in &works {
+            w.assert_all_executed_once();
+            assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+        }
+        // Gating oracle: every pipeline's first claim follows ALL its deps'
+        // finalizes.
+        let log = log.lock().unwrap();
+        for (i, (_, deps)) in shape.iter().enumerate() {
+            let ci = first_pos(&log, DagEv::Claim(i)).unwrap();
+            for &d in deps.iter() {
+                let fd = first_pos(&log, DagEv::Finalize(d)).unwrap();
+                assert!(ci > fd, "shape {si}: pipeline {i} claimed before dep {d} finalized");
+            }
+        }
+        assert!(rt.stats().dag_fanout_publishes >= 1, "shape {si} must fan out");
+    }
+}
