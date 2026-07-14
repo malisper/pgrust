@@ -1,0 +1,49 @@
+# M5 living coverage matrix (docs/design/m5-planner.md §4.1, emitted at M5-1).
+# One row per (shape class × composition state); the router's class list and
+# M5-3's suppression probe are asserted against / generated from THIS file —
+# "covered" claims and routing flags must not drift apart silently.
+#
+# Columns:
+#   class           shape class key (stable identifier; §4.1 row)
+#   arm             owning runtime arm: scan|heap|agg|distinct|hashjoin|sort|none
+#   spill_eligible  yes | no | gap:<flag> | na   (§2.4 law 2c: canonical-bytes
+#                   text engagements DISABLE the word-mode spill arm; the bytes
+#                   spill record is a data-driven gap flag, not a hardcoded rule)
+#   topn_composable yes | no | degrade:<arms> | na  (§2.4 law 2b: armed top-N
+#                   degrades pass-through and combine-split arms — full drain,
+#                   never a correctness change)
+#   adopt_eligible  yes | no | na  (§2.4 law 2a: a SPILLED Local disqualifies
+#                   single-Local pass-through AND seal-time table adopt)
+#   status          covered | covered-partial | covered-losing | refused | not-covered
+#   route_to        runtime | legacy   (the §2.3 suppression flag M5-3 consumes;
+#                   flipped per class with review + measurements only)
+#   notes           measured anchors / owning car
+#
+# §2.4 law 1 (spill-armed retained-result), restated as the router contract:
+# the retained-emit envelope applies ONLY when spill is DISARMED and is arm-
+# internal — the router NEVER pre-refuses on it (regression class: agg e2e
+# legs 4/4d/4e, sort-b leg 7, run through the router at every M5 increment).
+class	arm	spill_eligible	topn_composable	adopt_eligible	status	route_to	notes
+cbstore-scan-fold	scan	na	na	na	covered	runtime	runtime16=armed16 (100%); DOP-1 1.00x (dop1-tax2)
+cbstore-census-qual	scan	na	na	na	covered	runtime	bits-only staging; bare count(*) defers to Meta/footer
+heap-cmp-fold	heap	na	na	na	covered	runtime	12.58x DOP15; heap CMP DOP-1 == serial (717ms both); EA refuses (cbstore-only)
+heap-like-fold	heap	na	na	na	refused	legacy	M1-b next car (rowdrive PerRowFold substrate)
+agg-int-packed-reduced-keys	agg	yes	yes	yes	covered	runtime	q36 agg16 0.036s class-best; budget crossings SPILL (m35)
+agg-text-canonical-bytes	agg	gap:bytes-spill-record	yes	yes	covered	runtime	c3: q19@100M 4.96xCH (was 45.6x); law 2c — budget crossings REFUSE (expected, attribute as matrix flag, not router bug)
+agg-const-tlist	agg	na	na	na	refused	legacy	q35 class; const-tlist car
+agg-poly-numeric-states	agg	na	na	na	refused	legacy	PolyInt128/NumericAgg relocation car
+agg-topn-composed	agg	yes	degrade:passthrough,combine-split	yes	covered	runtime	m3-sort-b car 1: 100M 1.5-1.7xCH (was 3.5-6.3x); law 2b degrade rules
+groupby-high-1e7	agg	yes	no	no	covered-losing	legacy	runtime 2.23x vs legacy radix 2.73x; HOLD until parity (§10 Q2, v2 ruling)
+distinct-int-keys	distinct	yes	na	na	covered	runtime	q9/q10 22-28x rt16; DOP-1 budget class flipped to 1.69-2.06x WIN via spill
+distinct-text-date-args	distinct	na	na	na	refused	legacy	C1 car (text); date int_kind follow-up; plain q5/q6 shape unwired
+hashjoin-nbatch1	hashjoin	no	na	na	covered	runtime	inc-2 GREEN 14/14 byte parity; right family inc-3
+hashjoin-multibatch-spill	hashjoin	gap:m35-inc45-in-flight	na	na	refused	legacy	m35-spill-joins lane (STS substrate verified)
+topn-bounded-int-keys	sort	na	yes	na	covered	runtime	tranche 77/77; multi-key inc-5; relaxed tie-order default (probe-budget guard)
+fullsort-shape-b	sort	gap:inc6-run-spill	na	na	covered-partial	legacy	landed phase-1 in-memory only; flip per sub-shape after inc-6 + instrument acceptance
+ordered-stream-non-fusible	sort	na	na	na	not-covered	legacy	GatherMerge consumers over non-fusible inputs; legacy-forever candidate
+parallel-index-scan	none	na	na	na	not-covered	legacy	29 corpus sites; legacy-forever candidate (revisit with a workload)
+parallel-bitmap-heap-scan	none	na	na	na	not-covered	legacy	2 corpus sites; legacy forever
+parallel-append-partitionwise	none	na	na	na	not-covered	legacy	34 corpus sites; partitioned-table parallelism is its own program
+parallel-ctas-matview-write	none	na	na	na	not-covered	legacy	write_parallel.out; legacy forever
+fdw-custom-scan-parallel	none	na	na	na	not-covered	legacy	contrib-only; extension APIs keep thread semantics
+merge-join-parallel	none	na	na	na	not-covered	legacy	redesign §2.2 defers
