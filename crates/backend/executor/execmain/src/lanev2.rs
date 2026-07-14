@@ -3043,6 +3043,26 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                 );
             }
         }
+        // Lane-sliced int-key consume (hot-gap C2, the q5 class): read the
+        // staged key lane as WHOLE SLICES — no per-row emit_key call — and
+        // let nodeagg run one null scan per window before the batched set
+        // insert. Same rows, same order, same cells `emit_key` reads (the
+        // loop below stays the authority for windows with fallback rows;
+        // cbstore stages none).
+        if !self.key_bytes {
+            if let Some((vals, isnull, fb)) = emit.topk_key_lane(n) {
+                if fb.iter().all(|&w| w == 0) {
+                    return ::nodeagg::agg_plain_distinct_insert_lane_batch(
+                        self.agg,
+                        estate,
+                        &vals[pos as usize..],
+                        &isnull[pos as usize..],
+                        &mut self.ints,
+                        &mut self.hashes,
+                    );
+                }
+            }
+        }
         // Direct staged-key feed (page-level CFI in the staging fetch —
         // the sort breaker's emit_key cadence).
         self.keys.clear();
