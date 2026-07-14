@@ -851,6 +851,24 @@ fn run_worker_body(worker: &BackgroundWorker) -> PgResult<()> {
     if init_small::wretain::warm_claim() {
         gtrace("w.retain.claim_warm");
         lmgr_proc::ReattachRetainedProc(BackendType::BgWorker)?;
+        // SINVAL-LEAK FIX: the retained sinval slot's exit callback re-arms
+        // HERE, in the same breath as the PGPROC's (ReattachRetainedProc just
+        // re-registered ProcKill). It used to re-arm only in InitPostgres's
+        // warm arm — leaving a window (ReattachRetainedProc .. InitPostgres)
+        // where a task failure exits through a drain whose ProcKill FREES the
+        // PGPROC while nothing releases the still-claimed sinval slot: the
+        // procno returns to the freelist with proc_states[procno].procPid
+        // still holding the PREVIOUS task's pid, and every later claimant of
+        // that procno fails SharedInvalBackendInit with "sinval slot for
+        // backend N is already in use by process M". The window fired
+        // organically whenever a leader tore down its parallel context before
+        // a warm-claimed pool worker reached the connect (cancel mid-launch,
+        // early query end): ParallelWorkerMain errors pre-connect ("could not
+        // map dynamic shared memory segment", lock-group join refusal) — the
+        // standing chaos flake (notes/INBOX-standing-gang-dev-wedge-
+        // 2026-07-13.md item 3). Exit-callback LIFO keeps C's release order:
+        // CleanupInvalidationState before ProcKill.
+        sinval::ReattachRetainedBackend()?;
     } else {
         lmgr_proc::InitProcess(BackendType::BgWorker)?;
     }
