@@ -1302,6 +1302,11 @@ fn decide_exprkey_mk_case<'mcx>(
         case_col = Some((j as u16, preds, then_base, else_bytes));
     }
     let (key_out, preds, then_base, else_bytes) = case_col?;
+    let refused_at = |why: &str| {
+        trace_feed(&format!("expr-key case-dict: refused ({why})"));
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        None
+    };
     // Grouping-key classification (agg-input coordinates): the computed
     // column must be a TextRaw grouping key; every other key a bare Var of
     // a packable kind, at most one OTHER raw-bytes text key. Numeric keys
@@ -1313,45 +1318,45 @@ fn decide_exprkey_mk_case<'mcx>(
     for &(att, kind) in &key_cols {
         if att == key_out {
             if kind != ::nodeagg::GroupKeyKind::TextRaw {
-                return refused();
+                return refused_at("computed key kind != TextRaw");
             }
             computed_is_key = true;
             fixed_total += 4;
             continue;
         }
         if map.get(att as usize).copied().flatten().is_none() {
-            return refused();
+            return refused_at("key column is not a bare Var");
         }
         match kind {
             ::nodeagg::GroupKeyKind::Int { width } => fixed_total += width as usize,
             ::nodeagg::GroupKeyKind::TextRaw => {
                 if dict_input_att.is_some() {
-                    return refused();
+                    return refused_at("a third text key");
                 }
                 if plan.cols.iter().any(|&c| c == att) {
-                    return refused();
+                    return refused_at("fold reads the text key");
                 }
                 dict_input_att = Some(att);
                 fixed_total += 4;
             }
-            _ => return refused(),
+            _ => return refused_at("unpackable key kind"),
         }
     }
     if !computed_is_key || fixed_total > 16 {
-        return refused();
+        return refused_at("computed col not a key, or image > 16B");
     }
     // Dict-answered windows leave value lanes stale: the fold must not
     // read the THEN column (its cells ride the extra dict registration).
     if plan.cols.iter().any(|&c| map.get(c as usize).copied().flatten() == Some(then_base)) {
-        return refused();
+        return refused_at("fold reads the THEN column");
     }
     // The fold/spill coordinate rules (decide_exprkey_mk's exact checks).
     if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
-        return refused();
+        return refused_at("fold column unmapped");
     }
     let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
     if colnos_needed.len() != natts {
-        return refused();
+        return refused_at("needed-cols arity");
     }
     let mut prefix = then_base as i32 + 1;
     for &(base, _, _) in &preds {
@@ -1363,17 +1368,17 @@ fn decide_exprkey_mk_case<'mcx>(
         }
         match map[c] {
             Some(base) => prefix = prefix.max(base as i32 + 1),
-            None => return refused(),
+            None => return refused_at("needed col unmapped"),
         }
     }
     if let Some(q) = ss.ss.qual.as_deref() {
         match q.max_fetch(::execexpr::SlotSrc::Scan) {
             Some(b) => prefix = prefix.max(b),
-            None => return refused(),
+            None => return refused_at("qual fetch bound"),
         }
     }
     if prefix <= 0 {
-        return refused();
+        return refused_at("empty prefix");
     }
     let dict_base =
         dict_input_att.map(|att| map[att as usize].expect("TextRaw keys are bare Vars"));
@@ -1386,10 +1391,10 @@ fn decide_exprkey_mk_case<'mcx>(
         }
     }
     if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_base) {
-        return refused();
+        return refused_at("columnar arm");
     }
     if !::nodeseqscan::seq_scan_cb_dict_want_extra(ss, then_base) {
-        return refused();
+        return refused_at("extra dict registration");
     }
     trace_feed("agg-over-seqscan: expr-key feed armed (multi-key packed, case-dict key)");
     Some(Box::new(ExprKeyState {
