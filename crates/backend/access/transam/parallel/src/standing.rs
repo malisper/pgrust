@@ -327,6 +327,61 @@ pub fn is_exit_unwind(payload: &(dyn std::any::Any + Send)) -> bool {
     payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>()
 }
 
+// ---------------------------------------------------------------------------
+// CEREMONY-V2 deferred visibility (lazy bind): a standing worker claiming a
+// ticket no longer re-enters the procarray / retakes its ProcSignal slot up
+// front — a participant that never claims work stays park-invisible
+// throughout. serve_ticket ARMS the deferral before the driver; the deferred
+// binder's first-touch bind CONSUMES it (procarray re-add BEFORE any
+// snapshot state exists — xmin only counts while visible — plus the
+// no-callback ProcSignal re-init); serve_ticket's tail removes both iff the
+// deferral ENGAGED. The first-connect path stays eager (InitPostgres adds
+// visibility as a side effect of connecting).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum DeferredVis {
+    Off,
+    Armed,
+    Engaged,
+}
+
+thread_local! {
+    static DEFERRED_VIS: std::cell::Cell<DeferredVis> =
+        const { std::cell::Cell::new(DeferredVis::Off) };
+}
+
+fn arm_deferred_visibility() {
+    DEFERRED_VIS.with(|c| c.set(DeferredVis::Armed));
+}
+
+/// Tail read: did the first-touch consume the arming? Resets to Off.
+fn take_deferred_visibility_engaged() -> bool {
+    DEFERRED_VIS.with(|c| {
+        let engaged = c.get() == DeferredVis::Engaged;
+        c.set(DeferredVis::Off);
+        engaged
+    })
+}
+
+/// Called by the deferred binder at first touch (query_task_guard::
+/// DeferredQueryTaskBinding::bind_now). No-op unless a standing serve armed
+/// the deferral on this thread.
+pub(crate) fn engage_deferred_visibility() -> types_error::PgResult<()> {
+    if DEFERRED_VIS.with(|c| c.get()) != DeferredVis::Armed {
+        return Ok(());
+    }
+    procarray_seams::proc_array_add::call(init_small::globals::MyProcNumber())?;
+    if let Err(e) = procsignal::ProcSignalReinitStanding(&[]) {
+        let _ = elog::elog(
+            WARNING,
+            format!("standing executor ProcSignal re-init failed: {}", e.message()),
+        );
+    }
+    DEFERRED_VIS.with(|c| c.set(DeferredVis::Engaged));
+    Ok(())
+}
+
 /// Glue: mark a slot respawnable (worker exit / init failure).
 pub fn note_worker_exit(ordinal: usize) {
     if GANG.get().is_none() {
@@ -386,8 +441,15 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
             }
         };
         match wake {
-            Wake::RetireRaw => return GangExit::Raw,
+            Wake::RetireRaw => {
+                // Sticky retention (ceremony-v2) is heap-only and its guard
+                // is disarmed while parked: a plain drop, no shared-memory
+                // interaction — safe under the crash fence.
+                super::query_task_guard::sticky_clear();
+                return GangExit::Raw;
+            }
             Wake::Retire => {
+                super::query_task_guard::sticky_clear();
                 // Parked workers are procarray-ABSENT (serve_ticket's
                 // bracket); the exit-callback chain (RemoveProcFromArray)
                 // expects membership — rejoin before proc_exit.
@@ -551,6 +613,13 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             }
         }
         in_procarray = true; // InitPostgres's InitProcessPhase2 added us.
+    } else if super::query_task_guard::lazy_bind_enabled() {
+        // CEREMONY-V2 lazy bind: visibility (procarray + ProcSignal) is
+        // deferred to the FIRST MORSEL CLAIM — the deferred binder consumes
+        // this arming before its snapshot restore (xmin ordering held). A
+        // participant that never claims work stays park-invisible and pays
+        // neither the procarray lock nor the ProcSignal slot churn.
+        arm_deferred_visibility();
     } else {
         // Re-engagement on a connected worker: rejoin the procarray
         // BEFORE any snapshot state exists (the binder's snapshot restore
@@ -626,7 +695,9 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     // ProcSignal slot (a live slot whose owner never drains signals
     // wedges WaitForProcSignalBarrier — dropdb's SMGRRELEASE barrier).
     // Unwind paths above skip both deliberately — the thread-exit
-    // callbacks handle them then.
+    // callbacks handle them then. A deferred-visibility ticket only
+    // removes what its first-touch actually added.
+    let in_procarray = in_procarray || take_deferred_visibility_engaged();
     if in_procarray {
         if let Err(e) = procarray_seams::proc_array_remove::call(
             init_small::globals::MyProcNumber(),
