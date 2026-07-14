@@ -212,6 +212,58 @@ fn cycles_run_under_foreground_load() {
     let _ = fg_waiter.wait();
 }
 
+/// TWO concurrent latch jobs (the walwriter-migration shape: bgwriter +
+/// walwriter on one dispatcher): waking job A's latch dispatches ONLY A —
+/// B stays parked on its long deadline — and vice versa. Pins the per-job
+/// wake routing the multi-job seat design depends on.
+#[test]
+fn two_latch_jobs_wake_independently() {
+    let (rt, _pool) = test_runtime();
+    let d = Dispatcher::spawn(Arc::clone(&rt));
+
+    let mk = || -> (Arc<TickJob>, &'static Latch) {
+        let l: &'static Latch = Box::leak(Box::new(Latch::new(true, 0)));
+        (
+            Arc::new(TickJob {
+                cadence: Duration::from_secs(3600),
+                max_cycles: u64::MAX,
+                cycles: AtomicU64::new(0),
+                wakes: AtomicU64::new(0),
+                latch: Some(l),
+            }),
+            l,
+        )
+    };
+    let (a, la) = mk();
+    let (b, lb) = mk();
+    let _ida = d.register(Arc::clone(&a) as Arc<dyn BgJob>);
+    let _idb = d.register(Arc::clone(&b) as Arc<dyn BgJob>);
+
+    // Both startup cycles run, then both idle on hour-long deadlines.
+    assert!(wait_until(Duration::from_secs(10), || {
+        a.cycles.load(Ordering::SeqCst) == 1 && b.cycles.load(Ordering::SeqCst) == 1
+    }));
+    std::thread::sleep(Duration::from_millis(30));
+
+    // Wake A only.
+    latch::set_latch(la);
+    assert!(
+        wait_until(Duration::from_secs(10), || a.wakes.load(Ordering::SeqCst) >= 1),
+        "A's latch must dispatch A"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(b.cycles.load(Ordering::SeqCst), 1, "B must not ride A's wake");
+
+    // Wake B only.
+    latch::set_latch(lb);
+    assert!(
+        wait_until(Duration::from_secs(10), || b.wakes.load(Ordering::SeqCst) >= 1),
+        "B's latch must dispatch B"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(a.cycles.load(Ordering::SeqCst), 2, "A must not ride B's wake");
+}
+
 /// Panic containment: a job whose cycle body panics is crash-retired
 /// (crashed() hook fires once) while the dispatcher survives and other
 /// jobs keep cycling.
