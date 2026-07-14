@@ -1139,10 +1139,10 @@ fn engage_ceremony<'mcx>(
             });
         }
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets,
-        });
+        }, router::session_affinity_token());
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
