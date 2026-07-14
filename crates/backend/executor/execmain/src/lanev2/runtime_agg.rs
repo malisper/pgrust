@@ -258,7 +258,16 @@ impl AggSink {
     fn retain_bucket(&self, part: u64, buf: SinkEmitBuf, nlocals: usize) -> PgResult<()> {
         let retained = buf.bytes();
         let total = self.combined_bytes.fetch_add(retained, Ordering::Relaxed) + retained;
-        if total > self.budget.saturating_mul(nlocals.max(1)) {
+        // COMPOSITION (train-13, m35 spill x train-12 R3): the in-memory
+        // envelope (admitted Locals x per-Local budget) is the LAW for
+        // spill-disabled engagements — with the spill arm ON, the merged
+        // result is legitimately bounded by the SPILLED content (the m35
+        // ratified behavior: the combine's per-partition pre-build check
+        // bounds each claim's transient table; the retained emit is the
+        // result itself). Metering stays on for observability either way.
+        if self.spill_set.is_none()
+            && total > self.budget.saturating_mul(nlocals.max(1))
+        {
             self.refuse_budget();
             return Ok(());
         }
@@ -2008,7 +2017,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         agg,
         sink_cap_for(state_bytes, budget, ngroups_limit),
     ) {
-        refuse(estate, ea, node_id, "worker compact arm would refuse under the sink budget");
+        refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     }
