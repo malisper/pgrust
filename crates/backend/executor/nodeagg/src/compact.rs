@@ -1739,3 +1739,176 @@ pub fn batch_emit_row<'mcx>(
     ::exectuples::exec_store_virtual_tuple(slot);
     Ok(node.ps_ResultTupleSlot)
 }
+
+// ===========================================================================
+// Lane-v2 topkfin (hot-c1-topk-finalize): top-k GROUP SELECTION over the raw
+// compact-table states, ahead of finalize + emit. On the admitted
+// `GROUP BY … ORDER BY <int8 finalfn-none agg> LIMIT k` shape (the exact
+// topnemit spec — count(*)/count(x)/sum-int leading key) the downstream
+// bounded tuplesort keeps only k of the ~ngroups finalized rows; the
+// streaming topnemit boundary cut only elides groups STRICTLY worse than the
+// live k-th boundary, which on flat count distributions (Q32/Q33: the 10th
+// boundary count is ~1) cuts nothing. This pass instead selects the k
+// surviving groups FIRST — a bounded (badness, row) heap over the raw int8
+// transvalues, one sequential read per group — so finalize (numeric avg
+// division), key reconstruction, tuple forming and sort puts run for k
+// groups instead of all of them.
+//
+// Tie semantics (docs/conformance/tie-ordering.md, rule 2 applied to agg
+// groups): the heap's total order is (key, insertion row ascending) — the
+// strict-better replacement (`badness < worst.badness` only; arriving rows
+// have monotonically increasing row index, so an equal key can never evict a
+// kept one) keeps the FIRST-ARRIVED members of the k-th key's tie group, a
+// deterministic function of group birth order. C's bounded heap keeps a
+// heap-shape-arbitrary subset of the same tie group, so the selected set is
+// C-LEGAL but not byte-equal to a given lane-off run at a boundary tie —
+// exactly rule 2's ratified surface (gates count-gate the boundary tie
+// group). The lane arms this only in relaxed adaptive-topk mode; `tracked`
+// / `0` remain byte-exact channels, and PGRUST_LANE_V2_TOPKFIN=0 kills the
+// pass on its own.
+//
+// Fail-closed: any group whose leading-key transvalue is NULL or pending
+// bails the WHOLE pass (a NULL's rank depends on NULLS placement — the
+// tuplesort comparator stays the authority), before any side effect: the
+// selection scan is read-only and the caller falls through to the exact
+// pre-existing feed. Multi-column ORDER BY never admits (the k-th boundary's
+// tie-break needs the secondary keys; the lane checks numCols == 1).
+// ===========================================================================
+
+/// Monotone "badness" image of an int8 sort key: strictly increasing as the
+/// key gets WORSE under the sort direction (asc: bigger = worse; desc:
+/// smaller = worse). Total on all i64 values, no overflow cases.
+#[inline]
+fn topkfin_badness(key: i64, desc: bool) -> u64 {
+    let asc = (key as u64) ^ (1u64 << 63);
+    if desc {
+        !asc
+    } else {
+        asc
+    }
+}
+
+/// Phase 1 — select the top-k groups on raw states. Returns the surviving
+/// compact row indices in ROW (insertion) order plus the total group count,
+/// or `None` when the pass declines (no compact table, an emit already in
+/// progress, or a NULL/pending leading-key transvalue — the caller runs the
+/// pre-existing feed unchanged; nothing here mutates node state).
+pub fn topk_finalize_select(
+    node: &AggStateData<'_>,
+    spec: crate::TopnEmitSpec,
+    k: usize,
+) -> PgResult<Option<(Vec<u32>, u64)>> {
+    let Some(ph) = node.perhash.as_ref() else { return Ok(None) };
+    if ph.hashiter != 0 {
+        // A partially-drained emit cursor: the remaining groups are no longer
+        // "all groups", so selection over 0..nrows would be wrong. (The lane
+        // feeds drain in one call; this is a belt-and-braces guard.)
+        return Ok(None);
+    }
+    let Some(ch) = ph.compact.as_ref() else { return Ok(None) };
+    let nrows = ch.table.nrows();
+    let k = k.min(nrows);
+    // Max-heap of (badness, row): the root is the WORST kept group, ties on
+    // badness keep the larger row on top so eviction (which is strict-better
+    // only) can never touch an earlier-arrived tie member.
+    let mut heap: std::collections::BinaryHeap<(u64, u32)> =
+        std::collections::BinaryHeap::with_capacity(k.saturating_add(1));
+    for row in 0..nrows {
+        // The per-group retrieve cadence (batch_emit_scan_block's).
+        ::postgres_seams::check_for_interrupts::call()?;
+        // SAFETY: the row's state block is the group's live AggPerGroup
+        // array; transno < its length (topn_emit_resolve checked this node).
+        let pg = unsafe {
+            &*ch.table.row_states(row).cast::<AggPerGroup>().add(spec.transno as usize)
+        };
+        if pg.no_trans_value || pg.trans_value_is_null {
+            return Ok(None);
+        }
+        let b = topkfin_badness(pg.trans_value.as_i64(), spec.desc);
+        if heap.len() < k {
+            heap.push((b, row as u32));
+        } else {
+            match heap.peek() {
+                Some(&(wb, _)) if b < wb => {
+                    heap.pop();
+                    heap.push((b, row as u32));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut rows: Vec<u32> = heap.into_iter().map(|(_, row)| row).collect();
+    rows.sort_unstable();
+    Ok(Some((rows, nrows as u64)))
+}
+
+/// Phase 2 block staging: park an explicit survivor block in `plan.idx` for
+/// `batch_emit_row`, with `batch_emit_scan_block`'s block-granular
+/// ExprContext reset (the previous block's finalized images were copied by
+/// its sort puts before this call).
+pub fn batch_emit_set_block<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan: &mut crate::BatchEmitPlan,
+    rows: &[u32],
+) {
+    estate.reset_expr_context(node.ps_ExprContext);
+    plan.idx.clear();
+    plan.idx.extend_from_slice(rows);
+}
+
+/// Emit-drain contract after an owned topkfin feed: park the cursor at EOF
+/// and flip `agg_done`, exactly where a full block walk would have left them.
+pub fn agg_emit_mark_drained(node: &mut AggStateData<'_>) {
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    ph.hashiter =
+        ph.compact.as_ref().expect("topkfin requires the compact table").table.nrows();
+    node.agg_done = true;
+}
+
+#[cfg(test)]
+mod topkfin_tests {
+    use super::topkfin_badness;
+
+    /// Badness is a strictly monotone image of "worse under the direction":
+    /// asc worse = bigger key, desc worse = smaller key; total on extremes.
+    #[test]
+    fn badness_orders_keys() {
+        let keys = [i64::MIN, -3, -1, 0, 1, 2, i64::MAX];
+        for w in keys.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            // asc: hi is worse.
+            assert!(topkfin_badness(hi, false) > topkfin_badness(lo, false));
+            // desc: lo is worse.
+            assert!(topkfin_badness(lo, true) > topkfin_badness(hi, true));
+        }
+    }
+
+    /// The bounded-heap selection invariant this file's phase-1 loop relies
+    /// on: strict-better replacement over (badness, row) keeps the top-k
+    /// multiset AND the first-arrived members of the boundary tie group.
+    #[test]
+    fn bounded_heap_keeps_first_arrived_ties() {
+        // keys in arrival (row) order; desc top-3 selection.
+        let keys: [i64; 8] = [1, 5, 2, 2, 7, 2, 2, 1];
+        let k = 3;
+        let mut heap: std::collections::BinaryHeap<(u64, u32)> =
+            std::collections::BinaryHeap::new();
+        for (row, &key) in keys.iter().enumerate() {
+            let b = topkfin_badness(key, true);
+            if heap.len() < k {
+                heap.push((b, row as u32));
+            } else if let Some(&(wb, _)) = heap.peek() {
+                if b < wb {
+                    heap.pop();
+                    heap.push((b, row as u32));
+                }
+            }
+        }
+        let mut rows: Vec<u32> = heap.into_iter().map(|(_, r)| r).collect();
+        rows.sort_unstable();
+        // top-3 by key desc = {7, 5, and ONE of the four 2s} — the
+        // first-arrived 2 (row 2) survives.
+        assert_eq!(rows, vec![1, 2, 4]);
+    }
+}

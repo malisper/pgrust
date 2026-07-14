@@ -57,7 +57,8 @@ pub mod pardistinct;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
-    batch_emit_row, batch_emit_scan_block, BATCH_EMIT_BLOCK,
+    agg_emit_mark_drained, batch_emit_row, batch_emit_scan_block, batch_emit_set_block,
+    topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
     agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_reduced,
