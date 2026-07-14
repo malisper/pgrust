@@ -224,6 +224,35 @@ fn build_source(vacrel: &mut LVRelState<'_, '_>, resume_block: BlockNumber) -> P
     }
 }
 
+/// Scan-phase summary trace (inc-3): the DOP-ladder's scan-phase read and
+/// the one-gang-many-rounds ceremony-share evidence. `ceremony` = leader-side
+/// per-round launch (CreateParallelContext + DSM init + LaunchParallelWorkers)
+/// plus teardown (drain + DestroyParallelContext incl. worker-exit wait).
+struct ScanPhaseClock {
+    t0: std::time::Instant,
+    ceremony_ns: u64,
+    rounds_ns: u64,
+}
+
+impl ScanPhaseClock {
+    fn new() -> Self {
+        ScanPhaseClock { t0: std::time::Instant::now(), ceremony_ns: 0, rounds_ns: 0 }
+    }
+
+    fn emit(&self, rel: &str, rounds: u64, k: i32, outcome: &str) {
+        if rounds == 0 {
+            return;
+        }
+        vtrace(&format!(
+            "scan phase done rel={rel} rounds={rounds} k={k} outcome={outcome} \
+             t_scan_ms={} t_rounds_ms={} t_ceremony_ms={}",
+            self.t0.elapsed().as_millis(),
+            self.rounds_ns / 1_000_000,
+            self.ceremony_ns / 1_000_000,
+        ));
+    }
+}
+
 pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<ScanHandoff> {
     let rt = runtime::global().expect("admitted with a live runtime");
     ensure_hooks_registered();
@@ -231,6 +260,7 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
     let mut resume_block: BlockNumber = 0;
     let mut next_fsm: BlockNumber = 0;
     let mut rounds: u64 = 0;
+    let mut clock = ScanPhaseClock::new();
     let floor = min_granules().max(2 * k.max(1) as u64);
 
     loop {
@@ -238,9 +268,11 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         // heap_vacuum_rel already ran; a fire here (or in a previous round)
         // hands the remainder to the serial arm with index vacuuming off.
         if lazy_check_wraparound_failsafe(vacrel)? {
+            clock.emit(vacrel.rel.name(), rounds, k, "failsafe-preround");
             return Ok(ScanHandoff::Resume { block: resume_block, next_fsm });
         }
         if resume_block >= vacrel.rel_pages {
+            clock.emit(vacrel.rel.name(), rounds, k, "complete");
             return Ok(ScanHandoff::Resume { block: vacrel.rel_pages, next_fsm });
         }
 
@@ -250,10 +282,12 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             // Defensive: the last block is never skippable, so an empty map
             // means resume >= rel_pages (handled above).
             vacrel.skippedallvis |= source.skipsallvis();
+            clock.emit(vacrel.rel.name(), rounds, k, "complete");
             return Ok(ScanHandoff::Resume { block: vacrel.rel_pages, next_fsm });
         }
         if total < floor {
             // Small (or tail) geometry: the serial arm wins outright (V9).
+            clock.emit(vacrel.rel.name(), rounds, k, "small-tail");
             return Ok(if rounds == 0 {
                 ScanHandoff::Refused
             } else {
@@ -263,10 +297,12 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
 
         let source = Arc::new(source);
         let shared = Arc::new(VacScanShared::new(vacrel, rt, Arc::clone(&source)));
-        match run_round(vacrel, rt, k, &shared)? {
+        let t_round = std::time::Instant::now();
+        match run_round(vacrel, rt, k, &shared, &mut clock)? {
             RoundOutcome::Refused => {
                 // Pre-claim refusal (zero launch / all helpers refused):
                 // nothing consumed; serial takes over.
+                clock.emit(vacrel.rel.name(), rounds, k, "refused");
                 return Ok(if rounds == 0 {
                     ScanHandoff::Refused
                 } else {
@@ -369,18 +405,22 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         let complete = resume_g >= total;
         resume_block =
             if complete { vacrel.rel_pages } else { source.block_of(resume_g).block };
+        clock.rounds_ns += t_round.elapsed().as_nanos() as u64;
         vtrace(&format!(
             "round done rel={} granules={total} resume_g={resume_g} resume_block={resume_block} \
-             tripped={} failsafe={} coverage_failed={coverage_failed} quiesce_bytes={}",
+             tripped={} failsafe={} coverage_failed={coverage_failed} quiesce_bytes={} \
+             t_round_ms={}",
             vacrel.rel.name(),
             shared.quiesce.tripped(),
             shared.failsafe.load(Ordering::Relaxed),
             shared.quiesce.bytes(),
+            t_round.elapsed().as_millis(),
         ));
 
         if coverage_failed {
             // Fail-closed: never loop the morsel arm over unverifiable
             // coverage — the serial arm finishes from the hole.
+            clock.emit(vacrel.rel.name(), rounds, k, "coverage-hole");
             return Ok(ScanHandoff::Resume { block: resume_block, next_fsm });
         }
 
@@ -391,11 +431,13 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             if !::commands_vacuum::VacuumFailsafeActive() {
                 apply_failsafe(vacrel)?;
             }
+            clock.emit(vacrel.rel.name(), rounds, k, "failsafe");
             return Ok(ScanHandoff::Resume { block: resume_block, next_fsm });
         }
         if complete {
             // Whole remaining scan done: the final lazy_vacuum runs in the
             // caller's epilogue, C-exactly (bypass arithmetic included).
+            clock.emit(vacrel.rel.name(), rounds, k, "complete");
             return Ok(ScanHandoff::Resume { block: vacrel.rel_pages, next_fsm });
         }
 
@@ -1089,9 +1131,10 @@ fn run_round(
     rt: &'static Arc<runtime::Runtime>,
     k: i32,
     shared: &Arc<VacScanShared>,
+    clock: &mut ScanPhaseClock,
 ) -> PgResult<RoundOutcome> {
     xact::EnterParallelMode();
-    let r = round_ceremony(vacrel, rt, k, shared);
+    let r = round_ceremony(vacrel, rt, k, shared, clock);
     xact::ExitParallelMode();
     r
 }
@@ -1101,7 +1144,9 @@ fn round_ceremony(
     rt: &'static Arc<runtime::Runtime>,
     k: i32,
     shared: &Arc<VacScanShared>,
+    clock: &mut ScanPhaseClock,
 ) -> PgResult<RoundOutcome> {
+    let t_launch = std::time::Instant::now();
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_vacuum_scan_main", k)?;
 
     // Every exit past submission must complete the pinned RG; held outside
@@ -1137,6 +1182,7 @@ fn round_ceremony(
         shared.cost.active_nworkers.store(0, std::sync::atomic::Ordering::SeqCst);
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
+        clock.ceremony_ns += t_launch.elapsed().as_nanos() as u64;
         if launched <= 0 {
             drain_rg(rt, &rg);
             return Ok(RoundOutcome::Refused);
@@ -1250,6 +1296,7 @@ fn round_ceremony(
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the
     // context is destroyed (helpers reference the payload until then).
+    let t_teardown = std::time::Instant::now();
     if let Some(rg) = &submitted {
         if rg.try_outcome().is_none() {
             drain_rg(rt, rg);
@@ -1263,6 +1310,7 @@ fn round_ceremony(
             shared.cost.cost_balance.load(std::sync::atomic::Ordering::SeqCst) as i32
         );
     }
+    clock.ceremony_ns += t_teardown.elapsed().as_nanos() as u64;
     let out = body?;
     destroy?;
     Ok(out)
