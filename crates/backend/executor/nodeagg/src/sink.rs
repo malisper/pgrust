@@ -967,6 +967,16 @@ pub fn agg_sink_emit_block_row<'mcx>(
     node.ps_ResultTupleSlot
 }
 
+/// One emitted-column datum of row `row` in bucket `b` (the batched drain's
+/// boundary-cut key read — no slot build for rows the cut will skip).
+#[inline]
+pub fn agg_sink_emit_datum(node: &AggStateData<'_>, b: usize, row: usize, col: usize) -> (Datum, bool) {
+    let st = node.sink_emit.as_ref().expect("sink emit state adopted");
+    let buf = &st.bufs[b];
+    let i = row * st.natts + col;
+    (buf.values[i], buf.nulls[i])
+}
+
 /// End of a batched drain: the adopted state is consumed exactly as the
 /// cursor drain's EOF (state dropped, agg_done set — rescans rebuild).
 pub fn agg_sink_emit_drained(node: &mut AggStateData<'_>) {

@@ -846,17 +846,38 @@ fn ensure_hooks_registered() {
 // Leader-side admission + engagement.
 // ---------------------------------------------------------------------------
 
-/// Sink cap (worker table bound, entries). Default = the exchange cap class
-/// (64K); env-tunable for triage.
-fn sink_cap() -> u32 {
-    static N: OnceLock<u32> = OnceLock::new();
+/// Env override for the sink flush cap (entries); None = budget-derived.
+fn sink_cap_override() -> Option<u32> {
+    static N: OnceLock<Option<u32>> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_AGG_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|&c| c >= 1024)
-            .unwrap_or(1 << 16)
     })
+}
+
+/// Sink flush cap (worker table bound, entries) — BUDGET-DERIVED (dop1-tax
+/// inc-3b). The fixed 64K exchange-class cap forced ~17 flush cycles on
+/// q36@10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
+/// permanently dormant and re-inserting every group at combine. The cap is
+/// now the entry count whose compact-table estimate fills HALF the
+/// per-Local budget (the compact spill gate's own arithmetic:
+/// 16+8+state+16 bytes/entry), floored at the 64K class — at default
+/// work_mem it degenerates to ~the old cap (tranche behavior preserved);
+/// under the matched-memory protocol (1GB) a q36-class Local holds all its
+/// groups, never flushes, and the pass-through fires. Width-INDEPENDENT:
+/// each Local is budget-bounded exactly as before (runs held the same
+/// bytes the larger live table now holds — the R3 envelope arithmetic is
+/// unchanged, and the seal/accept budget checks still refuse crossings).
+/// PGRUST_RUNTIME_AGG_CAP overrides to a fixed cap (the A/B arm; 65536 =
+/// the old behavior).
+fn sink_cap_for(state_bytes: usize, budget: usize) -> u32 {
+    if let Some(c) = sink_cap_override() {
+        return c;
+    }
+    let entry = 16u64 + 8 + state_bytes as u64 + 16;
+    ((budget as u64 / 2) / entry.max(1)).clamp(1 << 16, u32::MAX as u64 / 2) as u32
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
@@ -1016,7 +1037,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
-    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap()) {
+    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap_for(state_bytes, budget)) {
         refuse("worker compact arm would refuse under the sink budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -1078,7 +1099,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let sink = Arc::new(AggSink {
         drain,
         red,
-        cap: sink_cap(),
+        cap: sink_cap_for(state_bytes, budget),
         budget,
         key_words: 1,
         state_bytes,
