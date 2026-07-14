@@ -1196,6 +1196,17 @@ fn engage_ceremony<'mcx>(
                     .collect();
                 let merged = runtime_instr::merge(ips.iter());
                 runtime_instr::ea_fill_scan_node(estate, scan_node, &merged.rows);
+                // Pipeline report for the inc-2 EXPLAIN block (one task
+                // set on this arm; partials = non-empty result exports).
+                estate.es_runtime_ea_pipelines.push(runtime_instr::ea_pipeline_report(
+                    "scan",
+                    agg.plan.plan.plan_node_id,
+                    scan_node,
+                    -1,
+                    1,
+                    parts.len() as u64,
+                    &merged,
+                ));
                 lane_trace(&format!(
                     "runtime-scan: EA merged workers={} claims={} granules={} \
                      scanned={} survived={}",

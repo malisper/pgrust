@@ -1380,6 +1380,19 @@ fn engage_ceremony<'mcx>(
                     sink.ea_instr.lock().unwrap_or_else(|p| p.into_inner()).take()
                 {
                     super::runtime_instr::ea_fill_scan_node(estate, scan_node, &m.rows);
+                    // Pipeline report for the inc-2 EXPLAIN block (ACCEPT +
+                    // COMBINE task sets on this arm; partials = workers).
+                    estate.es_runtime_ea_pipelines.push(
+                        super::runtime_instr::ea_pipeline_report(
+                            "agg",
+                            agg.plan.plan.plan_node_id,
+                            scan_node,
+                            -1,
+                            2,
+                            m.workers as u64,
+                            &m,
+                        ),
+                    );
                     lane_trace(&format!(
                         "runtime-agg: EA merged workers={} claims={} granules={} \
                          scanned={} survived={}",

@@ -16,7 +16,7 @@ use ::queryenvironment::QueryEnvironment;
 use ::snapmgr::Snapshot;
 use ::types_core::instrument::{
     AggregateInstrumentation, BitmapHeapScanInstrumentation, HashInstrumentation,
-    IncrementalSortInfo, Instrumentation, TuplesortInstrumentation,
+    IncrementalSortInfo, Instrumentation, RuntimeEaPipeline, TuplesortInstrumentation,
 };
 use ::types_core::CommandId;
 use ::types_error::{PgError, PgResult};
@@ -726,6 +726,11 @@ pub struct EStateData<'mcx> {
     // the EXPLAIN emission gate is "records exist", which keeps unarmed EA
     // output byte-identical to C.
     pub es_runtime_ea_refusals: PgVec<'mcx, RuntimeEaRefusal>,
+    // EA-on-morsels pipeline reports (ea-morsels.md §4): one per engaged
+    // runtime pipeline phase, pushed by the arm's leader merge on a clean
+    // Completed outcome. Same emission-gate law as the refusals: empty on
+    // every unarmed/uninstrumented path.
+    pub es_runtime_ea_pipelines: PgVec<'mcx, RuntimeEaPipeline>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
@@ -956,6 +961,7 @@ impl<'mcx> EStateData<'mcx> {
             es_instrument: 0,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
+            es_runtime_ea_pipelines: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
@@ -1436,6 +1442,7 @@ const _: () = assert!(!core::mem::needs_drop::<(i32, IncrementalSortInfo)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
 const _: () = assert!(!core::mem::needs_drop::<RuntimeEaRefusal>());
+const _: () = assert!(!core::mem::needs_drop::<RuntimeEaPipeline>());
 mcx::forget_safe_struct!(
     EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked, relsubs_rowmark, origslot },
     EStateData<'_> {
@@ -1458,6 +1465,7 @@ mcx::forget_safe_struct!(
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
+        es_runtime_ea_pipelines,
         es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
         es_hash_instrumentation, es_index_instrumentation,

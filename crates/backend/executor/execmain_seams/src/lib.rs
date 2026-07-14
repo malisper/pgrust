@@ -217,6 +217,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // EA-on-morsels (docs/design/ea-morsels.md §4): the engaged runtime
+    // pipeline reports rooted at a node. None = none (reports exist ONLY on
+    // armed + instrumented engagements — the same emission-gate law as the
+    // refusal records).
+    pub fn query_desc_runtime_ea_pipeline(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<types_core::instrument::RuntimeEaPipeline>>
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,

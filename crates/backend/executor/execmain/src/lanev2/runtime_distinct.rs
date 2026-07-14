@@ -1140,15 +1140,27 @@ fn engage_ceremony<'mcx>(
                     .collect();
                 let m = runtime_instr::merge(ips.iter());
                 runtime_instr::ea_fill_scan_node(estate, scan_id, &m.rows);
-                if let Some(sort_id) = agg
+                let sort_id = agg
                     .plan
                     .plan
                     .lefttree
                     .and_then(::types_nodes::node_tree::Node::as_sort)
-                    .map(|s| s.plan.plan_node_id)
-                {
+                    .map(|s| s.plan.plan_node_id);
+                if let Some(sort_id) = sort_id {
                     runtime_instr::ea_fill_passthrough_node(estate, sort_id, m.rows.survived);
                 }
+                // Pipeline report for the inc-2 EXPLAIN block (ACCEPT +
+                // SEALCVT + COMBINE task sets on this arm; the skipped Sort
+                // is the second member; partials = workers).
+                estate.es_runtime_ea_pipelines.push(runtime_instr::ea_pipeline_report(
+                    "distinct",
+                    agg.plan.plan.plan_node_id,
+                    scan_id,
+                    sort_id.unwrap_or(-1),
+                    3,
+                    m.workers as u64,
+                    &m,
+                ));
                 lane_trace(&format!(
                     "runtime-distinct: EA merged workers={} claims={} granules={} \
                      scanned={} survived={}",

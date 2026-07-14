@@ -180,3 +180,40 @@ pub(super) fn ea_fill_passthrough_node(
     i.ntuples += rows_out as f64;
     i.nloops += 1.0;
 }
+
+/// Construct the arm's ACCEPT-phase pipeline report (ea-morsels.md §4) from
+/// the leader merge. Pushed onto es_runtime_ea_pipelines on clean Completed
+/// outcomes only — the same emission-gate law as the refusal records.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn ea_pipeline_report(
+    arm: &'static str,
+    root_node_id: i32,
+    member_node_id: i32,
+    member2_node_id: i32,
+    taskset_count: u32,
+    partials: u64,
+    m: &InstrumentMerged,
+) -> ::types_core::instrument::RuntimeEaPipeline {
+    ::types_core::instrument::RuntimeEaPipeline {
+        root_node_id,
+        member_node_id,
+        member2_node_id,
+        arm,
+        role: "accept",
+        taskset_index: 1,
+        taskset_count,
+        workers: m.workers,
+        claims: m.claims,
+        // = claims until the dop1-tax claim-coalescing split is threaded
+        // through the partial (ea-morsels.md §2 coordination contract).
+        epoch_segments: m.claims,
+        granules: m.granules,
+        rows_scanned: m.rows.scanned,
+        rows_survived: m.rows.survived,
+        partials,
+        prune: m.prune,
+        busy_ns: m.busy_ns,
+        first_start_ns: m.first_start_ns,
+        last_end_ns: m.last_end_ns,
+    }
+}
