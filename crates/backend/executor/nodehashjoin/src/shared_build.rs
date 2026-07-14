@@ -226,6 +226,9 @@ pub struct JoinBuildLocal {
     in_run: bool,
     tuples: u64,
     budget: Arc<JoinBudget>,
+    /// Chunk growth ceiling in words (M3.5 leaf builds cap this so the
+    /// PLAN-BATCHES capacity model's last-chunk waste term stays small).
+    chunk_cap_words: usize,
 }
 
 impl JoinBuildLocal {
@@ -233,6 +236,16 @@ impl JoinBuildLocal {
     /// R3 pinned regime); must be < 256 (asserted — the pin-board lane
     /// space is 16+64, comfortably inside).
     pub fn new(ordinal: usize, budget: Arc<JoinBudget>) -> JoinBuildLocal {
+        JoinBuildLocal::with_chunk_cap(ordinal, budget, CHUNK_MAX_WORDS)
+    }
+
+    /// [`JoinBuildLocal::new`] with a chunk-growth ceiling (M3.5 batch
+    /// builds; `cap_words` clamps to the default ladder's bounds).
+    pub fn with_chunk_cap(
+        ordinal: usize,
+        budget: Arc<JoinBudget>,
+        cap_words: usize,
+    ) -> JoinBuildLocal {
         assert!(ordinal < 256, "join build Local ordinal {ordinal} out of ref range");
         JoinBuildLocal {
             ordinal: ordinal as u8,
@@ -243,7 +256,50 @@ impl JoinBuildLocal {
             in_run: false,
             tuples: 0,
             budget,
+            chunk_cap_words: cap_words.clamp(CHUNK_MIN_WORDS, CHUNK_MAX_WORDS),
         }
+    }
+
+    pub fn ordinal(&self) -> usize {
+        self.ordinal as usize
+    }
+
+    /// Visit every materialized tuple as `(hashvalue, payload)` — the M3.5
+    /// batch-0 demote dump (§5.2: a dumped batch 0 becomes an ordinary file
+    /// batch). Partition order, materialization order within.
+    pub fn drain_records<E>(
+        &self,
+        mut f: impl FnMut(u32, &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for refs in &self.part_refs {
+            for &r in refs {
+                let (ord, ci, off) = unpack_ref(r);
+                debug_assert_eq!(ord, self.ordinal as usize);
+                let chunk = &self.chunks[ci];
+                let w1 = chunk.read(off + 1);
+                let (len, hashvalue) = ((w1 >> 32) as usize, w1 as u32);
+                // SAFETY: frozen payload words of this Local's own chunk
+                // (single-threaded caller; accept has ended).
+                let payload = unsafe {
+                    std::slice::from_raw_parts(chunk.word_mut(off + HDR_WORDS) as *const u8, len)
+                };
+                f(hashvalue, payload)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop all materialized storage (post-dump). Runs are cleared too; the
+    /// Local behaves as freshly forked with no open run.
+    pub fn reset(&mut self) {
+        assert!(!self.in_run, "reset inside an open run");
+        self.chunks.clear();
+        self.cur_used = 0;
+        for refs in &mut self.part_refs {
+            refs.clear();
+        }
+        self.runs.clear();
+        self.tuples = 0;
     }
 
     /// Open the run for one accepted morsel. `range_start` = the claimed
@@ -282,7 +338,7 @@ impl JoinBuildLocal {
             let mut cap = self
                 .chunks
                 .last()
-                .map_or(CHUNK_MIN_WORDS, |c| (c.words.len() * 2).min(CHUNK_MAX_WORDS));
+                .map_or(CHUNK_MIN_WORDS, |c| (c.words.len() * 2).min(self.chunk_cap_words));
             cap = cap.max(need);
             assert!(
                 self.chunks.len() < MAX_CHUNKS_PER_LOCAL,
@@ -1062,6 +1118,48 @@ mod tests {
             }
         });
         assert_eq!(wins.load(Ordering::Relaxed), 1, "RIGHT_SEMI emit-once violated");
+    }
+
+    // ---- M3.5 batch-spill hooks: drain/reset + chunk cap ----
+
+    #[test]
+    fn drain_records_roundtrip_and_reset() {
+        let ds = ds_default();
+        let budget = JoinBudget::unlimited();
+        let mut l = JoinBuildLocal::with_chunk_cap(0, Arc::clone(&budget), CHUNK_MIN_WORDS);
+        l.begin_run(0);
+        for g in 0..ds.granules {
+            for (h, p) in ds.rows_of(g) {
+                l.push(h, &p).unwrap();
+            }
+        }
+        l.end_run();
+        assert!(l.chunks.len() > 1, "chunk cap must bound growth");
+        let mut drained: Vec<(u32, Vec<u8>)> = Vec::new();
+        l.drain_records(|h, p| -> Result<(), ()> {
+            drained.push((h, p.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        let mut expect = ds.all_rows();
+        drained.sort();
+        expect.sort();
+        assert_eq!(drained, expect, "drain must yield the exact pushed multiset");
+        l.reset();
+        assert_eq!(l.tuples(), 0);
+        assert!(l.chunks.is_empty());
+        let mut n = 0;
+        l.drain_records(|_, _| -> Result<(), ()> {
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, 0, "reset Local drains nothing");
+        // The Local is reusable post-reset.
+        l.begin_run(7);
+        l.push(0xAB, b"post-reset").unwrap();
+        l.end_run();
+        assert_eq!(l.tuples(), 1);
     }
 
     // ---- soak: larger randomized run vs the oracle ----

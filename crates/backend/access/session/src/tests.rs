@@ -338,6 +338,10 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      same drive-scoped class and argument as WORKER_EXEC slots 4-6.
     // Train-14's own cargo (q5/q22/q14/topn) adds ZERO sources — the
     // per-file census at the train-13 tip and the train-14 tip is identical.
+    // (Merge reconciliation, train-14 car 6: the m35-spill-joins lane
+    // independently re-pinned 474 attributing the whole drift to morsels.rs
+    // WORKER_CX; this block's net decomposition subsumes it — one pin kept.
+    // m35 inc-4/5's join-batch spill code itself adds no TLS source.)
     assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
