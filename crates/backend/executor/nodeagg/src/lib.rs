@@ -54,6 +54,7 @@ mod gsets;
 mod hashgrouped;
 pub mod merge;
 pub mod pardistinct;
+pub mod plainpd;
 pub mod sink;
 pub mod runtime_partial;
 
