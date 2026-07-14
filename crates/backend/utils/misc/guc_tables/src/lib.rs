@@ -10,6 +10,7 @@ pub mod consts;
 pub mod gather_fair;
 pub mod hooks;
 pub mod lane_pool;
+pub mod parallel_engine;
 pub mod runtime_pool;
 pub mod option_sets;
 pub mod session;
