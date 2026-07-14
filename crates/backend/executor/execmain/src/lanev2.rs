@@ -1595,6 +1595,52 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
+        // EA-on-morsels (ea-morsels.md §5, inc-1b): under EXPLAIN ANALYZE
+        // the scan-side fusibility memo refuses (the leader node carries an
+        // instr slot), but the runtime agg sink's workers run uninstrumented
+        // executors. Mirror the uninstrumented decision (E4: same lane
+        // choice, same breaker admissibility, only the instrument gate
+        // vacated) and give the sink its admission walk. Once a build was
+        // adopted, keep draining through the lane's own retrieve — the sink
+        // emit has no interpreter leg. A hash table built by the interpreter
+        // (engagement refused earlier) means the interpreter owns the node:
+        // never engage after that.
+        if runtime_instr::ea_active(estate)
+            && ::nodeagg::agg_hash_breaker_admissible(agg)
+            && seq_scan_fusible_runtime_ea(ss, estate)?
+        {
+            let c = match *choice {
+                Some(c) => c,
+                None => {
+                    let c = decide_agg_lane(agg, ss, xk, estate)?;
+                    *choice = Some(c);
+                    c
+                }
+            };
+            if c == AggLaneChoice::Fold {
+                if ::nodeagg::agg_is_done(agg) {
+                    return Ok(Some(None));
+                }
+                let engaged = ::nodeagg::sink::agg_sink_emitting(agg)
+                    || (!::nodeagg::agg_hash_table_filled(agg)
+                        && runtime_agg::try_engage_hashagg_runtime(
+                            agg,
+                            ss,
+                            xk.as_deref(),
+                            estate,
+                        )?);
+                if engaged {
+                    let mut root = RootAdapter::new(None);
+                    return Ok(Some(pull_step(
+                        agg,
+                        &mut HashAggSource,
+                        &mut HashAggEmit,
+                        &mut root,
+                        estate,
+                    )?));
+                }
+            }
+        }
         return Ok(None);
     }
     let c = match *choice {
