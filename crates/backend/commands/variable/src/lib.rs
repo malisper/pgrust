@@ -743,6 +743,19 @@ pub fn show_data_directory_mode() -> String {
     format!("{:04o}", init_small::globals::data_directory_mode())
 }
 
+// show_data_checksums (variable.c has none; C wires the GUC via
+// SetConfigOption in ReadControlFile — here a show hook over the same
+// ControlFile->data_checksum_version predicate).
+pub fn show_data_checksums() -> String {
+    if transam_xlog_seams::data_checksums_enabled::is_installed()
+        && transam_xlog_seams::data_checksums_enabled::call()
+    {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    }
+}
+
 pub fn show_log_file_mode() -> String {
     format!("{:04o}", guc::store::get_int("log_file_mode").unwrap_or(0))
 }
@@ -821,6 +834,7 @@ pub fn init_seams() {
     hooks::assign_io_max_combine_limit.install(assign_io_max_combine_limit);
     hooks::assign_io_combine_limit.install(assign_io_combine_limit);
     hooks::show_data_directory_mode.install(show_data_directory_mode);
+    hooks::show_data_checksums.install(show_data_checksums);
     hooks::show_log_file_mode.install(show_log_file_mode);
     hooks::show_unix_socket_permissions.install(show_unix_socket_permissions);
     hooks::check_bonjour.install(check_bonjour);
