@@ -1618,6 +1618,16 @@ pub struct SinkEmitState {
 }
 
 impl SinkEmitState {
+    /// Retained content bytes of the adopted result (the sink-teardown
+    /// release floor's input): the emit buffers' content, or the adopted
+    /// table's live memory on the table-adopt arm.
+    pub fn retained_bytes(&self) -> usize {
+        match &self.src {
+            SinkEmitSrc::Bufs(bufs) => bufs.iter().map(|b| b.bytes()).sum(),
+            SinkEmitSrc::Table { table, .. } => table.table().mem_used(),
+        }
+    }
+
     /// Bucket `b`'s row count.
     #[inline]
     fn bucket_len(&self, b: usize) -> usize {
