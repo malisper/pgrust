@@ -1015,7 +1015,20 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         return Ok(false);
     }
     if !sorted_arm_shape_ok(agg) {
-        refuse("sorted fold shape (guarded/vguards/resid/partial kinds)");
+        // Leg-resolved refusal trace (fleet diagnosis channel).
+        if !::nodeagg::agg_sorted_fold_admissible(agg) {
+            refuse("sorted fold shape (fold admission)");
+        } else if let Some(p) = ::nodeagg::agg_lanefold_plan(agg) {
+            if !p.vguards.is_empty() {
+                refuse("sorted fold shape (vguards)");
+            } else if !p.resid.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
+                refuse("sorted fold shape (residual transitions)");
+            } else {
+                refuse("sorted fold shape (runtime-partial kinds)");
+            }
+        } else {
+            refuse("sorted fold shape (no fold plan)");
+        }
         return Ok(false);
     }
     let Some(keys) = super::sorted_fold_key_cols(agg, ss) else {
