@@ -72,6 +72,10 @@ pub(super) struct AggSinkLocal {
     run_bytes: usize,
     table: Option<SinkTableHandle>,
     part: Option<SinkPart>,
+    /// EA-on-morsels instrument partial (ea-morsels.md §2): written only when
+    /// the sink is EA-armed (`sink.ea_scan_node.is_some()`); rides the Local
+    /// through SEAL exactly like the agg state it sits beside.
+    instr: super::runtime_instr::InstrumentPartial,
 }
 
 /// Which worker drain feeds the sink build.
@@ -120,6 +124,13 @@ struct AggSink {
     /// merged_bytes — must reset at re-publish or regenerated engagements
     /// double-count.
     combined_bytes: AtomicUsize,
+    /// EA-on-morsels (ea-morsels.md §2): Some(scan plan_node_id) ONLY when
+    /// engaged under EXPLAIN ANALYZE — the single EA flag for this sink;
+    /// None on every other path (dead-when-off).
+    ea_scan_node: Option<i32>,
+    /// The accept-phase instrument merge, written at finalize (last-worker-
+    /// out) from the sealed Locals; leader reads on clean Completed only.
+    ea_instr: Mutex<Option<super::runtime_instr::InstrumentMerged>>,
 }
 
 // SAFETY: out_emit cells are written only by the exclusive claimer of their
@@ -272,9 +283,16 @@ impl runtime::ParallelSink for AggSink {
 
     /// Publish: move the 256 emit buffers out (O(partitions), the §6
     /// contract). Locals drop with the plumbing right after.
-    fn finalize(&self, _locals: &[AggSinkLocal]) {
+    fn finalize(&self, locals: &[AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        // EA-on-morsels: merge the accept-phase instrument partials before
+        // the Locals drop (O(workers) sums — the §6-of-m2-sinks minimal-
+        // finalize ruling holds).
+        if self.ea_scan_node.is_some() {
+            *self.ea_instr.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(super::runtime_instr::merge(locals.iter().map(|l| &l.instr)));
         }
         let bufs: Vec<SinkEmitBuf> = self
             .out_emit
@@ -407,6 +425,17 @@ fn accept_morsel_body(
                 let drained = sink_drain_range(
                     sink, local, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot, estate,
                 );
+                // EA-on-morsels claim fold (EXACT — accumulate in the Local,
+                // never sampled; the dop1-tax contract).
+                if sink.ea_scan_node.is_some() && drained.is_ok() {
+                    local.instr.claims += 1;
+                    local.instr.granules += range.end - range.start;
+                    // Per-worker cumulative scan-desc counters: the snapshot
+                    // IS the running total (prune fold, ea-morsels.md §1).
+                    if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
+                        local.instr.prune = c;
+                    }
+                }
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
@@ -461,6 +490,10 @@ fn sink_drain_range<'mcx>(
             return Ok(());
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        let ea = sink.ea_scan_node.is_some();
+        if ea {
+            local.instr.rows.scanned += n as u64;
+        }
         if sink.drain == SinkDrain::ExprKey {
             // Expr-key feed: keys derived per batch; fail-closed inside the
             // adapter (range guard / per-row route / compact disarm).
@@ -472,6 +505,11 @@ fn sink_drain_range<'mcx>(
             super::exprkey::exprkey_sink_batch(
                 agg, ss, xk, stage_slot, idxs, groups, n, estate,
             )?;
+            if ea {
+                // The sink-legal expr-key route is the batched one (per-row
+                // routing errors above): idxs holds this batch's survivors.
+                local.instr.rows.survived += idxs.len() as u64;
+            }
             continue;
         }
         // Fail-closed: a fallback row has no staged key — the sink cannot
@@ -485,6 +523,9 @@ fn sink_drain_range<'mcx>(
         }
         let ScanK2Scratch { rows, keys, knull, .. } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
+        if ea {
+            local.instr.rows.survived += rows.len() as u64;
+        }
         keys.clear();
         knull.clear();
         {
@@ -891,30 +932,45 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     let Some(rt) = runtime::global() else { return Ok(false) };
 
-    // --- Plan shape gates (fail-closed).
-    let refuse = |why: &str| {
+    // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
+    // under EXPLAIN ANALYZE every refusal records its first failing gate for
+    // the transparency line.
+    let ea = super::runtime_instr::ea_active(estate);
+    let node_id = agg.plan.plan.plan_node_id;
+
+    // --- Plan shape gates (fail-closed). Refusals trace AND (under EA)
+    // record for the per-node EXPLAIN line.
+    fn refuse(estate: &mut EStateData<'_>, ea: bool, node_id: i32, why: &'static str) {
         lane_trace(&format!("runtime-agg: refused ({why})"));
-    };
-    if !::nodeagg::sink::agg_sink_plan_shape_ok(agg) {
-        refuse("plan shape");
-        return Ok(false);
-    }
-    if estate.es_instrument != 0 || estate.es_epq_active {
-        refuse("instrumented/EPQ");
-        // EA-on-morsels transparency (ea-morsels.md §6): the agg arm's
-        // TIMING OFF un-refusal is the inc-1b car; until then an EA walk
-        // reaching this gate records the honest reason for the EXPLAIN line.
-        if estate.es_instrument != 0 {
-            estate.runtime_ea_record_refusal(
-                agg.plan.plan.plan_node_id,
-                "agg",
-                "instrumented",
-            );
+        if ea {
+            estate.runtime_ea_record_refusal(node_id, "agg", why);
         }
+    }
+    if !::nodeagg::sink::agg_sink_plan_shape_ok(agg) {
+        refuse(estate, ea, node_id, "plan shape");
         return Ok(false);
     }
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
-        refuse("scan not fusible cbstore");
+    if estate.es_epq_active {
+        return Ok(false);
+    }
+    // Instrument MODE gate (inc-1): EXPLAIN (ANALYZE, TIMING OFF) —
+    // INSTRUMENT_ROWS exactly — engages; TIMER waits for the inc-3 clock
+    // pair, BUFFERS for threaded buffer accounting.
+    if ea && !super::runtime_instr::ea_rows_only(estate) {
+        refuse(estate, true, node_id, super::runtime_instr::ea_mode_refuse_reason(estate));
+        return Ok(false);
+    }
+    // Under EA the leader node carries an instr slot, which the serial-lane
+    // fusibility memo rightly refuses — the sink's workers run
+    // uninstrumented, so EA admission walks the same gates with only the
+    // instrument check vacated (E4).
+    let fusible = if ea {
+        super::seq_scan_fusible_runtime_ea(ss, estate)?
+    } else {
+        seq_scan_fusible(ss, estate)?
+    };
+    if !fusible || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        refuse(estate, ea, node_id, "scan not fusible cbstore");
         return Ok(false);
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the
@@ -922,7 +978,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
-        refuse("fold plan guarded/varlena/residual");
+        refuse(estate, ea, node_id, "fold plan guarded/varlena/residual");
         return Ok(false);
     }
     // Drain mode: projected scans take the expr-key feed (Arith/TsTrunc/
@@ -931,22 +987,22 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let (drain, red, width);
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
-            refuse("projected scan without an expr-key decide");
+            refuse(estate, ea, node_id, "projected scan without an expr-key decide");
             return Ok(false);
         };
         if xk.sink_refused() {
-            refuse("expr-key decide refused");
+            refuse(estate, ea, node_id, "expr-key decide refused");
             return Ok(false);
         }
         let Some(kind) = xk.sink_key_kind() else {
-            refuse("expr-key kind (dict/multi cars)");
+            refuse(estate, ea, node_id, "expr-key kind (dict/multi cars)");
             return Ok(false);
         };
         drain = SinkDrain::ExprKey;
         match kind {
             None => {
                 let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
-                    refuse("key width");
+                    refuse(estate, ea, node_id, "key width");
                     return Ok(false);
                 };
                 red = None;
@@ -962,15 +1018,15 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         // same shape on fallback) + the K2 single-key decide.
         super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
         if super::scan_k2_shape(agg, ss, estate).is_none() {
-            refuse("K2 shape");
+            refuse(estate, ea, node_id, "K2 shape");
             return Ok(false);
         }
         if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-            refuse("dict-group staging");
+            refuse(estate, ea, node_id, "dict-group staging");
             return Ok(false);
         }
         let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
-            refuse("key width");
+            refuse(estate, ea, node_id, "key width");
             return Ok(false);
         };
         drain = SinkDrain::K2;
@@ -979,7 +1035,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     // Combine + identity-emit qualification (fail-closed; catalog access).
     let Some(combines) = sink_resolve_combines(agg)? else {
-        refuse("combine whitelist");
+        refuse(estate, ea, node_id, "combine whitelist");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
@@ -988,7 +1044,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         None => SinkKeySpec::Single { width },
     };
     let Some(emit) = sink_build_emit_plan(agg, &key_spec) else {
-        refuse("identity emit");
+        refuse(estate, ea, node_id, "identity emit");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
@@ -1006,22 +1062,22 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
     if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap()) {
-        refuse("worker compact arm would refuse under the sink budget");
+        refuse(estate, ea, node_id, "worker compact arm would refuse under the sink budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     }
     // --- Session/binder gates (the M1 set, verbatim).
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
-        refuse("in parallel mode");
+        refuse(estate, ea, node_id, "in parallel mode");
         return Ok(false);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
-        refuse("extern params");
+        refuse(estate, ea, node_id, "extern params");
         return Ok(false);
     }
     let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
-        refuse("exec params");
+        refuse(estate, ea, node_id, "exec params");
         return Ok(false);
     }
     if !estate
@@ -1037,18 +1093,18 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
-        refuse("binder policy");
+        refuse(estate, ea, node_id, "binder policy");
         return Ok(false);
     }
     // Worker plan root: the Agg subtree's Node in the leader plan tree.
     let Some(root) = leader_pstmt.planTree else { return Ok(false) };
     let Some(agg_node) = find_agg_node(root, agg.plan) else {
-        refuse("agg node not in plan tree");
+        refuse(estate, ea, node_id, "agg node not in plan tree");
         return Ok(false);
     };
     // The Agg's scan child must be the SeqScan (no intermediate nodes).
     if agg.plan.plan.lefttree.map(Node::node_tag) != Some(NodeTag::T_SeqScan) {
-        refuse("scan child shape");
+        refuse(estate, ea, node_id, "scan child shape");
         return Ok(false);
     }
 
@@ -1059,11 +1115,20 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
-        refuse("granule floor");
+        refuse(estate, ea, node_id, "granule floor");
         return Ok(false);
     }
 
     // --- Engage.
+    let ea_scan_node = if ea {
+        agg.plan
+            .plan
+            .lefttree
+            .and_then(Node::as_seq_scan)
+            .map(|s| s.scan.plan.plan_node_id)
+    } else {
+        None
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -1081,6 +1146,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         error: Mutex::new(None),
         budget_refused: AtomicBool::new(false),
         combined_bytes: AtomicUsize::new(0),
+        ea_scan_node,
+        ea_instr: Mutex::new(None),
     });
     engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink)
 }
@@ -1135,7 +1202,7 @@ enum EngageOutcome {
 #[allow(clippy::too_many_arguments)]
 fn engage_ceremony<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
@@ -1304,6 +1371,22 @@ fn engage_ceremony<'mcx>(
             let natts = sink.emit.cols.len();
             let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
             lane_trace(&format!("runtime-agg: complete, groups={rows}"));
+            // EA-on-morsels merge (clean Completed only): write the bypassed
+            // scan node's rows/nfiltered/loops from the sealed accept-phase
+            // merge (ea-morsels.md §3 — node-exact rows; the Agg root ticks
+            // through its procnode wrapper as groups emit).
+            if let Some(scan_node) = sink.ea_scan_node {
+                if let Some(m) =
+                    sink.ea_instr.lock().unwrap_or_else(|p| p.into_inner()).take()
+                {
+                    super::runtime_instr::ea_fill_scan_node(estate, scan_node, &m.rows);
+                    lane_trace(&format!(
+                        "runtime-agg: EA merged workers={} claims={} granules={} \
+                         scanned={} survived={}",
+                        m.workers, m.claims, m.granules, m.rows.scanned, m.rows.survived
+                    ));
+                }
+            }
             ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
             Ok(true)
         }
