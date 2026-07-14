@@ -109,13 +109,28 @@ impl MkShape {
         self.packed_bytes as usize - 1
     }
 
-    /// The shape's Intern (text) component, when one exists — the M2 sink's
-    /// canonical-bytes machinery reads it (key position + component). Sink
-    /// admission caps Intern components at ONE per shape (a second text
-    /// component refuses upstream).
+    /// The shape's FIRST Intern (text) component, when one exists — the M2
+    /// sink's canonical-bytes machinery keys "is this a canonical shape" off
+    /// it. Shapes may carry up to two Intern components (the CaseDict q40
+    /// class: computed CASE key + bare text Var); the canonical byte image
+    /// length-prefixes each tail when more than one exists
+    /// ([`crate::sink`]'s `canon_row_bytes` doc).
     #[inline]
     pub fn intern_comp(&self) -> Option<(usize, &MkComp)> {
         self.comps.iter().enumerate().find(|(_, c)| c.kind == MkCompKind::Intern)
+    }
+
+    /// All Intern (text) components, in component (key) order — the
+    /// canonical image's tail order.
+    #[inline]
+    pub fn intern_comps(&self) -> impl Iterator<Item = (usize, &MkComp)> {
+        self.comps.iter().enumerate().filter(|(_, c)| c.kind == MkCompKind::Intern)
+    }
+
+    /// Intern (text) component count.
+    #[inline]
+    pub fn n_intern(&self) -> usize {
+        self.comps.iter().filter(|c| c.kind == MkCompKind::Intern).count()
     }
 }
 
@@ -204,6 +219,14 @@ pub(crate) struct CompactHash {
     /// The flush/partition entries keep their unconditional defensive
     /// extend (first-morsel rows hashed before the flag, and the tests).
     pub(crate) sink_mode: bool,
+    /// Intern-table GENERATION (canonical shapes; GID-merge car): bumped on
+    /// every wide-vocabulary intern RESET (`agg_sink_flush_if_due` /
+    /// `agg_sink_flush_now`). Within one generation a worker's packed key
+    /// words are a BIJECTION onto its groups (intern ids are insert-once),
+    /// so flushed runs stamped with the generation can merge word-mode at
+    /// combine; across generations the words are ambiguous and the combine's
+    /// per-worker map resets.
+    pub(crate) intern_gen: u64,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -225,6 +248,7 @@ pub(crate) fn compact_hash_for_tests(
         intern,
         canon_hashes: Vec::new(),
         sink_mode: false,
+        intern_gen: 0,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -444,6 +468,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         intern: None,
         canon_hashes: Vec::new(),
         sink_mode: false,
+        intern_gen: 0,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -561,6 +586,7 @@ fn try_arm_mk_n(
         }),
         canon_hashes: Vec::new(),
         sink_mode: false,
+        intern_gen: 0,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -698,14 +724,19 @@ fn mk_admit_n(
     // Spill-eligibility estimate at half margin (compact v1 formula; the
     // 2-word key rides the same 8-B slack term — conservative either way).
     // M3.5 spill-armed sink admission (the q33@100M hmm=2 cliff): a live
-    // spill arm absorbs budget crossings for WORD-KEYED shapes (runs spill
-    // as fixed-width records), so the ESTIMATE refusal is vacated then —
-    // the cap-bounded sizing (numgroups min'd above) still holds. Intern
-    // (canonical-bytes) shapes keep the refusal: their runs cannot
-    // round-trip the word-mode spill record format (the C2 gap).
+    // spill arm absorbs budget crossings (runs spill as records), so the
+    // ESTIMATE refusal is vacated then — the cap-bounded sizing (numgroups
+    // min'd above) still holds. Word-keyed shapes spill fixed-width records;
+    // Intern (canonical-bytes) shapes spill the C2 BYTES record
+    // (canon-sink-increments car 3) and now vacate too, unless the canonical
+    // spill kill switch restored the historical exclusion. The engagement's
+    // spill_set creation gates on the SAME predicate (the F1 leader/worker-
+    // verdict invariant): workers see `sink_spill_ok` from
+    // `spill_set.is_some()`, the leader mirrors it at admission.
     let spill_admits = ph.sink_cap.is_some()
         && ph.sink_spill_ok
-        && !kinds.iter().any(|&(_, k)| matches!(k, MkCompKind::Intern));
+        && (!kinds.iter().any(|&(_, k)| matches!(k, MkCompKind::Intern))
+            || crate::sink::sink_spill_canon_enabled());
     let est_bytes = numgroups.saturating_mul(16 + 16 + additionalsize as u64 + 16);
     if !spill_admits
         && (numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2)
@@ -806,6 +837,7 @@ pub fn agg_hash_compact_try_arm_reduced(
         intern: None,
         canon_hashes: Vec::new(),
         sink_mode: false,
+        intern_gen: 0,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
