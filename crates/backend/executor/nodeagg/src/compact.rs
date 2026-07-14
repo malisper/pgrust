@@ -1527,7 +1527,7 @@ fn bad_int8_transarray() -> Box<::types_error::PgError> {
 ///
 /// # Safety
 /// `d` is a non-null int8[2] transvalue datum (aggcontext-lived image).
-unsafe fn int8_avg_trans_read(d: Datum) -> PgResult<(i64, i64)> {
+pub(crate) unsafe fn int8_avg_trans_read(d: Datum) -> PgResult<(i64, i64)> {
     use ::types_tuple::varatt;
     const ARR_OVERHEAD_NONULLS_1: usize = 24;
     const INT8_TRANSARRAY_SIZE: usize = ARR_OVERHEAD_NONULLS_1 + 16;
