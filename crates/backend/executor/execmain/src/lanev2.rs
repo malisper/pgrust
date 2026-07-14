@@ -5305,30 +5305,53 @@ fn sink_topn_arm<'mcx>(
     state: &::nodesort::SortState<'mcx>,
     agg: &::nodeagg::AggStateData<'mcx>,
 ) -> Option<::nodeagg::sink::SinkTopnSpec> {
-    if !sink_topn_enabled() || !state.bounded {
+    let decline = |why: &str| {
+        lane_trace(&format!("runtime-agg topn: declined ({why})"));
+    };
+    if !sink_topn_enabled() {
         return None;
     }
-    let bound = u32::try_from(state.bound).ok().filter(|&b| b > 0)?;
+    if !state.bounded {
+        decline("unbounded");
+        return None;
+    }
+    let Some(bound) = u32::try_from(state.bound).ok().filter(|&b| b > 0) else {
+        decline("bound range");
+        return None;
+    };
     if bound > ::nodeagg::sink::SINK_TOPN_MAX_BOUND {
+        decline("bound cap");
         return None;
     }
     let plan = state.plan;
     // Single-column ORDER BY only: the boundary's tie-break must not need
     // secondary keys (the topkfin admission, verbatim).
     if plan.numCols != 1 || plan.sortColIdx.is_empty() {
+        decline("multi-column order");
         return None;
     }
     let oc = plan.sortColIdx[0];
     if oc < 1 {
+        decline("order column resno");
         return None;
     }
-    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
-    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn)? {
-        ::execexpr::CmpOp::Int8Gt => true,
-        ::execexpr::CmpOp::Int8Lt => false,
-        _ => return None,
+    let Some(opfn) = ::lsyscache::get_opcode(plan.sortOperators[0]).ok() else {
+        decline("order operator opcode");
+        return None;
     };
-    let transno = ::nodeagg::topn_emit_resolve(agg, oc)?;
+    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn) {
+        Some(::execexpr::CmpOp::Int8Gt) => true,
+        Some(::execexpr::CmpOp::Int8Lt) => false,
+        _ => {
+            decline("order operator kernel");
+            return None;
+        }
+    };
+    let Some(transno) = ::nodeagg::topn_emit_resolve(agg, oc) else {
+        decline("order column resolve");
+        return None;
+    };
+    lane_trace(&format!("runtime-agg topn: armed (bound={bound})"));
     Some(::nodeagg::sink::SinkTopnSpec { transno, desc, bound })
 }
 
