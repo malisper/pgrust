@@ -21,7 +21,10 @@
 //!   is documented in the design doc — do not build it here);
 //! - no real pipelines (M1 wires cbstore scans through [`MorselSource`] /
 //!   [`TaskSetWork`]); M0 exercises everything with synthetic sources;
-//! - no stride/priority policy (fields present, single-RG FIFO behavior);
+//! - no stride/priority policy (fields present, single-RG FIFO behavior)
+//!   — SUPERSEDED (M5-4): stride/fair-share at equal shares is live (see
+//!   sched.rs module doc; PGRUST_RUNTIME_STRIDE=0 restores FIFO); decaying
+//!   priorities + p_min stay M5-5;
 //! - no readahead (scan-side, M1).
 //!
 //! Thread accounting (§2.8): the pool is `cores + K` threads with exactly
@@ -183,7 +186,9 @@ impl RuntimeConfig {
 /// spawning is layered above (see [`WorkerPool`] and launch_backend's
 /// rtpool glue) so this type stays loom-drivable.
 pub struct Runtime {
-    sched: sched::Scheduler,
+    /// Arc'd so submitted RGs can hold a Weak back-reference for the M5-4
+    /// queued-abort reap (the RG never keeps the scheduler alive).
+    sched: Arc<sched::Scheduler>,
     config: RuntimeConfig,
     /// §2.9 ring registration: worker ordinal → io_uring ring id (None: no
     /// ring — uring unavailable, aio_uring not linked, or worker exited).
@@ -200,14 +205,14 @@ impl Runtime {
     pub fn with_clock(config: RuntimeConfig, clock: Arc<dyn Clock>) -> Arc<Runtime> {
         let nthreads = config.workers + config.standbys;
         Arc::new(Runtime {
-            sched: sched::Scheduler::new(
+            sched: Arc::new(sched::Scheduler::new(
                 nthreads,
                 config.workers,
                 config.slots,
                 config.sizing,
                 clock,
                 config.trace,
-            ),
+            )),
             config,
             #[cfg(not(loom))]
             rings: std::sync::Mutex::new(vec![None; nthreads]),
@@ -227,8 +232,35 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit`] with a leader-session affinity token (M5-4): the
+    /// stride pick's equal-pass tiebreak prefers workers sticky-bound to
+    /// this session (set theirs via [`WorkerLocal::set_session_token`]).
+    /// Token 0 ⇔ no affinity ⇔ plain `submit`. INTEGRATION-TRAIN NOTE:
+    /// [`QuerySpec`] deliberately does NOT carry the token (its literal
+    /// constructors stay source-compatible across lanes); the M5-1 router
+    /// should submit through this entry with the leader's session identity.
+    pub fn submit_with_affinity(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// M5-4 stride toggle (tests / A-B arms). Production default is the
+    /// PGRUST_RUNTIME_STRIDE kill switch, read once at construction:
+    /// ON ⇒ stride/fair-share pick; OFF ⇒ the M0 FIFO pick, byte-identical.
+    pub fn set_stride(&self, on: bool) {
+        self.sched.set_stride(on);
+    }
+
+    pub fn stride_enabled(&self) -> bool {
+        self.sched.stride_enabled()
     }
 
     /// Submit a MAINTENANCE resource group (M4 background-job cycles,
@@ -238,7 +270,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -252,7 +284,7 @@ impl Runtime {
     /// last-worker-out finalization protocol, abort drain, completion — is
     /// the ordinary runtime machinery.
     pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, 0);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 

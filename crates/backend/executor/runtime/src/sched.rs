@@ -34,9 +34,27 @@
 //! NEXT occupant as valid: the next occupant is published by last-out,
 //! which its own pending decrement blocks.
 //!
-//! Scheduling policy in M0 is single-RG FIFO: pick = lowest-index active
-//! slot; the stride/pass/priority fields exist but are never read
-//! (docs/design/inter-query-scheduling.md §5.2/§5.3 activate them in M5).
+//! Scheduling policy (M5-4, docs/design/inter-query-scheduling.md §5.3 /
+//! docs/design/m5-planner.md §3): STRIDE / FAIR-SHARE at equal shares. The
+//! pick is the lowest-`pass` active slot; each executed task advances its
+//! slot's pass by `stride × cpu_ns` (stride = STRIDE1/priority; every RG
+//! holds p_0 in M5-4, so shares are equal — decaying priorities + p_min are
+//! M5-5). Equal-pass ties prefer the slot whose RG's leader session the
+//! picking worker is sticky-bound to (§5.2 session-affine tiebreak,
+//! equal-pass-only per the design's §10 default), then lowest index. The
+//! M4 Maintenance preference is evaluated BEFORE the stride pick (§3.2
+//! reconciliation) and maintenance passes charge normally, so background
+//! cycles keep their ≤ ~1-task start bound without ever starving foreground.
+//!
+//! Invariants the activation preserves:
+//! - ONE ACTIVE RG ⇒ the pick is forced (the only set bit) with no pass
+//!   reads — provably today's FIFO pick; the single-query benchmark case is
+//!   bit-identical by construction.
+//! - `PGRUST_RUNTIME_STRIDE=0` (kill switch) restores the M0 FIFO
+//!   lowest-index pick outright.
+//! - Pass/stride/session words are Relaxed and ADVISORY: they order the
+//!   pick, never execution safety — a stale pick revalidates through the
+//!   slot word into Retry (same argument as the maintenance mask).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -53,6 +71,27 @@ use crate::taskset::{PinBoard, Slot, TaskSetRt, WorkerMailbox};
 /// Umbra's slot-array bound: 128 concurrently-active resource groups; later
 /// arrivals wait in the FIFO queue.
 pub const DEFAULT_SLOTS: usize = 128;
+
+/// Stride fixed point (M5-4): `stride = STRIDE1 / priority`, and a task's
+/// pass advance is `(cpu_ns × stride) >> PASS_SHIFT` — i.e. advance is
+/// cpu_ns scaled by `(1 << (32 - 16)) / priority`. At p_0 = 10^4 every RG
+/// advances ≈ 6.55 × cpu_ns: equal strides ⇒ equal shares, and u64 passes
+/// have decades of headroom. M5-5's decayed priorities (p ≥ p_min) only
+/// change the `stride_for` input.
+const STRIDE1: u64 = 1 << 32;
+const PASS_SHIFT: u32 = 16;
+
+pub(crate) fn stride_for(priority: u32) -> u64 {
+    STRIDE1 / priority.max(1) as u64
+}
+
+/// M5-4 kill switch: `PGRUST_RUNTIME_STRIDE=0` restores the M0 FIFO
+/// lowest-index pick (byte-identical to the pre-M5-4 scheduler). Default ON.
+/// Read once; tests toggle per-instance via [`crate::Runtime::set_stride`].
+fn stride_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STRIDE").map_or(true, |v| v.trim() != "0"))
+}
 
 /// Pin-board lanes reserved for EXTERNAL participant threads (M1: the
 /// query's bound parallel helpers driving `Runtime::drive_pinned`). External
@@ -125,12 +164,31 @@ pub struct WorkerLocal {
     /// pinned RG. Revalidated by one slot-word read per step; the membership
     /// lock is touched only when it goes stale (publish/finalize events).
     pinned_slot: Option<(usize, u64)>,
-    /// INERT until M5: thread-local stride state (SIGMOD'21 §2.3 — each
-    /// worker runs stride scheduling locally over the same slot set).
+    /// STILL INERT after M5-4 (decision recorded): the ratified §5.3 shape
+    /// is per-SLOT pass/stride ("each slot gets a stride/pass"), which M5-4
+    /// activated on [`crate::taskset::Slot`] directly — at task cadence
+    /// (~t_max) one Relaxed fetch_add per task is uncontended, so the
+    /// SIGMOD'21 §2.3 thread-local pass replication (these fields + the
+    /// worker mailboxes) stays dormant until a measured sync cost demands it.
     #[allow(dead_code)]
     local_pass: u64,
     #[allow(dead_code)]
     global_pass: u64,
+    /// Session-affinity token (M5-4): the leader session this worker is
+    /// currently sticky-bound to (ceremony-v2 retention), 0 = none. Feeds
+    /// the equal-pass pick tiebreak; set by the driving thread via
+    /// [`WorkerLocal::set_session_token`].
+    session_token: u64,
+}
+
+impl WorkerLocal {
+    /// Record the leader-session token this worker's thread is sticky-bound
+    /// to (0 = none). Purely a pick-tiebreak preference — never a
+    /// correctness input (a mismatched pick still executes correctly; the
+    /// session bind machinery revalidates its own keys).
+    pub fn set_session_token(&mut self, token: u64) {
+        self.session_token = token;
+    }
 }
 
 /// `PGRUST_MORSEL_MARKERS=1` arms the acceptance-instrument marker channel:
@@ -273,6 +331,13 @@ pub(crate) struct Scheduler {
     /// [`crate::sync::IoGuard`].
     pub(crate) permits: Semaphore,
     stop: AtomicBool,
+    /// M5-4 stride activation switch (env default; tests toggle per
+    /// instance). OFF ⇒ the M0 FIFO lowest-index pick, byte-identical.
+    stride: AtomicBool,
+    /// Global pass watermark (monotone max of charged passes): a NEWLY
+    /// admitted RG's slot pass starts here — standard stride join, no
+    /// credit for queue wait, no monopoly for late arrivals.
+    global_pass: AtomicU64,
     clock: Arc<dyn Clock>,
     params: SizingParams,
     pub(crate) stats: RuntimeStats,
@@ -311,6 +376,8 @@ impl Scheduler {
             external_lanes: AtomicU64::new(0),
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
+            stride: AtomicBool::new(stride_default()),
+            global_pass: AtomicU64::new(0),
             clock,
             params,
             stats: RuntimeStats::default(),
@@ -339,6 +406,7 @@ impl Scheduler {
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
+            session_token: 0,
         }
     }
 
@@ -358,7 +426,18 @@ impl Scheduler {
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
+            session_token: 0,
         }
+    }
+
+    /// M5-4: per-instance stride toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_STRIDE default once at construction).
+    pub(crate) fn set_stride(&self, on: bool) {
+        self.stride.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn stride_enabled(&self) -> bool {
+        self.stride.load(Ordering::Relaxed)
     }
 
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
@@ -388,20 +467,30 @@ impl Scheduler {
 
     // ---- membership: submit / publish / admit -----------------------------
 
-    pub(crate) fn submit(&self, spec: QuerySpec, pinned: bool, class: RgClass) -> Arc<ResourceGroup> {
+    pub(crate) fn submit(
+        self: &Arc<Self>,
+        spec: QuerySpec,
+        pinned: bool,
+        class: RgClass,
+        session_token: u64,
+    ) -> Arc<ResourceGroup> {
         assert!(
             !(pinned && class == RgClass::Maintenance),
             "maintenance RGs are pool-executed, never pinned"
         );
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let rg = ResourceGroup::new(rg_id, spec, pinned, class);
+        let rg =
+            ResourceGroup::new(rg_id, spec, pinned, class, session_token, Arc::downgrade(self));
+        rg.submit_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         if self.trace {
             self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
         }
         if rg.tasksets.is_empty() {
+            rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
             rg.completion.complete(RgOutcome::Completed);
             RuntimeStats::tick(&self.stats.rgs_completed);
+            self.emit_rgdone(&rg, false);
             return rg;
         }
         let mut m = lock(&self.membership);
@@ -434,6 +523,11 @@ impl Scheduler {
     /// Mark the RG's first task set started and publish it. Caller holds the
     /// membership lock (lock order: membership, then progress).
     fn start_rg_locked(&self, m: &mut Membership, rg: Arc<ResourceGroup>, slot: usize) {
+        // Stride join (M5-4): a newly-admitted RG starts at the global pass
+        // watermark — no credit for queue wait, no monopoly over incumbents.
+        // Stored BEFORE the publish makes the slot pickable; persists across
+        // the RG's task-set republishes (publish never resets it).
+        self.slots[slot].pass.store(self.global_pass.load(Ordering::Relaxed), Ordering::Relaxed);
         let first = {
             let mut p = lock(&rg.progress);
             rg.next_ready(&mut p).expect("fresh RG must have a ready task set (index 0)")
@@ -478,6 +572,14 @@ impl Scheduler {
         }
         let pinned = ts.rg.pinned;
         let class = ts.rg.class;
+        // Stride inputs (M5-4), refreshed at every publish: the slot's
+        // stride derives from the RG's CURRENT priority (constant p_0 at
+        // equal shares; M5-5's decay updates flow through here), and the
+        // session token feeds the equal-pass affinity tiebreak.
+        self.slots[slot]
+            .stride
+            .store(stride_for(ts.rg.priority.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.slots[slot].session.store(ts.rg.session_token, Ordering::Relaxed);
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // Pinned RGs are invisible to the pool's pick: only external
@@ -504,9 +606,12 @@ impl Scheduler {
         self.active[slot / 64].fetch_and(!(1u64 << (slot % 64)), Ordering::SeqCst);
     }
 
-    fn pick_slot(&self) -> Option<usize> {
+    fn pick_slot(&self, local: &WorkerLocal) -> Option<usize> {
         // M4 preference: any Maintenance-class slot first (§3.5 starvation
         // floor; mask is usually zero — two loads on the foreground path).
+        // Evaluated BEFORE the stride pick (m5-planner §3.2 reconciliation):
+        // maintenance cycles are few and single-morsel, and their passes
+        // charge normally below, so the preference cannot starve foreground.
         // A stale hit revalidates through the slot word into Retry.
         for (i, word) in self.maint.iter().enumerate() {
             let mask = word.load(Ordering::SeqCst);
@@ -517,19 +622,68 @@ impl Scheduler {
                 }
             }
         }
-        // M0 policy: FIFO / lowest-index active slot (single-RG benchmark
-        // case degenerates to "the only slot"). M5 replaces this scan with
-        // the thread-local lowest-pass stride pick.
-        for (i, word) in self.active.iter().enumerate() {
-            let mask = word.load(Ordering::SeqCst);
-            if mask != 0 {
-                let slot = i * 64 + mask.trailing_zeros() as usize;
-                if slot < self.slots.len() {
-                    return Some(slot);
+        let m0 = self.active[0].load(Ordering::SeqCst);
+        let m1 = self.active[1].load(Ordering::SeqCst);
+        if m0 | m1 == 0 {
+            return None;
+        }
+        // ONE active RG: the pick is forced — no pass reads, exactly the M0
+        // lowest-index pick (the single-query bit-identity anchor: stride
+        // and FIFO provably agree on this path).
+        if m0.count_ones() + m1.count_ones() == 1 {
+            let (i, mask) = if m0 != 0 { (0usize, m0) } else { (1, m1) };
+            let slot = i * 64 + mask.trailing_zeros() as usize;
+            return (slot < self.slots.len()).then_some(slot);
+        }
+        if !self.stride.load(Ordering::Relaxed) {
+            // Kill switch (PGRUST_RUNTIME_STRIDE=0): the M0 FIFO pick.
+            for (i, mask) in [m0, m1].into_iter().enumerate() {
+                if mask != 0 {
+                    let slot = i * 64 + mask.trailing_zeros() as usize;
+                    if slot < self.slots.len() {
+                        return Some(slot);
+                    }
+                }
+            }
+            return None;
+        }
+        // M5-4 stride pick (inter-query §5.3): lowest pass among active
+        // slots; equal-pass ties prefer the slot whose RG's leader session
+        // this worker is sticky-bound to (§5.2 affinity tiebreak — equal
+        // pass ONLY, no bounded pass penalty, per the design's §10 default),
+        // then lowest index (scan order). All reads Relaxed and advisory: a
+        // stale winner revalidates through the slot word into Retry.
+        let mut best: Option<(u64, usize)> = None;
+        for (i, mask) in [m0, m1].into_iter().enumerate() {
+            let mut w = mask;
+            while w != 0 {
+                let b = w.trailing_zeros() as usize;
+                w &= w - 1;
+                let slot = i * 64 + b;
+                if slot >= self.slots.len() {
+                    break;
+                }
+                let pass = self.slots[slot].pass.load(Ordering::Relaxed);
+                match best {
+                    None => best = Some((pass, slot)),
+                    Some((bp, bs)) => {
+                        if pass < bp {
+                            best = Some((pass, slot));
+                        } else if pass == bp
+                            && local.session_token != 0
+                            && self.slots[slot].session.load(Ordering::Relaxed)
+                                == local.session_token
+                            && self.slots[bs].session.load(Ordering::Relaxed)
+                                != local.session_token
+                        {
+                            RuntimeStats::tick(&self.stats.affinity_tiebreaks);
+                            best = Some((pass, slot));
+                        }
+                    }
                 }
             }
         }
-        None
+        best.map(|(_, slot)| slot)
     }
 
     // ---- the worker step ---------------------------------------------------
@@ -541,7 +695,7 @@ impl Scheduler {
         if self.stop.load(Ordering::SeqCst) {
             return Step::Stop;
         }
-        let Some(slot) = self.pick_slot() else {
+        let Some(slot) = self.pick_slot(local) else {
             // Idle transition: nothing is runnable — any WFIN accumulation
             // still held is this worker's final word on those sets.
             local.wfin_flush_all();
@@ -663,6 +817,16 @@ impl Scheduler {
     fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> bool {
         RuntimeStats::tick(&self.stats.tasks_claimed);
         RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
+        // Submit→first-service instrument (§3.5): CAS-once at the RG's first
+        // task admission (one Relaxed load per task thereafter).
+        if ts.rg.first_service_ns.load(Ordering::Relaxed) == 0 {
+            let _ = ts.rg.first_service_ns.compare_exchange(
+                0,
+                self.clock.now_ns().max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
         let task_t0 = if local.wfin.is_empty() { 0 } else { self.clock.now_ns() };
         ts.active_workers.fetch_add(1, Ordering::SeqCst);
 
@@ -739,8 +903,32 @@ impl Scheduler {
                     }
                 }
                 if t_morsels > 0 {
-                    // INERT stride accounting (M5 reads this).
+                    // Stride accounting (LIVE as of M5-4): the RG's CPU
+                    // consumption (fairness-instrument readback) and the
+                    // slot's pass advance. The `.max(1)` floors zero-dt
+                    // virtual-clock charges so multi-RG progress still
+                    // rotates (task-count round-robin) in deterministic
+                    // tests and loom models.
                     ts.rg.cpu_consumed_ns.fetch_add(t_cpu_ns, Ordering::Relaxed);
+                    if self.stride.load(Ordering::Relaxed) {
+                        let stride = self.slots[ts.slot].stride.load(Ordering::Relaxed);
+                        let adv = (t_cpu_ns.saturating_mul(stride) >> PASS_SHIFT).max(1);
+                        let new_pass =
+                            self.slots[ts.slot].pass.fetch_add(adv, Ordering::Relaxed) + adv;
+                        // Watermark: monotone max (new admissions join here).
+                        let mut cur = self.global_pass.load(Ordering::Relaxed);
+                        while new_pass > cur {
+                            match self.global_pass.compare_exchange_weak(
+                                cur,
+                                new_pass,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(c) => cur = c,
+                            }
+                        }
+                    }
                     RuntimeStats::add(&self.stats.morsels_claimed, t_morsels);
                     RuntimeStats::add(&ts.rg.stats.morsels_claimed, t_morsels);
                     RuntimeStats::add(&self.stats.granules_executed, t_granules);
@@ -964,6 +1152,7 @@ impl Scheduler {
                 // participant is provably gone, see retire_lifecycle) and
                 // retire its generation before the leader wakes.
                 rg.retire_lifecycle();
+                rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
                 rg.completion.complete(if aborted {
                     RgOutcome::Aborted
                 } else {
@@ -973,6 +1162,7 @@ impl Scheduler {
                 if aborted {
                     RuntimeStats::tick(&self.stats.rgs_aborted);
                 }
+                self.emit_rgdone(&rg, aborted);
                 // Parked pinned drivers observe completion by re-testing
                 // try_outcome after a wake; the completion word itself only
                 // unparks registered leader waiters.
@@ -1004,15 +1194,74 @@ impl Scheduler {
             }
         }
         for rg in complete_aborted {
-            {
-                let mut p = lock(&rg.progress);
-                p.aborted = true;
-            }
-            rg.retire_lifecycle();
-            rg.completion.complete(RgOutcome::Aborted);
-            RuntimeStats::tick(&self.stats.rgs_completed);
-            RuntimeStats::tick(&self.stats.rgs_aborted);
-            self.park.wake_all();
+            self.complete_queued_aborted(&rg);
         }
+    }
+
+    /// Complete an aborted RG that never reached a slot (popped aborted at
+    /// admission, or reaped from the wait queue at abort time). The caller
+    /// must have REMOVED the RG from the wait queue under the membership
+    /// lock — removal is the exactly-once election for this completion.
+    fn complete_queued_aborted(&self, rg: &Arc<ResourceGroup>) {
+        {
+            let mut p = lock(&rg.progress);
+            p.aborted = true;
+        }
+        rg.retire_lifecycle();
+        rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
+        rg.completion.complete(RgOutcome::Aborted);
+        RuntimeStats::tick(&self.stats.rgs_completed);
+        RuntimeStats::tick(&self.stats.rgs_aborted);
+        self.emit_rgdone(rg, true);
+        self.park.wake_all();
+    }
+
+    /// M5-4 slot-reclamation fix (m5-planner §3.3 / §7 row M5-4): reap an
+    /// aborted RG from the WAIT QUEUE at abort time, completing it promptly
+    /// — a queued abort must not wait for an unrelated slot to free (the
+    /// m1-scan-pipelines boundary note). Exactly-once with the admission
+    /// pop: both paths remove under the membership lock, and only the
+    /// remover completes. Not found ⇒ the RG was already admitted (its
+    /// abort drains through the ordinary protocol) or already popped.
+    pub(crate) fn reap_queued_abort(&self, rg: &Arc<ResourceGroup>) {
+        let removed = {
+            let mut m = lock(&self.membership);
+            match m.waitq.iter().position(|q| Arc::ptr_eq(q, rg)) {
+                Some(i) => {
+                    m.waitq.remove(i);
+                    true
+                }
+                None => false,
+            }
+        };
+        if !removed {
+            return;
+        }
+        RuntimeStats::tick(&self.stats.queued_aborts_reaped);
+        if self.trace {
+            self.trace(&format!("rg {} reaped from wait queue (aborted while queued)", rg.rg_id));
+        }
+        self.complete_queued_aborted(rg);
+    }
+
+    /// `MORSEL|RGDONE|…` completion trace (§3.5 submit→service channels;
+    /// same PGRUST_MORSEL_MARKERS switch and clock domain as WFIN/LFIN):
+    /// per-RG submit→first-service→done timestamps and the CPU readback the
+    /// MULTI-arm fairness verdicts consume. Off = one branch per completion.
+    fn emit_rgdone(&self, rg: &ResourceGroup, aborted: bool) {
+        if !markers_enabled() {
+            return;
+        }
+        eprintln!(
+            "MORSEL|RGDONE|qid={}|rg={}|class={:?}|outcome={}|submit_us={}|first_us={}|done_us={}|cpu_us={}",
+            rg.query_id,
+            rg.rg_id,
+            rg.class,
+            if aborted { "aborted" } else { "completed" },
+            rg.submit_ns.load(Ordering::Relaxed) / 1000,
+            rg.first_service_ns.load(Ordering::Relaxed) / 1000,
+            rg.done_ns.load(Ordering::Relaxed) / 1000,
+            rg.cpu_consumed_ns.load(Ordering::Relaxed) / 1000,
+        );
     }
 }

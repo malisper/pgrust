@@ -949,14 +949,20 @@ fn emit_lfin(
     if !wfin_enabled() {
         return;
     }
+    // submit_us/first_us (M5-4, m5-planner §3.5 submit→service channels):
+    // time-to-service = first_us − submit_us; leader completion latency =
+    // t_us − submit_us. Same scheduler clock domain as every other field.
+    let (submit_ns, first_ns, _done_ns) = rg.service_times();
     eprintln!(
-        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|chan={}",
+        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|submit_us={}|first_us={}|chan={}",
         rg.query_id(),
         rt.now_ns() / 1000,
         total_granules,
         nrgs,
         payload.started.load(Ordering::SeqCst),
         payload.refused.load(Ordering::SeqCst),
+        submit_ns / 1000,
+        first_ns / 1000,
         chan,
     );
 }

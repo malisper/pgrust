@@ -19,7 +19,9 @@ use crate::sync::{lock, Mutex};
 
 use types_error::{PgError, ERROR};
 
-/// Umbra's initial priority p_0 = 10^4 (SIGMOD'21 §3.2). INERT in M0.
+/// Umbra's initial priority p_0 = 10^4 (SIGMOD'21 §3.2). As of M5-4 this
+/// seeds the slot stride (equal shares: every RG holds p_0 — the decaying
+/// update `p_{i+1} = max(p_min, λ·p_i)` is M5-5's, deliberately not here).
 pub const INITIAL_PRIORITY: u32 = 10_000;
 
 /// The work body of one pipeline's task set. M0 exercises this with
@@ -240,12 +242,28 @@ pub struct ResourceGroup {
     pub(crate) progress: Mutex<RgProgress>,
     pub(crate) completion: Completion,
     pub(crate) stats: RgStats,
-    /// INERT until M5 (stride activation): decaying priority seed. Present
-    /// so per-task bookkeeping never needs restructuring (lit-review §5.4).
+    /// Priority feeding the slot stride (M5-4: constant p_0 = equal shares;
+    /// M5-5 activates the decay update `p_{i+1} = max(p_min, λ·p_i)` here).
     pub(crate) priority: AtomicU32,
-    /// INERT until M5: CPU nanoseconds consumed by this RG's tasks (the
-    /// quantity stride passes advance by).
+    /// CPU nanoseconds consumed by this RG's tasks — the quantity stride
+    /// passes advance by (LIVE as of M5-4), and the per-RG CPU-share
+    /// readback of the fairness instruments (§3.5).
     pub(crate) cpu_consumed_ns: AtomicU64,
+    /// Session-affinity token of the submitting leader (0 = none): the
+    /// equal-pass pick tiebreak prefers workers sticky-bound to this session
+    /// (M5-4; set via Runtime::submit_with_affinity — QuerySpec deliberately
+    /// unchanged for backward compatibility, integration-train note).
+    pub(crate) session_token: u64,
+    /// Scheduler back-reference for the queued-abort reap (M5-4 slot-
+    /// reclamation fix): an aborted RG still in the wait queue completes
+    /// promptly instead of waiting for a slot to free. Weak — the RG never
+    /// keeps the scheduler alive.
+    pub(crate) sched: std::sync::Weak<crate::sched::Scheduler>,
+    /// Submit→service instrument channel (§3.5), scheduler-clock ns:
+    /// submit time, first task admission, completion. 0 = not yet.
+    pub(crate) submit_ns: AtomicU64,
+    pub(crate) first_service_ns: AtomicU64,
+    pub(crate) done_ns: AtomicU64,
 }
 
 impl ResourceGroup {
@@ -254,6 +272,8 @@ impl ResourceGroup {
         spec: QuerySpec,
         pinned: bool,
         class: RgClass,
+        session_token: u64,
+        sched: std::sync::Weak<crate::sched::Scheduler>,
     ) -> Arc<ResourceGroup> {
         let n = spec.tasksets.len();
         for (i, ts) in spec.tasksets.iter().enumerate() {
@@ -280,6 +300,11 @@ impl ResourceGroup {
             stats: RgStats::default(),
             priority: AtomicU32::new(INITIAL_PRIORITY),
             cpu_consumed_ns: AtomicU64::new(0),
+            session_token,
+            sched,
+            submit_ns: AtomicU64::new(0),
+            first_service_ns: AtomicU64::new(0),
+            done_ns: AtomicU64::new(0),
         })
     }
 
@@ -400,8 +425,21 @@ impl RgHandle {
     /// the cleanup rides the ordinary last-worker-out protocol, completing
     /// the RG as Aborted. Idempotent (first recorded error wins; the close
     /// is a no-op on an already-closed word).
+    ///
+    /// M5-4 slot-reclamation fix: an aborted RG still QUEUED (never admitted
+    /// to a slot) must not wait for a slot to free before completing — the
+    /// reap removes it from the wait queue and completes it promptly.
+    /// Exactly-once with the admission pop: both remove under the membership
+    /// lock, and whoever removes the RG is the one that completes it. The
+    /// cancel-then-reap order closes the race with admission: an RG popped
+    /// after the cancel is observed aborted at the pop (completed there); an
+    /// RG popped before it starts normally and aborts through the ordinary
+    /// generation-refusal drain.
     pub fn abort(&self) {
         self.rg.task.cancel(abort_error());
+        if let Some(sched) = self.rg.sched.upgrade() {
+            sched.reap_queued_abort(&self.rg);
+        }
     }
 
     /// Abort observation for work bodies that subdivide a COALESCED claim
@@ -418,5 +456,26 @@ impl RgHandle {
     /// The submitting query's id (WFIN marker correlation key).
     pub fn query_id(&self) -> u64 {
         self.rg.query_id
+    }
+
+    /// CPU nanoseconds consumed by this RG's tasks so far — the per-RG CPU
+    /// share readback of the multi-query fairness instruments (§3.5; the
+    /// proportional-share error of the K-sweep gate is computed from this).
+    pub fn cpu_consumed_ns(&self) -> u64 {
+        use crate::sync::atomic::Ordering;
+        self.rg.cpu_consumed_ns.load(Ordering::Relaxed)
+    }
+
+    /// Submit→service instrument channel (§3.5), scheduler-clock ns:
+    /// `(submit_ns, first_service_ns, done_ns)`; 0 = not (yet) recorded.
+    /// submit→first_service is the time-to-service the MULTI-arm latency
+    /// distributions read; submit→done is the completion latency.
+    pub fn service_times(&self) -> (u64, u64, u64) {
+        use crate::sync::atomic::Ordering;
+        (
+            self.rg.submit_ns.load(Ordering::Relaxed),
+            self.rg.first_service_ns.load(Ordering::Relaxed),
+            self.rg.done_ns.load(Ordering::Relaxed),
+        )
     }
 }
