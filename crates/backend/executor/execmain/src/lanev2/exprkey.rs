@@ -1260,12 +1260,18 @@ fn decide_exprkey_mk_case<'mcx>(
     if !::nodeseqscan::seq_scan_is_cbstore(ss) {
         return refused();
     }
-    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+        trace_feed("expr-key case-dict: refused (no fold plan)");
+        return None;
+    };
     if plan.guarded || !plan.vguards.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
         trace_feed("expr-key case-dict: refused (guarded/vguards/residual plan)");
         return refused();
     }
-    let proj = ss.ss.ps_ProjInfo.as_ref()?;
+    let Some(proj) = ss.ss.ps_ProjInfo.as_ref() else {
+        trace_feed("expr-key case-dict: refused (unprojected scan)");
+        return None;
+    };
     let result_slot = proj.pi_result_slot;
     let natts = estate
         .slot(result_slot)
@@ -1275,7 +1281,11 @@ fn decide_exprkey_mk_case<'mcx>(
         .attrs
         .len();
     // The scan PLAN tlist: bare Vars everywhere except ONE CaseDict entry.
-    let scan_plan = agg.plan.plan.lefttree.and_then(::types_nodes::Node::as_seq_scan)?;
+    let Some(scan_plan) = agg.plan.plan.lefttree.and_then(::types_nodes::Node::as_seq_scan)
+    else {
+        trace_feed("expr-key case-dict: refused (agg child is not a SeqScan node)");
+        return None;
+    };
     let tlist = &scan_plan.scan.plan.targetlist;
     if tlist.len() != natts {
         trace_feed("expr-key case-dict: refused (tlist arity)");
@@ -1307,7 +1317,10 @@ fn decide_exprkey_mk_case<'mcx>(
         };
         case_col = Some((j as u16, preds, then_base, else_bytes));
     }
-    let (key_out, preds, then_base, else_bytes) = case_col?;
+    let Some((key_out, preds, then_base, else_bytes)) = case_col else {
+        trace_feed("expr-key case-dict: refused (no CASE entry in the scan tlist)");
+        return refused();
+    };
     let refused_at = |why: &str| {
         trace_feed(&format!("expr-key case-dict: refused ({why})"));
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
