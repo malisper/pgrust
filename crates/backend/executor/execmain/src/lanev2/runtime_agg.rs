@@ -388,17 +388,17 @@ fn accept_morsel_body(
                         "runtime agg worker outer node is not a SeqScan",
                     ))));
                 };
-                if !::nodeseqscan::seq_scan_cb_set_granule_range(
+                // train-12 composition: the heap lane generalized the
+                // positioner to AM-dispatched seq_scan_set_morsel_range
+                // (PgResult<()>); this arm admits only cbstore scans (its
+                // admission requires cb granule geometry), so the former
+                // not-cbstore false branch is unreachable by construction.
+                ::nodeseqscan::seq_scan_set_morsel_range(
                     ss,
                     estate,
                     range.start,
                     range.end,
-                )? {
-                    return Err(AcceptFail::Error(Box::new(PgError::new(
-                        ERROR,
-                        "runtime agg worker scan is not cbstore",
-                    ))));
-                }
+                )?;
                 // Lend the Local's table to the executor for this range
                 // (first morsel: the armed table is already in place).
                 if let Some(t) = local.table.take() {
