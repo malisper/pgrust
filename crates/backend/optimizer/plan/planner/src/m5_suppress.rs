@@ -116,6 +116,22 @@ pub enum CoverClass {
     /// keeps its own future flip). Multi-build-side joins (2+ JoinExprs)
     /// classify uncovered — the m5p1-flagged SQL admission gap.
     CbHashJoinPlainAgg,
+    /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
+    /// FOOTER-ANSWERABLE aggregation over one plain cbstore rel with NO
+    /// quals — count(*)/count(col), min/max over bare int-family Vars,
+    /// and sum/avg over int2/int4 AFFINE transforms (`v±k`, `v*k`; the
+    /// lanefold classify_arg admission, divk==1 only — classify_meta
+    /// refuses division) or bare int8 Vars. The serial lane's Meta arm
+    /// answers these from part footers in milliseconds; the
+    /// planner-parallel FinalizeAgg→Gather→PartialAgg shape escapes the
+    /// Meta arm's Agg-over-SeqScan scope entirely (band-2a measured
+    /// q30@100M: 3.9–7.2s parallel vs ~5ms footer — a ~700x hole
+    /// neutralized only by forced vectors). Suppressing Gather keeps the
+    /// serial plan; if the Meta arm's runtime footer checks refuse (guard
+    /// interval / non-MVCC), the runtime scan-arm fold is the engagement
+    /// fallback (lanefold admits the same affine forms), so no
+    /// suppress-then-refuse serial cliff class opens.
+    CbMetaFooterAgg,
 }
 
 /// One bootstrap matrix row: class key, covered verdict, §2.4 qualifiers.
@@ -180,6 +196,11 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
         class: CoverClass::CbHashJoinPlainAgg,
         covered: true,
         qualifiers: "one JoinExpr, phase-1+right families; hashable int equi key; unindexed rels only; both sides nbatch==1 estimate (spill row unflipped); multi-build-side = uncovered (m5p1 gap)",
+    },
+    MatrixRow {
+        class: CoverClass::CbMetaFooterAgg,
+        covered: true,
+        qualifiers: "no quals; footer-answerable aggs incl. affine int2/int4 sum/avg (divk==1, lanefold classify_arg forms); Meta lane answers, runtime scan fold is the engagement fallback",
     },
 ];
 
@@ -451,6 +472,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         if is_cb {
             if tlist_all_whitelisted_aggs(parse, rti, PLAIN_FOLD_AGGS) {
                 return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0);
+            }
+            // Meta-over-Gather (M5-5, the band-2a q30 handoff): the residual
+            // plain-agg shapes the Meta footer arm answers — affine int
+            // sum/avg args (`sum(v+k)` batteries) the bare-Var whitelist
+            // above does not key. No quals (footer answers are whole-table;
+            // the zero-count qual sub-arm stays unkeyed — narrower probe).
+            if !has_quals
+                && parse.sortClause.is_nil()
+                && tlist_all_meta_footer_aggs(parse, rti)
+            {
+                return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0);
             }
             return Ok(false);
         }
@@ -795,6 +827,116 @@ fn is_covered_key_var(expr: Node<'_>, rti: usize, type_ok: impl Fn(u32) -> bool)
 fn is_whitelisted_agg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
     let Some(agg) = expr.as_aggref() else { return false };
     aggref_plain(agg, rti) && whitelist.contains(&agg.aggfnoid)
+}
+
+// ---------------------------------------------------------------------------
+// Meta-over-Gather (CbMetaFooterAgg) admission — mirrors the lanefold
+// classify_meta/classify_arg structural walk at parse-tree altitude.
+// ---------------------------------------------------------------------------
+
+// Affine int op funcids (pg_proc; lanefold classify_arg's table). Division
+// forms are deliberately absent: classify_meta refuses divk != 1.
+const F_INT4MUL_FN: u32 = 141;
+const F_INT24MUL_FN: u32 = 170;
+const F_INT42MUL_FN: u32 = 171;
+const F_INT4PL_FN: u32 = 177;
+const F_INT24PL_FN: u32 = 178;
+const F_INT42PL_FN: u32 = 179;
+const F_INT4MI_FN: u32 = 181;
+const F_INT24MI_FN: u32 = 182;
+const F_INT42MI_FN: u32 = 183;
+
+/// An int4-result affine transform of one scanned-rel Var — `v ± k`,
+/// `v * k`, `k ± v` — exactly the lanefold classify_arg OpExpr admission
+/// with divk == 1. Refuses when the walk would (empty safe interval), via
+/// the SAME lanefold guard math, so probe ⊂ walk holds coefficient-exactly.
+fn meta_affine_int4_arg(expr: Node<'_>, rti: usize) -> bool {
+    let Some(op) = expr.as_op_expr() else { return false };
+    if op.opretset || op.args.len() != 2 {
+        return false;
+    }
+    let (a, b) = (op.args.nth(0), op.args.nth(1));
+    type Mk = fn(i64) -> (i64, i64);
+    let (var, konst, vartype, mk): (Node<'_>, Node<'_>, u32, Mk) = match op.opfuncid {
+        F_INT24PL_FN => (a, b, INT2OID, |k| (k, 1)),
+        F_INT42PL_FN => (b, a, INT2OID, |k| (k, 1)),
+        F_INT24MI_FN => (a, b, INT2OID, |k| (-k, 1)),
+        F_INT42MI_FN => (b, a, INT2OID, |k| (k, -1)),
+        F_INT24MUL_FN => (a, b, INT2OID, |k| (0, k)),
+        F_INT42MUL_FN => (b, a, INT2OID, |k| (0, k)),
+        F_INT4PL_FN => (a, b, INT4OID, |k| (k, 1)),
+        F_INT4MI_FN => (a, b, INT4OID, |k| (-k, 1)),
+        F_INT4MUL_FN => (a, b, INT4OID, |k| (0, k)),
+        _ => return false,
+    };
+    if !is_covered_key_var(var, rti, |t| t == vartype) {
+        return false;
+    }
+    let Some(c) = konst.as_const() else { return false };
+    if c.constisnull || c.consttype != INT4OID {
+        return false;
+    }
+    let (addend, mulk) = mk(c.constvalue.as_i32() as i64);
+    let width =
+        if vartype == INT2OID { ::lanefold::LaneWidth::I16 } else { ::lanefold::LaneWidth::I32 };
+    if ::lanefold::type_proof(width, addend, mulk, 1) {
+        return true;
+    }
+    let (lo, hi) = ::lanefold::safe_interval(addend, mulk, 1);
+    lo <= hi
+}
+
+/// One footer-answerable Aggref (the classify_meta admission at parse
+/// altitude): count(*) / count(bare Var); min/max over bare int-family
+/// Vars (transforms are monotone but not identity — walk refusal,
+/// mirrored); sum/avg(int4) over a bare int4 Var or an affine int4-result
+/// transform; sum/avg(int2) and sum/avg(int8) over bare Vars of their type
+/// (classify_arg admits OpExprs for INT4-expected args only).
+fn is_meta_footer_agg(expr: Node<'_>, rti: usize) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || !agg.aggdistinct.is_nil()
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+    {
+        return false;
+    }
+    let one_arg = |ok: &dyn Fn(Node<'_>) -> bool| -> bool {
+        agg.args.len() == 1
+            && agg.args.nth(0).as_target_entry().is_some_and(|tle| ok(tle.expr))
+    };
+    match agg.aggfnoid {
+        F_COUNT_STAR => agg.args.is_nil(),
+        // count(col): any bare scanned-rel Var (CountAny reads the isnull
+        // lane only; footers carry per-column null counts).
+        F_COUNT_ANY => one_arg(&|e| key_var(e, rti).is_some()),
+        F_MAX_INT8 | F_MAX_INT4 | F_MAX_INT2 | F_MIN_INT8 | F_MIN_INT4 | F_MIN_INT2 => {
+            one_arg(&|e| is_covered_key_var(e, rti, is_int_family))
+        }
+        F_SUM_INT2 | F_AVG_INT2 => one_arg(&|e| is_covered_key_var(e, rti, |t| t == INT2OID)),
+        F_SUM_INT4 | F_AVG_INT4 => one_arg(&|e| {
+            is_covered_key_var(e, rti, |t| t == INT4OID) || meta_affine_int4_arg(e, rti)
+        }),
+        F_SUM_INT8 | F_AVG_INT8 => one_arg(&|e| is_covered_key_var(e, rti, |t| t == INT8OID)),
+        _ => false,
+    }
+}
+
+/// Every tlist entry is a footer-answerable Aggref (all-or-nothing, the
+/// classify_meta contract), and at least one entry exists.
+fn tlist_all_meta_footer_aggs(parse: &Query<'_>, rti: usize) -> bool {
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return false };
+        if !is_meta_footer_agg(tle.expr, rti) {
+            return false;
+        }
+        n += 1;
+    }
+    n > 0
 }
 
 /// A `count(DISTINCT <int-family Var>)` on the scanned rel: normal kind,
