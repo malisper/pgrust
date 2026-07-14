@@ -88,6 +88,30 @@ struct SlotEntry {
     ts: Arc<TaskSetRt>,
 }
 
+/// One claim attempt's outcome (stream sources add STARVED to the classic
+/// claimed/exhausted pair).
+enum Claim {
+    Range(MorselRange),
+    /// Stream source, cursor at an OPEN watermark: nothing claimable NOW but
+    /// the set is not exhausted — the worker parks and the producer's
+    /// publish/close wakes it.
+    Starved,
+    Exhausted,
+}
+
+/// How a task ended (run_task).
+enum TaskEnd {
+    /// The set's cursor is exhausted (or its generation dead): drive
+    /// invalidation/finalization.
+    Exhausted,
+    /// Duration budget spent; more work remains.
+    Budget,
+    /// Stream starvation: no claimable granule and the stream is open. The
+    /// worker should park (epoch-guarded — a publish during the task wakes
+    /// the park immediately).
+    Starved,
+}
+
 /// Membership state: slot ownership + the RG wait queue. One mutex, touched
 /// only on membership events (publish/finalize/admit) and on worker cache
 /// misses — never on the per-task hot path (slot-word seq revalidation hits
@@ -562,15 +586,18 @@ impl Scheduler {
 
         let step = match self.resolve(local, slot) {
             None => Step::Retry,
-            Some(ts) => {
-                let exhausted = self.run_task(local, &ts);
-                if exhausted {
+            Some(ts) => match self.run_task(local, &ts) {
+                TaskEnd::Exhausted => {
                     // Protocol step 2: exhausted → invalidate (coordinator
                     // election by slot-word CAS).
                     self.coordinate(&ts);
+                    Step::Ran
                 }
-                Step::Ran
-            }
+                TaskEnd::Budget => Step::Ran,
+                // Starved stream: park (epoch captured before this step, so
+                // a publish that landed mid-task wakes the park at once).
+                TaskEnd::Starved => Step::Idle,
+            },
         };
 
         // Protocol step 4: settle own pin; pay any marker debt.
@@ -629,13 +656,14 @@ impl Scheduler {
                 // revalidation; not ours to run.
                 Step::Retry
             }
-            Some(ts) => {
-                let exhausted = self.run_task(local, &ts);
-                if exhausted {
+            Some(ts) => match self.run_task(local, &ts) {
+                TaskEnd::Exhausted => {
                     self.coordinate(&ts);
+                    Step::Ran
                 }
-                Step::Ran
-            }
+                TaskEnd::Budget => Step::Ran,
+                TaskEnd::Starved => Step::Idle,
+            },
         };
 
         // Protocol step 4: settle own pin; pay any marker debt.
@@ -667,9 +695,11 @@ impl Scheduler {
 
     /// Execute one task: claim boundary-clamped morsel ranges from the shared
     /// cursor until the duration budget is spent, the set is exhausted, or
-    /// the generation dies. Returns true ⇔ the task set is exhausted (or its
-    /// generation is dead) and finalization should be driven.
-    fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> bool {
+    /// the generation dies. [`TaskEnd::Exhausted`] ⇔ the task set is
+    /// exhausted (or its generation is dead) and finalization should be
+    /// driven; [`TaskEnd::Starved`] ⇔ an open stream source has nothing
+    /// claimable (park, producer wakes).
+    fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> TaskEnd {
         RuntimeStats::tick(&self.stats.tasks_claimed);
         RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
         let task_t0 = if local.wfin.is_empty() { 0 } else { self.clock.now_ns() };
@@ -679,15 +709,15 @@ impl Scheduler {
         // unconsumable — the merged lifecycle's fail-closed armed join
         // refuses, so no participant, no morsel. The exhausted path then
         // drives ordinary invalidate/finalize cleanup.
-        let exhausted = match ts.rg.handle.join() {
+        let end = match ts.rg.handle.join() {
             Err(_refused) => {
                 RuntimeStats::tick(&self.stats.generation_refusals);
-                true
+                TaskEnd::Exhausted
             }
             Ok(participant) => {
                 local.drive.tasks += 1;
                 let mut sizer = TaskSizer::new(self.params, ts.c0);
-                let mut exhausted = false;
+                let mut end = TaskEnd::Budget;
                 // Per-task observability accumulators (dop1-tax fix 5):
                 // morsel/granule/cpu counters are EXACT but flushed to the
                 // shared relaxed atomics once per TASK, not per morsel —
@@ -703,12 +733,19 @@ impl Scheduler {
                     // Morsel-boundary cancel point (Leis-style): an abort is
                     // observed within one morsel.
                     if ts.rg.is_aborted() {
-                        exhausted = true;
+                        end = TaskEnd::Exhausted;
                         break;
                     }
-                    let Some(range) = self.claim_morsel(ts, &mut sizer) else {
-                        exhausted = true;
-                        break;
+                    let range = match self.claim_morsel(ts, &mut sizer) {
+                        Claim::Range(range) => range,
+                        Claim::Starved => {
+                            end = TaskEnd::Starved;
+                            break;
+                        }
+                        Claim::Exhausted => {
+                            end = TaskEnd::Exhausted;
+                            break;
+                        }
                     };
                     let granules = range.end - range.start;
                     let t0 = self.clock.now_ns();
@@ -726,7 +763,7 @@ impl Scheduler {
                         })
                         .is_err()
                     {
-                        exhausted = true;
+                        end = TaskEnd::Exhausted;
                         break;
                     }
                     let t1 = self.clock.now_ns();
@@ -761,7 +798,7 @@ impl Scheduler {
                 // drained workers. (An unfinished Drop would cancel the
                 // generation; complete() is the required exit.)
                 let _ = participant.complete();
-                exhausted
+                end
             }
         };
 
@@ -773,21 +810,27 @@ impl Scheduler {
         // participation (no claim can succeed past an exhausted cursor), so
         // flush its line here.
         if !local.wfin.is_empty() {
-            let end = self.clock.now_ns();
-            local.wfin_observe(ts, end.saturating_sub(task_t0), end);
-            if exhausted {
+            let now = self.clock.now_ns();
+            local.wfin_observe(ts, now.saturating_sub(task_t0), now);
+            if matches!(end, TaskEnd::Exhausted) {
                 local.wfin_flush_slot(ts.slot);
             }
         }
-        exhausted
+        end
     }
 
-    fn claim_morsel(&self, ts: &TaskSetRt, sizer: &mut TaskSizer) -> Option<MorselRange> {
-        let total = ts.source().total_granules();
+    fn claim_morsel(&self, ts: &TaskSetRt, sizer: &mut TaskSizer) -> Claim {
+        // Stream sources: claimable up to the producer's watermark; only a
+        // CLOSED stream's watermark is exhaustion (closed read before the
+        // watermark inside stream_state — see the MorselSource contract).
+        let (total, closed) = match ts.source().stream_state() {
+            Some(state) => state,
+            None => (ts.source().total_granules(), true),
+        };
         loop {
             let cur = ts.cursor.load(Ordering::SeqCst);
             if cur >= total {
-                return None;
+                return if closed { Claim::Exhausted } else { Claim::Starved };
             }
             let workers = ts.active_workers.load(Ordering::SeqCst).max(1);
             let (want, decision) = sizer.next_size(&ts.sizer, total - cur, workers);
@@ -850,7 +893,7 @@ impl Scheduler {
                     SizingDecision::Shutdown => &self.stats.sizing_shutdown,
                 };
                 RuntimeStats::tick(counter);
-                return Some(cur..end);
+                return Claim::Range(cur..end);
             }
         }
     }
