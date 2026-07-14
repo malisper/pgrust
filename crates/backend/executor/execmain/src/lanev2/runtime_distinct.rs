@@ -401,7 +401,13 @@ fn runtime_distinct_worker_main(_shared: &parallel::ParallelShared) -> PgResult<
 }
 
 fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
-    let Some(private) = shared.private() else { return };
+    let Some(private) = shared.private() else {
+        // F1 observability: a context with NO private payload can never be
+        // driven by any arm — trace it (foreign-payload downcast misses stay
+        // silent below: every arm's hook runs for every worker by design).
+        lane_trace("runtime-distinct: post-task-park without a private payload");
+        return;
+    };
     let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else { return };
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
@@ -414,9 +420,22 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeDistinctShared>) {
     let _ = shared;
-    let Some(target) = payload.pcxt_shared.get() else { return };
-    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return };
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
+    let Some(target) = payload.pcxt_shared.get() else {
+        lane_trace("runtime-distinct: helper refused (no pcxt shared)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
+        lane_trace("runtime-distinct: helper refused (rg gone)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
     let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("runtime-distinct: helper refused (no external lane)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
@@ -432,6 +451,18 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeDistinct
         Err(e) => {
             if entered.get() {
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader's waiter
+                // parks forever. Drive the closed generation to completion
+                // (pure protocol cleanup); post-drive errors find it already
+                // complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 lane_trace(&format!(
                     "runtime-distinct: helper bind refused: {}",
@@ -874,7 +905,52 @@ fn engage_ceremony<'mcx>(
                 drain_rg(rt, &rg);
                 return Ok(EngageOutcome::Fallback);
             }
-            parallel::wait_parallel_finish_quantum();
+            // LIVENESS backstop (m1 helper-death fix 5cf96f83d, ported from
+            // runtime_scan.rs — F1 defect layer 2a): every launched helper's
+            // task has ENDED (normal hook exit keeps BGWH_STARTED until
+            // after the drive, so this cannot trip mid-drive) yet the RG is
+            // incomplete — helpers died or returned without a channel
+            // message and without driving. Nothing claimed => clean serial
+            // fallback; claimed => reap if possible and surface a real
+            // error.
+            if parallel::parallel_workers_all_stopped(pcxt) {
+                if let Some(o) = waiter.try_wait() {
+                    break o;
+                }
+                let claimed = rg.stats().tasks_claimed;
+                lane_trace(&format!(
+                    "runtime-distinct: helpers all stopped, rg incomplete (claimed={claimed})"
+                ));
+                rg.abort();
+                let drained = drain_rg(rt, &rg);
+                if let Some(e) = payload.take_error() {
+                    return Err(e);
+                }
+                if payload.crossed.load(Ordering::SeqCst) {
+                    lane_trace("runtime-distinct: worker budget crossed; serial fallback");
+                    stats::tick_refused(
+                        ShapeClass::AggBuild,
+                        RefuseReason::AdmissionEconomicsFusedDrive,
+                    );
+                    return Ok(EngageOutcome::Fallback);
+                }
+                if claimed == 0 && drained {
+                    return Ok(EngageOutcome::Fallback);
+                }
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime distinct helpers exited before completing the build",
+                )));
+            }
+            // A raised cancel disposition (statement_timeout /
+            // pg_cancel_backend) surfaces from the latch quantum (F1 defect
+            // layer 2b): abort + drain the RG, then propagate — exactly the
+            // CFI branch above.
+            if let Err(e) = parallel::wait_parallel_finish_quantum() {
+                rg.abort();
+                drain_rg(rt, &rg);
+                return Err(e);
+            }
         };
 
         if let Some(e) = payload.take_error() {
@@ -948,16 +1024,34 @@ fn engage_ceremony<'mcx>(
     }
 }
 
-/// Reap a pinned RG no helper will drive (abort/fallback paths) — protocol
-/// cleanup driving, not leader work execution (§2.5).
-fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) {
+/// Abort + BOUNDED drain of a pinned RG no helper will drive
+/// (abort/fallback paths) — protocol cleanup driving, not leader work
+/// execution (§2.5; runtime_scan's hardened drain, verbatim — F1 port).
+/// True = the RG completed. False = it could not be completed (a
+/// participant died holding an unsettled pin): the RG and its slot are
+/// deliberately LEAKED and the caller must surface an error rather than
+/// wait forever — the previous unbounded `loop {{ acquire }} + drive_pinned`
+/// shape could itself wedge on exactly the helper-death cases this lane
+/// fixes.
+fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
     rg.abort();
-    let lane = loop {
+    // Bounded lane wait (~2s): helper drives settle within a morsel.
+    let mut lane = None;
+    for _ in 0..4000 {
         if let Some(l) = rt.acquire_external_lane() {
-            break l;
+            lane = Some(l);
+            break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let Some(lane) = lane else {
+        lane_trace("runtime-distinct: LEAKED pinned RG (no external lane for the drain)");
+        return false;
     };
     let mut local = lane.local();
-    let _ = rt.drive_pinned(&mut local, rg);
+    let drained = rt.try_drain_pinned(&mut local, rg, 4000).is_some();
+    if !drained {
+        lane_trace("runtime-distinct: LEAKED pinned RG (drain gave up — dead participant?)");
+    }
+    drained
 }

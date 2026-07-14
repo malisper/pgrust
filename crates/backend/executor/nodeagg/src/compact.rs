@@ -255,6 +255,36 @@ pub fn agg_hash_spill_unlikely(node: &mut AggStateData<'_>) -> bool {
     numgroups <= ph.hash_ngroups_limit / 2 && est_bytes <= ph.hash_mem_limit as u64 / 2
 }
 
+/// Read-only LEADER-side admission precheck for the M2 runtime agg sink
+/// (F1 chaos fix, defect layer 1 root cause): would a WORKER build's
+/// `agg_hash_compact_try_arm*` arm under sink cap `cap`? Replicates the
+/// sink-mode gate exactly — cap-bounded numgroups (the `sink_cap` leg of
+/// `compact_single_word_gates`/`agg_hash_compact_try_arm`) against the
+/// half-margin spill-eligibility formula — WITHOUT installing a table or
+/// touching `sink_cap`. The workers run under the leader's restored GUCs,
+/// so the leader's `hash_mem_limit`/`hash_ngroups_limit` are the workers'
+/// numbers: false here means EVERY worker would refuse
+/// ("worker compact arm refused under the sink cap"), erroring before it
+/// ever joined the drive and stranding the pinned RG — the leader must
+/// refuse engagement up front (fail-closed → serial arm) instead.
+pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32) -> bool {
+    if !compact_enabled() {
+        return false;
+    }
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return false;
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor)
+        .max(1)
+        .min(cap as u64);
+    let Some(ph) = node.perhash.as_ref() else {
+        return false;
+    };
+    let additionalsize = ph.hashtable.additionalsize();
+    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
+    numgroups <= ph.hash_ngroups_limit / 2 && est_bytes <= ph.hash_mem_limit as u64 / 2
+}
+
 /// Decide + arm the compact table for this build. Caller (the lane's scan-K2
 /// feed) has already admitted the K2 shape; this adds the compact-specific
 /// gates (module doc). Idempotent per build: re-arming an armed node keeps
