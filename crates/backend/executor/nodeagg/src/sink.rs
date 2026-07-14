@@ -1115,6 +1115,127 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Combine-phase top-N composition (m3-sort-b car 1: agg sink → ORDER BY/
+// LIMIT). When the sink's consumer is a bounded single-column Sort whose
+// order column is a raw int8 transvalue (the topkfin/topnemit vocabulary),
+// each COMBINE task additionally selects its partition's top-`bound` groups
+// on the merged raw states — a pure bounded-heap pass over rows it already
+// walks for the emit — and FINALIZE truncate-merges the 256 per-partition
+// winner lists into one global winner list. The leader then drains ONLY the
+// winners through the (real) Sort node above, killing the serialized
+// all-groups sort tail. The emit buffers stay FULL (selection changes what
+// the leader drains, never what was computed): a mid-combine decline (a
+// NULL order transvalue — its rank depends on NULLS placement) degrades to
+// the plain full drain with zero data loss, no abort, no rerun.
+//
+// Selection total order (the rule-2 analog for agg groups): (badness,
+// null-key tier, canonical key words). Group keys are globally unique
+// (hash-partitioned, one bucket each; the NULL group is unique), so the
+// order is total and the winner set is a PURE FUNCTION OF THE DATA —
+// independent of worker claim order and of bucket geometry. Against C /
+// the serial relaxed arm the boundary tie group is the ratified
+// count-gated class (the q31/q32/q33 precedent).
+// ---------------------------------------------------------------------------
+
+/// The armed combine-phase top-N: `transno`'s raw int8 transvalue is the
+/// order key (`topn_emit_resolve` proved it), `desc` folds the direction,
+/// `bound` is the downstream sort's tuple bound (includes any OFFSET).
+#[derive(Clone, Copy)]
+pub struct SinkTopnSpec {
+    pub transno: u32,
+    pub desc: bool,
+    pub bound: u32,
+}
+
+/// Serial-cap agreement with the sort lanes (`TOPN_MAX_BOUND`).
+pub const SINK_TOPN_MAX_BOUND: u32 = 1 << 16;
+
+/// One winner candidate. FIELD ORDER IS THE SELECTION TOTAL ORDER (derived
+/// lexicographic Ord): badness first (monotone-worse image of the order key
+/// under the direction), then the null-group tier, then the canonical key
+/// words — unique per group, so two candidates never compare equal before
+/// the payload fields.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SinkTopnCand {
+    badness: u64,
+    null_key: bool,
+    kw: [u64; 2],
+    /// Payload: the winner's home bucket + row index in that bucket's emit
+    /// buffer (`sink_emit_bucket` iterates merged rows 0..n in table order,
+    /// so the selection row index IS the buf row index).
+    pub bucket: u16,
+    pub row: u32,
+}
+
+/// Select one merged partition's top-`bound` groups on the raw states
+/// (rows 0..nrows include the NULL group's allocated row). Sorted
+/// best-first. `None` = decline (a NULL/pending order transvalue) — the
+/// caller degrades to the full drain; nothing here has side effects.
+pub fn sink_topn_candidates(
+    t: &LaneAggTable,
+    spec: &SinkTopnSpec,
+    bucket: u16,
+) -> Option<Vec<SinkTopnCand>> {
+    let n = t.nrows();
+    let k = (spec.bound as usize).min(n);
+    // Max-heap: the WORST kept candidate on top; strict-better replacement.
+    let mut heap: std::collections::BinaryHeap<SinkTopnCand> =
+        std::collections::BinaryHeap::with_capacity(k.saturating_add(1));
+    for row in 0..n {
+        // SAFETY: row < nrows; the row's state block holds the merged
+        // AggPerGroup array (combine contract); transno bounds-checked by
+        // `topn_emit_resolve` on the leader's node.
+        let pg = unsafe {
+            &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(spec.transno as usize)
+        };
+        if pg.no_trans_value || pg.trans_value_is_null {
+            return None;
+        }
+        let badness = crate::compact::topkfin_badness(pg.trans_value.as_i64(), spec.desc);
+        let (null_key, kw) = match row_key_words(t, row) {
+            Some(w) => (false, w),
+            None => (true, [0, 0]),
+        };
+        let cand = SinkTopnCand { badness, null_key, kw, bucket, row: row as u32 };
+        if heap.len() < k {
+            heap.push(cand);
+        } else if heap.peek().is_some_and(|worst| cand < *worst) {
+            heap.pop();
+            heap.push(cand);
+        }
+    }
+    let mut v = heap.into_vec();
+    v.sort_unstable();
+    Some(v)
+}
+
+/// Truncate-merge the per-partition winner lists (each sorted best-first)
+/// into the global winner list: ≤ `bound` `(bucket, row)` pairs in the
+/// selection total order. K-way heap merge — O((P + bound)·log P), inside
+/// the finalize's O(partitions)-ish envelope.
+pub fn sink_topn_merge(lists: &[Vec<SinkTopnCand>], bound: usize) -> Vec<(u16, u32)> {
+    use std::cmp::Reverse;
+    let mut heads: std::collections::BinaryHeap<Reverse<(SinkTopnCand, usize)>> =
+        std::collections::BinaryHeap::with_capacity(lists.len());
+    for (li, l) in lists.iter().enumerate() {
+        if let Some(&c) = l.first() {
+            heads.push(Reverse((c, li)));
+        }
+    }
+    let mut winners = Vec::with_capacity(bound.min(lists.iter().map(Vec::len).sum()));
+    let mut cursor = vec![0usize; lists.len()];
+    while winners.len() < bound {
+        let Some(Reverse((c, li))) = heads.pop() else { break };
+        winners.push((c.bucket, c.row));
+        cursor[li] += 1;
+        if let Some(&next) = lists[li].get(cursor[li]) {
+            heads.push(Reverse((next, li)));
+        }
+    }
+    winners
+}
+
+// ---------------------------------------------------------------------------
 // Leader-side adopted emit (the published sink output as the Agg's source).
 // ---------------------------------------------------------------------------
 
@@ -1125,13 +1246,23 @@ pub struct SinkEmitState {
     pub natts: usize,
     bucket: usize,
     pos: usize,
+    /// Composed top-N (m3-sort-b car 1): `Some` = drain ONLY these
+    /// `(bucket, row)` winners, in list order. The bufs stay complete —
+    /// winners index into them.
+    winners: Option<Vec<(u16, u32)>>,
 }
 
 /// Adopt the published emit set; subsequent [`agg_sink_emit_next`] calls
 /// drain it. The Agg becomes a pure Source (its build never ran).
-pub fn agg_sink_adopt_emit(node: &mut AggStateData<'_>, bufs: Vec<SinkEmitBuf>, natts: usize) {
+/// `winners`: the composed top-N winner list (`None` = full drain).
+pub fn agg_sink_adopt_emit(
+    node: &mut AggStateData<'_>,
+    bufs: Vec<SinkEmitBuf>,
+    natts: usize,
+    winners: Option<Vec<(u16, u32)>>,
+) {
     debug_assert_eq!(bufs.len(), SINK_NBUCKETS);
-    node.sink_emit = Some(Box::new(SinkEmitState { bufs, natts, bucket: 0, pos: 0 }));
+    node.sink_emit = Some(Box::new(SinkEmitState { bufs, natts, bucket: 0, pos: 0, winners }));
 }
 
 /// Mid-emit resume marker for the lane dispatch.
@@ -1150,19 +1281,29 @@ pub fn agg_sink_emit_next<'mcx>(
     let mcx = estate.es_query_cxt;
     let next = {
         let st = node.sink_emit.as_mut().expect("sink emit state adopted");
-        loop {
-            if st.bucket >= SINK_NBUCKETS {
-                break None;
+        if let Some(winners) = &st.winners {
+            // Composed top-N: the winner list IS the drain (bufs stay
+            // complete; `pos` doubles as the winner cursor).
+            let w = winners.get(st.pos).map(|&(b, r)| (b as usize, r as usize));
+            if w.is_some() {
+                st.pos += 1;
             }
-            let b = &st.bufs[st.bucket];
-            if st.pos >= b.nrows {
-                st.bucket += 1;
-                st.pos = 0;
-                continue;
+            w
+        } else {
+            loop {
+                if st.bucket >= SINK_NBUCKETS {
+                    break None;
+                }
+                let b = &st.bufs[st.bucket];
+                if st.pos >= b.nrows {
+                    st.bucket += 1;
+                    st.pos = 0;
+                    continue;
+                }
+                let row = st.pos;
+                st.pos += 1;
+                break Some((st.bucket, row));
             }
-            let row = st.pos;
-            st.pos += 1;
-            break Some((st.bucket, row));
         }
     };
     let Some((bucket, row)) = next else {
@@ -1669,5 +1810,124 @@ mod tests {
             }
         }
         assert_eq!(found, 2);
+    }
+    // -- Combine-phase top-N composition (m3-sort-b car 1) -------------------
+
+    /// Reference selection: full sort of every group under the selection
+    /// total order (badness, null tier, key words), truncated to k.
+    fn topn_reference(t: &LaneAggTable, spec: &SinkTopnSpec, k: usize) -> Vec<Option<i64>> {
+        let mut all: Vec<(u64, bool, [u64; 2], Option<i64>)> = (0..t.nrows())
+            .map(|row| {
+                let pg = unsafe {
+                    &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(spec.transno as usize)
+                };
+                assert!(!pg.trans_value_is_null && !pg.no_trans_value);
+                let b = crate::compact::topkfin_badness(pg.trans_value.as_i64(), spec.desc);
+                match row_key_words(t, row) {
+                    Some(w) => (b, false, w, t.row_key_int(row)),
+                    None => (b, true, [0, 0], None),
+                }
+            })
+            .collect();
+        all.sort_unstable();
+        all.truncate(k);
+        all.into_iter().map(|(_, _, _, key)| key).collect()
+    }
+
+    fn cand_keys(t: &LaneAggTable, cands: &[SinkTopnCand]) -> Vec<Option<i64>> {
+        cands.iter().map(|c| t.row_key_int(c.row as usize)).collect()
+    }
+
+    #[test]
+    fn topn_candidates_match_reference() {
+        // Dense count ties (the boundary class) + a NULL group + both
+        // directions x several bounds, vs the full-sort reference.
+        let mut t = mk_table(64);
+        for k in 0..200i64 {
+            // counts collide heavily: count = k % 7 + 1 after the loop.
+            for _ in 0..(k % 7 + 1) {
+                bump(&mut t, Some(k), 1, k);
+            }
+        }
+        bump(&mut t, None, 3, 0);
+        for desc in [false, true] {
+            for bound in [1u32, 7, 10, 100, 500] {
+                let spec = SinkTopnSpec { transno: 0, desc, bound };
+                let got = sink_topn_candidates(&t, &spec, 0).expect("no NULL order keys");
+                assert_eq!(got.len(), (bound as usize).min(t.nrows()));
+                assert_eq!(
+                    cand_keys(&t, &got),
+                    topn_reference(&t, &spec, bound as usize),
+                    "desc={desc} bound={bound}"
+                );
+                // Sorted best-first under the total order.
+                assert!(got.windows(2).all(|w| w[0] < w[1]));
+            }
+        }
+    }
+
+    #[test]
+    fn topn_candidates_decline_on_null_order_key() {
+        // Transition [1] (max) stays NULL for a never-bumped-max group:
+        // write one group's max state back to NULL and select on transno 1.
+        let mut t = mk_table(16);
+        for k in 0..10 {
+            bump(&mut t, Some(k), 1, k);
+        }
+        unsafe {
+            let pg = t.row_states(3).cast::<AggPerGroup>().add(1);
+            (*pg).trans_value_is_null = true;
+        }
+        let spec = SinkTopnSpec { transno: 1, desc: true, bound: 5 };
+        assert!(sink_topn_candidates(&t, &spec, 0).is_none());
+        // The count transition (never NULL) still selects.
+        let spec0 = SinkTopnSpec { transno: 0, desc: true, bound: 5 };
+        assert!(sink_topn_candidates(&t, &spec0, 0).is_some());
+    }
+
+    #[test]
+    fn topn_merge_matches_flat_reference() {
+        // Per-bucket selection + truncate-merge == selection over the union,
+        // for an arbitrary 4-way bucket split (partition independence).
+        let keys: Vec<i64> = (0..300).collect();
+        let spec = SinkTopnSpec { transno: 0, desc: true, bound: 17 };
+        let mut union = mk_table(64);
+        let mut parts: Vec<LaneAggTable> = (0..4).map(|_| mk_table(64)).collect();
+        for &k in &keys {
+            let c = k % 5 + 1; // dense ties
+            for _ in 0..c {
+                bump(&mut union, Some(k), 1, k);
+                bump(&mut parts[(k as usize * 7919) % 4], Some(k), 1, k);
+            }
+        }
+        let lists: Vec<Vec<SinkTopnCand>> = parts
+            .iter()
+            .enumerate()
+            .map(|(b, t)| sink_topn_candidates(t, &spec, b as u16).unwrap())
+            .collect();
+        let winners = sink_topn_merge(&lists, spec.bound as usize);
+        let got: Vec<Option<i64>> = winners
+            .iter()
+            .map(|&(b, row)| parts[b as usize].row_key_int(row as usize))
+            .collect();
+        assert_eq!(got, topn_reference(&union, &spec, spec.bound as usize));
+    }
+
+    #[test]
+    fn topn_merge_edges() {
+        // Empty lists, bound beyond total, bound zero.
+        assert!(sink_topn_merge(&[], 10).is_empty());
+        assert!(sink_topn_merge(&[Vec::new(), Vec::new()], 10).is_empty());
+        let mut t = mk_table(16);
+        for k in 0..3 {
+            bump(&mut t, Some(k), k + 1, k);
+        }
+        let spec = SinkTopnSpec { transno: 0, desc: true, bound: 100 };
+        let l = sink_topn_candidates(&t, &spec, 5).unwrap();
+        assert_eq!(l.len(), 3);
+        let w = sink_topn_merge(&[l.clone()], 100);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0], (5, l[0].row));
+        assert!(sink_topn_merge(&[l], 0).is_empty());
     }
 }

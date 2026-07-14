@@ -1840,7 +1840,7 @@ pub fn batch_emit_row<'mcx>(
 /// key gets WORSE under the sort direction (asc: bigger = worse; desc:
 /// smaller = worse). Total on all i64 values, no overflow cases.
 #[inline]
-fn topkfin_badness(key: i64, desc: bool) -> u64 {
+pub(crate) fn topkfin_badness(key: i64, desc: bool) -> u64 {
     let asc = (key as u64) ^ (1u64 << 63);
     if desc {
         !asc

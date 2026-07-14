@@ -49,8 +49,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_partition_remainder,
-    sink_resolve_combines, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
-    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS,
+    sink_resolve_combines, sink_topn_candidates, sink_topn_merge, SinkCombineFn, SinkEmitBuf,
+    SinkEmitPlan, SinkKeySpec, SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand,
+    SinkTopnSpec, SINK_NBUCKETS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -109,11 +110,26 @@ struct AggSink {
     byref_states: bool,
     combines: Vec<SinkCombineFn>,
     emit: SinkEmitPlan,
+    /// Combine-phase top-N composition (m3-sort-b car 1): armed when the
+    /// sink's consumer is a bounded single-int8-column Sort (the drive
+    /// chain resolved the spec at engagement). Selection is an EXTRA pass
+    /// per combine claim; the emit buffers stay full, so a degrade (NULL
+    /// order transvalue) publishes the plain full drain — no abort.
+    topn: Option<SinkTopnSpec>,
+    /// 256 per-partition winner candidate lists; slot b written only by
+    /// partition b's combine task (single writer, as `out_emit`).
+    topn_cands: Vec<UnsafeCell<Vec<SinkTopnCand>>>,
+    /// A combine declined the selection (NULL order transvalue): global
+    /// degrade to the full drain (correct either way — winners are a drain
+    /// filter, never a data transform).
+    topn_degraded: AtomicBool,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
-    /// finalize's published output (leader consumes after completion).
-    published: Mutex<Option<Vec<SinkEmitBuf>>>,
+    /// finalize's published output (leader consumes after completion):
+    /// per-bucket emit buffers + the composed top-N winner list (`None` =
+    /// full drain).
+    published: Mutex<Option<(Vec<SinkEmitBuf>, Option<Vec<(u16, u32)>>)>>,
     /// Abort/observability control (shared with the engagement payload).
     rg: OnceLock<runtime::WeakRgHandle>,
     failed: AtomicBool,
@@ -251,6 +267,22 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
+            // Combine-phase top-N (car 1): select this partition's winners
+            // on the merged raw states BEFORE the emit walks the same rows
+            // (candidate row indices == emit buf row indices — both iterate
+            // table rows 0..n in order). A decline (NULL order transvalue)
+            // degrades globally to the full drain; the buf below stays full
+            // either way.
+            if let Some(spec) = &self.topn {
+                if !self.topn_degraded.load(Ordering::Acquire) {
+                    match sink_topn_candidates(&merged, spec, part as u16) {
+                        // SAFETY: partition `part` is claimed exactly once
+                        // (runtime contract); this is its single writer.
+                        Some(c) => unsafe { *self.topn_cands[part as usize].get() = c },
+                        None => self.topn_degraded.store(true, Ordering::Release),
+                    }
+                }
+            }
             let buf = sink_emit_bucket(&self.emit, &merged)?;
             // R3 accounting (m2-integration audit): the emit buffers are the
             // RETAINED merged result (held until the leader drains) — meter
@@ -297,7 +329,22 @@ impl runtime::ParallelSink for AggSink {
                 unsafe { std::mem::take(&mut *c.get()) }
             })
             .collect();
-        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(bufs);
+        // Composed top-N: truncate-merge the per-partition winner lists
+        // (O((P + bound)·log P) — the finalize's O(partitions) envelope).
+        // A degrade publishes `None` = the plain full drain.
+        let winners = match &self.topn {
+            Some(spec) if !self.topn_degraded.load(Ordering::Acquire) => {
+                let lists: Vec<Vec<SinkTopnCand>> = self
+                    .topn_cands
+                    .iter()
+                    // SAFETY: single reader after all combine claims settled.
+                    .map(|c| unsafe { std::mem::take(&mut *c.get()) })
+                    .collect();
+                Some(sink_topn_merge(&lists, spec.bound as usize))
+            }
+            _ => None,
+        };
+        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some((bufs, winners));
     }
 }
 
@@ -973,6 +1020,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: Option<&super::ExprKeyState>,
+    topn: Option<SinkTopnSpec>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -1198,6 +1246,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         width,
         combines,
         emit,
+        topn,
+        topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+        topn_degraded: AtomicBool::new(false),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         rg: OnceLock::new(),
@@ -1417,7 +1468,7 @@ fn engage_ceremony<'mcx>(
             Ok(false)
         }
         EngageOutcome::Completed => {
-            let bufs = sink
+            let (bufs, winners) = sink
                 .published
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -1427,8 +1478,17 @@ fn engage_ceremony<'mcx>(
                 })?;
             let natts = sink.emit.cols.len();
             let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
-            lane_trace(&format!("runtime-agg: complete, groups={rows}"));
-            ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+            match (&winners, &sink.topn) {
+                (Some(w), _) => lane_trace(&format!(
+                    "runtime-agg: complete, groups={rows}, topn composed (winners={})",
+                    w.len()
+                )),
+                (None, Some(_)) => lane_trace(&format!(
+                    "runtime-agg: complete, groups={rows}, topn degraded (NULL order key) — full drain"
+                )),
+                (None, None) => lane_trace(&format!("runtime-agg: complete, groups={rows}")),
+            }
+            ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
             Ok(true)
         }
     }
