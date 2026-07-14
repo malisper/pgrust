@@ -331,12 +331,17 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
         }
 
         // Exit if already caught up and not waiting for standby slots
-        // (NeedToWaitForWal, walsender.c:1926).
-        if !wait_for_standby_at_stop
-            && loc_ <= recent_flush
-            && !need_to_wait_for_standbys(recent_flush)?
-        {
-            break;
+        // (NeedToWaitForWal, walsender.c:1926). Track WHY we wait so the
+        // sleep below arms the right condition variable.
+        let mut wait_event = WAIT_EVENT_WAL_SENDER_WAIT_WAL;
+        if !wait_for_standby_at_stop && loc_ <= recent_flush {
+            if need_to_wait_for_standbys(recent_flush)? {
+                wait_event = crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION;
+            } else {
+                break;
+            }
+        } else if wait_for_standby_at_stop {
+            wait_event = crate::WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION;
         }
 
         // Waiting for new WAL: by definition caught up.
@@ -369,7 +374,7 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             wake_events |= WL_SOCKET_WRITEABLE;
         }
 
-        WalSndWait(wake_events, sleeptime, WAIT_EVENT_WAL_SENDER_WAIT_WAL)?;
+        WalSndWait(wake_events, sleeptime, wait_event)?;
     }
 
     // Reactivate the latch so WalSndLoop knows to continue.

@@ -175,10 +175,13 @@ fn pg_logical_slot_get_changes_guts(
 
     let mut srf = InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
 
-    if transam_xlog::RecoveryInProgress() {
-        panic!("unported callee reached from logicalfuncs.c: recovery end-of-wal");
-    }
-    let end_of_wal = transam_xlog::write::GetFlushRecPtr(None);
+    // Compute the current end-of-wal (logicalfuncs.c): flush position on a
+    // primary, replay position in recovery (logical decoding on standby).
+    let end_of_wal = if transam_xlog::RecoveryInProgress() {
+        xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
+    } else {
+        transam_xlog::write::GetFlushRecPtr(None)
+    };
 
     ReplicationSlotAcquire(&name, true, true)?;
 
