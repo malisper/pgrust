@@ -1106,6 +1106,15 @@ pub mod rtgang {
             bgw_extra: [0u8; bgworker::BGW_EXTRALEN],
             bgw_notify_pid: 0,
         });
+        // Per-thread timeout machinery, exactly where the bgworker glue
+        // does it (after signal dispositions, before any connect): the
+        // gang's warm/cold InitPostgres path registers the session
+        // timeouts, and RegisterTimeout debug_asserts InitializeTimeouts
+        // ran on THIS thread. Latent in m2-pool-binding -- its tranche rode
+        // a fast-profile sweep (assert compiled out); the train-12 split
+        // dev-profile tranche jobs exposed it (13 warm-connect panics,
+        // gang dead, standing refusals on every engagement).
+        timeout_seams::initialize_timeouts::call();
 
         // The loop + exit discipline (run_child_task-shaped): proc_exit's
         // unwind drains the deferred callbacks (ProcKill releases the

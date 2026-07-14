@@ -18,6 +18,7 @@ runtime = { path = "../../executor/runtime" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 backend_startup = { path = "../../tcop/backend_startup" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
 autovacuum = { path = "../autovacuum" }
 bgworker = { path = "../bgworker" }
 bgwriter = { path = "../bgwriter" }
