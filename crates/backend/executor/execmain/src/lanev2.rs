@@ -5996,6 +5996,34 @@ fn sort_feed_sink_batched<'mcx>(
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
     let spec = topn_emit_arm(sort, agg);
+    // COMPOSED top-N winner list (topn-winners-only amendment): when the
+    // sink published winners, the winner list IS the drain — put exactly
+    // the ≤bound winner rows in the selection total order (rule 5), in
+    // BOTH selection modes. This restores the winners-vs-FullDrain
+    // byte-identity oracle on tie-bearing shapes: the landed bucket walk
+    // fed ALL rows and let the bounded heap re-pick tie members
+    // (arrival-order-arbitrary — the ratified count-gated class); the
+    // winner-directed put pins tie members to the deterministic selection
+    // order. Winner sets are a valid top-bound under the sort's count
+    // order by the refinement argument (selection order = count badness
+    // first), so the tuplesort's bounded result stays correct by
+    // construction. Degraded/uncomposed sinks take `None` and walk the
+    // buckets exactly as before.
+    if let Some(winners) = ::nodeagg::sink::agg_sink_emit_take_winners(agg) {
+        for &(b, r) in &winners {
+            ::postgres_seams::check_for_interrupts::call()?;
+            let slot =
+                ::nodeagg::sink::agg_sink_emit_block_row(agg, estate, b as usize, r as usize);
+            ::nodesort::sort_lane_put(sort, estate, slot)?;
+        }
+        if stats::armed() && spec.is_some() {
+            stats::tick_topnemit_groups(winners.len() as u64, 0);
+        }
+        ::nodeagg::sink::agg_sink_emit_drained(agg);
+        ::nodesort::sort_lane_finish(sort, estate)?;
+        estate.es_direction = dir;
+        return Ok(());
+    }
     // The armed spec's sort key as an EMIT column: sortColIdx is 1-based
     // over the agg's output tlist = the EmitBuf's column order.
     let key_col = spec.map(|_| (sort.plan.sortColIdx[0] - 1) as usize);
@@ -7642,6 +7670,18 @@ fn hashgroup_emit<'mcx>(
     }
 }
 
+/// Emit loop over the runtime distinct sink's PAREMIT buckets (pardistinct
+/// paremit section doc): pre-formed rows in the plan Sort's prefix order,
+/// one row per pull — no HAVING on admitted shapes, so there is no
+/// group-rejected continue arm. CFI per group, the pull loop's cadence.
+fn pdemit_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    ::postgres_seams::check_for_interrupts::call()?;
+    ::nodeagg::agg_pdemit_emit_next(agg, estate)
+}
+
 // ===========================================================================
 // Dict-code batched exact-DISTINCT grouping (lane-v2-q14feed; nodeagg
 // codedgroup.rs holds the state machine + the byte-identity argument). The
@@ -8017,8 +8057,12 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
         return Ok(None);
     }
     // Mid-emit resume of a prior EA-engaged build (the serial top's
-    // hashgroup resume, verbatim — the sink adopts through hashgroup emit;
-    // the bypassed Sort must never be fed from the consumed scan).
+    // hashgroup resume, verbatim — the sink adopts through hashgroup emit
+    // or the paremit bucket merge; the bypassed Sort must never be fed
+    // from the consumed scan).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -8097,6 +8141,9 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // Hash-grouped arm mid-emit resume — BEFORE the dynamic gates (the arm's
     // section doc: the plan's Sort was bypassed and must never be fed from
     // the now-exhausted scan; the gates cannot flip mid-node here).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -12649,6 +12696,9 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Mid-emit resume — BEFORE the dynamic gates (the hashgrouped arm's
     // discipline: the fragment was consumed; nothing may re-pull it).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }

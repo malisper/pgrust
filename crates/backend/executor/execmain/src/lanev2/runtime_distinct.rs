@@ -57,9 +57,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::nodeagg::{
-    pd_bucket_precount, pd_concat_buckets, pd_empty_grouped_table, pd_merge_bucket_refs,
-    pd_route_value_records, pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdFeed,
-    PdHandedTable, PdMerged, PdSinkLocal, PdSpec, PD_SINK_GROUP_PARTS,
+    pd_bucket_precount, pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table,
+    pd_merge_bucket_refs, pd_route_value_records, pd_spill_record_width, pd_table_from_spill,
+    PdBucketMerger, PdEmitBucket, PdEmitRecipe, PdFeed, PdHandedTable, PdMerged, PdSinkLocal,
+    PdSpec, PD_SINK_GROUP_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -114,6 +115,12 @@ pub(super) struct RuntimeDistinctShared {
     /// The leader-derived build recipe (plain data; helpers fork Locals
     /// from it in-process — no DSM transfer).
     spec: Arc<PdSpec>,
+    /// PAREMIT recipe (pardistinct.rs section doc): Some = every combine
+    /// claim materializes its partition's ordered, fully-projected emit
+    /// bucket and the leader merges buckets instead of adopting a merged
+    /// table. Chosen once at admission — one engagement-level mode, so the
+    /// out cells hold one variant uniformly.
+    paremit: Option<Arc<PdEmitRecipe>>,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
@@ -148,10 +155,11 @@ pub(super) struct RuntimeDistinctShared {
     split_depth_max: AtomicU64,
     split_uniq: AtomicU64,
     /// Combine output cells, one per group partition. Single writer each:
-    /// partition p is claimed exactly once by the combine task set.
-    out: Vec<UnsafeCell<Option<PdMerged<'static>>>>,
-    /// The published merged result (finalize writes, the leader takes).
-    merged: Mutex<Option<PdMerged<'static>>>,
+    /// partition p is claimed exactly once by the combine task set. The
+    /// variant is uniform per engagement (`paremit`).
+    out: Vec<UnsafeCell<Option<DstCombined>>>,
+    /// The published result (finalize writes, the leader takes).
+    merged: Mutex<Option<DstPublished>>,
     /// EA-on-morsels (ea-morsels.md §2): Some(scan plan_node_id) ONLY when
     /// engaged under EXPLAIN ANALYZE — the sink's single EA flag; None on
     /// every other path (dead-when-off).
@@ -173,7 +181,9 @@ pub(super) struct RuntimeDistinctShared {
 // which the runtime's last-worker-out orders after every combine; (ii) the
 // PdMerged values held in `out`/`merged` are never-spilled bucket-merge
 // outputs (owned plain data — the PdHandedTable self-contained-buffer
-// argument); (iii) every other member is Send/Sync by composition.
+// argument), and the paremit PdEmitBucket values are arena-self-contained
+// projected rows (Send + Sync by the same argument); (iii) every other
+// member is Send/Sync by composition.
 unsafe impl Send for RuntimeDistinctShared {}
 unsafe impl Sync for RuntimeDistinctShared {}
 
@@ -206,9 +216,43 @@ impl RuntimeDistinctShared {
         self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
-    fn take_merged(&self) -> Option<PdMerged<'static>> {
+    fn take_merged(&self) -> Option<DstPublished> {
         self.merged.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
+
+    /// COMBINE-claim tail: convert the merged partition into the retained
+    /// form the engagement's mode publishes — the paremit bucket (ordered,
+    /// fully-projected; the merged table and its sets drop with the claim)
+    /// or the merged table itself (adopt mode, unchanged).
+    fn finish_combine(&self, m: PdMerged<'static>) -> PgResult<DstCombined> {
+        if let Some(r) = &self.paremit {
+            let b = pd_emit_bucket(&self.spec, r, &m)?;
+            return Ok(DstCombined::Emit(b));
+        }
+        Ok(DstCombined::Merged(m))
+    }
+}
+
+/// One combine claim's retained output (variant uniform per engagement).
+enum DstCombined {
+    Merged(PdMerged<'static>),
+    Emit(PdEmitBucket),
+}
+
+impl DstCombined {
+    /// Retained CONTENT bytes (the R3 merged-result metering input).
+    fn mem_bytes(&self) -> usize {
+        match self {
+            DstCombined::Merged(m) => m.mem_bytes(),
+            DstCombined::Emit(b) => b.mem_bytes(),
+        }
+    }
+}
+
+/// The finalize-published result the leader consumes.
+enum DstPublished {
+    Merged(PdMerged<'static>),
+    Emit(Vec<PdEmitBucket>),
 }
 
 // ---------------------------------------------------------------------------
@@ -342,13 +386,41 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             return;
         }
         // SAFETY: single-threaded under last-worker-out, after every combine.
-        let buckets: Vec<PdMerged<'static>> = self
+        let cells: Vec<DstCombined> = self
             .out
             .iter()
             .filter_map(|c| unsafe { (*c.get()).take() })
             .collect();
-        let merged = pd_concat_buckets(&self.spec, buckets);
-        *self.merged.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
+        // Uniform-mode invariant: the recipe is fixed before submit and
+        // finish_combine branches on the same field, so mixed variants are
+        // structurally impossible. Fail CLOSED if ever violated (publish
+        // nothing — the leader's "completed without a merged result"
+        // protocol check fires) rather than unwinding into the runtime
+        // (finalize runs outside the claim catch_unwind wrappers).
+        let mut bufs: Vec<PdEmitBucket> = Vec::new();
+        let mut merged_cells: Vec<PdMerged<'static>> = Vec::new();
+        for c in cells {
+            match c {
+                DstCombined::Emit(b) => bufs.push(b),
+                DstCombined::Merged(m) => merged_cells.push(m),
+            }
+        }
+        let published = if self.paremit.is_some() {
+            debug_assert!(merged_cells.is_empty(), "adopt cell in a paremit engagement");
+            if !merged_cells.is_empty() {
+                return;
+            }
+            // Paremit mode: publish the ordered buckets themselves (bucket
+            // position is a non-surface — the leader merge orders rows).
+            DstPublished::Emit(bufs)
+        } else {
+            debug_assert!(bufs.is_empty(), "paremit cell in an adopt engagement");
+            if !bufs.is_empty() {
+                return;
+            }
+            DstPublished::Merged(pd_concat_buckets(&self.spec, merged_cells))
+        };
+        *self.merged.lock().unwrap_or_else(|p| p.into_inner()) = Some(published);
     }
 }
 
@@ -358,7 +430,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
 /// SIZE decision itself is directory-only (M3.5 §4/§7 — nothing is read
 /// from disk before it); the split's own refusals come after bounded I/O.
 enum DstCombine {
-    Done(PdMerged<'static>),
+    Done(DstCombined),
     OverBudget,
 }
 
@@ -383,7 +455,9 @@ impl RuntimeDistinctShared {
         if spilled_bytes == 0 {
             // Nothing spilled into this partition: the donor merge verbatim.
             let refs: Vec<&PdHandedTable> = sealed.iter().map(|s| &s.table).collect();
-            return Ok(DstCombine::Done(pd_merge_bucket_refs(&self.spec, &refs, b)));
+            return Ok(DstCombine::Done(
+                self.finish_combine(pd_merge_bucket_refs(&self.spec, &refs, b))?,
+            ));
         }
         // Pre-count size check (M3.5 §4): spilled record count from the
         // directory alone; in-memory groups/values from the partition
@@ -457,7 +531,9 @@ impl RuntimeDistinctShared {
         }
         let refs: Vec<&PdHandedTable> =
             sealed.iter().map(|s| &s.table).chain(synth.iter()).collect();
-        Ok(DstCombine::Done(pd_merge_bucket_refs(&self.spec, &refs, b)))
+        Ok(DstCombine::Done(
+            self.finish_combine(pd_merge_bucket_refs(&self.spec, &refs, b))?,
+        ))
     }
 
     /// inc-3b COMBINE-SPLIT (design §4, the agg inc-2b twin on the VALUE
@@ -504,7 +580,7 @@ impl RuntimeDistinctShared {
         if !self.split_slices_into(&mut merger, b, set, &router.file, 1, groups, per_group)? {
             return Ok(DstCombine::OverBudget);
         }
-        Ok(DstCombine::Done(merger.finish()))
+        Ok(DstCombine::Done(self.finish_combine(merger.finish())?))
     }
 
     /// Merge each value slice of a routed split file into `merger`; slices
@@ -1239,6 +1315,15 @@ fn distinct_spill_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
+/// PAREMIT kill switch (default ON): `PGRUST_RUNTIME_DISTINCT_PAREMIT=0`
+/// keeps every engagement on the adopt tail — the A/B attribution channel
+/// (results are byte-identical either way; see the pardistinct.rs paremit
+/// section doc).
+fn distinct_paremit_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0"))
+}
+
 // ---------------------------------------------------------------------------
 // Leader-side engagement. Arming layering (kill switch + DOP option + lane
 // master) lives in guc_tables::runtime_pool::runtime_distinct_pool_dop —
@@ -1335,11 +1420,18 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // refusal priced the SERIAL hashgroup build vs the narrow sort, but
     // near-unique text shapes (CB q14, ~2 rows/group) are exactly this
     // arm's DOP-parallel conversion targets — the budget-fit term stays.
+    // PAREMIT shape probe BEFORE the economics tier: paremit-admitted
+    // shapes read the 1.0 density default — the serial adopt/emit tail the
+    // 8.0 tier priced is exactly what the parallel emit removes (the q14
+    // near-unique class's conversion; hashgrouped.rs economics doc).
+    let paremit_cols =
+        if distinct_paremit_enabled() { ::nodeagg::pd_paremit_cols(agg) } else { None };
     if !::nodeagg::agg_hashgroup_admissible(agg)
         || !::nodeagg::agg_hashgroup_economical_sink(
             agg,
             super::pardistinct_force(),
             sort.plan.plan.plan_rows,
+            paremit_cols.is_some(),
         )
     {
         refused(estate, ea, node_id, "hashgroup admission/economics");
@@ -1371,6 +1463,18 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "att bound");
         *rd_shape_refused = true;
         return Ok(None);
+    }
+    // PAREMIT recipe (mode fixed HERE, before submit — one engagement-level
+    // choice; combine and finalize branch on it uniformly). Resolution
+    // against the derived spec is structurally total for shapes the cols
+    // probe admitted; a None falls back to the adopt tail (correct, merely
+    // priced at the paremit density tier — comment at pd_paremit_recipe).
+    let paremit = paremit_cols
+        .as_deref()
+        .and_then(|cols| ::nodeagg::pd_paremit_recipe(&spec, cols, &order))
+        .map(Arc::new);
+    if paremit.is_some() {
+        lane_trace("runtime-distinct: paremit armed");
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
@@ -1442,7 +1546,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, order, scan_node, ea)
+    engage(agg, estate, rt, dop, total_granules, starts, spec, order, paremit, scan_node, ea)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1455,6 +1559,7 @@ fn engage<'mcx>(
     starts: Vec<u64>,
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
+    paremit: Option<Arc<PdEmitRecipe>>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     ea: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -1497,6 +1602,7 @@ fn engage<'mcx>(
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         eflags: estate.es_top_eflags,
         spec: Arc::clone(&spec),
+        paremit,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         exited: AtomicUsize::new(0),
@@ -1743,7 +1849,7 @@ fn engage_ceremony<'mcx>(
             Ok(None)
         }
         EngageOutcome::Completed => {
-            let Some(merged) = payload.take_merged() else {
+            let Some(published) = payload.take_merged() else {
                 // Completed with participants but no published result: a
                 // protocol violation, never silently wrong output.
                 return Err(Box::new(PgError::new(
@@ -1767,10 +1873,11 @@ fn engage_ceremony<'mcx>(
                     payload.split_depth_max.load(Ordering::Relaxed)
                 ));
             }
-            lane_trace(&format!(
-                "runtime-distinct: complete, groups={}",
-                merged.ngroups
-            ));
+            let groups = match &published {
+                DstPublished::Merged(m) => m.ngroups,
+                DstPublished::Emit(bufs) => bufs.iter().map(|b| b.nrows).sum(),
+            };
+            lane_trace(&format!("runtime-distinct: complete, groups={groups}"));
             // EA-on-morsels merge (clean Completed only): fold every
             // worker's final instrument export; write the bypassed
             // SeqScan's rows/nfiltered/loops and the bypassed Sort's
@@ -1812,15 +1919,37 @@ fn engage_ceremony<'mcx>(
                     m.workers, m.claims, m.granules, m.rows.scanned, m.rows.survived
                 ));
             }
-            trace_feed("runtime distinct sink adopt + hashgroup emit engaged");
-            ::nodeagg::agg_hashgroup_adopt_merged(
-                agg,
-                estate,
-                merged.into_lt(),
-                &spec.vocab,
-                order,
-            )?;
-            Ok(Some(super::hashgroup_emit(agg, estate)?))
+            match published {
+                DstPublished::Merged(merged) => {
+                    trace_feed("runtime distinct sink adopt + hashgroup emit engaged");
+                    ::nodeagg::agg_hashgroup_adopt_merged(
+                        agg,
+                        estate,
+                        merged.into_lt(),
+                        &spec.vocab,
+                        order,
+                    )?;
+                    Ok(Some(super::hashgroup_emit(agg, estate)?))
+                }
+                DstPublished::Emit(bufs) => {
+                    // PAREMIT adoption: rows were finalized, projected, and
+                    // ordered inside the combine claims; the leader's tail
+                    // is the cross-bucket merge + a datum memcpy per pull.
+                    let Some(recipe) = payload.paremit.as_deref() else {
+                        // Structurally impossible (finalize published Emit
+                        // only under Some) — protocol violation, never
+                        // silently wrong output.
+                        return Err(Box::new(PgError::new(
+                            ERROR,
+                            "runtime distinct published paremit buckets without a recipe",
+                        )));
+                    };
+                    trace_feed("runtime distinct sink paremit emit engaged");
+                    let st = ::nodeagg::pd_paremit_state(recipe, bufs)?;
+                    ::nodeagg::agg_pdemit_install(agg, st);
+                    Ok(Some(super::pdemit_emit(agg, estate)?))
+                }
+            }
         }
     }
 }
