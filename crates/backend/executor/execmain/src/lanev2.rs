@@ -4455,9 +4455,27 @@ fn sort_feed_if_needed<'mcx>(
             None
         };
         match (bplan, spec) {
-            (Some(plan), spec) => {
+            (Some(mut plan), spec) => {
                 lane_trace("batch emit armed (compact finalize kernels)");
-                sort_feed_agg_batched(state, &mut aps.agg, outer_desc, spec, plan, estate)?
+                // Top-k group selection before finalize/emit (lane-v2
+                // topkfin, hot-c1): on the single-key bounded shape, pick the
+                // k surviving groups on the RAW states and finalize/form only
+                // those. Declines (Ok(false)) fall through to the batched
+                // feed with nothing mutated.
+                let owned = match spec {
+                    Some(spec) if topkfin_admits(state) => sort_feed_agg_topk_finalize(
+                        state,
+                        &mut aps.agg,
+                        outer_desc.clone(),
+                        spec,
+                        &mut plan,
+                        estate,
+                    )?,
+                    _ => false,
+                };
+                if !owned {
+                    sort_feed_agg_batched(state, &mut aps.agg, outer_desc, spec, plan, estate)?
+                }
             }
             (None, Some(spec)) => {
                 sort_feed_agg_topn(state, &mut aps.agg, outer_desc, spec, estate)?
@@ -5363,6 +5381,98 @@ fn batch_emit_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(std::env::var("PGRUST_LANE_V2_BATCHEMIT").as_deref(), Ok("0") | Ok("off"))
     })
+}
+
+// ===========================================================================
+// Lane-v2 topkfin (hot-c1-topk-finalize): top-k group selection BEFORE
+// finalize/emit. The batched feed above still finalizes and forms a tuple for
+// EVERY group the topnemit boundary cut can't skip — and the streaming cut
+// only skips groups STRICTLY worse than the live k-th boundary, so on flat
+// order-key distributions (Q32/Q33: ~10M groups, boundary count ~1) it skips
+// nothing and ~10M numeric-avg divisions + tuple forms feed a sort that
+// keeps 10. This pass selects the k surviving groups FIRST, on the raw int8
+// order-key states (`nodeagg::topk_finalize_select` — a bounded (key, row)
+// heap in first-arrival total order), then runs the batched finalize+emit
+// for those k rows only.
+//
+// Admission (fail-closed, on top of the batchemit + topnemit admissions the
+// caller already proved):
+//   * single-column ORDER BY (the k-th boundary's tie-break must not need
+//     secondary keys);
+//   * bounded sort with a sane positive bound;
+//   * relaxed adaptive-topk tie mode (the selected members of the boundary
+//     tie group are the first-arrived, deterministic, C-LEGAL set — rule 2
+//     of docs/conformance/tie-ordering.md applied to agg groups; `tracked`
+//     and `0` stay byte-exact channels and never arm this);
+//   * every group's order-key transvalue non-NULL, checked row-by-row inside
+//     the selection scan (a NULL bails the whole pass before any side
+//     effect — NULLS placement stays the tuplesort's authority).
+// Kill switch: PGRUST_LANE_V2_TOPKFIN=0. Declines are never lane refusals —
+// the batched (or per-row) feed runs unchanged.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_TOPKFIN` kill switch (default ON inside the lane).
+fn topkfin_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_TOPKFIN").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Plan-shape admission for the topkfin pass (invariant block above). The
+/// state-level conditions (compact table present, non-NULL order keys) are
+/// checked by the selection itself.
+fn topkfin_admits(state: &::nodesort::SortState<'_>) -> bool {
+    topkfin_enabled()
+        && adaptive_topk_mode() == AdaptiveTopkMode::Relaxed
+        && state.bounded
+        && state.bound > 0
+        && state.plan.numCols == 1
+}
+
+/// The topkfin agg→sort feed: select the top-k groups on raw states, then
+/// `sort_feed_agg_batched`'s begin/put/finish frame over exactly those rows.
+/// Ok(false) = the selection declined (no compact table or a NULL order key)
+/// — nothing was mutated and no sort side effect happened; the caller runs
+/// the pre-existing feed.
+fn sort_feed_agg_topk_finalize<'mcx>(
+    sort: &mut ::nodesort::SortState<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    outer_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    spec: ::nodeagg::TopnEmitSpec,
+    plan: &mut ::nodeagg::BatchEmitPlan,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let k = usize::try_from(sort.bound).expect("admission checked bound > 0");
+    let Some((rows, groups)) = ::nodeagg::topk_finalize_select(agg, spec, k)? else {
+        stats::tick_topkfin_demoted();
+        return Ok(false);
+    };
+    lane_trace("topk finalize armed (group selection before finalize/emit)");
+    ::nodesort::sort_lane_begin(sort, outer_desc)?;
+    let dir = estate.es_direction;
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    for chunk in rows.chunks(::nodeagg::BATCH_EMIT_BLOCK) {
+        // Block-granular ExprContext reset — the previous block's finalized
+        // images were copied by its sort puts (batchemit's residency rule).
+        ::nodeagg::batch_emit_set_block(agg, estate, plan, chunk);
+        ::nodesort::sort_lane_put_batch(
+            sort,
+            estate,
+            0,
+            chunk.len() as u32,
+            false,
+            &mut BatchEmitFeed { agg, plan },
+        )?;
+    }
+    ::nodeagg::agg_emit_mark_drained(agg);
+    if stats::armed() {
+        stats::tick_topkfin_groups(groups, rows.len() as u64);
+        stats::tick_batchemit_groups(rows.len() as u64, 1);
+    }
+    ::nodesort::sort_lane_finish(sort, estate)?;
+    estate.es_direction = dir;
+    Ok(true)
 }
 
 /// `SortLaneBatchFeed` face of the batched compact emit: staged position `i`
