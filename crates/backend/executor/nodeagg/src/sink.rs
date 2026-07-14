@@ -750,6 +750,14 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
 /// The node's per-participant hash memory budget (C
 /// `work_mem × hash_mem_multiplier` — `get_hash_memory_limit`), the R3
 /// per-Local envelope.
+/// The node's hash-groups admission limit (C `hash_agg_check_limits`
+/// vocabulary) — the second bound of the sink admission gate; the
+/// budget-derived flush cap must respect BOTH bounds or it manufactures
+/// refusals the fixed cap never hit (dop1-tax inc-3b fix-up).
+pub fn agg_sink_ngroups_limit(node: &AggStateData<'_>) -> Option<u64> {
+    node.perhash.as_ref().map(|ph| ph.hash_ngroups_limit)
+}
+
 pub fn agg_sink_hash_mem_limit(node: &AggStateData<'_>) -> Option<usize> {
     node.perhash.as_ref().map(|ph| ph.hash_mem_limit)
 }
