@@ -17,6 +17,7 @@ use types_nodes::{Node, NodeTag};
 use crate::format::{
     append, ExplainCloseGroup, ExplainIndentText, ExplainOpenGroup, ExplainPropertyBool,
     ExplainPropertyFloat, ExplainPropertyInteger, ExplainPropertyList, ExplainPropertyText,
+    ExplainPropertyUInteger,
 };
 use define::str_in;
 use crate::state::{ExplainState, EXPLAIN_FORMAT_TEXT};
@@ -1485,6 +1486,91 @@ pub fn ExplainNode<'mcx>(
                         &format!("{arm}: {reason}"),
                         es,
                     );
+                }
+            }
+        }
+    }
+
+    // EA-on-morsels pipeline blocks (docs/design/ea-morsels.md §4): the
+    // engaged runtime pipeline reports at measured granularity — the full
+    // block on the pipeline's breaker (root) node, a marker line on
+    // bypassed member nodes. Reports exist ONLY on armed + instrumented
+    // engagements (same emission-gate law as the refusal line); TIMING OFF
+    // reports carry no time-derived lines (zero is not a time).
+    if es.analyze && !es.qd.is_null() {
+        if let Some(pipes) =
+            execmain_seams::query_desc_runtime_ea_pipeline::call(es.qd, plan.plan_node_id)
+        {
+            let mut member_marked = false;
+            for p in &pipes {
+                if p.root_node_id == plan.plan_node_id {
+                    let role = p.role.to_ascii_uppercase();
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        let (arm, ti, tc) = (p.arm, p.taskset_index, p.taskset_count);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "Runtime Pipeline: {arm} (task set {ti}/{tc} {role})\n");
+                        let workers = p.workers;
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Workers: {workers} participated\n");
+                        let (claims, granules) = (p.claims, p.granules);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Morsels: {claims} claims, {granules} granules\n");
+                        let (rs, rf, np) = (p.rows_scanned, p.rows_survived, p.partials);
+                        crate::format::ExplainIndentText(es);
+                        append!(es, "  Rows: {rs} scanned -> {rf} filtered -> {np} partials\n");
+                        let (pruned, bloom, meta, windows) =
+                            (p.prune[1], p.prune[2], p.prune[3], p.prune[6]);
+                        crate::format::ExplainIndentText(es);
+                        append!(
+                            es,
+                            "  Scan: {pruned} granules pruned ({bloom} bloom), \
+                             {meta} meta-answered, {windows} windows staged\n"
+                        );
+                    } else {
+                        crate::format::ExplainOpenGroup(
+                            "Runtime Pipeline",
+                            Some("Runtime Pipeline"),
+                            true,
+                            es,
+                        );
+                        crate::format::ExplainPropertyText("Arm", p.arm, es);
+                        crate::format::ExplainPropertyText("Role", &role, es);
+                        ExplainPropertyUInteger("Task Set", None, p.taskset_index as u64, es);
+                        ExplainPropertyUInteger("Task Sets", None, p.taskset_count as u64, es);
+                        ExplainPropertyUInteger("Workers", None, p.workers as u64, es);
+                        ExplainPropertyUInteger("Claims", None, p.claims, es);
+                        ExplainPropertyUInteger("Granules", None, p.granules, es);
+                        ExplainPropertyUInteger("Rows Scanned", None, p.rows_scanned, es);
+                        ExplainPropertyUInteger("Rows Filtered", None, p.rows_survived, es);
+                        ExplainPropertyUInteger("Partials", None, p.partials, es);
+                        ExplainPropertyUInteger("Granules Pruned", None, p.prune[1], es);
+                        ExplainPropertyUInteger("Bloom Pruned", None, p.prune[2], es);
+                        ExplainPropertyUInteger("Meta Answered", None, p.prune[3], es);
+                        ExplainPropertyUInteger("Windows Staged", None, p.prune[6], es);
+                        crate::format::ExplainCloseGroup(
+                            "Runtime Pipeline",
+                            Some("Runtime Pipeline"),
+                            true,
+                            es,
+                        );
+                    }
+                } else if !member_marked {
+                    member_marked = true;
+                    if es.format == EXPLAIN_FORMAT_TEXT {
+                        crate::format::ExplainIndentText(es);
+                        let arm = p.arm;
+                        append!(
+                            es,
+                            "runtime: member of {arm} pipeline \
+                             (times at pipeline granularity)\n"
+                        );
+                    } else {
+                        crate::format::ExplainPropertyText(
+                            "Runtime Member",
+                            &format!("{} pipeline (times at pipeline granularity)", p.arm),
+                            es,
+                        );
+                    }
                 }
             }
         }
