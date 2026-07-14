@@ -36,9 +36,12 @@
 //!    classified fold plan, representational grouping equality), lane-
 //!    comparable by-value keys, unprojected fusible cbstore SeqScan whose
 //!    staging arms (PREWHERE for qualled scans);
-//!  * UNGUARDED plan, no vguards, no residual transitions; every transition
-//!    kind runtime-partial combinable (AvgAccum/Int128/Count/Sum/byval
-//!    folds — Str/Bp/F min-max refuse);
+//!  * no vguards, no residual transitions; every transition kind
+//!    runtime-partial combinable (AvgAccum/Int128/Count/Sum/byval folds —
+//!    Str/Bp/F min-max refuse). GUARDED plans (the real q28 charlen mb
+//!    guard) ADMIT: the claim drive re-proves guards per window from zone
+//!    answers and refuses fail-closed on a Demote verdict (no checked
+//!    per-row program exists in the narrow drive);
 //!  * projection + HAVING reference ONLY grouping columns and aggregates
 //!    (the boundary-group representative is reconstructed from key datums;
 //!    a func-dep non-key Var would need the group's true first tuple);
@@ -425,6 +428,63 @@ fn drive_claim<'mcx>(
         if n % 64 != 0 {
             sel[nwords - 1] &= (1u64 << (n % 64)) - 1;
         }
+        // GUARDED plans (the real q28 class — charlen multibyte guard on
+        // avg(length(url))): the serial fold's per-window guard re-proof,
+        // verbatim (zone minmax answers first, then check_guards over the
+        // selected non-fallback rows). A Demote verdict is a fail-closed
+        // REFUSAL here (the narrow drive hosts no checked per-row program —
+        // serial rerun raises C's error at C's row if the data is bad).
+        {
+            let guarded = ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.guarded);
+            if guarded {
+                let mut zmm = [(0u16, (0i64, 0i64)); 8];
+                let mut nz = 0usize;
+                {
+                    let plan = ::nodeagg::agg_lanefold_plan(agg)
+                        .ok_or_else(|| sink_shape_error("guard proof without a plan"))?;
+                    for g in plan.guards.iter() {
+                        if nz == zmm.len() {
+                            break;
+                        }
+                        if let Some(mm) =
+                            ::nodeseqscan::seq_scan_window_value_minmax(ss, g.col as usize)
+                        {
+                            zmm[nz] = (g.col, mm);
+                            nz += 1;
+                        }
+                    }
+                }
+                let plan = ::nodeagg::agg_lanefold_plan(agg)
+                    .ok_or_else(|| sink_shape_error("guard proof without a plan"))?;
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .ok_or_else(|| sink_shape_error("guard proof without a staged SoA"))?;
+                // Proof domain: the selection (fallback words are all zero —
+                // checked above); PREWHERE lane sel is a superset of the
+                // fold's touched rows when present (the serial discipline).
+                let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
+                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                    Some(ls) => rows[..nwords].copy_from_slice(&ls[..nwords]),
+                    None => rows[..nwords].copy_from_slice(&sel[..nwords]),
+                }
+                if n % 64 != 0 {
+                    rows[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+                if rows[..nwords].iter().any(|&w| w != 0) {
+                    // SAFETY: proof rows are staged non-fallback selected
+                    // rows with live deformed lane values (the completing
+                    // deform filled every prefix column; vguard columns are
+                    // structurally absent — admission).
+                    let demote = unsafe {
+                        ::lanefold::check_guards(plan, soa, &rows[..nwords], |c| {
+                            zmm[..nz].iter().find(|e| e.0 == c).map(|e| e.1)
+                        }) == ::lanefold::GuardCheck::Demote
+                    };
+                    if demote {
+                        return Err(AcceptFail::Budget);
+                    }
+                }
+            }
+        }
         let mut run = [0u64; ::exectuples::SOA_BM_WORDS];
         let mut run_any = false;
         macro_rules! flush_run {
@@ -754,8 +814,12 @@ fn arm_sorted_build<'mcx>(
 /// vguards and no residuals, every transition runtime-partial combinable.
 fn sorted_arm_shape_ok(agg: &::nodeagg::AggStateData<'_>) -> bool {
     ::nodeagg::agg_sorted_fold_admissible(agg)
+        // GUARDED plans admit (the real q28 class — charlen mb guard):
+        // the claim drive re-proves guards per window from zone answers
+        // and REFUSES on Demote (no checked per-row program exists here).
+        // vguards (str min/max varlena guards) and residuals still refuse.
         && ::nodeagg::agg_lanefold_plan(agg)
-            .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty())
+            .is_some_and(|p| p.vguards.is_empty() && p.resid.is_empty())
         && !::nodeagg::agg_lanefold_has_resid(agg)
         && ::nodeagg::runtime_partial::agg_runtime_partial_admissible(agg)
 }
