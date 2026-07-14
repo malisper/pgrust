@@ -66,6 +66,39 @@ pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 /// zero measurement overhead.
 pub const PREFETCH_LOOKAHEAD: usize = 8;
 
+/// Runtime channel for the engaged look-ahead distance
+/// (`PGRUST_LANE_V2_PROBE_LOOKAHEAD`; default [`PREFETCH_LOOKAHEAD`], 0 =
+/// no in-loop hints). Read once, loaded into a register per batch — zero
+/// hot-loop cost. C3 probe-prefetch A/B channel.
+#[inline]
+fn probe_lookahead() -> usize {
+    static LA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LA.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_PROBE_LOOKAHEAD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(PREFETCH_LOOKAHEAD)
+    })
+}
+
+/// C3 two-stage row-line prefetch for the Salt8/Int128 engaged runs. The
+/// slot-line hint hides the ENTRY miss, but a salt hit must deref the ROW
+/// for the key compare — an unhidden dependent second miss (Inline16 keys
+/// compare in the slot and don't pay it). Two stages: prefetch the home
+/// slot 2d ahead; d ahead, read the (now cached) home slot and prefetch
+/// its referenced row line. `PGRUST_LANE_V2_PROBE_ROWPF=0` restores the
+/// slot-only shape at distance d (the pre-C3 behavior).
+#[inline]
+fn probe_rowpf() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_PROBE_ROWPF").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
 const SALT_SHIFT: u32 = 48;
 const REF_MASK: u64 = (1 << SALT_SHIFT) - 1;
 /// Salt bits 32..48 of the hash — DISJOINT from the two-level bucket byte
@@ -803,6 +836,12 @@ impl LaneAggTable {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
         let sw = if INLINE { 2 } else { 1 };
+        // C3 channels (registers for the whole run): slot-line hint distance
+        // + the Salt8 row-line second stage (see probe_rowpf — Inline16
+        // compares in the slot and skips it).
+        let la = probe_lookahead();
+        let rowpf = !INLINE && la != 0 && probe_rowpf();
+        let d_slot = if rowpf { la * 2 } else { la };
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             // Hoisted raw parts (re-derived after every insert — see
@@ -821,8 +860,8 @@ impl LaneAggTable {
             let rows_stride = self.rows.stride_words;
             let salt_on = !INLINE && self.total_members > SALT_DISABLE_MAX_ENTRIES;
             while i < keys.len() {
-                let j = i + PREFETCH_LOOKAHEAD;
-                if j < keys.len() {
+                let j = i + d_slot;
+                if la != 0 && j < keys.len() {
                     // SAFETY: j < keys.len() == hashes.len().
                     let h = unsafe { *hashes.get_unchecked(j) };
                     let (e_ptr_j, mask_j) = if bp.is_null() {
@@ -834,6 +873,32 @@ impl LaneAggTable {
                     };
                     // SAFETY: masked slot index × slot words (hint only).
                     prefetch(unsafe { e_ptr_j.add(((h as usize) & mask_j) * sw) });
+                }
+                if rowpf {
+                    // Stage 2 (Salt8): the home slot for row i+la was
+                    // hinted la iterations ago — read it and hint the row
+                    // line its ref points at (the key-compare deref).
+                    let j1 = i + la;
+                    if j1 < keys.len() {
+                        // SAFETY: j1 < keys.len() == hashes.len().
+                        let h = unsafe { *hashes.get_unchecked(j1) };
+                        let (e_ptr_1, mask_1) = if bp.is_null() {
+                            (sp_entries, sp_mask)
+                        } else {
+                            // SAFETY: two-level tables have 256 buckets.
+                            let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                            (set.entries.as_mut_ptr(), set.mask)
+                        };
+                        // SAFETY: masked slot index (Salt8: 1 slot word).
+                        let e = unsafe { *e_ptr_1.add((h as usize) & mask_1) };
+                        if e != 0 {
+                            let row = ((e & REF_MASK) - 1) as usize;
+                            // SAFETY: live row ref (entries hold row+1).
+                            prefetch(unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            });
+                        }
+                    }
                 }
                 // SAFETY: i < keys.len() == hashes.len().
                 let key = unsafe { *keys.get_unchecked(i) };
@@ -1174,6 +1239,11 @@ impl LaneAggTable {
     ) {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
+        // C3 channels (see probe_fold_hashed_run): Int128 is Salt8-only, so
+        // the row-line second stage always applies when enabled.
+        let la = probe_lookahead();
+        let rowpf = la != 0 && probe_rowpf();
+        let d_slot = if rowpf { la * 2 } else { la };
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             let bp: *mut EntrySet = match &mut self.buckets {
@@ -1190,8 +1260,8 @@ impl LaneAggTable {
             let rows_stride = self.rows.stride_words;
             let salt_on = self.total_members > SALT_DISABLE_MAX_ENTRIES;
             while i < keys.len() {
-                let j = i + PREFETCH_LOOKAHEAD;
-                if j < keys.len() {
+                let j = i + d_slot;
+                if la != 0 && j < keys.len() {
                     // SAFETY: j < keys.len() == hashes.len().
                     let h = unsafe { *hashes.get_unchecked(j) };
                     let (e_ptr_j, mask_j) = if bp.is_null() {
@@ -1203,6 +1273,32 @@ impl LaneAggTable {
                     };
                     // SAFETY: masked entry index (Salt8: 1 slot word) — hint.
                     prefetch(unsafe { e_ptr_j.add((h as usize) & mask_j) });
+                }
+                if rowpf {
+                    // Stage 2: read the (hinted) home slot for row i+la and
+                    // prefetch the row line its ref points at — the 2-word
+                    // key compare's otherwise-unhidden dependent miss.
+                    let j1 = i + la;
+                    if j1 < keys.len() {
+                        // SAFETY: j1 < keys.len() == hashes.len().
+                        let h = unsafe { *hashes.get_unchecked(j1) };
+                        let (e_ptr_1, mask_1) = if bp.is_null() {
+                            (sp_entries, sp_mask)
+                        } else {
+                            // SAFETY: two-level tables have 256 buckets.
+                            let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                            (set.entries.as_mut_ptr(), set.mask)
+                        };
+                        // SAFETY: masked entry index (Salt8: 1 slot word).
+                        let e = unsafe { *e_ptr_1.add((h as usize) & mask_1) };
+                        if e != 0 {
+                            let row = ((e & REF_MASK) - 1) as usize;
+                            // SAFETY: live row ref (entries hold row+1).
+                            prefetch(unsafe {
+                                row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                            });
+                        }
+                    }
                 }
                 // SAFETY: i < keys.len() == hashes.len().
                 let key = unsafe { *keys.get_unchecked(i) };
