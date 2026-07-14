@@ -85,6 +85,11 @@ pub(crate) struct RgProgress {
     pub(crate) started: Vec<bool>,
     pub(crate) done: Vec<bool>,
     pub(crate) aborted: bool,
+    /// Published-but-not-finalized task sets (live pipelines). Sequential
+    /// walk: 0 or 1 by construction. DAG dispatch (M5+1): the RG completes
+    /// only when `live == 0` AND nothing is ready — a finishing pipeline
+    /// with live siblings releases its slot without completing the RG.
+    pub(crate) live: usize,
 }
 
 /// RG completion state the submitting leader parks on (§2.5: submit-and-
@@ -254,6 +259,22 @@ pub struct ResourceGroup {
     /// (M5-4; set via Runtime::submit_with_affinity — QuerySpec deliberately
     /// unchanged for backward compatibility, integration-train note).
     pub(crate) session_token: u64,
+    /// Query-level stride account (M5+1 pipeline-DAG dispatch, m5-planner
+    /// §3.6): the QUERY is the fair-share principal — under DAG dispatch all
+    /// of the RG's live pipeline slots advance THIS account (pass advances
+    /// on the SUM of their consumed quanta) and each slot's pass word
+    /// mirrors it, so a query with 4 live pipelines gets the same aggregate
+    /// share as a single-pipeline peer. Unused (stays 0) in sequential-walk
+    /// mode. With ONE pipeline the account's value sequence is identical to
+    /// the slot's own fetch_add — single-pipeline scheduling is unchanged
+    /// by construction.
+    pub(crate) pass_account: AtomicU64,
+    /// Dependency depth per task set (M5+1, §3.6): depth[i] = length of the
+    /// longest dependency chain of task sets ABOVE i (its downstream
+    /// release). Within-query pick priority is deepest-first (ties by
+    /// submission = index order). Computed once at construction from the
+    /// deps DAG; immutable.
+    pub(crate) depth: Vec<u64>,
     /// Scheduler back-reference for the queued-abort reap (M5-4 slot-
     /// reclamation fix): an aborted RG still in the wait queue completes
     /// promptly instead of waiting for a slot to free. Weak — the RG never
@@ -281,6 +302,15 @@ impl ResourceGroup {
                 assert!(d < i, "task-set deps must be DAG-ordered (dep {d} >= index {i})");
             }
         }
+        // Dependency depth (§3.6): longest chain of dependents above each
+        // task set. Descending index order finalizes depth[j] before j is
+        // visited as anyone's dep (dependents always have larger indices).
+        let mut depth = vec![0u64; n];
+        for j in (0..n).rev() {
+            for &d in &spec.tasksets[j].deps {
+                depth[d] = depth[d].max(depth[j] + 1);
+            }
+        }
         let task = QueryTaskLifecycle::with_owner(Arc::new(SchedulerOwner));
         let handle = task.publish().expect("fresh lifecycle publishes once");
         Arc::new(ResourceGroup {
@@ -295,12 +325,15 @@ impl ResourceGroup {
                 started: vec![false; n],
                 done: vec![false; n],
                 aborted: false,
+                live: 0,
             }),
             completion: Completion::new(),
             stats: RgStats::default(),
             priority: AtomicU32::new(INITIAL_PRIORITY),
             cpu_consumed_ns: AtomicU64::new(0),
             session_token,
+            pass_account: AtomicU64::new(0),
+            depth,
             sched,
             submit_ns: AtomicU64::new(0),
             first_service_ns: AtomicU64::new(0),
@@ -309,16 +342,46 @@ impl ResourceGroup {
     }
 
     /// First not-yet-started task set whose deps have all finalized, marked
-    /// started. One task set of an RG is active at a time in M0 (single
-    /// slot; bushy parallelism deliberately avoided — 2014 §pipelines).
+    /// started. One task set of an RG is active at a time on the sequential
+    /// walk (single slot; the M0 shape — DAG dispatch is the M5+1 opt-in,
+    /// see [`ResourceGroup::ready_all`]).
     pub(crate) fn next_ready(&self, progress: &mut RgProgress) -> Option<usize> {
         for i in 0..self.tasksets.len() {
             if !progress.started[i] && self.tasksets[i].deps.iter().all(|&d| progress.done[d]) {
                 progress.started[i] = true;
+                progress.live += 1;
                 return Some(i);
             }
         }
         None
+    }
+
+    /// EVERY not-yet-started task set whose deps have all finalized, capped
+    /// at `max` (the caller's slot capacity), deepest-first (§3.6
+    /// within-query priority; stable sort keeps submission = index order on
+    /// ties). Marks the taken ones started; the rest stay unstarted-ready
+    /// and are re-found by the next call (a later finalize with freed
+    /// capacity). Returns `(taken, deferred)` where `deferred` counts ready
+    /// task sets left behind for lack of capacity. M5+1 DAG dispatch only.
+    pub(crate) fn ready_all(
+        &self,
+        progress: &mut RgProgress,
+        max: usize,
+    ) -> (Vec<usize>, usize) {
+        let mut ready: Vec<usize> = (0..self.tasksets.len())
+            .filter(|&i| {
+                !progress.started[i]
+                    && self.tasksets[i].deps.iter().all(|&d| progress.done[d])
+            })
+            .collect();
+        ready.sort_by_key(|&i| std::cmp::Reverse(self.depth[i]));
+        let deferred = ready.len().saturating_sub(max);
+        ready.truncate(max);
+        for &i in &ready {
+            progress.started[i] = true;
+            progress.live += 1;
+        }
+        (ready, deferred)
     }
 
     pub fn query_id(&self) -> u64 {

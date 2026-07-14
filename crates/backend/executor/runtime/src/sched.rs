@@ -55,6 +55,33 @@
 //! - Pass/stride/session words are Relaxed and ADVISORY: they order the
 //!   pick, never execution safety — a stale pick revalidates through the
 //!   slot word into Retry (same argument as the maintenance mask).
+//!
+//! PIPELINE-DAG DISPATCH (M5+1 increment 1, m5-planner §3.6 — independent-
+//! subtree overlap ONLY; `PGRUST_RUNTIME_PIPELINE_DAG=1`, default OFF):
+//! instead of walking an RG's task sets one slot at a time, publish EVERY
+//! task set whose dependencies have all finalized, each in its own slot —
+//! independent hash-build sides / subqueries / UNION ALL branches overlap. A
+//! task set with unmet deps is NOT SUBMITTED: it occupies no slot, queues
+//! nowhere, and no worker can wait on it — which is the increment's
+//! structural deadlock argument (the wait graph over RUNNING entities has no
+//! dependency edges at all; workers never hold-and-wait across task sets —
+//! one claim, one morsel, permits donated on declared blocking). A
+//! finishing pipeline's finalize marks its dep edge satisfied and publishes
+//! the newly-ready pipelines: the deepest into its own (retained) slot,
+//! the rest into free slots — capacity shortfalls defer (counted), and the
+//! deferred pipeline re-publishes when one of the query's own pipelines
+//! finishes, so the RG always holds ≥1 slot while work remains (progress
+//! guaranteed without any cross-RG wait). Fairness: the QUERY is the
+//! fair-share principal — all of an RG's slots advance ONE stride account
+//! ([`ResourceGroup::pass_account`], the sum of their quanta) mirrored into
+//! each slot's pass word (one-task-bounded staleness, advisory); within a
+//! query at equal pass the pick prefers the DEEPER pipeline (§3.6
+//! dependency-depth priority, ties by submission order). OFF (the kill
+//! switch, this increment's default) is today's sequential walk,
+//! byte-identical; ON with a single-pipeline RG degenerates to the same
+//! pick and pass sequence by construction (the CB-43 flatness anchor).
+//! Streaming across pipeline seams is inc-3 (evidence-gated, NOT here);
+//! tail/ramp readahead overlap is inc-2 (also not here).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -91,6 +118,18 @@ pub(crate) fn stride_for(priority: u32) -> u64 {
 fn stride_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STRIDE").map_or(true, |v| v.trim() != "0"))
+}
+
+/// M5+1 pipeline-DAG dispatch switch: `PGRUST_RUNTIME_PIPELINE_DAG=1` (or
+/// `on`) publishes every dependency-satisfied task set concurrently (see
+/// module doc). DEFAULT OFF at this increment — off is today's sequential
+/// walk, byte-identical. Read once; tests toggle per-instance via
+/// [`crate::Runtime::set_dag`].
+fn dag_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_PIPELINE_DAG").as_deref(), Ok("1") | Ok("on"))
+    })
 }
 
 /// Pin-board lanes reserved for EXTERNAL participant threads (M1: the
@@ -334,6 +373,10 @@ pub(crate) struct Scheduler {
     /// M5-4 stride activation switch (env default; tests toggle per
     /// instance). OFF ⇒ the M0 FIFO lowest-index pick, byte-identical.
     stride: AtomicBool,
+    /// M5+1 pipeline-DAG dispatch switch (env default, DEFAULT OFF this
+    /// increment; tests toggle per instance). OFF ⇒ the sequential
+    /// one-slot-per-RG task-set walk, byte-identical.
+    dag: AtomicBool,
     /// Global pass watermark (monotone max of charged passes): a NEWLY
     /// admitted RG's slot pass starts here — standard stride join, no
     /// credit for queue wait, no monopoly for late arrivals.
@@ -377,6 +420,7 @@ impl Scheduler {
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
             stride: AtomicBool::new(stride_default()),
+            dag: AtomicBool::new(dag_default()),
             global_pass: AtomicU64::new(0),
             clock,
             params,
@@ -440,6 +484,17 @@ impl Scheduler {
         self.stride.load(Ordering::Relaxed)
     }
 
+    /// M5+1: per-instance pipeline-DAG dispatch toggle (tests / A-B;
+    /// production reads the PGRUST_RUNTIME_PIPELINE_DAG default once at
+    /// construction — default OFF this increment).
+    pub(crate) fn set_dag(&self, on: bool) {
+        self.dag.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn dag_enabled(&self) -> bool {
+        self.dag.load(Ordering::Relaxed)
+    }
+
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
     pub(crate) fn clock_now_ns(&self) -> u64 {
         self.clock.now_ns()
@@ -486,6 +541,7 @@ impl Scheduler {
         if self.trace {
             self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
         }
+        self.emit_dag(&rg);
         if rg.tasksets.is_empty() {
             rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
             rg.completion.complete(RgOutcome::Completed);
@@ -520,19 +576,51 @@ impl Scheduler {
         rg
     }
 
-    /// Mark the RG's first task set started and publish it. Caller holds the
-    /// membership lock (lock order: membership, then progress).
+    /// Mark the RG's first ready task set(s) started and publish. Caller
+    /// holds the membership lock (lock order: membership, then progress).
+    ///
+    /// DAG dispatch (M5+1): admission publishes EVERY dependency-satisfied
+    /// task set the free slots allow — a UNION ALL's branches / a
+    /// multi-join's independent build sides start together. `slot` (the
+    /// caller's free pick) takes the deepest; extras fan out into remaining
+    /// free slots; capacity shortfalls defer (the deferred pipeline
+    /// re-publishes when one of the query's own pipelines finishes).
     fn start_rg_locked(&self, m: &mut Membership, rg: Arc<ResourceGroup>, slot: usize) {
         // Stride join (M5-4): a newly-admitted RG starts at the global pass
         // watermark — no credit for queue wait, no monopoly over incumbents.
         // Stored BEFORE the publish makes the slot pickable; persists across
         // the RG's task-set republishes (publish never resets it).
-        self.slots[slot].pass.store(self.global_pass.load(Ordering::Relaxed), Ordering::Relaxed);
-        let first = {
+        let watermark = self.global_pass.load(Ordering::Relaxed);
+        self.slots[slot].pass.store(watermark, Ordering::Relaxed);
+        if !self.dag.load(Ordering::Relaxed) {
+            let first = {
+                let mut p = lock(&rg.progress);
+                rg.next_ready(&mut p).expect("fresh RG must have a ready task set (index 0)")
+            };
+            self.publish_taskset_locked(m, rg, first, slot);
+            return;
+        }
+        // DAG join: the QUERY's shared stride account starts at the
+        // watermark; every slot publish mirrors it into the slot's pass.
+        rg.pass_account.store(watermark, Ordering::Relaxed);
+        let free = m.owned.iter().filter(|e| e.is_none()).count();
+        debug_assert!(free >= 1, "caller must hand start_rg_locked a free slot");
+        let (ready, deferred) = {
             let mut p = lock(&rg.progress);
-            rg.next_ready(&mut p).expect("fresh RG must have a ready task set (index 0)")
+            rg.ready_all(&mut p, free)
         };
-        self.publish_taskset_locked(m, rg, first, slot);
+        assert!(!ready.is_empty(), "fresh RG must have a ready task set (index 0)");
+        RuntimeStats::add(&self.stats.dag_ready_deferred, deferred as u64);
+        self.publish_taskset_locked(m, Arc::clone(&rg), ready[0], slot);
+        for &r in &ready[1..] {
+            let s = m
+                .owned
+                .iter()
+                .position(Option::is_none)
+                .expect("ready_all is capped by the free-slot count");
+            RuntimeStats::tick(&self.stats.dag_fanout_publishes);
+            self.publish_taskset_locked(m, Arc::clone(&rg), r, s);
+        }
     }
 
     fn publish_taskset_locked(
@@ -542,6 +630,18 @@ impl Scheduler {
         index: usize,
         slot: usize,
     ) {
+        // Submission gating (M5+1 structural deadlock premise 1): a task set
+        // is only ever PUBLISHED with every dependency finalized — no
+        // running task can wait on an unfinished pipeline because nothing
+        // dependency-unsatisfied is visible to any worker.
+        #[cfg(debug_assertions)]
+        {
+            let p = lock(&rg.progress);
+            debug_assert!(
+                rg.tasksets[index].deps.iter().all(|&d| p.done[d]),
+                "published task set {index} with unsatisfied dependencies"
+            );
+        }
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let c0 = rg.tasksets[index].source.startup_c0();
         // Generation binding (H1): hand the work its generation BEFORE the
@@ -580,6 +680,17 @@ impl Scheduler {
             .stride
             .store(stride_for(ts.rg.priority.load(Ordering::Relaxed)), Ordering::Relaxed);
         self.slots[slot].session.store(ts.rg.session_token, Ordering::Relaxed);
+        // M5+1 advisory words: same-query identification + dependency depth
+        // for the within-query pick refinement (read only under DAG mode).
+        self.slots[slot].rg.store(ts.rg.rg_id, Ordering::Relaxed);
+        self.slots[slot].depth.store(ts.rg.depth[index], Ordering::Relaxed);
+        if self.dag.load(Ordering::Relaxed) {
+            // The QUERY's shared stride account is the slot's pass (§3.6:
+            // one account summed over the query's pipelines). Mirrored at
+            // publish and at every advance; single-pipeline RGs see the
+            // exact per-slot sequence sequential mode would produce.
+            self.slots[slot].pass.store(ts.rg.pass_account.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // Pinned RGs are invisible to the pool's pick: only external
@@ -678,6 +789,25 @@ impl Scheduler {
                         {
                             RuntimeStats::tick(&self.stats.affinity_tiebreaks);
                             best = Some((pass, slot));
+                        } else if pass == bp && self.dag.load(Ordering::Relaxed) {
+                            // M5+1 within-query refinement (§3.6): among a
+                            // query's runnable pipelines at equal pass (its
+                            // slots share one mirrored account, so they tie),
+                            // prefer the DEEPER one — the critical path
+                            // releases the most downstream work. Same-query
+                            // only (advisory rg words match, nonzero); ties
+                            // keep scan = submission order. Never crosses
+                            // the affinity tiebreak: same-query slots carry
+                            // the same session token.
+                            let brg = self.slots[bs].rg.load(Ordering::Relaxed);
+                            if brg != 0
+                                && brg == self.slots[slot].rg.load(Ordering::Relaxed)
+                                && self.slots[slot].depth.load(Ordering::Relaxed)
+                                    > self.slots[bs].depth.load(Ordering::Relaxed)
+                            {
+                                RuntimeStats::tick(&self.stats.dag_depth_picks);
+                                best = Some((pass, slot));
+                            }
                         }
                     }
                 }
@@ -748,11 +878,39 @@ impl Scheduler {
             _ => {
                 let found = {
                     let m = lock(&self.membership);
-                    m.owned.iter().enumerate().find_map(|(i, e)| {
-                        e.as_ref()
-                            .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
-                            .map(|e| (i, e.seq))
-                    })
+                    if self.dag.load(Ordering::Relaxed) {
+                        // M5+1: a pinned RG may occupy several slots. Among
+                        // its live pipelines prefer the DEEPEST (§3.6
+                        // critical-path priority), then the least-crowded
+                        // (spreads the gang across independent pipelines),
+                        // then lowest index. Advisory — a stale choice
+                        // revalidates through the slot word into Retry.
+                        let mut best: Option<(u64, u64, usize, u64)> = None;
+                        for (i, e) in m.owned.iter().enumerate() {
+                            let Some(e) = e.as_ref().filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                            else {
+                                continue;
+                            };
+                            let depth = e.ts.rg.depth[e.ts.index];
+                            let crowd = e.ts.active_workers.load(Ordering::SeqCst);
+                            let better = match &best {
+                                None => true,
+                                Some((bd, bc, _, _)) => {
+                                    depth > *bd || (depth == *bd && crowd < *bc)
+                                }
+                            };
+                            if better {
+                                best = Some((depth, crowd, i, e.seq));
+                            }
+                        }
+                        best.map(|(_, _, i, seq)| (i, seq))
+                    } else {
+                        m.owned.iter().enumerate().find_map(|(i, e)| {
+                            e.as_ref()
+                                .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                                .map(|e| (i, e.seq))
+                        })
+                    }
                 };
                 local.pinned_slot = found;
                 found.map(|(slot, _)| slot)
@@ -913,8 +1071,22 @@ impl Scheduler {
                     if self.stride.load(Ordering::Relaxed) {
                         let stride = self.slots[ts.slot].stride.load(Ordering::Relaxed);
                         let adv = (t_cpu_ns.saturating_mul(stride) >> PASS_SHIFT).max(1);
-                        let new_pass =
-                            self.slots[ts.slot].pass.fetch_add(adv, Ordering::Relaxed) + adv;
+                        let new_pass = if self.dag.load(Ordering::Relaxed) {
+                            // M5+1 (§3.6): the QUERY is the fair-share
+                            // principal — advance the RG's shared account
+                            // (the SUM of its pipelines' quanta) and mirror
+                            // it into this slot's pass word. Sibling slots
+                            // lag by at most their own last task (advisory;
+                            // they re-sync on their next advance). With one
+                            // pipeline this is value-identical to the slot
+                            // fetch_add below.
+                            let np =
+                                ts.rg.pass_account.fetch_add(adv, Ordering::Relaxed) + adv;
+                            self.slots[ts.slot].pass.store(np, Ordering::Relaxed);
+                            np
+                        } else {
+                            self.slots[ts.slot].pass.fetch_add(adv, Ordering::Relaxed) + adv
+                        };
                         // Watermark: monotone max (new admissions join here).
                         let mut cur = self.global_pass.load(Ordering::Relaxed);
                         while new_pass > cur {
@@ -1101,6 +1273,13 @@ impl Scheduler {
     /// Protocol step 5: at-most-once finalization by the provably-last
     /// worker out, then activate the RG's next task set in the same slot —
     /// or complete the RG and admit the next queued one.
+    ///
+    /// DAG dispatch (M5+1): the finalize is the DEPENDENCY-EDGE
+    /// SATISFACTION event — it publishes every newly-ready pipeline (the
+    /// deepest reuses this slot; the rest fan out into free slots, deferring
+    /// on capacity). A finishing pipeline with live siblings releases its
+    /// slot WITHOUT completing the RG; the RG completes only at live == 0
+    /// with nothing ready (all done, or aborted).
     fn last_out(&self, ts: &Arc<TaskSetRt>) {
         let was = ts.finalized.swap(true, Ordering::SeqCst);
         assert!(!was, "finalization must run at most once");
@@ -1117,10 +1296,17 @@ impl Scheduler {
             ));
         }
 
+        if self.dag.load(Ordering::Relaxed) {
+            self.last_out_dag(ts, rg, aborted);
+            return;
+        }
+
+        // ---- sequential walk (DAG dispatch off): today's behavior --------
         // Progress under the RG lock only (never while holding membership).
         let next = {
             let mut p = lock(&rg.progress);
             p.done[ts.index] = true;
+            p.live -= 1;
             if aborted {
                 p.aborted = true;
                 None
@@ -1148,54 +1334,143 @@ impl Scheduler {
                     );
                 }
                 self.release_slot_and_admit(ts.slot, ts.seq);
-                // The RG leaves the scheduler: drain (a no-op — every
-                // participant is provably gone, see retire_lifecycle) and
-                // retire its generation before the leader wakes.
-                rg.retire_lifecycle();
-                rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
-                rg.completion.complete(if aborted {
-                    RgOutcome::Aborted
+                self.complete_rg(&rg, aborted);
+            }
+        }
+    }
+
+    /// The M5+1 edge-satisfaction/submission handshake (module doc; loom
+    /// model `dag_fanout_publish_exactly_once`). Membership is taken FIRST
+    /// (lock order: membership, then progress) so the ready computation,
+    /// its capacity cap, and the publishes are one atomic membership event —
+    /// two concurrently-finishing dependencies of one consumer serialize
+    /// here, and exactly one of them observes the consumer ready.
+    fn last_out_dag(&self, ts: &Arc<TaskSetRt>, rg: Arc<ResourceGroup>, aborted: bool) {
+        enum After {
+            Publish(Vec<usize>),
+            Release { complete: bool },
+        }
+        let mut m = lock(&self.membership);
+        debug_assert!(
+            matches!(&m.owned[ts.slot], Some(e) if e.seq == ts.seq),
+            "slot ownership changed before last-out"
+        );
+        let after = {
+            let mut p = lock(&rg.progress);
+            p.done[ts.index] = true;
+            p.live -= 1;
+            if aborted {
+                // No new submissions on a dead generation; live published
+                // siblings drain through their own generation-refusal
+                // last-outs — the LAST one completes the RG.
+                p.aborted = true;
+                After::Release { complete: p.live == 0 }
+            } else {
+                // This slot is still ours (freed below or reused), so the
+                // capacity for newly-ready pipelines is free slots + 1.
+                let free = m.owned.iter().filter(|e| e.is_none()).count();
+                let (ready, deferred) = rg.ready_all(&mut p, free + 1);
+                RuntimeStats::add(&self.stats.dag_ready_deferred, deferred as u64);
+                if ready.is_empty() {
+                    if p.live == 0 {
+                        debug_assert!(
+                            p.done.iter().all(|&d| d),
+                            "RG completed with unfinished task sets (dep DAG hole)"
+                        );
+                        After::Release { complete: true }
+                    } else {
+                        After::Release { complete: false }
+                    }
                 } else {
-                    RgOutcome::Completed
-                });
-                RuntimeStats::tick(&self.stats.rgs_completed);
-                if aborted {
-                    RuntimeStats::tick(&self.stats.rgs_aborted);
+                    After::Publish(ready)
                 }
-                self.emit_rgdone(&rg, aborted);
-                // Parked pinned drivers observe completion by re-testing
-                // try_outcome after a wake; the completion word itself only
-                // unparks registered leader waiters.
-                self.park.wake_all();
-                if self.trace {
-                    self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+            }
+        };
+        match after {
+            After::Publish(ready) => {
+                // Deepest into this (retained) slot — the within-query
+                // critical-path preference — then fan out.
+                self.publish_taskset_locked(&mut m, Arc::clone(&rg), ready[0], ts.slot);
+                for &r in &ready[1..] {
+                    let s = m
+                        .owned
+                        .iter()
+                        .position(Option::is_none)
+                        .expect("ready_all is capped by the free-slot count");
+                    RuntimeStats::tick(&self.stats.dag_fanout_publishes);
+                    self.publish_taskset_locked(&mut m, Arc::clone(&rg), r, s);
+                }
+            }
+            After::Release { complete } => {
+                let complete_aborted = self.release_slot_locked(&mut m, ts.slot, ts.seq);
+                drop(m);
+                for q in complete_aborted {
+                    self.complete_queued_aborted(&q);
+                }
+                if complete {
+                    self.complete_rg(&rg, aborted);
                 }
             }
         }
     }
 
-    fn release_slot_and_admit(&self, slot: usize, seq: u64) {
-        // RGs popped while already aborted complete without ever running.
-        let mut complete_aborted: Vec<Arc<ResourceGroup>> = Vec::new();
-        {
-            let mut m = lock(&self.membership);
-            debug_assert!(
-                matches!(&m.owned[slot], Some(e) if e.seq == seq),
-                "releasing a slot we do not own"
-            );
-            m.owned[slot] = None;
-            while let Some(rg) = m.waitq.pop_front() {
-                if rg.is_aborted() {
-                    complete_aborted.push(rg);
-                    continue;
-                }
-                self.start_rg_locked(&mut m, rg, slot);
-                break;
-            }
+    /// RG completion tail shared by both dispatch modes: retire the
+    /// generation, publish the outcome, wake waiters.
+    fn complete_rg(&self, rg: &Arc<ResourceGroup>, aborted: bool) {
+        // The RG leaves the scheduler: drain (a no-op — every participant
+        // is provably gone, see retire_lifecycle) and retire its generation
+        // before the leader wakes.
+        rg.retire_lifecycle();
+        rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
+        rg.completion.complete(if aborted { RgOutcome::Aborted } else { RgOutcome::Completed });
+        RuntimeStats::tick(&self.stats.rgs_completed);
+        if aborted {
+            RuntimeStats::tick(&self.stats.rgs_aborted);
         }
+        self.emit_rgdone(rg, aborted);
+        // Parked pinned drivers observe completion by re-testing
+        // try_outcome after a wake; the completion word itself only
+        // unparks registered leader waiters.
+        self.park.wake_all();
+        if self.trace {
+            self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+        }
+    }
+
+    fn release_slot_and_admit(&self, slot: usize, seq: u64) {
+        let complete_aborted = {
+            let mut m = lock(&self.membership);
+            self.release_slot_locked(&mut m, slot, seq)
+        };
         for rg in complete_aborted {
             self.complete_queued_aborted(&rg);
         }
+    }
+
+    /// Free `slot` and admit the next queued RG into it. Returns RGs popped
+    /// while already aborted — they complete without ever running (the
+    /// caller finishes them OUTSIDE the membership lock).
+    fn release_slot_locked(
+        &self,
+        m: &mut Membership,
+        slot: usize,
+        seq: u64,
+    ) -> Vec<Arc<ResourceGroup>> {
+        let mut complete_aborted: Vec<Arc<ResourceGroup>> = Vec::new();
+        debug_assert!(
+            matches!(&m.owned[slot], Some(e) if e.seq == seq),
+            "releasing a slot we do not own"
+        );
+        m.owned[slot] = None;
+        while let Some(rg) = m.waitq.pop_front() {
+            if rg.is_aborted() {
+                complete_aborted.push(rg);
+                continue;
+            }
+            self.start_rg_locked(m, rg, slot);
+            break;
+        }
+        complete_aborted
     }
 
     /// Complete an aborted RG that never reached a slot (popped aborted at
@@ -1242,6 +1517,38 @@ impl Scheduler {
             self.trace(&format!("rg {} reaped from wait queue (aborted while queued)", rg.rg_id));
         }
         self.complete_queued_aborted(rg);
+    }
+
+    /// `MORSEL|DAG|…` per-query pipeline-DAG trace (§3.6 instruments; same
+    /// PGRUST_MORSEL_MARKERS switch as WFIN/LFIN/RGDONE): one line at
+    /// submit with the decomposition — pipeline count, dependency edges
+    /// (`d->i`), per-pipeline depth, and the dispatch mode. Dispatch ORDER
+    /// is read off the publish/WFIN/RGDONE stream correlated by qid/pipe.
+    /// Off = one branch per submission.
+    fn emit_dag(&self, rg: &ResourceGroup) {
+        if !markers_enabled() {
+            return;
+        }
+        let mut edges = String::new();
+        for (i, ts) in rg.tasksets.iter().enumerate() {
+            for &d in &ts.deps {
+                if !edges.is_empty() {
+                    edges.push(',');
+                }
+                edges.push_str(&format!("{d}->{i}"));
+            }
+        }
+        let depths =
+            rg.depth.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        eprintln!(
+            "MORSEL|DAG|qid={}|rg={}|mode={}|pipes={}|edges={}|depths={}",
+            rg.query_id,
+            rg.rg_id,
+            if self.dag.load(Ordering::Relaxed) { "dag" } else { "seq" },
+            rg.tasksets.len(),
+            edges,
+            depths,
+        );
     }
 
     /// `MORSEL|RGDONE|…` completion trace (§3.5 submit→service channels;
