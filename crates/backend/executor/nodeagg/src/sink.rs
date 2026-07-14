@@ -1146,6 +1146,12 @@ pub enum SinkEmitCol {
     /// in the buf arena — byte-identical to the packed first-arrival datum
     /// by the keypack canonicality gates.
     MultiNumeric { off: u8, width: u8 },
+    /// A constant tlist entry (the q35 `SELECT 1, URL, ...` class): the
+    /// plan's Const datum, emitted verbatim on every row. Byval-only by
+    /// admission (a byref image would need per-row arena copies — refused
+    /// fail-closed), so nothing worker- or query-arena-owned crosses to the
+    /// leader; NULL consts ride the isnull flag.
+    ConstByval { value: Datum, isnull: bool },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
     /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
@@ -1266,6 +1272,20 @@ pub fn sink_build_emit_plan(
                 },
             };
             cols.push(col);
+            continue;
+        }
+        if let Some(c) = te.expr.as_const() {
+            // Const tlist entry (q35's `SELECT 1, URL, ...` class): byval
+            // images only — the emit-buf and table drains copy the datum
+            // verbatim per row; a byref const would need arena
+            // materialization (refuse fail-closed, as before this arm).
+            if !c.constbyval && !c.constisnull {
+                return None;
+            }
+            cols.push(SinkEmitCol::ConstByval {
+                value: if c.constisnull { Datum::null() } else { c.constvalue },
+                isnull: c.constisnull,
+            });
             continue;
         }
         return None;
@@ -1469,6 +1489,11 @@ fn emit_row(
                 values.push(pg.trans_value);
                 nulls.push(pg.trans_value_is_null);
             },
+            // Plan-owned byval datum, copied verbatim (admission gate).
+            SinkEmitCol::ConstByval { value, isnull } => {
+                values.push(value);
+                nulls.push(isnull);
+            }
             // fc_int8_avg's exact core: strict (NULL trans → NULL),
             // count == 0 → NULL, else the int64_avg_div image.
             // SAFETY: non-null _int8 transvalue is a live merged image
@@ -1631,8 +1656,22 @@ pub fn agg_sink_plan_shape_ok(node: &AggStateData<'_>) -> bool {
 /// (bounded Local discipline) and the runtime backstop fails closed instead
 /// of migrating. Must run BEFORE `agg_hash_compact_try_arm*`.
 pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
+    agg_sink_set_cap_spill(node, cap, false);
+}
+
+/// [`agg_sink_set_cap`] with the M3.5 spill-armed admission flag: when the
+/// engagement carries a live spill arm, the compact admission gates skip
+/// the ESTIMATE-based SpillRisk refusal for word-keyed shapes (a budget
+/// crossing degrades to spill epochs, not an error) — the q33@100M hmm=2
+/// cliff was a pure estimate refusal that the landed spill arm could have
+/// absorbed. Canonical bytes-keyed (Intern-bearing) shapes keep the
+/// phase-1 refusal regardless (their runs are not spillable); the mk
+/// admission checks that per shape. Leader probes and worker arms MUST
+/// pass the same flag (the F1 leader/worker-verdict invariant).
+pub fn agg_sink_set_cap_spill(node: &mut AggStateData<'_>, cap: u32, spill_ok: bool) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = Some(cap);
+        ph.sink_spill_ok = spill_ok;
     }
 }
 
@@ -1643,6 +1682,7 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
 pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = None;
+        ph.sink_spill_ok = false;
     }
 }
 
@@ -1827,6 +1867,46 @@ pub fn agg_sink_flush_if_due(
     }
 }
 
+/// LIVE bytes of a word-keyed sink table: entry line (16 B at ≤0.5 fill),
+/// key words, and the state block per live row — the compact spill gate's
+/// own per-entry arithmetic, applied to `nrows` instead of retained
+/// capacity. Used by the spill-armed pressure/backstop accounting only.
+pub(crate) fn sink_table_live_bytes(t: &LaneAggTable) -> usize {
+    t.nrows() * (16 + 8 * table_key_words(t) + t.state_bytes())
+}
+
+/// Force-flush the armed table into a run NOW, regardless of the cap
+/// (`None` = empty table, nothing to flush). The budget-pressure spill law
+/// (mt16-cliffs, the q33@100M hmm=2 cliff): when half-limit pressure trips
+/// on a spill-armed engagement, the drain flushes the bounded table through
+/// this and spills the accumulated runs as one epoch instead of refusing —
+/// the mem-leg pressure is table-driven there, and the flush drains it.
+/// Same canonical-twin + intern-reset semantics as [`agg_sink_flush_if_due`]
+/// (the caller MUST honor the reset flag identically).
+pub fn agg_sink_flush_now(node: &mut AggStateData<'_>) -> Option<(SinkRun, bool)> {
+    let ph = node.perhash.as_mut()?;
+    let hash_mem_limit = ph.hash_mem_limit;
+    let ch = ph.compact.as_mut()?;
+    if ch.table.len() == 0 {
+        return None;
+    }
+    if compact_canon_shape(ch).is_some() {
+        let run = sink_flush_table_canon(ch);
+        let reset_intern = ch
+            .intern
+            .as_ref()
+            .is_some_and(|t| t.mem_used() > hash_mem_limit / 4);
+        if reset_intern {
+            if let Some(t) = ch.intern.as_mut() {
+                t.reset();
+            }
+        }
+        Some((run, reset_intern))
+    } else {
+        Some((sink_flush_table(&mut ch.table), false))
+    }
+}
+
 /// Half-limit budget PRESSURE (the compact backstop's own condition plus
 /// headroom): the sink drain refuses on `true` (RG abort → serial rerun)
 /// BEFORE the backstop's sink-mode belt would raise its hard error — the
@@ -1837,7 +1917,18 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     let Some(ch) = ph.compact.as_ref() else { return false };
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used();
-    let mem = ch.table.mem_used()
+    // Spill-armed sink builds count the table's LIVE rows, not its retained
+    // capacity: `LaneAggTable::reset` (the flush) keeps capacity, so
+    // capacity-based accounting re-trips permanently after the first
+    // pressure flush and the spill law could never drain the pressure. The
+    // retained capacity is the bounded flush-cycle working set (≤ the cap's
+    // sizing, inside the R3 full-budget envelope), not growth.
+    let table_mem = if ph.sink_cap.is_some() && ph.sink_spill_ok {
+        sink_table_live_bytes(&ch.table)
+    } else {
+        ch.table.mem_used()
+    };
+    let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):
@@ -2064,6 +2155,7 @@ pub fn sink_emit_plan_all_byval(plan: &SinkEmitPlan) -> bool {
             SinkEmitCol::Key
                 | SinkEmitCol::Derived(_)
                 | SinkEmitCol::MultiComp { .. }
+                | SinkEmitCol::ConstByval { .. }
                 | SinkEmitCol::Agg { .. }
         )
     })
@@ -2107,6 +2199,8 @@ fn table_emit_datum(
                 &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(transno as usize);
             (pg.trans_value, pg.trans_value_is_null)
         },
+        // Plan-owned byval datum, copied verbatim (admission gate).
+        SinkEmitCol::ConstByval { value, isnull } => (value, isnull),
         // Byref emit kinds never reach the table drain: table adoption is
         // gated by sink_emit_plan_all_byval (MultiText/MultiNumeric/Avg*
         // are byref) — fail-soft NULL rather than asserting.

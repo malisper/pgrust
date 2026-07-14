@@ -612,6 +612,15 @@ struct PerHashData<'mcx> {
     // backstop must never migrate into the C table (the sink cannot export
     // it); the sink drain flushes at the cap instead.
     sink_cap: Option<u32>,
+    // M3.5 spill-armed admission (mt16-cliffs, the q33@100M hmm=2 cliff):
+    // true on a sink build whose engagement carries a live spill arm. The
+    // compact admission gates skip the ESTIMATE-based SpillRisk refusal
+    // then (word-keyed shapes only — a budget crossing degrades to spill
+    // epochs, not an error), keeping the cap-bounded sizing discipline.
+    // Meaningful only while `sink_cap` is Some; canonical bytes-keyed
+    // shapes never see it set (their runs are not spillable — the C2
+    // record-format gap keeps their phase-1 refusal).
+    sink_spill_ok: bool,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1916,6 +1925,7 @@ fn init_perhash<'mcx>(
         compact: None,
         exchange: merge::ExchangeState::Unresolved,
         sink_cap: None,
+        sink_spill_ok: false,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -6430,7 +6440,7 @@ mcx::forget_safe_struct!(
         spill, tapeset, rslot, wslot, tmp_ctx },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill, sink_cap;
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap, sink_spill_ok;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
