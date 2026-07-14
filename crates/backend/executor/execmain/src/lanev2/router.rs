@@ -172,6 +172,21 @@ fn engine_runtime_pool_ready() -> bool {
 /// layer consults the same predicates (`runtime_*_arm_enabled`). The sort
 /// arm's `PGRUST_RUNTIME_SORT`/`_FULL` kills live at the arm site and keep
 /// gating after the dop read, as before.
+/// M5-4 × M5-1 seam: the leader-session affinity token every arm engagement
+/// passes to [`runtime::Runtime::submit_pinned_with_affinity`]. INTEGRATION
+/// FLAG (m5-integration, deliberate): ceremony-v2's sticky bind has not
+/// landed POOL-SIDE — production pool workers never call
+/// `WorkerLocal::set_session_token`, and every arm engagement is a PINNED
+/// submission that bypasses the stride pick — so there is no token plumbing
+/// to consume yet and this returns 0 (the None-equivalent; stride treats it
+/// as a plain submit). When the pool-side sticky bind lands, derive the
+/// stable ceremony-v2 session key here; every arm submission picks it up
+/// through this one chokepoint with no call-site change.
+#[inline]
+pub(super) fn session_affinity_token() -> u64 {
+    0
+}
+
 pub(super) fn arm_dop(class: ArmClass) -> i32 {
     use ::guc_tables::runtime_pool as rp;
     let bench = match class {
@@ -486,6 +501,7 @@ mod tests {
                         "adopt_eligible",
                         "status",
                         "route_to",
+                        "probe_key",
                         "notes"
                     ],
                     "header drift"
@@ -493,9 +509,9 @@ mod tests {
                 continue;
             }
             rows += 1;
-            assert_eq!(cols.len(), 8, "row width: {line}");
-            let (class, arm, spill, topn, adopt, status, route_to) =
-                (cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6]);
+            assert_eq!(cols.len(), 9, "row width: {line}");
+            let (class, arm, spill, topn, adopt, status, route_to, probe_key) =
+                (cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7]);
             assert!(!class.is_empty());
             assert!(
                 ArmClass::ALL.iter().any(|a| a.name() == arm) || arm == "none",
@@ -526,6 +542,20 @@ mod tests {
             // Probe ⊂ walk (risk P1): only covered rows may route to runtime.
             if route_to == "runtime" {
                 assert_eq!(status, "covered", "{class}: runtime-routed but not covered");
+            }
+            // probe_key vocabulary (m5-integration reconciliation): "-" =
+            // not plan-time keyable, else an m5_suppress CoverClass ident.
+            // Keyed rows must belong to a real arm — the probe only keys
+            // shapes an arm walk admits (probe ⊂ walk). The key↔route
+            // agreement is pinned crate-side by m5_suppress's drift test.
+            assert!(
+                probe_key == "-"
+                    || probe_key.chars().all(|c| c.is_ascii_alphanumeric()),
+                "bad probe_key {probe_key} in {class}"
+            );
+            if probe_key != "-" {
+                assert_ne!(arm, "none", "{class}: probe-keyed row without an arm");
+                assert_eq!(status, "covered", "{class}: probe-keyed but not covered");
             }
             // §2.4 law 2c pinned: the canonical-bytes text class carries the
             // bytes-spill-record gap until that record lands.
