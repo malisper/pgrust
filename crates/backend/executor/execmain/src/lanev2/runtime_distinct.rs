@@ -55,9 +55,10 @@ use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
-use super::{lane_trace, seq_scan_fusible, trace_feed};
-use super::{drain_pipeline, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed};
+use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea, trace_feed};
+use super::{drain_pipeline, BatchEmit, BatchSink, SeqScanFilterProject, SeqScanSource, Sink, SinkFeed};
 
 // ---------------------------------------------------------------------------
 // Shared state: the parallel context's private payload AND the sink body
@@ -107,6 +108,15 @@ pub(super) struct RuntimeDistinctShared {
     out: Vec<UnsafeCell<Option<PdMerged<'static>>>>,
     /// The published merged result (finalize writes, the leader takes).
     merged: Mutex<Option<PdMerged<'static>>>,
+    /// EA-on-morsels (ea-morsels.md §2): Some(scan plan_node_id) ONLY when
+    /// engaged under EXPLAIN ANALYZE — the sink's single EA flag; None on
+    /// every other path (dead-when-off).
+    ea_scan_node: Option<i32>,
+    /// EA instrument partials, worker-indexed (the scan arm's per-ordinal
+    /// overwrite channel — the Local type is nodeagg's, so the partial rides
+    /// beside it, not inside it; same claim-end overwrite discipline, read
+    /// by the leader on clean Completed only). Some iff `ea_scan_node`.
+    ea_instr_slots: Option<Vec<Mutex<Option<InstrumentPartial>>>>,
 }
 
 // SAFETY: (i) each `out` cell has a single writer — the sink contract
@@ -166,12 +176,12 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget)
     }
 
-    fn accept_local(&self, local: &mut PdSinkLocal, _worker: usize, range: runtime::MorselRange) {
+    fn accept_local(&self, local: &mut PdSinkLocal, worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             // Already aborting: drain the claim without work.
             return;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(local, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(local, worker, range)));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -273,6 +283,9 @@ struct WorkerExec {
     reset_tmp: bool,
     /// THIS helper contributed an error (take the release/abort teardown).
     errored: std::cell::Cell<bool>,
+    /// EA-on-morsels: this worker's cumulative instrument partial (written
+    /// only when the engagement carries `ea_instr_slots`).
+    instr: std::cell::RefCell<InstrumentPartial>,
 }
 
 thread_local! {
@@ -296,6 +309,9 @@ struct PdAcceptSink<'a> {
     tmp: EcxtId,
     reset_tmp: bool,
     crossed: bool,
+    /// EA-on-morsels row funnel (Some only under EXPLAIN ANALYZE): scanned
+    /// tallied window-grain in accept_batch, survivors per emitted row.
+    tally: Option<&'a mut EaRowTally>,
 }
 
 impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
@@ -322,10 +338,49 @@ impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
     }
 }
 
-impl<'mcx> BatchSink<'mcx> for PdAcceptSink<'_> {}
+impl<'mcx> BatchSink<'mcx> for PdAcceptSink<'_> {
+    /// The default loop verbatim (same emit, same accept, same order — the
+    /// trait's byte-identity rule), plus the EA row-funnel tallies, which
+    /// are branch-dead when `tally` is None (every non-EA path).
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if let Some(t) = self.tally.as_deref_mut() {
+            // Window-grain: the staged batch rows are the pre-qual funnel
+            // stage (emit re-checks the qual per row below).
+            t.scanned += (n - pos) as u64;
+        }
+        for i in pos..n {
+            if let Some(slot) = emit.emit(i, estate)? {
+                if let Some(t) = self.tally.as_deref_mut() {
+                    t.survived += 1;
+                }
+                match self.accept(slot, estate)? {
+                    SinkFeed::NeedMore => {}
+                    // A breaker never fills; see `drain_pipeline`'s Paused arm.
+                    SinkFeed::Full => {
+                        return Err(Box::new(::types_error::PgError::error(
+                            "lane-v2 batch feed: breaker sink returned Full".to_string(),
+                        )))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl RuntimeDistinctShared {
-    fn morsel_body(&self, local: &mut PdSinkLocal, range: runtime::MorselRange) -> PgResult<()> {
+    fn morsel_body(
+        &self,
+        local: &mut PdSinkLocal,
+        worker: usize,
+        range: runtime::MorselRange,
+    ) -> PgResult<()> {
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -351,8 +406,17 @@ impl RuntimeDistinctShared {
                             "runtime distinct worker scan is not cbstore",
                         )));
                     }
-                    let mut sink =
-                        PdAcceptSink { local, tmp, reset_tmp, crossed: false };
+                    // EA-on-morsels: borrow the worker's cumulative partial
+                    // for the drain's row funnel (None on every non-EA path).
+                    let ea = self.ea_instr_slots.is_some();
+                    let mut ipb = ex.instr.borrow_mut();
+                    let mut sink = PdAcceptSink {
+                        local,
+                        tmp,
+                        reset_tmp,
+                        crossed: false,
+                        tally: ea.then_some(&mut ipb.rows),
+                    };
                     let fed = drain_pipeline(
                         ss,
                         &mut SeqScanSource,
@@ -362,6 +426,17 @@ impl RuntimeDistinctShared {
                     );
                     let crossed = sink.crossed;
                     fed?;
+                    // Claim fold + overwrite export (EXACT — accumulate in
+                    // the worker state, export at claim end; the dop1-tax
+                    // contract, ea-morsels.md §2).
+                    if let Some(slots) = &self.ea_instr_slots {
+                        ipb.claims += 1;
+                        ipb.granules += range.end - range.start;
+                        if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
+                            ipb.prune = c;
+                        }
+                        *slots[worker].lock().unwrap_or_else(|p| p.into_inner()) = Some(*ipb);
+                    }
                     if crossed {
                         trace_feed(
                             "runtime distinct worker budget crossed; aborting to serial fallback",
@@ -547,6 +622,7 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
                     tmp,
                     reset_tmp: payload.spec.any_bytes_set(),
                     errored: std::cell::Cell::new(false),
+                    instr: Default::default(),
                 });
                 Ok(())
             }
@@ -608,10 +684,19 @@ fn ensure_hooks_registered() {
 // ---------------------------------------------------------------------------
 
 /// Refusal diagnosis trace (PGRUST_LANE_V2_TRACE only; emitted only once the
-/// arm is ARMED — dop set + runtime on — so unarmed sessions stay silent).
+/// arm is ARMED — dop set + runtime on — so unarmed sessions stay silent) +
+/// under EA the per-node transparency record (ea-morsels.md §6).
 #[cold]
-fn refused(reason: &str) {
+fn refused(
+    estate: &mut EStateData<'_>,
+    ea: bool,
+    node_id: i32,
+    reason: &'static str,
+) {
     lane_trace(&format!("runtime-distinct: refused ({reason})"));
+    if ea {
+        estate.runtime_ea_record_refusal(node_id, "distinct", reason);
+    }
 }
 
 /// The runtime distinct-sink arm, probed from the sorted-agg narrow branch
@@ -641,33 +726,42 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
     lane_trace("runtime-distinct: probed");
 
+    // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
+    // under EXPLAIN ANALYZE every refusal records its first failing gate for
+    // the transparency line.
+    let ea = runtime_instr::ea_active(estate);
+    let node_id = agg.plan.plan.plan_node_id;
+
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
     let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
-        refused("outer not SeqScan");
+        refused(estate, ea, node_id, "outer not SeqScan");
         return Ok(None);
     };
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
-        refused("scan not fusible/cbstore");
+    // Under EA the leader node carries an instr slot, which the serial-lane
+    // fusibility memo rightly refuses — the sink's workers run
+    // uninstrumented, so EA admission walks the same gates with only the
+    // instrument check vacated (E4).
+    let fusible = if ea {
+        seq_scan_fusible_runtime_ea(ss, estate)?
+    } else {
+        seq_scan_fusible(ss, estate)?
+    };
+    if !fusible || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+        refused(estate, ea, node_id, "scan not fusible/cbstore");
         return Ok(None);
     }
-    // Instrumented runs refuse the sink (EXPLAIN ANALYZE stays C-exact) —
-    // the caller's seam does not gate instrumentation for the serial arms.
-    if estate.es_instrument != 0 || estate.es_epq_active {
-        refused("instrumented/epq");
-        // EA-on-morsels transparency (ea-morsels.md §6): the distinct arm's
-        // TIMING OFF un-refusal is the inc-1b car; until then an EA walk
-        // reaching this gate records the honest reason for the EXPLAIN line.
-        if estate.es_instrument != 0 {
-            estate.runtime_ea_record_refusal(
-                agg.plan.plan.plan_node_id,
-                "distinct",
-                "instrumented",
-            );
-        }
+    if estate.es_epq_active {
+        return Ok(None);
+    }
+    // Instrument MODE gate (inc-1): EXPLAIN (ANALYZE, TIMING OFF) —
+    // INSTRUMENT_ROWS exactly — engages; TIMER waits for the inc-3 clock
+    // pair, BUFFERS for threaded buffer accounting.
+    if ea && !runtime_instr::ea_rows_only(estate) {
+        refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
         return Ok(None);
     }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
-        refused("already in parallel machinery");
+        refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(None);
     }
     // Agg-side admission: the hash-grouped arm's integer-key/exact-set
@@ -681,37 +775,37 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
             sort.plan.plan.plan_rows,
         )
     {
-        refused("hashgroup admission/economics");
+        refused(estate, ea, node_id, "hashgroup admission/economics");
         return Ok(None);
     }
     let Some(order) = super::hashgroup_order_spec(agg, sort.plan, k) else {
-        refused("order spec");
+        refused(estate, ea, node_id, "order spec");
         *rd_shape_refused = true;
         return Ok(None);
     };
     let Some(desc) = outer_desc.as_ref() else {
-        refused("no outer desc");
+        refused(estate, ea, node_id, "no outer desc");
         return Ok(None);
     };
     let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc) else {
-        refused("spec derivation");
+        refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);
     };
     if spec.max_att > desc.natts {
-        refused("att bound");
+        refused(estate, ea, node_id, "att bound");
         *rd_shape_refused = true;
         return Ok(None);
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
-        refused("extern params");
+        refused(estate, ea, node_id, "extern params");
         return Ok(None);
     }
     let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
-        refused("exec params");
+        refused(estate, ea, node_id, "exec params");
         return Ok(None);
     }
     // Plan shape below the Agg: exactly THIS Sort → SeqScan (the workers
@@ -722,13 +816,13 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if sort_node.node_tag() != NodeTag::T_Sort
         || !std::ptr::eq(sort_node.as_sort().expect("Sort tag"), sort.plan)
     {
-        refused("agg child not this Sort");
+        refused(estate, ea, node_id, "agg child not this Sort");
         *rd_shape_refused = true;
         return Ok(None);
     }
     let Some(scan_node) = sort.plan.plan.lefttree else { return Ok(None) };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
-        refused("sort child not SeqScan");
+        refused(estate, ea, node_id, "sort child not SeqScan");
         *rd_shape_refused = true;
         return Ok(None);
     }
@@ -736,7 +830,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.qual.iter())?
         || !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
     {
-        refused("parallel-unsafe scan exprs");
+        refused(estate, ea, node_id, "parallel-unsafe scan exprs");
         *rd_shape_refused = true;
         return Ok(None);
     }
@@ -745,7 +839,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
-        refused("non-MVCC snapshot");
+        refused(estate, ea, node_id, "non-MVCC snapshot");
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
@@ -754,7 +848,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
-        refused("binder policy sources");
+        refused(estate, ea, node_id, "binder policy sources");
         return Ok(None);
     }
 
@@ -765,7 +859,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     };
     if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
-        refused("granule floor");
+        refused(estate, ea, node_id, "granule floor");
         return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
@@ -773,7 +867,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, order, scan_node)
+    engage(agg, estate, rt, dop, total_granules, starts, spec, order, scan_node, ea)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -787,6 +881,7 @@ fn engage<'mcx>(
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
+    ea: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -819,6 +914,16 @@ fn engage<'mcx>(
         merged_bytes: AtomicUsize::new(0),
         out: (0..PD_SINK_GROUP_PARTS as usize).map(|_| UnsafeCell::new(None)).collect(),
         merged: Mutex::new(None),
+        ea_scan_node: if ea {
+            scan_node.as_seq_scan().map(|s| s.scan.plan.plan_node_id)
+        } else {
+            None
+        },
+        ea_instr_slots: ea.then(|| {
+            (0..rt.nthreads() + runtime::MAX_EXTERNAL_LANES)
+                .map(|_| Mutex::new(None))
+                .collect()
+        }),
     });
 
     xact::EnterParallelMode();
@@ -1021,6 +1126,35 @@ fn engage_ceremony<'mcx>(
                 "runtime-distinct: complete, groups={}",
                 merged.ngroups
             ));
+            // EA-on-morsels merge (clean Completed only): fold every
+            // worker's final instrument export; write the bypassed
+            // SeqScan's rows/nfiltered/loops and the bypassed Sort's
+            // pass-through rows (ea-morsels.md §3 — node-exact rows; the
+            // engaged Agg root ticks through its procnode wrapper).
+            if let (Some(scan_id), Some(slots)) =
+                (payload.ea_scan_node, &payload.ea_instr_slots)
+            {
+                let ips: Vec<InstrumentPartial> = slots
+                    .iter()
+                    .filter_map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).take())
+                    .collect();
+                let m = runtime_instr::merge(ips.iter());
+                runtime_instr::ea_fill_scan_node(estate, scan_id, &m.rows);
+                if let Some(sort_id) = agg
+                    .plan
+                    .plan
+                    .lefttree
+                    .and_then(::types_nodes::node_tree::Node::as_sort)
+                    .map(|s| s.plan.plan_node_id)
+                {
+                    runtime_instr::ea_fill_passthrough_node(estate, sort_id, m.rows.survived);
+                }
+                lane_trace(&format!(
+                    "runtime-distinct: EA merged workers={} claims={} granules={} \
+                     scanned={} survived={}",
+                    m.workers, m.claims, m.granules, m.rows.scanned, m.rows.survived
+                ));
+            }
             trace_feed("runtime distinct sink adopt + hashgroup emit engaged");
             ::nodeagg::agg_hashgroup_adopt_merged(
                 agg,
