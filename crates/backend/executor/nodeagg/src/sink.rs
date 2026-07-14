@@ -1140,6 +1140,12 @@ pub enum SinkEmitCol {
     /// in the buf arena — byte-identical to the packed first-arrival datum
     /// by the keypack canonicality gates.
     MultiNumeric { off: u8, width: u8 },
+    /// A constant tlist entry (the q35 `SELECT 1, URL, ...` class): the
+    /// plan's Const datum, emitted verbatim on every row. Byval-only by
+    /// admission (a byref image would need per-row arena copies — refused
+    /// fail-closed), so nothing worker- or query-arena-owned crosses to the
+    /// leader; NULL consts ride the isnull flag.
+    ConstByval { value: Datum, isnull: bool },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
     /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
@@ -1260,6 +1266,20 @@ pub fn sink_build_emit_plan(
                 },
             };
             cols.push(col);
+            continue;
+        }
+        if let Some(c) = te.expr.as_const() {
+            // Const tlist entry (q35's `SELECT 1, URL, ...` class): byval
+            // images only — the emit-buf and table drains copy the datum
+            // verbatim per row; a byref const would need arena
+            // materialization (refuse fail-closed, as before this arm).
+            if !c.constbyval && !c.constisnull {
+                return None;
+            }
+            cols.push(SinkEmitCol::ConstByval {
+                value: if c.constisnull { Datum::null() } else { c.constvalue },
+                isnull: c.constisnull,
+            });
             continue;
         }
         return None;
@@ -1463,6 +1483,11 @@ fn emit_row(
                 values.push(pg.trans_value);
                 nulls.push(pg.trans_value_is_null);
             },
+            // Plan-owned byval datum, copied verbatim (admission gate).
+            SinkEmitCol::ConstByval { value, isnull } => {
+                values.push(value);
+                nulls.push(isnull);
+            }
             // fc_int8_avg's exact core: strict (NULL trans → NULL),
             // count == 0 → NULL, else the int64_avg_div image.
             // SAFETY: non-null _int8 transvalue is a live merged image
@@ -1625,8 +1650,22 @@ pub fn agg_sink_plan_shape_ok(node: &AggStateData<'_>) -> bool {
 /// (bounded Local discipline) and the runtime backstop fails closed instead
 /// of migrating. Must run BEFORE `agg_hash_compact_try_arm*`.
 pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
+    agg_sink_set_cap_spill(node, cap, false);
+}
+
+/// [`agg_sink_set_cap`] with the M3.5 spill-armed admission flag: when the
+/// engagement carries a live spill arm, the compact admission gates skip
+/// the ESTIMATE-based SpillRisk refusal for word-keyed shapes (a budget
+/// crossing degrades to spill epochs, not an error) — the q33@100M hmm=2
+/// cliff was a pure estimate refusal that the landed spill arm could have
+/// absorbed. Canonical bytes-keyed (Intern-bearing) shapes keep the
+/// phase-1 refusal regardless (their runs are not spillable); the mk
+/// admission checks that per shape. Leader probes and worker arms MUST
+/// pass the same flag (the F1 leader/worker-verdict invariant).
+pub fn agg_sink_set_cap_spill(node: &mut AggStateData<'_>, cap: u32, spill_ok: bool) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = Some(cap);
+        ph.sink_spill_ok = spill_ok;
     }
 }
 
@@ -1637,6 +1676,7 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
 pub fn agg_sink_clear_cap(node: &mut AggStateData<'_>) {
     if let Some(ph) = node.perhash.as_mut() {
         ph.sink_cap = None;
+        ph.sink_spill_ok = false;
     }
 }
 
@@ -2007,6 +2047,7 @@ pub fn sink_emit_plan_all_byval(plan: &SinkEmitPlan) -> bool {
             SinkEmitCol::Key
                 | SinkEmitCol::Derived(_)
                 | SinkEmitCol::MultiComp { .. }
+                | SinkEmitCol::ConstByval { .. }
                 | SinkEmitCol::Agg { .. }
         )
     })
@@ -2050,6 +2091,8 @@ fn table_emit_datum(
                 &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(transno as usize);
             (pg.trans_value, pg.trans_value_is_null)
         },
+        // Plan-owned byval datum, copied verbatim (admission gate).
+        SinkEmitCol::ConstByval { value, isnull } => (value, isnull),
         // Byref emit kinds never reach the table drain: table adoption is
         // gated by sink_emit_plan_all_byval (MultiText/MultiNumeric/Avg*
         // are byref) — fail-soft NULL rather than asserting.
