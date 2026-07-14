@@ -26,6 +26,13 @@
 //!      (IoGuard) lets a standby absorb the core while the blocked worker
 //!      keeps its pin-board entry and finalization-marker obligations; the
 //!      last-worker-out counter is never confused.
+//!   8. dag_fanout_publish_exactly_once (M5+1) — the pipeline-DAG
+//!      edge-satisfaction/submission handshake: racing finalizes of two
+//!      independent pipelines publish their gated consumer exactly once,
+//!      only after both dependencies finalized.
+//!   9. dag_abort_live_siblings_completes_once (M5+1) — abort racing two
+//!      live pipelines: the racing live-counter decrements elect exactly
+//!      one RG completer; a dead generation never publishes the sink.
 //!
 //! Determinism note: models use a never-advanced VirtualClock so every
 //! morsel measures a constant dt (loom requires branch determinism along an
@@ -95,18 +102,22 @@ struct ModelWork {
     inside: AtomicUsize,
     /// Finalize count (exactly-once assert).
     finalized: AtomicUsize,
-    /// Predecessor task set (dep-order assert): must have finalized before
-    /// any of our morsels runs.
-    predecessor: Option<Arc<ModelWork>>,
+    /// Predecessor task sets (dep-order assert): ALL must have finalized
+    /// before any of our morsels runs (M5+1 DAG models gate on several).
+    predecessors: Vec<Arc<ModelWork>>,
 }
 
 impl ModelWork {
     fn new(total: u64, predecessor: Option<Arc<ModelWork>>) -> Arc<ModelWork> {
+        ModelWork::new_deps(total, predecessor.into_iter().collect())
+    }
+
+    fn new_deps(total: u64, predecessors: Vec<Arc<ModelWork>>) -> Arc<ModelWork> {
         Arc::new(ModelWork {
             executed: (0..total).map(|_| AtomicUsize::new(0)).collect(),
             inside: AtomicUsize::new(0),
             finalized: AtomicUsize::new(0),
-            predecessor,
+            predecessors,
         })
     }
 
@@ -121,7 +132,7 @@ impl ModelWork {
 
 impl TaskSetWork for ModelWork {
     fn run_morsel(&self, _worker: usize, range: MorselRange) {
-        if let Some(p) = &self.predecessor {
+        for p in &self.predecessors {
             assert_eq!(
                 p.finalized.load(Ordering::SeqCst),
                 1,
@@ -688,5 +699,133 @@ fn stride_two_active_rgs_exactly_once() {
         let stats = rt.stats();
         assert_eq!(stats.rgs_completed, 2);
         assert_eq!(stats.finalize_events, 2);
+    });
+}
+
+/// Model 8 (M5+1): the DAG edge-satisfaction/submission handshake. Two
+/// workers, two slots, one RG shaped build-A + build-B -> probe-C
+/// (deps=[0,1]): A and B publish at admission (one via fan-out) and their
+/// finalizes RACE — both last-outs contend on the membership+progress
+/// handshake and exactly ONE of them must observe C newly-ready and publish
+/// it, exactly once, only after BOTH dependencies finalized (ModelWork's
+/// dep-order assert), with no lost pipeline and one RG completion. The
+/// submission-gating deadlock premise (nothing dependency-unsatisfied is
+/// ever visible to a worker) is asserted structurally by the publish-time
+/// debug assert plus C's gate here.
+#[test]
+fn dag_fanout_publish_exactly_once() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_stride(true);
+        rt.set_dag(true);
+        let wa = ModelWork::new(1, None);
+        let wb = ModelWork::new(1, None);
+        let wc = ModelWork::new_deps(1, vec![Arc::clone(&wa), Arc::clone(&wb)]);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wa) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                },
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wb) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                },
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wc) as Arc<dyn TaskSetWork>,
+                    deps: vec![0, 1],
+                },
+            ],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        drive(&rt, 0, &waiter);
+        t.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        wa.assert_complete();
+        wb.assert_complete();
+        wc.assert_complete();
+        let stats = rt.stats();
+        assert_eq!(stats.rgs_completed, 1, "RG completes exactly once");
+        assert_eq!(stats.finalize_events, 3);
+        assert_eq!(stats.tasksets_published, 3, "C published exactly once");
+        assert_eq!(stats.dag_fanout_publishes, 1, "B fanned out at admission");
+    });
+}
+
+/// Model 9 (M5+1): abort with multiple LIVE pipelines. Two workers drive an
+/// RG with two independent published pipelines plus a gated sink while an
+/// aborter thread races `abort()`: each live pipeline drains through its
+/// own last-out, the RG completes EXACTLY ONCE (the racing live-counter
+/// decrements elect one completer), the sink never publishes on a dead
+/// generation, and no finalize work runs after an observed abort.
+#[test]
+fn dag_abort_live_siblings_completes_once() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_stride(true);
+        rt.set_dag(true);
+        let wa = ModelWork::new(1, None);
+        let wb = ModelWork::new(1, None);
+        let wc = ModelWork::new_deps(1, vec![Arc::clone(&wa), Arc::clone(&wb)]);
+        let (h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wa) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                },
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wb) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                },
+                TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1)),
+                    work: Arc::clone(&wc) as Arc<dyn TaskSetWork>,
+                    deps: vec![0, 1],
+                },
+            ],
+        });
+
+        let aborter = thread::spawn(move || h.abort());
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        drive(&rt, 0, &waiter);
+        t.join().unwrap();
+        aborter.join().unwrap();
+
+        let outcome = waiter.try_wait().expect("RG must complete (no hang)");
+        let stats = rt.stats();
+        assert_eq!(stats.rgs_completed, 1, "RG completes exactly once");
+        match outcome {
+            RgOutcome::Aborted => {
+                // The abort landed before completion: the sink either never
+                // published or drained refused; nothing double-finalizes.
+                assert!(stats.rgs_aborted == 1);
+            }
+            RgOutcome::Completed => {
+                // Abort landed after completion (no-op on retired
+                // lifecycle): everything ran normally.
+                wa.assert_complete();
+                wb.assert_complete();
+                wc.assert_complete();
+            }
+        }
     });
 }

@@ -166,6 +166,15 @@ pub(crate) struct Slot {
     /// the equal-pass pick tiebreak prefers a slot whose token matches the
     /// picking worker's sticky-bound session (M5-4; ceremony-v2 mechanism).
     pub(crate) session: AtomicU64,
+    /// Occupying RG's id (M5+1 pipeline-DAG dispatch; 0 = none). ADVISORY
+    /// like every stride word: identifies same-query siblings for the
+    /// within-query dependency-depth pick refinement (m5-planner §3.6).
+    pub(crate) rg: AtomicU64,
+    /// Dependency depth of the occupying pipeline (M5+1): the length of the
+    /// longest dependency chain ABOVE it (downstream work it releases).
+    /// Within a query at equal pass, the pick prefers the deeper pipeline —
+    /// the critical path releases the most downstream work (§3.6).
+    pub(crate) depth: AtomicU64,
 }
 
 impl Slot {
@@ -175,6 +184,8 @@ impl Slot {
             pass: AtomicU64::new(0),
             stride: AtomicU64::new(0),
             session: AtomicU64::new(0),
+            rg: AtomicU64::new(0),
+            depth: AtomicU64::new(0),
         }
     }
 }
