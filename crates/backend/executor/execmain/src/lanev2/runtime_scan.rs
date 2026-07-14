@@ -70,6 +70,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea};
@@ -1608,11 +1609,16 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_scan_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Scan);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    // Armed offer reached the admission walk (heap shapes ride the scan
+    // arm's entry; they re-class at engagement).
+    router::tick(ArmClass::Scan, ArmCounter::Offered);
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED,
     // so under EXPLAIN ANALYZE every refusal records its reason for the
@@ -1824,7 +1830,13 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // --- Engage.
     let ea_scan_node = ea.then_some(scan_plan.scan.plan.plan_node_id);
     let ea_timer = ea && runtime_instr::ea_timer(estate);
-    engage(
+    // Router class resolution (M5-1): heap shapes re-class here — the entry
+    // and its refusals are the scan arm's, the engagement is per-source.
+    // Counter algebra at this single choke point: Engaged = ceremony
+    // entered; Completed = the runtime answered; Fallback = serial rerun.
+    let class = if is_cb { ArmClass::Scan } else { ArmClass::Heap };
+    router::tick(class, ArmCounter::Engaged);
+    let r = engage(
         agg,
         estate,
         rt,
@@ -1835,17 +1847,26 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         rg_starts,
         ea_scan_node,
         ea_timer,
-    )
+    )?;
+    router::tick(
+        class,
+        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
 }
 
 /// Record-and-refuse (transparency line, ea-morsels.md §6): armed +
 /// instrumented refusals only — every other path is byte-identical today.
+/// M5-1: every scan-arm refusal also feeds the router's consolidated
+/// taxonomy (entry-arm attribution — heap-shape refusals carry
+/// self-describing reasons).
 fn ea_refused<T>(
     estate: &mut EStateData<'_>,
     ea: bool,
     node_id: i32,
     reason: &'static str,
 ) -> PgResult<Option<T>> {
+    router::tick_refused(ArmClass::Scan, reason);
     if ea {
         estate.runtime_ea_record_refusal(node_id, "scan", reason);
     }

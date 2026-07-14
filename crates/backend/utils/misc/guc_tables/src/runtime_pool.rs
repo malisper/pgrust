@@ -220,6 +220,28 @@ pub fn parallel_engine_is_runtime() -> bool {
     crate::backing::pgrust_parallel_engine() == crate::consts::PARALLEL_ENGINE_RUNTIME
 }
 
+/// Per-arm enabled predicates for the M5-1 router's engine=runtime layer:
+/// the SAME kill-switch + lane-master gates the bench getters embed, exposed
+/// so the router honors `PGRUST_RUNTIME_*` kills when arming at
+/// `pgrust.runtime_dop` (bench GUC unset). The sort arm's kill
+/// (`PGRUST_RUNTIME_SORT`/`_FULL`) lives at the arm site and keeps gating
+/// after the dop read — its predicate here is the lane master only.
+pub fn runtime_scan_arm_enabled() -> bool {
+    runtime_scan_env_ok()
+}
+pub fn runtime_agg_arm_enabled() -> bool {
+    runtime_agg_env_ok()
+}
+pub fn runtime_distinct_arm_enabled() -> bool {
+    runtime_distinct_env_ok()
+}
+pub fn runtime_hashjoin_arm_enabled() -> bool {
+    runtime_hashjoin_env_ok()
+}
+pub fn runtime_sort_arm_enabled() -> bool {
+    crate::backing::pgrust_lane_executor()
+}
+
 /// The product runtime DOP (`pgrust.runtime_dop`), resolved: 0 = auto
 /// (available cores, the design default); explicit values clamped to
 /// available cores (the runtime pool's width — its leaders park rather than

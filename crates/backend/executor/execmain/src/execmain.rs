@@ -630,11 +630,16 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     }
     let pstmt = qd.plannedstmt();
 
-    // M5-0 (docs/design/m5-planner.md §2.2): under pgrust.parallel_engine=
-    // runtime with no runtime pool, degrade to legacy with a loud-once LOG
-    // line. One TLS read + cmp on the legacy default. The M5-1 unified
-    // admission router hooks here — executor startup, serial plan in hand.
-    let _ = crate::lanev2::engine_runtime_active();
+    // M5 unified admission router, query-start decision (docs/design/
+    // m5-planner.md §2): under pgrust.parallel_engine=runtime resolve the
+    // engine once — no pool degrades to legacy with a loud-once LOG line
+    // (M5-0); the routing decision is counted per query (M5-1): a legacy
+    // parallel plan (Gather machinery) executes on the legacy engine
+    // byte-untouched (the runtime arm shapes are disjoint from Gather plans
+    // by construction until M5-3's suppression), a serial-shaped plan
+    // routes to the arm offers at their sites. One TLS read + cmp on the
+    // legacy default (measured +8 instr/q on select1).
+    crate::lanev2::router_query_start(pstmt.parallelModeNeeded);
 
     if (guc_tables::vars::XactReadOnly.read() || xact::IsInParallelMode())
         && eflags & EXEC_FLAG_EXPLAIN_ONLY == 0
