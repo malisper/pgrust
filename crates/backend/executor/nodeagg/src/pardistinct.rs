@@ -1406,10 +1406,30 @@ impl PdBuilder<'_> {
     }
 
     /// Bytes of set VALUES currently held (what an epoch flush would move to
-    /// disk). The caller's worthwhileness gate: a group-table-dominated
-    /// crossing cannot be helped by value spill and must refuse.
+    /// disk). Observability figure; NOT the worthwhileness yardstick — see
+    /// [`Self::spill_freeable_bytes`].
     fn spill_value_bytes(&self) -> usize {
         self.dsets.iter().map(|d| d.ints().len() * 8).sum()
+    }
+
+    /// Bytes an epoch flush would RELEASE: the sets' full capacity-based
+    /// memory (`total_set_mem`) — `spill_reset_values` SHRINKS the sets, so
+    /// the entire set side of `mem()` comes back. This is the caller's
+    /// worthwhileness yardstick: a crossing is group-table-dominated exactly
+    /// when the set side is a small fraction of the budget (`base_mem`
+    /// drives the crossing), and THAT is what value spill cannot help.
+    ///
+    /// Calibration note (inc-3a followup, battery -82184): the original gate
+    /// compared `spill_value_bytes` (payload alone) against budget/4, but
+    /// `mem()` moves in capacity steps, so crossings land right after
+    /// Vec/IntSet doublings, where the 8-byte payloads are only ~1/6..1/3 of
+    /// set memory (IntSet's 50% max load = 16-32 table bytes/value, plus
+    /// 8-16 ints-Vec bytes/value). A purely value-dominated uniform corpus
+    /// (the q9 class: 97 sets filling in lockstep, all doubling together)
+    /// deterministically sat below budget/4 at every crossing and the arm
+    /// fail-closed to the serial fallback on every worker.
+    fn spill_freeable_bytes(&self) -> usize {
+        self.total_set_mem
     }
 
     /// Emit every held set value as spill records, partition-contiguous and
@@ -1502,6 +1522,11 @@ impl PdSinkLocal {
     /// See [`PdBuilder::spill_value_bytes`].
     pub fn pd_spill_value_bytes(&self) -> usize {
         self.builder.spill_value_bytes()
+    }
+
+    /// See [`PdBuilder::spill_freeable_bytes`].
+    pub fn pd_spill_freeable_bytes(&self) -> usize {
+        self.builder.spill_freeable_bytes()
     }
 
     /// See [`PdBuilder::spill_emit`].
