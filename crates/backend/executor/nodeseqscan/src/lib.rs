@@ -197,6 +197,15 @@ struct BatchSoa<'mcx> {
     // FULL original qual per row at fetch. Exact-bitmap consumers
     // (`seq_scan_batch_qual_sel`, the qual census) refuse these batches.
     lane_requal: bool,
+    // BITS-ONLY drive (dop1-tax2 inc-2, the census consumer): nothing past
+    // the qual reads the staged SoA — the drive consumes selection bits
+    // (fold_batch popcount) and fallback rows re-check off the STORE path.
+    // Skip the post-eval materialization the lane does for SoA readers
+    // (survivor-window completing deform + dict-lane gather; the serial
+    // Volcano census never does either). Bits are computed identically —
+    // eval reads the staged clause columns, which still stage. Set only by
+    // `seq_scan_batch_bits_only` (the runtime census arm).
+    bits_only: bool,
     // Dict-GROUP consumer column (cbstore dict-code grouping, cbstore-v2
     // plan Stage 2.1): the agg feed reads this column as codes+dict past the
     // qual, so the post-qual gather-to-Raw must SKIP it (the feed is the
@@ -751,6 +760,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 proj: None,
                 lane: None,
                 lane_requal: false,
+                bits_only: false,
                 dict_group: None,
                 cond_armed: false,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -883,6 +893,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
                         proj: None,
                         lane: None,
                         lane_requal: false,
+                        bits_only: false,
                         dict_group: None,
                         cond_armed: false,
                         sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -1026,6 +1037,7 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+            bits_only: false,
             dict_group: dict_key,
             cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -1258,6 +1270,7 @@ fn arm_key_soa<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+            bits_only: false,
                 dict_group: None,
             cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -1490,6 +1503,7 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+            bits_only: false,
             dict_group: None,
             cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -1555,6 +1569,7 @@ pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
             proj: None,
             lane: None,
             lane_requal: false,
+            bits_only: false,
                 dict_group: None,
             cond_armed: false,
             sel: [0; ::exectuples::SOA_BM_WORDS],
@@ -1665,6 +1680,33 @@ pub fn seq_scan_batch_qual_sel<'a, 'mcx>(node: &'a SeqScanState<'mcx>) -> Option
     // still re-run the full qual per row) — never expose them as the whole
     // qual's verdicts.
     (b.qual_armed && !b.lane_requal).then_some(&b.sel[..])
+}
+
+/// Declare the drive BITS-ONLY (dop1-tax2 inc-2): the consumer reads the
+/// selection bitmap (and per-row fallback emits off the store path) and
+/// NEVER the staged SoA cells — the runtime census drive (`census_drain`:
+/// fold_batch reads no lane columns). The lane then skips its post-eval
+/// SoA materialization (survivor-window completing deform + dict-lane
+/// gather) — dead work the serial Volcano census never does. Selection
+/// bits and fallback words are computed identically. True = accepted (a
+/// staged batch arm owns the scan); false = no staging armed (no-op).
+pub fn seq_scan_batch_bits_only(node: &mut SeqScanState<'_>) -> bool {
+    match node.batch_soa.as_deref_mut() {
+        // Hybrid requal quals refuse: their survivors re-run the full qual
+        // per row at fetch, and `seq_scan_batch_qual_sel` refuses their
+        // bits anyway — the drive falls to the per-row path, which must
+        // see today's staging exactly.
+        Some(b) if !b.lane_requal => {
+            b.bits_only = true;
+            // No SoA reader: never copy prefix cells onto stored slots
+            // (they may be un-materialized under this arm). The cbstore
+            // store path fills the slot's needed set itself (the prefix
+            // publish is a virtual-slot no-op there regardless).
+            b.publish = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// PREWHERE lane program armed on the batch staging (cbstore scans). The
@@ -1882,7 +1924,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                     && ::tableam::table_scan_condcache_lookup(scandesc, &mut b.sel);
                 if cond_hit {
                     b.soa.begin(n);
-                    if b.sel[..nwords].iter().any(|&w| w != 0) {
+                    if !b.bits_only && b.sel[..nwords].iter().any(|&w| w != 0) {
                         ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
                         for c in lq.dict_cols() {
                             if b.dict_group != Some(c) {
@@ -1924,7 +1966,7 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                         }
                         lq.eval_staged(k, &b.soa, n, &mut b.sel)?;
                     }
-                    if b.sel[..nwords].iter().any(|&w| w != 0) {
+                    if !b.bits_only && b.sel[..nwords].iter().any(|&w| w != 0) {
                         // Survivors: complete the deform to the full fill
                         // set (idempotent per column; dict-wanted columns
                         // re-answer as lanes and gather below — except a
@@ -1940,9 +1982,14 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 } else {
                     ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, None);
                     ::laneexec::eval_lane_qual(lq, &b.soa, n, &mut b.sel)?;
-                    for c in lq.dict_cols() {
-                        if b.dict_group != Some(c) {
-                            gather_or_len(scandesc, &mut b.soa, c as usize);
+                    // Bits-only drives skip the dict gather (nothing reads
+                    // the Raw cells); every other consumer gathers exactly
+                    // as before.
+                    if !b.bits_only {
+                        for c in lq.dict_cols() {
+                            if b.dict_group != Some(c) {
+                                gather_or_len(scandesc, &mut b.soa, c as usize);
+                            }
                         }
                     }
                 }
@@ -3614,7 +3661,7 @@ mcx::forget_safe_struct!(
     // `batch_soa = None` (the deform-JIT kernel Rc precedent).
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, lane_requal, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
+        nquals, lane_requal, bits_only, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

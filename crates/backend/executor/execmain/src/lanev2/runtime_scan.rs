@@ -751,6 +751,29 @@ fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                                     stitch: true,
                                 },
                             )?;
+                            // BITS-ONLY declaration (dop1-tax2 inc-2): the
+                            // census drive consumes selection bits and
+                            // fallback emits only — never the staged SoA
+                            // cells — so the PREWHERE lane skips its
+                            // post-eval materialization (survivor-window
+                            // completing deform + per-window dict-lane
+                            // gather). This was the measured per-granule
+                            // DOP-1 scan tax: SFIN/WFIN counters IDENTICAL
+                            // (rgswitch/dictbuild/granules/windows), the
+                            // delta pure per-window gather+deform work the
+                            // serial Volcano census never does (dist-prof:
+                            // gather_dict_lane 2.48% + decompress +4ms,
+                            // runtime1 only). cbstore only (the measured
+                            // shape; heap census keeps its kernel-bitmap
+                            // staging verbatim). Requal quals refuse inside.
+                            // PGRUST_RUNTIME_CENSUS_BITSONLY=0 restores the
+                            // materializing arm (A/B).
+                            if ::nodeseqscan::seq_scan_is_cbstore(ss)
+                                && census_bits_only_enabled()
+                                && ::nodeseqscan::seq_scan_batch_bits_only(ss)
+                            {
+                                super::lane_trace("runtime census: bits-only staging");
+                            }
                         }
                     }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
@@ -845,6 +868,15 @@ fn ensure_hooks_registered() {
         parallel::register_parallel_private_shutdown(runtime_scan_private_shutdown);
         parallel::standing::register_standing_driver(runtime_scan_standing_driver);
     });
+}
+
+/// inc-2 bits-only census staging kill switch (default ON):
+/// PGRUST_RUNTIME_CENSUS_BITSONLY=0 restores the materializing PREWHERE arm.
+fn census_bits_only_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_CENSUS_BITSONLY").map_or(true, |v| v.trim() != "0")
+    })
 }
 
 /// Fold when the plan reads lane columns (the serial Fold choice); the
