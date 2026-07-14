@@ -172,6 +172,11 @@ pub struct AggStateData<'mcx> {
     // state — published per-bucket identity-projected rows drained one per
     // call. Plain Rust memory; no aggcontext residue.
     sink_emit: Option<Box<sink::SinkEmitState>>,
+    // Runtime distinct sink PAREMIT (pardistinct.rs section doc): the
+    // LEADER's adopted per-partition ordered emit buckets, drained one row
+    // per call through the cross-bucket merge. Plain Rust memory; no
+    // aggcontext residue, no interplay with the group-boundary resets.
+    pdemit: Option<Box<pardistinct::PdParemitState>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -1542,6 +1547,7 @@ pub fn exec_init_agg<'mcx>(
         hashgroup: None,
         codedgroup: None,
         sink_emit: None,
+        pdemit: None,
     })
 }
 
@@ -5009,13 +5015,166 @@ pub fn pd_derive_spec(
 /// leader arm uses to pair `pd_derive_spec` with its admission story.
 pub use pardistinct::{
     pd_adopt_registry, pd_bucket_precount, pd_clear_thread_registry, pd_concat_buckets,
-    pd_empty_grouped_table, pd_export_registry, pd_merge_bucket, pd_merge_bucket_refs,
-    pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_registry_get, pd_registry_insert,
-    pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode,
-    pd_spill_min_record_width, pd_spill_record_width, pd_table_from_spill, PdBucketMerger,
-    PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff, PdKeyKind, PdMerged, PdSinkLocal,
-    PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
+    pd_emit_bucket, pd_empty_grouped_table, pd_export_registry, pd_merge_bucket,
+    pd_merge_bucket_refs, pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_paremit_recipe,
+    pd_paremit_state, pd_registry_get, pd_registry_insert, pd_registry_nonempty,
+    pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
+    pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdBuilder, PdEmitBucket,
+    PdEmitRecipe, PdExport, PdFeed, PdHandedTable, PdHandoff, PdKeyKind, PdMerged, PdParemitCol,
+    PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
 };
+
+/// PAREMIT shape probe (runtime distinct sink, emission-in-combine fast
+/// path — pardistinct.rs section doc): `Some(cols)` iff every output
+/// column is a pure shuffle of group keys and identity-finalized aggregate
+/// results the combine workers can materialize from the merged partials —
+/// the merge.rs `build_emit_plan` admission, extended to the distinct
+/// sink's vocabulary. Anything else (HAVING, expressions over aggregates
+/// or keys, non-count DISTINCT aggs, avg's finalfn shape, non-key Vars)
+/// returns `None` and the engagement keeps the ADOPT tail (never a serial
+/// refusal — adopt handles the general shapes byte-identically).
+///
+/// Spec-independent by design: the economics tier prices the paremit
+/// shape BEFORE `pd_derive_spec` runs; [`pd_paremit_recipe`] resolves
+/// these columns against the derived spec.
+pub fn pd_paremit_cols(node: &AggStateData<'_>) -> Option<Vec<pardistinct::PdParemitCol>> {
+    use pardistinct::PdParemitCol;
+    // pg_proc count(*) / count(any) / sum(int2) / sum(int4) — the
+    // identity-finalize vocabulary (avg carries a finalfn: refused).
+    const AGG_COUNT_STAR: Oid = 2803;
+    const AGG_COUNT_ANY: Oid = 2147;
+    const AGG_SUM_INT2: Oid = 2109;
+    const AGG_SUM_INT4: Oid = 2108;
+    // HAVING re-checks per group and expression projections need the
+    // interpreter — both keep the adopt tail (m2-sinks §6: emission moves
+    // into combine only where the shape admits it).
+    if node.qual.is_some() || node.skip_final {
+        return None;
+    }
+    let group_cols = node.plan.grpColIdx;
+    let mut cols = Vec::with_capacity(node.plan.plan.targetlist.len());
+    for n in node.plan.plan.targetlist.iter() {
+        let te = n.as_target_entry()?;
+        if let Some(v) = te.expr.as_var() {
+            // The projection evaluates over the outer tuple; only the
+            // grouping columns are materialized in the merged result.
+            if v.varno != ::execexpr::OUTER_VAR || v.varlevelsup != 0 {
+                return None;
+            }
+            let i = group_cols.iter().position(|&c| c == v.varattno)?;
+            cols.push(PdParemitCol::Key(i));
+            continue;
+        }
+        if let Some(ar) = te.expr.as_aggref() {
+            if ar.aggno < 0 || ar.aggno as usize >= node.peragg.len() {
+                return None;
+            }
+            let pa = &node.peragg[ar.aggno as usize];
+            // Identity finalize only (merge.rs discipline): no finalfn
+            // (the result IS the trans value), no direct args, byval
+            // transtype — count/sum-int shapes all qualify.
+            if pa.finalfn.is_some()
+                || !pa.direct_args.is_empty()
+                || !node.trans_typ[pa.transno as usize].byval
+            {
+                return None;
+            }
+            if !pa.aggref.aggdistinct.is_nil() {
+                // count(DISTINCT x) only: `set_count_transfn` proves the
+                // transition is exactly int8inc_any, so the merged set's
+                // value count IS the replay result (distinctset.rs
+                // `value_count` doc). Other set aggs keep the adopt
+                // replay.
+                let si = node
+                    .pertrans_sort
+                    .iter()
+                    .position(|ps| ps.transno == pa.transno as usize)?;
+                if !node.pertrans_sort[si].set_count_transfn {
+                    return None;
+                }
+                cols.push(PdParemitCol::SetCount(si));
+                continue;
+            }
+            let sum = match ar.aggfnoid {
+                AGG_COUNT_STAR | AGG_COUNT_ANY => false,
+                AGG_SUM_INT2 | AGG_SUM_INT4 => true,
+                _ => return None,
+            };
+            cols.push(PdParemitCol::Vocab { transno: pa.transno, sum });
+            continue;
+        }
+        // Consts / expressions keep the projection interpreter (adopt).
+        return None;
+    }
+    Some(cols)
+}
+
+/// Whether the runtime distinct sink's PAREMIT emit state is installed
+/// (the drive routes straight to [`agg_pdemit_emit_next`]; the plan's
+/// Sort was bypassed and must never be fed).
+pub fn agg_pdemit_emitting(node: &AggStateData<'_>) -> bool {
+    node.pdemit.is_some()
+}
+
+/// Install the adopted paremit emit state (runtime distinct sink,
+/// Completed leader path). The caller returns rows via
+/// [`agg_pdemit_emit_next`] from here on.
+pub fn agg_pdemit_install(node: &mut AggStateData<'_>, st: pardistinct::PdParemitState) {
+    debug_assert!(node.pdemit.is_none());
+    debug_assert!(node.hashgroup.is_none());
+    node.pdemit = Some(Box::new(st));
+}
+
+/// Emit the next merged paremit row into the node's result slot — the
+/// `agg_retrieve_emitted` discipline: a datum memcpy per row, no
+/// finalize, no projection interpreter, no per-row expr-context reset
+/// (nothing on this path allocates per tuple; text datums point into the
+/// published buckets' arenas, which outlive every pull). `Ok(None)` =
+/// stream end (`agg_done` set, state dropped). No HAVING on admitted
+/// shapes — every pull is one group row.
+pub fn agg_pdemit_emit_next<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    let mcx = estate.es_query_cxt;
+    let result = node.ps_ResultTupleSlot;
+    let st = node.pdemit.as_deref_mut().expect("pdemit emit without state");
+    let Some((bucket, row)) = pardistinct::pd_paremit_next(st)? else {
+        // Stream end: clear the slot's borrowed arena datums BEFORE the
+        // buckets drop (the hashgrouped end arm's discipline).
+        let slot = estate.slot_mut(result);
+        exectuples::exec_clear_tuple(slot, mcx);
+        node.agg_done = true;
+        agg_pdemit_reset(node);
+        return Ok(None);
+    };
+    let natts = st.natts;
+    let (values, nulls) = st.row(bucket, row);
+    let slot = estate.slot_mut(result);
+    exectuples::exec_clear_tuple(slot, mcx);
+    {
+        let sb = slot.base_mut();
+        sb.tts_values[..natts].copy_from_slice(values);
+        sb.tts_isnull[..natts].copy_from_slice(nulls);
+    }
+    exectuples::exec_store_virtual_tuple(slot);
+    Ok(Some(result))
+}
+
+/// Rescan/teardown: drop the paremit emit state. Engagement-sized results
+/// ride the same allocator-release discipline as the sink and hashgroup
+/// teardowns (69b97573f): the buckets were built by helper threads that
+/// have exited — purge the freed-but-retained segments so a repeat
+/// execution rebuilds inside the same RSS envelope.
+pub fn agg_pdemit_reset(node: &mut AggStateData<'_>) {
+    if let Some(st) = node.pdemit.take() {
+        let bytes = st.mem_bytes();
+        drop(st);
+        if bytes >= SINK_RELEASE_MIN_BYTES {
+            hashagg_release_retained("pdemit_teardown");
+        }
+    }
+}
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
 /// empty sets ARE the empty-input contract; finish emits the one row.
@@ -6260,6 +6419,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
     node.merge = None;
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
+    agg_pdemit_reset(node);
     if let Some(ph) = node.perhash.as_mut() {
         hashagg_reset_spill_state(ph, node.plan.numGroups as f64);
     }
@@ -6294,6 +6454,8 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     // the aggcontext reset below can free its by-ref transvalues safely.
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
+    // Runtime distinct sink paremit: spent on rescan, same law as the sink.
+    agg_pdemit_reset(node);
     merge::reset_merge_for_rescan(node);
     // M2 sink: a rescan re-engages (or falls back) from scratch; any adopted
     // parallel emit state is spent.
@@ -6342,6 +6504,8 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // exec_rescan_agg_chg).
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
+    // Runtime distinct sink paremit: spent on rescan, same law as the sink.
+    agg_pdemit_reset(node);
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
@@ -6474,7 +6638,7 @@ mcx::forget_safe_struct!(
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup,
-        sink_emit },
+        sink_emit, pdemit },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },
