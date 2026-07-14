@@ -333,6 +333,74 @@ pub fn on_exit_reset() {
     dsm_core::dsm::reset_on_dsm_detach();
 }
 
+/// M4 bgjobs multi-job seat (docs/design/m4-bgjobs.md §3.2): one dispatcher
+/// thread hosts several migrated daemons; each job's exit-callback stacks
+/// (registered during its aux prelude, drained by its teardown shmem_exit)
+/// are stashed here while the job is not the thread's bound identity.
+/// Without the swap, teardown of job A would run job B's aux exit chain,
+/// and job B's startup `on_exit_reset` would wipe job A's registrations.
+pub struct ExitCallbackLists {
+    before_shmem: [Option<BeforeOnExit>; MAX_ON_EXITS],
+    on_shmem: [Option<OnExit>; MAX_ON_EXITS],
+    on_proc: [Option<OnExit>; MAX_ON_EXITS],
+    before_shmem_index: usize,
+    on_shmem_index: usize,
+    on_proc_index: usize,
+}
+
+impl ExitCallbackLists {
+    pub const fn empty() -> ExitCallbackLists {
+        ExitCallbackLists {
+            before_shmem: [NO_BEFORE; MAX_ON_EXITS],
+            on_shmem: [NO_ON; MAX_ON_EXITS],
+            on_proc: [NO_ON; MAX_ON_EXITS],
+            before_shmem_index: 0,
+            on_shmem_index: 0,
+            on_proc_index: 0,
+        }
+    }
+}
+
+impl Default for ExitCallbackLists {
+    fn default() -> Self {
+        ExitCallbackLists::empty()
+    }
+}
+
+/// Exchange the calling thread's exit-callback stacks with `saved`.
+/// Self-inverse (the seat swap discipline). Must not be called while an
+/// exit is in progress on this thread (the drain loops walk the live TLS).
+pub fn swap_exit_callback_lists(saved: &mut ExitCallbackLists) {
+    debug_assert!(
+        !PROC_EXIT_INPROGRESS.with(Cell::get) && !SHMEM_EXIT_INPROGRESS.with(Cell::get),
+        "exit-callback seat swap during an in-progress exit drain"
+    );
+    BEFORE_SHMEM_EXIT_LIST.with(|l| {
+        let cur = l.get();
+        l.set(saved.before_shmem);
+        saved.before_shmem = cur;
+    });
+    ON_SHMEM_EXIT_LIST.with(|l| {
+        let cur = l.get();
+        l.set(saved.on_shmem);
+        saved.on_shmem = cur;
+    });
+    ON_PROC_EXIT_LIST.with(|l| {
+        let cur = l.get();
+        l.set(saved.on_proc);
+        saved.on_proc = cur;
+    });
+    let cur = BEFORE_SHMEM_EXIT_INDEX.with(Cell::get);
+    BEFORE_SHMEM_EXIT_INDEX.with(|c| c.set(saved.before_shmem_index));
+    saved.before_shmem_index = cur;
+    let cur = ON_SHMEM_EXIT_INDEX.with(Cell::get);
+    ON_SHMEM_EXIT_INDEX.with(|c| c.set(saved.on_shmem_index));
+    saved.on_shmem_index = cur;
+    let cur = ON_PROC_EXIT_INDEX.with(Cell::get);
+    ON_PROC_EXIT_INDEX.with(|c| c.set(saved.on_proc_index));
+    saved.on_proc_index = cur;
+}
+
 pub fn check_on_shmem_exit_lists_are_empty() -> PgResult<()> {
     if BEFORE_SHMEM_EXIT_INDEX.with(Cell::get) != 0 {
         return Err(Box::new(PgError::error(

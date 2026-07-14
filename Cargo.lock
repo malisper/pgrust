@@ -1604,6 +1604,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "auxjob"
+version = "0.0.0"
+dependencies = [
+ "auxprocess",
+ "backend_status",
+ "bgjobs",
+ "elog",
+ "guc_file_seams",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "libc",
+ "lmgr_proc",
+ "miscinit",
+ "postinit",
+ "postmaster_seams",
+ "procsignal",
+ "procsignal_seams",
+ "resowner",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
+]
+
+[[package]]
 name = "auxprocess"
 version = "0.0.0"
 dependencies = [
@@ -1907,6 +1935,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bgjobs"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "latch",
+ "runtime",
+ "types_error",
+ "types_storage",
+ "waiter",
+]
+
+[[package]]
 name = "bgworker"
 version = "0.0.0"
 dependencies = [
@@ -1947,13 +1987,16 @@ name = "bgwriter"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "auxjob",
  "auxprocess",
+ "bgjobs",
  "bufmgr",
  "checkpointer",
  "condition_variable_seams",
  "dynahash",
  "elog",
  "fd",
+ "guc_file_seams",
  "guc_tables",
  "init_small",
  "interrupt",
@@ -1961,10 +2004,14 @@ dependencies = [
  "latch",
  "libc",
  "libpq_pqsignal",
+ "lmgr_proc",
  "lwlock",
  "miscinit",
  "pgstat_seams",
+ "postinit",
+ "postmaster_seams",
  "procsignal",
+ "procsignal_seams",
  "resowner",
  "smgr",
  "standby_seams",
@@ -1972,6 +2019,8 @@ dependencies = [
  "transam_xlog",
  "types_core",
  "types_error",
+ "types_guc",
+ "types_resowner",
  "types_startup",
  "types_storage",
  "waitevent_seams",
@@ -7648,6 +7697,7 @@ version = "0.0.0"
 dependencies = [
  "autovacuum",
  "backend_startup",
+ "bgjobs",
  "bgworker",
  "bgwriter",
  "checkpointer",
@@ -18358,7 +18408,9 @@ name = "walwriter"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "auxjob",
  "auxprocess",
+ "bgjobs",
  "bufmgr",
  "condition_variable_seams",
  "dynahash",

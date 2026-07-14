@@ -82,6 +82,16 @@ fn wal_sync_method() -> i32 {
     guc_tables::vars::wal_sync_method.read()
 }
 
+/// M4 walwriter job overlay: stamp wal_sync_method into the EXECUTING
+/// worker's cell with the assign-hook semantics — a changed method
+/// invalidates the open segment's sync posture, so the open WAL file (per
+/// worker, like C's per-backend openLogFile) is fsync'd + closed first
+/// (assign_wal_sync_method). Raw var writes must not bypass that.
+pub fn stamp_wal_sync_method(new_val: i32) {
+    assign_wal_sync_method(new_val, None);
+    guc_tables::vars::wal_sync_method.write(new_val);
+}
+
 fn wal_io_start() -> i64 {
     pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read())
 }
@@ -677,12 +687,51 @@ pub fn XLogSetAsyncXactLSN(async_xact_lsn: XLogRecPtr) {
     }
 }
 
-/// XLogBackgroundFlush (xlog.c).
-pub fn XLogBackgroundFlush() -> PgResult<bool> {
-    thread_local! {
-        static LAST_FLUSH: Cell<i64> = const { Cell::new(0) };
-    }
+/// C XLogBackgroundFlush's function-static `lastflush`, extracted to
+/// CALLER-owned state (M4 walwriter migration): job-mode cycles hop pool
+/// workers, and the previous thread-local would reset the flush pacing to
+/// "flush immediately" on every hop, silently defeating
+/// wal_writer_flush_after batching. The thread driver owns one on its
+/// frame — behavior identical to the C static (walwriter is the only
+/// caller).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WalFlushPacing {
+    last_flush: i64,
+}
 
+impl WalFlushPacing {
+    pub const fn new() -> WalFlushPacing {
+        WalFlushPacing { last_flush: 0 }
+    }
+}
+
+/// The flush-or-defer decision (xlog.c XLogBackgroundFlush's pacing
+/// block), pure for the deterministic unit tests: whether to flush up to
+/// the write request now; advances the pacing clock when it does. C
+/// ordering preserved exactly: flush_after==0 / first call → flush;
+/// wal_writer_delay elapsed → flush; wal_writer_flush_after blocks
+/// accumulated → flush; else defer.
+pub fn wal_flush_pacing_decide(
+    pacing: &mut WalFlushPacing,
+    now: i64,
+    flushblocks: i64,
+    flush_after: i32,
+    delay_us: i64,
+) -> bool {
+    if flush_after == 0
+        || pacing.last_flush == 0
+        || now - pacing.last_flush >= delay_us
+        || flushblocks >= flush_after as i64
+    {
+        pacing.last_flush = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// XLogBackgroundFlush (xlog.c).
+pub fn XLogBackgroundFlush(pacing: &mut WalFlushPacing) -> PgResult<bool> {
     if crate::insert::RecoveryInProgress() {
         return Ok(false);
     }
@@ -719,15 +768,8 @@ pub fn XLogBackgroundFlush() -> PgResult<bool> {
     let flush_after = guc_tables::vars::WalWriterFlushAfter.read();
     let delay_us = guc_tables::vars::WalWriterDelay.read() as i64 * 1000;
 
-    if flush_after == 0 || LAST_FLUSH.get() == 0 {
+    if wal_flush_pacing_decide(pacing, now, flushblocks, flush_after, delay_us) {
         write_rqst_flush = write_rqst_write;
-        LAST_FLUSH.set(now);
-    } else if now - LAST_FLUSH.get() >= delay_us {
-        write_rqst_flush = write_rqst_write;
-        LAST_FLUSH.set(now);
-    } else if flushblocks >= flush_after as i64 {
-        write_rqst_flush = write_rqst_write;
-        LAST_FLUSH.set(now);
     } else {
         write_rqst_flush = 0;
     }
