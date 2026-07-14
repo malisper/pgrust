@@ -232,7 +232,16 @@ impl runtime::ParallelSink for AggSink {
             }
             Ok(Err(AcceptFail::Error(e))) => {
                 mark_self_errored();
-                self.fail(e);
+                // Estimate-failure class (the compact backstop tripping
+                // UNDER the sink cap — a planner-underestimate shape the
+                // admission gate could not see): a REFUSAL, not an error.
+                // The leader reruns serially, byte-identically (the leg-4
+                // budget-refusal path). Every other error stays an error.
+                if ::nodeagg::sink::is_sink_cap_breach(&e) {
+                    self.refuse_budget();
+                } else {
+                    self.fail(e);
+                }
             }
             Err(_panic) => {
                 mark_self_errored();
@@ -1041,8 +1050,21 @@ fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
     // floor keeps heavy-state shapes exactly at the old cap (their old
     // verdict, admit or refuse, is reproduced verbatim).
     let mem_bound = (budget as u64 / 2) / entry.max(1);
-    let cap = mem_bound.min(ngroups_limit / 2);
-    cap.clamp(1 << 16, u32::MAX as u64 / 2) as u32
+    // TRIP GUARD (dop1-tax2): the drain's flush-if-due runs BEFORE each
+    // batch and a batch can insert up to a full staged batch of NEW groups,
+    // so the cap must sit a batch below the runtime backstop's ngroups trip
+    // (hash_ngroups_limit/2) or the flush never fires first. The old 64K
+    // floor could RAISE the cap ABOVE the trip on small-limit plans
+    // (planner underestimates the Mk car now admits) — the worker backstop
+    // then errored mid-build (battery legs 2d/2e parity FAIL @ 5451ddc9d:
+    // "worker compact table crossed the hash memory limits under the sink
+    // cap" on the 389k-group two-key corpus query). The floor is kept for
+    // admission-verdict stability but NEVER above the trip.
+    let trip = (ngroups_limit / 2)
+        .saturating_sub(2 * ::exectuples::SOA_MAX_ROWS as u64)
+        .max(1);
+    let cap = mem_bound.min(trip);
+    cap.clamp((1 << 16).min(trip), u32::MAX as u64 / 2) as u32
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
