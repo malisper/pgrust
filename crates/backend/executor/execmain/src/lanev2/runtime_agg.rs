@@ -46,10 +46,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
 use ::nodeagg::sink::{
-    sink_bucket_row_count, sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket,
-    sink_null_only_run, sink_partition_remainder, sink_resolve_combines, sink_run_from_spill,
-    sink_run_spill_bucket, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
-    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS, SINK_NULL_BUCKET,
+    sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
+    sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
+    sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
+    sink_spill_row_bytes, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec, SinkLocalView,
+    SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS, SINK_NULL_BUCKET,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -146,6 +147,11 @@ struct AggSink {
     /// Spill observability (gate-record counters, R4 line).
     spill_epochs: AtomicU64,
     spilled_bytes: AtomicU64,
+    /// Combine-split observability (inc-2b): split events, deepest level
+    /// reached, and a per-sink uniquifier for split-file names.
+    combine_splits: AtomicU64,
+    split_depth_max: AtomicU64,
+    split_uniq: AtomicU64,
     /// WFIN accounting, indexed by worker slot (pin-board lane).
     wfin: Vec<[WfinPipe; 2]>,
 }
@@ -239,11 +245,44 @@ impl runtime::ParallelSink for AggSink {
         let t0 = std::time::Instant::now();
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<CombineOutcome> {
             let b = part as usize;
-            // M3.5 §3: rebuild each Local's spilled face for this bucket —
-            // open-by-name on THIS thread (the file is frozen: combine
-            // deps-follows accept), one synthesized run per Local plus its
-            // in-memory NULL blocks in the NULL bucket.
             let state_words = self.state_bytes / 8;
+            let row_bytes = sink_spill_row_bytes(self.key_words, state_words);
+            // Pre-build size check (M3.5 §3), from the DIRECTORY + in-memory
+            // counts only — nothing is read from disk before this decision.
+            // Rows over-count duplicates across faces, so the check is
+            // conservative in the safe direction.
+            let mut rows = 0usize;
+            for l in locals {
+                if let Some(sp) = &l.spill {
+                    rows += sp.file.part_len(b as u32) as usize / row_bytes;
+                }
+                for r in &l.runs {
+                    rows += (r.starts[b + 1] - r.starts[b]) as usize;
+                }
+                if let (Some(_), Some(p)) = (&l.table, &l.part) {
+                    rows += (p.starts[b + 1] - p.starts[b]) as usize;
+                }
+            }
+            if est_table_bytes(self, rows) > self.budget {
+                // inc-2b: recursive combine-split by deeper hash bits —
+                // stream every face through sub-bucket routing files and
+                // combine each sub-partition bounded; depth cap → refusal.
+                let Some(set) = &self.spill_set else {
+                    return Ok(CombineOutcome::OverBudget);
+                };
+                let mut out = SinkEmitBuf::default();
+                if !split_views_and_emit(self, b, set, locals, &mut out)? {
+                    return Ok(CombineOutcome::OverBudget);
+                }
+                // SAFETY: partition `part` is claimed exactly once (runtime
+                // contract); this is its single writer.
+                unsafe { *self.out_emit[b].get() = out };
+                return Ok(CombineOutcome::Done);
+            }
+            // In-memory path: rebuild each Local's spilled face for this
+            // bucket — open-by-name on THIS thread (the file is frozen:
+            // combine deps-follows accept), one synthesized run per Local
+            // plus its in-memory NULL blocks in the NULL bucket.
             let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
             for l in locals {
                 let mut v: Vec<SinkRun> = Vec::new();
@@ -274,20 +313,6 @@ impl runtime::ParallelSink for AggSink {
                     },
                 })
                 .collect();
-            // Pre-build size check (M3.5 §3): a partition whose merged
-            // table would cross the per-Local budget refuses BEFORE
-            // allocating (recursive sub-split is the chartered inc-2b —
-            // refusal keeps memory bounded until it lands). Rows here are
-            // an over-count (duplicates across faces merge), so this only
-            // ever refuses conservatively.
-            let rows = sink_bucket_row_count(b, &views);
-            let est = rows
-                .saturating_mul(self.key_words * 8 + self.state_bytes + 32)
-                .saturating_mul(3)
-                / 2;
-            if est > self.budget {
-                return Ok(CombineOutcome::OverBudget);
-            }
             let merged = sink_combine_bucket(
                 b,
                 self.key_words,
@@ -296,15 +321,14 @@ impl runtime::ParallelSink for AggSink {
                 &self.combines,
             )?;
             let buf = sink_emit_bucket(&self.emit, &merged);
-            // SAFETY: partition `part` is claimed exactly once (runtime
-            // contract); this is its single writer.
+            // SAFETY: as above — exactly-once claim, single writer.
             unsafe { *self.out_emit[part as usize].get() = buf };
             Ok(CombineOutcome::Done)
         }));
         match r {
             Ok(Ok(CombineOutcome::Done)) => {}
             Ok(Ok(CombineOutcome::OverBudget)) => {
-                lane_trace("runtime-agg: combine partition over budget (inc-2b recursion pending) — serial rerun");
+                lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
                 self.refuse_budget();
             }
             Ok(Err(e)) => self.fail(e),
@@ -513,6 +537,241 @@ fn spill_epoch(
     sink.spilled_bytes
         .fetch_add(sp.file.spilled_bytes() - before, Ordering::Relaxed);
     Ok(())
+}
+
+/// Merged-table byte estimate for `rows` input rows (entry overhead + key +
+/// state, ×1.5 headroom) — the combine pre-build check and the split loop
+/// read the SAME estimator.
+fn est_table_bytes(sink: &AggSink, rows: usize) -> usize {
+    rows.saturating_mul(sink.key_words * 8 + sink.state_bytes + 32)
+        .saturating_mul(3)
+        / 2
+}
+
+/// Combine-split depth cap: hash bytes below the top-8 the recursion may
+/// consume (depth 1 = the first split). Default 3; clamped to the routing
+/// vocabulary (≤6).
+fn spill_split_depth_cap() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SPILL_DEPTH")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(3)
+            .clamp(1, 6)
+    })
+}
+
+const SPLIT_FLUSH_BYTES: usize = 16 << 20;
+const SPLIT_READ_CHUNK: usize = 1 << 20;
+
+/// Bounded sub-bucket router (inc-2b): records absorb into 256 in-memory
+/// buffers and epoch-flush to a combine-task-owned spill file when the
+/// staged total crosses [`SPLIT_FLUSH_BYTES`] — partition-ascending per
+/// epoch, extents accumulate across epochs (the substrate contract).
+struct SubRouter {
+    file: ::spillset::SpillFile,
+    bufs: Vec<Vec<u8>>,
+    staged: usize,
+    key_words: usize,
+    state_words: usize,
+    depth: u32,
+}
+
+impl SubRouter {
+    fn new(
+        sink: &AggSink,
+        set: &Arc<::spillset::SpillSet>,
+        b: usize,
+        depth: u32,
+    ) -> SubRouter {
+        let uniq = sink.split_uniq.fetch_add(1, Ordering::Relaxed);
+        SubRouter {
+            file: ::spillset::SpillFile::new(
+                Arc::clone(set),
+                format!("m35-cmb-p{b}-d{depth}-u{uniq}"),
+                SINK_NBUCKETS as u32,
+            ),
+            bufs: vec![Vec::new(); SINK_NBUCKETS],
+            staged: 0,
+            key_words: sink.key_words,
+            state_words: sink.state_bytes / 8,
+            depth,
+        }
+    }
+
+    fn absorb(&mut self, records: &[u8]) -> PgResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        sink_route_records(records, self.key_words, self.state_words, self.depth, &mut self.bufs)?;
+        self.staged += records.len();
+        if self.staged >= SPLIT_FLUSH_BYTES {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> PgResult<()> {
+        if self.staged == 0 {
+            return Ok(());
+        }
+        let ctx = ::mcx::MemoryContext::new("m35-agg-split-write");
+        let mut w = self.file.begin_epoch(ctx.mcx())?;
+        for (s, buf) in self.bufs.iter_mut().enumerate() {
+            if !buf.is_empty() {
+                w.write_part(s as u32, buf)?;
+                buf.clear();
+            }
+        }
+        w.finish()?;
+        self.staged = 0;
+        Ok(())
+    }
+}
+
+/// Stream one spilled partition in ROW-ALIGNED chunks (fixed-width records;
+/// a torn tail fails closed).
+fn stream_part_rows(
+    file: &::spillset::SpillFile,
+    part: u32,
+    row_bytes: usize,
+    mut f: impl FnMut(&[u8]) -> PgResult<()>,
+) -> PgResult<()> {
+    let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let cap = (SPLIT_READ_CHUNK / row_bytes).max(1) * row_bytes;
+    let mut buf = vec![0u8; cap];
+    let mut filled = 0usize;
+    loop {
+        let n = rd.read(&mut buf[filled..])?;
+        if n == 0 {
+            rd.close()?;
+            if filled != 0 {
+                return Err(::nodeagg::sink::sink_shape_error(
+                    "torn spill record (partial row) in split stream",
+                ));
+            }
+            return Ok(());
+        }
+        filled += n;
+        let usable = filled / row_bytes * row_bytes;
+        if usable > 0 {
+            f(&buf[..usable])?;
+            buf.copy_within(usable..filled, 0);
+            filled -= usable;
+        }
+    }
+}
+
+/// inc-2b top level: route every face of over-budget partition `b` into a
+/// depth-1 sub-bucket file, then combine each sub-partition (recursing where
+/// still too big), emitting into `out`. Returns false on depth-cap overflow
+/// (the caller refuses → R5 serial rerun). NULL faces never route — they
+/// merge through one bounded mini-combine at the end.
+fn split_views_and_emit(
+    sink: &AggSink,
+    b: usize,
+    set: &Arc<::spillset::SpillSet>,
+    locals: &[AggSinkLocal],
+    out: &mut SinkEmitBuf,
+) -> PgResult<bool> {
+    sink.combine_splits.fetch_add(1, Ordering::Relaxed);
+    sink.split_depth_max.fetch_max(1, Ordering::Relaxed);
+    let state_words = sink.state_bytes / 8;
+    let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
+    let mut router = SubRouter::new(sink, set, b, 1);
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut null_runs: Vec<SinkRun> = Vec::new();
+    for l in locals {
+        for r in &l.runs {
+            scratch.clear();
+            sink_run_spill_bucket(r, b, &mut scratch);
+            router.absorb(&scratch)?;
+            if b == SINK_NULL_BUCKET {
+                if let Some(nb) = &r.null_states {
+                    null_runs.push(sink_null_only_run(sink.key_words, state_words, nb.clone()));
+                }
+            }
+        }
+        if let (Some(t), Some(p)) = (&l.table, &l.part) {
+            scratch.clear();
+            sink_remainder_spill_bucket(t.table(), p, b, &mut scratch);
+            router.absorb(&scratch)?;
+            if b == SINK_NULL_BUCKET {
+                if let Some(nb) = sink_remainder_null_block(t.table()) {
+                    null_runs.push(sink_null_only_run(sink.key_words, state_words, nb));
+                }
+            }
+        }
+        if let Some(sp) = &l.spill {
+            stream_part_rows(&sp.file, b as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            if b == SINK_NULL_BUCKET {
+                for nb in &sp.null_blocks {
+                    null_runs.push(sink_null_only_run(sink.key_words, state_words, nb.clone()));
+                }
+            }
+        }
+    }
+    router.flush()?;
+    if !split_subparts_and_emit(sink, b, set, &router.file, 1, out)? {
+        return Ok(false);
+    }
+    if !null_runs.is_empty() {
+        // The NULL group: one bounded mini-combine over its blocks only.
+        let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
+        let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        out.append(sink_emit_bucket(&sink.emit, &t));
+    }
+    Ok(true)
+}
+
+/// Combine each sub-partition of a routed split file; sub-partitions still
+/// over budget recurse one hash byte deeper (fresh file), depth-capped.
+fn split_subparts_and_emit(
+    sink: &AggSink,
+    b: usize,
+    set: &Arc<::spillset::SpillSet>,
+    file: &::spillset::SpillFile,
+    depth: u32,
+    out: &mut SinkEmitBuf,
+) -> PgResult<bool> {
+    let state_words = sink.state_bytes / 8;
+    let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
+    for s in 0..SINK_NBUCKETS {
+        let blen = file.part_len(s as u32) as usize;
+        if blen == 0 {
+            continue;
+        }
+        let rows = blen / row_bytes;
+        if est_table_bytes(sink, rows) > sink.budget {
+            if depth + 1 > spill_split_depth_cap() {
+                return Ok(false);
+            }
+            sink.combine_splits.fetch_add(1, Ordering::Relaxed);
+            sink.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
+            let mut router = SubRouter::new(sink, set, b, depth + 1);
+            stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            router.flush()?;
+            if !split_subparts_and_emit(sink, b, set, &router.file, depth + 1, out)? {
+                return Ok(false);
+            }
+            continue;
+        }
+        let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
+        let Some(mut rd) = file.read_part(ctx.mcx(), s as u32)? else { continue };
+        let bytes = rd.read_to_end()?;
+        rd.close()?;
+        let synth = sink_run_from_spill(b, sink.key_words, state_words, &bytes)?;
+        let view = [SinkLocalView {
+            spilled: core::slice::from_ref(&synth),
+            runs: &[],
+            remainder: None,
+        }];
+        let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        out.append(sink_emit_bucket(&sink.emit, &t));
+    }
+    Ok(true)
 }
 
 /// The narrow sink drain over the positioned claim: per staged page batch —
@@ -1209,6 +1468,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         spill_set,
         spill_epochs: AtomicU64::new(0),
         spilled_bytes: AtomicU64::new(0),
+        combine_splits: AtomicU64::new(0),
+        split_depth_max: AtomicU64::new(0),
+        split_uniq: AtomicU64::new(0),
         wfin: (0..rt.nthreads() + runtime::MAX_EXTERNAL_LANES)
             .map(|_| [WfinPipe::default(), WfinPipe::default()])
             .collect(),
@@ -1396,6 +1658,13 @@ fn engage_ceremony<'mcx>(
                 lane_trace(&format!(
                     "runtime-agg: SPILLED epochs={spill_epochs} bytes={}",
                     sink.spilled_bytes.load(Ordering::Relaxed)
+                ));
+            }
+            let splits = sink.combine_splits.load(Ordering::Relaxed);
+            if splits > 0 {
+                lane_trace(&format!(
+                    "runtime-agg: COMBINE-SPLIT splits={splits} max_depth={}",
+                    sink.split_depth_max.load(Ordering::Relaxed)
                 ));
             }
             lane_trace(&format!("runtime-agg: complete, groups={rows}"));
