@@ -21,6 +21,7 @@ pub fn init_seams() {}
 
 mod parallel;
 pub use parallel::exec_parallel_hash_join;
+pub mod batch;
 pub mod shared_build;
 pub mod shared_exec;
 

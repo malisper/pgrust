@@ -123,6 +123,30 @@ impl SpillFile {
             .sum()
     }
 
+    /// One partition's committed extents, epoch order (M3.5 join batches:
+    /// each extent is one morsel-claim unit — extents are RECORD-aligned by
+    /// construction, every epoch writes whole records).
+    pub fn part_extents(&self, part: u32) -> Vec<Extent> {
+        debug_assert!(part < self.nparts);
+        self.epochs
+            .iter()
+            .flat_map(|e| e.parts.iter())
+            .filter(|(p, _)| *p == part)
+            .map(|(_, x)| *x)
+            .collect()
+    }
+
+    /// Stream ONE extent (from [`SpillFile::part_extents`]) of the frozen
+    /// file. Any thread with temp-file access; same deps-DAG obligation as
+    /// [`SpillFile::read_part`].
+    pub fn read_extent<'mcx>(&self, mcx: Mcx<'mcx>, extent: Extent) -> PgResult<PartReader<'mcx>> {
+        debug_assert!(self.created, "read_extent on a never-written file");
+        let _io = runtime::blocking_io_section();
+        let bf = BufFileOpenFileSet(mcx, self.set.fileset(), &self.name, true)?;
+        drop(_io);
+        Ok(PartReader { bf, extents: vec![extent], cur: 0, pos_in_cur: 0, seeked: false })
+    }
+
     /// Begin one epoch write. MUST be called by the file's owning worker
     /// thread (single-writer law). The returned writer holds an open
     /// BufFile; every syscall-bearing call (open here, `write_part`,
