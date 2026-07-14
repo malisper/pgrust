@@ -140,6 +140,15 @@ struct AggSink {
     /// degrade to the full drain (correct either way — winners are a drain
     /// filter, never a data transform).
     topn_degraded: AtomicBool,
+    /// inc-1 winners-only evidence counters (docs/design/topn-winners-only.md
+    /// §6): attribute the combine phase's cost between the merged-table
+    /// build, the selection pass, and the emit materialization, plus the
+    /// materialized-row vs candidate-row split. Populated ONLY when `topn`
+    /// is armed (off-path-free: unarmed engagements read no clocks); read
+    /// once at adopt for the trace line. Nanos are summed raw claim time
+    /// across all workers (worker-time, not wall — divide by the engaged
+    /// DOP for a critical-path estimate).
+    topn_ctr: TopnCounters,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -208,6 +217,26 @@ struct AggSink {
 // partition (the runtime's exactly-once combine claim) and read only by
 // finalize, which happens-after every combine by last-worker-out.
 unsafe impl Sync for AggSink {}
+
+/// Combine-phase cost-attribution counters for topn-armed engagements
+/// (winners-only inc-1 — the design's stop-rule evidence: what share of the
+/// combine phase is the FULL emit materialization, and how many of the
+/// materialized rows are selection losers). Trace-only observability; no
+/// behavior reads these.
+#[derive(Default)]
+struct TopnCounters {
+    /// Merged-table build time (`sink_combine_bucket`), ns, summed claims.
+    build_ns: AtomicU64,
+    /// Selection pass time (`sink_topn_candidates`), ns, summed claims.
+    select_ns: AtomicU64,
+    /// Emit materialization time (`sink_emit_bucket` / pass-through), ns.
+    emit_ns: AtomicU64,
+    /// Rows materialized through `emit_row` (all merged groups today).
+    mat_rows: AtomicU64,
+    /// Winner-candidate rows selected (≤ 256 × bound) — what winners-only
+    /// materialization would materialize instead.
+    cand_rows: AtomicU64,
+}
 
 /// What finalize hands the leader.
 enum SinkPublished {
@@ -399,12 +428,19 @@ impl runtime::ParallelSink for AggSink {
                         if self.topn.is_some() {
                             self.topn_degraded.store(true, Ordering::Release);
                         }
+                        let t0 = self.topn.is_some().then(std::time::Instant::now);
                         let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
                             &self.emit,
                             t.table(),
                             p,
                             part as usize,
                         )?;
+                        if let Some(t0) = t0 {
+                            self.topn_ctr
+                                .emit_ns
+                                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+                        }
                         self.retain_bucket(part, buf, locals.len())?;
                         return Ok(CombineOutcome::Done);
                     }
@@ -491,6 +527,8 @@ impl runtime::ParallelSink for AggSink {
                     },
                 })
                 .collect();
+            let ctr = self.topn.is_some();
+            let t0 = ctr.then(std::time::Instant::now);
             let merged = sink_combine_bucket(
                 b,
                 self.key_words,
@@ -498,6 +536,11 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
+            if let Some(t0) = t0 {
+                self.topn_ctr
+                    .build_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
             // Combine-phase top-N (car 1): select this partition's winners
             // on the merged raw states BEFORE the emit walks the same rows
             // (candidate row indices == emit buf row indices — both iterate
@@ -506,15 +549,31 @@ impl runtime::ParallelSink for AggSink {
             // either way.
             if let Some(spec) = &self.topn {
                 if !self.topn_degraded.load(Ordering::Acquire) {
+                    let ts = std::time::Instant::now();
                     match sink_topn_candidates(&merged, spec, part as u16) {
                         // SAFETY: partition `part` is claimed exactly once
                         // (runtime contract); this is its single writer.
-                        Some(c) => unsafe { *self.topn_cands[part as usize].get() = c },
+                        Some(c) => {
+                            self.topn_ctr
+                                .cand_rows
+                                .fetch_add(c.len() as u64, Ordering::Relaxed);
+                            unsafe { *self.topn_cands[part as usize].get() = c }
+                        }
                         None => self.topn_degraded.store(true, Ordering::Release),
                     }
+                    self.topn_ctr
+                        .select_ns
+                        .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
+            let t0 = ctr.then(std::time::Instant::now);
             let buf = sink_emit_bucket(&self.emit, &merged)?;
+            if let Some(t0) = t0 {
+                self.topn_ctr
+                    .emit_ns
+                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
+            }
             self.retain_bucket(part, buf, locals.len())?;
             Ok(CombineOutcome::Done)
         }));
@@ -2141,6 +2200,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         topn,
         topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
         topn_degraded: AtomicBool::new(false),
+        topn_ctr: TopnCounters::default(),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -2465,6 +2525,21 @@ fn engage_ceremony<'mcx>(
                         (None, None) => {
                             lane_trace(&format!("runtime-agg: complete, groups={rows}"))
                         }
+                    }
+                    // Winners-only inc-1 evidence line (design §6): the
+                    // combine phase's cost decomposition on topn-armed
+                    // engagements. ns are worker-time sums across claims.
+                    if sink.topn.is_some() {
+                        let c = &sink.topn_ctr;
+                        lane_trace(&format!(
+                            "runtime-agg topn counters: mat_rows={} cand_rows={} \
+                             build_us={} select_us={} emit_us={}",
+                            c.mat_rows.load(Ordering::Relaxed),
+                            c.cand_rows.load(Ordering::Relaxed),
+                            c.build_ns.load(Ordering::Relaxed) / 1_000,
+                            c.select_ns.load(Ordering::Relaxed) / 1_000,
+                            c.emit_ns.load(Ordering::Relaxed) / 1_000,
+                        ));
                     }
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }
