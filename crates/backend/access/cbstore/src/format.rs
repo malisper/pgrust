@@ -381,9 +381,11 @@ pub fn schema_fingerprint(cols: &[(Oid, i16)]) -> u64 {
     h
 }
 
-// Runs on every Part open over the whole footer (~24B x rgs x cols): the
-// planner's footer_rows and the executor's open each pay it per statement,
-// so bitwise-per-bit here put ~16ms on a 100M-row 105-col table's Q1.
+// Ran on every Part open over the whole footer (~24B x rgs x cols) until
+// the sectioned lazy read (reader::read_footer_rgs): reader opens now skip
+// the whole-body CRC; this remains on the writer's reopen-append read and
+// the PGRUST_CBSTORE_FOOTER_EAGER=1 path. History: bitwise-per-bit here put
+// ~16ms on a 100M-row 105-col table's Q1.
 pub fn crc32c(bytes: &[u8]) -> u32 {
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("crc") {
