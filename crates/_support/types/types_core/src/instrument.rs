@@ -112,6 +112,55 @@ pub struct Instrumentation {
     pub walusage: WalUsage,
 }
 
+/// EA-on-morsels pipeline report (pgrust-fast docs/design/ea-morsels.md §4;
+/// no C counterpart). One record per engaged runtime pipeline phase,
+/// constructed by the arm's leader merge on a clean Completed outcome and
+/// read by EXPLAIN through the query_desc_runtime_ea_pipeline seam. All
+/// counters are EXACT merges of per-worker instrument partials; timing
+/// fields are zero under TIMING OFF and MUST NOT be printed as times then
+/// (never fake a time).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeEaPipeline {
+    /// The engaged pipeline's breaker (root) node — the block prints here.
+    pub root_node_id: i32,
+    /// Bypassed member nodes marked in EXPLAIN (-1 = unused slot). The m2
+    /// arms have one (SeqScan) or two (SeqScan + skipped Sort).
+    pub member_node_id: i32,
+    pub member2_node_id: i32,
+    /// Arm vocabulary: "scan" | "agg" | "distinct" (extensible).
+    pub arm: &'static str,
+    /// Phase role: "accept" ("combine"/"probe"/"fill" reserved for later
+    /// arms and the m3 extension points).
+    pub role: &'static str,
+    pub taskset_index: u32,
+    pub taskset_count: u32,
+    /// Workers that executed at least one claim.
+    pub workers: u32,
+    pub claims: u64,
+    /// Claim epoch segments (= claims until the dop1-tax coalescing split
+    /// is threaded through).
+    pub epoch_segments: u64,
+    pub granules: u64,
+    pub rows_scanned: u64,
+    pub rows_survived: u64,
+    /// Exported partials merged by the leader (scan: non-empty result
+    /// partials; sinks: participating workers).
+    pub partials: u64,
+    /// Scan-descriptor fold: [granules_scanned, granules_pruned,
+    /// granules_bloom_pruned, granules_meta, granules_bound_skipped,
+    /// blocks_pruned, windows_staged].
+    pub prune: [u64; 7],
+    /// TIMING ON only (inc-3); zero under TIMING OFF.
+    pub busy_ns: u64,
+    pub first_start_ns: u64,
+    pub last_end_ns: u64,
+    /// min over workers' last_end (finish spread = last_end - this).
+    pub min_last_end_ns: u64,
+    /// min/max per-claim wall ns.
+    pub morsel_min_ns: u64,
+    pub morsel_max_ns: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TuplesortMethod {
     #[default]

@@ -323,6 +323,62 @@ pub(crate) fn query_desc_instrument_seam(
     })
 }
 
+/// EA-on-morsels refusal records for one node (ea-morsels.md §6). None =
+/// nothing recorded — the armed+instrumented emission gate in data form.
+pub(crate) fn query_desc_runtime_ea_refusals_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(&'static str, &'static str)>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let v: Vec<(&'static str, &'static str)> = d
+                .estate
+                .es_runtime_ea_refusals
+                .iter()
+                .filter(|r| r.plan_node_id == plan_node_id)
+                .map(|r| (r.arm, r.reason))
+                .collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        })
+    })
+}
+
+/// EA-on-morsels pipeline reports touching one node (ea-morsels.md §4):
+/// the full block prints on the root, member nodes get the marker line —
+/// the caller distinguishes by root_node_id. None = none — the
+/// armed+instrumented emission gate in data form.
+pub(crate) fn query_desc_runtime_ea_pipeline_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<types_core::instrument::RuntimeEaPipeline>> {
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let v: Vec<types_core::instrument::RuntimeEaPipeline> = d
+                .estate
+                .es_runtime_ea_pipelines
+                .iter()
+                .filter(|p| {
+                    p.root_node_id == plan_node_id
+                        || p.member_node_id == plan_node_id
+                        || p.member2_node_id == plan_node_id
+                })
+                .copied()
+                .collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        })
+    })
+}
+
 pub(crate) fn query_desc_prune_result_seam(
     h: QueryDescHandle,
     part_prune_index: i32,

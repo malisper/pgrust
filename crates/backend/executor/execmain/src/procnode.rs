@@ -1611,6 +1611,45 @@ fn agg_arm<'mcx>(
 ) -> ProcResult {
     let aps = &mut **aps;
     let AggPlanState { agg, outer, lane_choice, lane_stage_slot, lane_exprkey } = aps;
+    // EA-on-morsels dispatch (docs/design/ea-morsels.md §5): under EXPLAIN
+    // ANALYZE every child is an `Instrumented` wrapper, so the concrete-
+    // variant arms below cannot match — which is CORRECT for the serial
+    // fused drives (they rely on the mismatch to keep EA C-exact), but the
+    // runtime arms' EA admission (whose workers run uninstrumented) must
+    // still get its walk. Peel ONE wrapper layer for the LANE HOOK ONLY:
+    // the serial lane arms re-refuse instrumented shapes themselves
+    // (instr_idx gates inside seq_scan_fusible / decide paths), so only the
+    // runtime EA walks can own the node; a refusal falls through to the
+    // unchanged per-tuple instrumented exec below, byte-identically.
+    if estate.es_instrument != 0 && crate::lanev2::enabled() {
+        if let PlanStateNode::Instrumented(w) = &mut *outer {
+            match &mut w.inner {
+                PlanStateNode::SeqScan(ss) => {
+                    if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
+                        agg,
+                        ss,
+                        lane_choice,
+                        lane_stage_slot,
+                        lane_exprkey,
+                        estate,
+                    )? {
+                        return Ok(r);
+                    }
+                }
+                PlanStateNode::Sort(s) => {
+                    // The DISTINCT sink's dedicated EA walk (its serial
+                    // dispatch sits behind the sort fusibility memo, which
+                    // rightly refuses instrumented trees).
+                    if let Some(r) =
+                        crate::lanev2::try_own_sorted_distinct_runtime_ea(agg, s, estate)?
+                    {
+                        return Ok(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     match outer {
         PlanStateNode::SeqScan(ss) => {
             // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):

@@ -3217,6 +3217,14 @@ pub fn seq_scan_cb_granule_geometry<'mcx>(
     ))
 }
 
+/// EA-on-morsels: this scan descriptor's cumulative cbstore counters (the
+/// CBSCAN fields — see tableam::table_scan_cb_ea_counters for the order).
+/// None = heap or no descriptor opened yet. Read-only snapshot; the EA
+/// prune fold takes it at claim end (docs/design/ea-morsels.md §2).
+pub fn seq_scan_cb_ea_counters(node: &SeqScanState<'_>) -> Option<[u64; 7]> {
+    ::tableam::table_scan_cb_ea_counters(node.ss.ss_currentScanDesc.as_ref()?)
+}
+
 /// A plain heap relation drives this scan (runtime heap morsel source gate,
 /// M1 heap source).
 pub fn seq_scan_is_heap(node: &SeqScanState<'_>) -> bool {
@@ -3245,6 +3253,7 @@ pub fn seq_scan_heap_block_geometry<'mcx>(
 /// cbstore, scan untouched — the m2 sink arms' fail-closed worker check
 /// (cbstore-only admission). The AM-dispatched positioning for the runtime
 /// scan arm is `seq_scan_set_morsel_range` below.
+
 pub fn seq_scan_cb_set_granule_range<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,

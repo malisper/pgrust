@@ -70,8 +70,9 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
-use super::{lane_trace, seq_scan_fusible};
+use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea};
 
 // ---------------------------------------------------------------------------
 // Shared state: the parallel context's private payload AND the runtime task
@@ -132,6 +133,16 @@ pub(super) struct RuntimeScanShared {
     /// standing_wait's own cleanup — the launched path gets the same
     /// guarantee from DestroyParallelContext's worker-exit wait.
     standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
+    /// EA-on-morsels instrument partials (ea-morsels.md §2): Some ONLY when
+    /// the engagement was admitted under EXPLAIN ANALYZE — None on every
+    /// other path (dead-when-off). Same per-ordinal overwrite discipline as
+    /// `partials`; read by the leader only on a clean Completed outcome.
+    instr: Option<Vec<Mutex<Option<InstrumentPartial>>>>,
+    /// TIMER mode (inc-3): one clock pair per claim against `ea_epoch`
+    /// (the shared engagement origin — cross-worker comparable). false in
+    /// ROWS mode and on every non-EA path: zero clock reads.
+    ea_timer: bool,
+    ea_epoch: std::time::Instant,
 }
 
 impl RuntimeScanShared {
@@ -200,6 +211,9 @@ struct WorkerExec {
     /// THIS helper contributed an error (its executor may be mid-batch —
     /// take the release/abort teardown, not finish/end).
     errored: std::cell::Cell<bool>,
+    /// EA-on-morsels: this worker's cumulative instrument partial (only
+    /// written when the engagement carries `instr` slots).
+    instr: std::cell::RefCell<InstrumentPartial>,
 }
 
 thread_local! {
@@ -311,6 +325,9 @@ impl RuntimeScanShared {
 
     fn morsel_body(&self, worker: usize, range: runtime::MorselRange) -> PgResult<()> {
         self.ensure_bound_first_touch()?;
+        // TIMER mode: the claim's clock pair (§5 — the ONLY TIMING ON cost).
+        let ea_t0 = (self.ea_timer && self.instr.is_some())
+            .then(|| self.ea_epoch.elapsed().as_nanos() as u64);
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
             let Some(ex) = b.as_ref() else {
@@ -350,6 +367,8 @@ impl RuntimeScanShared {
                     // observed between segments stops the claim (aborted
                     // generations need not execute every granule — the RG
                     // outcome is discarded).
+                    let ea = self.instr.is_some();
+                    let mut tally = EaRowTally::default();
                     let starts = self.rg_starts.get();
                     let mut seg = range.start;
                     while seg < range.end {
@@ -366,13 +385,28 @@ impl RuntimeScanShared {
                         ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, seg, seg_end)?;
                         match mode {
                             DriveMode::Fold => {
-                                super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                                if ea {
+                                    super::agg_plain_fold_drain_ea(
+                                        &mut aps.agg,
+                                        ss,
+                                        estate,
+                                        &mut tally,
+                                    )?
+                                } else {
+                                    super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                                }
                             }
-                            DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
+                            DriveMode::Census => census_drain(
+                                &mut aps.agg,
+                                ss,
+                                estate,
+                                ea.then_some(&mut tally),
+                            )?,
                             // rowdrive direct-drive modes (car 1/car 2):
-                            // heap-only admission (no rg_starts), so the
-                            // segmentation loop degenerates to one
-                            // positioned range for these arms.
+                            // heap-only admission (no rg_starts; EA refuses
+                            // heap at admission), so the segmentation loop
+                            // degenerates to one positioned range for these
+                            // arms and no tally is ever needed.
                             DriveMode::StorelessCount => {
                                 storeless_count_drain(&mut aps.agg, ss, estate)?
                             }
@@ -391,6 +425,29 @@ impl RuntimeScanShared {
                         {
                             break;
                         }
+                    }
+                    // EA-on-morsels: fold this claim into the worker's
+                    // cumulative instrument partial and export by OVERWRITE
+                    // (decision-6, same discipline as the result partial
+                    // below — the final export precedes the settle). EXACT
+                    // per the dop1-tax contract: accumulate in the local,
+                    // export at claim end, never sampled.
+                    if let Some(instr) = &self.instr {
+                        let mut ip = ex.instr.borrow_mut();
+                        ip.claims += 1;
+                        ip.granules += range.end - range.start;
+                        ip.rows.add(&tally);
+                        // Scan-desc counters are per-worker cumulative: the
+                        // snapshot IS the running total (prune fold, §1).
+                        if let Some(c) = ::nodeseqscan::seq_scan_cb_ea_counters(ss) {
+                            ip.prune = c;
+                        }
+                        if let Some(t0) = ea_t0 {
+                            let t1 = self.ea_epoch.elapsed().as_nanos() as u64;
+                            runtime_instr::ea_claim_time(&mut ip, t0, t1);
+                        }
+                        let slot = worker - self.pins_base;
+                        *instr[slot].lock().unwrap_or_else(|p| p.into_inner()) = Some(*ip);
                     }
                     // Cumulative partial export (in place), ONCE per claim:
                     // the worker's LAST claim's export — which precedes its
@@ -1037,8 +1094,12 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
         })();
         match armed {
             Ok(mode) => {
-                *cell.borrow_mut() =
-                    Some(WorkerExec { qd, mode, errored: std::cell::Cell::new(false) });
+                *cell.borrow_mut() = Some(WorkerExec {
+                    qd,
+                    mode,
+                    errored: std::cell::Cell::new(false),
+                    instr: Default::default(),
+                });
                 Ok(())
             }
             Err(e) => {
@@ -1168,6 +1229,7 @@ fn census_drain<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
+    mut tally: Option<&mut EaRowTally>,
 ) -> PgResult<()> {
     debug_assert!(::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| p.cols.is_empty() && p.resid.is_empty() && !p.guarded));
@@ -1180,6 +1242,9 @@ fn census_drain<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        if let Some(t) = tally.as_deref_mut() {
+            t.scanned += n as u64;
+        }
         let nwords = (n as usize).div_ceil(64);
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
         let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
@@ -1203,6 +1268,11 @@ fn census_drain<'mcx>(
             }
         };
         if fast {
+            if let Some(t) = tally.as_deref_mut() {
+                // Window-grain: selected non-fallback rows all count.
+                t.survived +=
+                    rows[..nwords].iter().map(|w| w.count_ones() as u64).sum::<u64>();
+            }
             // Fallback rows: full per-row program off the stored tuple
             // (qual re-checked inside emit).
             for (w, mut bits) in fallback[..nwords].iter().copied().enumerate() {
@@ -1210,6 +1280,9 @@ fn census_drain<'mcx>(
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
                     if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                        if let Some(t) = tally.as_deref_mut() {
+                            t.survived += 1;
+                        }
                         ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                     }
                 }
@@ -1240,6 +1313,9 @@ fn census_drain<'mcx>(
             // per-row path for every row.
             for i in 0..n {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if let Some(t) = tally.as_deref_mut() {
+                        t.survived += 1;
+                    }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
             }
@@ -1538,16 +1614,37 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
 
+    // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED,
+    // so under EXPLAIN ANALYZE every refusal records its reason for the
+    // transparency line. `ea` admits collection; the MODE gate (rows-only
+    // at inc-1) is enforced below with the other session gates.
+    let ea = runtime_instr::ea_active(estate);
+    let node_id = agg.plan.plan.plan_node_id;
+
     // --- Shape + session gates (fail-closed; every refusal is the serial arm).
+    // Under EA the leader node carries an instr slot, which the serial-lane
+    // fusibility memo rightly refuses — the runtime's workers run
+    // uninstrumented, so EA admission walks the same gates with only the
+    // instrument check vacated (E4).
+    let fusible = if ea {
+        seq_scan_fusible_runtime_ea(ss, estate)?
+    } else {
+        seq_scan_fusible(ss, estate)?
+    };
     let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
-    if !seq_scan_fusible(ss, estate)?
-        || !(is_cb || ::nodeseqscan::seq_scan_is_heap(ss))
-    {
-        return Ok(None);
+    if !fusible || !(is_cb || ::nodeseqscan::seq_scan_is_heap(ss)) {
+        return ea_refused(estate, ea, node_id, "scan-not-fusible");
+    }
+    // EA instrumentation is cbstore-only (the ratified lane's tally spans
+    // the cbstore fold/census drives; the rowdrive heap arms carry no
+    // tally): heap shapes under EA keep the pre-EA refusal — fail-closed
+    // observability, never un-tallied numbers.
+    if ea && !is_cb {
+        return ea_refused(estate, true, node_id, "heap-not-instrumented");
     }
     if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "partials-not-order-insensitive-exact");
     }
     // Census shapes (fold plan reads no columns) engage only with a qual:
     // cbstore's bare count(*) is the Meta/footer arm's, heap's is the fused
@@ -1567,7 +1664,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
             || ss.ss.ps_ProjInfo.is_some()
             || !::nodeagg::agg_plain_count_star_shape(agg)
         {
-            return Ok(None);
+            return ea_refused(estate, ea, node_id, "census-without-qual");
         }
         // The block floor rides the geometry probe below (the source's
         // granule = one heap block).
@@ -1588,50 +1685,60 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     let mut perrow = false;
     if drive_mode(agg, ss) == DriveMode::Fold {
         if ss.ss.ps_ProjInfo.is_some() {
-            return Ok(None);
+            return ea_refused(estate, ea, node_id, "projected-scan");
         }
         if !super::probe_arm_fold_prefix(agg, ss, estate)? {
             if is_cb || !rowdrive_enabled() {
-                return Ok(None);
+                return ea_refused(estate, ea, node_id, "fold-prefix-unarmable");
             }
             perrow = true;
         }
     }
-    if estate.es_instrument != 0 || estate.es_epq_active {
+    // EA vacates the pre-EA es_instrument blanket refusal (the whole
+    // point); EPQ still refuses.
+    if estate.es_epq_active {
         return Ok(None);
+    }
+    // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
+    // INSTRUMENT_TIMER (BUFFERS OFF, inc-3 — one clock pair per claim)
+    // engage; BUFFERS/WAL combinations refuse until threaded.
+    if ea && !runtime_instr::ea_mode_admissible(estate) {
+        return ea_refused(estate, true, node_id, runtime_instr::ea_mode_refuse_reason(estate));
     }
     // Not from within parallel machinery: helpers of helpers don't exist,
     // and a leader already in parallel mode (Gather in flight) must not
     // stack a second context here.
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "in-parallel-mode");
     }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "params");
     }
     let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "params");
     }
     // The Agg must be the plan root (workers ExecutorStart the whole worker
     // pstmt; a deeper Agg would drag unrelated plan into every helper).
     let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else { return Ok(None) };
+    let Some(root_agg) = root.as_agg() else {
+        return ea_refused(estate, ea, node_id, "agg-not-plan-root");
+    };
     if !std::ptr::eq(root_agg, agg.plan) {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "agg-not-plan-root");
     }
     // Scan expressions must be parallel-safe (they run on helpers).
     let Some(scan_node) = agg.plan.plan.lefttree else { return Ok(None) };
     if scan_node.node_tag() != NodeTag::T_SeqScan {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "outer-not-seqscan");
     }
     let scan_plan = scan_node.as_seq_scan().expect("SeqScan tag");
     if !exprs_parallel_safe(scan_plan.scan.plan.qual.iter())?
         || !exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
     {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "exprs-not-parallel-safe");
     }
     // MVCC snapshot (visibility folding parity with the serial drive).
     if !estate
@@ -1639,7 +1746,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "non-mvcc-snapshot");
     }
     // Binder policy sources must be empty — a set flag means every helper
     // bind would refuse; don't launch at all.
@@ -1649,7 +1756,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "binder-policy");
     }
 
     // --- Geometry: enough granules to be worth a gang. The source is the
@@ -1692,7 +1799,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     };
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
-        return Ok(None);
+        return ea_refused(estate, ea, node_id, "tiny-input-floor");
     }
     // Direct storeless-count drive: its own (higher) floor — the serial
     // fused advance is O(pages); parallel pays only on a big heap.
@@ -1715,7 +1822,34 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, nrgs, source, rg_starts)
+    let ea_scan_node = ea.then_some(scan_plan.scan.plan.plan_node_id);
+    let ea_timer = ea && runtime_instr::ea_timer(estate);
+    engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        nrgs,
+        source,
+        rg_starts,
+        ea_scan_node,
+        ea_timer,
+    )
+}
+
+/// Record-and-refuse (transparency line, ea-morsels.md §6): armed +
+/// instrumented refusals only — every other path is byte-identical today.
+fn ea_refused<T>(
+    estate: &mut EStateData<'_>,
+    ea: bool,
+    node_id: i32,
+    reason: &'static str,
+) -> PgResult<Option<T>> {
+    if ea {
+        estate.runtime_ea_record_refusal(node_id, "scan", reason);
+    }
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1728,6 +1862,8 @@ fn engage<'mcx>(
     nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
     rg_starts: Option<Arc<Vec<u64>>>,
+    ea_scan_node: Option<i32>,
+    ea_timer: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -1759,6 +1895,11 @@ fn engage<'mcx>(
         rg_starts: OnceLock::new(),
         drive_at_entry: entry_drive_enabled(),
         standing: Mutex::new(None),
+        instr: ea_scan_node.map(|_| {
+            (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect()
+        }),
+        ea_timer,
+        ea_epoch: std::time::Instant::now(),
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (cbstore).
@@ -1775,7 +1916,17 @@ fn engage<'mcx>(
     // (AtEOXact_Parallel — the Gather discipline).
     parallel::gtrace("l.engage.begin");
     xact::EnterParallelMode();
-    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, nrgs, source, &payload);
+    let engaged = engage_ceremony(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        nrgs,
+        source,
+        ea_scan_node,
+        &payload,
+    );
     xact::ExitParallelMode();
     parallel::gtrace("l.engage.end");
     engaged
@@ -1793,6 +1944,7 @@ fn engage_ceremony<'mcx>(
     total_granules: u64,
     nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
+    ea_scan_node: Option<i32>,
     payload: &Arc<RuntimeScanShared>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_scan_main", dop)?;
@@ -1949,6 +2101,40 @@ fn engage_ceremony<'mcx>(
                 .collect();
             let combined = agg_runtime_combine(agg, &parts)?;
             stats::tick_owned(ShapeClass::AggBuild);
+            // EA-on-morsels merge (clean Completed outcomes ONLY — the same
+            // invariant as the result partials): fold every worker's final
+            // instrument export and write the bypassed scan node's
+            // rows/loops/nfiltered (ea-morsels.md §3 — node-exact rows; the
+            // Agg root ticks naturally through its procnode wrapper as the
+            // result row returns).
+            if let (Some(instr), Some(scan_node)) = (&payload.instr, ea_scan_node) {
+                let ips: Vec<InstrumentPartial> = instr
+                    .iter()
+                    .filter_map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).take())
+                    .collect();
+                let merged = runtime_instr::merge(ips.iter());
+                runtime_instr::ea_fill_scan_node(estate, scan_node, &merged.rows);
+                // Pipeline report for the inc-2 EXPLAIN block (one task
+                // set on this arm; partials = non-empty result exports).
+                estate.es_runtime_ea_pipelines.push(runtime_instr::ea_pipeline_report(
+                    "scan",
+                    agg.plan.plan.plan_node_id,
+                    scan_node,
+                    -1,
+                    1,
+                    parts.len() as u64,
+                    &merged,
+                ));
+                lane_trace(&format!(
+                    "runtime-scan: EA merged workers={} claims={} granules={} \
+                     scanned={} survived={}",
+                    merged.workers,
+                    merged.claims,
+                    merged.granules,
+                    merged.rows.scanned,
+                    merged.rows.survived
+                ));
+            }
             lane_trace(&format!(
                 "runtime-scan: complete, partials={} ",
                 parts.len()
