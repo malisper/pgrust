@@ -102,6 +102,7 @@ use crate::{agg_sorted_emit, AggStateData};
 /// `nulls_first` are the plan Sort's flags for that prefix position.
 /// `collation` is the plan Sort's collation for that key — consulted only
 /// for text keys (`varstr_cmp`'s authority); 0 for integer keys.
+#[derive(Clone)]
 pub struct HashGroupOrderKey {
     pub key_idx: usize,
     pub desc: bool,
@@ -116,7 +117,7 @@ pub struct HashGroupOrderKey {
 /// `(arena offset << 32) | len`; byte equality is the grouping operator's
 /// equality (deterministic-collation `texteq` — module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HgKeyKind {
+pub(crate) enum HgKeyKind {
     Int16,
     Int32,
     Int64,
@@ -404,14 +405,22 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
 /// the leader-side adopt/emit tail (concat + rep synthesis + order +
 /// per-group emit over 835k groups) dominates, the q19@10M
-/// "emit/combine-bound near-unique" class. Default therefore stays at
-/// the serial-calibrated 8.0 — near-unique shapes keep their serial/def
-/// arms until a parallel-emit car exists; the env knob is the
-/// measurement channel (this run's evidence came through it).
+/// "emit/combine-bound near-unique" class. The serial-calibrated 8.0
+/// therefore prices the ADOPT tail.
+///
+/// `paremit` (parallel-emit car): the caller proved the shape rides the
+/// emission-in-combine fast path (`pd_paremit_cols` — ordered
+/// per-partition emit buckets built by workers; the leader tail collapses
+/// to the cross-bucket merge + datum memcpy), which removes exactly the
+/// serial floor the 8.0 tier priced. Those shapes read their own default
+/// (1.0; `PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG` is the re-pricing
+/// channel) so the near-unique q14 class engages by default. The
+/// budget-fit term applies unchanged to both tiers.
 pub fn agg_hashgroup_economical_sink(
     node: &AggStateData<'_>,
     force: bool,
     input_rows: f64,
+    paremit: bool,
 ) -> bool {
     if force {
         return true;
@@ -427,8 +436,18 @@ pub fn agg_hashgroup_economical_sink(
                 .unwrap_or(8.0)
         })
     }
+    fn paremit_min_rpg() -> f64 {
+        static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0)
+        })
+    }
+    let min_rpg = if paremit { paremit_min_rpg() } else { sink_min_rpg() };
     let est_groups = (node.plan.numGroups as f64).max(1.0);
-    if input_rows > 0.0 && input_rows < sink_min_rpg() * est_groups {
+    if input_rows > 0.0 && input_rows < min_rpg * est_groups {
         return false;
     }
     let per_group =
@@ -1673,10 +1692,82 @@ pub fn agg_hashgroup_finish_build<'mcx>(
     Ok(())
 }
 
+/// Compare two group rows — possibly from DIFFERENT key stores — under the
+/// plan Sort's prefix `spec` (total, C-identical order — module doc). Each
+/// side is `(keys, keynulls, arena, row)` in the packed-span convention.
+/// The ONE ordering authority shared by the build finish, the merged
+/// adoption ([`order_groups`]), and the runtime distinct sink's paremit
+/// bucket merge — byte-identity across those arms depends on this being
+/// the same comparator. Distinct groups never compare Equal on the full
+/// prefix (unique keys; deterministic collations tie-break by bytes).
+pub(crate) fn cmp_group_rows(
+    spec: &[HashGroupOrderKey],
+    nkeys: usize,
+    kinds: &[HgKeyKind],
+    a: (&[i64], &[u32], &[u8], usize),
+    b: (&[i64], &[u32], &[u8], usize),
+) -> PgResult<core::cmp::Ordering> {
+    let (akeys, anulls, aarena, ai) = a;
+    let (bkeys, bnulls, barena, bi) = b;
+    for k in spec.iter() {
+        let (na, nb) = (
+            anulls[ai] & (1 << k.key_idx) != 0,
+            bnulls[bi] & (1 << k.key_idx) != 0,
+        );
+        let ord = match (na, nb) {
+            (true, true) => core::cmp::Ordering::Equal,
+            (true, false) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Greater
+                }
+            }
+            (false, true) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Less
+                }
+            }
+            (false, false) => {
+                let (wa, wb) =
+                    (akeys[ai * nkeys + k.key_idx], bkeys[bi * nkeys + k.key_idx]);
+                let ord = if kinds[k.key_idx] == HgKeyKind::Text {
+                    // C's text btree order: varstr_cmp under the plan
+                    // Sort's collation (module doc — deterministic
+                    // collations tie-break by bytes, so byte-distinct
+                    // keys never compare equal).
+                    let (oa, la) = unpack_span(wa);
+                    let (ob, lb) = unpack_span(wb);
+                    ::varlena::varstr_cmp(
+                        &aarena[oa..oa + la],
+                        &barena[ob..ob + lb],
+                        k.collation,
+                    )?
+                    .cmp(&0)
+                } else {
+                    wa.cmp(&wb)
+                };
+                if k.desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        };
+        if ord != core::cmp::Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(core::cmp::Ordering::Equal)
+}
+
 /// Order group indices by the plan Sort's prefix (total, C-identical order —
-/// module doc). Shared by the build finish and the parallel-partials merged
-/// adoption.
-fn order_groups(
+/// module doc). Shared by the build finish, the parallel-partials merged
+/// adoption, and the runtime distinct sink's per-partition paremit bucket
+/// build (the same comparator then drives the leader's cross-bucket merge).
+pub(crate) fn order_groups(
     keys: &[i64],
     keynulls: &[u32],
     spec: &[HashGroupOrderKey],
@@ -1691,65 +1782,27 @@ fn order_groups(
     let mut cmp_err = None;
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
-        for k in spec.iter() {
-            let (na, nb) = (
-                keynulls[a] & (1 << k.key_idx) != 0,
-                keynulls[b] & (1 << k.key_idx) != 0,
-            );
-            let ord = match (na, nb) {
-                (true, true) => core::cmp::Ordering::Equal,
-                (true, false) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Less
-                    } else {
-                        core::cmp::Ordering::Greater
-                    }
+        match cmp_group_rows(
+            spec,
+            nkeys,
+            kinds,
+            (keys, keynulls, arena, a),
+            (keys, keynulls, arena, b),
+        ) {
+            Ok(ord) => {
+                debug_assert!(
+                    ord != core::cmp::Ordering::Equal || a == b,
+                    "distinct groups compare equal on the full prefix"
+                );
+                ord
+            }
+            Err(e) => {
+                if cmp_err.is_none() {
+                    cmp_err = Some(e);
                 }
-                (false, true) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Greater
-                    } else {
-                        core::cmp::Ordering::Less
-                    }
-                }
-                (false, false) => {
-                    let (wa, wb) = (keys[a * nkeys + k.key_idx], keys[b * nkeys + k.key_idx]);
-                    let ord = if kinds[k.key_idx] == HgKeyKind::Text {
-                        // C's text btree order: varstr_cmp under the plan
-                        // Sort's collation (module doc — deterministic
-                        // collations tie-break by bytes, so byte-distinct
-                        // keys never compare equal).
-                        let (oa, la) = unpack_span(wa);
-                        let (ob, lb) = unpack_span(wb);
-                        match ::varlena::varstr_cmp(
-                            &arena[oa..oa + la],
-                            &arena[ob..ob + lb],
-                            k.collation,
-                        ) {
-                            Ok(c) => c.cmp(&0),
-                            Err(e) => {
-                                if cmp_err.is_none() {
-                                    cmp_err = Some(e);
-                                }
-                                core::cmp::Ordering::Equal
-                            }
-                        }
-                    } else {
-                        wa.cmp(&wb)
-                    };
-                    if k.desc {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                }
-            };
-            if ord != core::cmp::Ordering::Equal {
-                return ord;
+                core::cmp::Ordering::Equal
             }
         }
-        debug_assert!(a == b || cmp_err.is_some(), "distinct groups compare equal on the full prefix");
-        core::cmp::Ordering::Equal
     });
     if let Some(e) = cmp_err {
         return Err(e);

@@ -255,6 +255,21 @@ impl<'mcx> DistinctSet<'mcx> {
         self.ints.len() + self.spans.len()
     }
 
+    /// Distinct NON-NULL value count of a never-spilled set — the paremit
+    /// finalization of count(DISTINCT x): n int8inc_any replays from the
+    /// '0' initcond add exactly n (strict fn, by-val i64 state, no
+    /// finalfn), and the at-most-one NULL (`seen_null`) strict-skips,
+    /// contributing 0 — so the set IS the count (the
+    /// `process_ordered_aggregates_set` distinctfin argument, applied
+    /// worker-side). Spilled sets hold values on tape that `len` cannot
+    /// see; the runtime distinct sink's merged sets are rebuilt in memory
+    /// at combine and never spill (fail-loud here, not silently short).
+    #[inline]
+    pub(crate) fn value_count(&self) -> usize {
+        debug_assert!(self.spill.is_none(), "value_count on a spilled set");
+        self.len()
+    }
+
     /// Bytes the set holds (capacities — actual allocation, the conservative
     /// figure the work_mem budget check wants).
     pub(crate) fn mem_bytes(&self) -> usize {

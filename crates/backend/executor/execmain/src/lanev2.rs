@@ -7638,6 +7638,18 @@ fn hashgroup_emit<'mcx>(
     }
 }
 
+/// Emit loop over the runtime distinct sink's PAREMIT buckets (pardistinct
+/// paremit section doc): pre-formed rows in the plan Sort's prefix order,
+/// one row per pull — no HAVING on admitted shapes, so there is no
+/// group-rejected continue arm. CFI per group, the pull loop's cadence.
+fn pdemit_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    ::postgres_seams::check_for_interrupts::call()?;
+    ::nodeagg::agg_pdemit_emit_next(agg, estate)
+}
+
 // ===========================================================================
 // Dict-code batched exact-DISTINCT grouping (lane-v2-q14feed; nodeagg
 // codedgroup.rs holds the state machine + the byte-identity argument). The
@@ -8013,8 +8025,12 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
         return Ok(None);
     }
     // Mid-emit resume of a prior EA-engaged build (the serial top's
-    // hashgroup resume, verbatim — the sink adopts through hashgroup emit;
-    // the bypassed Sort must never be fed from the consumed scan).
+    // hashgroup resume, verbatim — the sink adopts through hashgroup emit
+    // or the paremit bucket merge; the bypassed Sort must never be fed
+    // from the consumed scan).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -8093,6 +8109,9 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // Hash-grouped arm mid-emit resume — BEFORE the dynamic gates (the arm's
     // section doc: the plan's Sort was bypassed and must never be fed from
     // the now-exhausted scan; the gates cannot flip mid-node here).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -12645,6 +12664,9 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Mid-emit resume — BEFORE the dynamic gates (the hashgrouped arm's
     // discipline: the fragment was consumed; nothing may re-pull it).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
