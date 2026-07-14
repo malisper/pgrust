@@ -65,6 +65,16 @@ pub struct VacuumBlockSource {
     entries: Vec<ScanBlock>,
     skipsallvis: bool,
     rel_pages: u32,
+    /// Every SKIPPED run (>= threshold), by its position in granule space:
+    /// `(pos, has_avnotaf)` where `pos` = the index of the first granule
+    /// AFTER the run. inc-2 addition: a quiesced round consumes a skip
+    /// decision iff `resume_granule >= pos` (the resume block is the granule
+    /// at `resume_granule`, so every skipped run below it is jumped over
+    /// permanently); runs above the resume point are RE-DECIDED by the next
+    /// round's map. Committing the whole-map verdict on a tripped round
+    /// would over-suppress relfrozenxid advancement (safe but breaks the
+    /// on/off parity oracle).
+    skip_runs: Vec<(u64, bool)>,
 }
 
 impl VacuumBlockSource {
@@ -91,27 +101,34 @@ impl VacuumBlockSource {
     pub fn build(p: &SkipMapParams, mut vm: impl FnMut(u32) -> u8) -> Self {
         let mut entries = Vec::new();
         let mut skipsallvis = false;
+        let mut skip_runs: Vec<(u64, bool)> = Vec::new();
 
         // Pending maximal skippable run: [run_start, b) with its av-not-af
         // marker. Flushed when an unskippable block (or the end) is reached.
         let mut run: Option<(u32, bool)> = None;
 
-        let flush_run =
-            |run: &mut Option<(u32, bool)>, end: u32, entries: &mut Vec<ScanBlock>, sav: &mut bool| {
-                if let Some((start, has_avnotaf)) = run.take() {
-                    if end - start >= SKIP_PAGES_THRESHOLD {
-                        // Actually skipped: commit the verdict, emit nothing.
-                        if has_avnotaf {
-                            *sav = true;
-                        }
-                    } else {
-                        // Short run: scanned anyway, all-visible per the VM.
-                        for b in start..end {
-                            entries.push(ScanBlock { block: b, all_visible_according_to_vm: true });
-                        }
+        let flush_run = |run: &mut Option<(u32, bool)>,
+                         end: u32,
+                         entries: &mut Vec<ScanBlock>,
+                         sav: &mut bool,
+                         skip_runs: &mut Vec<(u64, bool)>| {
+            if let Some((start, has_avnotaf)) = run.take() {
+                if end - start >= SKIP_PAGES_THRESHOLD {
+                    // Actually skipped: commit the verdict, emit nothing.
+                    // Position = the granule index of the block that ends
+                    // the run (about to be pushed by the caller).
+                    skip_runs.push((entries.len() as u64, has_avnotaf));
+                    if has_avnotaf {
+                        *sav = true;
+                    }
+                } else {
+                    // Short run: scanned anyway, all-visible per the VM.
+                    for b in start..end {
+                        entries.push(ScanBlock { block: b, all_visible_according_to_vm: true });
                     }
                 }
-            };
+            }
+        };
 
         for b in p.resume_block..p.rel_pages {
             let status = vm(b);
@@ -131,7 +148,7 @@ impl VacuumBlockSource {
                     None => run = Some((b, avnotaf)),
                 }
             } else {
-                flush_run(&mut run, b, &mut entries, &mut skipsallvis);
+                flush_run(&mut run, b, &mut entries, &mut skipsallvis, &mut skip_runs);
                 entries.push(ScanBlock { block: b, all_visible_according_to_vm: all_visible });
             }
         }
@@ -140,7 +157,7 @@ impl VacuumBlockSource {
         // or resume >= rel_pages yields an empty map.)
         debug_assert!(run.is_none() || p.resume_block >= p.rel_pages);
 
-        VacuumBlockSource { entries, skipsallvis, rel_pages: p.rel_pages }
+        VacuumBlockSource { entries, skipsallvis, rel_pages: p.rel_pages, skip_runs }
     }
 
     pub fn entries(&self) -> &[ScanBlock] {
@@ -155,6 +172,17 @@ impl VacuumBlockSource {
 
     pub fn skipsallvis(&self) -> bool {
         self.skipsallvis
+    }
+
+    /// The `skipsallvis` verdict restricted to skip decisions CONSUMED by a
+    /// round that resumed at `resume_granule` (inc-2): a skipped run at
+    /// position `pos` (index of the first granule after it) is jumped over
+    /// permanently iff `resume_granule >= pos` — the next round's map starts
+    /// at the resume granule's BLOCK, past the run. Runs above the resume
+    /// point are re-decided from fresh VM state and must not commit here.
+    /// `skipsallvis_before(total_granules()) == skipsallvis()`.
+    pub fn skipsallvis_before(&self, resume_granule: u64) -> bool {
+        self.skip_runs.iter().any(|&(pos, avnotaf)| avnotaf && resume_granule >= pos)
     }
 
     pub fn rel_pages(&self) -> u32 {

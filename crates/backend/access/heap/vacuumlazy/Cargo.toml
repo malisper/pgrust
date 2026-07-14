@@ -46,6 +46,13 @@ pgstat = { path = "../../../utils/activity/pgstat" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 backend_progress = { path = "../../../utils/activity/backend_progress" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+# vacuum-morsels inc-2 (phase-I morselization behind PGRUST_RUNTIME_VACUUM=1)
+vacuum_morsels = { path = "../../../commands/vacuum_morsels" }
+runtime = { path = "../../../executor/runtime" }
+parallel = { path = "../../transam/parallel" }
+table = { path = "../../table/table" }
+latch = { path = "../../../storage/ipc/latch" }
+autovacuum_seams = { path = "../../../postmaster/autovacuum_seams" }
 
 [dev-dependencies]
 smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
