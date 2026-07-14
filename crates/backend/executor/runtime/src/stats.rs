@@ -59,6 +59,13 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     generation_refusals,
     /// Idle worker parks.
     worker_parks,
+    /// Aborted still-QUEUED RGs reaped from the wait queue at abort time
+    /// (M5-4 slot-reclamation fix) instead of waiting for a slot to free.
+    queued_aborts_reaped,
+    /// Stride picks resolved by the session-affinity equal-pass tiebreak
+    /// (M5-4: the pick preferred a slot whose leader session the worker is
+    /// sticky-bound to over an equal-pass lower-index slot).
+    affinity_tiebreaks,
 );
 
 counters!(RgStats, RgStatsSnapshot;
