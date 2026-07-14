@@ -232,11 +232,24 @@ struct ScanPhaseClock {
     t0: std::time::Instant,
     ceremony_ns: u64,
     rounds_ns: u64,
+    /// Serial-tail decomposition (the ladder's plateau attribution): skip-map
+    /// build, leader finalize (locals fold + coverage + resume), and the
+    /// dead-run merge into the round TidStore (risk V2).
+    source_ns: u64,
+    finalize_ns: u64,
+    merge_ns: u64,
 }
 
 impl ScanPhaseClock {
     fn new() -> Self {
-        ScanPhaseClock { t0: std::time::Instant::now(), ceremony_ns: 0, rounds_ns: 0 }
+        ScanPhaseClock {
+            t0: std::time::Instant::now(),
+            ceremony_ns: 0,
+            rounds_ns: 0,
+            source_ns: 0,
+            finalize_ns: 0,
+            merge_ns: 0,
+        }
     }
 
     fn emit(&self, rel: &str, rounds: u64, k: i32, outcome: &str) {
@@ -245,10 +258,14 @@ impl ScanPhaseClock {
         }
         vtrace(&format!(
             "scan phase done rel={rel} rounds={rounds} k={k} outcome={outcome} \
-             t_scan_ms={} t_rounds_ms={} t_ceremony_ms={}",
+             t_scan_ms={} t_rounds_ms={} t_ceremony_us={} t_source_ms={} \
+             t_finalize_ms={} t_merge_ms={}",
             self.t0.elapsed().as_millis(),
             self.rounds_ns / 1_000_000,
-            self.ceremony_ns / 1_000_000,
+            self.ceremony_ns / 1_000,
+            self.source_ns / 1_000_000,
+            self.finalize_ns / 1_000_000,
+            self.merge_ns / 1_000_000,
         ));
     }
 }
@@ -276,7 +293,9 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             return Ok(ScanHandoff::Resume { block: vacrel.rel_pages, next_fsm });
         }
 
+        let t_source = std::time::Instant::now();
         let source = build_source(vacrel, resume_block)?;
+        clock.source_ns += t_source.elapsed().as_nanos() as u64;
         let total = source.entries().len() as u64;
         if total == 0 {
             // Defensive: the last block is never skippable, so an empty map
@@ -337,6 +356,7 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         }
 
         // ---- SCAN finalize, leader-side (doc §3.2 + §5.2) ----
+        let t_finalize = std::time::Instant::now();
         let mut locals = shared.take_locals();
         if fault_lose_local() && !locals.is_empty() {
             // §9 fault-injection leg: simulate a lost worker Local.
@@ -370,9 +390,11 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         // Skip decisions below the resume point are consumed (jumped over
         // for good); later ones are re-decided by the next round's map.
         vacrel.skippedallvis |= source.skipsallvis_before(resume_g);
+        clock.finalize_ns += t_finalize.elapsed().as_nanos() as u64;
 
         // Merge the per-worker dead-TID runs into the round authority store
         // (the ONE serial O(dead TIDs) step per round — doc §3.2).
+        let t_merge = std::time::Instant::now();
         {
             let super::LVRelState { dead_items, dead_items_info, .. } = &mut *vacrel;
             for run in merge_dead_runs(&locals) {
@@ -384,6 +406,7 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
                 )?;
             }
         }
+        clock.merge_ns += t_merge.elapsed().as_nanos() as u64;
 
         // Deferred blocking-cleanup pages (§5.3): leader-serial, BEFORE the
         // round's INDEX phase, so the round's dead set is complete.
