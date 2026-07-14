@@ -17901,6 +17901,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vacuum_morsels"
+version = "0.0.0"
+dependencies = [
+ "runtime",
+ "types_core",
+]
+
+[[package]]
 name = "vacuum_seams"
 version = "0.0.0"
 dependencies = [
@@ -17914,6 +17922,7 @@ dependencies = [
 name = "vacuumlazy"
 version = "0.0.0"
 dependencies = [
+ "autovacuum_seams",
  "backend_progress",
  "bufmgr_seams",
  "catalog_storage",
@@ -17925,17 +17934,21 @@ dependencies = [
  "heapam_visibility_seams",
  "indexam",
  "init_small",
+ "latch",
  "lmgr",
  "mcx",
  "miscinit",
  "nbtree",
+ "parallel",
  "pgstat",
  "postgres_seams",
  "procarray_seams",
  "pruneheap",
  "relcache_seams",
+ "runtime",
  "sinval_seams",
  "smgr_seams",
+ "table",
  "tableam_seams",
  "tableam_vocab",
  "tidstore",
@@ -17948,6 +17961,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "vacuum_morsels",
  "vacuum_seams",
  "vacuumparallel",
  "visibilitymap",

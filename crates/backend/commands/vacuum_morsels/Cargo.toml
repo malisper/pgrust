@@ -1,0 +1,18 @@
+[package]
+name = "vacuum_morsels"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vacuum_morsels"
+path = "src/lib.rs"
+
+# inc-1 pure units (docs/design/vacuum-morsels.md §10): deliberately
+# dependency-thin — the skip-map, Locals, quiesce, and run-merge units are
+# driven by abstract oracles (VM-status closures, simulated claim schedules)
+# so the fleet unit gates can exercise adversarial inputs without buffers,
+# relations, or executor wiring. Wiring (inc-2) adds the real seams.
+[dependencies]
+runtime = { path = "../../executor/runtime" }
+types_core = { path = "../../../_support/types/types_core" }
