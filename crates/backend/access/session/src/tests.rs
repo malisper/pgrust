@@ -260,7 +260,24 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      by the loop itself (worker_enter/worker_exit); an envelope
     //      bind/unbind must never touch another thread's permit
     //      accounting.
-    assert_eq!(count_tree(crates), 468, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 469, re-pinned at train-12 (m2-integration x train-11 base composed):
+    // the guc-snapshots lane (train-11 car 2) added one block its own
+    // battery never counted (its unit sweeps did not run this crate's
+    // suite — the same stale-pin class as the distinct lane's 464) —
+    //   8. utils/misc/guc/src/layers.rs (SESSION_BASE + query-pin
+    //      statement-window cache, one thread_local! block) — the typed
+    //      base snapshot this thread last adopted (its started-with GUC
+    //      values) plus a mutation-counter-keyed cache for the query pin.
+    //      Deliberately non-session TLS in the envelope sense: the base is
+    //      installed at child bring-up / worker BIND (the binder owns the
+    //      movement, exactly like the WORKER_EXEC slots 4-6) and advanced
+    //      only by the thread's own ProcessConfigFile pass; the pin cache
+    //      is derived state keyed on the session store's mutation counter
+    //      (stale entries can never be adopted). Envelope capture/restore
+    //      moves the session GUC STORE; the layered snapshots follow it
+    //      through the bind path by construction (guc-snapshots lane
+    //      design, kill switches PGRUST_NO_GUC_BASE/_BIND).
+    assert_eq!(count_tree(crates), 469, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
