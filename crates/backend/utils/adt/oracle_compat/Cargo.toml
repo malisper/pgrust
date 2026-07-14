@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 datum = { path = "../../../../_support/types/datum" }
 init_small = { path = "../../init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 mcx = { path = "../../../../_support/mcx" }
 mbutils = { path = "../../mb/mbutils" }
 pg_locale = { path = "../pg_locale" }
