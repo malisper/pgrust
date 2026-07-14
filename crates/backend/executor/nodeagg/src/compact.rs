@@ -187,6 +187,23 @@ pub(crate) struct CompactHash {
     /// stored in the row's 8 state bytes for hit-side read-back). The
     /// reverse map IS the table's key arena (`row_key_bytes`).
     pub(crate) intern: Option<::lanetable::LaneAggTable>,
+    /// Canonical (text-bearing Multi) shapes: row i's sink hash over its
+    /// canonical byte image (`sink::sink_hash_bytes` of the row's
+    /// `canon_row_bytes`), parallel to the table's rows. Extended at the
+    /// BATCH TAIL for newly inserted rows (the accept path — parallel and
+    /// cache-warm), so the flush and the single-threaded SEAL partition
+    /// never hash: the SEAL collapses to a counting sort over these values
+    /// (the q19@100M settle/finalize serial-tail profile). Cleared with
+    /// every table reset (flush) — rows restart per epoch. Empty for word
+    /// shapes.
+    pub(crate) canon_hashes: Vec<u64>,
+    /// True once the RUNTIME sink drain owns this table (set per worker by
+    /// `agg_sink_mark_sink_mode`). Gates the batch-tail canonical hashing:
+    /// the serial lane shares this compact table and never flushes or
+    /// SEAL-partitions, so accept-time hashes would be pure overhead there.
+    /// The flush/partition entries keep their unconditional defensive
+    /// extend (first-morsel rows hashed before the flag, and the tests).
+    pub(crate) sink_mode: bool,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -206,6 +223,8 @@ pub(crate) fn compact_hash_for_tests(
         table,
         key,
         intern,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -423,6 +442,8 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         ),
         key: CompactKeySpec::Single { width },
         intern: None,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -538,6 +559,8 @@ fn try_arm_mk_n(
         intern: has_intern.then(|| {
             ::lanetable::LaneAggTable::new(::lanetable::KeyRepr::Bytes, 8, 1 << 10)
         }),
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -781,6 +804,8 @@ pub fn agg_hash_compact_try_arm_reduced(
         ),
         key: CompactKeySpec::Reduced(shape),
         intern: None,
+        canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -1021,16 +1046,26 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if !s.two_words));
-    let CompactHash { table, states, hashes, new_rows, .. } = ch;
-    states.clear();
-    new_rows.clear();
-    groups.clear();
-    table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
-    groups.extend(states.iter().map(|&s| {
-        // SAFETY: probe never returns null state pointers.
-        unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
-    }));
+    {
+        let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
+        states.clear();
+        new_rows.clear();
+        groups.clear();
+        table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        groups.extend(states.iter().map(|&s| {
+            // SAFETY: probe never returns null state pointers.
+            unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
+        }));
+    }
+    // Canonical shapes under the RUNTIME SINK ONLY: hash the batch's NEW
+    // rows' canonical images while their text bytes are cache-warm, on this
+    // (accepting) worker — the flush and the single-threaded SEAL partition
+    // then never hash. Serial lane: flag unset, zero added work (no-op for
+    // word shapes either way).
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 
@@ -1047,16 +1082,22 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if s.two_words));
-    let CompactHash { table, states, hashes, new_rows, .. } = ch;
-    states.clear();
-    new_rows.clear();
-    groups.clear();
-    table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
-    groups.extend(states.iter().map(|&s| {
-        // SAFETY: probe never returns null state pointers.
-        unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
-    }));
+    {
+        let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
+        states.clear();
+        new_rows.clear();
+        groups.clear();
+        table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        groups.extend(states.iter().map(|&s| {
+            // SAFETY: probe never returns null state pointers.
+            unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
+        }));
+    }
+    // Canonical shapes under the runtime sink only — see the mk1 twin.
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 
