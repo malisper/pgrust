@@ -133,6 +133,26 @@ impl BgWriterJob {
     }
 }
 
+/// Once-per-worker BaseInit (the thread-infrastructure half a backend
+/// prelude provides): VFD cache, pgstat init, aio, sync + smgr + buffer
+/// access, temp files, xloginsert scratch, lock-manager access. Runs under
+/// the job identity bind on the first cycle a given pool worker executes.
+/// The wait-event storage BaseInit points at the bound PGPROC is reset
+/// afterward so waits of FOREIGN tasks later scheduled on this worker are
+/// not attributed to the bgwriter's pg_stat_activity row.
+fn ensure_worker_cycle_init() -> Result<(), Box<PgError>> {
+    thread_local! {
+        static WORKER_BASE_INITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if WORKER_BASE_INITED.get() {
+        return Ok(());
+    }
+    postinit::BaseInit()?;
+    waitevent_seams::pgstat_reset_wait_event_storage::call();
+    WORKER_BASE_INITED.set(true);
+    Ok(())
+}
+
 /// RAII envelope bind for one cycle task on a pool worker (§3.4): identity
 /// TLS + the GUC overlay stamp; LIFO restore.
 struct EnvelopeBind {
@@ -397,6 +417,19 @@ impl BgJob for BgWriterJob {
         let mut st = self.state.lock().unwrap();
         let procno = self.procno();
         let _bind = EnvelopeBind::bind(self.pid, procno, &overlay);
+        // Once-per-worker thread infrastructure (BaseInit's half): pool
+        // workers never ran a backend prelude — the first cycle on a
+        // worker initializes the VFD cache, smgr, buffer access, sync and
+        // xloginsert scratch (found live: AllocateVfd "InitFileAccess not
+        // called?" then a double-panic abort through the unported
+        // AbortBufferIO arm; fleet job ...-0f92). Needs the identity bind
+        // (BaseInit asserts MyProc).
+        if let Err(e) = ensure_worker_cycle_init() {
+            crate::abort_cleanup(&e);
+            st.inner.prev_hibernate = false;
+            st.armed = false;
+            return CycleOutcome::Sleep(Duration::from_secs(1));
+        }
         let delay = Duration::from_millis(overlay.delay_ms.max(1) as u64);
 
         if st.hibernating {
