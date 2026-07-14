@@ -342,7 +342,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // independently re-pinned 474 attributing the whole drift to morsels.rs
     // WORKER_CX; this block's net decomposition subsumes it — one pin kept.
     // m35 inc-4/5's join-batch spill code itself adds no TLS source.)
-    assert_eq!(count_tree(crates), 474, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 475, re-pinned at band-2b (runtime plain-distinct sink):
+    //   16. executor/execmain/src/lanev2/runtime_plaindistinct.rs
+    //      WORKER_EXEC — the plain exact-DISTINCT sink helper's drive-scoped
+    //      worker executor slot (built inside the query-task binding, torn
+    //      down on every drive exit path) — same drive-scoped class and
+    //      argument as WORKER_EXEC slots 4-6.
+    assert_eq!(count_tree(crates), 475, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
