@@ -355,6 +355,13 @@ impl RgHandle {
         self.rg.task.cancel(abort_error());
     }
 
+    /// Abort observation for work bodies that subdivide a COALESCED claim
+    /// (dop1-tax fix 1): checking between epoch segments keeps cancel
+    /// latency at epoch grain even when one claim spans several epochs.
+    pub fn is_aborted(&self) -> bool {
+        self.rg.is_aborted()
+    }
+
     pub fn stats(&self) -> crate::stats::RgStatsSnapshot {
         self.rg.stats.snapshot()
     }

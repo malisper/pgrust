@@ -54,6 +54,11 @@ pub(crate) struct TaskSetRt {
     /// claim extends to the next hard boundary — per-epoch state is never
     /// split across workers (MorselSource::whole_boundary_claims).
     pub(crate) whole_claims: bool,
+    /// Claim coalescing on whole-boundary claims (source-provided, cached
+    /// at publish): at low live width one claim may span several epochs —
+    /// only for sources whose work body subdivides at epoch edges
+    /// (MorselSource::coalesce_claims).
+    pub(crate) coalesce: bool,
 }
 
 impl TaskSetRt {

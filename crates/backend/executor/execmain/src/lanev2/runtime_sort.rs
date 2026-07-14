@@ -885,7 +885,13 @@ fn engage_ceremony<'mcx>(
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
         // Submit the pinned RG (accept → seal → combine) before launch.
-        let source = Arc::new(super::runtime_scan::CbstoreGranuleSource { starts });
+        let source = Arc::new(super::runtime_scan::CbstoreGranuleSource {
+            starts: Arc::new(starts),
+            // This arm feeds claims straight into set_granule_range
+            // (single-epoch contract); it does not subdivide multi-epoch
+            // claims — never coalesce.
+            coalesce: false,
+        });
         let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
             runtime::sealed_sink_tasksets(
                 Arc::clone(payload),
