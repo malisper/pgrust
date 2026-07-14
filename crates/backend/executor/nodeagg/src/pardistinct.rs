@@ -1886,15 +1886,98 @@ impl PdEmitBucket {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bounded selection inside the distinct sink (named-kernels-distinct kernel
+// 2 — winners-phase2's flagged follow-up): on the paremit `GROUP BY k ORDER
+// BY <int8 agg> LIMIT n` consumer shape, each combine claim selects its
+// partition's top-`bound` groups ON THE RAW MERGED STATE (the distinct
+// count IS the set's value count; vocab counts are the sidecar words —
+// both state-comparable and never NULL, so there is no mid-combine decline
+// face at all) and materializes ONLY those through the ordered emit bucket;
+// the leader truncate-merges the per-partition candidate lists to the
+// global winner set and the paremit merge emits winners alone, in the same
+// group order as the full drain.
+//
+// Correctness is the winners-only superset lemma verbatim: partitions hold
+// DISJOINT groups (value-hash routing), so a group in the global top-
+// `bound` is beaten by fewer than `bound` groups anywhere — in particular
+// inside its own partition — and survives its partition's list; the union
+// of lists is a superset of the global top-`bound` and the truncate-merge
+// recovers exactly it.
+//
+// Selection total order = (badness, GROUP ORDER): badness first (the
+// monotone-worse image of the order value under the direction), ties by
+// the plan Sort's prefix order over the group keys — the EXACT arrival
+// order the full drain feeds the downstream bounded sort, whose C
+// tuplesort keeps the first-arriving tuple among equals (a new tuple
+// replaces the heap root only when strictly better). The winner set is
+// therefore a pure function of the data AND identical to the set the full
+// drain's bounded sort retains — the W≡F byte-identity argument. Within
+// one partition the tie rank is the bucket row index (bucket rows are in
+// group order); across partitions the leader compares tie candidates with
+// `cmp_group_rows` on the bucket key sidecars (the ONE ordering
+// authority).
+// ---------------------------------------------------------------------------
+
+/// The order value's location in the merged raw state (leader-resolved
+/// against the derived spec; both kinds are int8-monotone and never NULL —
+/// count states have non-NULL initvals and the merged set's value count is
+/// total by construction).
+#[derive(Clone, Copy, Debug)]
+pub enum PdTopnKey {
+    /// count(DISTINCT x): the merged exact set's non-null value count
+    /// (`spec.sets` index).
+    SetCount(usize),
+    /// count(*) / count(x): the vocab sidecar `acc` word (`spec.vocab`
+    /// index).
+    VocabCount(usize),
+}
+
+/// The armed distinct-sink top-N (one engagement-level choice, resolved at
+/// admission beside the paremit recipe).
+#[derive(Clone, Copy, Debug)]
+pub struct PdTopnSpec {
+    pub key: PdTopnKey,
+    pub desc: bool,
+    pub bound: u32,
+}
+
+/// One partition's winner candidate: `row` indexes the partition's emit
+/// bucket (bucket rows are the partition's candidates in GROUP order, so
+/// `row` doubles as the within-partition tie rank). Lists are sorted
+/// best-first by `(badness, row)`.
+#[derive(Clone, Copy, Debug)]
+pub struct PdTopnCand {
+    pub badness: u64,
+    pub row: u32,
+}
+
+/// A group's order value off the raw merged state (never NULL — doc above).
+#[inline]
+fn pd_topn_value(spec: &PdSpec, m: &PdMerged<'_>, key: PdTopnKey, g: usize) -> i64 {
+    match key {
+        PdTopnKey::SetCount(si) => m.dsets[g * spec.sets.len() + si]
+            .as_ref()
+            .map_or(0, DistinctSet::value_count) as i64,
+        PdTopnKey::VocabCount(vi) => m.states[g * 2 * spec.vocab.len() + 2 * vi],
+    }
+}
+
 /// COMBINE-claim tail (paremit mode): order one merged partition's groups
 /// by the plan Sort's prefix and materialize the projected rows. Runs on
 /// the combine worker; the merged partition (and its sets) drop with the
 /// claim — only this compact bucket is retained.
+///
+/// `topn` (kernel 2): materialize ONLY the partition's top-`bound`
+/// candidates (still in group order) and return the candidate list; `None`
+/// = the full drain exactly as before. The returned list is `Some` iff
+/// `topn` was.
 pub fn pd_emit_bucket(
     spec: &PdSpec,
     recipe: &PdEmitRecipe,
     m: &PdMerged<'_>,
-) -> PgResult<PdEmitBucket> {
+    topn: Option<&PdTopnSpec>,
+) -> PgResult<(PdEmitBucket, Option<Vec<PdTopnCand>>)> {
     let nkeys = recipe.nkeys();
     debug_assert_eq!(nkeys, spec.nkeys());
     let nsort = spec.sets.len();
@@ -1902,7 +1985,7 @@ pub fn pd_emit_bucket(
     let natts = recipe.cols.len();
     let n = m.ngroups;
     let kinds = recipe.hg_kinds();
-    let order = order_groups(
+    let mut order = order_groups(
         &m.keys,
         &m.keynulls,
         &recipe.order,
@@ -1911,6 +1994,47 @@ pub fn pd_emit_bucket(
         &m.key_arena,
         n,
     )?;
+    // Partition-local bounded selection on the raw states (section doc):
+    // scan in group order keeping the `bound` smallest `(badness, rank)`
+    // pairs — a max-heap with strict-better replacement, so equal-badness
+    // ties keep the EARLIEST group order (pairs are unique by rank). The
+    // surviving ranks rewrite `order` (rank-ascending = group order); the
+    // candidate list maps each winner to its bucket row.
+    let mut cands: Option<Vec<PdTopnCand>> = None;
+    if let Some(t) = topn {
+        let k = (t.bound as usize).min(n);
+        let mut heap: std::collections::BinaryHeap<(u64, u32)> =
+            std::collections::BinaryHeap::with_capacity(k.saturating_add(1));
+        for (rank, &g) in order.iter().enumerate() {
+            let badness = crate::compact::topkfin_badness(
+                pd_topn_value(spec, m, t.key, g as usize),
+                t.desc,
+            );
+            let cand = (badness, rank as u32);
+            if heap.len() < k {
+                heap.push(cand);
+            } else if heap.peek().is_some_and(|&worst| cand < worst) {
+                heap.pop();
+                heap.push(cand);
+            }
+        }
+        let mut sel = heap.into_vec();
+        sel.sort_unstable(); // (badness, rank) — the selection total order
+        // Ranks ascending = the bucket's row order; a winner's bucket row =
+        // its position in the rank-sorted list.
+        let mut ranks: Vec<u32> = sel.iter().map(|&(_, r)| r).collect();
+        ranks.sort_unstable();
+        cands = Some(
+            sel.iter()
+                .map(|&(badness, rank)| PdTopnCand {
+                    badness,
+                    row: ranks.binary_search(&rank).expect("winner rank present") as u32,
+                })
+                .collect(),
+        );
+        order = ranks.into_iter().map(|r| order[r as usize]).collect();
+    }
+    let n = order.len();
     let mut out = PdEmitBucket {
         nrows: n,
         natts,
@@ -2033,7 +2157,7 @@ pub fn pd_emit_bucket(
     for (i, off) in fixups {
         out.values[i] = Datum::from_usize(out.arena[off..].as_ptr() as usize);
     }
-    Ok(out)
+    Ok((out, cands))
 }
 
 /// Leader-side paremit emit state: the published buckets + a binary
@@ -2048,6 +2172,10 @@ pub struct PdParemitState {
     kinds: Vec<HgKeyKind>,
     nkeys: usize,
     pub natts: usize,
+    /// Kernel-2 winner direction: per-bucket GLOBAL-winner row indexes
+    /// (ascending = group order); the merge cursors walk these instead of
+    /// the full bucket. `None` = the full drain.
+    keep: Option<Vec<Vec<u32>>>,
 }
 
 impl PdParemitState {
@@ -2064,14 +2192,39 @@ impl PdParemitState {
         self.buckets.iter().map(PdEmitBucket::mem_bytes).sum()
     }
 
+    /// Global winner count (`Some` iff the selection is armed) — the
+    /// composed-top-N trace/observability figure.
+    pub fn kept_rows(&self) -> Option<usize> {
+        self.keep.as_ref().map(|k| k.iter().map(Vec::len).sum())
+    }
+
+    /// Bucket `b`'s CURRENT merge row (winner-directed when `keep` is
+    /// armed).
+    #[inline]
+    fn cur_row(&self, b: usize) -> usize {
+        match &self.keep {
+            Some(k) => k[b][self.cursors[b]] as usize,
+            None => self.cursors[b],
+        }
+    }
+
+    /// Bucket `b`'s merge row count (winners only when `keep` is armed).
+    #[inline]
+    fn rows_of(&self, b: usize) -> usize {
+        match &self.keep {
+            Some(k) => k[b].len(),
+            None => self.buckets[b].nrows,
+        }
+    }
+
     fn cmp_heads(&self, a: u32, b: u32) -> PgResult<core::cmp::Ordering> {
         let (ba, bb) = (&self.buckets[a as usize], &self.buckets[b as usize]);
         let ord = cmp_group_rows(
             &self.order,
             self.nkeys,
             &self.kinds,
-            (&ba.keys, &ba.keynulls, &ba.arena, self.cursors[a as usize]),
-            (&bb.keys, &bb.keynulls, &bb.arena, self.cursors[b as usize]),
+            (&ba.keys, &ba.keynulls, &ba.arena, self.cur_row(a as usize)),
+            (&bb.keys, &bb.keynulls, &bb.arena, self.cur_row(b as usize)),
         )?;
         // Distinct groups partition disjointly across buckets: a cross-
         // bucket tie on the full prefix would mean a duplicated group.
@@ -2102,16 +2255,89 @@ impl PdParemitState {
     }
 }
 
+/// Truncate-merge the per-partition candidate lists (each sorted
+/// best-first by the selection total order — within a bucket that is
+/// `(badness, row)`, and a bucket's rows ARE its group order) into the
+/// per-bucket GLOBAL winner row lists (≤ `bound` rows total; each list
+/// row-ascending). Cross-bucket badness ties resolve by `cmp_group_rows`
+/// over the bucket key sidecars — the global group order, i.e. the exact
+/// arrival order the full drain would feed the downstream bounded sort.
+/// O(bound × buckets) fallible head compares; bound ≤ the sink cap.
+fn pd_topn_keep(
+    recipe: &PdEmitRecipe,
+    buckets: &[PdEmitBucket],
+    cands: &[Vec<PdTopnCand>],
+    bound: u32,
+) -> PgResult<Vec<Vec<u32>>> {
+    debug_assert_eq!(cands.len(), buckets.len());
+    let kinds = recipe.hg_kinds();
+    let nkeys = recipe.nkeys();
+    let mut cur = vec![0usize; cands.len()];
+    let mut kept: Vec<Vec<u32>> = vec![Vec::new(); buckets.len()];
+    let mut taken = 0u32;
+    'take: while taken < bound {
+        let mut best: Option<usize> = None;
+        for bi in 0..cands.len() {
+            let Some(c) = cands[bi].get(cur[bi]) else { continue };
+            let better = match best {
+                None => true,
+                Some(bj) => {
+                    let cj = &cands[bj][cur[bj]];
+                    match c.badness.cmp(&cj.badness) {
+                        core::cmp::Ordering::Less => true,
+                        core::cmp::Ordering::Greater => false,
+                        core::cmp::Ordering::Equal => {
+                            let (ba, bb) = (&buckets[bi], &buckets[bj]);
+                            cmp_group_rows(
+                                &recipe.order,
+                                nkeys,
+                                &kinds,
+                                (&ba.keys, &ba.keynulls, &ba.arena, c.row as usize),
+                                (&bb.keys, &bb.keynulls, &bb.arena, cj.row as usize),
+                            )? == core::cmp::Ordering::Less
+                        }
+                    }
+                }
+            };
+            if better {
+                best = Some(bi);
+            }
+        }
+        let Some(bi) = best else { break 'take };
+        kept[bi].push(cands[bi][cur[bi]].row);
+        cur[bi] += 1;
+        taken += 1;
+    }
+    // Merge cursors walk each bucket in group order = row-ascending.
+    for l in &mut kept {
+        l.sort_unstable();
+    }
+    Ok(kept)
+}
+
 /// Build the leader emit state (heapify over non-empty buckets).
+///
+/// `topn` (kernel 2): the per-bucket candidate lists (aligned with
+/// `buckets`) + the global bound — the merge then emits ONLY the global
+/// winner set, in the same group order as the full drain. `None` = the
+/// full drain exactly as before.
 pub fn pd_paremit_state(
     recipe: &PdEmitRecipe,
     buckets: Vec<PdEmitBucket>,
+    topn: Option<(&[Vec<PdTopnCand>], u32)>,
 ) -> PgResult<PdParemitState> {
     let natts = recipe.cols.len();
+    let keep = match topn {
+        Some((cands, bound)) => Some(pd_topn_keep(recipe, &buckets, cands, bound)?),
+        None => None,
+    };
     let heap: Vec<u32> = buckets
         .iter()
         .enumerate()
-        .filter(|(_, b)| b.nrows > 0)
+        .filter(|(i, b)| match &keep {
+            Some(k) => !k[*i].is_empty(),
+            None => b.nrows > 0,
+        })
         .map(|(i, _)| i as u32)
         .collect();
     let cursors = vec![0usize; buckets.len()];
@@ -2123,6 +2349,7 @@ pub fn pd_paremit_state(
         kinds: recipe.hg_kinds(),
         nkeys: recipe.nkeys(),
         natts,
+        keep,
     };
     if !st.heap.is_empty() {
         for i in (0..st.heap.len() / 2).rev() {
@@ -2137,9 +2364,9 @@ pub fn pd_paremit_state(
 pub fn pd_paremit_next(st: &mut PdParemitState) -> PgResult<Option<(usize, usize)>> {
     let Some(&top) = st.heap.first() else { return Ok(None) };
     let b = top as usize;
-    let row = st.cursors[b];
+    let row = st.cur_row(b);
     st.cursors[b] += 1;
-    if st.cursors[b] >= st.buckets[b].nrows {
+    if st.cursors[b] >= st.rows_of(b) {
         let last = st.heap.len() - 1;
         st.heap.swap(0, last);
         st.heap.pop();
@@ -3355,7 +3582,7 @@ mod tests {
             &order_spec,
         )
         .expect("recipe resolves");
-        let b = pd_emit_bucket(&spec, &recipe, &m).expect("bucket builds");
+        let (b, _) = pd_emit_bucket(&spec, &recipe, &m, None).expect("bucket builds");
         assert_eq!(b.nrows, 5);
         assert_eq!(b.natts, 5);
         // The adopt reference order over the same partition.
@@ -3462,7 +3689,7 @@ mod tests {
                 states: vec![1; n * 2],
                 dsets: Vec::new(),
             };
-            buckets.push(pd_emit_bucket(&spec, &recipe, &m).expect("bucket"));
+            buckets.push(pd_emit_bucket(&spec, &recipe, &m, None).expect("bucket").0);
         }
         let kinds = recipe.hg_kinds();
         let whole = order_groups(
@@ -3479,7 +3706,7 @@ mod tests {
             .iter()
             .map(|&g| (cat_nulls[g as usize] != 0, cat_keys[g as usize]))
             .collect();
-        let mut st = pd_paremit_state(&recipe, buckets).expect("state");
+        let mut st = pd_paremit_state(&recipe, buckets, None).expect("state");
         let mut got = Vec::new();
         while let Some((b, row)) = pd_paremit_next(&mut st).expect("next") {
             let (values, nulls) = st.row(b, row);
@@ -3543,7 +3770,7 @@ mod tests {
                 states: vec![1; n * 2],
                 dsets: Vec::new(),
             };
-            tbuckets.push(pd_emit_bucket(&tspec, &trecipe, &m).expect("bucket"));
+            tbuckets.push(pd_emit_bucket(&tspec, &trecipe, &m, None).expect("bucket").0);
         }
         let tkinds = trecipe.hg_kinds();
         let whole = order_groups(
@@ -3563,7 +3790,7 @@ mod tests {
                 cat_arena[off..off + len].to_vec()
             })
             .collect();
-        let mut st = pd_paremit_state(&trecipe, tbuckets).expect("state");
+        let mut st = pd_paremit_state(&trecipe, tbuckets, None).expect("state");
         let mut got = Vec::new();
         while let Some((b, row)) = pd_paremit_next(&mut st).expect("next") {
             let (values, nulls) = st.row(b, row);
@@ -3579,4 +3806,116 @@ mod tests {
         }
         assert_eq!(got, expect);
     }
+
+    /// Kernel-2 oracle (the W≡F-style byte-identity gate at unit
+    /// altitude): bounded selection ON emits exactly the rows the FULL
+    /// drain's downstream bounded sort would retain — same winner set
+    /// (boundary ties keep the earliest group order: C's bounded heap
+    /// discards on tie, so first-arriving survives), same emit order
+    /// (group order), same datum words — and the compact-materialization
+    /// law holds (each bucket materializes exactly its candidate rows).
+    /// Exercised over BOTH order directions and a boundary that lands
+    /// mid-tie-group, groups split across two partitions.
+    #[test]
+    fn topn_selection_matches_full_drain_retention() {
+        use crate::hashgrouped::HashGroupOrderKey;
+        let spec = paremit_spec(vec![PdKeyKind::Int(PdInt::I64)], 1, Vec::new());
+        let order_spec = vec![HashGroupOrderKey {
+            key_idx: 0,
+            desc: false,
+            nulls_first: false,
+            collation: 0,
+        }];
+        let recipe = pd_paremit_recipe(
+            &spec,
+            &[PdParemitCol::Key(0), PdParemitCol::SetCount(0)],
+            &order_spec,
+        )
+        .expect("recipe resolves");
+        // (key, distinct-count): counts 5,3,5,2,3,3,1,5,2 — ties at every
+        // interesting boundary. Keys ascending = group order.
+        let groups: [(i64, usize); 9] =
+            [(1, 5), (2, 3), (3, 5), (4, 2), (5, 3), (6, 3), (7, 1), (8, 5), (9, 2)];
+        let build = |bi: usize| -> PdMerged<'static> {
+            let mut keys = Vec::new();
+            let mut keynulls = Vec::new();
+            let mut dsets: Vec<Option<DistinctSet<'static>>> = Vec::new();
+            for (i, &(k, c)) in groups.iter().enumerate() {
+                if i % 2 != bi {
+                    continue;
+                }
+                keys.push(k);
+                keynulls.push(0);
+                let mut d = DistinctSet::new();
+                for v in 0..c {
+                    d.insert_i64(v as i64 * 7 + k);
+                }
+                dsets.push(Some(d));
+            }
+            let n = keys.len();
+            PdMerged {
+                ngroups: n,
+                keys,
+                key_arena: Vec::new(),
+                keynulls,
+                states: Vec::new(),
+                dsets,
+            }
+        };
+        for desc in [true, false] {
+            for bound in [1u32, 3, 4, 6, 9, 20] {
+                // FULL drain stream: (key, count) rows in group order.
+                let full_bufs: Vec<PdEmitBucket> = (0..2)
+                    .map(|bi| pd_emit_bucket(&spec, &recipe, &build(bi), None).unwrap().0)
+                    .collect();
+                let mut st = pd_paremit_state(&recipe, full_bufs, None).unwrap();
+                let mut full: Vec<(i64, i64)> = Vec::new();
+                while let Some((b, row)) = pd_paremit_next(&mut st).unwrap() {
+                    let (v, nl) = st.row(b, row);
+                    assert!(!nl[0] && !nl[1]);
+                    full.push((v[0].as_i64(), v[1].as_i64()));
+                }
+                assert_eq!(full.len(), groups.len());
+                // The downstream bounded sort\'s retention: first-arriving
+                // among boundary ties (discard-on-tie) = the k smallest
+                // (badness, arrival rank) pairs.
+                let mut ranked: Vec<(u64, usize)> = full
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(_, c))| (crate::compact::topkfin_badness(c, desc), i))
+                    .collect();
+                ranked.sort_unstable();
+                let k = (bound as usize).min(full.len());
+                let mut kept: Vec<usize> = ranked[..k].iter().map(|&(_, i)| i).collect();
+                kept.sort_unstable();
+                let expect: Vec<(i64, i64)> = kept.iter().map(|&i| full[i]).collect();
+                // WINNERS arm.
+                let topn = PdTopnSpec { key: PdTopnKey::SetCount(0), desc, bound };
+                let mut bufs = Vec::new();
+                let mut cands = Vec::new();
+                for bi in 0..2 {
+                    let (b, c) =
+                        pd_emit_bucket(&spec, &recipe, &build(bi), Some(&topn)).unwrap();
+                    let c = c.expect("armed selection returns candidates");
+                    // Compact-materialization law: bucket rows ARE the
+                    // candidates.
+                    assert_eq!(b.nrows, c.len());
+                    assert!(c.len() <= bound as usize);
+                    bufs.push(b);
+                    cands.push(c);
+                }
+                let mut st =
+                    pd_paremit_state(&recipe, bufs, Some((&cands[..], bound))).unwrap();
+                assert_eq!(st.kept_rows(), Some(expect.len()));
+                let mut got: Vec<(i64, i64)> = Vec::new();
+                while let Some((b, row)) = pd_paremit_next(&mut st).unwrap() {
+                    let (v, nl) = st.row(b, row);
+                    assert!(!nl[0] && !nl[1]);
+                    got.push((v[0].as_i64(), v[1].as_i64()));
+                }
+                assert_eq!(got, expect, "desc={desc} bound={bound}");
+            }
+        }
+    }
+
 }
