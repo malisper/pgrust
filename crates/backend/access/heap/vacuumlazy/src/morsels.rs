@@ -277,6 +277,29 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
         }
         rounds += 1;
 
+        // Helper threads may have EXTENDED the relation's VM and FSM forks
+        // during the round. The per-thread smgr fork-size cache is trusted
+        // outside recovery (a recorded port divergence — C lseeks every
+        // time), so the LEADER's cached sizes would stay stale and every
+        // later leader-side read (next round's skip map, the epilogue's
+        // visibilitymap_count, FSM range vacuum) would see a truncated
+        // fork. Round-7 battery caught it: t_noidx relallvisible 0 with a
+        // BYTE-IDENTICAL VM fork on disk. Invalidate; the next read
+        // re-probes the real size.
+        {
+            let rlocator = bufmgr_seams::relation_smgr_locator::call(vacrel.rel);
+            smgr_seams::smgr_set_cached_nblocks::call(
+                rlocator,
+                ForkNumber::VISIBILITYMAP_FORKNUM,
+                ::types_core::InvalidBlockNumber,
+            )?;
+            smgr_seams::smgr_set_cached_nblocks::call(
+                rlocator,
+                ForkNumber::FSM_FORKNUM,
+                ::types_core::InvalidBlockNumber,
+            )?;
+        }
+
         // ---- SCAN finalize, leader-side (doc §3.2 + §5.2) ----
         let mut locals = shared.take_locals();
         if fault_lose_local() && !locals.is_empty() {
