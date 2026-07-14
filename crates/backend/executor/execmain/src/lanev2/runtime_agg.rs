@@ -649,6 +649,8 @@ struct WorkerExec {
     errored: std::cell::Cell<bool>,
     /// Per-worker reusable drain scratch.
     k2s: ScanK2Scratch,
+    /// Dict-code sink feed cache (DictFeed::Code; K2 drain only).
+    dgs: SinkDictScratch,
     idxs: Vec<u32>,
     groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     /// ExprKey drain state (SinkDrain::ExprKey only): the worker's own
@@ -694,8 +696,8 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
-        let (k2s, idxs, groups) = (&mut *k2s, &mut *idxs, &mut *groups);
+        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
+        let (k2s, dgs, idxs, groups) = (&mut *k2s, &mut *dgs, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
         crate::querydesc::with_qd(*qd, |q| {
@@ -733,8 +735,8 @@ fn accept_morsel_body(
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
                 let drained = sink_drain_range(
-                    sink, local, worker, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot,
-                    mk, mks,
+                    sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
+                    stage_slot, mk, mks,
                     estate,
                 );
                 // EA-on-morsels claim fold (EXACT — accumulate in the Local,
@@ -1043,6 +1045,150 @@ fn split_subparts_and_emit(
     Ok(true)
 }
 
+/// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
+/// what the K2 sink does when the scan staging is dict-group armed (the
+/// single-int-key GROUP BY over a dict-encoded cbstore column whose
+/// fixed-width prefix deform is unarmable — UserID past varlena columns).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DictFeed {
+    /// Consume the dict CODES directly (CH LowCardinality-style): per-epoch
+    /// code -> live compact-table state cache, one table probe per distinct
+    /// (epoch, code) instead of per row.
+    Code,
+    /// Dict-free columnar re-arm (the q5-serial precedent): rebuild the
+    /// scan staging with NO dict registration so windows fill decoded
+    /// Datums, then the plain K2 per-row probe drain runs unchanged.
+    Raw,
+    /// Refuse the engagement exactly as before this lane (kill switch).
+    Off,
+}
+
+fn dict_feed_mode() -> DictFeed {
+    static MODE: OnceLock<DictFeed> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
+        Ok("0") | Ok("off") => DictFeed::Off,
+        Ok("raw") => DictFeed::Raw,
+        _ => DictFeed::Code,
+    })
+}
+
+/// Per-worker dict-code sink scratch (DictFeed::Code): the direct-indexed
+/// code -> live compact-table state map, keyed on the serial dict-group
+/// arm's exact identity tuple (is_global, epoch/gepoch). The cached pointers
+/// are LaneAggTable row-state addresses — allocation-stable across inserts
+/// and across the morsel take/put hand-off (chunked row storage; the table
+/// handle moves, its rows do not) — and they die at every sink flush
+/// (`sink_flush_table` resets the table), which must `invalidate` this
+/// scratch exactly like the mk intern-id cache beside it.
+#[derive(Default)]
+pub(super) struct SinkDictScratch {
+    ident: Option<(bool, u64)>,
+    slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    /// This batch's first-appearance-ordered unresolved codes (parallel to
+    /// the miss probe batch).
+    miss_codes: Vec<u32>,
+}
+
+impl SinkDictScratch {
+    fn invalidate(&mut self) {
+        self.ident = None;
+        self.slots.clear();
+    }
+}
+
+/// One dict-answered staged batch through the CODE sink feed: pass 1 marks
+/// each first-appearing unresolved code (first-arrival order preserved:
+/// the miss batch probes in first-appearance order, which is row order),
+/// one compact batch probe resolves all of this batch's misses, pass 2
+/// hands every surviving row its cached state for the whole-batch fold.
+/// Mirrors the serial `scan_dictgroup_batch` against the WORKER's bounded
+/// compact table instead of the global C tuplehash; there is no spill leg
+/// (the sink table never spills — it flushes at the cap, which invalidates
+/// this cache in the drain loop).
+#[allow(clippy::too_many_arguments)]
+fn sink_dict_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    dgs: &mut SinkDictScratch,
+    rows: &[u32],
+    keys: &mut Vec<::datum::Datum>,
+    knull: &mut Vec<bool>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    lane: ::exectuples::SoaDictLane,
+    estate: &mut EStateData<'mcx>,
+) -> Result<(), AcceptFail> {
+    let ndict = lane.table.ndict as usize;
+    let global = lane.table.has_stitch();
+    let (ident, size) = if global {
+        ((true, lane.table.gepoch), lane.table.gndv as usize)
+    } else {
+        ((false, lane.table.epoch), ndict)
+    };
+    if dgs.ident != Some(ident) {
+        dgs.ident = Some(ident);
+        dgs.slots.clear();
+        dgs.slots.resize(size, None);
+    }
+    debug_assert!(dgs.slots.len() >= size, "dict size is fixed per identity");
+    // PENDING sentinel: marks a code queued in THIS batch's miss list. A
+    // dangling NonNull can never equal a live table row address.
+    let pending = core::ptr::NonNull::<::execexpr::AggPerGroup>::dangling();
+    dgs.miss_codes.clear();
+    keys.clear();
+    knull.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        debug_assert!(code < size, "stitch contract: global code < gndv");
+        if dgs.slots[code].is_none() {
+            dgs.slots[code] = Some(pending);
+            dgs.miss_codes.push(code as u32);
+            // NULL discipline: dict codes have no NULL representation and
+            // cbstore stores no NULLs (per-chunk proof) — as the serial arm.
+            keys.push(lane.table.datum(local));
+            knull.push(false);
+        }
+    }
+    if !keys.is_empty() {
+        groups.clear();
+        if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
+            // The sink-mode backstop errors before migrating; belt-and-braces
+            // (the raw K2 leg's exact treatment).
+            return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "worker compact table disarmed mid-build",
+            )));
+        }
+        for (k, &code) in dgs.miss_codes.iter().enumerate() {
+            dgs.slots[code as usize] = Some(groups[k]);
+        }
+    }
+    idxs.clear();
+    groups.clear();
+    for &i in rows {
+        let local = lane.code(i as usize);
+        let code =
+            if global { lane.table.global_code(local) as usize } else { local as usize };
+        let pg = dgs.slots[code].expect("every survivor code resolved above");
+        debug_assert!(pg != pending, "pending sentinel must have been installed");
+        idxs.push(i);
+        groups.push(pg);
+    }
+    let soa =
+        ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
+    // SAFETY: as the raw K2 sink fold — every probed row is non-fallback
+    // (cbstore stages none; the caller admits all-lane batches only) with
+    // valid lane values for every plan column (the key column is NOT in
+    // `plan.cols`: the dict-group arm refuses that shape, and only that arm
+    // registers the dict lane); the plan is unguarded (sink admission);
+    // each state is a live compact-table row installed by a probe since the
+    // last flush (flushes invalidate this cache before the next batch).
+    unsafe { super::agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(())
+}
+
 /// The narrow sink drain over the positioned claim: per staged page batch —
 /// cap-flush check, survivor collection, canonical key gather, compact
 /// batch probe (never the C table), whole-batch fold.
@@ -1054,6 +1200,7 @@ fn sink_drain_range<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     k2s: &mut ScanK2Scratch,
+    dgs: &mut SinkDictScratch,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     xk: &mut Option<Box<super::ExprKeyState>>,
@@ -1079,6 +1226,9 @@ fn sink_drain_range<'mcx>(
         {
             local.run_bytes += run.bytes();
             local.runs.push(run);
+            // The flush RESET the compact table: every cached code -> state
+            // pointer is a dangling table row — drop the dict-code cache.
+            dgs.invalidate();
             if intern_reset {
                 // The flush RESET the intern table (wide-vocabulary
                 // bounding): every code→intern-id cache is now stale — a
@@ -1194,6 +1344,18 @@ fn sink_drain_range<'mcx>(
         super::scan_collect_survivors(ss, estate, n, rows)?;
         if ea {
             local.instr.rows.survived += rows.len() as u64;
+        }
+        // Dict-answered window under the CODE feed (dict-group staging on a
+        // sink build): group on the u32 codes through the per-epoch cache —
+        // the key column's Datum cells are STALE while the dict lane
+        // answers, so this branch must own every dict window. Raw-answered
+        // windows (non-dict key chunks) take the plain keys path below;
+        // both resolve into the same worker table in the same row order.
+        if let Some(lane) = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .and_then(|soa| soa.dict_lane(key_col))
+        {
+            sink_dict_batch(agg, ss, dgs, rows, keys, knull, idxs, groups, lane, estate)?;
+            continue;
         }
         keys.clear();
         knull.clear();
@@ -1440,6 +1602,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     qd,
                     errored: std::cell::Cell::new(false),
                     k2s: ScanK2Scratch::default(),
+                    dgs: SinkDictScratch::default(),
                     idxs: Vec::new(),
                     groups: Vec::new(),
                     xk,
@@ -1455,6 +1618,27 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
             }
         }
     })
+}
+
+/// DictFeed::Raw: rebuild the scan staging as the dict-FREE columnar arm —
+/// the same offset-free window deform with NO column opted into dict lanes
+/// (`seq_scan_cb_columnar_arm(.., None)`; the q5-serial `arm_key_soa`
+/// precedent generalized to the fold prefix) — so every window fills
+/// decoded Datums and the plain K2 drain runs untouched. Fail-closed: the
+/// re-arm must actually shed the dict registration (a PREWHERE-owned batch
+/// keeps its co-consumers; single-key dict co-arms don't exist on that
+/// path today, but the check is what makes this safe, not the today).
+/// A later serial fallback re-arms dict-group idempotently — the fold
+/// feed's `arm_scan_staging` re-runs its whole ladder.
+fn sink_rearm_dictfree<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(prefix) = super::fused_agg_soa_prefix(agg, ss) else { return false };
+    ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None)
+        && ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_none()
+        && ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
 }
 
 /// The worker arm's drain-specific state (see [`arm_sink_build`]).
@@ -1589,8 +1773,24 @@ fn arm_sink_build<'mcx>(
     if super::scan_k2_shape(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
+    // Dict-group staging on the K2 build (the q16 class): the same mode
+    // decision the leader made. Code = keep the dict registration (the
+    // drain's dict-window branch consumes the codes); Raw = dict-free
+    // columnar re-arm (windows fill decoded Datums; the plain drain runs);
+    // Off = the pre-lane refusal. Leader/worker verdicts agree because the
+    // mode is a process-wide constant and both sides arm the same store.
     if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-        return Err(shape_err("dict-group staging on a sink worker"));
+        match dict_feed_mode() {
+            DictFeed::Code => {}
+            DictFeed::Raw => {
+                if !sink_rearm_dictfree(agg, ss, estate) {
+                    return Err(shape_err("dict-free columnar re-arm on a sink worker"));
+                }
+            }
+            DictFeed::Off => {
+                return Err(shape_err("dict-group staging on a sink worker"));
+            }
+        }
     }
     ::nodeagg::sink::agg_sink_set_cap(agg, sink.cap);
     if ::nodeagg::agg_hash_compact_try_arm(agg) != ::nodeagg::CompactArm::Armed {
@@ -1935,9 +2135,29 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         let k2_int = super::scan_k2_shape(agg, ss, estate).is_some()
             && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
         if k2_int {
+            // Dict-group staging (the q16 class: a single dict-encoded int
+            // key whose fixed-width prefix deform is unarmable). CODE feed:
+            // admit with the dict registration kept — the sink drain's
+            // dict-window branch consumes the codes through the per-epoch
+            // cache. RAW feed: dict-free columnar re-arm, plain K2 drain.
+            // Off: the pre-lane refusal exactly.
             if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
-                refuse(estate, ea, node_id, "dict-group staging");
-                return Ok(false);
+                match dict_feed_mode() {
+                    DictFeed::Code => {
+                        lane_trace("runtime-agg: K2 dict-code feed admitted");
+                    }
+                    DictFeed::Raw => {
+                        if !sink_rearm_dictfree(agg, ss, estate) {
+                            refuse(estate, ea, node_id, "dict-free columnar re-arm");
+                            return Ok(false);
+                        }
+                        lane_trace("runtime-agg: K2 dict-free columnar re-arm");
+                    }
+                    DictFeed::Off => {
+                        refuse(estate, ea, node_id, "dict-group staging");
+                        return Ok(false);
+                    }
+                }
             }
             let Some(w) = ::nodeagg::sink::agg_sink_key_width(agg) else {
                 refuse(estate, ea, node_id, "key width");
