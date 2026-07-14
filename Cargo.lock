@@ -7673,6 +7673,7 @@ dependencies = [
  "sinval",
  "stack_depth",
  "syslogger_seams",
+ "timeout_seams",
  "timestamp_seams",
  "types_core",
  "types_error",
