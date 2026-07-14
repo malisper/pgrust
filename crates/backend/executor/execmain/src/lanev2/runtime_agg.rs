@@ -51,8 +51,9 @@ use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
     sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
     sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
-    sink_spill_row_bytes, SinkCombineFn, SinkEmitBuf, SinkEmitPlan, SinkKeySpec, SinkLocalView,
-    SinkPart, SinkRun, SinkTableHandle, SINK_NBUCKETS, SINK_NULL_BUCKET,
+    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, SinkCombineFn, SinkEmitBuf,
+    SinkEmitPlan, SinkKeySpec, SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand,
+    SinkTopnSpec, SINK_NBUCKETS, SINK_NULL_BUCKET,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -122,6 +123,19 @@ struct AggSink {
     byref_states: bool,
     combines: Vec<SinkCombineFn>,
     emit: SinkEmitPlan,
+    /// Combine-phase top-N composition (m3-sort-b car 1): armed when the
+    /// sink's consumer is a bounded single-int8-column Sort (the drive
+    /// chain resolved the spec at engagement). Selection is an EXTRA pass
+    /// per combine claim; the emit buffers stay full, so a degrade (NULL
+    /// order transvalue) publishes the plain full drain — no abort.
+    topn: Option<SinkTopnSpec>,
+    /// 256 per-partition winner candidate lists; slot b written only by
+    /// partition b's combine task (single writer, as `out_emit`).
+    topn_cands: Vec<UnsafeCell<Vec<SinkTopnCand>>>,
+    /// A combine declined the selection (NULL order transvalue): global
+    /// degrade to the full drain (correct either way — winners are a drain
+    /// filter, never a data transform).
+    topn_degraded: AtomicBool,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -181,8 +195,9 @@ unsafe impl Sync for AggSink {}
 
 /// What finalize hands the leader.
 enum SinkPublished {
-    /// Combine-materialized per-bucket EmitBufs (the general arm).
-    Emit(Vec<SinkEmitBuf>),
+    /// Combine-materialized per-bucket EmitBufs (the general arm), plus the
+    /// composed top-N winner list (m3-sort-b car 1; `None` = full drain).
+    Emit(Vec<SinkEmitBuf>, Option<Vec<(u16, u32)>>),
     /// TRUE TABLE ADOPT: the single sealed Local's whole table — no SEAL
     /// partition, no merge, no re-insert, no EmitBuf materialization; the
     /// leader drains the table LINEARLY (insertion order = the DOP1
@@ -348,6 +363,14 @@ impl runtime::ParallelSink for AggSink {
             if let [l] = locals {
                 if l.runs.is_empty() && l.spill.is_none() {
                     if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                        // Top-N composition (m3-sort-b car 1) selects on the
+                        // MERGED table; the pass-through never builds one, so
+                        // an armed spec degrades globally to the full drain
+                        // (decision 1: winners are a drain filter — a miss
+                        // must never drop groups).
+                        if self.topn.is_some() {
+                            self.topn_degraded.store(true, Ordering::Release);
+                        }
                         let buf = ::nodeagg::sink::sink_emit_bucket_passthrough(
                             &self.emit,
                             t.table(),
@@ -385,6 +408,12 @@ impl runtime::ParallelSink for AggSink {
                 let Some(set) = &self.spill_set else {
                     return Ok(CombineOutcome::OverBudget);
                 };
+                // Top-N composition: the split emits sub-partition tables
+                // piecemeal (no single merged table to select on) — an armed
+                // spec degrades globally to the full drain.
+                if self.topn.is_some() {
+                    self.topn_degraded.store(true, Ordering::Release);
+                }
                 let mut out = SinkEmitBuf::default();
                 if !split_views_and_emit(self, b, set, locals, &mut out)? {
                     return Ok(CombineOutcome::OverBudget);
@@ -441,6 +470,22 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
+            // Combine-phase top-N (car 1): select this partition's winners
+            // on the merged raw states BEFORE the emit walks the same rows
+            // (candidate row indices == emit buf row indices — both iterate
+            // table rows 0..n in order). A decline (NULL order transvalue)
+            // degrades globally to the full drain; the buf below stays full
+            // either way.
+            if let Some(spec) = &self.topn {
+                if !self.topn_degraded.load(Ordering::Acquire) {
+                    match sink_topn_candidates(&merged, spec, part as u16) {
+                        // SAFETY: partition `part` is claimed exactly once
+                        // (runtime contract); this is its single writer.
+                        Some(c) => unsafe { *self.topn_cands[part as usize].get() = c },
+                        None => self.topn_degraded.store(true, Ordering::Release),
+                    }
+                }
+            }
             let buf = sink_emit_bucket(&self.emit, &merged)?;
             self.retain_bucket(part, buf, locals.len())?;
             Ok(CombineOutcome::Done)
@@ -484,7 +529,23 @@ impl runtime::ParallelSink for AggSink {
                 unsafe { std::mem::take(&mut *c.get()) }
             })
             .collect();
-        *self.published.lock().unwrap_or_else(|p| p.into_inner()) = Some(SinkPublished::Emit(bufs));
+        // Composed top-N: truncate-merge the per-partition winner lists
+        // (O((P + bound)·log P) — the finalize's O(partitions) envelope).
+        // A degrade publishes `None` = the plain full drain.
+        let winners = match &self.topn {
+            Some(spec) if !self.topn_degraded.load(Ordering::Acquire) => {
+                let lists: Vec<Vec<SinkTopnCand>> = self
+                    .topn_cands
+                    .iter()
+                    // SAFETY: single reader after all combine claims settled.
+                    .map(|c| unsafe { std::mem::take(&mut *c.get()) })
+                    .collect();
+                Some(sink_topn_merge(&lists, spec.bound as usize))
+            }
+            _ => None,
+        };
+        *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(SinkPublished::Emit(bufs, winners));
     }
 }
 
@@ -1567,6 +1628,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: Option<&super::ExprKeyState>,
+    topn: Option<SinkTopnSpec>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -1746,7 +1808,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse("extern params");
         return Ok(false);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refuse("no planned stmt");
+        return Ok(false);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
         refuse("exec params");
         return Ok(false);
@@ -1756,6 +1821,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
+        refuse("non-MVCC snapshot");
         return Ok(false);
     }
     let policy = parallel::query_task_policy_probe();
@@ -1768,7 +1834,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     // Worker plan root: the Agg subtree's Node in the leader plan tree.
-    let Some(root) = leader_pstmt.planTree else { return Ok(false) };
+    let Some(root) = leader_pstmt.planTree else {
+        refuse("no plan tree");
+        return Ok(false);
+    };
     let Some(agg_node) = find_agg_node(root, agg.plan) else {
         refuse("agg node not in plan tree");
         return Ok(false);
@@ -1783,6 +1852,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let Some((total_granules, starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
     else {
+        refuse("granule geometry unavailable (no columnar part)");
         return Ok(false);
     };
     if total_granules < min_granules().max(2 * dop as u64) {
@@ -1825,6 +1895,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         width,
         combines,
         emit,
+        topn,
+        topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+        topn_degraded: AtomicBool::new(false),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -2103,10 +2176,21 @@ fn engage_ceremony<'mcx>(
                 ));
             }
             match published {
-                SinkPublished::Emit(bufs) => {
+                SinkPublished::Emit(bufs, winners) => {
                     let rows = ::nodeagg::sink::sink_emit_rows(&bufs);
-                    lane_trace(&format!("runtime-agg: complete, groups={rows}"));
-                    ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
+                    match (&winners, &sink.topn) {
+                        (Some(w), _) => lane_trace(&format!(
+                            "runtime-agg: complete, groups={rows}, topn composed (winners={})",
+                            w.len()
+                        )),
+                        (None, Some(_)) => lane_trace(&format!(
+                            "runtime-agg: complete, groups={rows}, topn degraded — full drain"
+                        )),
+                        (None, None) => {
+                            lane_trace(&format!("runtime-agg: complete, groups={rows}"))
+                        }
+                    }
+                    ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }
                 SinkPublished::Table(table) => {
                     let rows = table.table().nrows();

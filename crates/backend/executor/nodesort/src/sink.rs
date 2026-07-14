@@ -98,27 +98,93 @@ impl TopnEntry {
     }
 }
 
-/// The per-worker bounded heap (`SealedParallelSink::Local`, inc-2): keeps
-/// the `bound` smallest entries seen so far. Plain owned data — `Send` by
-/// construction, no arena borrows (the m2-agg-sink decision-3 rule).
-/// Memory: ≤ bound × 16 bytes, no work_mem interaction (design §7).
-pub struct TopnHeap {
+/// Multi-key cap (inc-5): entries carry up to this many packed key words.
+/// Past it the shape refuses to the serial arms (admission, not data).
+pub const TOPN_MAX_KEYS: usize = 4;
+
+/// One packed per-key word for the WIDE entry: (tier:1 | word:64) in a
+/// u128, upper bits zero — the exact per-key law of `TopnEntry::encode`
+/// (null tier per nulls_first; direction-folded order-preserving word;
+/// canonical zero word for nulls).
+#[inline]
+fn key_word128(key: i64, null: bool, desc: bool, nulls_first: bool) -> u128 {
+    let tier = (null ^ nulls_first) as u128;
+    let word = if null {
+        0
+    } else {
+        let asc = (key as u64) ^ (1 << 63);
+        if desc {
+            !asc
+        } else {
+            asc
+        }
+    };
+    (tier << 64) | word as u128
+}
+
+/// Wide (multi-key) heap entry: lexicographic over the packed key words,
+/// then rowref ascending — the rule-2 total order at key arity 2..=4.
+/// Unused key slots are zero and identical across one sort's entries, so
+/// the derived full-array Ord equals the nkeys-prefix ordering.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct WideEntry {
+    keys: [u128; TOPN_MAX_KEYS],
+    rowref: u64,
+}
+
+impl WideEntry {
+    /// `keys` = per-key (widened i64, isnull) observations in sort-key
+    /// order; `flags` = the plan's per-key (desc, nulls_first). Lengths
+    /// equal, `1..=TOPN_MAX_KEYS` (the top-N HEAP uses `TopnEntry` at
+    /// arity 1 — cheaper entry; the full-sort run entries use WideEntry
+    /// at every arity, m3-sort-b shape b).
+    #[inline]
+    pub fn encode(keys: &[(i64, bool)], flags: &[(bool, bool)], rowref: u64) -> WideEntry {
+        debug_assert!(keys.len() == flags.len());
+        debug_assert!((1..=TOPN_MAX_KEYS).contains(&keys.len()));
+        debug_assert!(rowref <= TOPN_MAX_ROWREF);
+        let mut packed = [0u128; TOPN_MAX_KEYS];
+        for (i, (&(k, n), &(d, nf))) in keys.iter().zip(flags).enumerate() {
+            packed[i] = key_word128(k, n, d, nf);
+        }
+        WideEntry { keys: packed, rowref }
+    }
+
+    /// The physical (rg, row) address for the leader's late-mat gather.
+    #[inline]
+    pub fn rowref(self) -> u64 {
+        self.rowref
+    }
+}
+
+/// The per-worker bounded heap (`SealedParallelSink::Local`): keeps the
+/// `bound` smallest entries seen so far under the entry type's total order
+/// (`TopnEntry` = single-key u128; `WideEntry` = multi-key). Plain owned
+/// data — `Send` by construction, no arena borrows (the m2-agg-sink
+/// decision-3 rule). Memory: ≤ bound × size_of::<T>() (16 B narrow, 72 B
+/// wide), no work_mem interaction (design §7).
+pub struct BoundedTopnHeap<T: Ord + Copy> {
     bound: usize,
     // std max-heap: the WORST retained entry sits at the root (the current
     // k-th boundary), so replace-top is `peek_mut` (sift-on-drop).
-    heap: BinaryHeap<TopnEntry>,
+    heap: BinaryHeap<T>,
 }
 
-impl TopnHeap {
+/// The single-key heap (the shipped inc-1 surface, unchanged semantics).
+pub type TopnHeap = BoundedTopnHeap<TopnEntry>;
+/// The multi-key heap (inc-5).
+pub type TopnWideHeap = BoundedTopnHeap<WideEntry>;
+
+impl<T: Ord + Copy> BoundedTopnHeap<T> {
     /// `bound` per the plan's LIMIT arithmetic; admission guarantees
     /// `1 ≤ bound ≤ TOPN_MAX_BOUND` (asserted here — a violation is an
     /// admission bug, not data).
-    pub fn new(bound: usize) -> TopnHeap {
+    pub fn new(bound: usize) -> BoundedTopnHeap<T> {
         assert!(
             (1..=TOPN_MAX_BOUND).contains(&bound),
             "top-N sink bound {bound} outside admission envelope"
         );
-        TopnHeap { bound, heap: BinaryHeap::with_capacity(bound) }
+        BoundedTopnHeap { bound, heap: BinaryHeap::with_capacity(bound) }
     }
 
     pub fn len(&self) -> usize {
@@ -133,7 +199,7 @@ impl TopnHeap {
     /// is full: an entry ≥ the floor can never enter. `None` while filling
     /// (everything admits).
     #[inline]
-    pub fn floor(&self) -> Option<TopnEntry> {
+    pub fn floor(&self) -> Option<T> {
         if self.heap.len() == self.bound {
             self.heap.peek().copied()
         } else {
@@ -145,7 +211,7 @@ impl TopnHeap {
     /// `TopkCutState` donor discipline, per-worker floor): `false` means
     /// `push` would provably be a no-op.
     #[inline]
-    pub fn admits(&self, e: TopnEntry) -> bool {
+    pub fn admits(&self, e: T) -> bool {
         match self.floor() {
             Some(f) => e < f,
             None => true,
@@ -154,7 +220,7 @@ impl TopnHeap {
 
     /// Accept one observation: replace-top under the total order.
     #[inline]
-    pub fn push(&mut self, e: TopnEntry) {
+    pub fn push(&mut self, e: T) {
         if self.heap.len() < self.bound {
             self.heap.push(e);
             return;
@@ -169,7 +235,7 @@ impl TopnHeap {
 
     /// SEAL: consume into the ascending winner run (the combine's input).
     /// O(len log len), parallel across Local slots under the sealed sink.
-    pub fn into_sorted(self) -> Vec<TopnEntry> {
+    pub fn into_sorted(self) -> Vec<T> {
         self.heap.into_sorted_vec()
     }
 }
@@ -180,11 +246,11 @@ impl TopnHeap {
 /// list in emission order. Deterministic for ANY input arrangement: the
 /// total order has no ties, so the output is the unique sorted prefix of
 /// the union — claim-order independence needs no further argument.
-pub fn topn_merge(sealed: &[Vec<TopnEntry>], bound: usize) -> Vec<TopnEntry> {
+pub fn topn_merge<T: Ord + Copy>(sealed: &[Vec<T>], bound: usize) -> Vec<T> {
     use std::cmp::Reverse;
     debug_assert!(sealed.iter().all(|run| run.windows(2).all(|w| w[0] < w[1])), "unsorted sealed run");
     let mut pos = vec![1usize; sealed.len()];
-    let mut heads: BinaryHeap<Reverse<(TopnEntry, usize)>> = sealed
+    let mut heads: BinaryHeap<Reverse<(T, usize)>> = sealed
         .iter()
         .enumerate()
         .filter(|(_, run)| !run.is_empty())
@@ -467,12 +533,136 @@ mod tests {
     #[test]
     fn merge_edges() {
         let e = |k: i64, r: u64| TopnEntry::encode(k, false, false, false, r);
-        assert!(topn_merge(&[], 10).is_empty());
-        assert!(topn_merge(&[vec![], vec![]], 10).is_empty());
+        assert!(topn_merge::<TopnEntry>(&[], 10).is_empty());
+        assert!(topn_merge::<TopnEntry>(&[vec![], vec![]], 10).is_empty());
         let single = vec![e(1, 0), e(2, 1)];
         assert_eq!(topn_merge(&[single.clone()], 10), single);
         let got = topn_merge(&[vec![e(5, 4)], vec![], vec![e(1, 0), e(9, 8)], vec![e(2, 1)]], 3);
         assert_eq!(got, vec![e(1, 0), e(2, 1), e(5, 4)]);
+    }
+
+    /// Wide-entry reference comparator over raw multi-key observations:
+    /// lexicographic per-key (tier per that key's nulls_first, value per
+    /// its asc/desc), then rowref.
+    fn ref_cmp_wide(
+        a: (&[(i64, bool)], u64),
+        b: (&[(i64, bool)], u64),
+        flags: &[(bool, bool)],
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering::*;
+        for (i, &(desc, nulls_first)) in flags.iter().enumerate() {
+            let (ka, kb) = (a.0[i], b.0[i]);
+            let tier = |null: bool| if null == nulls_first { 0 } else { 1 };
+            match tier(ka.1).cmp(&tier(kb.1)) {
+                Equal => {}
+                o => return o,
+            }
+            if !ka.1 && !kb.1 {
+                let k = if desc { kb.0.cmp(&ka.0) } else { ka.0.cmp(&kb.0) };
+                if k != Equal {
+                    return k;
+                }
+            }
+        }
+        a.1.cmp(&b.1)
+    }
+
+    /// Wide encoding law: exhaustive small grid over 2-key and 3-key
+    /// shapes × per-key flag combinations.
+    #[test]
+    fn wide_encode_matches_reference() {
+        let kvals: &[i64] = &[i64::MIN, -1, 0, 1, i64::MAX];
+        let mut obs: Vec<(Vec<(i64, bool)>, u64)> = Vec::new();
+        let mut r = 0u64;
+        for &k0 in kvals {
+            for n0 in [false, true] {
+                for &k1 in &[-2i64, 0, 5] {
+                    for n1 in [false, true] {
+                        obs.push((vec![(k0, n0), (k1, n1)], r));
+                        r += 1;
+                    }
+                }
+            }
+        }
+        for f0 in [(false, false), (false, true), (true, false), (true, true)] {
+            for f1 in [(false, false), (true, true)] {
+                let flags = [f0, f1];
+                for a in &obs {
+                    for b in &obs {
+                        if a == b {
+                            continue;
+                        }
+                        let ea = WideEntry::encode(&a.0, &flags, a.1);
+                        let eb = WideEntry::encode(&b.0, &flags, b.1);
+                        if ea == eb {
+                            // Only all-null-key pairs with equal rowrefs
+                            // could collide; rowrefs are unique here.
+                            panic!("distinct wide obs encoded equal: {a:?} {b:?}");
+                        }
+                        assert_eq!(
+                            ea.cmp(&eb),
+                            ref_cmp_wide((&a.0, a.1), (&b.0, b.1), &flags),
+                            "flags={flags:?} a={a:?} b={b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wide claim-order independence + merge over dense key0 ties (key1
+    /// resolves some, rowref the rest) — the multi-key rule-2 face.
+    #[test]
+    fn wide_merge_is_claim_order_independent() {
+        let mut rng = Rng(0x71de);
+        let flags = [(false, false), (true, false)];
+        let obs: Vec<(Vec<(i64, bool)>, u64)> = (0..600)
+            .map(|i| {
+                let k0 = (rng.next() % 5) as i64; // dense: 5 distinct
+                let null1 = rng.next() % 9 == 0;
+                let k1 = (rng.next() % 40) as i64 - 20;
+                (vec![(k0, false), (k1, null1)], i as u64)
+            })
+            .collect();
+        let entries: Vec<WideEntry> =
+            obs.iter().map(|(ks, r)| WideEntry::encode(ks, &flags, *r)).collect();
+        for &bound in &[1usize, 7, 50, 599, 600] {
+            let mut want = entries.clone();
+            want.sort_unstable();
+            want.truncate(bound);
+            for trial in 0..6 {
+                let workers = 1 + (trial % 4);
+                let mut streams: Vec<Vec<WideEntry>> = vec![Vec::new(); workers];
+                for &e in &entries {
+                    streams[(rng.next() as usize) % workers].push(e);
+                }
+                for s in &mut streams {
+                    for i in (1..s.len()).rev() {
+                        s.swap(i, (rng.next() as usize) % (i + 1));
+                    }
+                }
+                let sealed: Vec<Vec<WideEntry>> = streams
+                    .into_iter()
+                    .map(|s| {
+                        let mut h = TopnWideHeap::new(bound);
+                        for e in s {
+                            h.push(e);
+                        }
+                        h.into_sorted()
+                    })
+                    .collect();
+                assert_eq!(topn_merge(&sealed, bound), want, "bound={bound} trial={trial}");
+            }
+        }
+    }
+
+    /// key0 strictly dominates key1 (lexicographic law).
+    #[test]
+    fn wide_key0_dominates() {
+        let flags = [(false, false), (false, false)];
+        let small_k0 = WideEntry::encode(&[(1, false), (1000, false)], &flags, 9);
+        let big_k0 = WideEntry::encode(&[(2, false), (-1000, false)], &flags, 1);
+        assert!(small_k0 < big_k0);
     }
 
     #[test]
