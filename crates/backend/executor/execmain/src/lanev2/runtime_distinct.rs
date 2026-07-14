@@ -2138,7 +2138,7 @@ fn engage_ceremony<'mcx>(
                             .map(|c| c.iter().map(Vec::len).sum())
                             .unwrap_or(0);
                         lane_trace(&format!(
-                            "runtime-distinct: topn composed (winners={w})                              mode=winners-only materialized={mat}"
+                            "runtime-distinct: topn composed (winners={w}) mode=winners-only materialized={mat}"
                         ));
                     }
                     ::nodeagg::agg_pdemit_install(agg, st);
