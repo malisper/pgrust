@@ -1262,6 +1262,7 @@ fn decide_exprkey_mk_case<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
     if plan.guarded || !plan.vguards.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
+        trace_feed("expr-key case-dict: refused (guarded/vguards/residual plan)");
         return refused();
     }
     let proj = ss.ss.ps_ProjInfo.as_ref()?;
@@ -1277,6 +1278,7 @@ fn decide_exprkey_mk_case<'mcx>(
     let scan_plan = agg.plan.plan.lefttree.and_then(::types_nodes::Node::as_seq_scan)?;
     let tlist = &scan_plan.scan.plan.targetlist;
     if tlist.len() != natts {
+        trace_feed("expr-key case-dict: refused (tlist arity)");
         return refused();
     }
     let mcx = estate.es_query_cxt;
@@ -1293,11 +1295,15 @@ fn decide_exprkey_mk_case<'mcx>(
             continue;
         }
         if case_col.is_some() {
+            trace_feed("expr-key case-dict: refused (two computed entries)");
             return refused();
         }
         let (preds, then_base, else_bytes) = match case_dict_recognize(expr, mcx) {
             Some(r) => r,
-            None => return refused(),
+            None => {
+                trace_feed("expr-key case-dict: refused (CASE shape not recognized)");
+                return refused();
+            }
         };
         case_col = Some((j as u16, preds, then_base, else_bytes));
     }
