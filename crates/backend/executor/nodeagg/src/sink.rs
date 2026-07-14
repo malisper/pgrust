@@ -283,6 +283,34 @@ fn compact_canon_shape(ch: &crate::compact::CompactHash) -> Option<&MkShape> {
     }
 }
 
+/// Extend the compact state's stored canonical hashes to cover every table
+/// row (rows are append-only within an epoch; a flush resets both). Called
+/// at the BATCH TAIL by the packed probes (new groups hash while their
+/// text bytes are cache-warm, on the accepting worker — parallel), and
+/// defensively at flush/SEAL entry (no-op when the batch tails covered
+/// everything; covers the per-row test/fallback insert paths). Word shapes
+/// return immediately.
+pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) {
+    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactKeySpec::Multi(shape) = key else { return };
+    if shape.intern_comp().is_none() {
+        return;
+    }
+    let Some(intern) = intern.as_ref() else { return };
+    let n = table.nrows();
+    if canon_hashes.len() >= n {
+        debug_assert_eq!(canon_hashes.len(), n, "canon hashes never outrun the table");
+        return;
+    }
+    let mut scratch: Vec<u8> = Vec::with_capacity(64);
+    canon_hashes.reserve(n - canon_hashes.len());
+    for row in canon_hashes.len()..n {
+        scratch.clear();
+        canon_row_bytes_append(table, shape, intern, row, &mut scratch);
+        canon_hashes.push(sink_hash_bytes(&scratch));
+    }
+}
+
 /// Row `row`'s packed key image as two little-endian words (one-word shapes
 /// zero-fill the high word) — the sink-side twin of compact's `mk_row_words`
 /// over a borrowed table.
@@ -353,23 +381,28 @@ fn canon_row_bytes_append(
 /// ids stay valid). Bucket-major two-pass counting sort by
 /// [`sink_hash_bytes`] over the canonical bytes.
 fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
-    let crate::compact::CompactHash { table, key, intern, .. } = ch;
+    // The batch tails already hashed every row's canonical image
+    // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
+    // here is the defensive no-op sweep for the non-batched insert paths.
+    // Pass 1: materialize each row's canonical image EXACTLY ONCE into a
+    // flat arrival-order scratch (image offsets recorded) and take
+    // per-bucket row + byte counts off the stored hashes. Pass 2 is then a
+    // plain permuting byte copy — the old shape re-ran the whole canonical
+    // materialization (word unpack + intern reverse-map chase + component
+    // assembly) a second time per row AND hashed at flush, which the
+    // q13/q19 profiles put at ~14% of the engaged 16-thread query.
+    compact_extend_canon_hashes(ch);
+    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else {
         unreachable!("canonical flush requires a Multi shape")
     };
     let intern = intern.as_ref().expect("canonical shapes carry the intern table");
     let state_words = table.state_bytes() / 8;
     let n = table.nrows();
-    // Pass 1: materialize each row's canonical image EXACTLY ONCE into a
-    // flat arrival-order scratch (image offsets recorded), hash it, and
-    // take per-bucket row + byte counts. Pass 2 is then a plain permuting
-    // byte copy — the old shape re-ran the whole canonical materialization
-    // (word unpack + intern reverse-map chase + component assembly) a
-    // second time per row, which the q13/q19 profiles put at ~14% of the
-    // engaged 16-thread query.
+    debug_assert_eq!(canon_hashes.len(), n, "flush entry extended the hashes");
+    let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
     let mut byte_counts = [0usize; SINK_NBUCKETS];
-    let mut hashes: Vec<u64> = Vec::with_capacity(n);
     let mut scratch: Vec<u8> = Vec::new();
     let mut scratch_offs: Vec<u32> = Vec::with_capacity(n + 1);
     scratch_offs.push(0);
@@ -377,8 +410,8 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
         let base = scratch.len();
         canon_row_bytes_append(table, shape, intern, i, &mut scratch);
         let img = &scratch[base..];
-        let h = sink_hash_bytes(img);
-        hashes.push(h);
+        debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+        let h = hashes[i];
         counts[bucket_of(h)] += 1;
         byte_counts[bucket_of(h)] += img.len();
         scratch_offs.push(scratch.len() as u32);
@@ -432,6 +465,8 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
     // out contiguously — slot s's key ends exactly where slot s+1 begins.
     debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
     table.reset();
+    // The epoch's rows are gone — the stored hashes restart with them.
+    canon_hashes.clear();
     SinkRun {
         key_words: 0,
         state_words,
@@ -445,23 +480,21 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
     }
 }
 
-/// [`sink_partition_remainder`]'s canonical twin: bucket index by
-/// [`sink_hash_bytes`] over each remainder row's canonical bytes. Canonical
-/// shapes are non-nullable — `has_null` is structurally false.
-fn sink_partition_remainder_canon(ch: &crate::compact::CompactHash) -> SinkPart {
-    let crate::compact::CompactHash { table, key, intern, .. } = ch;
-    let crate::compact::CompactKeySpec::Multi(shape) = key else {
-        unreachable!("canonical partition requires a Multi shape")
-    };
-    let intern = intern.as_ref().expect("canonical shapes carry the intern table");
+/// [`sink_partition_remainder`]'s canonical twin: bucket index by the
+/// STORED canonical hashes (`compact_extend_canon_hashes` — accept-time,
+/// parallel). This runs on the single-threaded last-worker-out SEAL, which
+/// the q19@100M profile showed serializing a canon+hash sweep over every
+/// Local's remainder while 15 workers waited — with the hashes carried it
+/// is a plain counting sort. Canonical shapes are non-nullable —
+/// `has_null` is structurally false.
+fn sink_partition_remainder_canon(ch: &mut crate::compact::CompactHash) -> SinkPart {
+    compact_extend_canon_hashes(ch);
+    let crate::compact::CompactHash { table, canon_hashes, .. } = ch;
     let n = table.nrows();
-    let mut canon: Vec<u8> = Vec::with_capacity(64);
+    debug_assert_eq!(canon_hashes.len(), n, "partition entry extended the hashes");
+    let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
-    let mut hashes: Vec<u64> = Vec::with_capacity(n);
-    for i in 0..n {
-        canon_row_bytes(table, shape, intern, i, &mut canon);
-        let h = sink_hash_bytes(&canon);
-        hashes.push(h);
+    for &h in hashes.iter() {
         counts[bucket_of(h)] += 1;
     }
     let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
@@ -1841,19 +1874,21 @@ impl SinkTableHandle {
     /// SEAL-time bucket index over this handle's remainder — canonical
     /// (text-bearing) shapes partition by their canonical bytes, word shapes
     /// by the key words ([`sink_partition_remainder`]).
-    pub fn partition_remainder(&self) -> SinkPart {
+    pub fn partition_remainder(&mut self) -> SinkPart {
         if compact_canon_shape(&self.0).is_some() {
-            sink_partition_remainder_canon(&self.0)
+            sink_partition_remainder_canon(&mut self.0)
         } else {
             sink_partition_remainder(&self.0.table)
         }
     }
 
-    /// This handle's retained footprint (compact + intern tables) — the
-    /// SEAL-time budget accounting twin of [`agg_sink_table_mem`].
+    /// This handle's retained footprint (compact + intern tables + the
+    /// stored canonical row hashes) — the SEAL-time budget accounting twin
+    /// of [`agg_sink_table_mem`].
     pub fn mem_used(&self) -> usize {
         self.0.table.mem_used()
             + self.0.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+            + self.0.canon_hashes.capacity() * 8
     }
 
     /// The combine-visible remainder face over this handle (+ the canonical
@@ -3170,7 +3205,7 @@ mod tests {
         // same canonical bytes) + a new text.
         bump_canon(&mut w1, Some(1), b"apple", 10);
         bump_canon(&mut w1, Some(3), b"cherry", 5);
-        let h1 = SinkTableHandle(w1);
+        let mut h1 = SinkTableHandle(w1);
         let part1 = h1.partition_remainder();
         assert!(!part1.has_null);
 
@@ -3178,7 +3213,7 @@ mod tests {
         bump_canon(&mut w2, Some(9), b"zzz", 7);
         bump_canon(&mut w2, Some(1), b"banana", 20);
         bump_canon(&mut w2, Some(1), b"apple", 30);
-        let h2 = SinkTableHandle(w2);
+        let mut h2 = SinkTableHandle(w2);
         let part2 = h2.partition_remainder();
 
         let locals = [
@@ -3248,7 +3283,7 @@ mod tests {
         // Second epoch re-inserts two of them (ids reused from intern).
         bump_canon(&mut w, None, b"a", 100);
         bump_canon(&mut w, None, b"abcdefghijklmnop", 200);
-        let h = SinkTableHandle(w);
+        let mut h = SinkTableHandle(w);
         let part = h.partition_remainder();
         let locals = [SinkLocalView {
             spilled: &[],
@@ -3319,10 +3354,10 @@ mod tests {
         // Remainder epoch: two re-arrivals + one new key.
         bump_canon(&mut w, None, b"a", 100);
         bump_canon(&mut w, None, b"new-remainder-key", 7);
+        let part = sink_partition_remainder_canon(&mut w);
         let crate::compact::CompactKeySpec::Multi(shape_ref) = &w.key else {
             unreachable!("canon worker is Multi");
         };
-        let part = sink_partition_remainder_canon(&w);
         assert_eq!(part.hashes.len(), part.idx.len());
         let intern = w.intern.as_ref().unwrap();
         let mut canon = Vec::new();
