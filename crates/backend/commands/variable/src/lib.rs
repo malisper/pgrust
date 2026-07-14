@@ -740,7 +740,11 @@ pub fn assign_io_combine_limit(newval: i32, _extra: Option<&GucHookExtra>) {
 }
 
 pub fn show_data_directory_mode() -> String {
-    format!("{:04o}", init_small::globals::data_directory_mode())
+    // Read the fd file_perm global that checkDataDir derives the mode from —
+    // the same source the server's own file creation uses (C reads the
+    // data_directory_mode global set from pg_dir_create_mode at the same
+    // spot; pg_basebackup clients apply this to everything they create).
+    format!("{:04o}", fd::vfd::pg_dir_create_mode())
 }
 
 // show_data_checksums (variable.c has none; C wires the GUC via

@@ -20,6 +20,7 @@ elog = { path = "../../utils/error/elog" }
 guc = { path = "../../utils/misc/guc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }
+fd = { path = "../../storage/file/fd" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 mbutils = { path = "../../utils/mb/mbutils" }
 mcx = { path = "../../../_support/mcx" }
