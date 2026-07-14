@@ -1112,8 +1112,44 @@ fn sink_drain_range<'mcx>(
         // aggcontext vs the compact backstop's own thresholds) REFUSE — RG
         // abort -> serial rerun — before the backstop's sink-mode belt
         // would raise its hard error (the q34@100M wide-vocabulary class).
+        //
+        // M3.5 x mt16-cliffs (the q33@100M hmm=2 cliff — measured: the
+        // engaged arm hit THIS demote with ZERO spill epochs and fell to a
+        // 150s serial spill): with a live spill arm the pressure is
+        // table-driven (the mem leg counts the cap-bounded table, which the
+        // mem-derived cap sizes to ~half the limit ALONE; cumulative byref
+        // aggcontext eats the margin) — a budget the spill arm can absorb.
+        // Law: force-flush the bounded table into a run (identical
+        // intern-reset handling to the cap flush above) and spill the
+        // accumulated runs as one epoch; only RESIDUAL pressure after the
+        // flush+spill (the aggcontext floor the runs still reference)
+        // refuses. Spill-disarmed (canonical/kill-switch) keeps the plain
+        // refusal exactly.
         if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
-            return Err(AcceptFail::Budget);
+            match &sink.spill_set {
+                Some(set) => {
+                    if let Some((run, intern_reset)) =
+                        ::nodeagg::sink::agg_sink_flush_now(agg)
+                    {
+                        local.run_bytes += run.bytes();
+                        local.runs.push(run);
+                        if intern_reset {
+                            mks.epoch = None;
+                            mks.code_ids.clear();
+                            if let Some(xk) = xk.as_deref_mut() {
+                                xk.invalidate_mk_intern_cache();
+                            }
+                        }
+                    }
+                    if !local.runs.is_empty() {
+                        spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
+                    }
+                    if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                        return Err(AcceptFail::Budget);
+                    }
+                }
+                None => return Err(AcceptFail::Budget),
+            }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
