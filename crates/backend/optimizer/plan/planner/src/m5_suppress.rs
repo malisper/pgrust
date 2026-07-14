@@ -679,18 +679,30 @@ fn classify_join_sides(
         }
     }
     // >=1 hashjoinable int-family equi clause between the two sides in the
-    // join quals (top-level AND terms only).
+    // join quals (top-level AND terms only). By probe time the quals may be
+    // an explicit BoolExpr AND, the planner's implicit-AND List (the
+    // canonicalized form the FromExpr carries at path generation), or one
+    // bare clause.
     let mut has_equi = false;
     let quals: Vec<Node<'_>> = match join_quals {
         None => return refuse_join("no join quals"),
-        Some(q) => match q.as_bool_expr() {
-            Some(be)
-                if matches!(be.boolop, types_nodes::primnodes::BoolExprType::AND_EXPR) =>
-            {
-                be.args.iter().collect()
+        Some(q) => {
+            if let Some(l) = q.as_list() {
+                l.iter().collect()
+            } else {
+                match q.as_bool_expr() {
+                    Some(be)
+                        if matches!(
+                            be.boolop,
+                            types_nodes::primnodes::BoolExprType::AND_EXPR
+                        ) =>
+                    {
+                        be.args.iter().collect()
+                    }
+                    _ => vec![q],
+                }
             }
-            _ => vec![q],
-        },
+        }
     };
     for qual in quals {
         let Some(op) = qual.as_op_expr() else { continue };
