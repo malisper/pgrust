@@ -1392,6 +1392,7 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         key_kinds.push(match desc.attr((col - 1) as usize).atttypid {
             INT2OID => HgKeyKind::Int16,
             INT4OID => HgKeyKind::Int32,
+            TEXTOID | VARCHAROID => HgKeyKind::Text,
             _ => HgKeyKind::Int64,
         });
     }
@@ -1408,6 +1409,10 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         let mut scratch =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
         let natts = desc.natts as usize;
+        // Text keys: the merged arena holds CONTENT bytes (span-packed key
+        // words); a scratch varlena image per key backs the virtual-slot
+        // datum until the minimal-tuple copy below materializes it.
+        let mut img_bufs: Vec<Vec<u32>> = vec![Vec::new(); nkeys];
         for g in 0..n {
             exectuples::exec_clear_tuple(&mut scratch, mcx);
             {
@@ -1426,9 +1431,15 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
                         HgKeyKind::Int16 => ::datum::Datum::from_i16(w as i16),
                         HgKeyKind::Int32 => ::datum::Datum::from_i32(w as i32),
                         HgKeyKind::Int64 => ::datum::Datum::from_i64(w),
-                        // pardistinct admission is integer-key only; the
-                        // oid map above never yields Text.
-                        HgKeyKind::Text => unreachable!("pardistinct merged keys are integer-only"),
+                        // Bytes-keyed pardistinct merges (band-kernels-1):
+                        // span-packed word into the merged key arena.
+                        HgKeyKind::Text => {
+                            let (off, len) = unpack_span(w);
+                            crate::distinctset::varlena_image(
+                                &merged.key_arena[off..off + len],
+                                &mut img_bufs[i],
+                            )
+                        }
                     };
                 }
             }
@@ -1508,6 +1519,9 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
             }
         }
     }
+    // NOTE: for Text keys these words are arena spans, so the values here
+    // are not the value-based group hashes — harmless: the adopted state
+    // starts (and stays) in the Emit phase, which never probes.
     let hashes: Vec<u64> = (0..n)
         .map(|g| crate::pardistinct::key_hash(&merged.keys[g * nkeys..(g + 1) * nkeys], merged.keynulls[g]))
         .collect();
@@ -1520,8 +1534,15 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         })
         .collect();
     let total_set_mem = set_mem.iter().sum();
-    let order =
-        order_groups(&merged.keys, &merged.keynulls, &order_spec, nkeys, &key_kinds, &[], n)?;
+    let order = order_groups(
+        &merged.keys,
+        &merged.keynulls,
+        &order_spec,
+        nkeys,
+        &key_kinds,
+        &merged.key_arena,
+        n,
+    )?;
     let rep_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
     node.hashgroup = Some(Box::new(HashGroupedState {
@@ -1536,7 +1557,7 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         table: Vec::new(),
         hashes,
         keys: merged.keys,
-        arena: Vec::new(),
+        arena: merged.key_arena,
         probe_buf: Vec::new(),
         probe_spans: vec![(0, 0); nkeys],
         keynulls: merged.keynulls,

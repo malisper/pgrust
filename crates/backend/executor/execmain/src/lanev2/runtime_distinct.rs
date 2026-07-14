@@ -345,7 +345,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             .iter()
             .filter_map(|c| unsafe { (*c.get()).take() })
             .collect();
-        let merged = pd_concat_buckets(buckets);
+        let merged = pd_concat_buckets(&self.spec, buckets);
         *self.merged.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
     }
 }
@@ -1082,7 +1082,9 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
                 *cell.borrow_mut() = Some(WorkerExec {
                     qd,
                     tmp,
-                    reset_tmp: payload.spec.any_bytes_set(),
+                    // Bytes SETS and bytes GROUP KEYS both detoast into the
+                    // per-tuple context — either one keys the per-row reset.
+                    reset_tmp: payload.spec.any_bytes_set() || payload.spec.any_bytes_key(),
                     errored: std::cell::Cell::new(false),
                     instr: Default::default(),
                 });
@@ -1257,7 +1259,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "no outer desc");
         return Ok(None);
     };
-    let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc) else {
+    let Some(spec) = ::nodeagg::pd_derive_spec(agg, desc, true) else {
         refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);
