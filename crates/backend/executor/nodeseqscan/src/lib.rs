@@ -3214,6 +3214,12 @@ pub fn seq_scan_set_morsel_range<'mcx>(
 /// Drive-scaling observability counters of a cbstore scan (runtime WFIN
 /// channel): (rg_switches, dict_builds, granules_scanned, windows_staged).
 /// None = heap or scan not opened yet.
+/// PGRUST_WFIN=1 gates the SFIN serial counter line (read once).
+fn sfin_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
+}
+
 pub fn seq_scan_cb_drive_counters(node: &SeqScanState<'_>) -> Option<(u64, u64, u64, u64)> {
     node.ss
         .ss_currentScanDesc
@@ -3445,6 +3451,19 @@ fn cb_zone_cmp(fnoid: u32) -> Option<(::tableam::ZoneCmp, u8)> {
 pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.bloom = None;
     node.cb_scan = None;
+    // SFIN drive-counter dump (dop1-tax diagnosis, PGRUST_WFIN=1 only): the
+    // SERIAL side of the WFIN cb-counter channel — one line per cbstore
+    // scan shutdown so the m0-accept harness can diff per-granule work
+    // (rg_switches/dict_builds/granules/windows) serial vs runtime workers
+    // directly. Same key=value discipline as MORSEL|WFIN (unknown fields
+    // ignored by the parsers); default-off = zero cost.
+    if sfin_enabled() {
+        if let Some((rgsw, dictb, gscan, wins)) = seq_scan_cb_drive_counters(node) {
+            eprintln!(
+                "MORSEL|SFIN|cb_rgswitch={rgsw}|cb_dictbuild={dictb}|cb_granules={gscan}|cb_windows={wins}"
+            );
+        }
+    }
     stitch_trace_summary(node);
     condcache_stats_summary(node);
     // Releases the plan's deform-JIT kernel Rc and the stitched body's code
