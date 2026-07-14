@@ -45,7 +45,9 @@ use ::nodeagg::runtime_partial::{
 use ::nodehashjoin::shared_build::{
     freeze, BudgetExceeded, CombinePlan, FrozenJoinTable, JoinBudget, JoinBuildLocal, PARTITIONS,
 };
-use ::nodehashjoin::shared_exec::{shared_build_accept, shared_join_admissible, shared_probe_outer};
+use ::nodehashjoin::shared_exec::{
+    shared_build_accept, shared_fill_partition, shared_join_admissible, shared_probe_outer,
+};
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
@@ -467,6 +469,92 @@ impl runtime::TaskSetWork for RuntimeHjShared {
     }
 }
 
+/// The FILL task set's work (right-fill family only, deps=[probe]):
+/// never-matched build tuples of one partition, null-extended, into the
+/// same plain-agg tail. The probe set's last-worker-out completion is the
+/// match-flag visibility barrier.
+struct FillWork(Arc<RuntimeHjShared>);
+
+fn fill_morsel_body(
+    payload: &Arc<RuntimeHjShared>,
+    worker: usize,
+    range: runtime::MorselRange,
+) -> PgResult<()> {
+    let Some(table) = payload.table() else {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join fill ran without a published table",
+        )));
+    };
+    with_worker_exec("runtime hash-join fill morsel without a bound executor", |es, ps| {
+        with_join_tree(es, ps, |estate, agg, hj, _outer_ss, hstate, _inner_ss| {
+            for part in range.clone() {
+                ::postgres_seams::check_for_interrupts::call()?;
+                shared_fill_partition(
+                    hj,
+                    hstate,
+                    estate,
+                    &table,
+                    part,
+                    &mut |_hj, estate, out| ::nodeagg::agg_plain_build_accept(agg, estate, out),
+                )?;
+            }
+            // Cumulative partial export (same slot as the probe morsels —
+            // the worker's agg accumulates across both phases; overwrite
+            // discipline keeps the last export authoritative).
+            let partial = agg_runtime_export_partial(agg)?;
+            let slot = worker - payload.pins_base;
+            *payload.partials[slot].lock().unwrap_or_else(|p| p.into_inner()) = Some(partial);
+            Ok(())
+        })
+    })
+}
+
+impl runtime::TaskSetWork for FillWork {
+    fn run_morsel(&self, worker: usize, range: runtime::MorselRange) {
+        if self.0.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        let payload = &self.0;
+        let r = catch_unwind(AssertUnwindSafe(|| fill_morsel_body(payload, worker, range)));
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                mark_self_errored();
+                payload.fail(e);
+            }
+            Err(_panic) => {
+                mark_self_errored();
+                payload.fail(
+                    PgError::new(ERROR, "runtime hash-join worker panicked in a fill morsel")
+                        .into(),
+                );
+            }
+        }
+    }
+
+    fn finalize(&self) {}
+}
+
+/// The fill set's morsel space: one claim per partition (the sink
+/// plumbing's PartitionSource shape, re-stated here — it is private to
+/// runtime::sink).
+struct FillPartitionSource;
+
+impl runtime::MorselSource for FillPartitionSource {
+    fn total_granules(&self) -> u64 {
+        PARTITIONS as u64
+    }
+
+    fn next_boundary_after(&self, start: u64) -> u64 {
+        (start + 1).min(PARTITIONS as u64)
+    }
+
+    fn startup_c0(&self) -> u64 {
+        1
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper (worker) side: entry task + POST_TASK_PARK drive.
 // ---------------------------------------------------------------------------
@@ -802,7 +890,25 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         return Ok(Some(None));
     }
 
-    engage(agg, estate, rt, dop, outer_granules, outer_starts, inner_starts, space_allowed)
+    // Right-fill family (RIGHT/FULL/RIGHT_ANTI) adds the FILL task set.
+    let fill_inner = matches!(
+        join_plan.join.jointype,
+        ::types_nodes::JoinType::JOIN_RIGHT
+            | ::types_nodes::JoinType::JOIN_FULL
+            | ::types_nodes::JoinType::JOIN_RIGHT_ANTI
+    );
+
+    engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        outer_granules,
+        outer_starts,
+        inner_starts,
+        space_allowed,
+        fill_inner,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -815,6 +921,7 @@ fn engage<'mcx>(
     outer_starts: Vec<u64>,
     inner_starts: Vec<u64>,
     space_allowed: usize,
+    fill_inner: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -864,6 +971,7 @@ fn engage<'mcx>(
         inner_starts,
         &payload,
         sink,
+        fill_inner,
     );
     xact::ExitParallelMode();
     engaged
@@ -885,6 +993,7 @@ fn engage_ceremony<'mcx>(
     inner_starts: Vec<u64>,
     payload: &Arc<RuntimeHjShared>,
     sink: Arc<JoinBuildSink>,
+    fill_inner: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_hashjoin_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
@@ -915,10 +1024,20 @@ fn engage_ceremony<'mcx>(
             work: Arc::clone(payload) as Arc<dyn runtime::TaskSetWork>,
             deps: vec![1],
         };
+        let mut tasksets = vec![accept, combine, probe];
+        if fill_inner {
+            // Right-fill family: the unmatched-build walk, after the probe
+            // barrier (deps=[2] — the match-flag visibility edge).
+            tasksets.push(runtime::TaskSetSpec {
+                source: Arc::new(FillPartitionSource),
+                work: Arc::new(FillWork(Arc::clone(payload))),
+                deps: vec![2],
+            });
+        }
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
-            tasksets: vec![accept, combine, probe],
+            tasksets,
         });
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
