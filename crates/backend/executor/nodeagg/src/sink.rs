@@ -1482,17 +1482,65 @@ pub fn agg_sink_put_table(node: &mut AggStateData<'_>, h: SinkTableHandle) {
 /// Flush the armed table into a run if it crossed `cap` (checked BEFORE a
 /// batch — no caller-held group pointer is ever invalidated mid-batch).
 /// Canonical (text-bearing) shapes flush through the canonical-bytes twin —
-/// key bytes copied out, intern table kept (scan-lifetime).
-pub fn agg_sink_flush_if_due(node: &mut AggStateData<'_>, cap: u32) -> Option<SinkRun> {
-    let ch = node.perhash.as_mut()?.compact.as_mut()?;
+/// key bytes copied out. The intern table is normally KEPT (scan-lifetime
+/// vocabulary, ids reused across windows), but once it has grown past a
+/// quarter of the hash-mem budget it is RESET with the table: the flushed
+/// run copied its canonical bytes and the remainder is empty at this
+/// moment, so no live row references an intern id — the next window
+/// re-interns its own vocabulary (bounded memory instead of the backstop's
+/// half-limit error on wide-vocabulary scans — the q34@100M URL class).
+/// `true` in the pair = the intern table WAS reset: the caller MUST
+/// invalidate any code→intern-id cache it holds (`MkScratch`/
+/// `MultiKeyChain` epoch caches) — a stale id would materialize the wrong
+/// bytes.
+pub fn agg_sink_flush_if_due(
+    node: &mut AggStateData<'_>,
+    cap: u32,
+) -> Option<(SinkRun, bool)> {
+    let ph = node.perhash.as_mut()?;
+    let hash_mem_limit = ph.hash_mem_limit;
+    let ch = ph.compact.as_mut()?;
     if ch.table.len() < cap as usize {
         return None;
     }
     if compact_canon_shape(ch).is_some() {
-        Some(sink_flush_table_canon(ch))
+        let run = sink_flush_table_canon(ch);
+        let reset_intern = ch
+            .intern
+            .as_ref()
+            .is_some_and(|t| t.mem_used() > hash_mem_limit / 4);
+        if reset_intern {
+            if let Some(t) = ch.intern.as_mut() {
+                t.reset();
+            }
+        }
+        Some((run, reset_intern))
     } else {
-        Some(sink_flush_table(&mut ch.table))
+        Some((sink_flush_table(&mut ch.table), false))
     }
+}
+
+/// Half-limit budget PRESSURE (the compact backstop's own condition plus
+/// headroom): the sink drain refuses on `true` (RG abort → serial rerun)
+/// BEFORE the backstop's sink-mode belt would raise its hard error — the
+/// demote = refusal discipline. The headroom covers one batch's worst-case
+/// growth between per-batch checks.
+pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
+    let Some(ph) = node.perhash.as_ref() else { return false };
+    let Some(ch) = ph.compact.as_ref() else { return false };
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used();
+    let mem = ch.table.mem_used()
+        + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+        + aggctx;
+    // Proportional headroom (an eighth of the half-limit, capped at 32MB):
+    // at small work_mem the margin shrinks with the limit instead of
+    // refusing everything; at production work_mem 32MB dwarfs any single
+    // batch's growth.
+    let half = ph.hash_mem_limit / 2;
+    let headroom = (half / 8).min(32 << 20);
+    (ch.table.len() as u64).saturating_add(4096) >= ph.hash_ngroups_limit / 2
+        || mem.saturating_add(headroom) >= half
 }
 
 /// The armed table's current footprint (budget accounting) — the intern
