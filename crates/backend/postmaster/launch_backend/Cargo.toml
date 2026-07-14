@@ -33,6 +33,7 @@ procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 sinval = { path = "../../storage/ipc/sinval" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 libc = "0.2"
 

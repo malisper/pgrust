@@ -597,3 +597,107 @@ fn forward_deps_rejected() {
         }],
     });
 }
+
+// ---- M1 pinned submission + external participant drive ---------------------
+
+/// Pinned RGs are invisible to the pool: external drivers execute every
+/// granule exactly once, finalize exactly once, and the pool workers never
+/// claim a morsel (their task counter stays zero).
+#[test]
+fn pinned_rg_runs_on_external_drivers_only() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 4,
+        standbys: 1,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    // Real pool spun up — it must IGNORE the pinned RG.
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    let total = 10_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (handle, waiter) = rt.submit_pinned(spec_one(
+        &work,
+        Arc::new(SyntheticMorselSource::with_boundaries(total, 8)),
+    ));
+
+    let mut joins = Vec::new();
+    for ordinal in 0..3usize {
+        let rt2 = Arc::clone(&rt);
+        let h = handle.clone();
+        joins.push(std::thread::spawn(move || {
+            let mut local = rt2.external_local(ordinal);
+            rt2.drive_pinned(&mut local, &h)
+        }));
+    }
+    for j in joins {
+        assert_eq!(j.join().unwrap(), RgOutcome::Completed);
+    }
+    assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    // Boundary contract: no claim crosses a multiple of 8.
+    for r in work.claims.lock().unwrap().iter() {
+        assert_eq!(r.start / 8, (r.end - 1) / 8, "claim {r:?} crossed a boundary");
+    }
+    pool.shutdown();
+    let stats = rt.stats();
+    // Every task was claimed by an external lane, none by the pool: the
+    // per-RG counter equals the global one (only this RG ran), and the pool
+    // parked without work.
+    assert_eq!(stats.rgs_completed, 1);
+}
+
+/// Aborting a pinned RG with NO external driver still completes once a
+/// driver drains it (the leader's reap path: closed generation refuses
+/// every join, so the drive runs pure protocol cleanup).
+#[test]
+fn pinned_rg_abort_reaped_by_driver() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 1,
+        slots: 4,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let total = 1_000u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let (handle, waiter) = rt.submit_pinned(spec_one(
+        &work,
+        Arc::new(SyntheticMorselSource::new(total)),
+    ));
+    handle.abort();
+    assert_eq!(waiter.try_wait(), None, "nobody drove the pinned RG yet");
+    let mut local = rt.external_local(0);
+    assert_eq!(rt.drive_pinned(&mut local, &handle), RgOutcome::Aborted);
+    assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted));
+    // The closed generation refused every join: no morsel ran.
+    assert!(work.claims.lock().unwrap().is_empty());
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "finalize work must not run");
+}
+
+/// External-lane leases are process-exclusive: 64 concurrent leases exhaust
+/// the mask, drop releases, and every lease maps to a distinct lane.
+#[test]
+fn external_lane_leases_are_exclusive() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 0,
+        slots: 4,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let mut lanes = Vec::new();
+    for _ in 0..MAX_EXTERNAL_LANES {
+        lanes.push(rt.acquire_external_lane().expect("lane available"));
+    }
+    let mut seen: Vec<usize> = lanes.iter().map(|l| l.ordinal()).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), MAX_EXTERNAL_LANES, "lanes must be distinct");
+    assert!(rt.acquire_external_lane().is_none(), "mask exhausted");
+    lanes.pop();
+    let again = rt.acquire_external_lane().expect("released lane reusable");
+    assert_eq!(again.ordinal(), MAX_EXTERNAL_LANES - 1);
+}

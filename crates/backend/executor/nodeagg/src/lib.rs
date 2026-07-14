@@ -54,13 +54,16 @@ mod gsets;
 mod hashgrouped;
 pub mod merge;
 pub mod pardistinct;
+pub mod sink;
+pub mod runtime_partial;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
     batch_emit_row, batch_emit_scan_block, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
-    agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_reduced,
+    agg_hash_compact_sink_admissible, agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk,
+    agg_hash_compact_try_arm_reduced,
     agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
     RedDerived, RedOp, RedShape,
@@ -159,6 +162,10 @@ pub struct AggStateData<'mcx> {
     // (building or emitting). Plain Rust memory only — no aggcontext
     // residue, no interplay with the group-boundary resets (module doc).
     codedgroup: Option<Box<codedgroup::CodedGroupState<'mcx>>>,
+    // M2 aggregation sink (sink.rs): the LEADER's adopted parallel emit
+    // state — published per-bucket identity-projected rows drained one per
+    // call. Plain Rust memory; no aggcontext residue.
+    sink_emit: Option<Box<sink::SinkEmitState>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -595,6 +602,11 @@ struct PerHashData<'mcx> {
     // Stage-4 §4.4 radix exchange (merge.rs): the worker-side bounded-table
     // state, lazily resolved off the handoff registry on the first probe.
     exchange: merge::ExchangeState,
+    // M2 aggregation sink (sink.rs): Some(cap) on a SINK WORKER build — the
+    // compact arms size/gate by the cap (bounded Local discipline) and the
+    // backstop must never migrate into the C table (the sink cannot export
+    // it); the sink drain flushes at the cap instead.
+    sink_cap: Option<u32>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -1514,6 +1526,7 @@ pub fn exec_init_agg<'mcx>(
         hash_build_combined: false,
         hashgroup: None,
         codedgroup: None,
+        sink_emit: None,
     })
 }
 
@@ -1897,6 +1910,7 @@ fn init_perhash<'mcx>(
         table_filled: false,
         compact: None,
         exchange: merge::ExchangeState::Unresolved,
+        sink_cap: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -4658,6 +4672,19 @@ pub fn agg_plain_finish<'mcx>(
 /// key type. Derivation treats presorted entries as set-mode (the arm always
 /// arms `force_distinct_set` before engaging — but only AFTER every refusal
 /// point, so a refusal leaves the classic path's adjacent-dedup untouched).
+/// Env-gated derive-refusal diagnosis (PGRUST_LANE_V2_TRACE — the lane's
+/// trace channel; pd_derive_spec is a pure Option chain, so the refusal
+/// POINT is otherwise invisible to the arm's traces).
+#[cold]
+fn pd_derive_trace(msg: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    }) {
+        eprintln!("[lane-v2] pd_derive_spec refused: {msg}");
+    }
+}
+
 pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
@@ -4704,15 +4731,23 @@ pub fn pd_derive_spec(
     let mut sets = Vec::with_capacity(node.pertrans_sort.len());
     let mut set_transnos: Vec<usize> = Vec::with_capacity(node.pertrans_sort.len());
     for ps in node.pertrans_sort.iter() {
-        let kind = ps.set_kind?;
+        let Some(kind) = ps.set_kind else {
+            pd_derive_trace("set transition without set_kind");
+            return None;
+        };
         if !ps.set_active(true) || ps.num_inputs != 1 {
+            pd_derive_trace("set transition inactive or multi-input");
             return None;
         }
         let pa = node.peragg.iter().find(|pa| pa.transno as usize == ps.transno)?;
         if !pa.aggref.aggorder.is_nil() || pa.aggref.aggdistinct.is_nil() {
+            pd_derive_trace("set aggref has aggorder / lacks aggdistinct");
             return None;
         }
-        let att = arg_att(pa.aggref)?;
+        let Some(att) = arg_att(pa.aggref) else {
+            pd_derive_trace("set argument not a plain outer Var");
+            return None;
+        };
         // The set kind was established from this very argument at init; the
         // width re-check keeps the extraction honest.
         match kind {
@@ -4741,22 +4776,35 @@ pub fn pd_derive_spec(
         seen[transno] = true;
         let ar = pa.aggref;
         if !ar.aggdistinct.is_nil() || !ar.aggorder.is_nil() {
+            pd_derive_trace("vocab aggref carries aggdistinct/aggorder");
             return None;
         }
         let att = if ar.args.is_nil() {
             None
         } else {
-            let a = arg_att(ar)?;
+            let Some(a) = arg_att(ar) else {
+                pd_derive_trace("vocab argument not a plain outer Var");
+                return None;
+            };
             max_att = max_att.max(a as i32 + 1);
-            Some((a, int_kind(desc.attr(a as usize).atttypid)?))
+            let Some(k) = int_kind(desc.attr(a as usize).atttypid) else {
+                pd_derive_trace("vocab argument not an int2/int4/int8 column");
+                return None;
+            };
+            Some((a, k))
         };
         if ar.aggfilter.is_some() {
+            pd_derive_trace("vocab aggref has FILTER");
             return None;
         }
-        let kind = pardistinct::vocab_kind(ar.aggfnoid, att)?;
+        let Some(kind) = pardistinct::vocab_kind(ar.aggfnoid, att) else {
+            pd_derive_trace("vocab transfn outside the exact-integer whitelist");
+            return None;
+        };
         vocab.push(PdVocab { transno: transno as u32, kind });
     }
     if !seen.iter().all(|&s| s) {
+        pd_derive_trace("uncovered transition (neither set nor vocab)");
         return None;
     }
     Some(std::sync::Arc::new(PdSpec {
@@ -4772,9 +4820,11 @@ pub fn pd_derive_spec(
 /// Vocab aggfnoids map through the transfn whitelist; re-exported check the
 /// leader arm uses to pair `pd_derive_spec` with its admission story.
 pub use pardistinct::{
-    pd_adopt_registry, pd_clear_thread_registry, pd_export_registry, pd_registry_get,
-    pd_registry_insert, pd_registry_nonempty, pd_registry_remove, pd_parallel_merge_grouped,
-    pd_parallel_merge_plain, PdBuilder, PdExport, PdFeed, PdHandoff, PdMerged,
+    pd_adopt_registry, pd_clear_thread_registry, pd_concat_buckets, pd_empty_grouped_table,
+    pd_export_registry, pd_merge_bucket, pd_parallel_merge_grouped, pd_parallel_merge_plain,
+    pd_registry_get, pd_registry_insert, pd_registry_nonempty, pd_registry_remove, PdBuilder,
+    PdExport, PdFeed, PdHandedTable, PdHandoff, PdMerged, PdSinkLocal, PdSinkMerged, PdSpec,
+    PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
@@ -5853,6 +5903,12 @@ fn agg_retrieve_hash_table<'mcx>(
     estate: &mut EStateData<'mcx>,
     mut cut: Option<TopnEmitCut<'_>>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // M2 sink (sink.rs): an adopted parallel result is the node's source —
+    // finished, fully-projected rows (no pergroups; the topn cut is a skip
+    // optimization over transvalues and simply does not apply).
+    if node.sink_emit.is_some() {
+        return sink::agg_sink_emit_next(node, estate);
+    }
     let mcx = estate.es_query_cxt;
     loop {
         estate.reset_expr_context(node.ps_ExprContext);
@@ -6013,6 +6069,9 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     hashgrouped::agg_hashgroup_reset(node);
     codedgroup::agg_codedgroup_reset(node);
     merge::reset_merge_for_rescan(node);
+    // M2 sink: a rescan re-engages (or falls back) from scratch; any adopted
+    // parallel emit state is spent.
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6060,6 +6119,8 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     // Merged results combine into the handed buffers in place, so a rescan
     // rebuilds from a fresh worker run instead of reusing the filled table.
     let merged = merge::reset_merge_for_rescan(node);
+    // M2 sink: spent on rescan (see exec_rescan_agg_chg).
+    sink::agg_sink_reset_emit(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6177,7 +6238,7 @@ mcx::forget_safe_struct!(
         spill, tapeset, rslot, wslot, tmp_ctx },
     PerHashData<'_> { num_cols, hash_grp_col_idx_input, largest_grp_col_idx,
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
-        hash_mem_limit, table_filled, hashiter, spill;
+        hash_mem_limit, table_filled, hashiter, spill, sink_cap;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
         exchange },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
@@ -6186,7 +6247,8 @@ mcx::forget_safe_struct!(
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
-        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup },
+        pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup,
+        sink_emit },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },

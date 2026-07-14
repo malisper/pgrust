@@ -35,6 +35,9 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod runtime_agg;
+mod runtime_distinct;
+mod runtime_scan;
 mod push;
 mod stats;
 
@@ -2187,6 +2190,19 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
         }
         return try_meta_agg_answer(agg, ss, estate);
     }
+    // M1 runtime scan arm (the Meta arm preempts above — footer answers
+    // beat any parallel scan): FORCED engagement under PGRUST_RUNTIME=1 +
+    // pgrust.runtime_scan_pool, serial plan surface unchanged. Owns the
+    // Fold shapes AND the cbstore count-only census shape (a qualed
+    // count(*) — serial-refused because the footer is the serial lever,
+    // but a parallel PREWHERE scan is exactly M1's LIKE-count target).
+    // None = not engaged/refused — fall through byte-identically (nothing
+    // was consumed).
+    if matches!(c, AggLaneChoice::Fold | AggLaneChoice::Refuse) {
+        if let Some(r) = runtime_scan::try_own_plain_agg_runtime(agg, ss, estate)? {
+            return Ok(Some(r));
+        }
+    }
     if c == AggLaneChoice::Refuse {
         return Ok(None);
     }
@@ -2547,6 +2563,20 @@ fn agg_plain_fold_feed<'mcx>(
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    agg_plain_fold_drain(agg, ss, estate)
+}
+
+/// The fold feed's drain half (split out for the runtime morsel drive,
+/// which arms staging + build_begin ONCE per worker and then re-enters this
+/// loop per claimed granule range): drives `seq_scan_next_pagebatch` to
+/// exhaustion — the whole scan on the serial feed; exactly the positioned
+/// claim on a granule-ranged scan — folding into the CURRENT pergroups.
+/// Byte-path-identical to the pre-split body (pure extraction).
+fn agg_plain_fold_drain<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
     // Str MIN/MAX dict-code side channel (lane-v2-dictminmax; identity plan→
@@ -3032,7 +3062,18 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
-    if ::nodeagg::agg_hash_table_filled(agg) {
+    if ::nodeagg::agg_hash_table_filled(agg) || ::nodeagg::sink::agg_sink_emitting(agg) {
+        return Ok(());
+    }
+    // M2 runtime aggregation sink (runtime_agg.rs): the forced/explicit
+    // parallel engagement, tried at the ONE build seam every drive chain
+    // shares (bare agg hook, Limit-over-agg, sort feed). Success adopts the
+    // published emit; every retrieve path drains it through
+    // agg_hash_retrieve's sink branch. Refusal falls through to the serial
+    // build byte-identically.
+    if c == AggLaneChoice::Fold
+        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), estate)?
+    {
         return Ok(());
     }
     // One OWNED tick per lane-owned hash-agg build event (the gate's
@@ -4222,7 +4263,7 @@ pub fn try_own_sort<'mcx>(
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
 
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
         // Feed-time refuse (agg-over-join multi-batch spill), before any
         // sort-side effect: the Volcano fallback resumes byte-identically.
@@ -6873,7 +6914,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     if !state.sort_done() {
         // C's CHECK_FOR_INTERRUPTS at the feed call's ExecSort entry (the
         // emit chain's source checks per subsequent fetch).
@@ -6881,6 +6922,18 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
         if let Some(k) = narrow {
             // Arm set-mode BEFORE any input (sticky; the arming doc).
             ::nodeagg::agg_sorted_force_distinct_set(agg);
+            // M2 runtime DISTINCT sink first (armed only under
+            // PGRUST_RUNTIME=1 + pgrust.runtime_distinct_pool > 0, falling
+            // back to pgrust.runtime_scan_pool — absent, two placeholder GUC
+            // lookups (alloc-free when never SET) and fall through). Owns
+            // the node on engagement; refusal/fallback keeps every serial
+            // arm below byte-identical.
+            match runtime_distinct::try_own_sorted_distinct_runtime(
+                agg, state, &mut **outer, outer_desc, rd_shape_refused, k, estate,
+            )? {
+                Some(row) => return Ok(Some(row)),
+                None => {}
+            }
             // Dict-code distinct arm first: it owns EXACTLY the density band
             // the hash arm's tier refuses (Q14-class near-unique text keys;
             // the two admissions partition the density axis), so ordering
@@ -9988,7 +10041,7 @@ pub fn try_own_limit<'mcx>(
             // (the tuplesort bound set by the prologue makes it top-N,
             // exactly as C's bounded sort under Limit).
             ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
             if !sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)? {
                 // Agg-over-join multi-batch spill refuse, before any lane
                 // tuple or sort-side effect: exec_limit over the per-tuple
@@ -11109,7 +11162,7 @@ pub fn try_pardistinct_worker_sort<'mcx>(
         s.pd_state = Some(false);
         return Ok(None);
     }
-    let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+    let crate::procnode::SortNode { state, outer, outer_desc, rd_shape_refused, .. } = s;
     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut **outer else {
         s.pd_state = Some(false);
         return Ok(None);
