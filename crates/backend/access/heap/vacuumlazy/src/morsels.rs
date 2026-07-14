@@ -147,7 +147,11 @@ pub(crate) fn admit(vacrel: &LVRelState<'_, '_>, nrequested: i32) -> Option<i32>
     if vacrel.rel.uses_local_buffers() {
         return None;
     }
-    if nrequested == 0 {
+    // Port convention (ExecVacuum): nworkers == 0 means NO PARALLEL option
+    // (auto), -1 means PARALLEL 0 (parallelism disabled), > 0 is the
+    // requested cap. (Inverted from C's raw option value — the port folds
+    // the "-1 = not given" sentinel at parse time.)
+    if nrequested < 0 {
         return None;
     }
     let mpmw = guc_tables::vars::max_parallel_maintenance_workers.read();
