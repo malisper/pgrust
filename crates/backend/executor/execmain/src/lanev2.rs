@@ -4520,7 +4520,7 @@ fn sort_feed_if_needed<'mcx>(
             // are gathered and buffered, the refsort emit face is live;
             // false = refused or fell back with nothing consumed and no sort
             // state touched.
-            if runtime_sort::try_own_sort_topn(state, ss, &outer_desc, estate)? {
+            if runtime_sort::try_own_sort(state, ss, &outer_desc, estate)? {
                 return Ok(true);
             }
             // Zone-adaptive top-N granule order (cbstore bounded sorts; None

@@ -37,6 +37,7 @@
 //! serial plan; EXPLAIN unchanged; instrumented runs refuse (EXPLAIN
 //! ANALYZE stays C-exact).
 
+use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -105,16 +106,16 @@ struct TopnSpec {
     bound: usize,
 }
 
-/// Shape derivation (fail-closed; `None` = the serial feed runs unchanged).
-fn topn_spec<'mcx>(
+/// Shared shape derivation (both sort-sink arms): datum-sort refusal,
+/// cbstore window-ref availability, the Var-only tlist census, and the
+/// int-family key vocabulary. `None` = the serial feed runs unchanged.
+fn sort_keys_and_map<'mcx>(
     state: &::nodesort::SortState<'mcx>,
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     outer_desc: &::types_tuple::TupleDescData<'static>,
-) -> Option<TopnSpec> {
-    if !state.bounded || state.bound <= 0 || state.bound > TOPN_MAX_BOUND as i64 {
-        return None;
-    }
-    // Single-column output sorts bare datums (nothing to late-materialize).
+) -> Option<(Vec<KeyCol>, Vec<u16>)> {
+    // Single-column output sorts bare datums (nothing to late-materialize
+    // / no row image to carry).
     if ::nodesort::sort_lane_is_datum(state) {
         return None;
     }
@@ -136,7 +137,7 @@ fn topn_spec<'mcx>(
         // No projection: outer resno j is scan attno j (physical tlist).
         None => (0..natts as u16).collect(),
         // Projected scans admit only the pure Var-copy census (a computing
-        // column deferred to winners could elide C's error).
+        // column deferred past the accept could elide C's error).
         Some(p) => {
             let cols = p.pi_state.scan_proj_cols()?;
             if cols.any_arith() || cols.n as usize != natts {
@@ -182,7 +183,51 @@ fn topn_spec<'mcx>(
             width,
         });
     }
+    Some((keys, tlist_map))
+}
+
+/// Shape derivation (fail-closed; `None` = the serial feed runs unchanged).
+fn topn_spec<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+) -> Option<TopnSpec> {
+    if !state.bounded || state.bound <= 0 || state.bound > TOPN_MAX_BOUND as i64 {
+        return None;
+    }
+    let (keys, tlist_map) = sort_keys_and_map(state, ss, outer_desc)?;
     Some(TopnSpec { keys, tlist_map, bound: state.bound as usize })
+}
+
+/// Shape-(b) full-sort spec: UNBOUNDED forward-only sorts; the shared key
+/// vocabulary + the self-contained-copy column census (byval / fixed-len
+/// byref / varlena; cstring refuses).
+struct FullSpec {
+    keys: Vec<KeyCol>,
+    natts: usize,
+    cols: Vec<::nodesort::fullsort::RunCol>,
+}
+
+fn full_spec<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+) -> Option<FullSpec> {
+    // Bounded sorts are the top-N arm's; rewind/mark/backward shapes
+    // refuse (the runtime result is forward-streamed once).
+    if state.bounded || state.randomAccess {
+        return None;
+    }
+    let (keys, _tlist_map) = sort_keys_and_map(state, ss, outer_desc)?;
+    let natts = outer_desc.natts as usize;
+    let mut cols = Vec::with_capacity(natts);
+    for a in outer_desc.attrs.iter().take(natts) {
+        if !a.attbyval && a.attlen != -1 && a.attlen <= 0 {
+            return None; // cstring / unknown copy law
+        }
+        cols.push(::nodesort::fullsort::RunCol { byval: a.attbyval, len: a.attlen });
+    }
+    Some(FullSpec { keys, natts, cols })
 }
 
 // ---------------------------------------------------------------------------
@@ -225,20 +270,78 @@ pub(super) struct RuntimeSortShared {
     /// completion and gathers by rowref — the entry width is a worker
     /// detail).
     winners: Mutex<Option<Vec<u64>>>,
+    /// Shape (b) FULL SORT (m3-sort-b car 2; design §5). `None` = the
+    /// top-N arm (everything above).
+    full: Option<FullShared>,
 }
 
+/// Shape-(b) full-sort payload half: per-worker self-contained run
+/// buffers, splitter-sliced partition-parallel merge.
+pub(super) struct FullShared {
+    /// Output arity + per-column copy law (outer-desc census).
+    natts: usize,
+    cols: Vec<::nodesort::fullsort::RunCol>,
+    /// Per-Local byte budget (work_mem per participant, design §7). A
+    /// runtime crossing = refusal (recorded), RG abort, serial rerun.
+    budget: usize,
+    /// Partition-parallel merge width.
+    parts: usize,
+    /// Splitters, computed once by the first combine claimer from the
+    /// sealed runs (they gate BALANCE only, never content).
+    splitters: OnceLock<Vec<::nodesort::sink::WideEntry>>,
+    /// Per-partition merged (run, bufrow) outputs; slot p is written only
+    /// by partition p's combine claim (single writer, sink contract).
+    out_parts: Vec<UnsafeCell<Vec<(u16, u32)>>>,
+    /// A Local crossed the byte budget: not an error — refusal + serial
+    /// rerun (R5), the design-§7 law.
+    budget_refused: AtomicBool,
+    /// finalize's published output: the sealed runs (Arc — O(W) publish,
+    /// no row copies) + partition outputs in partition order.
+    published: Mutex<Option<FullPublish>>,
+}
+
+pub(super) struct FullPublish {
+    runs: Vec<Arc<::nodesort::fullsort::FullRun>>,
+    parts: Vec<Vec<(u16, u32)>>,
+}
+
+// SAFETY: `out_parts` slots follow the single-writer-per-partition sink
+// contract (each combine partition is claimed exactly once; finalize is
+// the single reader after all claims settle) — the runtime_agg `AggSink`
+// argument, verbatim.
+unsafe impl Sync for FullShared {}
+
 /// Per-worker Local: the narrow u128 heap at key arity 1 (the shipped
-/// inc-2 path), the wide heap at arity 2..=TOPN_MAX_KEYS (inc-5).
+/// inc-2 path), the wide heap at arity 2..=TOPN_MAX_KEYS (inc-5), or the
+/// shape-(b) full-sort run under construction (car 2).
 pub(super) enum TopnLocal {
     Narrow(TopnHeap),
     Wide(TopnWideHeap),
+    Full(FullLocal),
+}
+
+/// A full-sort run under construction: unsorted entries + the
+/// self-contained row buffer (budget-metered).
+pub(super) struct FullLocal {
+    entries: Vec<::nodesort::fullsort::RunEnt>,
+    buf: ::nodesort::fullsort::RunBuf,
+}
+
+impl FullLocal {
+    fn bytes(&self) -> usize {
+        self.buf.bytes()
+            + self.entries.capacity() * core::mem::size_of::<::nodesort::fullsort::RunEnt>()
+    }
 }
 
 /// The sealed (sorted) form of a Local. Variants never mix within one
-/// engagement (fork decides once from the spec's key arity).
+/// engagement (fork decides once from the spec's key arity/mode).
 pub(super) enum TopnSealed {
     Narrow(Vec<TopnEntry>),
     Wide(Vec<WideEntry>),
+    /// Sealed full-sort run (sorted entries + fixed-up buf) — Arc so the
+    /// finalize publish clones pointers, never row data.
+    Full(Arc<::nodesort::fullsort::FullRun>),
 }
 
 impl RuntimeSortShared {
@@ -284,7 +387,12 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
     type Sealed = TopnSealed;
 
     fn fork(&self, _worker: usize) -> TopnLocal {
-        if self.keys.len() == 1 {
+        if let Some(full) = &self.full {
+            TopnLocal::Full(FullLocal {
+                entries: Vec::new(),
+                buf: ::nodesort::fullsort::RunBuf::new(full.natts),
+            })
+        } else if self.keys.len() == 1 {
             TopnLocal::Narrow(TopnHeap::new(self.bound))
         } else {
             TopnLocal::Wide(TopnWideHeap::new(self.bound))
@@ -292,7 +400,10 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
     }
 
     fn accept_local(&self, local: &mut TopnLocal, _worker: usize, range: runtime::MorselRange) {
-        if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
+        if self.failed.load(Ordering::SeqCst)
+            || self.broke.load(Ordering::SeqCst)
+            || self.full.as_ref().is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
+        {
             return; // aborting: drain the claim without work
         }
         let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(local, range)));
@@ -313,22 +424,65 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
         if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
             return TopnSealed::Narrow(Vec::new());
         }
-        // POD sort — cannot unwind.
+        // POD sort — cannot unwind (RunBuf fixup is index arithmetic).
         match local {
             TopnLocal::Narrow(h) => TopnSealed::Narrow(h.into_sorted()),
             TopnLocal::Wide(h) => TopnSealed::Wide(h.into_sorted()),
+            TopnLocal::Full(mut l) => {
+                let full = self.full.as_ref().expect("full local under a full spec");
+                l.entries.sort_unstable();
+                l.buf.seal_fixup(&full.cols);
+                TopnSealed::Full(Arc::new(::nodesort::fullsort::FullRun {
+                    entries: l.entries,
+                    buf: l.buf,
+                }))
+            }
         }
     }
 
     fn partitions(&self) -> u64 {
-        1
+        match &self.full {
+            Some(f) => f.parts as u64,
+            None => 1,
+        }
     }
 
     fn combine(&self, part: u64, sealed: &[TopnSealed]) {
-        debug_assert_eq!(part, 0);
-        if self.failed.load(Ordering::SeqCst) || self.broke.load(Ordering::SeqCst) {
+        if self.failed.load(Ordering::SeqCst)
+            || self.broke.load(Ordering::SeqCst)
+            || self.full.as_ref().is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
+        {
             return;
         }
+        if let Some(full) = &self.full {
+            // Shape (b): slice every sealed run to this partition's key
+            // range and k-way merge (design §5). Splitters computed once
+            // by the first claimer (balance only, never content).
+            let runs: Vec<&[::nodesort::fullsort::RunEnt]> = sealed
+                .iter()
+                .map(|s| match s {
+                    TopnSealed::Full(r) => r.entries.as_slice(),
+                    // Aborted-path placeholder seals are Narrow(empty).
+                    TopnSealed::Narrow(v) => {
+                        debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
+                        &[]
+                    }
+                    TopnSealed::Wide(_) => {
+                        unreachable!("mixed sealed variants in one sort sink")
+                    }
+                })
+                .collect();
+            let splitters = full
+                .splitters
+                .get_or_init(|| ::nodesort::fullsort::fullsort_splitters(&runs, full.parts));
+            let out =
+                ::nodesort::fullsort::fullsort_partition_merge(&runs, splitters, part as usize);
+            // SAFETY: partition `part` is claimed exactly once (runtime
+            // contract); this is its single writer.
+            unsafe { *full.out_parts[part as usize].get() = out };
+            return;
+        }
+        debug_assert_eq!(part, 0);
         // Variants never mix within one engagement (fork decides once);
         // aborted-path placeholder Narrow(empty) seals are harmless in
         // either collection (empty runs contribute nothing).
@@ -337,7 +491,9 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                 .iter()
                 .map(|s| match s {
                     TopnSealed::Narrow(v) => v.clone(),
-                    TopnSealed::Wide(_) => unreachable!("mixed sealed variants in one sort sink"),
+                    TopnSealed::Wide(_) | TopnSealed::Full(_) => {
+                        unreachable!("mixed sealed variants in one sort sink")
+                    }
                 })
                 .collect();
             topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
@@ -351,6 +507,9 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                         debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
                         Vec::new()
                     }
+                    TopnSealed::Full(_) => {
+                        unreachable!("mixed sealed variants in one sort sink")
+                    }
                 })
                 .collect();
             topn_merge(&runs, self.bound).iter().map(|e| e.rowref()).collect()
@@ -358,10 +517,41 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
         *self.winners.lock().unwrap_or_else(|p| p.into_inner()) = Some(rowrefs);
     }
 
-    fn finalize(&self, _sealed: &[TopnSealed]) {
-        // Publish already happened in the (single) combine; nothing to do.
-        // Aborted RGs skip finalize; the leader validates the winner slot
-        // on the Completed path (protocol-violation error, never silence).
+    fn finalize(&self, sealed: &[TopnSealed]) {
+        // Top-N: publish already happened in the (single) combine.
+        // Full sort: collect the partition outputs + clone the run Arcs
+        // (O(W + partitions) — never row data). Aborted RGs skip
+        // finalize; the leader validates the published slot on the
+        // Completed path (protocol-violation error, never silence).
+        let Some(full) = &self.full else { return };
+        if self.failed.load(Ordering::SeqCst)
+            || self.broke.load(Ordering::SeqCst)
+            || full.budget_refused.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        // INDEX ALIGNMENT: partition outputs address runs by SEALED SLOT
+        // index — non-Full placeholders map to an empty run (no entry ever
+        // addresses one: its combine slice was empty).
+        let runs: Vec<Arc<::nodesort::fullsort::FullRun>> = sealed
+            .iter()
+            .map(|s| match s {
+                TopnSealed::Full(r) => Arc::clone(r),
+                _ => Arc::new(::nodesort::fullsort::FullRun {
+                    entries: Vec::new(),
+                    buf: ::nodesort::fullsort::RunBuf::new(full.natts),
+                }),
+            })
+            .collect();
+        let parts: Vec<Vec<(u16, u32)>> = full
+            .out_parts
+            .iter()
+            // SAFETY: all combine claims settled (last-worker-out);
+            // finalize is the single reader.
+            .map(|c| unsafe { std::mem::take(&mut *c.get()) })
+            .collect();
+        *full.published.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(FullPublish { runs, parts });
     }
 }
 
@@ -433,6 +623,7 @@ impl<'a> TopnAcceptSink<'a> {
             TopnLocal::Wide(h) => {
                 h.push(WideEntry::encode(&self.obs[..nk], &self.flags[..nk], rowref));
             }
+            TopnLocal::Full(_) => unreachable!("full locals feed FullAcceptSink"),
         }
     }
 }
@@ -547,6 +738,124 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
     }
 }
 
+/// Shape-(b) full-sort accept feed: EVERY surviving row runs the exact
+/// per-row emit (C qual/detoast semantics, C's errors on C's row; the
+/// staged-lane fast leg is a chartered perf lever, not phase 1), then the
+/// outer-format slot row is copied SELF-CONTAINED into the run buffer and
+/// its (keys, global rowref) entry stamped. `broke` = a staged batch
+/// without a window ref (no rowref ⇒ no canonical tie order): contract
+/// break, RG abort, serial rerun. `budget_broke` = the Local crossed the
+/// work_mem-per-participant byte budget: refusal, RG abort, serial rerun
+/// (design §7 — the serial arm then spills correctly).
+struct FullAcceptSink<'a> {
+    local: &'a mut FullLocal,
+    keys: &'a [KeyCol],
+    cols: &'a [::nodesort::fullsort::RunCol],
+    natts: usize,
+    budget: usize,
+    broke: bool,
+    budget_broke: bool,
+    obs: [(i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
+    flags: [(bool, bool); ::nodesort::sink::TOPN_MAX_KEYS],
+}
+
+impl<'a> FullAcceptSink<'a> {
+    fn new(
+        local: &'a mut FullLocal,
+        keys: &'a [KeyCol],
+        full: &'a FullShared,
+    ) -> FullAcceptSink<'a> {
+        let mut flags = [(false, false); ::nodesort::sink::TOPN_MAX_KEYS];
+        for (i, k) in keys.iter().enumerate() {
+            flags[i] = (k.desc, k.nulls_first);
+        }
+        FullAcceptSink {
+            local,
+            keys,
+            cols: &full.cols,
+            natts: full.natts,
+            budget: full.budget,
+            broke: false,
+            budget_broke: false,
+            obs: [(0, false); ::nodesort::sink::TOPN_MAX_KEYS],
+            flags,
+        }
+    }
+}
+
+impl<'mcx> Sink<'mcx> for FullAcceptSink<'_> {
+    fn accept(&mut self, _tuple: ExecSlotId, _estate: &mut EStateData<'mcx>) -> PgResult<SinkFeed> {
+        // Row-granular arrival = no staged window ref (defensive break, as
+        // the top-N sink).
+        self.broke = true;
+        Ok(SinkFeed::NeedMore)
+    }
+
+    fn finish(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        Ok(())
+    }
+}
+
+impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
+    fn accept_batch<E: BatchEmit<'mcx>>(
+        &mut self,
+        emit: &mut E,
+        pos: u32,
+        n: u32,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()> {
+        if self.broke || self.budget_broke {
+            return Ok(());
+        }
+        let Some((rg, row0)) = emit.window_ref() else {
+            self.broke = true;
+            return Ok(());
+        };
+        ::postgres_seams::check_for_interrupts::call()?;
+        let nk = self.keys.len();
+        for i in pos..n {
+            // The per-row emit leg: qual verdict + projection + detoast —
+            // C semantics, C's errors on C's row. None = qual-filtered.
+            let Some(id) = emit.emit(i, estate)? else { continue };
+            let bufrow = self.local.buf.nrows as u32;
+            {
+                let slot = estate.slot_mut(id);
+                ::exectuples::slot_getsomeattrs(slot, self.natts as i32);
+                let base = slot.base();
+                for ki in 0..nk {
+                    let key = self.keys[ki];
+                    let (d, isnull) =
+                        (base.tts_values[key.resno_outer], base.tts_isnull[key.resno_outer]);
+                    self.obs[ki] = (key_i64(d, key.width), isnull);
+                }
+                // SAFETY: outer-format slot cells are live, fully-detoasted
+                // datums under the admitted column census (byval / fixed-len
+                // byref / plain varlena — cstring never admits).
+                unsafe {
+                    self.local.buf.push_row(
+                        &base.tts_values[..self.natts],
+                        &base.tts_isnull[..self.natts],
+                        self.cols,
+                    )
+                };
+            }
+            let rowref = ((rg as u64) << 32) | (row0 + i) as u64;
+            self.local.entries.push(::nodesort::fullsort::RunEnt {
+                key: ::nodesort::sink::WideEntry::encode(
+                    &self.obs[..nk],
+                    &self.flags[..nk],
+                    rowref,
+                ),
+                bufrow,
+            });
+        }
+        if self.local.bytes() > self.budget {
+            self.budget_broke = true;
+        }
+        Ok(())
+    }
+}
+
 impl RuntimeSortShared {
     fn morsel_body(&self, local: &mut TopnLocal, range: runtime::MorselRange) -> PgResult<()> {
         WORKER_EXEC.with(|cell| {
@@ -571,17 +880,43 @@ impl RuntimeSortShared {
                         range.start,
                         range.end,
                     )?;
-                    let mut sink = TopnAcceptSink::new(local, &self.keys);
-                    let fed = drain_pipeline(
-                        ss,
-                        &mut SeqScanSource,
-                        &mut SeqScanFilterProject,
-                        &mut sink,
-                        estate,
-                    );
-                    let broke = sink.broke;
-                    fed?;
-                    if broke {
+                    let (broke, budget_broke) = match local {
+                        TopnLocal::Full(l) => {
+                            let full =
+                                self.full.as_ref().expect("full local under a full spec");
+                            let mut sink = FullAcceptSink::new(l, &self.keys, full);
+                            let fed = drain_pipeline(
+                                ss,
+                                &mut SeqScanSource,
+                                &mut SeqScanFilterProject,
+                                &mut sink,
+                                estate,
+                            );
+                            let flags = (sink.broke, sink.budget_broke);
+                            fed?;
+                            flags
+                        }
+                        local => {
+                            let mut sink = TopnAcceptSink::new(local, &self.keys);
+                            let fed = drain_pipeline(
+                                ss,
+                                &mut SeqScanSource,
+                                &mut SeqScanFilterProject,
+                                &mut sink,
+                                estate,
+                            );
+                            let broke = sink.broke;
+                            fed?;
+                            (broke, false)
+                        }
+                    };
+                    if budget_broke {
+                        trace_feed("runtime sort worker budget crossing; refusing to serial");
+                        if let Some(full) = &self.full {
+                            full.budget_refused.store(true, Ordering::SeqCst);
+                        }
+                        self.abort_rg();
+                    } else if broke {
                         trace_feed("runtime sort worker contract break; aborting to serial fallback");
                         self.break_contract();
                     }
@@ -704,9 +1039,14 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                     // deform plans bake the narrowed set. Unneeded
                     // per-row-emit cells read NULL and never escape (the
                     // sink reads the key cells only).
-                    let key_attnos: Vec<u16> =
-                        payload.keys.iter().map(|k| k.attno_scan).collect();
-                    ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &key_attnos);
+                    // FULL SORT (car 2): workers copy WHOLE output rows into
+                    // their run buffers — the needed set stays full (no
+                    // narrowing; the top-N late-mat contract does not apply).
+                    if payload.full.is_none() {
+                        let key_attnos: Vec<u16> =
+                            payload.keys.iter().map(|k| k.attno_scan).collect();
+                        ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &key_attnos);
+                    }
                     super::arm_scan_staging(
                         ss,
                         estate,
@@ -794,12 +1134,22 @@ fn refused(reason: &str) {
     lane_trace(&format!("runtime-sort: refused ({reason})"));
 }
 
-/// The runtime top-N sink arm, probed from the sort feed's SeqScan branch
-/// BEFORE the serial arms arm anything. `Ok(false)` = refused or fell back
-/// (nothing consumed, no sort state touched; the serial feed runs
-/// byte-identically). `Ok(true)` = the arm owns the node: the winners are
-/// gathered and buffered (`refsort_out`), the emit face is live.
-pub(super) fn try_own_sort_topn<'mcx>(
+/// `PGRUST_RUNTIME_SORT_FULL` kill switch for the shape-(b) full-sort arm
+/// (default ON; layered under the arm-wide `PGRUST_RUNTIME_SORT`).
+fn runtime_sort_full_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_SORT_FULL").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The runtime sort sink arms, probed from the sort feed's SeqScan branch
+/// BEFORE the serial arms arm anything: bounded sorts take the top-N sink
+/// (shape a); unbounded forward-only sorts take the full-sort sink (shape
+/// b, m3-sort-b car 2). `Ok(false)` = refused or fell back (nothing
+/// consumed, no sort state touched; the serial feed runs byte-identically).
+/// `Ok(true)` = the arm owns the node and its emit face is live.
+pub(super) fn try_own_sort<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     outer_desc: &::types_tuple::TupleDescData<'static>,
@@ -808,6 +1158,9 @@ pub(super) fn try_own_sort_topn<'mcx>(
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
     let dop = ::guc_tables::runtime_pool::runtime_sort_pool_dop();
     if dop <= 0 || !runtime::runtime_enabled() || !runtime_sort_enabled() {
+        return Ok(false);
+    }
+    if !state.bounded && !runtime_sort_full_enabled() {
         return Ok(false);
     }
     let Some(rt) = runtime::global() else { return Ok(false) };
@@ -826,9 +1179,30 @@ pub(super) fn try_own_sort_topn<'mcx>(
         refused("already in parallel machinery");
         return Ok(false);
     }
-    let Some(spec) = topn_spec(state, ss, outer_desc) else {
-        refused("shape spec (bound/key vocabulary/tlist census)");
-        return Ok(false);
+    let spec = if state.bounded {
+        let Some(spec) = topn_spec(state, ss, outer_desc) else {
+            refused("shape spec (bound/key vocabulary/tlist census)");
+            return Ok(false);
+        };
+        ArmSpec::Topn(spec)
+    } else {
+        let Some(spec) = full_spec(state, ss, outer_desc) else {
+            refused("full-sort shape spec (rewind/key vocabulary/tlist/column census)");
+            return Ok(false);
+        };
+        // Per-participant budget: work_mem per Local (design §7); the
+        // admission estimate refuses up front, a runtime crossing refuses
+        // at accept (R5 rerun) — phase 1 has NO spill.
+        let budget = (::init_small::globals::work_mem().max(64) as usize) * 1024;
+        let est_row = state.plan.plan.plan_width.max(1) as f64
+            + core::mem::size_of::<::nodesort::fullsort::RunEnt>() as f64
+            + (spec.natts * 9) as f64;
+        let est_per_local = state.plan.plan.plan_rows.max(0.0) * est_row / dop.max(1) as f64;
+        if est_per_local > budget as f64 {
+            refused("full-sort admission estimate exceeds work_mem per participant");
+            return Ok(false);
+        }
+        ArmSpec::Full(spec, budget)
     };
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
         refused("extern params");
@@ -889,6 +1263,17 @@ pub(super) fn try_own_sort_topn<'mcx>(
     engage(state, ss, outer_desc, estate, rt, dop, total_granules, starts, spec, scan_node)
 }
 
+/// Which sort-sink arm is engaging (the payload construction switch).
+enum ArmSpec {
+    Topn(TopnSpec),
+    /// Full sort + the per-Local byte budget (work_mem per participant).
+    Full(FullSpec, usize),
+}
+
+/// Partition-parallel merge width for shape (b) (partition-count-agnostic
+/// like the join lane's; 256 = the sink bucket precedent).
+const FULLSORT_PARTS: usize = 256;
+
 #[allow(clippy::too_many_arguments)]
 fn engage<'mcx>(
     state: &mut ::nodesort::SortState<'mcx>,
@@ -899,7 +1284,7 @@ fn engage<'mcx>(
     dop: i32,
     total_granules: u64,
     starts: Vec<u64>,
-    spec: TopnSpec,
+    spec: ArmSpec,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
 ) -> PgResult<bool> {
     ensure_hooks_registered();
@@ -907,6 +1292,23 @@ fn engage<'mcx>(
 
     let pstmt = crate::execparallel::build_worker_pstmt(estate, scan_node)?;
 
+    let (keys, bound, full) = match &spec {
+        ArmSpec::Topn(s) => (s.keys.clone(), s.bound, None),
+        ArmSpec::Full(s, budget) => (
+            s.keys.clone(),
+            0,
+            Some(FullShared {
+                natts: s.natts,
+                cols: s.cols.clone(),
+                budget: *budget,
+                parts: FULLSORT_PARTS,
+                splitters: OnceLock::new(),
+                out_parts: (0..FULLSORT_PARTS).map(|_| UnsafeCell::new(Vec::new())).collect(),
+                budget_refused: AtomicBool::new(false),
+                published: Mutex::new(None),
+            }),
+        ),
+    };
     let payload = Arc::new(RuntimeSortShared {
         rt,
         rg: OnceLock::new(),
@@ -921,14 +1323,15 @@ fn engage<'mcx>(
         }),
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         eflags: estate.es_top_eflags,
-        keys: spec.keys.clone(),
-        bound: spec.bound,
+        keys,
+        bound,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         broke: AtomicBool::new(false),
         winners: Mutex::new(None),
+        full,
     });
 
     xact::EnterParallelMode();
@@ -951,6 +1354,7 @@ fn engage<'mcx>(
 enum EngageOutcome {
     Fallback,
     Completed(Vec<u64>),
+    CompletedFull(FullPublish),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -964,7 +1368,7 @@ fn engage_ceremony<'mcx>(
     total_granules: u64,
     starts: Vec<u64>,
     payload: &Arc<RuntimeSortShared>,
-    spec: &TopnSpec,
+    spec: &ArmSpec,
 ) -> PgResult<bool> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_sort_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
@@ -1009,10 +1413,15 @@ fn engage_ceremony<'mcx>(
         // max_worker_processes silently caps DOP probes — every probe
         // config must be able to see the LAUNCHED number, not the asked
         // one).
-        lane_trace(&format!(
-            "runtime-sort: engaged dop={launched}/{dop} granules={total_granules} bound={}",
-            spec.bound
-        ));
+        match spec {
+            ArmSpec::Topn(s) => lane_trace(&format!(
+                "runtime-sort: engaged dop={launched}/{dop} granules={total_granules} bound={}",
+                s.bound
+            )),
+            ArmSpec::Full(..) => lane_trace(&format!(
+                "runtime-sort: engaged dop={launched}/{dop} granules={total_granules} full"
+            )),
+        }
 
         // Submit-and-park (the WaitForParallelWorkersToFinish shape).
         let outcome = loop {
@@ -1042,6 +1451,15 @@ fn engage_ceremony<'mcx>(
             return Err(e);
         }
         if outcome == runtime::RgOutcome::Aborted {
+            if let Some(full) = &payload.full {
+                if full.budget_refused.load(Ordering::SeqCst) {
+                    // Design §7: a runtime budget crossing is a recorded
+                    // refusal + whole-attempt serial rerun (the serial arm
+                    // spills correctly), never an error.
+                    refused("per-participant sort budget crossed at accept");
+                    return Ok(EngageOutcome::Fallback);
+                }
+            }
             if payload.broke.load(Ordering::SeqCst) {
                 lane_trace("runtime-sort: sink contract break; serial fallback");
                 return Ok(EngageOutcome::Fallback);
@@ -1051,6 +1469,18 @@ fn engage_ceremony<'mcx>(
         }
         if payload.started.load(Ordering::SeqCst) == 0 {
             return Ok(EngageOutcome::Fallback);
+        }
+        if let Some(full) = &payload.full {
+            let Some(publish) = full.published.lock().unwrap_or_else(|p| p.into_inner()).take()
+            else {
+                // Completed with participants but nothing published: a
+                // protocol violation, never silently wrong output.
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "runtime full sort completed without a published result",
+                )));
+            };
+            return Ok(EngageOutcome::CompletedFull(publish));
         }
         let Some(winners) = payload.take_winners() else {
             // Completed with participants but no published winners: a
@@ -1074,14 +1504,24 @@ fn engage_ceremony<'mcx>(
     let outcome = body?;
     destroy?;
 
-    match outcome {
-        EngageOutcome::Fallback => {
+    match (outcome, spec) {
+        (EngageOutcome::Fallback, _) => {
             lane_trace("runtime-sort: fallback to serial arm");
             Ok(false)
         }
-        EngageOutcome::Completed(winners) => {
+        (EngageOutcome::Completed(winners), ArmSpec::Topn(spec)) => {
             adopt_winners(state, ss, outer_desc, estate, spec, winners)
         }
+        (EngageOutcome::CompletedFull(publish), ArmSpec::Full(..)) => {
+            ::nodesort::sort_lane_runtime_full_adopt(state, publish.runs, publish.parts);
+            trace_feed("runtime full sort adopt + partition emit engaged");
+            lane_trace(&format!(
+                "runtime-sort: complete (full), rows={}",
+                ::nodesort::sort_lane_runtime_full_rows(state)
+            ));
+            Ok(true)
+        }
+        _ => Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch"))),
     }
 }
 
