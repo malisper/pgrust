@@ -39,6 +39,7 @@ mod runtime_agg;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
+mod runtime_plaindistinct;
 mod runtime_scan;
 mod runtime_sort;
 mod push;
@@ -3136,6 +3137,18 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
+    // Runtime plain-distinct sink probe (band-2b): DOP-parallel partitioned
+    // distinct sets over the scan subtree. Refusal falls through to the
+    // serial drive, value-identically.
+    if let Some(scan_node) = agg.plan.plan.lefttree {
+        if scan_node.node_tag() == ::types_nodes::NodeTag::T_SeqScan {
+            if let Some(r) = runtime_plaindistinct::try_own_plain_distinct_runtime(
+                agg, ss, scan_node, false, estate,
+            )? {
+                return Ok(Some(r));
+            }
+        }
+    }
     // One OWNED tick per lane-owned plain-agg build event (the gate's
     // aggbuild floor counts builds; this drive runs the whole feed inside
     // one call).
@@ -3229,6 +3242,25 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     }
     // C's CHECK_FOR_INTERRUPTS at the would-be ExecSort feed entry.
     ::postgres_seams::check_for_interrupts::call()?;
+    // Runtime plain-distinct sink probe (band-2b): DOP-parallel partitioned
+    // distinct sets over the scan subtree — the skip-sort law already ratified
+    // above covers the parallel arrival-order relaxation too. Refusal falls
+    // through to the serial skip-sort drive, value-identically.
+    {
+        let scan_node = s.state.plan.plan.lefttree;
+        if let Some(scan_node) = scan_node {
+            if scan_node.node_tag() == ::types_nodes::NodeTag::T_SeqScan {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
+                    unreachable!("matched SeqScan above")
+                };
+                if let Some(r) = runtime_plaindistinct::try_own_plain_distinct_runtime(
+                    agg, ss, scan_node, true, estate,
+                )? {
+                    return Ok(Some(r));
+                }
+            }
+        }
+    }
     stats::tick_owned(ShapeClass::AggBuild);
     trace_feed("plain-agg distinct-set skip-sort drive engaged");
     // Arm set-mode for the presorted entries BEFORE any input (sticky;
