@@ -292,7 +292,29 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      identical class and argument as slots 4-6/9 (bound-helper
     //      drive slot inside the query-task binding, torn down before
     //      unbind on every path, non-session TLS).
-    assert_eq!(count_tree(crates), 471, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 473, re-pinned at runtime-ceremony2 (lazy first-touch bind + sticky
+    // session-affine binding, notes/runtime-ceremony2.md) —
+    //   11. access/transam/parallel/src/query_task_guard.rs (STICKY +
+    //      ACTIVE_DEFERRED, one thread_local! block) — the standing gang
+    //      worker's KEYED session-bind retention (parked, disarmed guard;
+    //      evicted by the binder before any foreign-session bind) and the
+    //      mid-drive bound-guard slot of the deferred first-touch binding.
+    //      Non-session TLS in the census sense with one sanctioned twist:
+    //      the sticky slot deliberately RETAINS binder-owned session state
+    //      between same-session engagements — the envelope's exception is
+    //      SessionEnvelopeBoundaryIssueForRetainedBind (this crate), and
+    //      the binder still owns ALL session-state movement (bind/resume/
+    //      evict/park run only inside DeferredQueryTaskBinding). wpool /
+    //      launched helpers never use the slot (sticky_allowed=false);
+    //      envelope bind/unbind never touches another thread's slot.
+    //      (runtime_scan.rs's LAZY_CTX rides the existing WORKER_EXEC
+    //      block — same drive-scoped class as slots 4-6.)
+    //   12. access/transam/parallel/src/standing.rs DEFERRED_VIS — the
+    //      standing serve's visibility-deferral latch (Armed by
+    //      serve_ticket, consumed at the first-touch bind, reset in the
+    //      serve tail): pure worker-loop bookkeeping, no session identity,
+    //      same argument as the io.rs pool-worker block (slot 7).
+    assert_eq!(count_tree(crates), 473, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
