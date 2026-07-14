@@ -108,6 +108,15 @@ impl MkShape {
         debug_assert!(self.nullable);
         self.packed_bytes as usize - 1
     }
+
+    /// The shape's Intern (text) component, when one exists — the M2 sink's
+    /// canonical-bytes machinery reads it (key position + component). Sink
+    /// admission caps Intern components at ONE per shape (a second text
+    /// component refuses upstream).
+    #[inline]
+    pub fn intern_comp(&self) -> Option<(usize, &MkComp)> {
+        self.comps.iter().enumerate().find(|(_, c)| c.kind == MkCompKind::Intern)
+    }
 }
 
 /// The arithmetic of one reconstructable (redundant) grouping key
@@ -183,6 +192,25 @@ pub(crate) struct CompactHash {
     states: Vec<*mut u8>,
     hashes: Vec<u64>,
     new_rows: Vec<u32>,
+}
+
+/// Test-only constructor (the sink's canonical-bytes unit tests build bare
+/// compact states around prebuilt tables; the batch scratch stays empty).
+#[cfg(test)]
+pub(crate) fn compact_hash_for_tests(
+    table: ::lanetable::LaneAggTable,
+    key: CompactKeySpec,
+    intern: Option<::lanetable::LaneAggTable>,
+) -> CompactHash {
+    CompactHash {
+        table,
+        key,
+        intern,
+        keys: Vec::new(),
+        states: Vec::new(),
+        hashes: Vec::new(),
+        new_rows: Vec::new(),
+    }
 }
 
 /// The compact-table arming verdict — lanev2 ticks its refuse-reason
@@ -408,10 +436,32 @@ pub fn agg_hash_compact_try_arm_mk(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> CompactArm {
+    try_arm_mk_n(node, nullable, dict_att, 2)
+}
+
+/// [`agg_hash_compact_try_arm_mk`] with the arity gate relaxed to ONE
+/// grouping key — the M2 sink's SINGLE-TEXT worker arm (a 1-component
+/// Intern shape riding the packed machinery: the intern id is the packed
+/// image; canonical raw bytes are the cross-worker merge key). Serial
+/// callers keep the >=2 gate verbatim (`scan_mk_plan_wanted` owns the
+/// single-key kernels there).
+pub fn agg_hash_compact_try_arm_mk1(
+    node: &mut AggStateData<'_>,
+    dict_att: Option<u16>,
+) -> CompactArm {
+    try_arm_mk_n(node, false, dict_att, 1)
+}
+
+fn try_arm_mk_n(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    dict_att: Option<u16>,
+    min_keys: usize,
+) -> CompactArm {
     if node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some()) {
         return CompactArm::Armed;
     }
-    let (shape, numgroups) = match agg_hash_compact_mk_admit(node, nullable, dict_att) {
+    let (shape, numgroups) = match mk_admit_n(node, nullable, dict_att, min_keys) {
         Ok(admitted) => admitted,
         Err(verdict) => return verdict,
     };
@@ -465,6 +515,24 @@ pub fn agg_hash_compact_mk_admit(
     nullable: bool,
     dict_att: Option<u16>,
 ) -> Result<(MkShape, u64), CompactArm> {
+    mk_admit_n(node, nullable, dict_att, 2)
+}
+
+/// [`agg_hash_compact_mk_admit`]'s single-key relaxation — the probe half of
+/// [`agg_hash_compact_try_arm_mk1`] (the M2 sink single-text leader probe).
+pub fn agg_hash_compact_mk_admit1(
+    node: &mut AggStateData<'_>,
+    dict_att: Option<u16>,
+) -> Result<(MkShape, u64), CompactArm> {
+    mk_admit_n(node, false, dict_att, 1)
+}
+
+fn mk_admit_n(
+    node: &mut AggStateData<'_>,
+    nullable: bool,
+    dict_att: Option<u16>,
+    min_keys: usize,
+) -> Result<(MkShape, u64), CompactArm> {
     if !compact_enabled() {
         return Err(CompactArm::Off);
     }
@@ -478,7 +546,7 @@ pub fn agg_hash_compact_mk_admit(
     }
     let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
     let key_cols = ph.hashtable.key_cols();
-    if key_cols.len() < 2 {
+    if key_cols.len() < min_keys {
         return Err(CompactArm::KeyKind);
     }
     // Component kinds first; offsets are laid out per numeric width below
@@ -974,7 +1042,7 @@ pub(crate) fn mk_unpack(words: [u64; 2], comp: &MkComp) -> u64 {
 /// Row `row`'s packed key image as two little-endian words (one-word shapes
 /// zero-fill the high word).
 #[inline]
-fn mk_row_words(ch: &CompactHash, shape: &MkShape, row: usize) -> [u64; 2] {
+pub(crate) fn mk_row_words(ch: &CompactHash, shape: &MkShape, row: usize) -> [u64; 2] {
     if shape.two_words {
         ch.table.row_key_i128(row).expect("multi-key tables have no NULL row")
     } else {
@@ -1060,7 +1128,7 @@ pub fn mk_numeric_i64_bits(v: i64, width: u8) -> Option<u64> {
 
 /// Decode component bits back to the canonical key form.
 #[inline]
-fn mk_numeric_key_decode(bits: u64, width: u8) -> ::adt_numeric::NumericKeyForm {
+pub(crate) fn mk_numeric_key_decode(bits: u64, width: u8) -> ::adt_numeric::NumericKeyForm {
     use ::adt_numeric::NumericKeyForm as K;
     let shift = (width as u32 - 1) * 8;
     let e = ((bits >> shift) as u8) as i8;

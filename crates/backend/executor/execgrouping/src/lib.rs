@@ -1004,6 +1004,16 @@ impl<'mcx> TupleHashTable<'mcx> {
         }
     }
 
+    /// True when the single grouping key probes through the TEXT kernel
+    /// (deterministic collation proved at kernel selection — bpchar and
+    /// nondeterministic collations never select it). The M2 sink's
+    /// single-text admission input: byte equality IS the grouping
+    /// operator's verdict for this kernel, so raw key bytes are canonical
+    /// across workers.
+    pub fn staged_probe_is_text(&self) -> bool {
+        matches!(self.kernel, ProbeKernel::Text { .. })
+    }
+
     /// K2 batched hashing: `TupleHashTableHash` over a staged key lane in one
     /// tight loop, bit-identical per element to [`Self::hash_slot`] over a
     /// slot carrying the same value. Kernel tables only
