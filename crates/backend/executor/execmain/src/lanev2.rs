@@ -4045,6 +4045,11 @@ impl MkFreezeSnap {
     fn build(shape: &::nodeagg::MkShape, entries: &[Vec<u8>]) -> MkFreezeSnap {
         let k = entries.len();
         debug_assert!(k >= 1 && k <= 64);
+        // The snapshot parses a SINGLE raw text tail (`e[pb..]`); multi-tail
+        // canonical images (two-Intern shapes, canon-sink car 1) are
+        // length-prefixed and never reach the freeze (arming excludes them
+        // — the Mk drain cannot produce a two-Intern shape).
+        debug_assert!(shape.n_intern() <= 1, "freeze snapshot is single-tail");
         let full = if k == 64 { u64::MAX } else { (1u64 << k) - 1 };
         let pb = shape.packed_bytes as usize;
         let mut comp_vals: Vec<Option<Vec<i64>>> = Vec::with_capacity(shape.comps.len());
