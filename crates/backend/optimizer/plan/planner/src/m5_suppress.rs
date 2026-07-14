@@ -21,13 +21,16 @@
 //! — so every class below whitelists only shapes the §1.1 walk censuses
 //! admit, and anything unrecognized is uncovered.
 //!
-//! BOOTSTRAP MATRIX (M5-3 prep-lane stand-in): the class table below is a
-//! STATIC derivation from the design's §4.1 retirement matrix (route-to
-//! column at inc-3), mirrored in docs/design/m5-coverage-bootstrap.tsv and
-//! asserted against it by a unit test. The M5-0/1 router lane owns the
-//! LIVING coverage-matrix artifact; swapping this static table for that
-//! artifact is a named follow-up of the router-lane integration, not of
-//! this module's callers (the choke-point seam stays put).
+//! MATRIX OF RECORD (reconciled at m5-integration): the class table below
+//! is pinned against the `probe_key` column of the LIVING coverage matrix,
+//! crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv (the M5-1 router artifact — one file, one
+//! (class × spill/topn/bytes) row-key vocabulary, asserted by the unit
+//! test below; the separate bootstrap TSV is deleted). Coverage stays
+//! BOOTSTRAP-EQUIVALENT at this integration: the same seven probe-keyed
+//! classes route runtime; living-matrix rows the probe cannot key at plan
+//! time carry probe_key "-" and keep Gather regardless of their route_to
+//! flag (the bootstrap-narrowing law — safe false negatives, upgraded per
+//! class in future M5-3 row-flip increments with review + measurements).
 //!
 //! Kill switches / gates (outermost first):
 //!   * `pgrust.parallel_engine` unset/`legacy` (the default) — inert.
@@ -54,8 +57,9 @@ use types_pathnodes::AMFLAG_CBSTORE;
 // The bootstrap coverage classes (matrix rows the probe can key).
 // ---------------------------------------------------------------------------
 
-/// Shape classes the BOOTSTRAP matrix knows. Every variant corresponds to a
-/// row of docs/design/m5-coverage-bootstrap.tsv (asserted by `tests` below);
+/// Shape classes the probe matrix knows. Every variant corresponds to one
+/// or more probe_key rows of crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv (asserted by
+/// `tests` below);
 /// rows carry §2.4 composition qualifiers as documentation — the executor
 /// walk owns their enforcement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -590,42 +594,52 @@ fn tle_by_sortgroupref<'mcx>(
 mod tests {
     use super::*;
 
-    /// The living-matrix discipline (§4.1): the routing table the probe
-    /// consults and the checked-in artifact must not drift apart. The TSV
-    /// is the reviewable/reportable surface; this table is the executable
-    /// one; this test is the tie.
+    /// The living-matrix discipline (§4.1, reconciled at m5-integration):
+    /// the routing table the probe consults and the ONE checked-in living
+    /// artifact (crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv, the M5-1 router file) must
+    /// not drift apart. The TSV is the reviewable/reportable surface; this
+    /// table is the executable one; this test is the tie. A probe key may
+    /// span several matrix rows (CbPlainAggFold keys both cbstore fold
+    /// rows); all rows sharing a key must agree on route_to.
     #[test]
     fn bootstrap_matrix_matches_tsv() {
-        let tsv = include_str!("../../../../../../docs/design/m5-coverage-bootstrap.tsv");
-        let mut tsv_covered: Vec<(String, bool)> = Vec::new();
+        let tsv = include_str!("../../../../../../crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv");
+        let mut keyed: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
         for line in tsv.lines() {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
             let cols: Vec<&str> = line.split('\t').collect();
-            assert!(cols.len() >= 4, "malformed TSV row: {line}");
-            if cols[0] == "class_key" {
-                continue; // header
+            if cols[0] == "class" {
+                continue; // header (schema pinned by the router's test)
             }
-            if cols[1] == "probe" {
-                tsv_covered.push((cols[0].to_string(), cols[2] == "runtime"));
+            assert_eq!(cols.len(), 9, "malformed TSV row: {line}");
+            let (probe_key, route_to) = (cols[7], cols[6]);
+            if probe_key == "-" {
+                continue; // not plan-time keyable: probe returns None, Gather stands
+            }
+            let runtime = route_to == "runtime";
+            if let Some(prev) = keyed.insert(probe_key.to_string(), runtime) {
+                assert_eq!(
+                    prev, runtime,
+                    "rows sharing probe_key {probe_key} disagree on route_to"
+                );
             }
         }
-        // Every probe-keyed TSV row maps onto exactly one code row with the
+        // Every probe key in the TSV maps onto exactly one code row with the
         // same verdict, and vice versa.
         assert_eq!(
-            tsv_covered.len(),
+            keyed.len(),
             BOOTSTRAP_MATRIX.len(),
-            "probe-keyed TSV rows != BOOTSTRAP_MATRIX rows"
+            "distinct TSV probe keys != BOOTSTRAP_MATRIX rows"
         );
         for row in BOOTSTRAP_MATRIX {
             let key = format!("{:?}", row.class);
-            let tsv_row = tsv_covered
-                .iter()
-                .find(|(k, _)| *k == key)
-                .unwrap_or_else(|| panic!("class {key} missing from TSV"));
+            let runtime = *keyed
+                .get(&key)
+                .unwrap_or_else(|| panic!("class {key} missing from TSV probe_key column"));
             assert_eq!(
-                tsv_row.1, row.covered,
+                runtime, row.covered,
                 "route-to drift for {key}: TSV vs BOOTSTRAP_MATRIX"
             );
         }
