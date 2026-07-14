@@ -316,6 +316,7 @@ members = [
     "crates/backend/commands/cluster_seams",
     "crates/backend/access/heap/rewriteheap",
     "crates/backend/commands/vacuum",
+    "crates/backend/commands/vacuum_morsels",
     "crates/backend/commands/vacuumparallel",
     "crates/backend/commands/view",
     "crates/backend/commands/tablespace",
