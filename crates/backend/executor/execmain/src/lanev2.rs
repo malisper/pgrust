@@ -1579,7 +1579,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, estate)?;
+    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, None, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -3087,6 +3087,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     c: AggLaneChoice,
     stage_slot: &mut Option<ExecSlotId>,
     xk: &mut Option<Box<ExprKeyState>>,
+    sink_topn: Option<::nodeagg::sink::SinkTopnSpec>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
@@ -3098,9 +3099,10 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // shares (bare agg hook, Limit-over-agg, sort feed). Success adopts the
     // published emit; every retrieve path drains it through
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
-    // build byte-identically.
+    // build byte-identically. `sink_topn` (m3-sort-b car 1): the sort feed's
+    // resolved combine-phase top-N spec — None from the other chains.
     if c == AggLaneChoice::Fold
-        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), estate)?
+        && runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), sink_topn, estate)?
     {
         return Ok(());
     }
@@ -4409,12 +4411,18 @@ fn sort_feed_if_needed<'mcx>(
             let built = match &mut aps.outer {
                 crate::procnode::PlanStateNode::SeqScan(ss) => {
                     let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                    // m3-sort-b car 1: the sort feed is the one chain that
+                    // knows the bounded-sort consumer — resolve the runtime
+                    // sink's combine-phase top-N spec pre-build (plan-shape
+                    // reads only; declines arm nothing).
+                    let sink_topn = sink_topn_arm(state, &aps.agg);
                     agg_seq_scan_build_if_needed(
                         &mut aps.agg,
                         ss,
                         c,
                         &mut aps.lane_stage_slot,
                         &mut aps.lane_exprkey,
+                        sink_topn,
                         estate,
                     )?;
                     true
@@ -5273,6 +5281,55 @@ fn topn_emit_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(std::env::var("PGRUST_LANE_V2_TOPNEMIT").as_deref(), Ok("0") | Ok("off"))
     })
+}
+
+/// `PGRUST_RUNTIME_AGG_TOPN` kill switch (default ON — the composed
+/// combine-phase top-N only ever engages inside an engaged runtime agg
+/// sink, which has its own arming ladder).
+fn sink_topn_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TOPN").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// m3-sort-b car 1 — arm the RUNTIME agg sink's combine-phase top-N: the
+/// bounded-sort consumer's shape, resolved PRE-BUILD at the sort feed's
+/// engagement seam (plan reads only; `topn_emit_resolve` never touches
+/// build state). Same admission vocabulary as `topn_emit_arm` (single
+/// int8-kernel order column over a raw finalfn-none int8 Aggref) plus the
+/// bound cap (`SINK_TOPN_MAX_BOUND` — the serial lanes' cap agreement).
+/// `None` = not admitted: the sink runs with the plain full drain — never
+/// a refusal, never a plan change.
+fn sink_topn_arm<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    agg: &::nodeagg::AggStateData<'mcx>,
+) -> Option<::nodeagg::sink::SinkTopnSpec> {
+    if !sink_topn_enabled() || !state.bounded {
+        return None;
+    }
+    let bound = u32::try_from(state.bound).ok().filter(|&b| b > 0)?;
+    if bound > ::nodeagg::sink::SINK_TOPN_MAX_BOUND {
+        return None;
+    }
+    let plan = state.plan;
+    // Single-column ORDER BY only: the boundary's tie-break must not need
+    // secondary keys (the topkfin admission, verbatim).
+    if plan.numCols != 1 || plan.sortColIdx.is_empty() {
+        return None;
+    }
+    let oc = plan.sortColIdx[0];
+    if oc < 1 {
+        return None;
+    }
+    let opfn = ::lsyscache::get_opcode(plan.sortOperators[0]).ok()?;
+    let desc = match ::execexpr::CmpOp::for_fn_oid(opfn)? {
+        ::execexpr::CmpOp::Int8Gt => true,
+        ::execexpr::CmpOp::Int8Lt => false,
+        _ => return None,
+    };
+    let transno = ::nodeagg::topn_emit_resolve(agg, oc)?;
+    Some(::nodeagg::sink::SinkTopnSpec { transno, desc, bound })
 }
 
 /// Admission + arming for the emit-side top-N boundary cut (invariant block
@@ -10492,6 +10549,7 @@ pub fn try_own_limit<'mcx>(
                             c,
                             &mut aps.lane_stage_slot,
                             &mut aps.lane_exprkey,
+                            None,
                             estate,
                         )?;
                         true
