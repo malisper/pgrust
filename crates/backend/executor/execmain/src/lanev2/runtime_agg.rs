@@ -120,12 +120,13 @@ struct AggSink {
     /// helpers; byref shapes keep the EmitBuf arms (whose arena copy is what
     /// makes them self-contained).
     adopt_shape: bool,
-    /// Seal-time hand-off: the single sealed Local's table + SEAL partition.
-    /// Set only when the LIVE seal census admits (exactly one sealed Local,
-    /// zero flushed runs, adopt_shape) — every combine claim then no-ops and
-    /// finalize publishes the table wholesale (the ledger's literal "adopt
-    /// its table (pointer hand-off)").
-    adopted: Mutex<Option<(SinkTableHandle, SinkPart)>>,
+    /// Seal-time hand-off: the single sealed Local's whole table (no SEAL
+    /// partition — the leader drains it linearly). Set only when the LIVE
+    /// seal census admits (exactly one sealed Local, zero flushed runs,
+    /// adopt_shape) — every combine claim then no-ops and finalize
+    /// publishes the table wholesale (the ledger's literal "adopt its
+    /// table (pointer hand-off)").
+    adopted: Mutex<Option<SinkTableHandle>>,
     /// Lock-free mirror of `adopted` for the per-claim combine check
     /// (written once at SEAL, which happens-before every combine claim).
     adopted_flag: AtomicBool,
@@ -158,10 +159,11 @@ unsafe impl Sync for AggSink {}
 enum SinkPublished {
     /// Combine-materialized per-bucket EmitBufs (the general arm).
     Emit(Vec<SinkEmitBuf>),
-    /// TRUE TABLE ADOPT: the single sealed Local's whole table + SEAL
-    /// partition — no partition merge ran, no re-insert, no EmitBuf
-    /// materialization; the leader drains the table directly.
-    Table(SinkTableHandle, SinkPart),
+    /// TRUE TABLE ADOPT: the single sealed Local's whole table — no SEAL
+    /// partition, no merge, no re-insert, no EmitBuf materialization; the
+    /// leader drains the table LINEARLY (insertion order = the DOP1
+    /// build's serial-equivalent order).
+    Table(SinkTableHandle),
 }
 
 impl AggSink {
@@ -256,6 +258,26 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
+        // (the sealed-Local census is final: last-worker-out; a widened
+        // engagement forked >=2 Locals and takes the merge arms below).
+        // Exactly one sealed Local, zero flushed runs, all-byval shape:
+        // hand the table to finalize WHOLESALE — no SEAL partition (the
+        // leader drains the table LINEARLY: for a DOP1 build the insertion
+        // order IS the serial build's own order — sequential claims — so
+        // the drain is serial-faithful AND cache-linear), no combine work,
+        // no emit materialization. Memory: the table was charged during
+        // accept; no partition index is ever built.
+        if self.adopt_shape {
+            if let [l] = &mut *locals {
+                if l.runs.is_empty() && l.table.is_some() {
+                    let t = l.table.take().expect("checked Some");
+                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
+                    self.adopted_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
         for l in locals.iter_mut() {
             l.part = l.table.as_ref().map(|t| sink_partition_remainder(t.table()));
             // R3 accounting (m2-integration audit): the SEAL index is
@@ -268,25 +290,6 @@ impl runtime::ParallelSink for AggSink {
                 if l.run_bytes + table_mem > self.budget {
                     self.refuse_budget();
                     return;
-                }
-            }
-        }
-        // TRUE TABLE ADOPT decision (dop1-tax2 inc-1) — LIVE STATE at SEAL:
-        // the sealed-Local census is final here (last-worker-out; a widened
-        // engagement forked ≥2 Locals and takes the merge/pass-through
-        // combine arms). Exactly one sealed Local with zero flushed runs
-        // and an all-byval shape: hand its table + SEAL partition to
-        // finalize wholesale. Every combine claim then no-ops (nothing to
-        // merge, nothing to materialize) and the leader drains the table
-        // directly — forming rows only for boundary-cut survivors. Memory
-        // is already charged (the loop above); nothing new is retained.
-        if self.adopt_shape {
-            if let [l] = locals {
-                if l.runs.is_empty() && l.table.is_some() && l.part.is_some() {
-                    let t = l.table.take().expect("checked Some");
-                    let p = l.part.take().expect("checked Some");
-                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some((t, p));
-                    self.adopted_flag.store(true, Ordering::SeqCst);
                 }
             }
         }
@@ -371,11 +374,9 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         if self.adopted_flag.load(Ordering::SeqCst) {
-            if let Some((t, p)) =
-                self.adopted.lock().unwrap_or_else(|g| g.into_inner()).take()
-            {
+            if let Some(t) = self.adopted.lock().unwrap_or_else(|g| g.into_inner()).take() {
                 *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some(SinkPublished::Table(t, p));
+                    Some(SinkPublished::Table(t));
                 return;
             }
             // Unreachable by construction (flag implies content); fall
@@ -1591,17 +1592,12 @@ fn engage_ceremony<'mcx>(
                     lane_trace(&format!("runtime-agg: complete, groups={rows}"));
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts);
                 }
-                SinkPublished::Table(table, part) => {
-                    let rows = part.idx.len() + usize::from(part.has_null);
+                SinkPublished::Table(table) => {
+                    let rows = table.table().nrows();
                     lane_trace(&format!(
                         "runtime-agg: complete (table adopt), groups={rows}"
                     ));
-                    ::nodeagg::sink::agg_sink_adopt_table(
-                        agg,
-                        table,
-                        part,
-                        sink.emit.clone(),
-                    );
+                    ::nodeagg::sink::agg_sink_adopt_table(agg, table, sink.emit.clone());
                 }
             }
             Ok(true)
