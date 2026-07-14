@@ -163,6 +163,15 @@ enum DriveMode {
     /// `fold_batch` (CountStar reads no lanes), fallback/scalar-qual rows
     /// through the per-row program. Graceful when no SoA/bitmap staged.
     Census,
+    /// DIRECT MORSEL DRIVE (rowdrive car 1): bare heap count(*) — the
+    /// serial fused storeless batch advance (`exec_agg_batched`'s
+    /// count-star arm: one checked add per page batch of visible rows,
+    /// zero per-row work) run UNCHANGED per block-range claim. No staging,
+    /// no fold plan reads, no sink: the per-worker partial is the plain
+    /// count transvalue the ordinary partial export/combine already
+    /// carries. Admission is the census gate's qual-required carve-out
+    /// (heap only, above a block floor, PGRUST_RUNTIME_ROWDRIVE kill).
+    StorelessCount,
 }
 
 struct WorkerExec {
@@ -248,6 +257,9 @@ impl RuntimeScanShared {
                             super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
                         }
                         DriveMode::Census => census_drain(&mut aps.agg, ss, estate)?,
+                        DriveMode::StorelessCount => {
+                            storeless_count_drain(&mut aps.agg, ss, estate)?
+                        }
                     }
                     // Cumulative partial export (in place): the worker's
                     // LAST morsel's export — which precedes its settle, and
@@ -683,7 +695,7 @@ fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                             "runtime scan worker fold plan diverged from the leader's",
                         )));
                     }
-                    let mode = drive_mode(&aps.agg);
+                    let mode = drive_mode(&aps.agg, ss);
                     match mode {
                         DriveMode::Fold => {
                             // The serial fold feed's arm/init half, once per
@@ -718,6 +730,20 @@ fn build_worker_exec_inner(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
                                     stitch: true,
                                 },
                             )?;
+                        }
+                        DriveMode::StorelessCount => {
+                            // Direct morsel drive: NO staging at all — the
+                            // drain advances the count once per page batch
+                            // of visible rows; nothing reads columns. The
+                            // leader proved the bare-count shape on its own
+                            // node (same plan), so a diverged worker shape
+                            // is an error, never a wrong answer.
+                            if !::nodeagg::agg_plain_count_star_shape(&aps.agg) {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime scan worker count-star shape diverged from the leader's",
+                                )));
+                            }
                         }
                     }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
@@ -815,11 +841,24 @@ fn ensure_hooks_registered() {
 }
 
 /// Fold when the plan reads lane columns (the serial Fold choice); the
-/// census shape (no columns) takes the per-row drain. Deterministic from
-/// the classified plan, so leader and workers always agree.
-fn drive_mode(agg: &::nodeagg::AggStateData<'_>) -> DriveMode {
+/// census shape (no columns) takes the census drain with a qual, the
+/// direct storeless drive without one. Deterministic from the classified
+/// plan + the plan's scan qual, so leader and workers always agree.
+fn drive_mode(
+    agg: &::nodeagg::AggStateData<'_>,
+    ss: &::nodeseqscan::SeqScanState<'_>,
+) -> DriveMode {
     match ::nodeagg::agg_lanefold_plan(agg) {
-        Some(plan) if plan.cols.is_empty() => DriveMode::Census,
+        Some(plan) if plan.cols.is_empty() => {
+            // Qual-less census = the direct storeless drive (admission
+            // reaches it only through the rowdrive carve-out: bare heap
+            // count(*)); a qual'd census counts its selection bitmap.
+            if ss.ss.qual.is_none() {
+                DriveMode::StorelessCount
+            } else {
+                DriveMode::Census
+            }
+        }
         _ => DriveMode::Fold,
     }
 }
@@ -912,6 +951,37 @@ fn census_drain<'mcx>(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// The DIRECT MORSEL DRIVE drain (rowdrive car 1): bare heap count(*) over
+/// one block-range claim — the serial fused storeless inner loop UNCHANGED:
+/// `seq_scan_next_pagebatch` (page batch of VISIBLE tuples;
+/// `page_collect_tuples` under the task-bound leader snapshot, exactly the
+/// serial drive's visibility work) + one checked count advance per batch
+/// (`exec_agg_batched`'s storeless count-star arm, refused-advance per-row
+/// fallback included). No staging, no fold plan reads, no per-row work.
+/// Byte-identity: a count's transvalue composes by addition over any claim
+/// partition (order-insensitive-exact); visibility is per tuple, identical
+/// per page regardless of which worker visits it.
+fn storeless_count_drain<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(::nodeagg::agg_plain_count_star_shape(agg));
+    debug_assert!(ss.ss.qual.is_none());
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        if n == 0 {
+            // End of claim: drop the scan slot's pin (fold drain parity).
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        ::nodeagg::agg_plain_count_star_accept_batch(agg, estate, n)?;
     }
     Ok(())
 }
@@ -1084,6 +1154,31 @@ pub(super) fn min_granules() -> u64 {
     })
 }
 
+/// Direct-morsel-drive arm kill (rowdrive car 1): PGRUST_RUNTIME_ROWDRIVE=0
+/// disables the storeless-count carve-out; the fold/census arms are
+/// untouched. Layered UNDER PGRUST_RUNTIME + the pool GUC like every arm
+/// switch.
+fn rowdrive_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ROWDRIVE").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// Engagement floor for the direct storeless-count drive, in heap blocks.
+/// The serial fused advance is O(pages) at memory bandwidth — a small heap
+/// finishes before the gang is worth waking. Default 8,192 blocks (64MB);
+/// the e2e tranche forces it down to exercise engagement.
+fn rowdrive_min_blocks() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ROWDRIVE_MIN_BLOCKS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(8192)
+    })
+}
+
 /// The runtime scan arm. `None` = not engaged (caller falls through to the
 /// serial fold/per-row arms, byte-identically — nothing was consumed).
 /// `Some(row)` = the node's one finalized result row (agg_done set).
@@ -1114,11 +1209,24 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // cbstore's bare count(*) is the Meta/footer arm's, heap's is the fused
     // storeless batch advance's (O(pages) serially — a per-row parallel
     // drive would lose), and a qual-less census scan would stage nothing
-    // for the per-row drive either way.
+    // for the per-row drive either way. CARVE-OUT (rowdrive car 1, the
+    // direct morsel drive): bare heap count(*) — the ONE storeless-count
+    // transition shape whose serial O(pages) inner loop runs unchanged per
+    // block-range claim (DriveMode::StorelessCount) — engages above a block
+    // floor. Fail-closed: anything short of the exact shape refuses here as
+    // before (the serial fused drive owns it).
     if ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
         && ss.ss.qual.is_none()
     {
-        return Ok(None);
+        if is_cb
+            || !rowdrive_enabled()
+            || ss.ss.ps_ProjInfo.is_some()
+            || !::nodeagg::agg_plain_count_star_shape(agg)
+        {
+            return Ok(None);
+        }
+        // The block floor rides the geometry probe below (the source's
+        // granule = one heap block).
     }
     // Fold-mode shapes must have an armable fold prefix on this scan:
     // cbstore proved it at decide time (only the Fold choice reaches here
@@ -1128,7 +1236,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // — free for an already-armed cbstore scan, decisive for heap. The
     // worker-side arm re-verifies (divergence is an error, not a wrong
     // answer).
-    if drive_mode(agg) == DriveMode::Fold
+    if drive_mode(agg, ss) == DriveMode::Fold
         && (ss.ss.ps_ProjInfo.is_some() || !super::probe_arm_fold_prefix(agg, ss, estate)?)
     {
         return Ok(None);
@@ -1209,6 +1317,16 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
         return Ok(None);
+    }
+    // Direct storeless-count drive: its own (higher) floor — the serial
+    // fused advance is O(pages); parallel pays only on a big heap.
+    if drive_mode(agg, ss) == DriveMode::StorelessCount {
+        if total_granules < rowdrive_min_blocks() {
+            return Ok(None);
+        }
+        // Observability (e2e tranche): a following "engaged" line at this
+        // query is a DIRECT-DRIVE engagement.
+        lane_trace(&format!("runtime-scan: rowdrive admit blocks={total_granules}"));
     }
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
