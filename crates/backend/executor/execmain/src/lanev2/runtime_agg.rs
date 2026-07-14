@@ -631,8 +631,10 @@ impl SubRouter {
 }
 
 /// Stream one spilled partition in ROW-ALIGNED chunks (fixed-width records;
-/// a torn tail fails closed).
-fn stream_part_rows(
+/// a torn tail fails closed). `pub(super)`: the runtime-distinct combine
+/// split (inc-3b) streams its fixed-width value records through the same
+/// discipline.
+pub(super) fn stream_part_rows(
     file: &::spillset::SpillFile,
     part: u32,
     row_bytes: usize,

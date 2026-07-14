@@ -4822,9 +4822,9 @@ pub use pardistinct::{
     pd_adopt_registry, pd_bucket_precount, pd_clear_thread_registry, pd_concat_buckets,
     pd_empty_grouped_table, pd_export_registry, pd_merge_bucket, pd_merge_bucket_refs,
     pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_registry_get, pd_registry_insert,
-    pd_registry_nonempty, pd_registry_remove, pd_spill_record_width, pd_table_from_spill,
-    PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff, PdMerged, PdSinkLocal, PdSinkMerged,
-    PdSpec, PD_SINK_GROUP_PARTS,
+    pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_record_width,
+    pd_table_from_spill, PdBucketMerger, PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff,
+    PdMerged, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
