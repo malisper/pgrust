@@ -25,12 +25,16 @@
 //! is pinned against the `probe_key` column of the LIVING coverage matrix,
 //! crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv (the M5-1 router artifact — one file, one
 //! (class × spill/topn/bytes) row-key vocabulary, asserted by the unit
-//! test below; the separate bootstrap TSV is deleted). Coverage stays
-//! BOOTSTRAP-EQUIVALENT at this integration: the same seven probe-keyed
-//! classes route runtime; living-matrix rows the probe cannot key at plan
+//! test below; the separate bootstrap TSV is deleted). ROW-FLIP TRANCHE 1
+//! (m5-integration-r2): the original seven bootstrap classes plus TWO
+//! flipped rows — CbTopnBoundedIntKeys (bounded top-N, sort arm) and
+//! CbHashJoinPlainAgg (plain agg over one two-cbstore-rel join, hashjoin
+//! arm) — route runtime; living-matrix rows the probe cannot key at plan
 //! time carry probe_key "-" and keep Gather regardless of their route_to
 //! flag (the bootstrap-narrowing law — safe false negatives, upgraded per
 //! class in future M5-3 row-flip increments with review + measurements).
+//! Per-class measured comparisons: scripts/m5-rowflip-measure-e2e.sh (the
+//! §4.4 vehicle; ledger rows in the lane notes).
 //!
 //! Kill switches / gates (outermost first):
 //!   * `pgrust.parallel_engine` unset/`legacy` (the default) — inert.
@@ -90,6 +94,22 @@ pub enum CoverClass {
     /// plain heap rel, no quals, int-family args (text-first prefix and
     /// min(text) are walk refusals, so the probe never keys them).
     HeapCmpFoldPrefix,
+    /// M5-3 row flip 1 (m5-integration-r2): bounded top-N over cbstore
+    /// (sort arm shape a) — ORDER BY int-family Var keys + LIMIT without
+    /// OFFSET/WITH TIES, all-Var tlist. Full sort (no LIMIT) stays the
+    /// uncovered fullsort-shape-b row.
+    CbTopnBoundedIntKeys,
+    /// M5-3 row flip 2 (m5-integration-r2): plain (ungrouped) whitelisted
+    /// aggregation over ONE explicit two-cbstore-relation join (the
+    /// hashjoin arm's agg-over-HashJoin shape): single JoinExpr of a
+    /// phase-1/right family, >=1 hashjoinable int-family equi clause,
+    /// NEITHER rel indexed (index paths could cost a serial merge/NL plan
+    /// the walk refuses — the strictly-narrower guard against the
+    /// serial-instead-of-legacy false positive), both sides estimated
+    /// nbatch==1 (the flipped row is hashjoin-nbatch1; the m35 spill row
+    /// keeps its own future flip). Multi-build-side joins (2+ JoinExprs)
+    /// classify uncovered — the m5p1-flagged SQL admission gap.
+    CbHashJoinPlainAgg,
 }
 
 /// One bootstrap matrix row: class key, covered verdict, §2.4 qualifiers.
@@ -144,6 +164,16 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
         class: CoverClass::HeapCmpFoldPrefix,
         covered: true,
         qualifiers: "no quals; int-family args; excludes bare count(*) (own row), text prefixes",
+    },
+    MatrixRow {
+        class: CoverClass::CbTopnBoundedIntKeys,
+        covered: true,
+        qualifiers: "int-family keys, single+multi (inc-5); LIMIT no OFFSET; relaxed tie-order default (probe-budget guard); full sort NOT keyed",
+    },
+    MatrixRow {
+        class: CoverClass::CbHashJoinPlainAgg,
+        covered: true,
+        qualifiers: "one JoinExpr, phase-1+right families; hashable int equi key; unindexed rels only; both sides nbatch==1 estimate (spill row unflipped); multi-build-side = uncovered (m5p1 gap)",
     },
 ];
 
@@ -317,10 +347,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    // Exactly one plain-relation FROM item (planagg's jointree walk).
+    // Exactly one FROM item: a plain relation (the single-rel classes) or
+    // ONE explicit JoinExpr (row flip 2, CbHashJoinPlainAgg). A flat
+    // comma-join (`FROM a, b WHERE ...`, fromlist len 2) and nested join
+    // trees (multi-build-side — the m5p1 SQL admission gap) classify
+    // uncovered by construction.
     let Some(top) = parse.jointree else { return Ok(false) };
     if top.fromlist.len() != 1 {
         return Ok(false);
+    }
+    if let Some(je) = top.fromlist.nth(0).as_join_expr() {
+        return classify_join_covered(run, parse, je);
     }
     let Some(rtr) = top.fromlist.nth(0).as_range_tbl_ref() else {
         return Ok(false);
@@ -361,8 +398,34 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
 
     // --- Aggregate shapes ----------------------------------------------------
     if !parse.hasAggs {
-        // Bare scans / ORDER BY / LIMIT shapes: bounded top-N and full
-        // sort are uncovered bootstrap rows (route-to legacy at inc-3).
+        // Bounded top-N over cbstore (row flip 1, CbTopnBoundedIntKeys):
+        // ORDER BY int-family Var keys + LIMIT, no OFFSET (WITH TIES is
+        // prefiltered above), every tlist entry a plain Var on the rel
+        // (the sort arm's emit face; junk sort-key entries are Vars too).
+        // Full sort (no LIMIT) stays the uncovered fullsort-shape-b row;
+        // heap rels stay uncovered (the arm is cbstore-fusible only).
+        if is_cb
+            && !parse.sortClause.is_nil()
+            && parse.limitCount.is_some()
+            && parse.limitOffset.is_none()
+        {
+            for sc_node in &parse.sortClause {
+                let Some(sc) = sc_node.as_sort_group_clause() else { return Ok(false) };
+                let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+                    return Ok(false);
+                };
+                if !is_covered_key_var(tle.expr, rti, is_int_family) {
+                    return Ok(false);
+                }
+            }
+            for tle_node in &parse.targetList {
+                let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+                if key_var(tle.expr, rti).is_none() {
+                    return Ok(false);
+                }
+            }
+            return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0);
+        }
         return Ok(false);
     }
 
@@ -483,6 +546,141 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     finish(run, class, rte.relid, ngroups)
 }
 
+/// Row flip 2 (CbHashJoinPlainAgg): plain whitelisted aggregation over one
+/// explicit two-cbstore-relation join. Strictly narrower than the
+/// runtime_hashjoin walk (probe ⊂ walk, risk P1) PLUS two planner-choice
+/// guards the walk cannot express — the probe must also be confident the
+/// SERIAL plan will BE an agg-over-HashJoin-over-two-SeqScans:
+///   * neither rel carries an index (no serial merge/NL-with-inner-index
+///     plan for the costing to prefer; unindexed equi-joins cost to hash);
+///   * >=1 hashjoinable int-family equi clause in the JOIN quals.
+/// Every early `false` keeps Gather exactly as today.
+fn classify_join_covered(
+    run: &mut PlannerRun<'_>,
+    parse: &Query<'_>,
+    je: &types_nodes::primnodes::JoinExpr<'_>,
+) -> PgResult<bool> {
+    use types_nodes::JoinType;
+    // Plain one-row aggregation only (the arm drives a plain agg sink):
+    // no grouping, no DISTINCT, no ORDER BY/LIMIT decoration.
+    if !parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.distinctClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some()
+    {
+        return Ok(false);
+    }
+    // Phase-1 + right join families the walk admits (semi/anti arrive via
+    // sublinks, prefiltered upstream).
+    if !matches!(
+        je.jointype,
+        JoinType::JOIN_INNER | JoinType::JOIN_LEFT | JoinType::JOIN_RIGHT | JoinType::JOIN_FULL
+    ) {
+        return Ok(false);
+    }
+    // Both arms plain cbstore relations (no nested joins: the
+    // multi-build-side SQL shapes are the m5p1 admission gap, uncovered).
+    let mut sides = [0usize; 2];
+    for (i, arg) in [je.larg, je.rarg].into_iter().enumerate() {
+        let Some(rtr) = arg.as_range_tbl_ref() else { return Ok(false) };
+        sides[i] = rtr.rtindex as usize;
+    }
+    let [rti_l, rti_r] = sides;
+    let mut relids = [0u32; 2];
+    for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
+        let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
+            return Ok(false);
+        };
+        if rte.rtekind != RTEKind::RTE_RELATION
+            || rte.relkind != types_rel::RELKIND_RELATION
+            || rte.inh
+            || rte.tablesample.is_some()
+        {
+            return Ok(false);
+        }
+        relids[i] = rte.relid;
+        let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
+            return Ok(false);
+        };
+        let rel = run.root.rel(rel_id);
+        if rel.amflags & AMFLAG_CBSTORE == 0 {
+            return Ok(false);
+        }
+        // Unindexed-only guard (see the fn doc): an index on either side
+        // lets the costing pick serial merge/NL shapes the walk refuses.
+        if !rel.indexlist.is_empty() {
+            return Ok(false);
+        }
+        // nbatch==1 on this side's estimate (whichever side the planner
+        // hashes must fit): the flipped row is hashjoin-nbatch1; larger
+        // builds keep Gather until the spill row's own flip.
+        let Some(pt_id) = rel.pathtarget_id else { return Ok(false) };
+        let width = run.root.pathtarget(pt_id).width;
+        let dop = guc_tables::runtime_pool::runtime_dop();
+        let (_, nbatch, _, _) = ::nodehash::exec_choose_hash_table_size_full(
+            rel.rows.max(1.0),
+            width,
+            false, // useskew: C PHJ parity
+            true,  // try_combined_hash_mem: pooled participant budget
+            dop.max(1),
+        );
+        if nbatch > 1 {
+            return Ok(false);
+        }
+    }
+    // >=1 hashjoinable int-family equi clause between the two sides in the
+    // JOIN quals (top-level AND terms only).
+    let mut has_equi = false;
+    let quals: Vec<Node<'_>> = match je.quals {
+        None => return Ok(false),
+        Some(q) => match q.as_bool_expr() {
+            Some(be)
+                if matches!(be.boolop, types_nodes::primnodes::BoolExprType::AND_EXPR) =>
+            {
+                be.args.iter().collect()
+            }
+            _ => vec![q],
+        },
+    };
+    for qual in quals {
+        let Some(op) = qual.as_op_expr() else { continue };
+        if op.args.len() != 2 {
+            continue;
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let pair = key_var(a, rti_l)
+            .zip(key_var(b, rti_r))
+            .or_else(|| key_var(a, rti_r).zip(key_var(b, rti_l)));
+        let Some((va, vb)) = pair else { continue };
+        if is_int_family(va.vartype)
+            && is_int_family(vb.vartype)
+            && lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            has_equi = true;
+            break;
+        }
+    }
+    if !has_equi {
+        return Ok(false);
+    }
+    // Emit discipline: every non-junk tlist entry is a whitelisted plain
+    // aggregate whose args live on either joined rel (count(*) included).
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if !is_whitelisted_agg_2rti(tle.expr, rti_l, rti_r, PLAIN_FOLD_AGGS) {
+            return Ok(false);
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return Ok(false);
+    }
+    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0)
+}
+
 /// Matrix consult + optional trace, shared tail.
 fn finish(
     run: &mut PlannerRun<'_>,
@@ -521,6 +719,16 @@ fn is_covered_key_var(expr: Node<'_>, rti: usize, type_ok: impl Fn(u32) -> bool)
 fn is_whitelisted_agg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
     let Some(agg) = expr.as_aggref() else { return false };
     aggref_plain(agg, rti) && whitelist.contains(&agg.aggfnoid)
+}
+
+/// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
+/// row flip): the aggregate's single Var arg may live on either joined rel.
+fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist: &[u32]) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if !whitelist.contains(&agg.aggfnoid) {
+        return false;
+    }
+    aggref_plain(agg, rti_l) || aggref_plain(agg, rti_r)
 }
 
 fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
