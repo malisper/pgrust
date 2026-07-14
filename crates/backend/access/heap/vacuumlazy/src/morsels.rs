@@ -921,7 +921,15 @@ fn worker_drive(shared: &Arc<VacScanShared>) -> PgResult<()> {
         shared.ring_nbuffers * (::types_core::BLCKSZ as i32 / 1024),
     );
     // Worker-derived vistest, AFTER the leader's OldestXmin capture — every
-    // removal decision within C's envelope (doc §5.1).
+    // removal decision within C's envelope (doc §5.1). GlobalVisTestFor
+    // returns a handle to THREAD-LOCAL cached horizons, which on a reused
+    // helper thread are as old as that thread's last refresh — the round-6
+    // battery caught stale worker horizons classifying freshly-deleted
+    // tuples RECENTLY_DEAD (unremoved; all_visible false; one-pass VM bits
+    // never set). Refresh the horizons ON THIS THREAD first, exactly the
+    // computation the leader's own capture ran (GetOldestNonRemovable ->
+    // ComputeXidHorizons), so the derived state is >= the leader's.
+    let _ = procarray_seams::get_oldest_non_removable_transaction_id::call(&rel)?;
     let vistest = procarray_seams::global_vis_test_for::call(&rel);
 
     let mut wcx = VacWorkerCx {
