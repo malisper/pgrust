@@ -1639,6 +1639,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
                             ss,
                             xk.as_deref(),
                             None,
+                            None,
                             estate,
                         )?);
                 if engaged {
@@ -1671,7 +1672,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, None, estate)?;
+    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, None, None, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -2136,7 +2137,7 @@ fn agg_hash_build_fold_feed<'mcx>(
                     .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
                 if all_lane {
                     if scan_mk_batch(
-                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, estate,
+                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, None, estate,
                     )? {
                         // As the K2 arm: the mk fold bypassed the memo.
                         mm_scratch.invalidate();
@@ -3304,6 +3305,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     stage_slot: &mut Option<ExecSlotId>,
     xk: &mut Option<Box<ExprKeyState>>,
     sink_topn: Option<::nodeagg::sink::SinkTopnSpec>,
+    sink_freeze: Option<u32>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
@@ -3317,8 +3319,17 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
     // build byte-identically. `sink_topn` (m3-sort-b car 1): the sort feed's
     // resolved combine-phase top-N spec — None from the other chains.
+    // `sink_freeze` (band-2a q18): the Limit-over-agg chain's LIMIT-k-no-
+    // ORDER bound (offset+count) — None from the other chains.
     if c == AggLaneChoice::Fold {
-        if runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), sink_topn, estate)? {
+        if runtime_agg::try_engage_hashagg_runtime(
+            agg,
+            ss,
+            xk.as_deref(),
+            sink_topn,
+            sink_freeze,
+            estate,
+        )? {
             return Ok(());
         }
     } else if sink_topn.is_some() {
@@ -3999,6 +4010,87 @@ struct MkScratch {
     // (scan-stable gepoch, never cleared within one scan).
     epoch: Option<(bool, u64)>,
     code_ids: Vec<Option<u32>>,
+    /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
+    /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
+    /// cache. `None` until this worker observes FROZEN.
+    fz: Option<MkFreezeSnap>,
+    /// Per-survivor candidate-mask scratch (reused across batches).
+    fz_mask: Vec<u64>,
+}
+
+/// One worker's parsed view of the frozen canonical set ([`MkScratch::fz`]).
+/// Entry order matches the shared set; masks are bit-per-entry (bound <= 64
+/// by [`::nodeagg::sink::SINK_FREEZE_MAX_BOUND`]).
+struct MkFreezeSnap {
+    /// All-entries mask: (1 << k) - 1 (k = 64 => u64::MAX).
+    full: u64,
+    /// Per Int component (aligned with `shape.comps`; None for the Intern
+    /// component): each entry's canonical (sign-extended) value.
+    comp_vals: Vec<Option<Vec<i64>>>,
+    /// The Intern component's text payload per entry (empty when the shape
+    /// has no Intern component — word-keyed shapes).
+    texts: Vec<Vec<u8>>,
+    has_intern: bool,
+    /// Per-epoch dict code -> member mask (the code_ids identity discipline,
+    /// retargeted to the text bytes — intern-table resets do NOT invalidate
+    /// it, so it rolls on its own identity).
+    code_epoch: Option<(bool, u64)>,
+    code_mask: Vec<Option<u64>>,
+}
+
+impl MkFreezeSnap {
+    /// Parse the shared canonical entries against the armed shape. Entry
+    /// encoding = the seal/flush canonical bytes: `packed_bytes` LE image
+    /// bytes (Intern id bytes zeroed) + the text tail (Intern shapes only).
+    fn build(shape: &::nodeagg::MkShape, entries: &[Vec<u8>]) -> MkFreezeSnap {
+        let k = entries.len();
+        debug_assert!(k >= 1 && k <= 64);
+        let full = if k == 64 { u64::MAX } else { (1u64 << k) - 1 };
+        let pb = shape.packed_bytes as usize;
+        let mut comp_vals: Vec<Option<Vec<i64>>> = Vec::with_capacity(shape.comps.len());
+        for comp in &shape.comps {
+            match comp.kind {
+                ::nodeagg::MkCompKind::Int { width } => {
+                    let mut vals = Vec::with_capacity(k);
+                    for e in entries {
+                        debug_assert!(e.len() >= pb);
+                        let mut w = [0u8; 8];
+                        let off = comp.off as usize;
+                        w[..width as usize].copy_from_slice(&e[off..off + width as usize]);
+                        let raw = u64::from_le_bytes(w);
+                        // Sign-extend at the component width (canonical i64).
+                        let shift = 64 - (width as u32) * 8;
+                        vals.push(((raw << shift) as i64) >> shift);
+                    }
+                    comp_vals.push(Some(vals));
+                }
+                _ => comp_vals.push(None),
+            }
+        }
+        let has_intern = shape.intern_comp().is_some();
+        let texts = entries.iter().map(|e| e[pb..].to_vec()).collect();
+        MkFreezeSnap {
+            full,
+            comp_vals,
+            texts,
+            has_intern,
+            code_epoch: None,
+            code_mask: Vec::new(),
+        }
+    }
+
+    /// The member mask for one text payload (linear over <= 64 entries;
+    /// called once per (epoch, code) through the cache, or per row on raw
+    /// windows).
+    fn text_mask(&self, bytes: &[u8]) -> u64 {
+        let mut m = 0u64;
+        for (e, t) in self.texts.iter().enumerate() {
+            if t.as_slice() == bytes {
+                m |= 1u64 << e;
+            }
+        }
+        m
+    }
 }
 
 /// SINGLE-TEXT sink admission (M2 C2 car, sink-only — the serial lane's
@@ -4236,6 +4328,7 @@ fn scan_mk_batch<'mcx>(
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
+    freeze: Option<&::nodeagg::sink::SinkFreeze>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
@@ -4288,8 +4381,142 @@ fn scan_mk_batch<'mcx>(
         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
         return Ok(false);
     }
-    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
+    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids, fz, fz_mask } = mks;
     scan_collect_survivors(ss, estate, n, rows)?;
+    // FREEZE FILTER (band-2a q18, LIMIT-k-no-ORDER): once FROZEN, drop
+    // survivors whose key is not in the frozen set BEFORE any interning or
+    // packing — post-freeze per-row work collapses to a per-(epoch, code)
+    // mask lookup + tiny int compares. Component-major like the pack loop;
+    // a row's final nonzero mask == full key equality with some entry.
+    if let Some(fzc) = freeze {
+        debug_assert!(!mk.shape.nullable, "freeze arming excludes nullable shapes");
+        if fz.is_none() {
+            if let Some(entries) = fzc.entries() {
+                *fz = Some(MkFreezeSnap::build(&mk.shape, entries));
+            }
+        }
+        if let Some(snap) = fz.as_mut() {
+            let n_before = rows.len();
+            fz_mask.clear();
+            fz_mask.resize(rows.len(), snap.full);
+            for (j, comp) in mk.shape.comps.iter().enumerate() {
+                let att = comp.att as usize;
+                match comp.kind {
+                    ::nodeagg::MkCompKind::Int { width } => {
+                        let vals =
+                            snap.comp_vals[j].as_ref().expect("Int comp carries entry values");
+                        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .expect("multi-key feed requires the armed SoA");
+                        let values = soa.col_values(att);
+                        for (k, &i) in rows.iter().enumerate() {
+                            let m = fz_mask[k];
+                            if m == 0 {
+                                continue;
+                            }
+                            let v = match width {
+                                2 => values[i as usize].as_i16() as i64,
+                                4 => values[i as usize].as_i32() as i64,
+                                _ => values[i as usize].as_i64(),
+                            };
+                            let mut keep = 0u64;
+                            let mut mm = m;
+                            while mm != 0 {
+                                let e = mm.trailing_zeros() as usize;
+                                if vals[e] == v {
+                                    keep |= 1u64 << e;
+                                }
+                                mm &= mm - 1;
+                            }
+                            fz_mask[k] = keep;
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Intern => {
+                        let mcx = estate.es_query_cxt;
+                        let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .and_then(|soa| soa.dict_lane(att));
+                        match lane {
+                            Some(lane) => {
+                                // The code_ids identity discipline retargeted
+                                // to member masks (text-derived — intern
+                                // resets never invalidate it).
+                                let ndict = lane.table.ndict as usize;
+                                let global = lane.table.has_stitch();
+                                let (ident, size) = if global {
+                                    ((true, lane.table.gepoch), lane.table.gndv as usize)
+                                } else {
+                                    ((false, lane.table.epoch), ndict)
+                                };
+                                if snap.code_epoch != Some(ident) {
+                                    snap.code_epoch = Some(ident);
+                                    snap.code_mask.clear();
+                                    snap.code_mask.resize(size, None);
+                                }
+                                for (k, &i) in rows.iter().enumerate() {
+                                    if fz_mask[k] == 0 {
+                                        continue;
+                                    }
+                                    let local = lane.code(i as usize);
+                                    let code = if global {
+                                        lane.table.global_code(local) as usize
+                                    } else {
+                                        local as usize
+                                    };
+                                    let cm = match snap.code_mask[code] {
+                                        Some(m) => m,
+                                        None => {
+                                            let d = lane.table.datum(local);
+                                            // SAFETY: as the pack loop's dict
+                                            // branch — live non-null text
+                                            // varlena for the staged window.
+                                            let v = unsafe {
+                                                ::types_fmgr::datum_varlena_packed(d, mcx)
+                                            }?;
+                                            let m = snap.text_mask(v.data());
+                                            snap.code_mask[code] = Some(m);
+                                            m
+                                        }
+                                    };
+                                    fz_mask[k] &= cm;
+                                }
+                            }
+                            None => {
+                                // Raw-answered window: per-row text compare
+                                // (correct, colder — the dict path owns the
+                                // hot shape).
+                                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                                    .expect("multi-key feed requires the armed SoA");
+                                let values = soa.col_values(att);
+                                for (k, &i) in rows.iter().enumerate() {
+                                    if fz_mask[k] == 0 {
+                                        continue;
+                                    }
+                                    let d = values[i as usize];
+                                    // SAFETY: staged non-null live text
+                                    // varlena (as the pack loop's raw branch).
+                                    let v =
+                                        unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                                    fz_mask[k] &= snap.text_mask(v.data());
+                                }
+                            }
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Numeric { .. } => {
+                        unreachable!("freeze arming excludes Numeric components")
+                    }
+                }
+            }
+            // Compact the survivor list to members (order-preserving).
+            let mut w = 0usize;
+            for k in 0..rows.len() {
+                if fz_mask[k] != 0 {
+                    rows[w] = rows[k];
+                    w += 1;
+                }
+            }
+            rows.truncate(w);
+            fzc.note_dropped((n_before - w) as u64);
+        }
+    }
     // Pack pre-pass, component-major over the survivors (each component
     // lane streams once), into the REUSED u128 accumulator.
     packbuf.clear();
@@ -4441,6 +4668,34 @@ fn scan_mk_batch<'mcx>(
     // the plan is unguarded; each pergroup was installed by the compact
     // probe within this batch.
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
+    // table reaches the bound wins the CAS and publishes its first `bound`
+    // groups' canonical keys. Correct from ANY table state — nothing was
+    // dropped anywhere before FROZEN, so every present group is exact-so-far
+    // and set members keep counting everywhere after.
+    if let Some(fzc) = freeze {
+        if !fzc.frozen()
+            && ::nodeagg::agg_hash_compact_ngroups(agg)
+                .is_some_and(|ng| ng >= fzc.bound() as usize)
+            && fzc.try_begin_install()
+        {
+            match ::nodeagg::sink::sink_freeze_extract(agg, fzc.bound()) {
+                Some(entries) => {
+                    lane_trace(&format!(
+                        "runtime-agg freeze: installed (bound={})",
+                        fzc.bound()
+                    ));
+                    fzc.publish(entries);
+                }
+                None => {
+                    // Fail OPEN: no drops ever happen; the engagement drains
+                    // fully (correct, just unoptimized).
+                    lane_trace("runtime-agg freeze: install extraction failed — disabled");
+                    fzc.disable();
+                }
+            }
+        }
+    }
     Ok(true)
 }
 
@@ -4768,6 +5023,7 @@ fn sort_feed_if_needed<'mcx>(
                         &mut aps.lane_stage_slot,
                         &mut aps.lane_exprkey,
                         sink_topn,
+                        None,
                         estate,
                     )?;
                     true
@@ -11387,6 +11643,19 @@ pub fn try_own_limit<'mcx>(
                 let built = match &mut aps.outer {
                     crate::procnode::PlanStateNode::SeqScan(ss) => {
                         let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                        // band-2a q18: the Limit-over-Agg chain is the one
+                        // chain that knows the bare-LIMIT bound — derive the
+                        // group-admission freeze bound (offset + count,
+                        // recomputed by the prologue above). There is no
+                        // Sort between this Limit and the Agg by
+                        // construction, so ANY `bound` groups with exact
+                        // aggregates satisfy the query (the ratified q18
+                        // membership class); the sink's arming gates
+                        // (Mk-drain shape, bound ceiling, kill switch)
+                        // decline everything else, and a decline keeps
+                        // today's full drain byte-identically.
+                        let sink_freeze = ::nodelimit::lane_limit_total_bound(&l.state)
+                            .and_then(|b| u32::try_from(b).ok());
                         agg_seq_scan_build_if_needed(
                             &mut aps.agg,
                             ss,
@@ -11394,6 +11663,7 @@ pub fn try_own_limit<'mcx>(
                             &mut aps.lane_stage_slot,
                             &mut aps.lane_exprkey,
                             None,
+                            sink_freeze,
                             estate,
                         )?;
                         true
