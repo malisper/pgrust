@@ -852,20 +852,76 @@ struct PdParCtx<'a> {
 unsafe impl Sync for PdParCtx<'_> {}
 
 fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'static> {
-    let nkeys = spec.nkeys();
-    let nvocab = spec.vocab.len();
-    let nsets = spec.sets.len();
-    let mut out = PdMerged {
-        ngroups: 0,
-        keys: Vec::new(),
-        keynulls: Vec::new(),
-        states: Vec::new(),
-        dsets: Vec::new(),
-    };
-    // Bucket-local open-addressed probe over the output groups.
-    let mut table: Vec<u32> = vec![0; 64];
-    let mut hashes: Vec<u64> = Vec::new();
-    for t in tables {
+    let refs: Vec<&PdHandedTable> = tables.iter().collect();
+    merge_bucket_refs(spec, &refs, b)
+}
+
+/// The bucket merge over BORROWED tables (the M3.5 combine mixes sealed
+/// in-memory tables with spill-synthesized ones it owns locally; everything
+/// else about the merge is the donor verbatim). Implemented as the
+/// incremental [`PdBucketMerger`] driven in one pass, so the donor
+/// semantics stay single-sourced.
+fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMerged<'static> {
+    let mut m = PdBucketMerger::new(spec);
+    for &t in tables {
+        m.absorb(t, b);
+    }
+    m.finish()
+}
+
+/// Incremental donor bucket merge (M3.5 inc-3b): [`merge_bucket_refs`]'s
+/// loop body, restructured so the combine-split path can absorb tables IN
+/// SEQUENCE — the sealed in-memory tables in one pass, then one value-hash
+/// slice's synthesized table at a time, dropping each between absorbs so
+/// transient memory stays bounded.
+///
+/// EXACTLY-ONCE LAW (the inc-3b hazard): value-hash slices partition each
+/// group's VALUE SET disjointly, but everything that is NOT a per-value
+/// fact must merge exactly once, not once per slice. The sealed IN-MEMORY
+/// tables are the sole carriers of group-level state — vocab (acc,count)
+/// words, `seen_null`, and group existence (a spilled record can never
+/// reference a group its own Local's remainder lacks: groups are created
+/// at accept and the epoch reset clears only set VALUES) — and they are
+/// absorbed ONCE, before any slice. Each slice's synthesized table
+/// ([`pd_table_from_spill`]) is built by replaying value records through a
+/// fresh builder: its vocab states are all ZERO and its `set_null` faces
+/// all FALSE (`create_group` zero-init; NULLs never touch the file), so
+/// absorbing it adds 0 to every vocab word, ORs `false` into every
+/// `seen_null`, and contributes ONLY set-value insertions — idempotent,
+/// over slices that are disjoint by the routing law. Hence "in-memory once
+/// + slices in any sequence" equals the direct one-pass donor merge
+/// (property test `split_slice_merge_invariance`).
+pub struct PdBucketMerger<'s> {
+    spec: &'s PdSpec,
+    out: PdMerged<'static>,
+    /// Bucket-local open-addressed probe over the output groups.
+    table: Vec<u32>,
+    hashes: Vec<u64>,
+}
+
+impl<'s> PdBucketMerger<'s> {
+    pub fn new(spec: &'s PdSpec) -> PdBucketMerger<'s> {
+        PdBucketMerger {
+            spec,
+            out: PdMerged {
+                ngroups: 0,
+                keys: Vec::new(),
+                keynulls: Vec::new(),
+                states: Vec::new(),
+                dsets: Vec::new(),
+            },
+            table: vec![0; 64],
+            hashes: Vec::new(),
+        }
+    }
+
+    /// Merge bucket `b` of `t` into the output — the donor loop body
+    /// verbatim.
+    pub fn absorb(&mut self, t: &PdHandedTable, b: usize) {
+        let nkeys = self.spec.nkeys();
+        let nvocab = self.spec.vocab.len();
+        let nsets = self.spec.sets.len();
+        let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
         for &g in &parts.idx[s..e] {
@@ -900,7 +956,7 @@ fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'
                                 }
                                 nt[sl] = (gg + 1) as u32;
                             }
-                            table = nt;
+                            *table = nt;
                         }
                         break d;
                     }
@@ -934,7 +990,28 @@ fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'
             }
         }
     }
-    out
+
+    /// Capacity-based bytes of the merged-so-far bucket — the combine
+    /// split's EXACT dedup-aware budget check (read after every slice
+    /// absorb; no directory estimate can see through duplicates, this can).
+    pub fn mem_bytes(&self) -> usize {
+        self.out.keys.capacity() * 8
+            + self.out.keynulls.capacity() * 4
+            + self.out.states.capacity() * 8
+            + self.hashes.capacity() * 8
+            + self.table.capacity() * 4
+            + self.out.dsets.capacity() * core::mem::size_of::<Option<DistinctSet<'static>>>()
+            + self
+                .out
+                .dsets
+                .iter()
+                .map(|d| d.as_ref().map_or(0, |d| d.mem_bytes()))
+                .sum::<usize>()
+    }
+
+    pub fn finish(self) -> PdMerged<'static> {
+        self.out
+    }
 }
 
 fn pd_claim_loop(ctx: &PdParCtx<'_>, nbuckets: usize) {
@@ -1145,7 +1222,6 @@ pub(crate) fn vocab_kind(aggfnoid: Oid, att: Option<(u16, PdInt)>) -> Option<PdV
 
 /// Uniform internal error for impossible wire states (defensive; never
 /// expected to fire).
-#[allow(dead_code)]
 #[cold]
 pub(crate) fn pd_internal(msg: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("pardistinct internal: {msg}")))
@@ -1244,6 +1320,17 @@ pub fn pd_merge_bucket(
     merge_bucket(spec, tables, bucket)
 }
 
+/// [`pd_merge_bucket`] over borrowed tables: the M3.5 spill combine merges
+/// the sealed in-memory tables together with spill-synthesized tables it
+/// builds (and owns) on the combine thread.
+pub fn pd_merge_bucket_refs(
+    spec: &PdSpec,
+    tables: &[&PdHandedTable],
+    bucket: usize,
+) -> PdMerged<'static> {
+    merge_bucket_refs(spec, tables, bucket)
+}
+
 /// Concatenate per-bucket merge outputs (bucket order) into the one merged
 /// result — the grouped parallel merge's tail, exposed for the sink's
 /// finalize.
@@ -1292,6 +1379,298 @@ impl PdSinkMerged {
     }
 }
 
+// ===========================================================================
+// M3.5 accept-side spill surface (docs/design/m3.5-spill.md §4, inc-3a).
+// ADDITIVE ONLY: the builder's own Mcx-bound spill machinery (`evict_sets`
+// / distinctset `SpillState`) is untouched — the sink Locals still carry
+// `mcx: None` and freeze()'s `!ever_spilled` invariant keeps holding. What
+// spills here are the DistinctSet VALUES alone, through an operator-owned
+// byte contract the caller writes to a spillset file: group keys, vocab
+// words, and `seen_null` stay in memory and ride the Local through SEAL.
+//
+// Record contract (fixed width per spec, native-endian — the DistinctSet
+// int law, raw i64 words): one record per (group, set, value) =
+//   [keynulls u64][key word i64 × nkeys][set index u64][value i64]
+// NULLs NEVER touch the file: group-key null bits ride the keynulls word
+// (part of the group identity, not a value), and set NULL presence rides
+// the in-memory `seen_null` (the distinctset frozen rule).
+//
+// Partition law: top-8 bits of the group-key hash (`hash >> 56`) — EXACTLY
+// the counting-sort partition freeze() builds and the bucket merge reads,
+// so a spilled record replays into the same combine partition that claims
+// its group.
+// ===========================================================================
+
+/// Byte width of one spilled (group, set, value) record for `spec`.
+pub fn pd_spill_record_width(spec: &PdSpec) -> usize {
+    (spec.nkeys() + 3) * 8
+}
+
+impl PdBuilder<'_> {
+    /// Fail-closed shape gate: only grouped int-set builders spill exactly.
+    /// Plain/element-partition shapes (nkeys == 0), bytes sets, and anything
+    /// touching the leader's Mcx-bound machinery refuse (the caller falls
+    /// through to the phase-1 Crossed abort → serial rerun).
+    fn spill_eligible(&self) -> bool {
+        self.spec.nkeys() > 0
+            && !self.spec.sets.is_empty()
+            && self
+                .spec
+                .sets
+                .iter()
+                .all(|s| !matches!(s.kind, DistinctKeyKind::Bytes))
+            && self.mcx.is_none()
+            && !self.ever_spilled
+            && !self.frozen
+    }
+
+    /// Bytes of set VALUES currently held (what an epoch flush would move to
+    /// disk). Observability figure; NOT the worthwhileness yardstick — see
+    /// [`Self::spill_freeable_bytes`].
+    fn spill_value_bytes(&self) -> usize {
+        self.dsets.iter().map(|d| d.ints().len() * 8).sum()
+    }
+
+    /// Bytes an epoch flush would RELEASE: the sets' full capacity-based
+    /// memory (`total_set_mem`) — `spill_reset_values` SHRINKS the sets, so
+    /// the entire set side of `mem()` comes back. This is the caller's
+    /// worthwhileness yardstick: a crossing is group-table-dominated exactly
+    /// when the set side is a small fraction of the budget (`base_mem`
+    /// drives the crossing), and THAT is what value spill cannot help.
+    ///
+    /// Calibration note (inc-3a followup, battery -82184): the original gate
+    /// compared `spill_value_bytes` (payload alone) against budget/4, but
+    /// `mem()` moves in capacity steps, so crossings land right after
+    /// Vec/IntSet doublings, where the 8-byte payloads are only ~1/6..1/3 of
+    /// set memory (IntSet's 50% max load = 16-32 table bytes/value, plus
+    /// 8-16 ints-Vec bytes/value). A purely value-dominated uniform corpus
+    /// (the q9 class: 97 sets filling in lockstep, all doubling together)
+    /// deterministically sat below budget/4 at every crossing and the arm
+    /// fail-closed to the serial fallback on every worker.
+    fn spill_freeable_bytes(&self) -> usize {
+        self.total_set_mem
+    }
+
+    /// Emit every held set value as spill records, partition-contiguous and
+    /// partition-ascending (the spillset EpochWriter contract): groups are
+    /// counting-sorted by the top-8 hash bits — freeze()'s own partition law
+    /// — and each group's sets stream in set order, values in insertion
+    /// order. Read-only: the caller resets values via
+    /// [`Self::spill_reset_values`] only after its epoch write COMMITS.
+    fn spill_emit(&self, emit: &mut dyn FnMut(u32, &[u8]) -> PgResult<()>) -> PgResult<()> {
+        debug_assert!(self.spill_eligible());
+        let nkeys = self.spec.nkeys();
+        let nsets = self.spec.sets.len();
+        let n = self.ngroups();
+        // The freeze partition law, verbatim (counting sort, top-8 bits).
+        let mut starts = vec![0u32; PD_GROUP_PARTS + 1];
+        for &h in &self.hashes {
+            starts[(h >> 56) as usize + 1] += 1;
+        }
+        for p in 0..PD_GROUP_PARTS {
+            starts[p + 1] += starts[p];
+        }
+        let mut idx = vec![0u32; n];
+        let mut cur = starts.clone();
+        for (g, &h) in self.hashes.iter().enumerate() {
+            let b = (h >> 56) as usize;
+            idx[cur[b] as usize] = g as u32;
+            cur[b] += 1;
+        }
+        let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+        for p in 0..PD_GROUP_PARTS {
+            buf.clear();
+            for &g in &idx[starts[p] as usize..starts[p + 1] as usize] {
+                let g = g as usize;
+                let nulls = (self.keynulls[g] as u64).to_ne_bytes();
+                let keys = &self.keys[g * nkeys..(g + 1) * nkeys];
+                for j in 0..nsets {
+                    let jw = (j as u64).to_ne_bytes();
+                    for &v in self.dsets[g * nsets + j].ints() {
+                        buf.extend_from_slice(&nulls);
+                        for &w in keys {
+                            buf.extend_from_slice(&w.to_ne_bytes());
+                        }
+                        buf.extend_from_slice(&jw);
+                        buf.extend_from_slice(&v.to_ne_bytes());
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                emit(p as u32, &buf)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Post-commit epoch reset: drop every set's VALUES, `seen_null`
+    /// retained (the distinctset seen_null law — NULLs never spill).
+    /// DEVIATION from the §4 sketch's "capacities retained": `mem()` is
+    /// capacity-based, so retained capacities would re-arm the crossing
+    /// only on capacity DOUBLING (a ~2× budget high-water); shrinking the
+    /// sets keeps the R3 bound at ~budget + one insert with the plain
+    /// budget check re-armed naturally. The small eviction-floor ratchet
+    /// guards the group-table-dominated tail (base_mem alone near the
+    /// budget), where the caller's worthwhileness gate then refuses.
+    fn spill_reset_values(&mut self) {
+        let nsets = self.spec.sets.len();
+        for d in &mut self.dsets {
+            let seen_null = d.seen_null;
+            *d = DistinctSet::new();
+            d.seen_null = seen_null;
+        }
+        if nsets > 0 {
+            self.total_set_mem = 0;
+            for g in 0..self.ngroups() {
+                let m: usize =
+                    self.dsets[g * nsets..(g + 1) * nsets].iter().map(|d| d.mem_bytes()).sum();
+                self.set_mem[g] = m;
+                self.total_set_mem += m;
+            }
+        }
+        self.evict_floor = self.mem() + (self.budget / 16).max(4096);
+    }
+}
+
+impl PdSinkLocal {
+    /// See [`PdBuilder::spill_eligible`].
+    pub fn pd_spill_eligible(&self) -> bool {
+        self.builder.spill_eligible()
+    }
+
+    /// See [`PdBuilder::spill_value_bytes`].
+    pub fn pd_spill_value_bytes(&self) -> usize {
+        self.builder.spill_value_bytes()
+    }
+
+    /// See [`PdBuilder::spill_freeable_bytes`].
+    pub fn pd_spill_freeable_bytes(&self) -> usize {
+        self.builder.spill_freeable_bytes()
+    }
+
+    /// See [`PdBuilder::spill_emit`].
+    pub fn pd_spill_emit(
+        &self,
+        emit: &mut dyn FnMut(u32, &[u8]) -> PgResult<()>,
+    ) -> PgResult<()> {
+        self.builder.spill_emit(emit)
+    }
+
+    /// See [`PdBuilder::spill_reset_values`].
+    pub fn pd_spill_reset_values(&mut self) {
+        self.builder.spill_reset_values()
+    }
+}
+
+/// Rebuild ONE partition's spilled records into a merge-compatible
+/// [`PdHandedTable`]: replay through a fresh (never-crossing, never-Mcx)
+/// builder of the same spec — probe/create-group + set insert, the donor
+/// kernel — then freeze. Cross-epoch duplicate values re-dedup here; vocab
+/// states are zero (they never left the in-memory tables) so the bucket
+/// merge adds nothing for them. Fail-closed on torn or corrupt records.
+pub fn pd_table_from_spill(spec: &Arc<PdSpec>, bytes: &[u8]) -> PgResult<PdHandedTable> {
+    let nkeys = spec.nkeys();
+    let nsets = spec.sets.len();
+    if nkeys == 0 || nsets == 0 {
+        return Err(pd_internal("distinct spill replay on a non-grouped spec"));
+    }
+    let width = pd_spill_record_width(spec);
+    if bytes.len() % width != 0 {
+        return Err(pd_internal("torn distinct spill record (partial row)"));
+    }
+    let mut b = PdBuilder::new(Arc::clone(spec), usize::MAX, None);
+    let mut words = vec![0i64; nkeys];
+    let mut off = 0usize;
+    let rd = |o: usize| u64::from_ne_bytes(bytes[o..o + 8].try_into().unwrap());
+    while off < bytes.len() {
+        let nulls = rd(off);
+        off += 8;
+        if nulls >= (1u64 << nkeys) {
+            return Err(pd_internal("corrupt distinct spill record (keynulls)"));
+        }
+        for w in words.iter_mut() {
+            *w = rd(off) as i64;
+            off += 8;
+        }
+        let j = rd(off) as usize;
+        off += 8;
+        if j >= nsets {
+            return Err(pd_internal("corrupt distinct spill record (set index)"));
+        }
+        let v = rd(off) as i64;
+        off += 8;
+        let nulls = nulls as u32;
+        let h = key_hash(&words, nulls);
+        let (found, slot) = b.probe(&words, nulls, h);
+        let g = match found {
+            Some(g) => g,
+            None => b.create_group(&words, nulls, h, slot),
+        } as usize;
+        b.dsets[g * nsets + j].insert_i64(v);
+    }
+    b.freeze()
+}
+
+/// Route spilled distinct records into 256 value-hash SLICES by the byte of
+/// `mix64(value)` `depth` levels from the top (depth 1 = bits 56..64,
+/// depth 2 = bits 48..56, …, depth 6 = bits 16..24) — the M3.5 §4
+/// COMBINE-SPLIT law (inc-3b). The mixer is distinctset.rs's own spill
+/// mixer (splitmix64, the `spill_part` law); distinctset's serial spill
+/// consumes bits UPWARD from bit 32 (`(mix64(v) >> 32) & (nparts-1)`),
+/// while this routing consumes whole bytes TOP-DOWN — any deterministic
+/// slicing of the same full-avalanche hash is legal (equal values hash
+/// equal, so every distinct (group, set, value) lands in exactly one
+/// slice), and top-down bytes make recursion levels strictly nested (a
+/// depth-d slice is subdivided exactly by the next byte down). Fail-closed
+/// on torn input and out-of-range depth.
+pub fn pd_route_value_records(
+    spec: &PdSpec,
+    bytes: &[u8],
+    depth: u32,
+    out: &mut [Vec<u8>],
+) -> PgResult<()> {
+    debug_assert_eq!(out.len(), PD_GROUP_PARTS);
+    if !(1..=6).contains(&depth) {
+        return Err(pd_internal("distinct value-slice depth out of range"));
+    }
+    let width = pd_spill_record_width(spec);
+    if bytes.len() % width != 0 {
+        return Err(pd_internal("torn distinct spill record (partial row) in split"));
+    }
+    let voff = width - 8;
+    let shift = 64 - 8 * depth;
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let v = u64::from_ne_bytes(bytes[off + voff..off + width].try_into().unwrap());
+        let s = ((mix64(v) >> shift) & 0xFF) as usize;
+        out[s].extend_from_slice(&bytes[off..off + width]);
+        off += width;
+    }
+    Ok(())
+}
+
+/// Combine-side pre-count of one bucket's IN-MEMORY faces: (groups, set
+/// values). Together with the spill directory's `part_len`, this is
+/// everything the conservative over-budget refusal reads — nothing touches
+/// disk before the decision. Groups are an upper bound on the merged
+/// bucket's output groups: spilled records never introduce a group the
+/// in-memory tables lack (group creation happens at accept; the epoch reset
+/// clears only set values).
+pub fn pd_bucket_precount(spec: &PdSpec, t: &PdHandedTable, bucket: usize) -> (usize, usize) {
+    let Some(parts) = t.parts.as_ref() else { return (0, 0) };
+    let nsets = spec.sets.len();
+    let (s, e) = (parts.starts[bucket] as usize, parts.starts[bucket + 1] as usize);
+    let mut vals = 0usize;
+    for &g in &parts.idx[s..e] {
+        let g = g as usize;
+        for j in 0..nsets {
+            let si = g * nsets + j;
+            vals += (t.set_int_offs[si + 1] - t.set_int_offs[si]) as usize;
+        }
+    }
+    (e - s, vals)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,5 +1708,298 @@ mod tests {
         // The OLD (buggy) transfn oids must NOT match.
         assert!(vocab_kind(1219, None).is_none());
         assert!(vocab_kind(2804, Some((0, PdInt::I64))).is_none());
+    }
+
+    // --- M3.5 inc-3a spill surface (fleet-run: the known local nodeagg
+    // test-binary link limitation) ---------------------------------------
+
+    fn spill_test_spec() -> Arc<PdSpec> {
+        Arc::new(PdSpec {
+            key_atts: vec![0, 1],
+            key_kinds: vec![PdInt::I64, PdInt::I32],
+            vocab: vec![PdVocab { transno: 0, kind: PdVocabKind::CountStar }],
+            sets: vec![
+                PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 },
+                PdSetSpec { att: 3, kind: DistinctKeyKind::Int32 },
+            ],
+            max_att: 4,
+            worker_budget: usize::MAX,
+        })
+    }
+
+    /// Feed one (group, set, value) into a builder directly (the accept
+    /// kernel minus the slot plumbing): probe/create + vocab bump + insert.
+    fn feed(b: &mut PdBuilder<'static>, keys: &[i64], nulls: u32, j: usize, v: Option<i64>) {
+        let nsets = b.spec.sets.len();
+        let h = key_hash(keys, nulls);
+        let (found, slot) = b.probe(keys, nulls, h);
+        let g = match found {
+            Some(g) => g,
+            None => b.create_group(keys, nulls, h, slot),
+        } as usize;
+        b.states[g * 2 * b.spec.vocab.len()] += 1; // CountStar
+        match v {
+            Some(v) => b.dsets[g * nsets + j].insert_i64(v),
+            None => b.dsets[g * nsets + j].seen_null = true,
+        }
+    }
+
+    /// One deterministic worker's content (re-runnable: the reference and
+    /// the spill arms must build identical inputs).
+    fn build_worker(spec: &Arc<PdSpec>, salt: i64) -> PdBuilder<'static> {
+        let mut b = PdBuilder::new(Arc::clone(spec), usize::MAX, None);
+        for i in 0..4000i64 {
+            let k = [(i * 13 + salt) % 37, ((i * 7 + salt) % 11) as i64];
+            let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
+            feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
+            feed(&mut b, &k, nulls, 1, Some(i % 97 - 40));
+            if (i + salt) % 41 == 0 {
+                feed(&mut b, &k, nulls, 1, None); // set NULL: seen_null face
+            }
+        }
+        b
+    }
+
+    /// Canonical view of a merged bucket set: (keys, nulls, states,
+    /// per-set sorted values + seen_null).
+    fn canon(spec: &PdSpec, m: &PdMerged<'_>) -> Vec<(Vec<i64>, u32, Vec<i64>, Vec<(Vec<i64>, bool)>)> {
+        let nkeys = spec.nkeys();
+        let nsets = spec.sets.len();
+        let nvocab = spec.vocab.len();
+        let mut rows: Vec<_> = (0..m.ngroups)
+            .map(|g| {
+                let sets = (0..nsets)
+                    .map(|j| {
+                        let d = m.dsets[g * nsets + j].as_ref().unwrap();
+                        let mut vals = d.ints().to_vec();
+                        vals.sort_unstable();
+                        (vals, d.seen_null)
+                    })
+                    .collect();
+                (
+                    m.keys[g * nkeys..(g + 1) * nkeys].to_vec(),
+                    m.keynulls[g],
+                    m.states[g * 2 * nvocab..(g + 1) * 2 * nvocab].to_vec(),
+                    sets,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// M3.5 §4 round-trip: drain values → records → rebuild → merge with the
+    /// in-memory remainders EQUALS the direct (never-spilled) merge, on every
+    /// bucket — groups, keynulls, vocab states, set values, and the
+    /// seen_null face (which never touches the records).
+    #[test]
+    fn spill_roundtrip_merge_equivalence() {
+        let spec = spill_test_spec();
+
+        // Reference: direct merge of two never-spilled workers.
+        let t1 = build_worker(&spec, 0).freeze().unwrap();
+        let t2 = build_worker(&spec, 5).freeze().unwrap();
+        let tables = [t1, t2];
+        let direct = pd_concat_buckets(
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
+        );
+
+        // Spill arm: same two workers, drained mid-build (values → records),
+        // then a second accept wave (cross-epoch duplicates included by
+        // construction), remainder frozen, records replayed per bucket.
+        let mut spilled: Vec<std::collections::HashMap<u32, Vec<u8>>> = Vec::new();
+        let mut remainders: Vec<PdHandedTable> = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker(&spec, salt);
+            assert!(b.spill_eligible());
+            assert!(b.spill_value_bytes() > 0);
+            let mut parts: std::collections::HashMap<u32, Vec<u8>> = Default::default();
+            let mut last_p: i64 = -1;
+            b.spill_emit(&mut |p, bytes| {
+                assert!((p as i64) > last_p, "partitions ascend");
+                last_p = p as i64;
+                assert_eq!(bytes.len() % pd_spill_record_width(&spec), 0);
+                parts.entry(p).or_default().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            b.spill_reset_values();
+            // Second epoch: refeed a slice of the same content (duplicates
+            // across epochs) plus fresh values; stays IN MEMORY (remainder).
+            for i in 0..4000i64 {
+                let k = [(i * 13 + salt) % 37, ((i * 7 + salt) % 11) as i64];
+                let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
+                // Undo the double CountStar bump: subtract before refeeding.
+                let h = key_hash(&k, nulls);
+                let (found, _) = b.probe(&k, nulls, h);
+                let g = found.expect("group exists from epoch 1") as usize;
+                b.states[g * 2 * spec.vocab.len()] -= 1;
+                feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
+            }
+            spilled.push(parts);
+            remainders.push(b.freeze().unwrap());
+        }
+        let mut buckets = Vec::with_capacity(PD_GROUP_PARTS);
+        for bkt in 0..PD_GROUP_PARTS {
+            let mut synth: Vec<PdHandedTable> = Vec::new();
+            for parts in &spilled {
+                if let Some(bytes) = parts.get(&(bkt as u32)) {
+                    synth.push(pd_table_from_spill(&spec, bytes).unwrap());
+                }
+            }
+            let refs: Vec<&PdHandedTable> =
+                remainders.iter().chain(synth.iter()).collect();
+            buckets.push(pd_merge_bucket_refs(&spec, &refs, bkt));
+        }
+        let merged = pd_concat_buckets(buckets);
+
+        assert_eq!(canon(&spec, &direct), canon(&spec, &merged));
+
+        // Pre-count sanity: in-memory groups bound the merged groups; the
+        // record width divides every partition's bytes (checked above).
+        let mut groups = 0usize;
+        for t in &tables {
+            for bkt in 0..PD_GROUP_PARTS {
+                groups += pd_bucket_precount(&spec, t, bkt).0;
+            }
+        }
+        assert!(groups >= direct.ngroups);
+    }
+
+    /// Torn / corrupt records fail closed (never a silent wrong answer).
+    #[test]
+    fn spill_torn_record_fails_closed() {
+        let spec = spill_test_spec();
+        let width = pd_spill_record_width(&spec);
+        assert_eq!(width, (2 + 3) * 8);
+        // Torn: not a whole number of records.
+        assert!(pd_table_from_spill(&spec, &vec![0u8; width + 1]).is_err());
+        // Corrupt set index.
+        let mut rec = vec![0u8; width];
+        rec[(1 + spec.nkeys()) * 8..(2 + spec.nkeys()) * 8]
+            .copy_from_slice(&(u64::MAX).to_ne_bytes());
+        assert!(pd_table_from_spill(&spec, &rec).is_err());
+        // Corrupt keynulls (bit beyond nkeys).
+        let mut rec = vec![0u8; width];
+        rec[..8].copy_from_slice(&(1u64 << 63).to_ne_bytes());
+        assert!(pd_table_from_spill(&spec, &rec).is_err());
+        // A well-formed empty image and a single record are fine.
+        assert!(pd_table_from_spill(&spec, &[]).is_ok());
+        assert!(pd_table_from_spill(&spec, &vec![0u8; width]).is_ok());
+    }
+
+    /// M3.5 inc-3b slice invariance: routing a bucket's spilled records by
+    /// `mix64(value)` bytes and merging per-slice synth tables IN SEQUENCE
+    /// (after the one-pass in-memory merge) equals the direct never-spilled
+    /// merge on every bucket — groups, keynulls, vocab states, sorted set
+    /// values, and the seen_null face — with every distinct (group, set,
+    /// value) record in exactly one slice, at depth 1 and depth 2.
+    #[test]
+    fn split_slice_merge_invariance() {
+        let spec = spill_test_spec();
+
+        // Reference: direct merge of two never-spilled workers.
+        let t1 = build_worker(&spec, 0).freeze().unwrap();
+        let t2 = build_worker(&spec, 5).freeze().unwrap();
+        let tables = [t1, t2];
+        let direct = pd_concat_buckets(
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tables, b)).collect(),
+        );
+
+        // Spill arm: same two workers drained mid-build, then a second
+        // accept wave (cross-epoch duplicates by construction) — the
+        // inc-3a construction, reused.
+        let mut spilled: Vec<std::collections::HashMap<u32, Vec<u8>>> = Vec::new();
+        let mut remainders: Vec<PdHandedTable> = Vec::new();
+        for salt in [0i64, 5] {
+            let mut b = build_worker(&spec, salt);
+            let mut parts: std::collections::HashMap<u32, Vec<u8>> = Default::default();
+            b.spill_emit(&mut |p, bytes| {
+                parts.entry(p).or_default().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            b.spill_reset_values();
+            for i in 0..4000i64 {
+                let k = [(i * 13 + salt) % 37, ((i * 7 + salt) % 11) as i64];
+                let nulls = if (i + salt) % 29 == 0 { 1 } else { 0 };
+                let h = key_hash(&k, nulls);
+                let (found, _) = b.probe(&k, nulls, h);
+                let g = found.expect("group exists from epoch 1") as usize;
+                b.states[g * 2 * spec.vocab.len()] -= 1;
+                feed(&mut b, &k, nulls, 0, Some((i * 104729 + salt) % 2500));
+            }
+            spilled.push(parts);
+            remainders.push(b.freeze().unwrap());
+        }
+
+        let width = pd_spill_record_width(&spec);
+        for depth in [1u32, 2] {
+            let mut buckets = Vec::with_capacity(PD_GROUP_PARTS);
+            for bkt in 0..PD_GROUP_PARTS {
+                // Every Local's bucket records concatenated (the runtime
+                // streams all Locals' partitions through one router).
+                let mut bytes = Vec::new();
+                for parts in &spilled {
+                    if let Some(bb) = parts.get(&(bkt as u32)) {
+                        bytes.extend_from_slice(bb);
+                    }
+                }
+                let mut slices: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+                pd_route_value_records(&spec, &bytes, depth, &mut slices).unwrap();
+                // Routing loses nothing and duplicates nothing…
+                assert_eq!(slices.iter().map(|s| s.len()).sum::<usize>(), bytes.len());
+                // …and every distinct record (group identity + set + value)
+                // has exactly one home slice.
+                let mut home: std::collections::HashMap<Vec<u8>, usize> = Default::default();
+                for (si, s) in slices.iter().enumerate() {
+                    for r in s.chunks(width) {
+                        if let Some(prev) = home.insert(r.to_vec(), si) {
+                            assert_eq!(prev, si, "record in two slices");
+                        }
+                    }
+                }
+                // The split combine: in-memory tables ONCE, then each
+                // slice's synth table in sequence, dropped between absorbs.
+                let mut merger = PdBucketMerger::new(&spec);
+                for t in &remainders {
+                    merger.absorb(t, bkt);
+                }
+                for s in &slices {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    let synth = pd_table_from_spill(&spec, s).unwrap();
+                    merger.absorb(&synth, bkt);
+                }
+                buckets.push(merger.finish());
+            }
+            let merged = pd_concat_buckets(buckets);
+            assert_eq!(canon(&spec, &direct), canon(&spec, &merged), "depth {depth}");
+        }
+    }
+
+    /// Torn / out-of-range input to the value router fails closed; a single
+    /// record routes to exactly the mix64-top-byte slice.
+    #[test]
+    fn value_route_torn_fails_closed() {
+        let spec = spill_test_spec();
+        let width = pd_spill_record_width(&spec);
+        let mut out: Vec<Vec<u8>> = vec![Vec::new(); PD_GROUP_PARTS];
+        // Torn: not a whole number of records.
+        assert!(pd_route_value_records(&spec, &vec![0u8; width + 1], 1, &mut out).is_err());
+        // Depth outside the routing vocabulary.
+        assert!(pd_route_value_records(&spec, &vec![0u8; width], 0, &mut out).is_err());
+        assert!(pd_route_value_records(&spec, &vec![0u8; width], 7, &mut out).is_err());
+        // Empty image routes nothing.
+        assert!(pd_route_value_records(&spec, &[], 1, &mut out).is_ok());
+        assert!(out.iter().all(|s| s.is_empty()));
+        // One record lands in exactly the depth-1 (top-byte) slice.
+        let mut rec = vec![0u8; width];
+        rec[width - 8..].copy_from_slice(&77i64.to_ne_bytes());
+        pd_route_value_records(&spec, &rec, 1, &mut out).unwrap();
+        let expect = (mix64(77i64 as u64) >> 56) as usize;
+        assert_eq!(out[expect].len(), width);
+        assert_eq!(out.iter().map(|s| s.len()).sum::<usize>(), width);
     }
 }

@@ -233,6 +233,20 @@ fn compact_split_divisor(aggsplit: ::types_pathnodes::AggSplit) -> Option<u64> {
     None
 }
 
+/// THE single-word-key spill-eligibility gate at the compact table's HALF
+/// MARGIN — the single source of the SpillRisk arithmetic (inc-2c): entry
+/// (8 B at ≤0.5 fill → 16), key word, states, and a transvalue-slack
+/// allowance per group. `true` = the arm would refuse `numgroups` as
+/// spill-eligible. Every caller — `agg_hash_compact_try_arm`,
+/// `compact_single_word_gates` (Reduced), `agg_hash_spill_unlikely`, and
+/// the sink leader mirror `agg_hash_compact_sink_would_refuse` — asks this
+/// so the two sides of the M2 sink engagement can never diverge.
+fn single_word_spillrisk(ph: &PerHashData<'_>, numgroups: u64) -> bool {
+    let additionalsize = ph.hashtable.additionalsize();
+    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
+    numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2
+}
+
 /// Spill-eligibility estimate at the compact table's HALF MARGIN, exported
 /// for feeds whose batching collapses aggcontext allocation sequences (the
 /// code-histogram build's str tie-copies, lane-v2-codehist): such a feed is
@@ -248,11 +262,31 @@ pub fn agg_hash_spill_unlikely(node: &mut AggStateData<'_>) -> bool {
     let Some(ph) = node.perhash.as_mut() else {
         return false;
     };
-    let additionalsize = ph.hashtable.additionalsize();
-    // Entry (8 B at <=0.5 fill -> 16), key word, states, transvalue slack —
-    // the compact arm's exact formula.
-    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
-    numgroups <= ph.hash_ngroups_limit / 2 && est_bytes <= ph.hash_mem_limit as u64 / 2
+    !single_word_spillrisk(ph, numgroups)
+}
+
+/// Leader-side mirror of the SINK WORKER's compact-arm spill gate (inc-2c,
+/// the leg-4d wedge class): would `agg_hash_compact_try_arm` /
+/// `agg_hash_compact_try_arm_reduced` SpillRisk-refuse on a worker build of
+/// this plan under sink cap `cap` (`agg_sink_set_cap` installed before the
+/// worker's try_arm, so the worker's group estimate is min'd to the cap)?
+/// READ-ONLY by contract: the leader's own node may already carry a
+/// serial-armed compact table (`ph.compact`) — nothing here consults or
+/// mutates it; only the plan estimate and the ph limits are read. Both sink
+/// drain modes (K2 single-key and expr-key Single/Reduced) arm through the
+/// same single-word gate, so one predicate covers them. Conservative:
+/// `true` also for shapes whose aggsplit divisor refuses.
+pub fn agg_hash_compact_sink_would_refuse(node: &AggStateData<'_>, cap: u32) -> bool {
+    let Some(divisor) = compact_split_divisor(node.plan.aggsplit) else {
+        return true;
+    };
+    let numgroups = (node.plan.numGroups.max(1) as u64 / divisor)
+        .max(1)
+        .min(cap as u64);
+    let Some(ph) = node.perhash.as_ref() else {
+        return true;
+    };
+    single_word_spillrisk(ph, numgroups)
 }
 
 /// Read-only LEADER-side admission precheck for the M2 runtime agg sink
@@ -313,10 +347,9 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     };
     let additionalsize = ph.hashtable.additionalsize();
     debug_assert!(additionalsize > 0, "K2 shapes carry a fold plan (numtrans > 0)");
-    // Spill-eligibility estimate at half margin: entry (8 B at ≤0.5 fill →
-    // 16), key word, states, and a transvalue-slack allowance per group.
-    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
-    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
+    // Spill-eligibility estimate at half margin ([`single_word_spillrisk`],
+    // the single-sourced arithmetic — the M2 sink leader mirror reads it too).
+    if single_word_spillrisk(ph, numgroups) {
         return CompactArm::SpillRisk;
     }
     // Entry layout by planner group estimate. Inline16 resolves hits from
@@ -530,10 +563,11 @@ fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm>
     if let Some(cap) = ph.sink_cap {
         numgroups = numgroups.min(cap as u64);
     }
-    let additionalsize = ph.hashtable.additionalsize();
-    debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
-    let est_bytes = numgroups.saturating_mul(16 + 8 + additionalsize as u64 + 16);
-    if numgroups > ph.hash_ngroups_limit / 2 || est_bytes > ph.hash_mem_limit as u64 / 2 {
+    debug_assert!(
+        ph.hashtable.additionalsize() > 0,
+        "fold-fed shapes carry transitions (numtrans > 0)"
+    );
+    if single_word_spillrisk(ph, numgroups) {
         return Err(CompactArm::SpillRisk);
     }
     Ok(numgroups)

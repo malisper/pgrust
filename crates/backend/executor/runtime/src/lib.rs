@@ -37,6 +37,7 @@
 //! wholesale at merge; the scheduler (rg.rs / sched.rs) is the dispatcher
 //! owner the donor demands.
 
+mod blocking;
 mod clock;
 mod lifecycle;
 mod morsel;
@@ -58,6 +59,7 @@ mod tests;
 
 use std::sync::Arc;
 
+pub use blocking::{blocking_io_section, BlockingIoSection, PermitThreadReg};
 pub use clock::{Clock, MonotonicClock, VirtualClock};
 pub use lifecycle::{
     ForeignParticipationDisabled, Generation, LifecycleState, ParticipantOwner, QueryTaskLifecycle,

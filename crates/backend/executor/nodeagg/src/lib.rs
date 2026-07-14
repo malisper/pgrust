@@ -63,8 +63,8 @@ pub use compact::{
     topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_admit, agg_hash_compact_mk_shape,
-    agg_hash_compact_reduced_admissible,
-    agg_hash_compact_sink_admissible, agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk,
+    agg_hash_compact_reduced_admissible, agg_hash_compact_sink_admissible,
+    agg_hash_compact_sink_would_refuse, agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk,
     agg_hash_compact_try_arm_reduced,
     agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
@@ -4895,11 +4895,12 @@ pub fn pd_derive_spec(
 /// Vocab aggfnoids map through the transfn whitelist; re-exported check the
 /// leader arm uses to pair `pd_derive_spec` with its admission story.
 pub use pardistinct::{
-    pd_adopt_registry, pd_clear_thread_registry, pd_concat_buckets, pd_empty_grouped_table,
-    pd_export_registry, pd_merge_bucket, pd_parallel_merge_grouped, pd_parallel_merge_plain,
-    pd_registry_get, pd_registry_insert, pd_registry_nonempty, pd_registry_remove, PdBuilder,
-    PdExport, PdFeed, PdHandedTable, PdHandoff, PdMerged, PdSinkLocal, PdSinkMerged, PdSpec,
-    PD_SINK_GROUP_PARTS,
+    pd_adopt_registry, pd_bucket_precount, pd_clear_thread_registry, pd_concat_buckets,
+    pd_empty_grouped_table, pd_export_registry, pd_merge_bucket, pd_merge_bucket_refs,
+    pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_registry_get, pd_registry_insert,
+    pd_registry_nonempty, pd_registry_remove, pd_route_value_records, pd_spill_record_width,
+    pd_table_from_spill, PdBucketMerger, PdBuilder, PdExport, PdFeed, PdHandedTable, PdHandoff,
+    PdMerged, PdSinkLocal, PdSinkMerged, PdSpec, PD_SINK_GROUP_PARTS,
 };
 
 /// Plain-shape adoption for ZERO input rows anywhere: fresh init states +

@@ -212,6 +212,166 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
 }
 
 // ---------------------------------------------------------------------------
+// M3.5 spill record contract (docs/design/m3.5-spill.md §3): a spilled
+// bucket segment is interleaved row-major u64 native-endian words —
+// `key_words` canonical key words then `state_words` state words per row.
+// NULL-group blocks NEVER touch the file (they ride the Local in memory,
+// the distinctset seen_null discipline applied to agg states).
+// ---------------------------------------------------------------------------
+
+/// Byte width of one spilled row.
+#[inline]
+pub fn sink_spill_row_bytes(key_words: usize, state_words: usize) -> usize {
+    (key_words + state_words) * 8
+}
+
+/// Append bucket `b`'s rows of `run` to `out` in the spill record contract.
+pub fn sink_run_spill_bucket(run: &SinkRun, b: usize, out: &mut Vec<u8>) {
+    let lo = run.starts[b] as usize;
+    let hi = run.starts[b + 1] as usize;
+    out.reserve((hi - lo) * sink_spill_row_bytes(run.key_words, run.state_words));
+    for i in lo..hi {
+        for w in 0..run.key_words {
+            out.extend_from_slice(&run.keys[i * run.key_words + w].to_ne_bytes());
+        }
+        for w in 0..run.state_words {
+            out.extend_from_slice(&run.states[i * run.state_words + w].to_ne_bytes());
+        }
+    }
+}
+
+/// Rebuild a single-bucket [`SinkRun`] from spilled bytes: every row lands
+/// in bucket `b`, insertion order = file order (= flush order, the
+/// first-seen discipline). Fail-closed on a torn record.
+pub fn sink_run_from_spill(
+    b: usize,
+    key_words: usize,
+    state_words: usize,
+    bytes: &[u8],
+) -> PgResult<SinkRun> {
+    let row = sink_spill_row_bytes(key_words, state_words);
+    if bytes.len() % row != 0 {
+        return Err(sink_shape_error("torn spill record (partial row)"));
+    }
+    let n = bytes.len() / row;
+    let mut keys: Vec<u64> = Vec::with_capacity(n * key_words);
+    let mut states: Vec<u64> = Vec::with_capacity(n * state_words);
+    let mut off = 0usize;
+    for _ in 0..n {
+        for _ in 0..key_words {
+            keys.push(u64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap()));
+            off += 8;
+        }
+        for _ in 0..state_words {
+            states.push(u64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap()));
+            off += 8;
+        }
+    }
+    let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+    for i in 0..=SINK_NBUCKETS {
+        starts.push(if i > b { n as u32 } else { 0 });
+    }
+    Ok(SinkRun { key_words, state_words, starts, keys, states, null_states: None })
+}
+
+/// Serialize bucket-`b`'s REMAINDER rows (via the SEAL partition index)
+/// into the spill record contract.
+pub fn sink_remainder_spill_bucket(
+    t: &LaneAggTable,
+    part: &SinkPart,
+    b: usize,
+    out: &mut Vec<u8>,
+) {
+    let key_words = table_key_words(t);
+    let state_words = t.state_bytes() / 8;
+    let lo = part.starts[b] as usize;
+    let hi = part.starts[b + 1] as usize;
+    out.reserve((hi - lo) * sink_spill_row_bytes(key_words, state_words));
+    for &row in &part.idx[lo..hi] {
+        let [w0, w1] =
+            row_key_words(t, row as usize).expect("partition indexes only non-NULL rows");
+        out.extend_from_slice(&w0.to_ne_bytes());
+        if key_words == 2 {
+            out.extend_from_slice(&w1.to_ne_bytes());
+        }
+        let states = t.row_states(row as usize).cast_const().cast::<u64>();
+        for w in 0..state_words {
+            // SAFETY: the row's state block is state_words u64s (8-aligned
+            // LaneAggTable state layout).
+            out.extend_from_slice(&unsafe { *states.add(w) }.to_ne_bytes());
+        }
+    }
+}
+
+/// The remainder table's NULL-group state block, if any (the combine's own
+/// row-scan discipline, extracted for the split path).
+pub fn sink_remainder_null_block(t: &LaneAggTable) -> Option<Vec<u64>> {
+    let state_words = t.state_bytes() / 8;
+    for row in 0..t.nrows() {
+        if row_key_words(t, row).is_none() {
+            let mut block = vec![0u64; state_words];
+            // SAFETY: as above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    t.row_states(row).cast::<u64>().cast_const(),
+                    block.as_mut_ptr(),
+                    state_words,
+                );
+            }
+            return Some(block);
+        }
+    }
+    None
+}
+
+/// Route raw spill records into 256 SUB-buckets by the hash byte `depth`
+/// levels below the top-8 (depth 1 = bits 48..56). The M3.5 recursive
+/// combine-split law: sub-partitioning a bucket by strictly deeper bits of
+/// the SAME hash partitions its groups exactly. Fail-closed on torn input.
+pub fn sink_route_records(
+    bytes: &[u8],
+    key_words: usize,
+    state_words: usize,
+    depth: u32,
+    out: &mut [Vec<u8>],
+) -> PgResult<()> {
+    debug_assert_eq!(out.len(), SINK_NBUCKETS);
+    debug_assert!((1..=6).contains(&depth), "sub-bucket depth out of range");
+    let row = sink_spill_row_bytes(key_words, state_words);
+    if bytes.len() % row != 0 {
+        return Err(sink_shape_error("torn spill record (partial row) in split"));
+    }
+    let shift = 56 - 8 * depth;
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let w0 = u64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap());
+        let w1 = if key_words == 2 {
+            u64::from_ne_bytes(bytes[off + 8..off + 16].try_into().unwrap())
+        } else {
+            0
+        };
+        let s = ((sink_hash(w0, w1) >> shift) & 0xFF) as usize;
+        out[s].extend_from_slice(&bytes[off..off + row]);
+        off += row;
+    }
+    Ok(())
+}
+
+/// A rows-free run carrying only a spilled NULL-group block (absorbed by
+/// the [`SINK_NULL_BUCKET`] combine like any run's null face).
+pub fn sink_null_only_run(key_words: usize, state_words: usize, block: Vec<u64>) -> SinkRun {
+    debug_assert_eq!(block.len(), state_words);
+    SinkRun {
+        key_words,
+        state_words,
+        starts: vec![0; SINK_NBUCKETS + 1],
+        keys: Vec::new(),
+        states: Vec::new(),
+        null_states: Some(block),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SEAL-time remainder partitioning.
 // ---------------------------------------------------------------------------
 
@@ -492,11 +652,23 @@ unsafe fn int8_avg_trans_data_mut(d: Datum) -> PgResult<*mut i64> {
 // The bucket combine.
 // ---------------------------------------------------------------------------
 
-/// One Local's combine-visible faces: its flushed runs (flush order) and its
-/// remainder table + SEAL partition.
+/// One Local's combine-visible faces: its spill-synthesized runs (epoch
+/// order — spilled epochs happened BEFORE anything still in memory, so they
+/// are visited first under the first-seen discipline), its in-memory
+/// flushed runs (flush order), and its remainder table + SEAL partition.
 pub struct SinkLocalView<'a> {
+    /// Runs rebuilt from spilled epochs ([`sink_run_from_spill`] /
+    /// [`sink_null_only_run`]); empty when the Local never spilled.
+    pub spilled: &'a [SinkRun],
     pub runs: &'a [SinkRun],
     pub remainder: Option<(&'a LaneAggTable, &'a SinkPart)>,
+}
+
+impl SinkLocalView<'_> {
+    /// All run faces in first-seen order.
+    fn all_runs(&self) -> impl Iterator<Item = &SinkRun> {
+        self.spilled.iter().chain(self.runs.iter())
+    }
 }
 
 /// Merge bucket `b` across `locals` (slice order = worker-slot order) into a
@@ -504,6 +676,21 @@ pub struct SinkLocalView<'a> {
 /// remainder rows — the first-seen discipline. NULL blocks are absorbed only
 /// in [`SINK_NULL_BUCKET`]. `state_bytes` and `key_words` are the sink's
 /// (identical across all sources by construction — one worker plan).
+/// Row count of bucket `b` across all faces (the combine's pre-build size
+/// check reads this before allocating anything — M3.5 §3).
+pub fn sink_bucket_row_count(b: usize, locals: &[SinkLocalView<'_>]) -> usize {
+    let mut total = 0usize;
+    for l in locals {
+        for r in l.all_runs() {
+            total += (r.starts[b + 1] - r.starts[b]) as usize;
+        }
+        if let Some((_, p)) = l.remainder {
+            total += (p.starts[b + 1] - p.starts[b]) as usize;
+        }
+    }
+    total
+}
+
 pub fn sink_combine_bucket(
     b: usize,
     key_words: usize,
@@ -514,7 +701,7 @@ pub fn sink_combine_bucket(
     debug_assert!(b < SINK_NBUCKETS);
     let mut total = 0usize;
     for l in locals {
-        for r in l.runs {
+        for r in l.all_runs() {
             total += (r.starts[b + 1] - r.starts[b]) as usize;
         }
         if let Some((_, p)) = l.remainder {
@@ -568,7 +755,7 @@ pub fn sink_combine_bucket(
     };
 
     for l in locals {
-        for r in l.runs {
+        for r in l.all_runs() {
             debug_assert_eq!(r.key_words, key_words);
             debug_assert_eq!(r.state_words, state_words);
             let lo = r.starts[b] as usize;
@@ -790,6 +977,15 @@ impl SinkEmitBuf {
         self.values.capacity() * core::mem::size_of::<Datum>()
             + self.nulls.capacity()
             + self.arena.capacity()
+    }
+
+    /// Append another bucket-emit (the M3.5 combine-split path emits one
+    /// buf per sub-partition and concatenates — group order across
+    /// sub-partitions is a non-surface under the order-free posture).
+    pub fn append(&mut self, other: SinkEmitBuf) {
+        self.values.extend(other.values);
+        self.nulls.extend(other.nulls);
+        self.nrows += other.nrows;
     }
 }
 
@@ -1613,8 +1809,8 @@ mod tests {
         assert!(!part2.has_null);
 
         let locals = [
-            SinkLocalView { runs: core::slice::from_ref(&run1), remainder: Some((&t1, &part1)) },
-            SinkLocalView { runs: &[], remainder: Some((&t2, &part2)) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some((&t1, &part1)) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some((&t2, &part2)) },
         ];
         let combines = test_combines();
         let mut merged: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
@@ -1690,8 +1886,8 @@ mod tests {
         bump(&mut t2, Some(same[0]), 1, 0);
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { runs: core::slice::from_ref(&run1), remainder: Some((&t1, &part1)) },
-            SinkLocalView { runs: &[], remainder: Some((&t2, &part2)) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some((&t1, &part1)) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some((&t2, &part2)) },
         ];
         let combines = test_combines();
         let t = sink_combine_bucket(want_bucket, 1, STATE_BYTES, &locals, &combines).unwrap();
@@ -1944,7 +2140,7 @@ mod tests {
             ],
         };
         let locals =
-            [SinkLocalView { runs: &[], remainder: Some((&t, &part)) }];
+            [SinkLocalView { spilled: &[], runs: &[], remainder: Some((&t, &part)) }];
         let combines = test_combines();
         let mut total_rows = 0usize;
         for b in 0..SINK_NBUCKETS {
@@ -2040,7 +2236,7 @@ mod tests {
         let run = sink_flush_table(&mut t);
         assert_eq!(run.nrows(), 2);
         assert_eq!(run.key_words, 2);
-        let locals = [SinkLocalView { runs: core::slice::from_ref(&run), remainder: None }];
+        let locals = [SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run), remainder: None }];
         let combines = test_combines();
         let mut found = 0;
         for b in 0..SINK_NBUCKETS {
@@ -2059,5 +2255,160 @@ mod tests {
             }
         }
         assert_eq!(found, 2);
+    }
+
+    /// M3.5 spill contract: serializing every bucket of a run set and
+    /// rebuilding synthesized runs combines to EXACTLY the same groups as
+    /// the in-memory runs (all buckets, null face included via the
+    /// in-memory null-block path).
+    #[test]
+    fn spill_roundtrip_combine_equivalence() {
+        let mut t1 = mk_table(64);
+        for k in 0..1000 {
+            bump(&mut t1, Some(k), 1, k);
+        }
+        bump(&mut t1, None, 5, 11);
+        let mut run_a = sink_flush_table(&mut t1);
+        for k in 300..1300 {
+            bump(&mut t1, Some(k), 2, 4 * k);
+        }
+        let mut run_b = sink_flush_table(&mut t1);
+        let combines = test_combines();
+
+        // Reference: in-memory combine over [run_a, run_b].
+        let runs = [run_a, run_b];
+        let locals_mem = [SinkLocalView { spilled: &runs, runs: &[], remainder: None }];
+        let mut reference: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
+        for b in 0..SINK_NBUCKETS {
+            reference.push(sink_combine_bucket(b, 1, STATE_BYTES, &locals_mem, &combines).unwrap());
+        }
+        let [mut run_a, mut run_b] = runs;
+
+        // Spill image: per-bucket serialize both runs (epoch order), null
+        // blocks pulled aside exactly as the Local does.
+        let state_words = STATE_BYTES / 8;
+        let mut null_blocks: Vec<Vec<u64>> = Vec::new();
+        for r in [&mut run_a, &mut run_b] {
+            if let Some(nb) = r.null_states.take() {
+                null_blocks.push(nb);
+            }
+        }
+        let mut found_rows = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let mut bytes = Vec::new();
+            sink_run_spill_bucket(&run_a, b, &mut bytes);
+            sink_run_spill_bucket(&run_b, b, &mut bytes);
+            let mut synth = vec![sink_run_from_spill(b, 1, state_words, &bytes).unwrap()];
+            if b == SINK_NULL_BUCKET {
+                for nb in &null_blocks {
+                    synth.push(sink_null_only_run(1, state_words, nb.clone()));
+                }
+            }
+            let locals = [SinkLocalView { spilled: &synth, runs: &[], remainder: None }];
+            assert_eq!(
+                sink_bucket_row_count(b, &locals),
+                (run_a.starts[b + 1] - run_a.starts[b] + run_b.starts[b + 1] - run_b.starts[b])
+                    as usize
+            );
+            let got = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            assert_eq!(got.nrows(), reference[b].nrows(), "bucket {b} group count");
+            for row in 0..got.nrows() {
+                let key = got.row_key_int(row);
+                assert_eq!(
+                    read_group(&got, key),
+                    read_group(&reference[b], key),
+                    "bucket {b} key {key:?}"
+                );
+                found_rows += 1;
+            }
+        }
+        // 1300 distinct keys + the NULL group.
+        assert_eq!(found_rows, 1301);
+    }
+
+    /// Torn spill records fail closed.
+    #[test]
+    fn spill_torn_record_refuses() {
+        let bytes = vec![0u8; sink_spill_row_bytes(1, 2) + 3];
+        assert!(sink_run_from_spill(0, 1, 2, &bytes).is_err());
+    }
+
+    /// M3.5 split invariance: routing a bucket's records by deeper hash
+    /// bits and combining per sub-bucket yields exactly the direct
+    /// combine's groups, each group in exactly one sub-bucket. Remainder
+    /// serialization rides the same law.
+    #[test]
+    fn split_route_combine_invariance() {
+        let mut t1 = mk_table(64);
+        for k in 0..2000 {
+            bump(&mut t1, Some(k), 1, k);
+        }
+        let run1 = sink_flush_table(&mut t1);
+        // Remainder face: overlapping keys, serialized through the SEAL
+        // partition index.
+        for k in 1500..2500 {
+            bump(&mut t1, Some(k), 3, k + 7);
+        }
+        let part1 = sink_partition_remainder(&t1);
+        let combines = test_combines();
+        let state_words = STATE_BYTES / 8;
+
+        for b in [0usize, 17, SINK_NULL_BUCKET] {
+            let locals = [SinkLocalView {
+                spilled: core::slice::from_ref(&run1),
+                runs: &[],
+                remainder: Some((&t1, &part1)),
+            }];
+            let direct = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+
+            // Serialize the bucket (run + remainder), route at depth 1.
+            let mut bytes = Vec::new();
+            sink_run_spill_bucket(&run1, b, &mut bytes);
+            sink_remainder_spill_bucket(&t1, &part1, b, &mut bytes);
+            let mut subs: Vec<Vec<u8>> = vec![Vec::new(); SINK_NBUCKETS];
+            sink_route_records(&bytes, 1, state_words, 1, &mut subs).unwrap();
+
+            let mut seen = std::collections::HashMap::new();
+            let mut total = 0usize;
+            for sub in &subs {
+                if sub.is_empty() {
+                    continue;
+                }
+                let synth = sink_run_from_spill(b, 1, state_words, sub).unwrap();
+                let sl = [SinkLocalView {
+                    spilled: core::slice::from_ref(&synth),
+                    runs: &[],
+                    remainder: None,
+                }];
+                let merged = sink_combine_bucket(b, 1, STATE_BYTES, &sl, &combines).unwrap();
+                for row in 0..merged.nrows() {
+                    let key = merged.row_key_int(row).expect("no NULL rows in records");
+                    let prev = seen.insert(key, read_group(&merged, Some(key)).unwrap());
+                    assert!(prev.is_none(), "group {key} in two sub-buckets");
+                    total += 1;
+                }
+            }
+            // Every direct non-NULL group appears exactly once with equal
+            // states; the NULL group (only bucket 255, remainder face)
+            // stays OUT of routed records by contract.
+            let mut direct_nonnull = 0usize;
+            for row in 0..direct.nrows() {
+                match direct.row_key_int(row) {
+                    Some(key) => {
+                        direct_nonnull += 1;
+                        assert_eq!(
+                            seen.get(&key),
+                            read_group(&direct, Some(key)).as_ref(),
+                            "bucket {b} key {key}"
+                        );
+                    }
+                    None => {
+                        assert_eq!(b, SINK_NULL_BUCKET);
+                        assert!(sink_remainder_null_block(&t1).is_some());
+                    }
+                }
+            }
+            assert_eq!(total, direct_nonnull, "bucket {b} group counts");
+        }
     }
 }
