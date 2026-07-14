@@ -88,10 +88,33 @@ struct Membership {
     waitq: VecDeque<Arc<ResourceGroup>>,
 }
 
+/// Per-drive observability accumulators (the WFIN marker channel —
+/// fabled run-m0-parallel-accept.sh parses `MORSEL|WFIN|…` off server
+/// stderr). Plain thread-owned data written at morsel/task cadence and
+/// read by the drive's owner after completion: no synchronization, no
+/// loom-visible operations. Timestamps are the scheduler clock's ns.
+#[derive(Default, Clone, Copy)]
+pub struct DriveLocal {
+    /// Tasks this local executed (claim loops entered with a live join).
+    pub tasks: u64,
+    pub morsels: u64,
+    pub granules: u64,
+    /// Sum of executed-morsel durations (excludes claim/park/settle time).
+    pub busy_ns: u64,
+    /// Clock at the first claimed morsel's execution start; 0 = none ran.
+    pub first_claim_ns: u64,
+    /// Clock at the end of the last executed morsel (the WFIN t_us).
+    pub last_end_ns: u64,
+}
+
 /// Thread-local scheduling bookkeeping (one per worker, owned by the worker
 /// loop — deliberately NOT thread_local! so loom can drive it).
 pub struct WorkerLocal {
     worker: usize,
+    /// WFIN drive accumulators (fresh per `Runtime::external_local`; pool
+    /// workers accumulate for their thread's lifetime — only the external
+    /// pinned drives read them today).
+    pub drive: DriveLocal,
     /// Slot-word cache: (seq, task set) per slot; revalidated by one atomic
     /// read of the slot word.
     cache: Vec<Option<(u64, Arc<TaskSetRt>)>>,
@@ -186,6 +209,7 @@ impl Scheduler {
         assert!(worker < self.nthreads);
         WorkerLocal {
             worker,
+            drive: DriveLocal::default(),
             cache: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
             local_pass: 0,
@@ -199,11 +223,17 @@ impl Scheduler {
         assert!(ordinal < MAX_EXTERNAL_LANES, "external participant lanes exhausted");
         WorkerLocal {
             worker: self.nthreads + ordinal,
+            drive: DriveLocal::default(),
             cache: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
         }
+    }
+
+    /// Scheduler clock read (WFIN leader marks share the workers' domain).
+    pub(crate) fn clock_now_ns(&self) -> u64 {
+        self.clock.now_ns()
     }
 
     pub(crate) fn snapshot(&self) -> RuntimeStatsSnapshot {
@@ -459,6 +489,7 @@ impl Scheduler {
                 true
             }
             Ok(participant) => {
+                local.drive.tasks += 1;
                 let mut sizer = TaskSizer::new(self.params, ts.c0);
                 let mut exhausted = false;
                 loop {
@@ -491,7 +522,16 @@ impl Scheduler {
                         exhausted = true;
                         break;
                     }
-                    let dt = self.clock.now_ns().saturating_sub(t0);
+                    let t1 = self.clock.now_ns();
+                    let dt = t1.saturating_sub(t0);
+                    // WFIN accumulators (thread-owned plain data).
+                    local.drive.morsels += 1;
+                    local.drive.granules += granules;
+                    local.drive.busy_ns += dt;
+                    if local.drive.first_claim_ns == 0 {
+                        local.drive.first_claim_ns = t0;
+                    }
+                    local.drive.last_end_ns = t1;
                     sizer.observe(&ts.sizer, granules, dt);
                     // INERT stride accounting (M5 reads this).
                     ts.rg.cpu_consumed_ns.fetch_add(dt, Ordering::Relaxed);

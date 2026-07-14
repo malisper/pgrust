@@ -346,6 +346,7 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
         return Ok(());
     }
     let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    emit_wfin("entry", lane.ordinal(), &local, &rg);
     // Teardown mode per drive_bound: self-error takes the release path;
     // the abort discipline is the transaction-level Err below (the hook
     // path gets the same via the binder's finish(false)).
@@ -447,6 +448,7 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
+    emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
     // cleanly under the about-to-commit binder unbind. Only a self-error
@@ -454,9 +456,7 @@ fn drive_bound(
     // binder's transaction abort clean up.
     let self_errored = WORKER_EXEC
         .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
-    let teardown = teardown_worker_exec(!self_errored);
-    let _ = ordinal;
-    teardown
+    teardown_worker_exec(!self_errored)
 }
 
 fn mark_self_errored() {
@@ -465,6 +465,101 @@ fn mark_self_errored() {
             ex.errored.set(true);
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// WFIN drive markers — the m0-accept harness's worker-finish channel
+// (fabled run-m0-parallel-accept.sh: `MORSEL|WFIN|qid=|pipe=|worker=|t_us=|
+// tasks=|task_avg_us=` off server stderr; unknown key=value fields are
+// ignored, so the extra decomposition fields are safe). Env-gated
+// (PGRUST_WFIN=1, passed via CB_PGRUST_ENV on diagnosis runs): default-off,
+// zero cost on the ladder's standing timing arms.
+// ---------------------------------------------------------------------------
+
+fn wfin_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
+}
+
+/// This worker's cbstore drive counters (rg_switches, dict_builds,
+/// granules_scanned, windows_staged) — read BEFORE teardown releases the qd.
+fn worker_cb_counters() -> Option<(u64, u64, u64, u64)> {
+    WORKER_EXEC.with(|cell| {
+        let b = cell.borrow();
+        let ex = b.as_ref()?;
+        crate::querydesc::with_qd(ex.qd, |q| {
+            let x = q.exec.as_mut()?;
+            x.with_mut(|d| {
+                let crate::procnode::PlanStateNode::Agg(aps) = d.planstate.as_mut()? else {
+                    return None;
+                };
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &aps.outer else {
+                    return None;
+                };
+                ::nodeseqscan::seq_scan_cb_drive_counters(ss)
+            })
+        })
+    })
+}
+
+/// One worker-finish marker per participant per drive. `t_us` is the
+/// scheduler clock at the end of this worker's LAST executed morsel (parked
+/// waiting after the pipeline's end does not count); the harness's spread =
+/// max-min of t_us per qid across workers.
+fn emit_wfin(
+    chan: &str,
+    ordinal: usize,
+    local: &runtime::WorkerLocal,
+    rg: &runtime::RgHandle,
+) {
+    if !wfin_enabled() {
+        return;
+    }
+    let d = local.drive;
+    let task_avg_us = if d.tasks > 0 { d.busy_ns / d.tasks / 1000 } else { 0 };
+    let (rgsw, dictb, gscan, wins) = worker_cb_counters().unwrap_or((0, 0, 0, 0));
+    eprintln!(
+        "MORSEL|WFIN|qid={}|pipe=0|worker={}|t_us={}|tasks={}|task_avg_us={}|first_us={}|busy_us={}|morsels={}|granules={}|chan={}|cb_rgswitch={}|cb_dictbuild={}|cb_granules={}|cb_windows={}",
+        rg.query_id(),
+        ordinal,
+        d.last_end_ns / 1000,
+        d.tasks,
+        task_avg_us,
+        d.first_claim_ns / 1000,
+        d.busy_ns / 1000,
+        d.morsels,
+        d.granules,
+        chan,
+        rgsw,
+        dictb,
+        gscan,
+        wins,
+    );
+}
+
+/// Leader-side completion mark (same clock domain as the workers' t_us):
+/// leader wake latency = LFIN t_us − max worker t_us.
+fn emit_lfin(
+    rt: &Arc<runtime::Runtime>,
+    chan: &str,
+    rg: &runtime::RgHandle,
+    total_granules: u64,
+    nrgs: usize,
+    payload: &Arc<RuntimeScanShared>,
+) {
+    if !wfin_enabled() {
+        return;
+    }
+    eprintln!(
+        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|chan={}",
+        rg.query_id(),
+        rt.now_ns() / 1000,
+        total_granules,
+        nrgs,
+        payload.started.load(Ordering::SeqCst),
+        payload.refused.load(Ordering::SeqCst),
+        chan,
+    );
 }
 
 fn build_worker_exec(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
@@ -1053,6 +1148,7 @@ fn engage_ceremony<'mcx>(
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
         // Submit the pinned RG before launch: helpers find work immediately.
+        let nrgs = starts.len().saturating_sub(1);
         let source = Arc::new(CbstoreGranuleSource { starts });
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
@@ -1072,6 +1168,7 @@ fn engage_ceremony<'mcx>(
         // RG untouched and takes the launched path below.
         match standing_wait(rt, payload, dop, total_granules, &rg, &waiter)? {
             StandingWait::Done(outcome) => {
+                emit_lfin(rt, "standing", &rg, total_granules, nrgs, payload);
                 return finish_outcome(payload, outcome);
             }
             StandingWait::Fallback => {}
@@ -1141,6 +1238,7 @@ fn engage_ceremony<'mcx>(
             }
             parallel::wait_parallel_finish_quantum();
         };
+        emit_lfin(rt, "launched", &rg, total_granules, nrgs, payload);
 
         finish_outcome(payload, outcome)
     })(&mut submitted);
