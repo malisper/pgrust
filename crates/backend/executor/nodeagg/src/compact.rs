@@ -197,6 +197,13 @@ pub(crate) struct CompactHash {
     /// every table reset (flush) — rows restart per epoch. Empty for word
     /// shapes.
     pub(crate) canon_hashes: Vec<u64>,
+    /// True once the RUNTIME sink drain owns this table (set per worker by
+    /// `agg_sink_mark_sink_mode`). Gates the batch-tail canonical hashing:
+    /// the serial lane shares this compact table and never flushes or
+    /// SEAL-partitions, so accept-time hashes would be pure overhead there.
+    /// The flush/partition entries keep their unconditional defensive
+    /// extend (first-morsel rows hashed before the flag, and the tests).
+    pub(crate) sink_mode: bool,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -217,6 +224,7 @@ pub(crate) fn compact_hash_for_tests(
         key,
         intern,
         canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -435,6 +443,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         key: CompactKeySpec::Single { width },
         intern: None,
         canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -520,6 +529,7 @@ fn try_arm_mk_n(
             ::lanetable::LaneAggTable::new(::lanetable::KeyRepr::Bytes, 8, 1 << 10)
         }),
         canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -738,6 +748,7 @@ pub fn agg_hash_compact_try_arm_reduced(
         key: CompactKeySpec::Reduced(shape),
         intern: None,
         canon_hashes: Vec::new(),
+        sink_mode: false,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -984,11 +995,14 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
             unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
         }));
     }
-    // Canonical shapes: hash the batch's NEW rows' canonical images while
-    // their text bytes are cache-warm, on this (accepting) worker — the
-    // flush and the single-threaded SEAL partition then never hash
-    // (no-op for word shapes).
-    crate::sink::compact_extend_canon_hashes(ch);
+    // Canonical shapes under the RUNTIME SINK ONLY: hash the batch's NEW
+    // rows' canonical images while their text bytes are cache-warm, on this
+    // (accepting) worker — the flush and the single-threaded SEAL partition
+    // then never hash. Serial lane: flag unset, zero added work (no-op for
+    // word shapes either way).
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 
@@ -1017,10 +1031,10 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
             unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
         }));
     }
-    // Canonical shapes: hash the batch's NEW rows' canonical images while
-    // their text bytes are cache-warm (no-op for word shapes) — see the
-    // mk1 twin.
-    crate::sink::compact_extend_canon_hashes(ch);
+    // Canonical shapes under the runtime sink only — see the mk1 twin.
+    if ch.sink_mode {
+        crate::sink::compact_extend_canon_hashes(ch);
+    }
     Ok(())
 }
 

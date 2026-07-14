@@ -732,6 +732,10 @@ fn accept_morsel_body(
                 if let Some(t) = local.table.take() {
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
+                // Sink-owned table: arm the batch-tail canonical hashing
+                // (idempotent; the first morsel's table arms during the
+                // drain below, so mark again before reclaiming it).
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 let drained = sink_drain_range(
                     sink, local, worker, &mut aps.agg, ss, k2s, idxs, groups, xk, stage_slot,
                     mk, mks,
@@ -754,6 +758,7 @@ fn accept_morsel_body(
                 }
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
                     local.table = Some(t);
                 }
