@@ -37,6 +37,7 @@
 mod exprkey;
 mod runtime_agg;
 mod runtime_distinct;
+mod runtime_hashjoin;
 mod runtime_scan;
 mod push;
 mod stats;
@@ -9687,6 +9688,13 @@ pub fn try_own_agg_over_hash_join<'mcx>(
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
         stats::tick_refused(ShapeClass::Join, RefuseReason::Backward);
         return Ok(None);
+    }
+    // M3 runtime hash-join arm (FORCED engagement under PGRUST_RUNTIME=1 +
+    // pgrust.runtime_hashjoin_pool; serial plan surface unchanged). Owns the
+    // plain-agg-over-join probe tails; None = not engaged/refused — fall
+    // through byte-identically (nothing was consumed).
+    if let Some(r) = runtime_hashjoin::try_own_agg_over_hash_join_runtime(agg, hj, estate)? {
+        return Ok(Some(r));
     }
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);

@@ -21,6 +21,8 @@ pub fn init_seams() {}
 
 mod parallel;
 pub use parallel::exec_parallel_hash_join;
+pub mod shared_build;
+pub mod shared_exec;
 
 const HJ_BUILD_HASHTABLE: u8 = 1;
 const HJ_NEED_NEW_OUTER: u8 = 2;

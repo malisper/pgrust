@@ -152,3 +152,28 @@ pub fn runtime_distinct_pool_dop() -> i32 {
     }
     pool_option_dop("pgrust.runtime_scan_pool")
 }
+
+// ---------------------------------------------------------------------------
+// M3 runtime hash-join arming (docs/design/m3-joins.md §9): same layering as
+// the scan arm — PGRUST_RUNTIME=1 + `SET pgrust.runtime_hashjoin_pool = <dop>`
+// (customized option, planner never consults it) + the lane master switch;
+// `PGRUST_RUNTIME_HASHJOIN=0`/`off` is the dedicated arm kill.
+// ---------------------------------------------------------------------------
+
+fn runtime_hashjoin_env_ok() -> bool {
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let killed = *KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_HASHJOIN").as_deref(), Ok("0") | Ok("off"))
+    });
+    !killed && crate::backing::pgrust_lane_executor()
+}
+
+/// The armed runtime hash-join DOP: `pgrust.runtime_hashjoin_pool` clamped
+/// to available cores, or 0 when unarmed. Callers must additionally gate on
+/// `PGRUST_RUNTIME=1` and the shape/binder admission.
+pub fn runtime_hashjoin_pool_dop() -> i32 {
+    if !runtime_hashjoin_env_ok() {
+        return 0;
+    }
+    pool_option_dop("pgrust.runtime_hashjoin_pool")
+}
