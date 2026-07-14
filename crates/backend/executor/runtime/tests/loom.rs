@@ -544,3 +544,149 @@ fn facade_standby_absorption() {
         assert_eq!(rt.execution_permits().available(), 1);
     });
 }
+
+/// Drive until EVERY listed waiter resolves (multi-RG models; `drive` stops
+/// at its single waiter). Same park discipline; first finisher stops the
+/// runtime so parked peers exit.
+fn drive_all(rt: &Arc<Runtime>, worker: usize, waiters: &[CompletionWaiter]) {
+    let mut local = rt.worker_local(worker);
+    loop {
+        if waiters.iter().all(|w| w.try_wait().is_some()) {
+            break;
+        }
+        let epoch = rt.park_epoch();
+        match rt.worker_step(&mut local) {
+            Step::Ran => {}
+            Step::Retry => thread::yield_now(),
+            Step::Idle => {
+                if waiters.iter().all(|w| w.try_wait().is_some()) {
+                    break;
+                }
+                rt.park(epoch);
+            }
+            Step::Stop => break,
+        }
+    }
+    rt.request_stop();
+}
+
+/// Model 5 (M5-4): queued-abort reap vs slot-release admission — the
+/// exactly-once completion election. One slot: RG A occupies it, RG B
+/// queues; an aborter thread races `abort()` (cancel + wait-queue reap)
+/// against the driver completing A (whose slot release pops the queue).
+/// Every interleaving must complete BOTH RGs exactly once (rgs_completed
+/// == 2 — a double complete would tick 3) with no hang: B is reaped
+/// (never executes), popped-aborted, or admitted and then aborted/completed
+/// through the ordinary protocol.
+#[test]
+fn queued_abort_reap_exactly_once() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let cfg = RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 1, // force B to queue behind A
+            sizing: SizingParams::default(),
+            trace: false,
+        };
+        let rt = Runtime::with_clock(cfg, Arc::new(VirtualClock::new()) as Arc<dyn Clock>);
+        let wa = ModelWork::new(1, None);
+        let (_ha, waiter_a) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::clone(&wa) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        let wb = ModelWork::new(1, None);
+        let (hb, waiter_b) = rt.submit(QuerySpec {
+            query_id: 2,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::clone(&wb) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let aborter = thread::spawn(move || hb.abort());
+        drive_all(&rt, 0, &[waiter_a.clone(), waiter_b.clone()]);
+        aborter.join().unwrap();
+
+        assert_eq!(waiter_a.try_wait(), Some(RgOutcome::Completed));
+        wa.assert_complete();
+        let outcome_b = waiter_b.try_wait().expect("B must complete (no hang)");
+        let stats = rt.stats();
+        // Exactly-once completion: reap and admission-pop both remove under
+        // the membership lock; only the remover completes.
+        assert_eq!(stats.rgs_completed, 2, "each RG completes exactly once");
+        match outcome_b {
+            RgOutcome::Aborted => {
+                // Reaped from the queue, popped aborted, or drained through
+                // the generation-refusal path — B's finalize never runs.
+                assert_eq!(wb.finalized.load(Ordering::SeqCst), 0);
+                if stats.queued_aborts_reaped == 1 {
+                    // Reaped ⇒ never admitted ⇒ never executed.
+                    assert_eq!(wb.executed[0].load(Ordering::SeqCst), 0);
+                }
+            }
+            RgOutcome::Completed => {
+                // The abort landed after B already completed (cancel on a
+                // retired lifecycle is a no-op) — legal, and B ran normally.
+                assert_eq!(stats.queued_aborts_reaped, 0);
+                wb.assert_complete();
+            }
+        }
+    });
+}
+
+/// Model 6 (M5-4): two CONCURRENTLY ACTIVE RGs under the live stride pick —
+/// two workers, two slots. The pass/stride/session words are advisory
+/// (Relaxed) by design; this model proves the finalization protocol's
+/// exactly-once guarantees hold across every interleaving of the new pick:
+/// every granule of both RGs exactly once, finalize exactly once each, both
+/// RGs complete.
+#[test]
+fn stride_two_active_rgs_exactly_once() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_stride(true);
+        let wa = ModelWork::new(2, None);
+        let (_ha, waiter_a) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&wa) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        let wb = ModelWork::new(1, None);
+        let (_hb, waiter_b) = rt.submit(QuerySpec {
+            query_id: 2,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::clone(&wb) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let (wa1, wb1) = (waiter_a.clone(), waiter_b.clone());
+        let t = thread::spawn(move || drive_all(&rt1, 1, &[wa1, wb1]));
+        drive_all(&rt, 0, &[waiter_a.clone(), waiter_b.clone()]);
+        t.join().unwrap();
+
+        assert_eq!(waiter_a.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(waiter_b.try_wait(), Some(RgOutcome::Completed));
+        wa.assert_complete();
+        wb.assert_complete();
+        let stats = rt.stats();
+        assert_eq!(stats.rgs_completed, 2);
+        assert_eq!(stats.finalize_events, 2);
+    });
+}

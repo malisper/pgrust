@@ -140,18 +140,32 @@ impl PinBoard {
 }
 
 /// One slot of the global scheduler array. The word is the single-atomic-read
-/// hot path: `(seq << 1) | valid`. `pass`/`stride` are the INERT stride
-/// scheduling fields (SIGMOD'21 §2.3; activate in M5 — with a single active
-/// RG the lowest-pass pick degenerates to the only slot, so M0 runs FIFO
-/// lowest-index and never reads them).
+/// hot path: `(seq << 1) | valid`. `pass`/`stride` are the stride scheduling
+/// fields (SIGMOD'21 §2.3), LIVE as of M5-4 (inter-query §5.3): the pick is
+/// lowest `pass` among active slots and each executed task advances the
+/// slot's pass by `stride × cpu_ns`. With a single active RG the lowest-pass
+/// pick degenerates to the only slot — the single-query case is provably
+/// today's FIFO pick (and `PGRUST_RUNTIME_STRIDE=0` restores FIFO outright).
+///
+/// All stride fields are Relaxed and ADVISORY: they order the pick, never
+/// execution safety — a stale pick revalidates through the slot word into
+/// Retry, exactly like a stale maintenance-mask hit.
 pub(crate) struct Slot {
     pub(crate) word: AtomicU64,
-    /// INERT until M5: priority-weighted virtual time of the occupying RG.
-    #[allow(dead_code)]
+    /// Priority-weighted virtual time of the occupying RG. Reset to the
+    /// scheduler's global-pass watermark when a NEW RG is admitted to the
+    /// slot (standard stride join — no credit for queue wait); persists
+    /// across the same RG's task-set republishes.
     pub(crate) pass: AtomicU64,
-    /// INERT until M5: 1/priority scaled; pass advances by stride × time.
-    #[allow(dead_code)]
+    /// Fixed-point stride (see sched::stride_for): STRIDE1/priority, so pass
+    /// advance = (cpu_ns × stride) >> PASS_SHIFT. Refreshed from the RG's
+    /// priority at every publish — M5-5's decaying priorities only have to
+    /// update `ResourceGroup::priority` and republish/refresh to take effect.
     pub(crate) stride: AtomicU64,
+    /// Session-affinity token of the occupying RG's leader (0 = none):
+    /// the equal-pass pick tiebreak prefers a slot whose token matches the
+    /// picking worker's sticky-bound session (M5-4; ceremony-v2 mechanism).
+    pub(crate) session: AtomicU64,
 }
 
 impl Slot {
@@ -160,6 +174,7 @@ impl Slot {
             word: AtomicU64::new(0),
             pass: AtomicU64::new(0),
             stride: AtomicU64::new(0),
+            session: AtomicU64::new(0),
         }
     }
 }
