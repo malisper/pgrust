@@ -1907,6 +1907,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bgjobs"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "latch",
+ "runtime",
+ "types_error",
+ "types_storage",
+ "waiter",
+]
+
+[[package]]
 name = "bgworker"
 version = "0.0.0"
 dependencies = [
@@ -1948,12 +1960,14 @@ version = "0.0.0"
 dependencies = [
  "aio_seams",
  "auxprocess",
+ "bgjobs",
  "bufmgr",
  "checkpointer",
  "condition_variable_seams",
  "dynahash",
  "elog",
  "fd",
+ "guc_file_seams",
  "guc_tables",
  "init_small",
  "interrupt",
@@ -1961,10 +1975,14 @@ dependencies = [
  "latch",
  "libc",
  "libpq_pqsignal",
+ "lmgr_proc",
  "lwlock",
  "miscinit",
  "pgstat_seams",
+ "postinit",
+ "postmaster_seams",
  "procsignal",
+ "procsignal_seams",
  "resowner",
  "smgr",
  "standby_seams",
@@ -1972,6 +1990,8 @@ dependencies = [
  "transam_xlog",
  "types_core",
  "types_error",
+ "types_guc",
+ "types_resowner",
  "types_startup",
  "types_storage",
  "waitevent_seams",
@@ -7647,6 +7667,7 @@ version = "0.0.0"
 dependencies = [
  "autovacuum",
  "backend_startup",
+ "bgjobs",
  "bgworker",
  "bgwriter",
  "checkpointer",

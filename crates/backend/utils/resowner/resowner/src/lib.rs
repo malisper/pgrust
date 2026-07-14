@@ -1035,6 +1035,16 @@ pub fn AuxProcessResourceOwner() -> ResourceOwner {
     AUX_PROCESS_OWNER.with(|c| c.get())
 }
 
+/// M4 bgjobs (docs/design/m4-bgjobs.md §3.4): the aux resource owner is
+/// per-DAEMON state, but the cell is per-thread. The job envelope bind
+/// points a pool worker's cell at the job's owner for one cycle (buffer
+/// pins and the error path's ReleaseAuxProcessResources route through
+/// it), and the dispatcher's per-lifecycle reset clears its own stale
+/// cells before re-running CreateAuxProcessResourceOwner.
+pub fn SetAuxProcessResourceOwner(owner: ResourceOwner) {
+    AUX_PROCESS_OWNER.with(|c| c.set(owner));
+}
+
 pub fn ResourceOwnerStateClean() -> bool {
     ResourceOwnerStateIssue().is_none()
 }

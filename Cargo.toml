@@ -671,6 +671,7 @@ members = [
     "crates/backend/postmaster/auxprocess",
     "crates/backend/postmaster/checkpointer",
     "crates/backend/postmaster/bgwriter",
+    "crates/backend/postmaster/bgjobs",
     "crates/backend/postmaster/walwriter",
     "crates/backend/postmaster/pgarch",
     "crates/backend/postmaster/walsummarizer",

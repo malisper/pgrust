@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use crate::clock::Clock;
 use crate::morsel::MorselRange;
-use crate::rg::{QuerySpec, ResourceGroup, RgOutcome};
+use crate::rg::{QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
 use crate::stats::{RuntimeStats, RuntimeStatsSnapshot};
 use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -234,6 +234,12 @@ pub(crate) struct Scheduler {
     /// pick (read-mostly, uncontended at 16 workers); M5 syncs it into the
     /// thread-local views via the worker mailboxes.
     active: [AtomicU64; 2],
+    /// M4 maintenance preference mask (docs/design/m4-bgjobs.md §3.5):
+    /// subset of `active` holding Maintenance-class slots; the pick scans it
+    /// first. ADVISORY ONLY — a stale bit resolves to Retry through the slot
+    /// word, so no ordering discipline against `active` is needed. Cost on
+    /// the foreground path: two zero-mask loads per pick.
+    maint: [AtomicU64; 2],
     membership: Mutex<Membership>,
     pins: PinBoard,
     /// INERT until M5: per-worker change/return masks.
@@ -279,6 +285,7 @@ impl Scheduler {
         Scheduler {
             slots: (0..nslots).map(|_| Slot::new()).collect(),
             active: [AtomicU64::new(0), AtomicU64::new(0)],
+            maint: [AtomicU64::new(0), AtomicU64::new(0)],
             membership: Mutex::new(Membership {
                 owned: (0..nslots).map(|_| None).collect(),
                 waitq: VecDeque::new(),
@@ -366,9 +373,13 @@ impl Scheduler {
 
     // ---- membership: submit / publish / admit -----------------------------
 
-    pub(crate) fn submit(&self, spec: QuerySpec, pinned: bool) -> Arc<ResourceGroup> {
+    pub(crate) fn submit(&self, spec: QuerySpec, pinned: bool, class: RgClass) -> Arc<ResourceGroup> {
+        assert!(
+            !(pinned && class == RgClass::Maintenance),
+            "maintenance RGs are pool-executed, never pinned"
+        );
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let rg = ResourceGroup::new(rg_id, spec, pinned);
+        let rg = ResourceGroup::new(rg_id, spec, pinned, class);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         if self.trace {
             self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
@@ -379,14 +390,29 @@ impl Scheduler {
             return rg;
         }
         let mut m = lock(&self.membership);
-        // FIFO admission: never overtake queued RGs.
-        if m.waitq.is_empty() {
-            if let Some(slot) = m.owned.iter().position(Option::is_none) {
-                self.start_rg_locked(&mut m, Arc::clone(&rg), slot);
-                return rg;
+        match class {
+            RgClass::Foreground => {
+                // FIFO admission: never overtake queued RGs.
+                if m.waitq.is_empty() {
+                    if let Some(slot) = m.owned.iter().position(Option::is_none) {
+                        self.start_rg_locked(&mut m, Arc::clone(&rg), slot);
+                        return rg;
+                    }
+                }
+                m.waitq.push_back(Arc::clone(&rg));
+            }
+            RgClass::Maintenance => {
+                // Starvation floor (§3.5): a due job cycle takes any free
+                // slot regardless of queued foreground RGs, and if every
+                // slot is busy it goes to the FRONT of the queue (the
+                // handful of jobs never meaningfully reorders the FIFO).
+                if let Some(slot) = m.owned.iter().position(Option::is_none) {
+                    self.start_rg_locked(&mut m, Arc::clone(&rg), slot);
+                    return rg;
+                }
+                m.waitq.push_front(Arc::clone(&rg));
             }
         }
-        m.waitq.push_back(Arc::clone(&rg));
         rg
     }
 
@@ -434,13 +460,14 @@ impl Scheduler {
             ));
         }
         let pinned = ts.rg.pinned;
+        let class = ts.rg.class;
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // Pinned RGs are invisible to the pool's pick: only external
         // participants (drive_pinned) may execute them — pool workers have
         // no session binding for the query (M1; §2.3 retires this in M2+).
         if !pinned {
-            self.set_active(slot);
+            self.set_active(slot, class);
         }
         RuntimeStats::tick(&self.stats.tasksets_published);
         // Wake parked workers: new work exists (external pinned drivers
@@ -448,15 +475,31 @@ impl Scheduler {
         self.park.wake_all();
     }
 
-    fn set_active(&self, slot: usize) {
+    fn set_active(&self, slot: usize, class: RgClass) {
+        if class == RgClass::Maintenance {
+            self.maint[slot / 64].fetch_or(1u64 << (slot % 64), Ordering::SeqCst);
+        }
         self.active[slot / 64].fetch_or(1u64 << (slot % 64), Ordering::SeqCst);
     }
 
     fn clear_active(&self, slot: usize) {
+        self.maint[slot / 64].fetch_and(!(1u64 << (slot % 64)), Ordering::SeqCst);
         self.active[slot / 64].fetch_and(!(1u64 << (slot % 64)), Ordering::SeqCst);
     }
 
     fn pick_slot(&self) -> Option<usize> {
+        // M4 preference: any Maintenance-class slot first (§3.5 starvation
+        // floor; mask is usually zero — two loads on the foreground path).
+        // A stale hit revalidates through the slot word into Retry.
+        for (i, word) in self.maint.iter().enumerate() {
+            let mask = word.load(Ordering::SeqCst);
+            if mask != 0 {
+                let slot = i * 64 + mask.trailing_zeros() as usize;
+                if slot < self.slots.len() {
+                    return Some(slot);
+                }
+            }
+        }
         // M0 policy: FIFO / lowest-index active slot (single-RG benchmark
         // case degenerates to "the only slot"). M5 replaces this scan with
         // the thread-local lowest-pass stride pick.

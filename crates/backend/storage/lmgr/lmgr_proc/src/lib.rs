@@ -57,6 +57,23 @@ pub fn MyProc() -> Option<ProcNumber> {
     (procno != INVALID_PROC_NUMBER).then_some(procno)
 }
 
+/// M4 bgjobs (docs/design/m4-bgjobs.md §3.4): bind a job's aux PGPROC onto
+/// this thread for one cycle task — LWLock/pg_sema waits and buffer-pin
+/// bookkeeping route through the job's PGPROC while the cycle runs on a
+/// pool worker. Returns the previous binding for the RAII restore. The
+/// PGPROC itself is owned by the job (acquired by InitAuxiliaryProcess on
+/// the dispatcher); this only points the thread-local at it.
+pub fn bind_task_proc(procno: ProcNumber) -> ProcNumber {
+    let prev = MY_PROC.get();
+    MY_PROC.set(procno);
+    prev
+}
+
+/// Restore [`bind_task_proc`]'s previous binding.
+pub fn unbind_task_proc(prev: ProcNumber) {
+    MY_PROC.set(prev);
+}
+
 fn my_proc_required() -> ProcNumber {
     MyProc().unwrap_or_else(|| panic!("MyProc is not set"))
 }
