@@ -56,6 +56,7 @@ pub mod merge;
 pub mod pardistinct;
 pub mod sink;
 pub mod runtime_partial;
+pub mod sortedsink;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
@@ -171,6 +172,10 @@ pub struct AggStateData<'mcx> {
     // state — published per-bucket identity-projected rows drained one per
     // call. Plain Rust memory; no aggcontext residue.
     sink_emit: Option<Box<sink::SinkEmitState>>,
+    // q28-sorted-arm: the ordered-grouped runtime sink's adopted emit state
+    // (sortedsink.rs) — stitched ordered segments drained one row per call.
+    // Plain Rust memory; no aggcontext residue.
+    sorted_sink_emit: Option<Box<sortedsink::SortedSinkEmitState>>,
 }
 
 // Lane-v2 fold state for the execmain lanev2 hash-agg breaker: the lanefold
@@ -1541,6 +1546,7 @@ pub fn exec_init_agg<'mcx>(
         hashgroup: None,
         codedgroup: None,
         sink_emit: None,
+        sorted_sink_emit: None,
     })
 }
 
@@ -6255,6 +6261,8 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
             hashagg_release_retained("sink_teardown");
         }
     }
+    // q28-sorted-arm: same discipline for the ordered sink's segments.
+    sortedsink::agg_sorted_sink_reset(node);
     node.qual = None;
     node.merge = None;
     hashgrouped::agg_hashgroup_reset(node);
@@ -6297,6 +6305,7 @@ pub fn exec_rescan_agg_chg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut ES
     // M2 sink: a rescan re-engages (or falls back) from scratch; any adopted
     // parallel emit state is spent.
     sink::agg_sink_reset_emit(node);
+    sortedsink::agg_sorted_sink_reset(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6346,6 +6355,7 @@ pub fn exec_rescan_agg<'mcx>(node: &mut AggStateData<'mcx>, _estate: &mut EState
     let merged = merge::reset_merge_for_rescan(node);
     // M2 sink: spent on rescan (see exec_rescan_agg_chg).
     sink::agg_sink_reset_emit(node);
+    sortedsink::agg_sorted_sink_reset(node);
     for ps in node.pertrans_sort.iter_mut() {
         for st in ps.sortstates.iter_mut() {
             if let Some(sort) = st.take() {
@@ -6473,7 +6483,7 @@ mcx::forget_safe_struct!(
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
         pertrans_sort, qual, lanefold, meta_aggs, hashgroup, codedgroup,
-        sink_emit },
+        sink_emit, sorted_sink_emit },
     // resid released in exec_end_agg (evaltrans discipline); the plan holds
     // only arena PgVecs.
     LaneFold<'_> { plan; resid },

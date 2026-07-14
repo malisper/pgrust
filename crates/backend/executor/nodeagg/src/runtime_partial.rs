@@ -143,9 +143,29 @@ pub fn agg_runtime_export_partial_into(
     node: &AggStateData<'_>,
     partial: &mut RuntimePartial,
 ) -> PgResult<()> {
+    export_partial_from(node, crate::agg_plain_pergroup_base(node), partial)
+}
+
+/// SORTED-arm twin (q28-sorted-arm): export the OPEN group's pergroup states
+/// (the sorted drive's single current-group array) — the per-claim boundary
+/// partial of the ordered-grouped runtime arm. Same admission, same
+/// self-contained representation, same error-path invariant as the plain
+/// export above.
+pub fn agg_sorted_export_partial_into(
+    node: &AggStateData<'_>,
+    partial: &mut RuntimePartial,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, crate::AGG_SORTED);
+    export_partial_from(node, crate::agg_sorted_pergroup_base(node), partial)
+}
+
+fn export_partial_from(
+    node: &AggStateData<'_>,
+    base: core::ptr::NonNull<::execexpr::AggPerGroup>,
+    partial: &mut RuntimePartial,
+) -> PgResult<()> {
     let plan = crate::agg_lanefold_plan(node)
         .ok_or_else(|| PgError::error("runtime partial export without a fold plan".to_string()))?;
-    let base = crate::agg_plain_pergroup_base(node);
     let out = &mut partial.trans;
     out.clear();
     out.reserve(plan.trans.len());
@@ -248,6 +268,34 @@ fn combine_two(kind: LaneKind, a: RuntimePartialTrans, b: RuntimePartialTrans) -
     }
 }
 
+/// Pairwise combine (the ordered-grouped arm's boundary stitch): fold `src`
+/// into `dst` in place. Left-to-right stitch order; every admitted kind is
+/// order-insensitive-exact so the association cannot be observed.
+pub fn agg_runtime_combine_into(
+    node: &AggStateData<'_>,
+    dst: &mut RuntimePartial,
+    src: &RuntimePartial,
+) -> PgResult<()> {
+    let plan = crate::agg_lanefold_plan(node)
+        .ok_or_else(|| PgError::error("runtime partial combine without a fold plan".to_string()))?;
+    for p in [&*dst, src] {
+        if p.trans.len() != plan.trans.len()
+            || p.trans
+                .iter()
+                .zip(plan.trans.iter())
+                .any(|(&(no, _), t)| no != t.transno)
+        {
+            return Err(Box::new(PgError::error(
+                "runtime partial: transno layout mismatch".to_string(),
+            )));
+        }
+    }
+    for (i, t) in plan.trans.iter().enumerate() {
+        dst.trans[i].1 = combine_two(t.kind, dst.trans[i].1, src.trans[i].1);
+    }
+    Ok(())
+}
+
 /// Combine worker partials (order-insensitive-exact for every admitted
 /// kind; install order is immaterial by construction).
 pub fn agg_runtime_combine(
@@ -295,6 +343,31 @@ pub fn exec_agg_runtime_partials<'mcx>(
         return Ok(None);
     }
     crate::agg_plain_build_begin(node, estate)?;
+    absorb_partial_states(node, combined)?;
+    crate::agg_plain_finish(node, estate)
+}
+
+/// SORTED-arm twin (q28-sorted-arm): absorb a combined boundary partial into
+/// the CURRENT group's pergroup states. The caller ran
+/// [`crate::agg_sorted_stitch_begin`] (initval copies installed) and follows
+/// with `agg_sorted_emit` — the plain arm's begin/absorb/finish discipline,
+/// sorted flavor.
+pub fn agg_sorted_absorb_partial(
+    node: &mut AggStateData<'_>,
+    combined: &RuntimePartial,
+) -> PgResult<()> {
+    debug_assert_eq!(node.plan.aggstrategy, crate::AGG_SORTED);
+    absorb_partial_states(node, combined)
+}
+
+/// The shared absorb loop: write each transno's combined partial into the
+/// node's once-allocated pergroup array (plain and sorted share
+/// `pergroup_base` — one current-group array either way), byte-for-byte the
+/// serial transfn chain's end state.
+fn absorb_partial_states(
+    node: &mut AggStateData<'_>,
+    combined: &RuntimePartial,
+) -> PgResult<()> {
     {
         let plan = crate::agg_lanefold_plan(node)
             .ok_or_else(|| PgError::error("runtime partial absorb without a fold plan".to_string()))?;
@@ -303,7 +376,7 @@ pub fn exec_agg_runtime_partials<'mcx>(
                 "runtime partial: combined layout mismatch".to_string(),
             )));
         }
-        let base = crate::agg_plain_pergroup_base(node);
+        let base = node.pergroup_base;
         let mut int128_fixups: Vec<(u16, i64, i128)> = Vec::new();
         for (t, &(transno, p)) in plan.trans.iter().zip(combined.trans.iter()) {
             debug_assert_eq!(t.transno, transno);
@@ -364,7 +437,7 @@ pub fn exec_agg_runtime_partials<'mcx>(
             unsafe {
                 ptr.write(Int128AggState { calc_sum_x2: false, n, sum_x: sum, sum_x2: 0 });
             }
-            let base = crate::agg_plain_pergroup_base(node);
+            let base = node.pergroup_base;
             // SAFETY: transno bound as above.
             let pg = unsafe { &mut *base.as_ptr().add(transno as usize) };
             pg.trans_value = Datum::from_usize(ptr as usize);
@@ -372,5 +445,5 @@ pub fn exec_agg_runtime_partials<'mcx>(
             pg.no_trans_value = false;
         }
     }
-    crate::agg_plain_finish(node, estate)
+    Ok(())
 }
