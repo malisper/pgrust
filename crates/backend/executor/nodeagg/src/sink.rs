@@ -140,6 +140,24 @@ pub fn sink_gid_merge_enabled() -> bool {
     })
 }
 
+/// combine16 kill switch (default ON): build each combine claim's merged
+/// bucket table FLAT — one single-level entry set presized from the claim's
+/// arrival count, two-level conversion suppressed, long-key arena reserved
+/// from the directory's byte counts. Root cause: the sink bucket and the
+/// table's two-level bucket both key on `hash >> 56`, and bytes-mode combine
+/// probes reuse the carried SINK hash — constant top byte within a claim —
+/// so a `total > TWO_LEVEL_THRESHOLD` two-level table funnels every member
+/// into ONE sub-EntrySet (re-grown through full rehashes) while the other
+/// 255 presized sets are allocated + zeroed unused. Byte-invisible: entry
+/// layout/growth never changes dedup results or row insertion order, and
+/// every consumer reads rows in insertion order.
+pub fn sink_combine16_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_COMBINE16").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SinkRun — the flush wire format.
 // ---------------------------------------------------------------------------
@@ -1656,11 +1674,20 @@ pub fn sink_combine_bucket(
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
 ) -> PgResult<LaneAggTable> {
-    sink_combine_bucket_impl(b, key_words, state_bytes, locals, combines, sink_gid_merge_enabled())
+    sink_combine_bucket_impl(
+        b,
+        key_words,
+        state_bytes,
+        locals,
+        combines,
+        sink_gid_merge_enabled(),
+        sink_combine16_enabled(),
+    )
 }
 
-/// [`sink_combine_bucket`] with the GID-map decision injected (unit tests
-/// exercise the GID lane regardless of the process env).
+/// [`sink_combine_bucket`] with the GID-map and combine16 flat-table
+/// decisions injected (unit tests exercise both lanes regardless of the
+/// process env).
 fn sink_combine_bucket_impl(
     b: usize,
     key_words: usize,
@@ -1668,12 +1695,26 @@ fn sink_combine_bucket_impl(
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
     gid_enabled: bool,
+    flat: bool,
 ) -> PgResult<LaneAggTable> {
     debug_assert!(b < SINK_NBUCKETS);
     let mut total = 0usize;
+    // Bytes mode (combine16): the runs' key-byte volume for this bucket, an
+    // O(faces) directory read. Run ranges are exact image bytes (a slight
+    // over-count vs the arena — packed ≤8 B keys never land there — the
+    // safe direction). Remainder-face images are NOT counted (they
+    // materialize from shape + intern at absorb time; no cheap directory
+    // length exists) — a hint is not a cap, the arena extends past it
+    // freely, and the flush-heavy shapes where arena volume is material
+    // are run-dominated. Feeds `reserve_arena` on the flat path only.
+    let mut key_bytes = 0usize;
     for l in locals {
         for r in l.all_runs() {
             total += (r.starts[b + 1] - r.starts[b]) as usize;
+            if key_words == 0 {
+                key_bytes += (r.key_offs[r.starts[b + 1] as usize]
+                    - r.key_offs[r.starts[b] as usize]) as usize;
+            }
         }
         if let Some(rem) = &l.remainder {
             total += (rem.part.starts[b + 1] - rem.part.starts[b]) as usize;
@@ -1686,13 +1727,27 @@ fn sink_combine_bucket_impl(
         // Inline16: bucket tables are G/256-sized — well inside the band.
         _ => (KeyRepr::Int, EntryLayout::Inline16),
     };
-    let mut t = LaneAggTable::with_config(
-        repr,
-        state_bytes,
-        total.max(4),
-        HashKind::best(),
-        layout,
-    );
+    let mut t = if flat {
+        let mut t = LaneAggTable::with_flat_capacity(
+            repr,
+            state_bytes,
+            total.max(4),
+            HashKind::best(),
+            layout,
+        );
+        if key_words == 0 {
+            t.reserve_arena(key_bytes);
+        }
+        t
+    } else {
+        LaneAggTable::with_config(
+            repr,
+            state_bytes,
+            total.max(4),
+            HashKind::best(),
+            layout,
+        )
+    };
     let state_words = state_bytes / 8;
 
     // Shared merge tail: seed a new group's block or combine into the
@@ -4122,6 +4177,179 @@ mod tests {
         assert_eq!(seen[&(9, b"zzz".to_vec())], 7);
     }
 
+    // -- combine16: flat presized merged tables ------------------------------
+
+    /// Row-for-row identity (key, order, states) between two merged tables —
+    /// the combine16 byte gate: entry-set layout/growth must never move a
+    /// row or a state byte.
+    fn assert_merged_identical(a: &LaneAggTable, b: &LaneAggTable, key_words: usize) {
+        assert_eq!(a.nrows(), b.nrows());
+        let state_words = a.state_bytes() / 8;
+        assert_eq!(b.state_bytes() / 8, state_words);
+        for row in 0..a.nrows() {
+            match key_words {
+                0 => {
+                    let (mut sa, mut sb) = ([0u8; 8], [0u8; 8]);
+                    assert_eq!(
+                        a.row_key_bytes(row, &mut sa),
+                        b.row_key_bytes(row, &mut sb),
+                        "row {row} key"
+                    );
+                }
+                2 => assert_eq!(a.row_key_i128(row), b.row_key_i128(row), "row {row} key"),
+                _ => assert_eq!(a.row_key_int(row), b.row_key_int(row), "row {row} key"),
+            }
+            let (pa, pb) = (a.row_states(row).cast_const(), b.row_states(row).cast_const());
+            // SAFETY: live rows; state blocks are state_words u64s.
+            let (va, vb) = unsafe {
+                (
+                    core::slice::from_raw_parts(pa.cast::<u64>(), state_words),
+                    core::slice::from_raw_parts(pb.cast::<u64>(), state_words),
+                )
+            };
+            // AggPerGroup datums for the toy byval corpus are value words —
+            // bit-comparable (byref corpora would need field-wise reads).
+            assert_eq!(va, vb, "row {row} states");
+        }
+    }
+
+    #[test]
+    fn flat_combine_matches_incumbent() {
+        // The roundtrip corpus (runs + remainders + NULL) through both
+        // construction arms, all 256 buckets.
+        let mut t1 = mk_table(64);
+        for k in 0..1000 {
+            bump(&mut t1, Some(k), 1, k);
+        }
+        bump(&mut t1, None, 1, 7);
+        let run1 = sink_flush_table(&mut t1);
+        for k in 500..1200 {
+            bump(&mut t1, Some(k), 1, 2 * k);
+        }
+        bump(&mut t1, None, 2, 3);
+        let part1 = sink_partition_remainder(&t1);
+        let mut t2 = mk_table(64);
+        for k in 300..1500 {
+            bump(&mut t2, Some(k), 1, 3 * k);
+        }
+        let part2 = sink_partition_remainder(&t2);
+        let locals = [
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+        ];
+        let combines = test_combines();
+        for b in 0..SINK_NBUCKETS {
+            let incumbent =
+                sink_combine_bucket_impl(b, 1, STATE_BYTES, &locals, &combines, false, false)
+                    .unwrap();
+            let flat =
+                sink_combine_bucket_impl(b, 1, STATE_BYTES, &locals, &combines, false, true)
+                    .unwrap();
+            assert_eq!(flat.grow_count(), 0, "bucket {b}: presized flat table grew");
+            assert_eq!(flat.convert_count(), 0, "bucket {b}: flat table converted");
+            assert_merged_identical(&incumbent, &flat, 1);
+        }
+    }
+
+    #[test]
+    fn flat_combine_matches_incumbent_canon() {
+        // The canonical corpus (skewed per-worker intern ids, run +
+        // remainder faces) through both arms — bytes-mode probes carry the
+        // SINK hash, the degeneracy class this lane exists for.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        for i in 0..40i64 {
+            bump_canon(&mut w1, Some(i % 7), format!("text-{i}").as_bytes(), 1);
+        }
+        let run1 = sink_flush_table_canon(&mut w1);
+        for i in 20..60i64 {
+            bump_canon(&mut w1, Some(i % 5), format!("text-{i}").as_bytes(), 2);
+        }
+        let mut h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        for i in (0..50i64).rev() {
+            bump_canon(&mut w2, Some(i % 7), format!("text-{i}").as_bytes(), 3);
+        }
+        let mut h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run1),
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h2.remainder_view(&part2)) },
+        ];
+        let combines = test_combines();
+        for gid in [false, true] {
+            for b in 0..SINK_NBUCKETS {
+                let incumbent =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &locals, &combines, gid, false)
+                        .unwrap();
+                let flat =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &locals, &combines, gid, true)
+                        .unwrap();
+                assert_eq!(flat.grow_count(), 0, "bucket {b}: presized flat table grew");
+                assert_eq!(flat.convert_count(), 0, "bucket {b}: flat table converted");
+                assert_merged_identical(&incumbent, &flat, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn flat_suppresses_constant_top_byte_degeneracy() {
+        // The root-cause proof in miniature: keys whose carried hashes share
+        // one top byte (a combine claim's invariant — sink bucket = hash
+        // top byte). Past TWO_LEVEL_THRESHOLD the incumbent converts
+        // two-level and funnels every member into ONE sub-EntrySet (which
+        // then re-grows); the flat table does neither. Same inserts, same
+        // insertion order, identical read-back.
+        const N: usize = ::lanetable::TWO_LEVEL_THRESHOLD + 20_000;
+        let mk_key = |i: usize| (i as u64).to_le_bytes();
+        // Carried-hash discipline: constant top byte, varying low bits —
+        // the shape probe_bytes sees from a combine claim's run hashes.
+        let mk_hash =
+            |i: usize| (0xABu64 << 56) | (sink_hash(i as u64, 17) & ((1u64 << 56) - 1));
+        let mut incumbent = LaneAggTable::with_config(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            N,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        let mut flat = LaneAggTable::with_flat_capacity(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            N,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        for i in 0..N {
+            let (k, h) = (mk_key(i), mk_hash(i));
+            let pi = incumbent.probe_bytes(&k, h);
+            let pf = flat.probe_bytes(&k, h);
+            assert_eq!(pi.is_new, pf.is_new, "insert {i}");
+            assert!(pi.is_new, "distinct keys");
+        }
+        // Re-probe: every key hits in both.
+        for i in 0..N {
+            let (k, h) = (mk_key(i), mk_hash(i));
+            assert!(!incumbent.probe_bytes(&k, h).is_new, "re-probe {i} (incumbent)");
+            assert!(!flat.probe_bytes(&k, h).is_new, "re-probe {i} (flat)");
+        }
+        assert_eq!(flat.grow_count(), 0, "flat presized table must never grow");
+        assert_eq!(flat.convert_count(), 0);
+        // The incumbent, presized IDENTICALLY, still degrades: the constant
+        // top byte defeats its 256-way presize (two-level at birth for this
+        // hint), so the one live sub-EntrySet re-grows.
+        assert!(incumbent.is_two_level(), "hint above threshold builds two-level");
+        assert!(
+            incumbent.grow_count() > 0,
+            "constant-top-byte inserts must grow the incumbent's single live sub-set"
+        );
+        assert_merged_identical(&incumbent, &flat, 0);
+    }
+
     #[test]
     fn canonical_single_text_short_and_long_keys() {
         // 1-comp Intern shape (4-byte image, one word — the q13/q34 single
@@ -5514,8 +5742,9 @@ mod tests {
             for b in 0..SINK_NBUCKETS {
                 // GID lane forced ON (the default is the measured-off
                 // evidence channel; the law under test is byte-invisibility).
-                let t = sink_combine_bucket_impl(b, 0, STATE_BYTES, locals, &combines, true)
-                    .unwrap();
+                let t =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, locals, &combines, true, true)
+                        .unwrap();
                 let buf = sink_emit_bucket(&plan, &t).unwrap();
                 for row in 0..buf.nrows {
                     let k = buf.values[row * 3].as_i64();
