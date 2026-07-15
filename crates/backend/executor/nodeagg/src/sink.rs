@@ -352,12 +352,24 @@ pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) 
         debug_assert_eq!(canon_hashes.len(), n, "canon hashes never outrun the table");
         return;
     }
+    let spk_t0 = crate::spankey::spankey_t0();
+    let start = canon_hashes.len();
+    let mut spk_bytes = 0u64;
     let mut scratch: Vec<u8> = Vec::with_capacity(64);
     canon_hashes.reserve(n - canon_hashes.len());
     for row in canon_hashes.len()..n {
         scratch.clear();
         canon_row_bytes_append(table, shape, intern, row, &mut scratch);
+        if spk_t0.is_some() {
+            spk_bytes += scratch.len() as u64;
+        }
         canon_hashes.push(sink_hash_bytes(&scratch));
+    }
+    if spk_t0.is_some() {
+        use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+        spankey_add(&S.canon_accept_rows, (n - start) as u64);
+        spankey_add(&S.canon_accept_bytes, spk_bytes);
+        spankey_lap(&S.canon_accept_ns, spk_t0);
     }
 }
 
@@ -454,6 +466,7 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
 /// [`sink_flush_table_canon`] with the GID-word fill decision injected (the
 /// unit tests exercise the GID lane regardless of the process env).
 fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) -> SinkRun {
+    let spk_t0 = crate::spankey::spankey_t0();
     // The batch tails already hashed every row's canonical image
     // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
     // here is the defensive no-op sweep for the non-batched insert paths.
@@ -551,6 +564,12 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     table.reset();
     // The epoch's rows are gone — the stored hashes restart with them.
     canon_hashes.clear();
+    if spk_t0.is_some() {
+        use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+        spankey_add(&S.flush_canon_rows, n as u64);
+        spankey_add(&S.flush_canon_bytes, total_bytes as u64);
+        spankey_lap(&S.flush_canon_ns, spk_t0);
+    }
     SinkRun {
         key_words: 0,
         state_words,
@@ -1760,8 +1779,10 @@ fn sink_combine_bucket_impl(
 
     // Canonical remainder scratch (bytes mode only).
     let mut canon: Vec<u8> = Vec::new();
+    let spk = crate::spankey::spankey_ctr_enabled();
     for l in locals {
         gmap.clear();
+        let spk_t0 = spk.then(std::time::Instant::now);
         for r in l.all_runs() {
             debug_assert_eq!(r.key_words, key_words);
             debug_assert_eq!(r.state_words, state_words);
@@ -1815,6 +1836,10 @@ fn sink_combine_bucket_impl(
                 }
             }
         }
+        crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.combine_runs_ns, spk_t0);
+        let spk_t0 = spk.then(std::time::Instant::now);
+        let mut spk_rows = 0u64;
+        let mut spk_bytes = 0u64;
         if let Some(rem) = &l.remainder {
             let (rt, part) = (rem.table, rem.part);
             debug_assert_eq!(rt.state_bytes(), t.state_bytes());
@@ -1845,12 +1870,20 @@ fn sink_combine_bucket_impl(
                             continue;
                         }
                         canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                        if spk {
+                            spk_rows += 1;
+                            spk_bytes += canon.len() as u64;
+                        }
                         let dst =
                             absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
                     canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                    if spk {
+                        spk_rows += 1;
+                        spk_bytes += canon.len() as u64;
+                    }
                     absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
                 }
                 debug_assert!(!part.has_null, "canonical shapes are non-nullable");
@@ -1872,6 +1905,12 @@ fn sink_combine_bucket_impl(
                     }
                 }
             }
+        }
+        if spk {
+            use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+            spankey_add(&S.combine_rem_rows, spk_rows);
+            spankey_add(&S.combine_rem_bytes, spk_bytes);
+            spankey_lap(&S.combine_rem_ns, spk_t0);
         }
     }
     Ok(t)
