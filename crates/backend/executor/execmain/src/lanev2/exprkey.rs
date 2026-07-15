@@ -1730,14 +1730,20 @@ enum ChVerdict {
     Disarm,
 }
 
-/// Kill switch for the zero-page code→intern-id cache allocation
-/// (`PGRUST_EXPRKEY_ZEROPAGE=0` restores the historical eager refill).
+/// Opt-in for the zero-page (fresh alloc_zeroed) code→intern-id cache
+/// allocation (`PGRUST_EXPRKEY_ZEROPAGE=1`). Default OFF — MEASURED
+/// (board-or-hold wave, notes/vecstate-lane.md): the fresh-mmap-per-
+/// execution strategy showed a consistent official-channel hot try-2
+/// spike (+6-14% on q40; allocator page-churn class) while the eager
+/// u32-memset refill below carries the SAME -27% diagnostic win (the win
+/// is the u32 id+1 representation — memset-optimizable at half the bytes
+/// vs the old `Vec<Option<u32>>` ptr::write fill — not the lazy paging).
 fn zeropage_cache_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(
+        matches!(
             std::env::var("PGRUST_EXPRKEY_ZEROPAGE").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
+            Ok("1") | Ok("on") | Ok("true")
         )
     })
 }
