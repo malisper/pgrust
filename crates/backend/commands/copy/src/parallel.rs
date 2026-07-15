@@ -122,6 +122,18 @@ fn window(k: i32) -> u64 {
     req.unwrap_or((2 * k as u64) + 4).max(2)
 }
 
+/// Sort-merge encode threads (PGRUST_PARALLEL_COPY_SORT_ENCODERS,
+/// default = the COPY dop).
+fn sort_encoders(rt: &runtime::Runtime) -> usize {
+    static N: OnceLock<Option<usize>> = OnceLock::new();
+    let req = *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_SORT_ENCODERS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+    });
+    req.unwrap_or(dop(rt) as usize).clamp(1, 32)
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -1072,11 +1084,16 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
 // Leader: admission + the ceremony (segment/publish/commit loop).
 // ---------------------------------------------------------------------------
 
-/// Sort-mode phase 2: k-way merge every spilled run into the plain writer.
-/// Emits rows in global memcmp-key order (== the serial presort order —
-/// no key ties on admitted int-class keys make the order total) through
-/// append_row, whose RG seals fall exactly where a plain sorted load's
-/// would. Returns the merged row count.
+/// Sort-mode phase 2: k-way merge every spilled run, encode in parallel,
+/// commit in order (load-r2 L3-1 step d).
+///
+/// The merge thread streams rows in global memcmp-key order (== the serial
+/// presort order — no key ties on admitted int-class keys) into exactly
+/// RG_ROWS-row batches; a scoped encode pool (RgChunkEncoder — the landed
+/// worker-encode machinery, byte-proven vs serial by its seam oracle)
+/// seals them; this thread commits EncodedRgs in batch order through
+/// commit_encoded_rg. Backpressure: the bounded work channel caps
+/// in-flight batches at ~encoders+1. Returns the merged row count.
 fn merge_sorted_runs(
     writer: &mut cbstore::CbWriter,
     shared: &Arc<ParCopyShared>,
@@ -1090,31 +1107,183 @@ fn merge_sorted_runs(
     for p in &paths {
         let _ = std::fs::remove_file(p);
     }
-    ptrace(&format!("sort merge over {} runs", paths.len()));
-    let codec = cbstore::loadsort::RowCodec::new(shared.plan.coltypes.clone());
-    let ncols = shared.plan.coltypes.len();
-    let mut key = Vec::with_capacity(sort.key_w);
-    let mut row = Vec::new();
-    let mut arena = Vec::new();
-    let mut values = vec![::datum::Datum::null(); ncols];
-    let isnull = vec![false; ncols];
-    let mut n = 0u64;
-    let mut since_cfi = 0u32;
-    while merge.next_entry(&mut key, &mut row)? {
-        since_cfi += 1;
-        if since_cfi >= 4096 {
-            since_cfi = 0;
-            postgres_seams::check_for_interrupts::call()?;
-        }
-        arena.clear();
-        codec.deserialize_row(&row, &mut arena, &mut values)?;
-        writer.append_row(&values, &isnull)?;
-        n += 1;
-        if n % 65536 == 0 {
-            pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n as i64);
-        }
+    let nenc = sort_encoders(shared.rt);
+    ptrace(&format!("sort merge over {} runs encoders={nenc}", paths.len()));
+
+    const RG: usize = cbstore::format::RG_ROWS;
+    struct Batch {
+        idx: u64,
+        arena: Vec<u8>,
+        lens: Vec<u32>,
     }
-    Ok(n)
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<Batch>(nenc + 1);
+    let work_rx = Mutex::new(work_rx);
+    let (done_tx, done_rx) =
+        std::sync::mpsc::channel::<(u64, PgResult<cbstore::EncodedRg>)>();
+
+    let mut n_rows = 0u64;
+    let mut first_err: Option<Box<PgError>> = None;
+    let mut committed = 0u64;
+
+    std::thread::scope(|scope| {
+        for _ in 0..nenc {
+            let rx = &work_rx;
+            let tx = done_tx.clone();
+            let plan = Arc::clone(&shared.plan);
+            scope.spawn(move || {
+                let codec = cbstore::loadsort::RowCodec::new(plan.coltypes.clone());
+                let ncols = plan.coltypes.len();
+                let mut arena: Vec<u8> = Vec::new();
+                let mut values = vec![::datum::Datum::null(); ncols];
+                let isnull = vec![false; ncols];
+                loop {
+                    let b = {
+                        let g = rx.lock().unwrap_or_else(|p| p.into_inner());
+                        g.recv()
+                    };
+                    let Ok(b) = b else { break };
+                    let r = catch_unwind(AssertUnwindSafe(
+                        || -> PgResult<cbstore::EncodedRg> {
+                            let mut enc =
+                                cbstore::RgChunkEncoder::new(Arc::clone(&plan));
+                            let mut off = 0usize;
+                            for &l in &b.lens {
+                                let l = l as usize;
+                                arena.clear();
+                                codec.deserialize_row(
+                                    &b.arena[off..off + l],
+                                    &mut arena,
+                                    &mut values,
+                                )?;
+                                enc.append_row(&values, &isnull)?;
+                                off += l;
+                            }
+                            Ok(enc.seal())
+                        },
+                    ));
+                    let r = match r {
+                        Ok(r) => r,
+                        Err(_) => Err(Box::new(PgError::new(
+                            ERROR,
+                            "parallel load-sort encoder panicked",
+                        ))),
+                    };
+                    let failed = r.is_err();
+                    if tx.send((b.idx, r)).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(done_tx); // encoder clones remain; done_rx ends when they exit
+
+        let mut body = |first_err: &mut Option<Box<PgError>>| -> PgResult<()> {
+            let mut key: Vec<u8> = Vec::with_capacity(sort.key_w);
+            let mut row: Vec<u8> = Vec::new();
+            let mut cur = Batch { idx: 0, arena: Vec::new(), lens: Vec::new() };
+            let mut next_send = 0u64;
+            let mut pending: BTreeMap<u64, cbstore::EncodedRg> = BTreeMap::new();
+            let mut merge_done = false;
+            let mut since_cfi = 0u32;
+            loop {
+                // 1. fill + send one RG-sized batch (blocking send = the
+                //    backpressure bound; done_rx is unbounded so encoders
+                //    never deadlock against a full work channel).
+                if !merge_done && first_err.is_none() {
+                    while cur.lens.len() < RG {
+                        if !merge.next_entry(&mut key, &mut row)? {
+                            merge_done = true;
+                            break;
+                        }
+                        cur.arena.extend_from_slice(&row);
+                        cur.lens.push(row.len() as u32);
+                        n_rows += 1;
+                        since_cfi += 1;
+                        if since_cfi >= 4096 {
+                            since_cfi = 0;
+                            postgres_seams::check_for_interrupts::call()?;
+                        }
+                    }
+                    if !cur.lens.is_empty() && (cur.lens.len() == RG || merge_done) {
+                        let full = std::mem::replace(
+                            &mut cur,
+                            Batch { idx: next_send + 1, arena: Vec::new(), lens: Vec::new() },
+                        );
+                        if work_tx.send(full).is_err() {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "parallel load-sort encoder pool exited early",
+                            )));
+                        }
+                        next_send += 1;
+                    }
+                }
+                // 2. drain finished encodes; commit in batch order.
+                loop {
+                    match done_rx.try_recv() {
+                        Ok((idx, Ok(enc))) => {
+                            pending.insert(idx, enc);
+                        }
+                        Ok((_, Err(e))) => {
+                            if first_err.is_none() {
+                                *first_err = Some(e);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                while pending.keys().next() == Some(&committed) {
+                    let enc = pending.remove(&committed).unwrap();
+                    writer.commit_encoded_rg(enc)?;
+                    committed += 1;
+                    if committed % 16 == 0 {
+                        pgstat_progress_update_param(
+                            PROGRESS_COPY_TUPLES_PROCESSED,
+                            (committed * RG as u64) as i64,
+                        );
+                    }
+                }
+                if first_err.is_some() {
+                    return Ok(());
+                }
+                if merge_done && committed == next_send {
+                    return Ok(());
+                }
+                // 3. everything sent, nothing committable: block on done.
+                if merge_done {
+                    match done_rx.recv() {
+                        Ok((idx, Ok(enc))) => {
+                            pending.insert(idx, enc);
+                        }
+                        Ok((_, Err(e))) => {
+                            if first_err.is_none() {
+                                *first_err = Some(e);
+                            }
+                        }
+                        Err(_) => {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "parallel load-sort encoder pool exited with batches pending",
+                            )));
+                        }
+                    }
+                }
+            }
+        };
+        let r = body(&mut first_err);
+        drop(work_tx); // encoders drain + exit; scope joins them
+        if let Err(e) = r {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    });
+
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n_rows as i64);
+    Ok(n_rows)
 }
 
 fn vacuum_style_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
