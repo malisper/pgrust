@@ -2092,12 +2092,22 @@ fn agg_hash_build_fold_feed<'mcx>(
         if demote {
             // The per-row program advances the admitted str transitions
             // behind the memo's back — drop every memo (StrMmScratch doc).
+            // Emit-dead word skip (skip-sel: cleared bits are definitive
+            // rejections, even under requal) — same accepted rows/order.
             mm_scratch.invalidate();
-            for i in 0..n {
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         // K2 deferred batched probe, per batch: only when EVERY staged row
@@ -2803,14 +2813,25 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             }
         }
         if demote {
-            for i in 0..n {
+            // Emit-dead word skip (skip-sel: cleared bits are definitive
+            // rejections, even under requal) — same accepted rows/order,
+            // same survived tally (skipped rows emit None).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     if EA {
                         tally.survived += 1;
                     }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
@@ -2849,9 +2870,20 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                 }
             }
         } else {
-            for i in 0..n {
+            // Residual/requal per-row walk, with the emit-dead word skip
+            // (skip-sel: cleared bits are definitive rejections even under
+            // requal — the surviving emit stream and fold selection are
+            // identical).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
-                    continue;
+                    return Ok(());
                 };
                 if EA {
                     tally.survived += 1;
@@ -2865,7 +2897,8 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                         ::nodeagg::agg_plain_build_accept_resid(agg, estate, slot)?;
                     }
                 }
-            }
+                Ok(())
+            })?;
         }
         if rows[..nwords].iter().any(|w| *w != 0) {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
@@ -3003,13 +3036,17 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
         if !self.key_direct {
-            // Default per-row delegation loop, verbatim.
-            for i in pos..n {
+            // Default per-row delegation loop with the emit-dead word skip
+            // (`live_sel`: a cleared bit answers `emit` with None and no
+            // observable effect — the BatchSink default's contract).
+            let live = emit.live_sel();
+            let live = live.as_ref().map(|w| &w[..]);
+            return ::exectuples::for_each_live(live, pos, n, |i| -> PgResult<()> {
                 if let Some(slot) = emit.emit(i, estate)? {
                     ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
                 }
-            }
-            return Ok(());
+                Ok(())
+            });
         }
         // Dict-coded text window (the cbstore zero-decode lane): consume
         // codes+dict for the whole window — the key's datum cells are stale
@@ -3581,11 +3618,22 @@ fn scan_collect_survivors<'mcx>(
             }
         }
         None => {
-            for i in 0..n {
+            // Per-row emit collection, word-skipping emit-dead rows
+            // (skip-sel cleared bits are definitive rejections even under
+            // requal — the collected survivor set/order is identical).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
                     rows.push(i);
                 }
-            }
+                Ok(())
+            })?;
         }
     }
     Ok(())
@@ -6929,10 +6977,6 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
         if let Some(tk) = self.topk.as_mut() {
             cutmask = tk.batch_mask(self.sort, &*emit, pos, n)?;
         }
-        let keep = |sel: &Option<[u64; ::exectuples::SOA_BM_WORDS]>, i: u32| match sel {
-            Some(m) => m[(i / 64) as usize] & (1u64 << (i % 64)) != 0,
-            None => true,
-        };
         // Fast leg availability for THIS batch: exact whole-qual selection
         // (or no qual) + the key column's staged datum cells ready. The
         // bitmap words are snapshotted locally (they are per-batch-stable;
@@ -6948,18 +6992,30 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
             });
             (fb, selw)
         });
-        for i in pos..n {
-            if !keep(&cutmask, i) {
-                continue;
-            }
-            if let Some((fb, selw)) = &fast {
-                let w = (i / 64) as usize;
-                let bit = 1u64 << (i % 64);
-                if let Some(selw) = selw {
-                    if selw[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
+        // Composed skip mask, word-skipped by `for_each_live`: top-k cut
+        // rows, the fast leg's exact qual-cleared rows, and the feed's
+        // qual-survivor snapshot (`live_sel` — cleared bits answer `emit`
+        // with None; covers the no-fast/requal legs) each produce nothing,
+        // so skipping them keeps the surviving put stream identical.
+        let skip = {
+            let mut skip: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let selw = fast.as_ref().and_then(|(_, s)| *s);
+            for m in [cutmask, emit.live_sel(), selw].into_iter().flatten() {
+                match &mut skip {
+                    None => skip = Some(m),
+                    Some(acc) => {
+                        for (a, b) in acc.iter_mut().zip(m.iter()) {
+                            *a &= *b;
+                        }
                     }
                 }
+            }
+            skip
+        };
+        ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
+            if let Some((fb, _)) = &fast {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
                 if fb[w] & bit == 0 {
                     // Clean staged row: key straight from the SoA column —
                     // value/null identical to the emit + slot read below.
@@ -6969,13 +7025,12 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
                             .expect("refsort key batch stable within a staged batch");
                         (kvals[i as usize], knulls[i as usize])
                     };
-                    ::nodesort::sort_lane_put_refsort(
+                    return ::nodesort::sort_lane_put_refsort(
                         self.sort,
                         key,
                         isnull,
                         ::nodesort::refsort_encode(rg, row0 + i),
-                    )?;
-                    continue;
+                    );
                 }
                 // Forced-fallback row (stale cells / kernel-undecidable):
                 // fall through to the exact per-row emit.
@@ -6983,7 +7038,7 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
             // Per-row emit leg: the exact qual (C detoast semantics, C's
             // errors on C's row) + the Var projection; key from the
             // projected output slot cell.
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             let (key, isnull) = {
                 let slot = estate.slot_mut(id);
                 ::exectuples::slot_getsomeattrs(slot, self.key_resno as i32 + 1);
@@ -6995,8 +7050,8 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
                 key,
                 isnull,
                 ::nodesort::refsort_encode(rg, row0 + i),
-            )?;
-        }
+            )
+        })?;
         // Zone-adaptive bound feedback (identical to the wide sink's tail).
         if let Some((bkey, false)) = ::nodesort::sort_lane_topk_boundary(self.sort) {
             emit.push_topk_bound(bkey);
@@ -7670,34 +7725,32 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         }
                     }
                 }
-                // Post-degrade remainder: the exact per-row path.
-                for j in i..n {
-                    let w = (j / 64) as usize;
-                    let bit = 1u64 << (j % 64);
-                    if let Some(s) = &selw {
-                        if s[w] & bit == 0 {
-                            continue; // qual-filtered
+                // Post-degrade remainder: the exact per-row path (word-skip
+                // over the same qual-filtered continues, stream-identical).
+                ::exectuples::for_each_live(
+                    selw.as_ref().map(|w| &w[..]),
+                    i,
+                    n,
+                    |j| -> PgResult<()> {
+                        self.slow_rows += 1;
+                        if let Some(slot) = emit.emit(j, estate)? {
+                            self.accept(slot, estate)?;
                         }
-                    }
-                    self.slow_rows += 1;
-                    if let Some(slot) = emit.emit(j, estate)? {
-                        self.accept(slot, estate)?;
-                    }
-                }
+                        Ok(())
+                    },
+                )?;
                 return Ok(());
             }
             let mut keyd = [::datum::Datum::null(); 32];
             let mut keyn = [false; 32];
             let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
             let mut folds: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.fold_cols.len()];
-            for i in pos..n {
+            // Word-skip the qual-filtered continues (exact whole-qual
+            // verdict; same surviving rows, same order — the SPAN control
+            // stays byte-identical to the span form).
+            ::exectuples::for_each_live(selw.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
                 let w = (i / 64) as usize;
                 let bit = 1u64 << (i % 64);
-                if let Some(s) = &selw {
-                    if s[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
-                    }
-                }
                 if self.degraded || fb[w] & bit != 0 {
                     // Post-degrade remainder / forced-fallback row: the
                     // exact per-row path (emit re-checks + C detoast).
@@ -7705,7 +7758,7 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     if let Some(slot) = emit.emit(i, estate)? {
                         self.accept(slot, estate)?;
                     }
-                    continue;
+                    return Ok(());
                 }
                 // SAFETY: per the snapshot contract above; `i < n` and every
                 // view spans `n` staged rows.
@@ -7743,14 +7796,17 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         }
                     }
                 }
-            }
+                Ok(())
+            })?;
             return Ok(());
         }
-        // Per-row delegation loop (the default impl, verbatim).
+        // Per-row delegation loop (the default impl, incl. its emit-dead
+        // word skip; slow_rows stays window-grain, unchanged by skips).
         if self.batch.is_some() {
             self.slow_rows += (n - pos) as u64;
         }
-        for i in pos..n {
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             if let Some(slot) = emit.emit(i, estate)? {
                 match self.accept(slot, estate)? {
                     SinkFeed::NeedMore => {}
@@ -7761,8 +7817,8 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -8234,12 +8290,21 @@ fn codedgroup_drive<'mcx>(
         ::postgres_seams::check_for_interrupts::call()?;
         if degraded {
             // Post-degrade remainder: the narrow-sort arm's per-row feed
-            // (emit = qual verdicts + projection, one evaluation per row).
-            for i in 0..n {
+            // (emit = qual verdicts + projection, one evaluation per row),
+            // word-skipping emit-dead rows (skip-sel cleared bits).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodesort::sort_lane_put(sort, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         // Slot-free survivor collection FIRST (`scan_collect_survivors`'
@@ -8297,12 +8362,21 @@ fn codedgroup_drive<'mcx>(
         let Some(lane) = lane.filter(|_| all_lane && survivors_decidable) else {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;
-            // This batch is wholly unconsumed: feed it per-row.
-            for i in 0..n {
+            // This batch is wholly unconsumed: feed it per-row, word-
+            // skipping emit-dead rows (skip-sel cleared bits).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodesort::sort_lane_put(sort, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         };
         let (consumed, keep) = {
@@ -9467,20 +9541,20 @@ fn sorted_fold_window<'mcx>(
                     key_vals[k] = soa.col_values(keys.cols[k].0 as usize);
                     key_nulls[k] = soa.col_isnull(keys.cols[k].0 as usize);
                 }
-                let mut ev = Ev::End;
-                let mut j = i;
-                while j < n {
-                    if sel[(j / 64) as usize] & (1u64 << (j % 64)) == 0 {
-                        j += 1;
-                        continue;
-                    }
+                // Word-skip the qual-rejected positions (the bitmap IS the
+                // verdict here): an all-clear selection word advances 64
+                // rows in one compare — the run-extension events fire at
+                // exactly the same survivor positions in the same order.
+                let walk = ::exectuples::for_each_live(
+                    Some(&sel[..nwords]),
+                    i,
+                    n,
+                    |j| -> Result<(), Ev> {
                     if fb[(j / 64) as usize] & (1u64 << (j % 64)) != 0 {
-                        ev = Ev::Fallback(j);
-                        break;
+                        return Err(Ev::Fallback(j));
                     }
                     if !*group_open {
-                        ev = Ev::Boundary(j);
-                        break;
+                        return Err(Ev::Boundary(j));
                     }
                     let same = (0..nkeys).all(|k| {
                         let (cv, cn) = cur_key[k];
@@ -9492,17 +9566,17 @@ fn sorted_fold_window<'mcx>(
                         }
                     });
                     if !same {
-                        ev = Ev::Boundary(j);
-                        break;
+                        return Err(Ev::Boundary(j));
                     }
                     run[(j / 64) as usize] |= 1u64 << (j % 64);
                     run_any = true;
-                    j += 1;
+                    Ok(())
+                    },
+                );
+                match walk {
+                    Err(ev) => ev,
+                    Ok(()) => Ev::End,
                 }
-                if matches!(ev, Ev::End) {
-                    debug_assert_eq!(j, n);
-                }
-                ev
             };
             // Phase B: fold the accumulated run, then the per-row event.
             flush_run!();

@@ -999,10 +999,15 @@ impl<'mcx> BatchSink<'mcx> for PdAcceptSink<'_> {
     ) -> PgResult<()> {
         if let Some(t) = self.tally.as_deref_mut() {
             // Window-grain: the staged batch rows are the pre-qual funnel
-            // stage (emit re-checks the qual per row below).
+            // stage (emit re-checks the qual per row below); skipped
+            // emit-dead rows still count as scanned, exactly as before.
             t.scanned += (n - pos) as u64;
         }
-        for i in pos..n {
+        // Emit-dead word skip (`live_sel` — the BatchSink default's
+        // contract): cleared bits answer `emit` with None, so the surviving
+        // feed (and the `survived` tally) is identical.
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             if let Some(slot) = emit.emit(i, estate)? {
                 if let Some(t) = self.tally.as_deref_mut() {
                     t.survived += 1;
@@ -1017,8 +1022,8 @@ impl<'mcx> BatchSink<'mcx> for PdAcceptSink<'_> {
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
