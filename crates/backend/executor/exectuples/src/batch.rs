@@ -68,6 +68,54 @@ pub fn for_each_live<E>(
     }
 }
 
+/// Single-body variant of [`for_each_live`]: the SAME visited stream (`None`
+/// = every position), but the dense case runs through the same word loop
+/// with all-set words — so the caller's row body is instantiated ONCE, not
+/// duplicated into separate dense and sparse loop arms. Use this when `f`
+/// is large and the dense case is hot: duplicating a big row body into two
+/// arms measurably regressed the hashgroup span accept's unfiltered leg
+/// (q9/q10 +9%), while the all-set word walk costs ~2 extra ops per row.
+#[inline(always)]
+pub fn for_each_live_onebody<E>(
+    live: Option<&[u64]>,
+    pos: u32,
+    n: u32,
+    mut f: impl FnMut(u32) -> Result<(), E>,
+) -> Result<(), E> {
+    if pos >= n {
+        return Ok(());
+    }
+    let last = ((n - 1) / 64) as usize;
+    debug_assert!(live.is_none_or(|w| w.len() > last), "live words must cover bit n-1");
+    #[inline(always)]
+    fn word_at(live: Option<&[u64]>, w: usize) -> u64 {
+        match live {
+            Some(s) => s[w],
+            None => !0u64,
+        }
+    }
+    let mut w = (pos / 64) as usize;
+    // Mask off bits below `pos` in the first word; bits at/past `n` are
+    // masked at the last word (dense words need the mask; bitmap producers
+    // stage zeros there by contract — the mask is their belt).
+    let mut bits = word_at(live, w) & (!0u64 << (pos % 64));
+    loop {
+        if w == last && n % 64 != 0 {
+            bits &= (1u64 << (n % 64)) - 1;
+        }
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            f(i)?;
+        }
+        if w == last {
+            return Ok(());
+        }
+        w += 1;
+        bits = word_at(live, w);
+    }
+}
+
 /// Fixed-width prefix plan: every column below `ncols` has `attlen > 0`.
 pub struct SoaDeformPlan<'mcx> {
     ncols: u16,

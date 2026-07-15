@@ -1097,3 +1097,40 @@ fn for_each_live_matches_plain_loop_on_set_bits() {
         }
     }
 }
+
+// for_each_live_onebody: identical visited stream to for_each_live for both
+// Some masks and the dense None case (the single-body word loop).
+#[test]
+fn for_each_live_onebody_matches_two_arm() {
+    let mut seed = 0xA0761D6478BD642Fu64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..300u32 {
+        let n: u32 = (rng() % (64 * SOA_BM_WORDS as u64 - 1) + 1) as u32;
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let nwords = (n as usize).div_ceil(64);
+        let mut words: Vec<u64> = (0..nwords).map(|_| rng()).collect();
+        if n % 64 != 0 {
+            words[nwords - 1] &= (1u64 << (n % 64)) - 1;
+        }
+        for live in [None, Some(&words[..])] {
+            let mut a = Vec::new();
+            for_each_live::<()>(live, pos, n, |i| {
+                a.push(i);
+                Ok(())
+            })
+            .unwrap();
+            let mut b = Vec::new();
+            for_each_live_onebody::<()>(live, pos, n, |i| {
+                b.push(i);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(a, b, "case {case} n={n} pos={pos} some={}", live.is_some());
+        }
+    }
+}
