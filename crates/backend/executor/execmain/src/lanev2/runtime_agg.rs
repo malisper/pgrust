@@ -36,10 +36,14 @@
 //! WFIN markers (M0 acceptance instrument contract): emitted by the
 //! runtime's generic sched.rs channel under `PGRUST_MORSEL_MARKERS=1` —
 //! `MORSEL|WFIN|qid=..|pipe=..|worker=..|t_us=..|tasks=..|task_avg_us=..`
-//! per (worker, task set); pipe = task-set index (0 = ACCEPT, 1 = COMBINE).
-//! The arm's own duplicate emitter was removed at m2-integration: with the
-//! sched channel armed, double emission (different time bases) garbled the
-//! instrument parser's spread verdicts.
+//! per (worker, task set); pipe = task-set index. Under the default 3-set
+//! sealed plumbing (combine-parallel lane): 0 = ACCEPT, 1 = FREEZE (parallel
+//! per-Local SEAL), 2 = COMBINE; under `PGRUST_RUNTIME_AGG_PARSEAL=0` the
+//! 2-set layout is 0 = ACCEPT, 1 = COMBINE (and the single-threaded SEAL
+//! emits its own `MORSEL|AGGSEAL|arm=2set|...|dur_us=..` line when markers
+//! are armed). The arm's own duplicate WFIN emitter was removed at
+//! m2-integration: with the sched channel armed, double emission (different
+//! time bases) garbled the instrument parser's spread verdicts.
 
 use core::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -193,6 +197,13 @@ struct AggSink {
     /// Lock-free mirror of `adopted` for the per-claim combine check
     /// (written once at SEAL, which happens-before every combine claim).
     adopted_flag: AtomicBool,
+    /// Forked-Local census for the 3-set parallel seal's adopt-skip: a seal
+    /// claim may skip its partition pass only when it can PROVE the adopt
+    /// census will take the table wholesale (exactly one fork). Counted at
+    /// fork (accept set), read at seal (deps=[accept] — final by then).
+    /// Overcounting (a stale-generation re-fork) only costs a wasted
+    /// partition pass — the safe direction.
+    forks: AtomicUsize,
     /// Abort/observability control (shared with the engagement payload).
     rg: OnceLock<runtime::WeakRgHandle>,
     failed: AtomicBool,
@@ -329,6 +340,31 @@ fn topn_winners_spill_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_AGG_PARSEAL` (default ON): the 3-set sealed plumbing —
+/// SEAL's per-Local partition pass runs parallel across Local slots (its own
+/// task set between ACCEPT and COMBINE, the distinct sink's SEALCVT shape).
+/// 0/off restores the 2-set plumbing (single-threaded SEAL) exactly — the
+/// A/B and rollback channel (combine-parallel lane).
+fn parseal_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_PARSEAL").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_MORSEL_MARKERS=1` (the sched.rs WFIN channel's env, re-read here
+/// for the arm's own AGGSEAL line): default OFF — zero cost beyond one
+/// branch per SEAL.
+fn agg_markers_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// Leg-R fault injection (`PGRUST_RUNTIME_AGG_TOPN_FAULT=decline`): simulate
 /// the NULL-order-transvalue selection decline, which is structurally
 /// unreachable on real cbstore feeds (sort-b decision 6) — the e2e refusal
@@ -450,12 +486,78 @@ impl AggSink {
         unsafe { *self.out_emit[part as usize].get() = buf };
         Ok(())
     }
+
+    // --- SEAL decomposition (combine-parallel lane) ---------------------
+    // The 2-set arm's single-threaded seal and the 3-set arm's parallel
+    // per-Local seal share these pieces; the ORDER differs (2-set: census →
+    // partition loop → topn resolution; 3-set: per-claim partition with an
+    // adopt-shape skip, then census + topn in sealed_ready). Outcomes are
+    // byte-identical: partition_remainder is a pure function of one Local's
+    // table, and both census decisions read post-accept state that no seal
+    // work mutates.
+
+    /// TRUE TABLE ADOPT census (dop1-tax2 inc-1b), verbatim from the 2-set
+    /// seal. True = adopted (callers skip partition/combine work).
+    fn try_adopt_census(&self, locals: &mut [AggSinkLocal]) -> bool {
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        if self.adopt_shape && !frozen {
+            if let [l] = &mut *locals {
+                if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
+                    let t = l.table.take().expect("checked Some");
+                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
+                    self.adopted_flag.store(true, Ordering::SeqCst);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Partition ONE Local's remainder table + the R3 SEAL-index accounting
+    /// (per-Local, so safely parallel across seal claims — the refusal flag
+    /// is idempotent and fail-closed).
+    fn seal_partition_local(&self, l: &mut AggSinkLocal) {
+        // Canonical (text-bearing) shapes partition by canonical bytes;
+        // word shapes by key words — the handle dispatches.
+        l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+        // R3 accounting (m2-integration audit): the SEAL index is per-Local
+        // retained memory that lives through the whole combine phase —
+        // charge it like a run. Crossing = budget refusal (R5 whole-attempt
+        // rerun), never an error. Table mem includes the intern table (text
+        // shapes) — it lives through combine too.
+        if let Some(p) = &l.part {
+            l.run_bytes += p.bytes();
+            let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
+            if l.run_bytes + table_mem > self.budget {
+                self.refuse_budget();
+            }
+        }
+    }
+
+    /// §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2),
+    /// verbatim from the 2-set seal: the single-Local pass-through shape
+    /// never builds a merged table, so an armed selection resolves
+    /// FullDrain HERE, before the first combine claim.
+    fn resolve_topn_at_seal(&self, locals: &[AggSinkLocal]) {
+        if self.topn.is_some() {
+            let passthrough = matches!(
+                locals,
+                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+            );
+            let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
+            self.topn_mode.store(mode.encode(), Ordering::Release);
+            if passthrough {
+                lane_trace("runtime-agg topn: pass-through shape at SEAL — mode=full");
+            }
+        }
+    }
 }
 
 impl runtime::ParallelSink for AggSink {
     type Local = AggSinkLocal;
 
     fn fork(&self, _worker: usize) -> AggSinkLocal {
+        self.forks.fetch_add(1, Ordering::SeqCst);
         AggSinkLocal::default()
     }
 
@@ -492,10 +594,14 @@ impl runtime::ParallelSink for AggSink {
 
     /// SEAL: partition every Local's remainder table (single-threaded by
     /// the last-worker-out protocol; counting sort, one pass per Local).
+    /// This is the PGRUST_RUNTIME_AGG_PARSEAL=0 arm — the 3-set sealed
+    /// plumbing runs the same pieces with the partition pass parallel
+    /// across Local slots (see the SealedParallelSink impl below).
     fn seal(&self, locals: &mut [AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        let t0 = agg_markers_on().then(std::time::Instant::now);
         // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
         // (the sealed-Local census is final: last-worker-out; a widened
         // engagement forked >=2 Locals and takes the merge arms below).
@@ -511,51 +617,27 @@ impl runtime::ParallelSink for AggSink {
         // the wholesale table hand-off cannot filter them, so it stands
         // down and the combine's member filter runs instead. An armed-but-
         // never-frozen freeze dropped nothing — the adopt stays valid.
-        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
-        if self.adopt_shape && !frozen {
-            if let [l] = &mut *locals {
-                if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
-                    let t = l.table.take().expect("checked Some");
-                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
-                    self.adopted_flag.store(true, Ordering::SeqCst);
-                    return;
-                }
-            }
+        if self.try_adopt_census(locals) {
+            return;
         }
         for l in locals.iter_mut() {
-            // Canonical (text-bearing) shapes partition by canonical bytes;
-            // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
-            // R3 accounting (m2-integration audit): the SEAL index is
-            // per-Local retained memory that lives through the whole combine
-            // phase — charge it like a run. Crossing = budget refusal (R5
-            // whole-attempt rerun), never an error. Table mem includes the
-            // intern table (text shapes) — it lives through combine too.
-            if let Some(p) = &l.part {
-                l.run_bytes += p.bytes();
-                let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
-                if l.run_bytes + table_mem > self.budget {
-                    self.refuse_budget();
-                    return;
-                }
+            self.seal_partition_local(l);
+            if self.failed.load(Ordering::SeqCst) {
+                return;
             }
         }
-        // §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2):
-        // the single-Local pass-through shape never builds a merged table,
-        // so an armed selection has nothing to run on. Resolve FullDrain
-        // HERE, before the first combine claim, instead of degrading
-        // mid-claim (the sealed census is final and uniform across claims;
-        // SEAL happens-before every combine by last-worker-out).
-        if self.topn.is_some() {
-            let passthrough = matches!(
-                locals,
-                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+        self.resolve_topn_at_seal(locals);
+        if let Some(t0) = t0 {
+            let rows: usize =
+                locals.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            // Marker channel (PGRUST_MORSEL_MARKERS=1, the WFIN sibling):
+            // the single-threaded seal's duration — the phase the 3-set arm
+            // parallelizes; its A/B evidence line.
+            eprintln!(
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|dur_us={}",
+                locals.len(),
+                t0.elapsed().as_micros()
             );
-            let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
-            self.topn_mode.store(mode.encode(), Ordering::Release);
-            if passthrough {
-                lane_trace("runtime-agg topn: pass-through shape at SEAL — mode=full");
-            }
         }
     }
 
@@ -978,6 +1060,84 @@ impl runtime::ParallelSink for AggSink {
         };
         *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(SinkPublished::Emit(bufs, winners));
+    }
+}
+
+/// The 3-set arm (combine-parallel lane, PGRUST_RUNTIME_AGG_PARSEAL — default
+/// ON): identical sink semantics to the 2-set ParallelSink impl above, with
+/// the SEAL partition pass PARALLEL across Local slots (one freeze claim per
+/// slot; the distinct sink's SEALCVT precedent). Rationale: the 2-set SEAL is
+/// single-threaded and O(forked Locals × remainder rows) — a per-Local
+/// locality-capped table makes that O(DOP × cap), a serial term that GROWS
+/// with DOP while the parallel combine share shrinks (measured DOP-15 gap
+/// 5-10ms on q17/q34; Amdahl-fatal at DOP 192 — notes/combine-parallel-lane.md).
+/// Byte identity: partition_remainder is a pure per-Local function, and the
+/// whole-census decisions (TRUE TABLE ADOPT, top-N SEAL resolution) run
+/// exactly once in `sealed_ready` (single-threaded, happens-before every
+/// combine claim) — same inputs, same order, same outputs as the 2-set seal.
+impl runtime::SealedParallelSink for AggSink {
+    type Local = AggSinkLocal;
+    type Sealed = AggSinkLocal;
+
+    fn fork(&self, worker: usize) -> AggSinkLocal {
+        <Self as runtime::ParallelSink>::fork(self, worker)
+    }
+
+    fn accept_local(&self, local: &mut AggSinkLocal, worker: usize, range: runtime::MorselRange) {
+        <Self as runtime::ParallelSink>::accept_local(self, local, worker, range)
+    }
+
+    /// Freeze one Local: the per-Local partition pass, parallel across
+    /// slots. The TRUE-TABLE-ADOPT shape SKIPS the pass when it can prove
+    /// the census will take the table wholesale (exactly one fork — the
+    /// dop1-tax2 "no partition index is ever built" property preserved);
+    /// an overcounted census (stale re-fork) partitions anyway and the
+    /// adopt in `sealed_ready` simply ignores the index — the safe
+    /// direction, never an unpartitioned Local reaching the merge arms.
+    fn seal(&self, _worker: usize, mut local: AggSinkLocal) -> AggSinkLocal {
+        if self.failed.load(Ordering::SeqCst) {
+            return local;
+        }
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        let adopt_skip = self.adopt_shape
+            && !frozen
+            && self.forks.load(Ordering::SeqCst) == 1
+            && local.runs.is_empty()
+            && local.spill.is_none()
+            && local.table.is_some();
+        if !adopt_skip {
+            let r = catch_unwind(AssertUnwindSafe(|| self.seal_partition_local(&mut local)));
+            if r.is_err() {
+                self.fail(PgError::new(ERROR, "runtime agg sink seal panicked").into());
+            }
+        }
+        local
+    }
+
+    /// Exactly-once whole-census decisions, single-threaded under the
+    /// freeze set's last-worker-out, strictly before any combine claim:
+    /// the 2-set seal's census pieces verbatim (partitioning already done
+    /// per claim above).
+    fn sealed_ready(&self, sealed: &mut Vec<AggSinkLocal>) {
+        if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.try_adopt_census(sealed) {
+            return;
+        }
+        self.resolve_topn_at_seal(sealed);
+    }
+
+    fn partitions(&self) -> u64 {
+        <Self as runtime::ParallelSink>::partitions(self)
+    }
+
+    fn combine(&self, part: u64, sealed: &[AggSinkLocal]) {
+        <Self as runtime::ParallelSink>::combine(self, part, 0, sealed)
+    }
+
+    fn finalize(&self, sealed: &[AggSinkLocal]) {
+        <Self as runtime::ParallelSink>::finalize(self, sealed)
     }
 }
 
@@ -3261,6 +3421,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         adopt_shape,
         adopted: Mutex::new(None),
         adopted_flag: AtomicBool::new(false),
+        forks: AtomicUsize::new(0),
         rg: OnceLock::new(),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
@@ -3355,20 +3516,32 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        // The sink's two task sets over the cbstore granule geometry.
+        // The sink's task sets over the cbstore granule geometry. Default
+        // (combine-parallel lane): the 3-set sealed plumbing — ACCEPT →
+        // FREEZE (per-Local SEAL partition, parallel across slots) →
+        // COMBINE. PGRUST_RUNTIME_AGG_PARSEAL=0 restores the 2-set shape
+        // (single-threaded SEAL in the accept set's finalize) exactly.
         let source = Arc::new(CbstoreGranuleSource { starts });
-        let runtime::SinkTaskSets { accept, combine, probe: _probe } = runtime::sink_tasksets(
-            Arc::clone(sink),
-            source,
-            rt.nthreads(),
-            0,
-        );
+        let tasksets = if parseal_enabled() {
+            let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
+                runtime::sealed_sink_tasksets(
+                    Arc::clone(sink),
+                    source,
+                    rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                    0,
+                );
+            vec![accept, freeze, combine]
+        } else {
+            let runtime::SinkTaskSets { accept, combine, probe: _probe } =
+                runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
+            vec![accept, combine]
+        };
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
         let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
             query_id: qid,
-            tasksets: vec![accept, combine],
+            tasksets,
         });
         payload
             .rg
@@ -3568,7 +3741,9 @@ fn engage_ceremony<'mcx>(
                             agg.plan.plan.plan_node_id,
                             scan_node,
                             -1,
-                            2,
+                            // Task-set count: 3 under the sealed plumbing
+                            // (accept/freeze/combine), 2 under PARSEAL=0.
+                            if parseal_enabled() { 3 } else { 2 },
                             m.workers as u64,
                             &m,
                         ),
