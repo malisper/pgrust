@@ -219,6 +219,33 @@ impl CodedGroupState<'_> {
         }
     }
 
+    /// Epoch roll: close the outgoing epoch's run and reset `code_map` to
+    /// all-zero over `[0, map_size)` for the incoming identity. Default arm
+    /// ([`cg_touched_clear_enabled`]) zeroes only the slots the closing
+    /// epoch WROTE — the exact set is `epoch_pairs`' map indexes (every
+    /// first-seen insert writes both, nothing else writes the map) — and the
+    /// allocation only grows; the kill-switch arm restores the full
+    /// `clear()+resize(map_size, 0)` domain memset. Both arms establish the
+    /// same visible state: `code_map[0..map_size]` all zero, `epoch_pairs`
+    /// empty. Must zero BEFORE `close_epoch` drains `epoch_pairs`.
+    fn roll_epoch(&mut self, ident: u64, map_size: usize) {
+        if cg_touched_clear_enabled() {
+            for &(mcode, _) in &self.epoch_pairs {
+                self.code_map[mcode as usize] = 0;
+            }
+            self.close_epoch();
+            self.cur_epoch = Some(ident);
+            if self.code_map.len() < map_size {
+                self.code_map.resize(map_size, 0);
+            }
+        } else {
+            self.close_epoch();
+            self.cur_epoch = Some(ident);
+            self.code_map.clear();
+            self.code_map.resize(map_size, 0);
+        }
+    }
+
     /// Close the current epoch: sort its (code, state) pairs by code (byte
     /// order — sorted dicts) into one merge run.
     fn close_epoch(&mut self) {
@@ -431,6 +458,22 @@ fn cgemit_small_max() -> usize {
     })
 }
 
+/// `PGRUST_LANE_V2_CGTOUCHED` kill switch (default ON; `0`/`off` restores the
+/// full-domain re-zeroing): LOCAL-mode epoch rolls clear only the `code_map`
+/// slots this epoch actually WROTE (the exact set is `epoch_pairs` — every
+/// first-seen insert records its map index there) and the map only grows,
+/// instead of `clear()+resize(ndict, 0)` re-zeroing the whole per-RG dict
+/// domain on every roll (proportionality-audit B3: O(touched codes) useful
+/// work, O(ndict) memset per row group per worker). Map contents visible to
+/// the algorithm are identical under both arms: all-zero over
+/// `[0, map_size)` at every epoch start.
+fn cg_touched_clear_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CGTOUCHED").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Distinct count of a small value slice by pairwise compares (no hashing,
 /// no table). Exact-set semantics: |support of the multiset|.
 #[inline]
@@ -563,13 +606,10 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
         ((t.epoch), ndict)
     };
     if cg.cur_epoch != Some(ident) {
-        // Local mode: epoch roll (close the run, rebuild the map). Global
+        // Local mode: epoch roll (close the run, reset the map). Global
         // mode: gepoch is scan-stable, so only the FIRST window lands here.
         debug_assert!(!global || cg.cur_epoch.is_none(), "gepoch is scan-stable");
-        cg.close_epoch();
-        cg.cur_epoch = Some(ident);
-        cg.code_map.clear();
-        cg.code_map.resize(map_size, 0);
+        cg.roll_epoch(ident, map_size);
     }
     debug_assert!(cg.code_map.len() >= map_size, "map size is fixed per identity");
     for (idx, &i) in rows.iter().enumerate() {
@@ -840,6 +880,86 @@ mod tests {
     // scripts/lane-distinct-set-e2e.sh's codefeed battery; the unit surface
     // below covers the header-form reader the merge comparator relies on.
     use super::*;
+
+    #[test]
+    fn roll_epoch_touched_clear_invariant() {
+        // Default arm (PGRUST_LANE_V2_CGTOUCHED unset = ON): every roll must
+        // establish the map contract — all-zero over [0, map_size), pairs
+        // drained into a code-sorted run — while the allocation only grows
+        // and only the closing epoch's touched slots get written. This is
+        // the proportionality-audit B3 regression pin: a reintroduced
+        // full-domain clear stays byte-identical, but a touched-walk that
+        // misses a slot poisons the NEXT epoch — this test is the miss
+        // detector (stale slot 7 from epoch 1, reused map in epoch 2).
+        let m: &'static ::mcx::MemoryContext =
+            Box::leak(Box::new(::mcx::MemoryContext::new("cg-roll-test")));
+        let mcx = m.mcx();
+        let rep_slot =
+            ::exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, None);
+        let mut cg = CodedGroupState {
+            phase: CgPhase::Building,
+            key_att: 0,
+            arg_att: 0,
+            kind: DistinctKeyKind::Int64,
+            natts: 1,
+            spans: Vec::new(),
+            pool: Vec::new(),
+            vals_flat: Vec::new(),
+            state_off: Vec::new(),
+            arena: Vec::new(),
+            mode_global: Some(false),
+            cur_epoch: None,
+            code_map: Vec::new(),
+            epoch_pairs: Vec::new(),
+            runs: Vec::new(),
+            order: Vec::new(),
+            cursor: Vec::new(),
+            heap: Vec::new(),
+            gstates: Vec::new(),
+            vals: Vec::new(),
+            val_hashes: Vec::new(),
+            replay_idx: 0,
+            rep_slot,
+            budget: 1 << 20,
+            mcx,
+        };
+        // Epoch 1, ndict 10: first roll builds the map; touch codes 7 then 3
+        // (the accept discipline writes map[m] = s+1 AND pushes (m, s)).
+        cg.roll_epoch(1, 10);
+        assert_eq!(cg.cur_epoch, Some(1));
+        assert!(cg.code_map.len() >= 10);
+        assert!(cg.code_map.iter().all(|&v| v == 0));
+        assert!(cg.runs.is_empty());
+        cg.code_map[7] = 1;
+        cg.epoch_pairs.push((7, 0));
+        cg.code_map[3] = 2;
+        cg.epoch_pairs.push((3, 1));
+        // Epoch 2, SMALLER ndict 6: the retained map may stay larger, but the
+        // visible prefix must be all-zero (esp. slot 3) and so must the
+        // retained tail (slot 7 — a stale nonzero there is the bug class).
+        cg.roll_epoch(2, 6);
+        assert_eq!(cg.cur_epoch, Some(2));
+        assert!(cg.code_map.len() >= 6);
+        assert!(
+            cg.code_map.iter().all(|&v| v == 0),
+            "stale epoch-1 slots must be zeroed: {:?}",
+            cg.code_map
+        );
+        assert!(cg.epoch_pairs.is_empty());
+        assert_eq!(cg.runs.len(), 1);
+        // The closed run is code-sorted: code 3 -> state 1, code 7 -> state 0.
+        assert_eq!(&cg.order[..], &[1, 0]);
+        // Epoch 3, LARGER ndict 12: grow-only resize extends with zeros.
+        cg.code_map[5] = 3;
+        cg.epoch_pairs.push((5, 2));
+        cg.roll_epoch(3, 12);
+        assert!(cg.code_map.len() >= 12);
+        assert!(cg.code_map.iter().all(|&v| v == 0));
+        assert_eq!(cg.runs.len(), 2);
+        // An empty epoch closes no run (close_epoch's empty guard).
+        cg.roll_epoch(4, 12);
+        assert_eq!(cg.runs.len(), 2);
+    }
 
     #[test]
     fn content_reads_both_header_forms() {
