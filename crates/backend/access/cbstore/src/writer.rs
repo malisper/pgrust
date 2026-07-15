@@ -517,6 +517,12 @@ pub struct CbWriter {
     commit_pwrite: std::time::Duration,
     commit_meta: std::time::Duration,
     commit_bytes: u64,
+    // load-r3 M1a: finish() phase walls — stitch rank+blob writes, footer
+    // build+write, pad_and_sync+header (read via finish_phase_split()).
+    finish_stitch: std::time::Duration,
+    finish_footer: std::time::Duration,
+    finish_sync: std::time::Duration,
+    finish_blob_bytes: u64,
 }
 
 pub struct FooterRg {
@@ -657,6 +663,10 @@ fn open_writer_inner(
         commit_pwrite: std::time::Duration::ZERO,
         commit_meta: std::time::Duration::ZERO,
         commit_bytes: 0,
+        finish_stitch: std::time::Duration::ZERO,
+        finish_footer: std::time::Duration::ZERO,
+        finish_sync: std::time::Duration::ZERO,
+        finish_blob_bytes: 0,
     };
     if stitch_write_enabled() {
         w.stitch = Some(
@@ -878,6 +888,7 @@ impl CbWriter {
         let nrgs = self.rgs.len();
         let mut stitch_gndv = vec![0u64; self.ncols];
         let mut stitch_dir = vec![(0u64, 0u32); nrgs * self.ncols];
+        let ft0 = std::time::Instant::now();
         if let Some(cols) = self.stitch.take() {
             for (c, st) in cols.into_iter().enumerate() {
                 let Some(st) = st else { continue };
@@ -899,11 +910,14 @@ impl CbWriter {
                     let off = align64(self.write_off);
                     self.file.write_all_at(&blob, off)?;
                     self.write_off = off + blob.len() as u64;
+                    self.finish_blob_bytes += blob.len() as u64;
                     stitch_dir[rg * self.ncols + c] = (off, map.len() as u32);
                 }
                 stitch_gndv[c] = gndv as u64;
             }
         }
+        let ft1 = std::time::Instant::now();
+        self.finish_stitch += ft1 - ft0;
         // Footer.
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));
         put_u32(&mut f, self.rgs.len() as u32);
@@ -1003,13 +1017,28 @@ impl CbWriter {
         let footer_off = align64(self.write_off);
         self.file.write_all_at(&f, footer_off)?;
         self.write_off = footer_off + flen;
+        let ft2 = std::time::Instant::now();
+        self.finish_footer += ft2 - ft1;
 
         // Data + footer durable before the publish (impl doc §5); segment
         // tails padded to BLCKSZ multiples for md's block accounting.
         self.file.pad_and_sync(self.write_off)?;
         self.write_header(footer_off)?;
         self.file.sync_data()?;
+        self.finish_sync += ft2.elapsed();
         Ok(())
+    }
+
+    /// load-r3 M1a: finish() phase walls — (stitch_rank_blobs_s, footer_s,
+    /// sync_s, blob_bytes). Sorter-drain time (serial presort only) is not
+    /// included; the parallel path never has a sorter.
+    pub fn finish_phase_split(&self) -> (f64, f64, f64, u64) {
+        (
+            self.finish_stitch.as_secs_f64(),
+            self.finish_footer.as_secs_f64(),
+            self.finish_sync.as_secs_f64(),
+            self.finish_blob_bytes,
+        )
     }
 }
 
