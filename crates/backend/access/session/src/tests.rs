@@ -348,7 +348,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      worker executor slot (built inside the query-task binding, torn
     //      down on every drive exit path) — same drive-scoped class and
     //      argument as WORKER_EXEC slots 4-6.
-    assert_eq!(count_tree(crates), 475, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 476, re-pinned at train-18 (q28-sorted-arm ordered-grouped runtime sink):
+    //   17. executor/execmain/src/lanev2/runtime_agg_sorted.rs
+    //      WORKER_EXEC — the ordered-grouped (sorted-agg) sink's drive-scoped
+    //      worker executor slot (QueryDescHandle + fold keys/spec, built
+    //      inside the query-task binding, torn down on every drive exit
+    //      path incl. mark_self_errored) — same drive-scoped class and
+    //      argument as WORKER_EXEC slots 4-6 and the band-2b slot 16.
+    assert_eq!(count_tree(crates), 476, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
