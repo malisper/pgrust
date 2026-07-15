@@ -3772,12 +3772,25 @@ impl SharedCountTable {
             self.closed.store(true, ShOrdering::Release);
             return false;
         }
+        // RESERVATION RELEASE LAW: rows resolving to an EXISTING key (or
+        // the key-0 side slot) release their reservation below, so steady-
+        // state `members` counts CLAIMED SLOTS, not cumulative flushed
+        // rows. Duplicate keys across runs are the COMMON case (every key
+        // recurs in ~W×flushes runs); without the release the face closes
+        // after ~cap total flushed rows regardless of NDV (the concurrent-
+        // oracle unit test caught exactly this). Claimed slots therefore
+        // never exceed cap_members ≤ slots/2 — probe termination stays
+        // structural. Transient in-flight reservations (Σ concurrent runs'
+        // rows) can spuriously close a face genuinely NEAR capacity —
+        // fail-safe direction (the run rides the incumbent path).
+        let mut release = 0usize;
         for i in 0..n {
             let key = run.keys[i];
             let cnt = run.states[i];
             if key == 0 {
                 self.zero_present.store(true, ShOrdering::Release);
                 self.zero_count.fetch_add(cnt, ShOrdering::Relaxed);
+                release += 1;
                 continue;
             }
             let mut pos = (sink_hash(key, 0) as usize) & self.mask;
@@ -3785,6 +3798,7 @@ impl SharedCountTable {
                 let cur = self.keys[pos].load(ShOrdering::Acquire);
                 if cur == key {
                     self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                    release += 1;
                     break;
                 }
                 if cur == 0 {
@@ -3795,11 +3809,13 @@ impl SharedCountTable {
                         ShOrdering::Acquire,
                     ) {
                         Ok(_) => {
+                            // Fresh slot claim: consumes its reservation.
                             self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
                             break;
                         }
                         Err(now) if now == key => {
                             self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                            release += 1;
                             break;
                         }
                         Err(_) => { /* raced claim by another key: keep probing */ }
@@ -3812,6 +3828,9 @@ impl SharedCountTable {
                 pos = (pos + 1) & self.mask;
             }
         }
+        if release > 0 {
+            self.members.fetch_sub(release, ShOrdering::AcqRel);
+        }
         if let Some(block) = run.null_states.as_ref() {
             self.null_present.store(true, ShOrdering::Release);
             self.null_count.fetch_add(block[0], ShOrdering::Relaxed);
@@ -3819,8 +3838,8 @@ impl SharedCountTable {
         true
     }
 
-    /// Live distinct groups absorbed (observability; exact only at
-    /// quiescence — reservations over-count during concurrent merges).
+    /// Claimed slots + in-flight reservations (observability; equals the
+    /// live distinct group count at quiescence).
     pub fn reserved(&self) -> usize {
         self.members.load(ShOrdering::Relaxed)
     }
@@ -3976,7 +3995,11 @@ mod tests {
     /// group. The drain must equal the oracle exactly.
     #[test]
     fn shared_count_concurrent_oracle() {
-        let t = SharedCountTable::new(4096);
+        // Capacity must clear the worst-case TRANSIENT reservation window
+        // (Σ concurrent runs' rows ≈ 8×900 in-flight + ≤900 claimed), not
+        // just the distinct-key count — the release law keeps steady-state
+        // at claimed slots, but pre-checks see in-flight reservations.
+        let t = SharedCountTable::new(16384);
         let mut oracle: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         let mut per_thread: Vec<Vec<(Vec<(u64, u64)>, Option<u64>)>> = vec![Vec::new(); 8];
         let mut null_total = 0u64;
@@ -4020,6 +4043,25 @@ mod tests {
         let (map, null) = drained_map(&t);
         assert_eq!(map, oracle);
         assert_eq!(null, Some(null_total));
+    }
+
+    /// The reservation RELEASE law: repeated runs over the SAME key set —
+    /// the production steady state (every key recurs in ~W×flushes runs) —
+    /// must never burn capacity. Under the pre-release design this closed
+    /// the face after ~cap total flushed ROWS regardless of NDV (the wave-3
+    /// fleet failure).
+    #[test]
+    fn shared_count_repeat_keys_do_not_burn_capacity() {
+        let t = SharedCountTable::new(512);
+        let pairs: Vec<(u64, u64)> = (1..=100u64).map(|k| (k, 1)).collect();
+        for _ in 0..1000 {
+            assert!(t.merge_run(&count_run(&pairs, None)), "repeat keys must release");
+        }
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 100, "steady state counts claimed slots only");
+        let (map, _) = drained_map(&t);
+        assert_eq!(map.len(), 100);
+        assert!(map.values().all(|&c| c == 1000));
     }
 
     /// The spill fallback: a reservation crossing capacity CLOSES the face

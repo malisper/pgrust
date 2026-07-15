@@ -3703,6 +3703,20 @@ fn agg_shared_table_max_groups() -> u64 {
     })
 }
 
+/// Band lower-bound OVERRIDE (`PGRUST_RUNTIME_AGG_SHARED_MIN`, experiment/
+/// e2e forcing channel): None = the engaged sink cap (the default band
+/// floor — below the cap Locals never fill and there is nothing to
+/// absorb). The e2e forced legs set 1 so engagement does not hinge on the
+/// corpus's planner group estimates.
+fn agg_shared_table_min_groups() -> Option<u64> {
+    static N: OnceLock<Option<u64>> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    })
+}
+
 /// The experiment face: one shared count table per socket half (the
 /// numa-combine socket map; non-Linux / single-node folds to table 0).
 /// Prototype scope (recorded in the design note): single-int-word K2 keys,
@@ -4452,7 +4466,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         && topn.is_none()
         && freeze.is_none()
         && ::nodeagg::sink::agg_sink_all_count(agg)
-        && est_groups > sink_cap as u64
+        && est_groups > agg_shared_table_min_groups().unwrap_or(sink_cap as u64)
         && est_groups <= agg_shared_table_max_groups()
     {
         lane_trace(&format!(
