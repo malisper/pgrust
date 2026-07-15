@@ -3618,12 +3618,29 @@ fn agg_alpha_reprobe_mult() -> u64 {
 /// default 1MB at the shape's own 16+8+state+16 entry estimate) — the same
 /// "table + flush scatter fit the private L2" constant, deliberately shared
 /// so the calibration ladder moves both together. None (controller off):
-/// kill switch; serial (dop ≤ 1 — one table cannot oversubscribe the SLC);
+/// kill switch; dop at or under the DOPCAP anchor (see below);
 /// fixed-cap A/B override (PGRUST_RUNTIME_AGG_CAP stays authoritative, the
 /// locality-bound law); freeze-armed shapes (caller gates); or a floor at/
 /// above the engaged cap (nothing to demote to).
+///
+/// ANCHOR GATE (this lane's mt16 100M ON/OFF pair verdict): at or under
+/// the anchor width the aggregate working set already sits at the ratified
+/// SLC constant — demoting write-buffer tables there paid flush-EVENT
+/// overhead (dict-code cache invalidation + run setup at ~3.5× the
+/// cadence: q32 hot +9%, q19 +2.5%, suite otherwise flat 1.0026) and
+/// bought no residency anyone needed at 16 workers. Above the anchor is
+/// the window-B regime the controller is FOR (per-worker shares shrink
+/// below adjudication value; dopcap scales caps toward the floor and the
+/// α-gate decides which workers deserve their share). Sharing
+/// [`agg_dopcap_anchor`] means a window-D re-anchoring moves the α-gate's
+/// engagement band with it — one calibration channel, one knob. The
+/// official mt16 channel is therefore byte-AND-time identical by
+/// construction (the dopcap boarding precedent).
 fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
-    if !agg_alphagate_enabled() || dop <= 1 || sink_cap_override().is_some() {
+    if !agg_alphagate_enabled()
+        || dop <= agg_dopcap_anchor() as i32
+        || sink_cap_override().is_some()
+    {
         return None;
     }
     let entry = 16u64 + 8 + state_bytes as u64 + 16;
