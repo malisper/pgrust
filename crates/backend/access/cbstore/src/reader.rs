@@ -411,6 +411,16 @@ pub struct Part {
     // Lazy absolute-granule prefix sums (see granule_starts). OnceLock so a
     // part-cache-shared Part builds it once under any thread.
     granule_starts: std::sync::OnceLock<Vec<u64>>,
+    // Lazy per-column on-disk chunk byte totals (see col_bytes). The
+    // planner asks on EVERY plan of a cbstore rel (plancat column-fraction
+    // seqscan disk costing) and the walk is O(rgs x ncols) over the footer
+    // chunk directory — at 100M (~1.5K RGs x 105 cols) it measured 85% of
+    // the replan loop / 76% of the whole serial per-query fixed path
+    // (fixedpath2 round-2 perf probe), ~0.2ms of the ~0.25ms
+    // post-footer_ndv plan constant. Same class as the round-1 footer_ndv
+    // fix: derived purely from this footer parse, so compute once per
+    // cached Part.
+    col_bytes: std::sync::OnceLock<Vec<u64>>,
 }
 
 impl Part {
@@ -513,7 +523,36 @@ impl Part {
             data_end,
             identity,
             granule_starts: std::sync::OnceLock::new(),
+            col_bytes: std::sync::OnceLock::new(),
         }))
+    }
+
+    /// Per-column on-disk chunk bytes summed over the part's committed row
+    /// groups (planner column-fraction seqscan disk costing). Within an RG
+    /// the column chunks are laid out contiguously in column order (writer
+    /// flush: chunk_off is the running body offset), so column i's bytes
+    /// are the offset delta to column i+1's chunk; the last column runs to
+    /// the end of the RG body (the next RG's file_off, or this footer's
+    /// offset for the newest RG). Stale interior footers left by earlier
+    /// COPY batches inflate at most the last column of each batch's tail RG
+    /// — noise at costing precision. Values are identical to the historical
+    /// per-call walk (lib.rs footer_col_bytes pre-cache), computed once per
+    /// cached Part.
+    pub fn col_bytes(&self) -> &[u64] {
+        self.col_bytes.get_or_init(|| {
+            let ncols = self.ncols;
+            let mut out = vec![0u64; ncols];
+            for (r, rg) in self.rgs.iter().enumerate() {
+                let rg_end = self.rgs.get(r + 1).map_or(self.footer_off, |next| next.file_off);
+                let body_len = rg_end.saturating_sub(rg.file_off);
+                for i in 0..ncols {
+                    let start = rg.chunks[i].0.min(body_len);
+                    let end = if i + 1 < ncols { rg.chunks[i + 1].0 } else { body_len };
+                    out[i] += end.min(body_len).saturating_sub(start);
+                }
+            }
+            out
+        })
     }
 
     /// v7 part-global dict size for a column (0 = no stitch: pre-v7 part,
