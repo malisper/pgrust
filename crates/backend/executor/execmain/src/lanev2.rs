@@ -4288,9 +4288,12 @@ struct MkScratch {
     keys2: Vec<[u64; 2]>,
     // Identity of the code -> intern-id cache: (is_global, id). Per-epoch
     // (RG index, cleared per roll) or — under a v7 stitch — part-global
-    // (scan-stable gepoch, never cleared within one scan).
+    // (scan-stable gepoch, never cleared within one scan). Entry encoding:
+    // 0 = unset, `id + 1` otherwise (exprkey::reset_code_id_cache — the
+    // zero-page allocation is the vecstate q40 fix: the gndv-sized eager
+    // None-fill was 38% of q40's cycles).
     epoch: Option<(bool, u64)>,
-    code_ids: Vec<Option<u32>>,
+    code_ids: Vec<u32>,
     /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
     /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
     /// cache. `None` until this worker observes FROZEN.
@@ -4873,8 +4876,7 @@ fn scan_mk_batch<'mcx>(
                         };
                         if *epoch != Some(ident) {
                             *epoch = Some(ident);
-                            code_ids.clear();
-                            code_ids.resize(size, None);
+                            exprkey::reset_code_id_cache(code_ids, size);
                         }
                         debug_assert!(code_ids.len() >= size);
                         for (k, &i) in rows.iter().enumerate() {
@@ -4887,8 +4889,8 @@ fn scan_mk_batch<'mcx>(
                             };
                             debug_assert!(code < size, "stitch contract: global code < gndv");
                             let id = match code_ids[code] {
-                                Some(id) => id,
-                                None => {
+                                c if c != 0 => c - 1,
+                                _ => {
                                     // First surviving row of (identity,
                                     // code): materialize dict[code] once,
                                     // intern.
@@ -4902,7 +4904,8 @@ fn scan_mk_batch<'mcx>(
                                     }?;
                                     let id =
                                         ::nodeagg::agg_hash_compact_intern(agg, v.data());
-                                    code_ids[code] = Some(id);
+                                    debug_assert!(id != u32::MAX, "id+1 encoding");
+                                    code_ids[code] = id + 1;
                                     id
                                 }
                             };
