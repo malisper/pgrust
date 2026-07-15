@@ -56,6 +56,26 @@ use runtime::{
 };
 use types_error::{PgError, ERROR};
 
+/// loomfast lane (2026-07-15): fast-tier preemption clamp. The census showed
+/// the loom gate's ~6,300s wall is entirely these models at their LANDED
+/// hardcoded bounds (finalization_protocol/dag_abort >900s, dag_fanout 611s;
+/// all waiter models ~0s even unbounded), so an external LOOM_MAX_PREEMPTIONS
+/// cannot make a fast tier -- Builder::new() reads it but the models overwrite
+/// preemption_bound. This helper lets PGRUST_LOOM_PREEMPTION_CAP only LOWER a
+/// model's landed bound, never raise it: unset (the exhaustive tier,
+/// runtime-loom-e2e.sh) is byte-identical to the pre-lane behavior; the fast
+/// tier (runtime-loom-fast-e2e.sh) sets the cap. Model logic and landed
+/// bounds are unchanged.
+fn clamped_bound(landed: usize) -> Option<usize> {
+    match std::env::var("PGRUST_LOOM_PREEMPTION_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(cap) if cap < landed => Some(cap),
+        _ => Some(landed),
+    }
+}
+
 fn small_runtime(workers: usize, standbys: usize) -> Arc<Runtime> {
     let cfg = RuntimeConfig {
         workers,
@@ -175,7 +195,7 @@ impl TaskSetWork for ModelWork {
 #[test]
 fn finalization_protocol() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     // The full scheduler step is branch-heavy (stats ticks, sizer locks);
     // the default 1k-branch budget underestimates one execution.
     b.max_branches = 200_000;
@@ -240,7 +260,7 @@ impl ParticipantOwner for ModelOwner {
 #[test]
 fn generation_handoff_unconsumable() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     b.check(|| {
         let task = QueryTaskLifecycle::with_owner(Arc::new(ModelOwner));
         let handle = task.publish().expect("fresh lifecycle publishes once");
@@ -326,7 +346,7 @@ fn abort_cleanup() {
     }
 
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     b.check(|| {
         let rt = small_runtime(1, 0);
         let abort_done = Arc::new(AtomicBool::new(false));
@@ -433,7 +453,7 @@ fn standby_absorption() {
     }
 
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     b.check(|| {
         // workers=1 ⇒ ONE execution permit; standbys=1 ⇒ two pool threads.
         let rt = small_runtime(1, 1);
@@ -528,7 +548,7 @@ fn facade_standby_absorption() {
     }
 
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     b.check(|| {
         // workers=1 ⇒ ONE execution permit; standbys=1 ⇒ two pool threads.
         let rt = small_runtime(1, 1);
@@ -596,7 +616,7 @@ fn drive_all(rt: &Arc<Runtime>, worker: usize, waiters: &[CompletionWaiter]) {
 #[test]
 fn queued_abort_reap_exactly_once() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(3);
+    b.preemption_bound = clamped_bound(3);
     b.max_branches = 200_000;
     b.check(|| {
         let cfg = RuntimeConfig {
@@ -666,7 +686,7 @@ fn queued_abort_reap_exactly_once() {
 #[test]
 fn stride_two_active_rgs_exactly_once() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = clamped_bound(2);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
@@ -719,7 +739,7 @@ fn stride_two_active_rgs_exactly_once() {
 #[test]
 fn dag_fanout_publish_exactly_once() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = clamped_bound(2);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
@@ -776,7 +796,7 @@ fn dag_fanout_publish_exactly_once() {
 #[test]
 fn dag_abort_live_siblings_completes_once() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = clamped_bound(2);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
@@ -849,7 +869,7 @@ fn dag_abort_live_siblings_completes_once() {
 #[test]
 fn stream_source_handshake() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = clamped_bound(2);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
