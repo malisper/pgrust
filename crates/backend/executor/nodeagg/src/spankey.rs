@@ -29,6 +29,21 @@ pub fn spankey_ctr_enabled() -> bool {
     })
 }
 
+/// STORE-ONCE canonical bytes (spankey step 2; coordinator-approved seam =
+/// the canonical image lifecycle across accept/flush/combine). Default ON;
+/// `PGRUST_RUNTIME_AGG_SPANKEY=0|off` kills it (exact incumbent paths:
+/// accept-time build-hash-discard, flush pass-1 rebuild, combine-remainder
+/// per-arrival rebuild). The canonical SPILL record path is untouched
+/// either way (condition of record: spill bytes identical, the fail-closed
+/// replay path unaware anything changed).
+pub fn spankey_store_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_RUNTIME_AGG_SPANKEY")
+            .is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("off"))
+    })
+}
+
 macro_rules! ctrs {
     ($($name:ident),* $(,)?) => {
         #[derive(Default)]
