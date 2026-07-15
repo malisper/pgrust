@@ -1129,6 +1129,9 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
         refuse("granule floor");
         return Ok(false);
     }
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
     // --- Engage.
     let budget = ::execgrouping::get_hash_memory_limit() as usize;
     let mut key_lens = [0i16; SORTED_FOLD_MAX_KEYS];
