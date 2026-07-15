@@ -244,6 +244,27 @@ pub(super) trait BatchEmit<'mcx> {
         None
     }
 
+    /// Stitched dict-code view of scan column `col` for the CURRENT staged
+    /// window (the DictCode sort-key class, docs/design/dict-code-flow.md
+    /// inc-1): codes + per-RG dict identity, with the v7 part-global stitch
+    /// published when the scan carries one. `Some` certifies only the
+    /// window's codes/dict identity; a consumer using codes for ORDER
+    /// semantics must additionally gate on `table.has_stitch()` and fail
+    /// closed otherwise. Default: never serves (only the cbstore-backed
+    /// seqscan emit face can).
+    fn refsort_dictcode_batch(&mut self, _col: u16) -> Option<::exectuples::SoaDictLane> {
+        None
+    }
+
+    /// Column-independent staged-batch masks for the refsort fast leg:
+    /// `(fallback_words, sel_words)` — see
+    /// `nodeseqscan::seq_scan_refsort_batch_masks` for the soundness
+    /// contract. Default `None` = no certified masks (the caller fails
+    /// closed or takes the per-row emit path).
+    fn refsort_batch_masks(&self, _n: u32) -> Option<(&[u64], Option<&[u64]>)> {
+        None
+    }
+
     /// Survivor-bit snapshot of the CURRENT staged batch's qual selection:
     /// a CLEARED bit means `emit(i)` returns `None` with no observable
     /// side effect (the staged qual verdict already rejected row i without
