@@ -276,6 +276,69 @@ fn compact_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_LANE_V2_COMPACT").map_or(true, |v| v != "0"))
 }
 
+/// mkaccept inc-1 kill switch (census U4): fused mk accept lanes — the
+/// packed-key lane is VIEWED in place instead of repacked, and the probe
+/// writes the state-pointer lane directly into the caller's groups vec
+/// instead of through the `CompactHash::states` scratch + copy. `=0`
+/// restores both copy paths. The fused lanes carry bit-identical values to
+/// the copies they elide; this gate exists for A/B and revert.
+fn mkaccept_fused() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_MKACCEPT").map_or(true, |v| v != "0"))
+}
+
+/// The two-word packed key lane for the mk2 probe: on little-endian targets
+/// (with the mkaccept switch on) an IN-PLACE view of the pack pre-pass's
+/// `u128` accumulator — `[w as u64, (w >> 64) as u64]` IS the LE memory
+/// image, so the view is bit-identical to the repack it elides. Otherwise
+/// the historical repack into `scratch`.
+pub fn mk_keys2_lane<'a>(packbuf: &'a [u128], scratch: &'a mut Vec<[u64; 2]>) -> &'a [[u64; 2]] {
+    const _SIZE: () = assert!(core::mem::size_of::<u128>() == core::mem::size_of::<[u64; 2]>());
+    const _ALIGN: () = assert!(core::mem::align_of::<u128>() >= core::mem::align_of::<[u64; 2]>());
+    if cfg!(target_endian = "little") && mkaccept_fused() {
+        // SAFETY: same element size, stronger alignment, and on LE the
+        // u128's bytes are exactly [low u64, high u64] — the repack's
+        // element values. Shared borrow for the probe's read-only pass.
+        unsafe { core::slice::from_raw_parts(packbuf.as_ptr().cast::<[u64; 2]>(), packbuf.len()) }
+    } else {
+        scratch.clear();
+        scratch.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
+        scratch
+    }
+}
+
+/// Take the caller's groups vec as the probe's raw `*mut u8` out-lane
+/// (recycling its buffer — no allocation churn across batches).
+#[inline]
+fn groups_take_raw(groups: &mut Vec<NonNull<AggPerGroup>>) -> Vec<*mut u8> {
+    let mut v = core::mem::ManuallyDrop::new(core::mem::take(groups));
+    // SAFETY: `NonNull<AggPerGroup>` and `*mut u8` have identical size and
+    // alignment (pointer-sized); length 0 reinterprets no element (NonNull
+    // is Copy — forgetting the stale elements is sound); capacity and
+    // allocator carry over unchanged (Vec::from_raw_parts contract).
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast::<*mut u8>(), 0, v.capacity()) }
+}
+
+/// Hand the probed state-pointer lane back as the caller's groups vec —
+/// BEFORE any fallible step, so an error path never leaks the buffer.
+#[inline]
+fn groups_restore(groups: &mut Vec<NonNull<AggPerGroup>>, raw: Vec<*mut u8>) {
+    let mut raw = core::mem::ManuallyDrop::new(raw);
+    let (len, cap) = (raw.len(), raw.capacity());
+    // SAFETY: layout as in [`groups_take_raw`]; every element was written
+    // by the batch probe, which never returns null state pointers (the
+    // existing mk batch contract), so the NonNull invariant holds.
+    *groups =
+        unsafe { Vec::from_raw_parts(raw.as_mut_ptr().cast::<NonNull<AggPerGroup>>(), len, cap) };
+}
+
+/// The groups lane as [`seed_new_groups`]'s `*mut u8` slice.
+#[inline]
+fn groups_ptr_slice(groups: &[NonNull<AggPerGroup>]) -> &[*mut u8] {
+    // SAFETY: identical element layout (pointer-sized), shared borrow.
+    unsafe { core::slice::from_raw_parts(groups.as_ptr().cast::<*mut u8>(), groups.len()) }
+}
+
 /// Aggsplit admission + the per-worker group-estimate divisor (Stage 2.2 ×
 /// Stage 4):
 ///   * `AGGSPLIT_SIMPLE` — the serial lane build; divisor 1.
@@ -1078,7 +1141,17 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if !s.two_words));
-    {
+    if mkaccept_fused() {
+        // Fused state lane (mkaccept inc-1): probe directly into the
+        // caller's groups vec — same pointers, minus the states-scratch
+        // pass. Restore precedes the fallible seed (no leak on error).
+        let CompactHash { table, hashes, new_rows, .. } = &mut *ch;
+        new_rows.clear();
+        let mut raw = groups_take_raw(groups);
+        table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, &mut raw, new_rows);
+        groups_restore(groups, raw);
+        seed_new_groups(aggctx, trans_init, trans_typ, groups_ptr_slice(groups), new_rows)?;
+    } else {
         let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
         states.clear();
         new_rows.clear();
@@ -1114,7 +1187,15 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if s.two_words));
-    {
+    if mkaccept_fused() {
+        // Fused state lane — see the mk1 twin.
+        let CompactHash { table, hashes, new_rows, .. } = &mut *ch;
+        new_rows.clear();
+        let mut raw = groups_take_raw(groups);
+        table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, &mut raw, new_rows);
+        groups_restore(groups, raw);
+        seed_new_groups(aggctx, trans_init, trans_typ, groups_ptr_slice(groups), new_rows)?;
+    } else {
         let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
         states.clear();
         new_rows.clear();
