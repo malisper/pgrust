@@ -29,8 +29,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
-use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use ::datum::Datum;
 use ::types_core::{InvalidOid, Oid};
@@ -40,7 +40,7 @@ use crate::format::get_u64;
 use crate::reader::Part;
 
 struct Entry {
-    part: Rc<Part>,
+    part: Arc<Part>,
     path: String,
     ncols: usize,
     dev: u64,
@@ -51,6 +51,84 @@ struct Entry {
 
 thread_local! {
     static CACHE: RefCell<Option<HashMap<Oid, Entry>>> = const { RefCell::new(None) };
+}
+
+// Compile-time proof that the shared registry below is sound to hand a Part
+// to any thread: every Part field is Send+Sync (SegMap by the coldio-lane
+// impl in segfile.rs; the lazy caches are OnceLock; the rest is plain data).
+#[allow(dead_code)]
+fn _assert_part_send_sync() {
+    fn f<T: Send + Sync>() {}
+    f::<Part>();
+}
+
+// Process-shared parsed-Part registry (partdir lane; proportionality-audit
+// census B1/P6). The thread-local CACHE above never hits in runtime pool
+// workers: they are ephemeral (one scan, then exit), so at 100M every worker
+// re-preads ~5.8MB of footer sections and re-parses the O(nrgs x ncols)
+// chunk+stitch directory (~320K entries, ~5MB of owned Vecs) per query, x
+// DOP. This registry shares ONE live parsed Part per part state across
+// threads, keyed by the part-cache identity vocabulary (seg0 dev, ino, len)
+// with the same footer_off header-word revalidation as `probe`.
+//
+// LAW POSTURE (no-large-memory-caches): the registry holds Weak only — it
+// never extends any Part's lifetime and retains no derived state of its own;
+// a Part stays alive exactly while some scan or the (pre-existing,
+// design-doc'd, sinval-invalidated) session part cache holds the Arc. Dead
+// entries are swept on every publish. Serving a Part whose footer is newer
+// than the prober's stat is snapshot-safe by the header comment's two-sided
+// argument (footers are snapshot-agnostic supersets; per-RG xmin gates
+// exclude too-new row groups) — identical to Part::open itself, which always
+// reads the CURRENT header regardless of when the caller stat'd.
+//
+// Kill switch: PGRUST_CBSTORE_SHARED_PART=0/off (per-thread parse, the
+// historical behavior). PGRUST_CBSTORE_PART_CACHE=0 disables this too (the
+// registry is probed only from the cache-miss path).
+static SHARED_PARTS: Mutex<Option<HashMap<(u64, u64, u64), Weak<Part>>>> = Mutex::new(None);
+
+// Per-process counters (always on, uncontended increments): full directory
+// parses at Part::open vs registry shares. The A/B evidence channel for the
+// per-worker-redundancy claim; PGRUST_PARTCACHE_DEBUG=1 additionally prints
+// one line per event (PARTCACHE|parse us=.. / PARTCACHE|share).
+pub static PART_DIR_PARSES: AtomicU64 = AtomicU64::new(0);
+pub static PART_DIR_SHARES: AtomicU64 = AtomicU64::new(0);
+
+fn shared_part_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_SHARED_PART").as_deref(),
+            Ok("0") | Ok("off") | Ok("OFF"),
+        )
+    })
+}
+
+// Upgrade the live shared Part for this file state, revalidating exactly as
+// `probe` does: ncols unchanged and the live mapping's header footer_off
+// word equal to the offset the cached footer was parsed from (the header
+// page is MAP_SHARED, so a publish is visible through the old mapping).
+fn shared_lookup(key: (u64, u64, u64), ncols: usize) -> Option<Arc<Part>> {
+    if !shared_part_enabled() {
+        return None;
+    }
+    let live = {
+        let guard = SHARED_PARTS.lock().unwrap();
+        guard.as_ref()?.get(&key).and_then(Weak::upgrade)?
+    };
+    if live.ncols != ncols || get_u64(live.bytes(), 16) != live.footer_off {
+        return None;
+    }
+    Some(live)
+}
+
+fn shared_publish(key: (u64, u64, u64), part: &Arc<Part>) {
+    if !shared_part_enabled() {
+        return;
+    }
+    let mut guard = SHARED_PARTS.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.retain(|_, w| w.strong_count() > 0);
+    map.insert(key, Arc::downgrade(part));
 }
 
 // Was the hidden GUC `cbstore_part_cache` on the old branch; re-homed to an
@@ -110,11 +188,12 @@ fn probe(e: &Entry, path: &str, ncols: usize) -> bool {
 
 /// Cache-or-open the relation's Part. None: no committed footer yet
 /// (deliberately uncached — the next COPY changes everything anyway).
-pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Rc<Part>>> {
+pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Arc<Part>>> {
     let ncols = crate::writer::coltypes_of(rel)?.len();
     let path = crate::rel_main_path(rel);
     if !enabled() {
-        return Ok(Part::open(&path, ncols)?.map(Rc::new));
+        PART_DIR_PARSES.fetch_add(1, Relaxed);
+        return Ok(Part::open(&path, ncols)?.map(Arc::new));
     }
     if CACHE.with(|cell| cell.borrow().is_none()) {
         init()?;
@@ -123,7 +202,7 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Rc<Part>>
     let hit = CACHE.with(|cell| {
         let b = cell.borrow();
         let map = b.as_ref().expect("part cache initialized");
-        map.get(&relid).filter(|e| probe(e, &path, ncols)).map(|e| Rc::clone(&e.part))
+        map.get(&relid).filter(|e| probe(e, &path, ncols)).map(|e| Arc::clone(&e.part))
     });
     if let Some(part) = hit {
         if debug_log() {
@@ -135,15 +214,44 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Rc<Part>>
     // footer newer than the probe values, so the next lookup rebuilds
     // (spurious miss, never a stale hit).
     let md = std::fs::metadata(&path).ok();
-    let Some(part) = Part::open(&path, ncols)? else {
-        CACHE.with(|cell| {
-            if let Some(map) = cell.borrow_mut().as_mut() {
-                map.remove(&relid);
+    // Thread-local miss: another thread (in the common shape, the leader at
+    // plan time) may already hold the parsed directory for this exact file
+    // state — share it instead of re-parsing (census B1: the per-worker
+    // O(nrgs x ncols) tax).
+    let shared_key = md.as_ref().map(|m| (m.dev(), m.ino(), m.len()));
+    let part = match shared_key.and_then(|key| shared_lookup(key, ncols)) {
+        Some(live) => {
+            PART_DIR_SHARES.fetch_add(1, Relaxed);
+            if debug_log() {
+                eprintln!("PARTCACHE|share relid={relid}");
             }
-        });
-        return Ok(None);
+            live
+        }
+        None => {
+            let t0 = debug_log().then(std::time::Instant::now);
+            PART_DIR_PARSES.fetch_add(1, Relaxed);
+            let Some(part) = Part::open(&path, ncols)? else {
+                CACHE.with(|cell| {
+                    if let Some(map) = cell.borrow_mut().as_mut() {
+                        map.remove(&relid);
+                    }
+                });
+                return Ok(None);
+            };
+            let part = Arc::new(part);
+            if let Some(t0) = t0 {
+                eprintln!(
+                    "PARTCACHE|parse relid={relid} nrgs={} ncols={ncols} us={}",
+                    part.rgs.len(),
+                    t0.elapsed().as_micros()
+                );
+            }
+            if let Some(key) = shared_key {
+                shared_publish(key, &part);
+            }
+            part
+        }
     };
-    let part = Rc::new(part);
     if let Some(md) = md {
         if debug_log() {
             eprintln!("PARTCACHE|fill relid={relid}");
@@ -153,7 +261,7 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Rc<Part>>
                 map.insert(
                     relid,
                     Entry {
-                        part: Rc::clone(&part),
+                        part: Arc::clone(&part),
                         path,
                         ncols,
                         dev: md.dev(),
@@ -177,7 +285,7 @@ mod tests {
         let part = Part::open(path, ncols).unwrap().unwrap();
         Entry {
             footer_off: part.footer_off,
-            part: Rc::new(part),
+            part: Arc::new(part),
             path: path.to_string(),
             ncols,
             dev: md.dev(),
@@ -215,6 +323,61 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, &bytes).unwrap();
         assert!(!probe(&orig, &path, 3));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // partdir lane (census B1): one live parsed Part per part state, shared
+    // across threads; revalidation refuses ncols drift and a republished
+    // header; the Weak registry never keeps a dead Part alive.
+    #[test]
+    fn shared_part_registry_shares_and_revalidates() {
+        let path = crate::reader::test_part(
+            &format!("partdir-shared-{}", std::process::id()),
+            &[1000, 2000],
+            3,
+        );
+        let md = std::fs::metadata(&path).unwrap();
+        let key = (md.dev(), md.ino(), md.len());
+        let part = Arc::new(Part::open(&path, 3).unwrap().unwrap());
+        shared_publish(key, &part);
+
+        // Same file state upgrades to the SAME allocation, from any thread.
+        let live = shared_lookup(key, 3).expect("live entry upgrades");
+        assert!(Arc::ptr_eq(&part, &live));
+        let (k2, p2) = (key, Arc::clone(&part));
+        let cross = std::thread::spawn(move || {
+            shared_lookup(k2, 3).map(|l| Arc::ptr_eq(&p2, &l))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(cross, Some(true), "cross-thread share must hit the same Part");
+
+        // ncols drift refuses the share.
+        assert!(shared_lookup(key, 4).is_none());
+
+        // Republish detection: rewrite the header footer_off word in place
+        // (same inode/len — the case the (dev,ino,len) key alone cannot
+        // see); the MAP_SHARED header page makes it visible through the
+        // cached mapping and the probe-word revalidation refuses.
+        let orig_word = get_u64(part.bytes(), 16);
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(16)).unwrap();
+            f.write_all(&(orig_word + 8).to_le_bytes()).unwrap();
+        }
+        assert!(shared_lookup(key, 3).is_none(), "stale footer_off must refuse");
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(16)).unwrap();
+            f.write_all(&orig_word.to_le_bytes()).unwrap();
+        }
+        assert!(shared_lookup(key, 3).is_some());
+
+        // Weak lifetime: with every holder dropped the entry dies.
+        drop((part, live));
+        assert!(shared_lookup(key, 3).is_none(), "Weak registry must not retain");
         std::fs::remove_file(&path).unwrap();
     }
 }
