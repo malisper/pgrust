@@ -2453,9 +2453,12 @@ fn sink_locality_cap() -> Option<u32> {
     })
 }
 
-/// Wave-1 ladder knee (q36/q16@100M, notes/q36-radix-lane.md). Placeholder
-/// until the ladder adjudicates; the env channel overrides either way.
-const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 20;
+/// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
+/// monotone improvement control→64K (q36 0.378→0.234 = 2.30x→1.40x CH-mt16;
+/// q16 0.468→0.270), knee flattening 256K→64K, guards (q21/q38) flat-or-
+/// better. 64K = the historical exchange-class cap (tranche-proven).
+/// 32K/16K extension arms recorded in the lane note; env overrides.
+const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 
 /// The ENGAGED sink cap: the budget-derived cap ([`sink_cap_for`]) bounded
 /// by the locality cap on word-keyed DOP>1 engagements. This is the single
