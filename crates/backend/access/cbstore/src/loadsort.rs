@@ -219,8 +219,174 @@ fn fadvise_willneed(f: &std::fs::File, off: u64, len: u64) {
 #[cfg(not(target_os = "linux"))]
 fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
 
+// ---- loadcommit C2b: explicit bounded run prefetch --------------------------
+//
+// The C2a fadvise probe refuted page-cache-mediated readahead under cgroup
+// pressure (advance 23.9 -> 31.6 s @100M): pages fetched ahead of use get
+// reclaimed before consumption. This is the consume-on-arrival shape
+// instead: N pool threads read 512 KB chunks per run into a bounded
+// (capacity-2) channel; the pump consumes chunks as a byte stream. Bytes
+// are identical by construction (same files, same order); only WHO issues
+// the read() changes. Peak buffered memory ~= runs x 2.5 chunks (~360 MB
+// at 290 runs), replacing the per-run 1 MB BufReader.
+
+/// Prefetched chunk size.
+const PRE_CHUNK: usize = 512 << 10;
+
+/// Consumer side of one run's prefetch channel: a plain byte stream.
+struct PrefetchSource {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    cur: Vec<u8>,
+    pos: usize,
+    eof: bool,
+}
+
+impl std::io::Read for PrefetchSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.cur.len() {
+            if self.eof {
+                return Ok(0);
+            }
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.cur = chunk;
+                    self.pos = 0;
+                }
+                Ok(Err(e)) => {
+                    self.eof = true;
+                    return Err(e);
+                }
+                Err(_) => {
+                    // feeder dropped the sender = clean EOF
+                    self.eof = true;
+                    return Ok(0);
+                }
+            }
+        }
+        let n = buf.len().min(self.cur.len() - self.pos);
+        buf[..n].copy_from_slice(&self.cur[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// One run's feeder-side state (owned by a pool thread).
+struct FeedRun {
+    f: std::fs::File,
+    tx: Option<std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>>,
+    /// Chunk read but not yet accepted by the (full) channel.
+    pending: Option<std::io::Result<Vec<u8>>>,
+    eof: bool,
+}
+
+/// Pool of prefetch threads; joined (after `stop`) on drop.
+pub struct PrefetchPool {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for PrefetchPool {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
+fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::io::Read;
+    loop {
+        let mut progress = false;
+        let mut alive = false;
+        for r in &mut runs {
+            let Some(tx) = &r.tx else { continue };
+            alive = true;
+            // Refill the pending slot, then try to hand it over.
+            loop {
+                if r.pending.is_none() {
+                    if r.eof {
+                        r.tx = None; // dropping the sender = EOF downstream
+                        progress = true;
+                        break;
+                    }
+                    let mut chunk = vec![0u8; PRE_CHUNK];
+                    let mut got = 0usize;
+                    let mut err = None;
+                    while got < chunk.len() {
+                        match r.f.read(&mut chunk[got..]) {
+                            Ok(0) => break,
+                            Ok(n) => got += n,
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(e) => {
+                                err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(e) = err {
+                        r.pending = Some(Err(e));
+                        r.eof = true;
+                    } else {
+                        if got < chunk.len() {
+                            r.eof = true;
+                        }
+                        if got == 0 {
+                            continue; // clean boundary EOF: close on next pass
+                        }
+                        chunk.truncate(got);
+                        r.pending = Some(Ok(chunk));
+                    }
+                }
+                let p = r.pending.take().unwrap();
+                let was_err = p.is_err();
+                match tx.try_send(p) {
+                    Ok(()) => {
+                        progress = true;
+                        if was_err {
+                            r.tx = None;
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                        r.pending = Some(p);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        r.tx = None;
+                        break;
+                    }
+                }
+            }
+        }
+        if !alive || stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        if !progress {
+            std::thread::sleep(std::time::Duration::from_micros(300));
+        }
+    }
+}
+
+/// Byte source for a run: direct buffered file reads (default) or the
+/// C2b prefetch channel.
+enum RunSrc {
+    Buf(BufReader<std::fs::File>),
+    Pre(PrefetchSource),
+}
+
+impl std::io::Read for RunSrc {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            RunSrc::Buf(r) => r.read(buf),
+            RunSrc::Pre(p) => p.read(buf),
+        }
+    }
+}
+
 struct RunReader {
-    r: BufReader<std::fs::File>,
+    r: RunSrc,
     key_w: usize,
     /// Current entry (valid when `live`).
     key: Vec<u8>,
@@ -238,8 +404,12 @@ struct RunReader {
 impl RunReader {
     fn open(path: &std::path::Path, key_w: usize) -> PgResult<RunReader> {
         let f = std::fs::File::open(path).map_err(|e| io_err("run open", e))?;
+        Self::from_src(RunSrc::Buf(BufReader::with_capacity(1 << 20, f)), key_w)
+    }
+
+    fn from_src(src: RunSrc, key_w: usize) -> PgResult<RunReader> {
         let mut rr = RunReader {
-            r: BufReader::with_capacity(1 << 20, f),
+            r: src,
             key_w,
             key: vec![0; key_w],
             row: Vec::new(),
@@ -255,13 +425,14 @@ impl RunReader {
 
     /// loadcommit C2a: arm the sliding readahead window and advise the
     /// first stretch immediately (the open() above already consumed the
-    /// first entry, so `pos` is live).
+    /// first entry, so `pos` is live). No-op on a prefetch source.
     fn set_fadvise(&mut self, win: u64) {
+        let RunSrc::Buf(r) = &self.r else { return };
         if win == 0 {
             return;
         }
         self.fadv_win = win;
-        fadvise_willneed(self.r.get_ref(), self.pos, win);
+        fadvise_willneed(r.get_ref(), self.pos, win);
         self.advised_to = self.pos + win;
         self.fadv_mark = self.pos + (1 << 20);
     }
@@ -273,9 +444,10 @@ impl RunReader {
         if self.fadv_win == 0 || self.pos < self.fadv_mark {
             return;
         }
+        let RunSrc::Buf(r) = &self.r else { return };
         let end = self.pos + self.fadv_win;
         if end > self.advised_to {
-            fadvise_willneed(self.r.get_ref(), self.advised_to, end - self.advised_to);
+            fadvise_willneed(r.get_ref(), self.advised_to, end - self.advised_to);
             self.advised_to = end;
         }
         self.fadv_mark = self.pos + (1 << 20);
@@ -445,6 +617,8 @@ fn v2_less(readers: &[RunReader], a: u32, b: u32) -> bool {
 ///   - rows are appended straight into the caller's batch arena (the heap
 ///     path copies key+row into pump-local buffers first).
 pub struct RunMergeV2 {
+    /// Declared before `_pool`: dropping the readers first closes the
+    /// prefetch receivers, so pool threads see Disconnected and exit.
     readers: Vec<RunReader>,
     /// Tournament tree over k = readers.len() leaves: internal node x in
     /// 1..k holds the LOSER run index of the match played there; node x's
@@ -453,6 +627,8 @@ pub struct RunMergeV2 {
     losers: Vec<u32>,
     winner: u32,
     stats: FillStats,
+    /// loadcommit C2b: keeps the prefetch threads alive; joined on drop.
+    _pool: Option<PrefetchPool>,
 }
 
 impl RunMergeV2 {
@@ -461,6 +637,52 @@ impl RunMergeV2 {
         for p in paths {
             readers.push(RunReader::open(p, key_w)?);
         }
+        Self::from_readers(readers, None)
+    }
+
+    /// loadcommit C2b (PGRUST_PARALLEL_COPY_FILL_PREFETCH=<n>): prefetch-fed
+    /// merge — `threads` pool threads stream 512 KB chunks per run through
+    /// bounded channels; byte stream identical to the direct open by
+    /// construction (oracle extends v2_matches_heap_reference).
+    pub fn open_prefetch(
+        paths: &[std::path::PathBuf],
+        key_w: usize,
+        threads: usize,
+    ) -> PgResult<RunMergeV2> {
+        let threads = threads.clamp(1, 16);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut buckets: Vec<Vec<FeedRun>> = (0..threads).map(|_| Vec::new()).collect();
+        let mut sources = Vec::with_capacity(paths.len());
+        for (i, p) in paths.iter().enumerate() {
+            let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(2);
+            buckets[i % threads].push(FeedRun { f, tx: Some(tx), pending: None, eof: false });
+            sources.push(PrefetchSource { rx, cur: Vec::new(), pos: 0, eof: false });
+        }
+        let mut handles = Vec::with_capacity(threads);
+        for runs in buckets {
+            if runs.is_empty() {
+                continue;
+            }
+            let stop2 = std::sync::Arc::clone(&stop);
+            let h = std::thread::Builder::new()
+                .name("cb-run-prefetch".into())
+                .spawn(move || prefetch_feed(runs, stop2))
+                .map_err(|e| io_err("prefetch spawn", e))?;
+            handles.push(h);
+        }
+        let pool = PrefetchPool { stop, threads: handles };
+        let mut readers = Vec::with_capacity(sources.len());
+        for src in sources {
+            readers.push(RunReader::from_src(RunSrc::Pre(src), key_w)?);
+        }
+        Self::from_readers(readers, Some(pool))
+    }
+
+    fn from_readers(
+        readers: Vec<RunReader>,
+        pool: Option<PrefetchPool>,
+    ) -> PgResult<RunMergeV2> {
         let k = readers.len();
         let mut losers = vec![u32::MAX; k.max(1)];
         let winner = if k == 0 {
@@ -468,7 +690,7 @@ impl RunMergeV2 {
         } else {
             Self::build(&readers, &mut losers, k, 1)
         };
-        Ok(RunMergeV2 { readers, losers, winner, stats: FillStats::default() })
+        Ok(RunMergeV2 { readers, losers, winner, stats: FillStats::default(), _pool: pool })
     }
 
     /// Play the tournament under node x, storing losers; returns the winner.
@@ -766,6 +988,15 @@ mod tests {
         assert_eq!(lens, ref_lens, "V2 row lengths diverge from the heap reference");
         assert_eq!(arena, ref_arena, "V2 row bytes diverge from the heap reference");
         assert_eq!(v2.fill_stats().1, v1.fill_stats().1, "run-bytes accounting diverges");
+        // C2b: the prefetch-fed merge must emit the identical stream.
+        let mut vp = RunMergeV2::open_prefetch(paths, kw, 3).unwrap();
+        let mut p_arena: Vec<u8> = Vec::new();
+        let mut p_lens: Vec<u32> = Vec::new();
+        while let Some(l) = vp.next_row_into(&mut p_arena).unwrap() {
+            p_lens.push(l);
+        }
+        assert_eq!(p_lens, ref_lens, "prefetch V2 row lengths diverge");
+        assert_eq!(p_arena, ref_arena, "prefetch V2 row bytes diverge");
     }
 
     #[test]

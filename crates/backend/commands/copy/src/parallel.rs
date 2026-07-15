@@ -186,6 +186,21 @@ fn fill_fadv_bytes() -> u64 {
     })
 }
 
+/// loadcommit C2b: PGRUST_PARALLEL_COPY_FILL_PREFETCH=<threads> — explicit
+/// bounded run prefetch for the merge fill (512 KB chunks, capacity-2
+/// channels, consume-on-arrival: the shape the C2a fadvise refutation
+/// points at). Requires FILL_V2=1; default 0 = off.
+fn fill_prefetch() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_PREFETCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(16)
+    })
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -1201,7 +1216,14 @@ fn merge_sorted_runs(
         V1(cbstore::loadsort::RunMerge),
         V2(cbstore::loadsort::RunMergeV2),
     }
-    let mut merge = if fill_v2() {
+    let prefetch = if fill_v2() { fill_prefetch() } else { 0 };
+    let mut merge = if prefetch > 0 {
+        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_prefetch(
+            &paths,
+            sort.key_w,
+            prefetch,
+        )?)
+    } else if fill_v2() {
         MergeKind::V2(cbstore::loadsort::RunMergeV2::open(&paths, sort.key_w)?)
     } else {
         MergeKind::V1(cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?)
@@ -1226,7 +1248,7 @@ fn merge_sorted_runs(
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
-        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={}",
+        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch}",
         paths.len(),
         match &merge {
             MergeKind::V1(_) => "v1",
