@@ -118,6 +118,14 @@ pub struct AggStateData<'mcx> {
     agg_done: bool,
     skip_final: bool,
     numtrans: usize,
+    // avgpack: bit per transno of the AvgInt8 class (`_int8` {count,sum}
+    // transarray — avg(int2/int4)), 0 when the kill switch is off or any
+    // such transno is >= 64. Computed once at node build; a SINK worker
+    // build's compact arm adopts it as the table's packed-representation
+    // mask (compact.rs `CompactHash::avgpack_mask`), and the leader's
+    // combine/emit resolution reads the same value — one deterministic
+    // predicate on both sides (the F1 leader/worker-verdict law).
+    pub(crate) avgpack_shape_mask: u64,
     perhash: Option<PerHashData<'mcx>>,
     merge: Option<merge::FinalizeMerge<'mcx>>,
     persort: Option<PerSortData<'mcx>>,
@@ -1518,6 +1526,7 @@ pub fn exec_init_agg<'mcx>(
         false
     };
 
+    let avgpack_shape_mask = sink::sink_avgpack_shape_mask(&peragg);
     Ok(AggStateData {
         plan: node,
         ps_ExprContext,
@@ -1537,6 +1546,7 @@ pub fn exec_init_agg<'mcx>(
         agg_done: false,
         skip_final,
         numtrans,
+        avgpack_shape_mask,
         perhash,
         merge,
         persort,
@@ -6659,6 +6669,7 @@ mcx::forget_safe_struct!(
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,
+        avgpack_shape_mask,
         force_distinct_set, group_eq_representational, trans_order_insensitive,
         instr_idx, hash_build_combined;
         ps_ResultTupleDesc, proj, evaltrans, perhash, merge, persort, gsets,
