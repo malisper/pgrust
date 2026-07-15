@@ -4288,9 +4288,12 @@ struct MkScratch {
     keys2: Vec<[u64; 2]>,
     // Identity of the code -> intern-id cache: (is_global, id). Per-epoch
     // (RG index, cleared per roll) or — under a v7 stitch — part-global
-    // (scan-stable gepoch, never cleared within one scan).
+    // (scan-stable gepoch, never cleared within one scan). Entry encoding:
+    // 0 = unset, `id + 1` otherwise (exprkey::reset_code_id_cache — the
+    // zero-page allocation is the vecstate q40 fix: the gndv-sized eager
+    // None-fill was 38% of q40's cycles).
     epoch: Option<(bool, u64)>,
-    code_ids: Vec<Option<u32>>,
+    code_ids: Vec<u32>,
     /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
     /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
     /// cache. `None` until this worker observes FROZEN.
@@ -4811,6 +4814,10 @@ fn scan_mk_batch<'mcx>(
     for (j, comp) in shape.comps.iter().enumerate() {
         let att = comp.att as usize;
         let off_bits = comp.off as u32 * 8;
+        // spankey copy-tax band timer (measurement only): Intern components
+        // (datum views + code_ids + DictLazy ensures + intern resolves) vs
+        // word components, per batch.
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
         match comp.kind {
             ::nodeagg::MkCompKind::Int { width } => {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -4873,8 +4880,7 @@ fn scan_mk_batch<'mcx>(
                         };
                         if *epoch != Some(ident) {
                             *epoch = Some(ident);
-                            code_ids.clear();
-                            code_ids.resize(size, None);
+                            exprkey::reset_code_id_cache(code_ids, size);
                         }
                         debug_assert!(code_ids.len() >= size);
                         for (k, &i) in rows.iter().enumerate() {
@@ -4887,8 +4893,8 @@ fn scan_mk_batch<'mcx>(
                             };
                             debug_assert!(code < size, "stitch contract: global code < gndv");
                             let id = match code_ids[code] {
-                                Some(id) => id,
-                                None => {
+                                c if c != 0 => c - 1,
+                                _ => {
                                     // First surviving row of (identity,
                                     // code): materialize dict[code] once,
                                     // intern.
@@ -4902,7 +4908,8 @@ fn scan_mk_batch<'mcx>(
                                     }?;
                                     let id =
                                         ::nodeagg::agg_hash_compact_intern(agg, v.data());
-                                    code_ids[code] = Some(id);
+                                    debug_assert!(id != u32::MAX, "id+1 encoding");
+                                    code_ids[code] = id + 1;
                                     id
                                 }
                             };
@@ -4933,6 +4940,15 @@ fn scan_mk_batch<'mcx>(
                 }
             }
         }
+        {
+            use ::nodeagg::spankey::{spankey_lap, SPANKEY_CTRS as S};
+            let ctr = if matches!(comp.kind, ::nodeagg::MkCompKind::Intern) {
+                &S.pack_intern_ns
+            } else {
+                &S.pack_word_ns
+            };
+            spankey_lap(ctr, spk_t0);
+        }
     }
     // Split the accumulator into the packed key lane and probe.
     if shape.two_words {
@@ -4953,7 +4969,9 @@ fn scan_mk_batch<'mcx>(
     // plan column (a dict component is never in `plan.cols` — admission);
     // the plan is unguarded; each pergroup was installed by the compact
     // probe within this batch.
+    let spk_t0 = ::nodeagg::spankey::spankey_t0();
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.fold_ns, spk_t0);
     // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
     // table reaches the bound wins the CAS and publishes its first `bound`
     // groups' canonical keys. Correct from ANY table state — nothing was
@@ -5461,9 +5479,14 @@ fn sort_feed_if_needed<'mcx>(
             // ladder (a dense boundary tie would re-feed the whole scan: the
             // Q25@100M cliff class fix-100m-engagement retired). Refsort still
             // owns adaptive-off and tracked feeds (its ratified e2e arms).
-            // Follow-up (landing note): extend the narrow comparator with the
-            // ref column to reclaim refsort under the relaxed default.
-            let refsort = if narrow.is_none() && tie != TieMode::Rowref {
+            // LAZYTOPN (the chartered follow-up, delivered): under
+            // `topn_lazyfetch_enabled` the narrow comparator EXTENDS with the
+            // ref column (rule-2 (key, ref) total order — selection-exact,
+            // demote-free, byte-identical to the wide rowref arm by
+            // construction), reclaiming refsort under the relaxed default.
+            let refsort = if narrow.is_none()
+                && (tie != TieMode::Rowref || topn_lazyfetch_enabled())
+            {
                 refsort_arm(state, ss, &outer_desc)
             } else {
                 None
@@ -5471,7 +5494,7 @@ fn sort_feed_if_needed<'mcx>(
             let mut fed = false;
             if let Some(spec) = &refsort {
                 lane_trace("refsort armed (bounded sort late materialization)");
-                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
+                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tie, estate)? {
                     fed = true;
                 } else {
                     // Demoted before any output escaped: sticky-refuse the
@@ -7000,6 +7023,20 @@ fn refsort_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_TOPN_LAZYFETCH` kill switch (default ON; lazytopn lane).
+/// Governs the two lazytopn increments: (a) refsort arming under the
+/// relaxed rowref default (the rule-2 (key, ref) narrow comparator — the
+/// train-10 landing follow-up), and (b) the refsort accept-side needed-set
+/// narrowing (key ∪ qual during the narrow feed; the full set restores
+/// before the winner gather). `0|off` restores the pre-lane behavior
+/// exactly: refsort only on Off/Track tie modes, full-needed accept.
+fn topn_lazyfetch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_TOPN_LAZYFETCH").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Bound cap (matches the adaptive walk's): past this the top-N is
 /// scan-shaped anyway and the winner gather stops being "a handful of rows".
 const REFSORT_MAX_BOUND: i64 = 1 << 16;
@@ -7302,13 +7339,31 @@ fn sort_feed_refsort<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
     spec: &RefSortSpec,
     topk: Option<TopkCut>,
-    tie_track: bool,
+    tie: TieMode,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let key_desc = refsort_key_desc(sort, outer_desc, spec.key_resno_outer);
-    ::nodesort::sort_lane_begin_refsort(sort, key_desc)?;
-    if tie_track {
+    // Rowref (relaxed default, lazytopn): the ref column joins the
+    // comparator — rule-2 (key, ref) total order, selection-exact, no tie
+    // machinery. Track keeps the byte-exact demote ladder; Off keeps the
+    // plain leading-key comparator (physical-order feed, ties invisible to
+    // selection by arrival order).
+    ::nodesort::sort_lane_begin_refsort(sort, key_desc, tie == TieMode::Rowref)?;
+    if tie == TieMode::Track {
         ::nodesort::sort_lane_topk_tie_track_arm(sort);
+    } else if tie == TieMode::Rowref {
+        lane_trace("refsort rule-2 comparator armed (rowref tie-break)");
+    }
+    // Accept-side needed-set narrowing (lazytopn): the narrow feed reads
+    // only the key (fast leg) and the qual columns (staging + per-row
+    // requal); every other tlist column decodes ONLY at the winner gather.
+    // Restored unconditionally after the drain — the gather's needed-set
+    // guard demotes on any cell outside the CURRENT set, and the demote
+    // re-feed (legacy wide feed) reads every tlist column.
+    let narrowed = topn_lazyfetch_enabled()
+        && ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &[spec.key_attno_scan]);
+    if narrowed {
+        lane_trace("refsort accept narrowed (key+qual needed set)");
     }
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
@@ -7319,7 +7374,12 @@ fn sort_feed_refsort<'mcx>(
         topk: topk.map(TopkCutState::new),
         demoted: false,
     };
-    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    let drained =
+        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+    if narrowed {
+        ::nodeseqscan::seq_scan_cb_restore_needed(ss);
+    }
+    drained?;
     let demoted = sink.demoted;
     estate.es_direction = dir;
     if demoted {

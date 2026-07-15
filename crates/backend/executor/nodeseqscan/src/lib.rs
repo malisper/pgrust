@@ -97,6 +97,11 @@ struct CbScanInfo {
     /// all) — the floor `seq_scan_cb_narrow_needed` may not shrink below:
     /// the exact per-row qual must keep reading real cells.
     qual_needed: Vec<bool>,
+    /// The plan-derived full needed set, stashed by
+    /// `seq_scan_cb_narrow_needed` so `seq_scan_cb_restore_needed` can put
+    /// it back (the serial refsort accept-narrow / gather-restore pair —
+    /// lazytopn lane). `None` = not currently narrowed.
+    needed_full: Option<Vec<bool>>,
     /// Zone-map-mappable `Var CMP Const` conjuncts of the scan qual
     /// (advisory pruning only; the executor still evaluates the full qual
     /// on surviving rows).
@@ -3618,7 +3623,14 @@ fn cb_scan_info<'mcx>(
         _ => None,
     };
     let zone_covers_qual = nquals > 0 && zone.len() == nquals;
-    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual, zone_covers_qual })
+    Ok(CbScanInfo {
+        needed: cx.needed,
+        qual_needed,
+        needed_full: None,
+        zone,
+        zero_qual,
+        zone_covers_qual,
+    })
 }
 
 /// M3 runtime-sort key-only staged accept (docs/design/m3-sort.md inc-4
@@ -3639,7 +3651,32 @@ pub fn seq_scan_cb_narrow_needed(node: &mut SeqScanState<'_>, keep: &[u16]) -> b
             needed[a as usize] = true;
         }
     }
-    cb.needed = needed;
+    // Stash the plan-derived set once so `seq_scan_cb_restore_needed` can
+    // undo the narrowing (serial refsort accept — lazytopn lane). The
+    // runtime-sort WORKER path narrows and never restores (its leader owns
+    // a separate scan state); the stash is inert there.
+    if cb.needed_full.is_none() {
+        cb.needed_full = Some(std::mem::replace(&mut cb.needed, needed));
+    } else {
+        cb.needed = needed;
+    }
+    if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
+        ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
+    }
+    true
+}
+
+/// Undo `seq_scan_cb_narrow_needed`: restore the plan-derived full needed
+/// set (re-pushed onto an open scan desc; decoders re-derive via the needed
+/// epoch). The serial refsort accept narrows to key ∪ qual and MUST restore
+/// before its winner gather (`gather_row` nulls cells outside the CURRENT
+/// set and the gather-time guard demotes on them) and before any demote
+/// re-feed (the legacy wide feed reads every tlist column). False = not a
+/// cbstore scan or not narrowed (no-op).
+pub fn seq_scan_cb_restore_needed(node: &mut SeqScanState<'_>) -> bool {
+    let Some(cb) = node.cb_scan.as_deref_mut() else { return false };
+    let Some(full) = cb.needed_full.take() else { return false };
+    cb.needed = full;
     if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
         ::tableam::table_scan_set_needed_attrs(sd, &cb.needed);
     }
@@ -3765,9 +3802,15 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
 }
 
 // Condition-cache stats line at scan shutdown (armed scans only): the
-// cumulative process counters, DEBUG1 like every lane stats line.
-fn condcache_stats_summary(node: &SeqScanState<'_>) {
+// cumulative process counters, DEBUG1 like every lane stats line. Folds
+// this scan's per-scan stat cells first so the line includes its own
+// counts (the cells otherwise fold at scan-desc drop, which happens after
+// this summary in shutdown/park order).
+fn condcache_stats_summary(node: &mut SeqScanState<'_>) {
     if node.batch_soa.as_deref().is_some_and(|b| b.cond_armed) {
+        if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
+            ::tableam::table_scan_condcache_fold_stats(sd);
+        }
         let (h, m, i, e) = ::tableam::condcache_stats();
         ::laneexec::log_condcache_stats(h, m, i, e);
     }

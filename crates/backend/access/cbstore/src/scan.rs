@@ -388,6 +388,10 @@ struct CondState {
     fp: u128,
     cur_rg: u32,
     entry: Option<std::sync::Arc<crate::condcache::RgEntry>>,
+    // Per-scan hit/miss cells (folded into the process counters at drop or
+    // via condcache_fold_stats) — the shared per-window fetch_add was the
+    // 16-worker cache-line contention on condcache-hot scans (census U7).
+    stats: crate::condcache::LocalStats,
 }
 
 pub struct CbScanDescData<'mcx> {
@@ -1234,7 +1238,12 @@ impl<'mcx> CbScanDescData<'mcx> {
             return false;
         }
         crate::condcache::set_capacity(capacity);
-        self.cond = Some(Box::new(CondState { fp, cur_rg: u32::MAX, entry: None }));
+        self.cond = Some(Box::new(CondState {
+            fp,
+            cur_rg: u32::MAX,
+            entry: None,
+            stats: Default::default(),
+        }));
         true
     }
 
@@ -1276,13 +1285,25 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// legs entirely. false = miss (or unarmed): evaluate as always, then
     /// `condcache_store` the bits.
     pub fn condcache_lookup(&mut self, sel: &mut [u64]) -> bool {
-        let Some((entry, slot)) = self.cond_slot() else { return false };
-        if entry.lookup(slot, sel) {
-            crate::condcache::count_hit();
-            true
-        } else {
-            crate::condcache::count_miss();
-            false
+        let hit = match self.cond_slot() {
+            Some((entry, slot)) => entry.lookup(slot, sel),
+            None => return false,
+        };
+        // Count in the per-scan cell (cond is Some — cond_slot said so);
+        // the shared statics see one fold at scan teardown, not one
+        // fetch_add per window (the q21/q8 contention line, census U7).
+        if let Some(cond) = self.cond.as_deref_mut() {
+            cond.stats.count(hit);
+        }
+        hit
+    }
+
+    /// Fold this scan's condition-cache stat cells into the process
+    /// counters (idempotent; CondState's drop folds too — this exists so a
+    /// stats read at scan shutdown sees the scan's own counts).
+    pub fn condcache_fold_stats(&mut self) {
+        if let Some(cond) = self.cond.as_deref_mut() {
+            cond.stats.fold();
         }
     }
 
