@@ -361,6 +361,25 @@ pub enum CbGranuleMetaStep {
     Meta { rows: u32 },
 }
 
+/// `agg_meta_peek` verdict (footer-stat consumption arm: whole-RG /
+/// whole-granule aggregate answers under an all-rows-passing zone proof).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CbAggMetaStep {
+    /// Scan exhausted (next_window would return 0).
+    Exhausted,
+    /// Not at a metadata-answerable position; stage windows normally.
+    NotMeta,
+    /// The upcoming WHOLE row group: wholly visible, every pushed zone qual
+    /// AllPass over its footer extremes — described by footer metadata
+    /// (row count + per-column exact (min, max) / i128 sums / Σ length).
+    MetaRg { rows: u64 },
+    /// The upcoming granule: wholly visible RG, every pushed zone qual
+    /// AllPass over the granule's zone entry — row count + per-column exact
+    /// (min, max) / Σ length (the format stores NO granule-altitude value
+    /// sums, so `sum_cols` must be empty for this tier to serve).
+    MetaGranule { rows: u32 },
+}
+
 // Condition-cache scan arm (pgrust.condition_cache): the staged-qual
 // fingerprint plus the current row group's shared RgEntry, refreshed once
 // per RG (the global cache lock is per-RG, window lookups/stores are
@@ -449,7 +468,9 @@ pub struct CbScanDescData<'mcx> {
     // Row groups whose chunk extents were advised (claim-time readahead).
     // Test/observability channel: a serial scan must always read 0 here.
     pub rgs_readahead: u64,
-    // Granules answered wholesale from v7 footer length stats (never decoded).
+    // Granules answered wholesale from footer metadata (never decoded):
+    // the sorted-fold v7 length-stats arm plus the plain-fold footer-stat
+    // arm (agg_meta_peek — whole-RG consumes count the RG's granules).
     pub granules_meta: u64,
     // Drive-scaling observability (the runtime WFIN channel): granule-range
     // re-entries that landed in a NEW row group (per-claim epoch rolls) and
@@ -1466,6 +1487,222 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// Consume the granule `granule_meta_peek` just answered: advance past it
     /// without decoding. Only legal immediately after a `Meta` verdict.
     pub fn granule_meta_consume(&mut self) {
+        debug_assert!(self.rg_claimed && !self.decoded);
+        self.granules_meta += 1;
+        self.granule += 1;
+        self.win = 0;
+    }
+
+    /// Footer-stat aggregate metadata peek (the plain fold drive's meta
+    /// arm): when the NEXT `next_window` call would decode a fresh scan
+    /// unit, describe that unit from footer metadata alone — IF every
+    /// pushed zone qual is AllPass over the unit's footer extremes (all
+    /// rows provably pass; the CALLER must separately prove the pushed
+    /// zone quals mirror the ENTIRE scan qual) and the unit is wholly
+    /// visible. Two tiers:
+    ///   * whole RG (fresh-RG boundary): rows + exact per-column (min,
+    ///     max) from the RG footer chunks, exact i128 sums from the v4
+    ///     footer sums (RG_FLAG_SUMS), Σ octet_length folded over the v7
+    ///     granule length stats (RG_FLAG_LENSTATS);
+    ///   * granule: rows + (min, max) from the granule zone entry and
+    ///     length stats from its v7 entry — only when `sum_cols` is empty
+    ///     (the format stores no granule-altitude value sums; the v9 spec
+    ///     owns that).
+    /// The caller either consumes the unit (`agg_meta_consume_rg` /
+    /// `agg_meta_consume_granule` — never decoded) or declines (state
+    /// untouched beyond RG claiming, which `next_window`'s own loop head
+    /// performs identically, prune accounting included).
+    ///
+    /// NotMeta whenever any gate fails: parallel/adaptive/granule-ranged
+    /// scans, mid-granule position, an RG not wholly visible or missing a
+    /// required stats flag, a text column requested for (min, max)/sums
+    /// (text zone entries carry byte lengths), a length column without v7
+    /// stats, or a non-AllPass zone verdict. Exhausted mirrors
+    /// next_window's 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agg_meta_peek(
+        &mut self,
+        mm_cols: &[u16],
+        sum_cols: &[u16],
+        len_cols: &[u16],
+        mm: &mut [(i64, i64)],
+        sums: &mut [i128],
+        lens: &mut [i64],
+    ) -> PgResult<CbAggMetaStep> {
+        debug_assert_eq!(mm_cols.len(), mm.len());
+        debug_assert_eq!(sum_cols.len(), sums.len());
+        debug_assert_eq!(len_cols.len(), lens.len());
+        if self.adaptive.is_some()
+            || self.rs_base.rs_parallel.is_some()
+            || self.range_end.is_some()
+        {
+            return Ok(CbAggMetaStep::NotMeta);
+        }
+        let Some(part) = self.part.clone() else { return Ok(CbAggMetaStep::Exhausted) };
+        // (min, max) and value sums are int-family only (text zone entries
+        // carry byte lengths, text has no footer value sums); length sums
+        // need the column flagged in the v7 prelude.
+        for &c in mm_cols.iter().chain(sum_cols) {
+            match self.coltypes.get(c as usize) {
+                Some(t) if !t.is_text() => {}
+                _ => return Ok(CbAggMetaStep::NotMeta),
+            }
+        }
+        if len_cols.iter().any(|&c| !part.has_len_stats(c as usize)) {
+            return Ok(CbAggMetaStep::NotMeta);
+        }
+        let nrgs = part.rgs.len();
+        loop {
+            if !self.rg_claimed {
+                self.rg = self.claim_next_rg();
+                self.rg_claimed = true;
+                self.granule = 0;
+                self.win = 0;
+                self.rg_checked = false;
+                self.decoded = false;
+                self.rg_switches += 1;
+            }
+            if self.rg >= nrgs {
+                return Ok(CbAggMetaStep::Exhausted);
+            }
+            let rg_rows = part.rgs[self.rg].nrows as usize;
+            let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
+            if !self.rg_checked {
+                // next_window's verbatim RG gate + prune accounting.
+                if !self.rg_visible(self.rg)? || !self.rg_zone_ok(self.rg) {
+                    self.granules_pruned += ngranules as u64;
+                    self.rg_claimed = false;
+                    continue;
+                }
+                self.rg_checked = true;
+            }
+            if self.granule >= ngranules {
+                self.rg_claimed = false;
+                continue;
+            }
+            if self.decoded {
+                if self.win * self.window_rows < self.granule_rows {
+                    // Mid-granule: staged windows pending.
+                    return Ok(CbAggMetaStep::NotMeta);
+                }
+                // Decoded granule fully consumed: advance exactly as
+                // next_window's own loop head would.
+                self.granule += 1;
+                self.decoded = false;
+                continue;
+            }
+            // Fresh granule. Metadata answers require a wholly-visible RG
+            // (footer counts stand in for the rows; own-transaction RGs
+            // demote — the next_meta_count precedent).
+            let m = &part.rgs[self.rg];
+            if !self.rg_wholly_visible(self.rg)? {
+                return Ok(CbAggMetaStep::NotMeta);
+            }
+            // Whole-RG tier: at the RG's first granule with every zone qual
+            // AllPass over the RG footer extremes, the whole row group is
+            // provably all-passing.
+            if self.granule == 0
+                && (sum_cols.is_empty() || m.flags & RG_FLAG_SUMS != 0)
+                && (len_cols.is_empty() || m.flags & RG_FLAG_LENSTATS != 0)
+                && self.zone_quals.iter().all(|q| {
+                    let (_, min, max) = part.rgs[self.rg].chunks[(q.attnum - 1) as usize];
+                    zone_verdict(q, min, max) == ZoneVerdict::AllPass
+                })
+            {
+                for (k, &c) in mm_cols.iter().enumerate() {
+                    let (_, min, max) = part.rgs[self.rg].chunks[c as usize];
+                    mm[k] = (min, max);
+                }
+                for (k, &c) in sum_cols.iter().enumerate() {
+                    sums[k] = part.rg_sum(self.rg, c as usize);
+                }
+                if !self.rg_len_stats(&part, ngranules, rg_rows, len_cols, lens) {
+                    return Ok(CbAggMetaStep::NotMeta);
+                }
+                return Ok(CbAggMetaStep::MetaRg { rows: rg_rows as u64 });
+            }
+            // Granule tier: no granule-altitude value sums exist.
+            if !sum_cols.is_empty() {
+                return Ok(CbAggMetaStep::NotMeta);
+            }
+            if !len_cols.is_empty() && m.flags & RG_FLAG_LENSTATS == 0 {
+                return Ok(CbAggMetaStep::NotMeta);
+            }
+            let g = self.granule;
+            if !self
+                .zone_quals
+                .iter()
+                .all(|q| {
+                    let ge = part.chunk(self.rg, (q.attnum - 1) as usize).granule(g);
+                    zone_verdict(q, ge.min, ge.max) == ZoneVerdict::AllPass
+                })
+            {
+                return Ok(CbAggMetaStep::NotMeta);
+            }
+            let grows = (rg_rows - g * GRANULE_ROWS).min(GRANULE_ROWS);
+            for (k, &c) in mm_cols.iter().enumerate() {
+                let ge = part.chunk(self.rg, c as usize).granule(g);
+                mm[k] = (ge.min, ge.max);
+            }
+            for (k, &c) in len_cols.iter().enumerate() {
+                let Some(st) = part.granule_len_stats(self.rg, g, c as usize) else {
+                    return Ok(CbAggMetaStep::NotMeta);
+                };
+                // cbstore stores no NULLs; a mismatch means foreign/corrupt
+                // stats — refuse rather than answer.
+                if st.1 != grows as u32 {
+                    return Ok(CbAggMetaStep::NotMeta);
+                }
+                lens[k] = st.0 as i64;
+            }
+            return Ok(CbAggMetaStep::MetaGranule { rows: grows as u32 });
+        }
+    }
+
+    // Fold the v7 per-granule length stats to RG altitude (exact: granule
+    // sums partition the RG's rows). false = a missing/foreign entry —
+    // refuse rather than answer (the granule_meta_peek precedent).
+    fn rg_len_stats(
+        &self,
+        part: &Part,
+        ngranules: usize,
+        rg_rows: usize,
+        len_cols: &[u16],
+        lens: &mut [i64],
+    ) -> bool {
+        for (k, &c) in len_cols.iter().enumerate() {
+            let mut sum = 0i64;
+            for g in 0..ngranules {
+                let grows = (rg_rows - g * GRANULE_ROWS).min(GRANULE_ROWS);
+                let Some(st) = part.granule_len_stats(self.rg, g, c as usize) else {
+                    return false;
+                };
+                if st.1 != grows as u32 {
+                    return false;
+                }
+                // Bounded: a granule sum < 2^44 and <= 8 granules per RG.
+                sum += st.0 as i64;
+            }
+            lens[k] = sum;
+        }
+        true
+    }
+
+    /// Consume the whole row group `agg_meta_peek` just answered (`MetaRg`):
+    /// advance past it without decoding any granule. Only legal immediately
+    /// after a `MetaRg` verdict.
+    pub fn agg_meta_consume_rg(&mut self) {
+        debug_assert!(self.rg_claimed && !self.decoded && self.granule == 0);
+        let part = self.part.as_ref().unwrap();
+        let ngranules = (part.rgs[self.rg].nrows as usize).div_ceil(GRANULE_ROWS);
+        self.granules_meta += ngranules as u64;
+        self.rg_claimed = false;
+    }
+
+    /// Consume the granule `agg_meta_peek` just answered (`MetaGranule`):
+    /// advance past it without decoding. Only legal immediately after a
+    /// `MetaGranule` verdict.
+    pub fn agg_meta_consume_granule(&mut self) {
         debug_assert!(self.rg_claimed && !self.decoded);
         self.granules_meta += 1;
         self.granule += 1;

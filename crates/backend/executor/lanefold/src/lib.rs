@@ -1388,6 +1388,157 @@ pub unsafe fn fold_granule_meta(
     }
 }
 
+/// Column requests for the whole-RG / whole-granule footer-metadata fold
+/// (`agg_meta_cols` / `fold_agg_meta` — the footer-stat consumption arm of
+/// the PLAIN fold drive): `mm_cols` want exact footer (min, max) entries
+/// (Min/Max transitions plus every integer-guard column for the caller's
+/// interval re-proof), `sum_cols` want exact i128 footer sums (v4 RG
+/// sums — RG altitude only; the format stores no granule sums), `len_cols`
+/// want Σ octet_length (v7 granule length stats, foldable to RG altitude).
+pub struct AggMetaCols {
+    pub mm_cols: Vec<u16>,
+    pub sum_cols: Vec<u16>,
+    pub len_cols: Vec<u16>,
+}
+
+/// Footer-metadata fold admissibility for an ALL-ROWS-PASSING scan unit (a
+/// wholly visible row group / granule every one of whose rows passes the
+/// scan qual — the caller proves that from the zone maps): `Some` iff there
+/// are no residual transitions and EVERY admitted transition is answerable
+/// from (row count, exact footer (min, max), exact footer sums,
+/// Σ octet_length):
+///   * CountStar/CountAny — the unit's row count (cbstore stores no NULLs,
+///     so the non-null count IS the row count, any column type);
+///   * Min/Max over PLAIN int lanes — the footer extremes are attained
+///     values of the unit's rows (identity transform only: min(v*3) is not
+///     derivable from min(v), the classify_meta rule);
+///   * Sum/AvgAccum over affine divk==1 int lanes — delta = mulk*S +
+///     addend*N in the wrapping-i64 ring (the SumBase/cse_delta derivation
+///     with the footer sum standing in for the batch sum: S ≡ Σv mod 2^64);
+///   * Int128AvgAccum over bare int8 lanes — the i128 footer sum is the
+///     exact Σv (see sum128_selected's reassociation proof; the footer
+///     accumulation has the same non-overflow envelope);
+///   * Sum/AvgAccum over PLAIN VarLenBytes lanes — Σ octet_length is
+///     exactly the v7 length-stats sum (VarLenChars refuses: no char-count
+///     stats exist).
+/// Integer guards admit — `mm_cols` carries their columns and the CALLER
+/// must prove every guard interval against the unit's footer (min, max)
+/// (all rows fold, so the footer extremes are exactly check_guards' value
+/// domain) or decline the unit. vguards are per-batch staging proofs over
+/// lane READS — the metadata fold reads no lanes, so they are vacuous;
+/// uguards only arise on VarLenChars lanes, which refuse above. The
+/// float/bool/bitwise/str tiers refuse exactly as classify_meta (no footer
+/// answer exists).
+pub fn agg_meta_cols(plan: &LanePlan<'_>) -> Option<AggMetaCols> {
+    if !plan.resid.is_empty() {
+        return None;
+    }
+    let mut out =
+        AggMetaCols { mm_cols: Vec::new(), sum_cols: Vec::new(), len_cols: Vec::new() };
+    let push = |v: &mut Vec<u16>, c: u16| {
+        if !v.contains(&c) {
+            v.push(c);
+        }
+    };
+    for t in plan.trans.iter() {
+        let plain = (t.addend, t.mulk, t.divk) == (0, 1, 1);
+        let affine = t.divk == 1;
+        let int_width = matches!(t.width, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64);
+        match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => {}
+            LaneKind::Min | LaneKind::Max if plain && int_width => {
+                push(&mut out.mm_cols, t.col)
+            }
+            LaneKind::Sum | LaneKind::AvgAccum if affine && int_width => {
+                push(&mut out.sum_cols, t.col)
+            }
+            LaneKind::Sum | LaneKind::AvgAccum
+                if plain && t.width == LaneWidth::VarLenBytes =>
+            {
+                push(&mut out.len_cols, t.col)
+            }
+            LaneKind::Int128AvgAccum if plain && int_width => {
+                push(&mut out.sum_cols, t.col)
+            }
+            _ => return None,
+        }
+    }
+    for g in plan.guards.iter() {
+        push(&mut out.mm_cols, g.col);
+    }
+    Some(out)
+}
+
+/// Apply the plan's transitions for a footer-metadata-answered scan unit
+/// (whole RG or whole granule) of `rows` (> 0) all-passing rows: `mm_of` =
+/// the unit's exact attained (min, max) per requested int column, `sum_of` =
+/// the unit's exact i128 value sum per requested int column, `len_of` =
+/// Σ octet_length per requested VarLenBytes column. Bit-equal to
+/// `fold_batch` over an all-ones selection of the unit's rows:
+/// count/sum/avg/minmax/int128 applies are the identical state mutations,
+/// the sum deltas live in the same mod-2^64 ring (`meta_delta` ==
+/// `cse_delta` with the footer sum for the batch sum), the i128 sum is the
+/// exact per-row accumulation, and the min/max advance sees the attained
+/// extreme instead of every row (same survivor under a strict total order).
+/// The CSE schedule is only a compute-sharing plan — per-transition
+/// application yields the same increments (the fold_granule_meta precedent).
+/// Caller proved the plan via `agg_meta_cols` and, when guarded, proved
+/// every guard interval against the unit's (min, max).
+///
+/// # Safety
+/// `pergroup_base` follows fold_batch's contract (once-allocated pergroup
+/// array covering every transno; AvgAccum pergroups hold a live
+/// `new_int8_transarray`-shaped transvalue; Int128AvgAccum pergroups are
+/// NULL or hold a live aggcontext `Int128AggState` pointer, with `aggcxt`
+/// that same aggcontext).
+pub unsafe fn fold_agg_meta(
+    plan: &LanePlan<'_>,
+    rows: i64,
+    mm_of: impl Fn(u16) -> (i64, i64),
+    sum_of: impl Fn(u16) -> i128,
+    len_of: impl Fn(u16) -> i64,
+    pergroup_base: NonNull<AggPerGroup>,
+    aggcxt: Mcx<'_>,
+) -> PgResult<()> {
+    debug_assert!(rows > 0);
+    for t in plan.trans.iter() {
+        // SAFETY: transno < pergroup length (caller contract).
+        let pg = unsafe { &mut *pergroup_base.as_ptr().add(t.transno as usize) };
+        match t.kind {
+            LaneKind::CountStar | LaneKind::CountAny => count_apply(pg, rows),
+            LaneKind::Sum if t.width == LaneWidth::VarLenBytes => {
+                sum_apply(pg, len_of(t.col))
+            }
+            LaneKind::AvgAccum if t.width == LaneWidth::VarLenBytes => {
+                avg_apply(pg, rows, len_of(t.col))
+            }
+            LaneKind::Sum => sum_apply(pg, meta_delta(t, rows, sum_of(t.col))),
+            LaneKind::AvgAccum => avg_apply(pg, rows, meta_delta(t, rows, sum_of(t.col))),
+            LaneKind::Int128AvgAccum => {
+                let st = int128_state(pg, aggcxt)?;
+                // SAFETY: aggcontext-lived state installed by int128_state or
+                // the per-row transfn chain (caller contract).
+                unsafe {
+                    (*st).n += rows;
+                    (*st).sum_x += sum_of(t.col);
+                }
+            }
+            LaneKind::Min => minmax_advance(t, pg, mm_of(t.col).0, false),
+            LaneKind::Max => minmax_advance(t, pg, mm_of(t.col).1, true),
+            _ => unreachable!("agg_meta_cols admitted the plan"),
+        }
+    }
+    Ok(())
+}
+
+// The Sum/AvgAccum member delta off a unit's exact footer sum: mulk*S +
+// addend*N in the wrapping-i64 ring — `cse_delta(t, rows, S mod 2^64)`
+// verbatim (divk == 1 by admission, so the shared base sum IS Σv).
+#[inline(always)]
+fn meta_delta(t: &LaneTrans, rows: i64, s: i128) -> i64 {
+    cse_delta(t, rows, s as i64)
+}
+
 /// Whole-batch ungrouped fold: apply every admitted transition over the
 /// selected rows of the staged batch, CSE groups first, then the ungrouped
 /// per-trans kernels. `aggcxt` is the agg (transvalue) memory context — where
