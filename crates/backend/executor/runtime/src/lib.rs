@@ -97,13 +97,14 @@ pub use parallel::{
     QueryTaskBindingPolicy,
 };
 
-/// Kill switch (M0 deliverable 6): the runtime is OFF by default and nothing
-/// in production paths engages it yet. `PGRUST_RUNTIME=1` enables; any other
-/// value (or unset) disables. Read once.
+/// Kill switch (M0 deliverable 6; DEFAULT FLIPPED at the M5 boarding —
+/// docs/design/m5-planner.md §4.4 criteria met): the runtime pool is ON by
+/// default. `PGRUST_RUNTIME=0` is the kill switch (restores the pool-less
+/// process exactly); any other value (or unset) enables. Read once.
 #[cfg(not(loom))]
 pub fn runtime_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| !std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "0"))
 }
 
 /// Process-global runtime handle (M1): published once by the postmaster's
