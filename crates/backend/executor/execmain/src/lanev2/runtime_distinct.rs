@@ -1398,20 +1398,25 @@ fn distinct_spill_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
-/// LOCALITY CAP default (bytes) — the distinct-sidecar working-set bound.
-/// Sized to the q36-radix knee translated to set bytes: ~64K live values at
-/// the IntSet cost model (50% max load = 16-32 table bytes/value + 8-16
-/// ints-Vec bytes/value ≈ 32-48B/value) ≈ a few MB — L2-resident on the
-/// c8g fleet (2MB/core). Finalized by the q9/q10@100M cap ladder (see
-/// notes/distinct-sidecar-cap.md).
-const DST_LOCALITY_CAP_DEFAULT: usize = 4 << 20;
-
-/// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): 0 = off (budget-epoch
-/// cadence exactly — the kill switch), N = working-set bound override
-/// (floored at 64KB), unset = [`DST_LOCALITY_CAP_DEFAULT`]. Engagement is
-/// further gated at engage(): DOP>1 AND the spill arm live (the epoch drain
-/// is the spill machinery; a dead arm means no flush target, and a single
-/// Local has no duplicate-group tax to convert — the q36-radix DOP1 law).
+/// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): unset/0 = OFF (the
+/// budget-epoch cadence exactly — the DEFAULT), N = working-set bound
+/// (floored at 64KB). Engagement is further gated at engage(): DOP>1 AND
+/// the spill arm live (the epoch drain is the spill machinery; a dead arm
+/// means no flush target, and a single Local has no duplicate-group tax to
+/// convert — the q36-radix DOP1 law).
+///
+/// MEASURED REFUSAL as a default (2026-07-14 q9/q10/q14 @100M mt16 cap
+/// ladder, notes/distinct-sidecar-cap.md): every cap point 2MB-32MB is
+/// +17..21% WORSE than off on q9/q10 (hot 0.79/0.93 -> 0.94-0.99/
+/// 1.09-1.13) and cap-FLAT — no knee. The distinct-sidecar working set is
+/// not a latency lever there: at matched memory the baseline never spills
+/// and its sets merge ONCE through the freeze partition law, while the
+/// locality regime adds epoch write + full replay re-probe for near-unique
+/// (group,value) pairs whose accept probes were not DRAM-bound enough to
+/// repay (the bandwidth study's instruction-parity reading). Outputs
+/// byte-MATCHED on all four cap arms at 100M — the mechanism is correct,
+/// just unprofitable; the env channel stays for shapes that may differ
+/// (C3/q36-radix measured-refusal precedent).
 fn distinct_locality_cap() -> Option<usize> {
     static N: OnceLock<Option<usize>> = OnceLock::new();
     *N.get_or_init(|| {
@@ -1419,9 +1424,8 @@ fn distinct_locality_cap() -> Option<usize> {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
         {
-            Some(0) => None,
+            None | Some(0) => None,
             Some(c) => Some(c.max(64 << 10)),
-            None => Some(DST_LOCALITY_CAP_DEFAULT),
         }
     })
 }
