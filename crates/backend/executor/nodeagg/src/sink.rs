@@ -3760,11 +3760,26 @@ impl SharedCountTable {
     /// number of worker threads may call concurrently.
     pub fn merge_run(&self, run: &SinkRun) -> bool {
         debug_assert_eq!(run.key_words, 1, "shared count face is single-word-keyed");
-        debug_assert_eq!(run.state_words, 1, "shared count face is count-state only");
+        // State block = one AggPerGroup (16B = 2 words): word 0 the count
+        // Datum, word 1 the trans_value_is_null/no_trans_value flag bytes —
+        // structurally 0 for count (seeded non-null, never nulled).
+        debug_assert_eq!(run.state_words, 2, "shared count face is count-state only");
         if self.closed.load(ShOrdering::Acquire) {
             return false;
         }
         let n = run.nrows();
+        // FAIL-CLOSED flags pre-pass BEFORE any reservation or slot write:
+        // a nonzero flags word (a null-marked state, or non-zeroed padding)
+        // is not the count shape this face folds — refuse the whole run
+        // (it rides the incumbent path; never a partial merge).
+        for i in 0..n {
+            if run.states[i * 2 + 1] != 0 {
+                return false;
+            }
+        }
+        if run.null_states.as_ref().is_some_and(|b| b[1] != 0) {
+            return false;
+        }
         // Reserve BEFORE touching slots: crossing capacity closes the face
         // with the reservation backed out — no partial run is ever merged.
         if self.members.fetch_add(n, ShOrdering::AcqRel) + n > self.cap_members {
@@ -3786,7 +3801,7 @@ impl SharedCountTable {
         let mut release = 0usize;
         for i in 0..n {
             let key = run.keys[i];
-            let cnt = run.states[i];
+            let cnt = run.states[i * 2];
             if key == 0 {
                 self.zero_present.store(true, ShOrdering::Release);
                 self.zero_count.fetch_add(cnt, ShOrdering::Relaxed);
@@ -3869,7 +3884,7 @@ impl SharedCountTable {
         let null = self
             .null_present
             .load(ShOrdering::Acquire)
-            .then(|| vec![self.null_count.load(ShOrdering::Acquire)]);
+            .then(|| vec![self.null_count.load(ShOrdering::Acquire), 0]);
         if pairs.is_empty() && null.is_none() {
             return None;
         }
@@ -3889,17 +3904,18 @@ impl SharedCountTable {
         let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
         let n = pairs.len();
         let mut keys: Vec<u64> = vec![0; n];
-        let mut states: Vec<u64> = vec![0; n];
+        // Emitted states are valid AggPerGroup blocks: [count, flags=0].
+        let mut states: Vec<u64> = vec![0; n * 2];
         for &(k, c) in &pairs {
             let b = bucket_of(sink_hash(k, 0));
             let slot = cursor[b] as usize;
             cursor[b] += 1;
             keys[slot] = k;
-            states[slot] = c;
+            states[slot * 2] = c;
         }
         Some(SinkRun {
             key_words: 1,
-            state_words: 1,
+            state_words: 2,
             starts,
             keys,
             states,
@@ -3953,21 +3969,21 @@ mod tests {
         }
         let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
         let mut keys = vec![0u64; pairs.len()];
-        let mut states = vec![0u64; pairs.len()];
+        let mut states = vec![0u64; pairs.len() * 2];
         for &(k, c) in pairs {
             let b = bucket_of(sink_hash(k, 0));
             let s = cursor[b] as usize;
             cursor[b] += 1;
             keys[s] = k;
-            states[s] = c;
+            states[s * 2] = c;
         }
         SinkRun {
             key_words: 1,
-            state_words: 1,
+            state_words: 2,
             starts,
             keys,
             states,
-            null_states: null.map(|c| vec![c]),
+            null_states: null.map(|c| vec![c, 0]),
             key_offs: Vec::new(),
             key_bytes: Vec::new(),
             hashes: Vec::new(),
@@ -3985,7 +4001,15 @@ mod tests {
                 assert_eq!(bucket_of(sink_hash(run.keys[i], 0)), b, "bucket-major framing");
             }
         }
-        let map = run.keys.iter().copied().zip(run.states.iter().copied()).collect();
+        let map = run
+            .keys
+            .iter()
+            .copied()
+            .zip(run.states.chunks(2).map(|st| {
+                assert_eq!(st[1], 0, "drained states are valid non-null AggPerGroup blocks");
+                st[0]
+            }))
+            .collect();
         (map, run.null_states.as_ref().map(|b| b[0]))
     }
 
@@ -4111,6 +4135,23 @@ mod tests {
     #[test]
     fn shared_count_empty_drain() {
         assert!(SharedCountTable::new(64).drain_to_run().is_none());
+    }
+
+    /// FAIL-CLOSED flags pre-pass: a null-marked (or padding-dirty) state
+    /// block refuses the WHOLE run before any reservation or slot write —
+    /// refusal, not closure (later clean runs still merge).
+    #[test]
+    fn shared_count_nonzero_flags_refused() {
+        let t = SharedCountTable::new(64);
+        let mut bad = count_run(&[(5, 1)], None);
+        bad.states[1] = 1; // trans_value_is_null
+        assert!(!t.merge_run(&bad));
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 0, "refused before reserving");
+        assert!(t.drain_to_run().is_none());
+        assert!(t.merge_run(&count_run(&[(5, 2)], None)));
+        let (map, _) = drained_map(&t);
+        assert_eq!(map[&5], 2);
     }
 
     const STATE_BYTES: usize = core::mem::size_of::<AggPerGroup>() * 2;

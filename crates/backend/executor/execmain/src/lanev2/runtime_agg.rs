@@ -4461,7 +4461,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let shared = if agg_shared_table_enabled()
         && drain == SinkDrain::K2
         && key_words == 1
-        && state_bytes == 8
+        // ONE count transition: the state block is a single AggPerGroup
+        // (16B — Datum + flag bytes), the layout the shared face folds
+        // (wave-4 finding: the raw-transvalue 8B guess never engaged).
+        && state_bytes == core::mem::size_of::<::execexpr::AggPerGroup>()
         && dop > 1
         && topn.is_none()
         && freeze.is_none()
