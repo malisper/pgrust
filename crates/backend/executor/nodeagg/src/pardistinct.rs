@@ -3481,9 +3481,13 @@ mod tests {
                 b.flush_staged();
                 let exact: usize = b.dsets.iter().map(|d| d.mem_bytes()).sum();
                 assert_eq!(b.total_set_mem, exact, "delta accounting drifted");
+                // Group ids are creation-ordered (i=0 hits the i%13 arm, so
+                // the dominant key 0 is NOT group 0) — locate the dominant
+                // set by size, not index.
+                let dominant = b.dsets.iter().map(|d| d.len()).max().unwrap_or(0);
                 assert!(
-                    b.dsets[0].len() >= PD_PROJECT_MIN,
-                    "test shape: dominant set must cross the projection gate"
+                    dominant >= PD_PROJECT_MIN,
+                    "test shape: dominant set must cross the projection gate (max len {dominant})"
                 );
             }
             b.freeze().unwrap()
