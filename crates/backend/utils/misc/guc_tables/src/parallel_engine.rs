@@ -12,8 +12,10 @@
 //! deleted, exactly the redirect the bootstrap note promised.
 //!
 //! Contract (§2.2):
-//!   * `pgrust.parallel_engine = legacy | runtime`, default **legacy** —
-//!     fail-closed to today's behavior, byte-for-byte.
+//!   * `pgrust.parallel_engine = legacy | runtime`, default **runtime**
+//!     since the M5 boarding flip (§4.4 criteria met; boarded with
+//!     coverage-keyed FloorGuards, min_dop=12). `legacy` restores the
+//!     pre-M5 planning byte-for-byte.
 //!   * `runtime` additionally requires the runtime pool
 //!     (`PGRUST_RUNTIME=1`, the M0 master switch) and the lane master
 //!     switch (`pgrust.lane_executor`). Absent either, the suppression
@@ -37,12 +39,13 @@ fn m5_suppress_killed() -> bool {
     })
 }
 
-/// Whether the runtime pool exists in this process (`PGRUST_RUNTIME=1`,
-/// the M0 master switch; mirrors `runtime::runtime_enabled` — guc_tables
-/// cannot depend on the runtime crate).
+/// Whether the runtime pool exists in this process (the M0 master switch,
+/// DEFAULT ON since the M5 boarding flip; `PGRUST_RUNTIME=0` kills; mirrors
+/// `runtime::runtime_enabled` — guc_tables cannot depend on the runtime
+/// crate).
 fn runtime_pool_env() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| !std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "0"))
 }
 
 /// §2.2 degrade line, loud-once per process.
