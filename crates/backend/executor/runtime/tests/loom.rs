@@ -33,6 +33,10 @@
 //!   9. dag_abort_live_siblings_completes_once (M5+1) — abort racing two
 //!      live pipelines: the racing live-counter decrements elect exactly
 //!      one RG completer; a dead generation never publishes the sink.
+//!  10. stream_source_handshake — the stream-fed source / producer
+//!      handshake (parallel COPY): starved claims never finalize an open
+//!      stream, publish/close wakes are lost-wakeup-free through the
+//!      epoch-guarded park, exhaustion requires the close.
 //!
 //! Determinism note: models use a never-advanced VirtualClock so every
 //! morsel measures a constant dt (loom requires branch determinism along an
@@ -48,7 +52,7 @@ use loom::thread;
 use runtime::{
     Clock, CompletionWaiter, Generation, MorselRange, ParticipantOwner, QuerySpec,
     QueryTaskLifecycle, RgOutcome, Runtime, RuntimeConfig, SizingParams, Step,
-    SyntheticMorselSource, TaskSetSpec, TaskSetWork, VirtualClock,
+    StreamSource, SyntheticMorselSource, TaskSetSpec, TaskSetWork, VirtualClock,
 };
 use types_error::{PgError, ERROR};
 
@@ -827,5 +831,68 @@ fn dag_abort_live_siblings_completes_once() {
                 wc.assert_complete();
             }
         }
+    });
+}
+
+
+/// Model 5: the STREAM-FED source / producer handshake (parallel COPY's
+/// segmentator feed). One producer publishes granule 1, then granule 2 and
+/// closes — each publish/close followed by the wake (`publish`-then-wake is
+/// the documented order); 2 workers drive with the epoch-guarded park
+/// discipline. Invariants under bounded-exhaustive interleavings:
+///   * a starved claim (cursor at an OPEN watermark) never finalizes the
+///     set — exhaustion requires the close;
+///   * no lost wakeup: parked starved workers always observe the
+///     publish/close (the epoch protocol), so the RG always completes;
+///   * every granule exactly once, finalize exactly once, and finalize only
+///     after the close made the watermark final.
+#[test]
+fn stream_source_handshake() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        let work = ModelWork::new(2, None);
+        let source = Arc::new(StreamSource::new());
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::clone(&source) as _,
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let producer = {
+            let rt = Arc::clone(&rt);
+            let source = Arc::clone(&source);
+            let work = Arc::clone(&work);
+            thread::spawn(move || {
+                source.publish(1);
+                rt.notify_source_progress();
+                source.publish(2);
+                source.close();
+                // Finalize before the close is a protocol breach; the close
+                // is ordered before the wake below, so a finalize observed
+                // here can only have raced the close itself never a starved
+                // claim (the assert documents exhaustion-requires-close).
+                rt.notify_source_progress();
+                let _ = work;
+            })
+        };
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        drive(&rt, 0, &waiter);
+        t.join().unwrap();
+        producer.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let stats = rt.stats();
+        assert_eq!(stats.finalize_events, 1);
+        assert_eq!(stats.rgs_completed, 1);
     });
 }

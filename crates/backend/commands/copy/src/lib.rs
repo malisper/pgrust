@@ -19,6 +19,7 @@ use types_tuple::TupleDescData;
 
 mod from;
 mod fromparse;
+mod parallel;
 mod to;
 #[cfg(test)]
 mod tests;

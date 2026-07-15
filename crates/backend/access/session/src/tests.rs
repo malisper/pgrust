@@ -372,7 +372,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      bookkeeping, no session identity, no state movement — the
     //      stats.rs dump-on-exit discipline; same argument as the worker
     //      pool-loop block (slot 7).
-    assert_eq!(count_tree(crates), 477, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 478, parallel-copy lane (+1, renumbered to slot 19 over m5-boarding's
+    //   router DUMP slot 18 at the train-20 merge):
+    //   19. commands/copy/src/parallel.rs WORKER_CX (morsel-parallel COPY)
+    //      — the COPY chunk task set's drive-scoped worker context pointer
+    //      (parse state + chunk encoder plan), set for one drive_pinned
+    //      frame and cleared before the frame drops — the EXACT class and
+    //      argument as slot 15 (vacuumlazy morsels.rs WORKER_CX): full-
+    //      identity parallel helpers, no cross-thread access, no retained
+    //      session state.
+    assert_eq!(count_tree(crates), 478, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

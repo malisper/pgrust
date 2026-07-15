@@ -26,10 +26,30 @@ std::thread_local! {
         const { core::cell::UnsafeCell::new([0; MAXDATELEN + 1]) };
 }
 
+// PGRUST_ADT_IN_FASTUTF8 (load-speed prototype, DEFAULT OFF): from_utf8_lossy
+// walks the bytes with the chunked lossy iterator even when the input is
+// entirely valid (the always case for COPY input, which is already
+// encoding-verified) — measured ~4% of the 10M ClickBench COPY wall
+// (load-speed lane perf, 2026-07-14; ~20M date/timestamp fields). The fast
+// arm validates with core's optimized `str::from_utf8` and borrows; invalid
+// input falls back to the identical lossy copy, so semantics are unchanged.
+fn in_fastutf8() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_ADT_IN_FASTUTF8").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 fn in_arg<'a>(fcinfo: &'a Fcinfo) -> std::borrow::Cow<'a, str> {
     // SAFETY: catalog arg 0 of the in-functions is cstring (typlen -2).
     let s = unsafe { fcinfo.arg_cstring(0) };
-    String::from_utf8_lossy(s.to_bytes())
+    let b = s.to_bytes();
+    if in_fastutf8() {
+        if let Ok(v) = std::str::from_utf8(b) {
+            return std::borrow::Cow::Borrowed(v);
+        }
+    }
+    String::from_utf8_lossy(b)
 }
 
 #[inline]

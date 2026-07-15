@@ -68,46 +68,89 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             CopySrc::File { fd, .. } => {
                 let fd = *fd;
                 let dst = &mut self.raw_buf[at..at + maxread];
-                let read = fd::with_allocated_stdio(fd, |f| {
-                    use std::io::Read;
-                    f.read(dst)
-                });
-                let bytesread = match read {
-                    Some(Ok(n)) => n,
-                    Some(Err(e)) => {
-                        ereport(ERROR)
-                            .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                            .errcode_for_file_access()
-                            .errmsg("could not read from COPY file: %m")
-                            .finish(loc("CopyGetData"))?;
-                        unreachable!()
-                    }
-                    None => panic!("COPY FROM: AllocateFile index {fd} vanished"),
-                };
-                if bytesread == 0 {
+                let n = Self::file_read(fd, dst)?;
+                if n == 0 {
                     self.raw_reached_eof = true;
                 }
-                Ok(bytesread)
+                Ok(n)
             }
-            CopySrc::Frontend { .. } => self.copy_get_data_frontend(at, minread, maxread),
+            CopySrc::Frontend { .. } => {
+                // SAFETY: dst aliases raw_buf, which the frontend reader
+                // never touches through self (it reads src's msgbuf and the
+                // eof flag only; msgbuf and raw_buf are disjoint
+                // allocations — the pre-refactor SAFETY argument).
+                let dst = unsafe {
+                    core::slice::from_raw_parts_mut(self.raw_buf.as_mut_ptr().add(at), maxread)
+                };
+                self.copy_read_frontend_into(dst, minread)
+            }
+            CopySrc::Chunk(cur) => {
+                let n = cur.read(&mut self.raw_buf[at..at + maxread]);
+                if n == 0 {
+                    self.raw_reached_eof = true;
+                }
+                Ok(n)
+            }
+        }
+    }
+
+    fn file_read(fd: i32, dst: &mut [u8]) -> PgResult<usize> {
+        let read = fd::with_allocated_stdio(fd, |f| {
+            use std::io::Read;
+            f.read(dst)
+        });
+        match read {
+            Some(Ok(n)) => Ok(n),
+            Some(Err(e)) => {
+                ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg("could not read from COPY file: %m")
+                    .finish(loc("CopyGetData"))?;
+                unreachable!()
+            }
+            None => panic!("COPY FROM: AllocateFile index {fd} vanished"),
+        }
+    }
+
+    /// Parallel COPY leader (segmentator): raw stream read into an external
+    /// buffer — fills `dst` fully unless the source hits EOF. Sets
+    /// `raw_reached_eof` exactly like the buffered path.
+    pub(crate) fn copy_read_stream(&mut self, dst: &mut [u8]) -> PgResult<usize> {
+        match &mut self.src {
+            CopySrc::File { fd, .. } => {
+                let fd = *fd;
+                let mut filled = 0usize;
+                while filled < dst.len() {
+                    let n = Self::file_read(fd, &mut dst[filled..])?;
+                    if n == 0 {
+                        self.raw_reached_eof = true;
+                        break;
+                    }
+                    filled += n;
+                }
+                Ok(filled)
+            }
+            CopySrc::Frontend { .. } => {
+                let len = dst.len();
+                self.copy_read_frontend_into(dst, len)
+            }
+            CopySrc::Chunk(_) => unreachable!("chunk sources never feed the segmentator"),
         }
     }
 
     // CopyGetData, COPY_FRONTEND arm: drain CopyData messages, terminate on
-    // CopyDone/CopyFail, ignore Flush/Sync per protocol.
-    fn copy_get_data_frontend(
-        &mut self,
-        at: usize,
-        minread: usize,
-        mut maxread: usize,
-    ) -> PgResult<usize> {
-        let mut dst = at;
+    // CopyDone/CopyFail, ignore Flush/Sync per protocol. `dst` may alias
+    // raw_buf (see copy_get_data) or be an external buffer (copy_read_stream).
+    fn copy_read_frontend_into(&mut self, dst: &mut [u8], minread: usize) -> PgResult<usize> {
+        let mut maxread = dst.len();
+        let mut at = 0usize;
         let mut bytesread = 0usize;
         while maxread > 0 && bytesread < minread && !self.raw_reached_eof {
             loop {
                 let msgbuf = match &self.src {
                     CopySrc::Frontend { msgbuf } => msgbuf,
-                    CopySrc::File { .. } => unreachable!(),
+                    _ => unreachable!(),
                 };
                 if msgbuf.cursor < msgbuf.len() {
                     break;
@@ -140,7 +183,7 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 };
                 let msgbuf = match &mut self.src {
                     CopySrc::Frontend { msgbuf } => msgbuf,
-                    CopySrc::File { .. } => unreachable!(),
+                    _ => unreachable!(),
                 };
                 if pqcomm::pq_getmessage(msgbuf, maxmsglen)? != 0 {
                     return Err(unexpected_eof());
@@ -165,21 +208,13 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             }
             let msgbuf = match &mut self.src {
                 CopySrc::Frontend { msgbuf } => msgbuf,
-                CopySrc::File { .. } => unreachable!(),
+                _ => unreachable!(),
             };
             let avail = (msgbuf.len() - msgbuf.cursor).min(maxread);
-            let (from, cursor) = (msgbuf.as_bytes().as_ptr(), msgbuf.cursor);
-            // SAFETY: msgbuf and raw_buf are disjoint allocations; avail is
-            // within both slices' bounds.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    from.add(cursor),
-                    self.raw_buf.as_mut_ptr().add(dst),
-                    avail,
-                );
-            }
+            let cursor = msgbuf.cursor;
+            dst[at..at + avail].copy_from_slice(&msgbuf.as_bytes()[cursor..cursor + avail]);
             msgbuf.cursor += avail;
-            dst += avail;
+            at += avail;
             maxread -= avail;
             bytesread += avail;
         }
