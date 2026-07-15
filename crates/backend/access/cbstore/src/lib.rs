@@ -15,6 +15,7 @@ pub mod part_cache;
 pub mod reader;
 pub mod scan;
 pub mod segfile;
+pub mod sortkey;
 pub mod writer;
 
 use ::datum::Datum;
