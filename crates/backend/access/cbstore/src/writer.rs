@@ -510,6 +510,13 @@ pub struct CbWriter {
     // NDV/sorted invalidation precedent) or when stitch writing is disabled.
     // Int columns hold None slots.
     stitch: Option<Vec<Option<StitchCol>>>,
+    // load-r3 M0: commit_encoded_rg phase-wall accumulators (RG granularity,
+    // negligible cost, always accumulated; the parallel COPY leader's trace
+    // line reads them via commit_phase_split()).
+    commit_stitch: std::time::Duration,
+    commit_pwrite: std::time::Duration,
+    commit_meta: std::time::Duration,
+    commit_bytes: u64,
 }
 
 pub struct FooterRg {
@@ -646,6 +653,10 @@ fn open_writer_inner(
         sorter: None,
         draining_clustered: false,
         stitch: None,
+        commit_stitch: std::time::Duration::ZERO,
+        commit_pwrite: std::time::Duration::ZERO,
+        commit_meta: std::time::Duration::ZERO,
+        commit_bytes: 0,
     };
     if stitch_write_enabled() {
         w.stitch = Some(
@@ -1399,9 +1410,15 @@ impl CbWriter {
         debug_assert!(self.nbuf == 0, "ordered commit into a writer with buffered rows");
         debug_assert!(self.sorter.is_none(), "ordered commit into a sorting writer");
         let mut sealed = enc.sealed;
+        let t0 = std::time::Instant::now();
         self.register_stitch(&mut sealed);
+        let t1 = std::time::Instant::now();
+        self.commit_stitch += t1 - t0;
         let file_off = align64(self.write_off);
         self.file.write_all_at(&sealed.body, file_off)?;
+        let t2 = std::time::Instant::now();
+        self.commit_pwrite += t2 - t1;
+        self.commit_bytes += sealed.body.len() as u64;
         self.write_off = file_off + sealed.body.len() as u64;
         if let Some(ndv) = &mut self.ndv {
             let hll = enc
@@ -1450,7 +1467,20 @@ impl CbWriter {
             lenstats: sealed.lenstats,
             zerocnt: sealed.zerocnt,
         });
+        self.commit_meta += t2.elapsed();
         Ok(())
+    }
+
+    /// load-r3 M0: cumulative commit_encoded_rg phase walls —
+    /// (stitch_s, pwrite_s, meta_s, body_bytes). meta = NDV merge + sorted
+    /// probes + footer push.
+    pub fn commit_phase_split(&self) -> (f64, f64, f64, u64) {
+        (
+            self.commit_stitch.as_secs_f64(),
+            self.commit_pwrite.as_secs_f64(),
+            self.commit_meta.as_secs_f64(),
+            self.commit_bytes,
+        )
     }
 
     /// Statement-end publish for the parallel driver (the ordinary finish:

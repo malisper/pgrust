@@ -670,6 +670,13 @@ struct WorkerSortState {
     codec: cbstore::loadsort::RowCodec,
     keybuf: Vec<u8>,
     rowbuf: Vec<u8>,
+    /// Phase-wall accumulators (load-r3 M0; ptrace-gated — stay zero and
+    /// untouched per-row when tracing is off).
+    t_parse: std::time::Duration,
+    t_key: std::time::Duration,
+    t_spill: std::time::Duration,
+    rows: u64,
+    runs: u32,
 }
 
 thread_local! {
@@ -755,6 +762,9 @@ impl ParCopyShared {
         } else {
             None
         };
+        // load-r3 M0 phase walls: per-row Instants only in sort mode AND
+        // only when tracing is armed (the default path takes one branch).
+        let trace = self.sort.is_some() && ptrace_enabled();
         let mut since_cfi = 0u32;
         loop {
             since_cfi += 1;
@@ -762,6 +772,7 @@ impl ParCopyShared {
                 since_cfi = 0;
                 postgres_seams::check_for_interrupts::call()?;
             }
+            let t0 = if trace { Some(std::time::Instant::now()) } else { None };
             wcx.row_cx.reset();
             exectuples::exec_clear_tuple(&mut wcx.slot, wcx.mcx);
             // SAFETY (lifetime erasure): per-row datums land in row_cx and
@@ -809,11 +820,20 @@ impl ParCopyShared {
                             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }
+                let t1 = t0.map(|t0| {
+                    let now = std::time::Instant::now();
+                    st.t_parse += now - t0;
+                    now
+                });
                 st.keybuf.clear();
                 cbstore::sortkey::encode_sort_key(&sort.keys, &base.tts_values, &mut st.keybuf);
                 st.rowbuf.clear();
                 st.codec.serialize_row(&base.tts_values, &mut st.rowbuf)?;
                 st.batch.push(&st.keybuf, &st.rowbuf);
+                st.rows += 1;
+                if let Some(t1) = t1 {
+                    st.t_key += t1.elapsed();
+                }
                 if st.batch.bytes() >= sort.budget {
                     self.spill_worker_batch(st)?;
                 }
@@ -847,8 +867,11 @@ impl ParCopyShared {
             seq
         ));
         self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
+        let t0 = std::time::Instant::now();
         st.batch.sort();
         st.batch.spill_run(&path)?;
+        st.t_spill += t0.elapsed();
+        st.runs += 1;
         ptrace(&format!("sort run spilled seq={seq}"));
         Ok(())
     }
@@ -1012,6 +1035,11 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             codec: cbstore::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
             keybuf: Vec::with_capacity(sp.key_w),
             rowbuf: Vec::new(),
+            t_parse: std::time::Duration::ZERO,
+            t_key: std::time::Duration::ZERO,
+            t_spill: std::time::Duration::ZERO,
+            rows: 0,
+            runs: 0,
         });
         Ok(ParCopyWorkerCx {
             mcx,
@@ -1063,6 +1091,16 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
                 shared.fail_hard(e);
             }
         }
+        // load-r3 M0: the per-worker phase decomposition of the parse+spill
+        // pole (trace-gated; accumulators are zero when tracing is off).
+        ptrace(&format!(
+            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={}",
+            st.t_parse.as_secs_f64(),
+            st.t_key.as_secs_f64(),
+            st.t_spill.as_secs_f64(),
+            st.rows,
+            st.runs,
+        ));
     }
 
     drop(wcx);
@@ -1316,8 +1354,10 @@ fn merge_sorted_runs(
             "parallel load-sort merge lost batches (committed != sent)",
         )));
     }
+    let (c_stitch, c_pwrite, c_meta, c_bytes) = writer.commit_phase_split();
     ptrace(&format!(
-        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed}",
+        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed} \
+         commit split: stitch {c_stitch:.2}s pwrite {c_pwrite:.2}s meta {c_meta:.2}s bytes={c_bytes}",
         t_merge.elapsed().as_secs_f64(),
         t_commit.as_secs_f64(),
     ));
@@ -1618,6 +1658,10 @@ fn ceremony(
         let mut input_done = false;
         let mut closed = false;
         let mut bytes_read = 0u64;
+        // load-r3 M0: leader read-pump walls (block granularity — free).
+        let t_loop = std::time::Instant::now();
+        let mut t_read = std::time::Duration::ZERO;
+        let mut t_seg = std::time::Duration::ZERO;
         let window = window(k);
         let mut ready: Vec<ChunkDesc> = Vec::new();
         let outcome = loop {
@@ -1645,14 +1689,18 @@ fn ceremony(
             let mut read_any = false;
             if !input_done && !error_seen && published.saturating_sub(next_commit) < window {
                 let mut buf = vec![0u8; READ_BLOCK];
+                let tr = std::time::Instant::now();
                 let n = cstate.copy_read_stream(&mut buf)?;
+                t_read += tr.elapsed();
                 bytes_read += n as u64;
                 pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, bytes_read as i64);
                 read_any = n > 0;
                 if n > 0 {
                     buf.truncate(n);
                     let abuf = Arc::new(buf);
+                    let ts = std::time::Instant::now();
                     let consumed = seg.feed(&abuf, n, &mut ready);
+                    t_seg += ts.elapsed();
                     if seg.eoc {
                         // End-of-copy marker: never segment past it. A
                         // frontend stream drains protocol-level (serial's
@@ -1689,8 +1737,11 @@ fn ceremony(
                     rt.notify_source_progress();
                     closed = true;
                     ptrace(&format!(
-                        "input closed chunks={published} rows={} bytes={bytes_read}",
-                        seg.rows_total
+                        "input closed chunks={published} rows={} bytes={bytes_read} read {:.2}s seg {:.2}s wall {:.2}s",
+                        seg.rows_total,
+                        t_read.as_secs_f64(),
+                        t_seg.as_secs_f64(),
+                        t_loop.elapsed().as_secs_f64(),
                     ));
                 }
             } else if error_seen && !closed {
