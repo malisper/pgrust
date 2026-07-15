@@ -1124,6 +1124,11 @@ fn merge_sorted_runs(
     let mut n_rows = 0u64;
     let mut first_err: Option<Box<PgError>> = None;
     let mut committed = 0u64;
+    let t_merge = std::time::Instant::now();
+    let mut t_fill = std::time::Duration::ZERO;
+    let mut t_send = std::time::Duration::ZERO;
+    let mut t_wait = std::time::Duration::ZERO;
+    let mut t_commit = std::time::Duration::ZERO;
 
     std::thread::scope(|scope| {
         for _ in 0..nenc {
@@ -1190,6 +1195,7 @@ fn merge_sorted_runs(
                 //    backpressure bound; done_rx is unbounded so encoders
                 //    never deadlock against a full work channel).
                 if !merge_done && first_err.is_none() {
+                    let t0 = std::time::Instant::now();
                     while cur.lens.len() < RG {
                         if !merge.next_entry(&mut key, &mut row)? {
                             merge_done = true;
@@ -1204,7 +1210,9 @@ fn merge_sorted_runs(
                             postgres_seams::check_for_interrupts::call()?;
                         }
                     }
+                    t_fill += t0.elapsed();
                     if !cur.lens.is_empty() && (cur.lens.len() == RG || merge_done) {
+                        let t1 = std::time::Instant::now();
                         let full = std::mem::replace(
                             &mut cur,
                             Batch { idx: next_send + 1, arena: Vec::new(), lens: Vec::new() },
@@ -1216,6 +1224,7 @@ fn merge_sorted_runs(
                             )));
                         }
                         next_send += 1;
+                        t_send += t1.elapsed();
                     }
                 }
                 // 2. drain finished encodes; commit in batch order.
@@ -1232,6 +1241,7 @@ fn merge_sorted_runs(
                         Err(_) => break,
                     }
                 }
+                let t2 = std::time::Instant::now();
                 while pending.keys().next() == Some(&committed) {
                     let enc = pending.remove(&committed).unwrap();
                     writer.commit_encoded_rg(enc)?;
@@ -1243,6 +1253,7 @@ fn merge_sorted_runs(
                         );
                     }
                 }
+                t_commit += t2.elapsed();
                 if first_err.is_some() {
                     return Ok(());
                 }
@@ -1251,7 +1262,10 @@ fn merge_sorted_runs(
                 }
                 // 3. everything sent, nothing committable: block on done.
                 if merge_done {
-                    match done_rx.recv() {
+                    let t3 = std::time::Instant::now();
+                    let r = done_rx.recv();
+                    t_wait += t3.elapsed();
+                    match r {
                         Ok((idx, Ok(enc))) => {
                             pending.insert(idx, enc);
                         }
@@ -1282,6 +1296,14 @@ fn merge_sorted_runs(
     if let Some(e) = first_err {
         return Err(e);
     }
+    ptrace(&format!(
+        "sort merge done: {:.2}s total (fill {:.2}s / send-block {:.2}s / done-wait {:.2}s / commit {:.2}s) rows={n_rows} rgs={committed}",
+        t_merge.elapsed().as_secs_f64(),
+        t_fill.as_secs_f64(),
+        t_send.as_secs_f64(),
+        t_wait.as_secs_f64(),
+        t_commit.as_secs_f64(),
+    ));
     pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n_rows as i64);
     Ok(n_rows)
 }
@@ -1754,6 +1776,7 @@ fn ceremony(
         // so wait for actual worker exit, then k-way merge the runs into
         // the plain writer — the serial presort drain byte-path.
         if shared.sort.is_some() {
+            let t_parse = std::time::Instant::now();
             while !parallel::parallel_workers_all_stopped(pcxt) {
                 postgres_seams::check_for_interrupts::call()?;
                 parallel::ProcessParallelMessages()?;
@@ -1763,6 +1786,7 @@ fn ceremony(
             if let Some(e) = shared.take_hard_error() {
                 return Err(e);
             }
+            ptrace(&format!("sort phase: worker drain {:.2}s", t_parse.elapsed().as_secs_f64()));
             processed = merge_sorted_runs(writer, shared)?;
         }
         Ok(Ceremony::Done(processed))
