@@ -3386,10 +3386,6 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse(estate, ea, node_id, "granule floor");
         return Ok(false);
     }
-    // DOP-elastic admission (tails192 #5): floors above ran against the
-    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
-    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
-
     // --- Engage.
     // Canonical (text-bearing) shapes merge on canonical key BYTES:
     // key_words 0 = the combine's bytes mode.
@@ -3400,6 +3396,43 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 })
     };
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill:
+    // PGRUST_RUNTIME_ELASTIC_DOP=0). BYREF-FLOOR GUARD (cross-lane
+    // constraint, proportionality-audit @ a39910a0b, q33@dop2 172s
+    // root-cause): byref state classes (AvgInt8/PolyInt128) accumulate an
+    // UNSPILLABLE per-Local aggcontext floor ~= est_groups/W x per-group
+    // bytes, while agg_sink_budget_pressure refuses at hash_mem_limit/2 —
+    // a per-worker CONSTANT. Narrowing W raises the floor toward the trip
+    // and a refusal costs a wasted drive + TRUE-serial rerun (~100x wall).
+    // Never narrow below the floor-safe width:
+    //   w_floor = ceil(est_groups x per_group_bytes / (budget/2))
+    // per_group_bytes = state_bytes + key_words*8 + 48 (row + aggcontext
+    // headroom — deliberately conservative: it only makes elastic narrow
+    // LESS; the audit's root fix packs these classes inline and will
+    // retire the term). est_groups = the same leader plan estimate the
+    // locality law reads (coordinate: proportionality-audit).
+    let dop = {
+        let elastic = super::runtime_scan::elastic_dop(dop, total_granules);
+        if elastic < dop && byref_states {
+            let half_budget = (budget as u64 / 2).max(1);
+            let per_group = state_bytes as u64 + (key_words as u64) * 8 + 48;
+            let w_floor = est_groups
+                .saturating_mul(per_group)
+                .div_ceil(half_budget)
+                .max(1)
+                .min(dop as u64) as i32;
+            let guarded = elastic.max(w_floor);
+            if guarded > elastic {
+                lane_trace(&format!(
+                    "runtime-agg: elastic byref-floor guard {elastic}->{guarded} (est_groups={est_groups})"
+                ));
+            }
+            guarded
+        } else {
+            elastic
+        }
+    };
     // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
     // the adopted table's rows must be self-contained past helper teardown
     // (a byref transvalue points into a worker aggcontext).
