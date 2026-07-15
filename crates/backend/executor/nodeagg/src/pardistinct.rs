@@ -164,7 +164,7 @@ pub struct PdSetSpec {
 }
 
 /// Element partitions for the plain (nkeys == 0) shape's parallel union.
-pub const PD_ELEM_PARTS: usize = 64;
+pub const PD_ELEM_PARTS: usize = 256;
 /// Group partitions (top-8 hash bits) for the grouped parallel merge.
 const PD_GROUP_PARTS: usize = 256;
 
