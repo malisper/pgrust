@@ -178,6 +178,11 @@ pub struct PdSpec {
     pub max_att: i32,
     /// Per-worker build budget (freeze-and-degrade crossing point).
     pub worker_budget: usize,
+    /// dedupsub I3: expected post-qual rows ONE worker will accept (plan
+    /// rows estimate / dop, set by the runtime sink at engage; 0 = unknown
+    /// and the projection reserve is inert). Drives the window-grain
+    /// distinct-set table pre-sizing only — never a semantic input.
+    pub expected_worker_rows: u64,
 }
 
 impl PdSpec {
@@ -311,6 +316,34 @@ const INIT_TABLE: usize = 64;
 /// batch-insert lane: staged-window size for the batched distinct-set
 /// insert schedule (one scan batch — the -075a micro-probe's window).
 const PD_STAGE_BATCH: usize = 1024;
+
+/// dedupsub I3: sets below this length keep the plain doubling ladder (the
+/// sub-32KB tables are cache-resident and their ladder is cheap; reserving
+/// for every small group would trade rehash for memory across the whole
+/// 9K-group population).
+const PD_PROJECT_MIN: usize = 8192;
+
+/// dedupsub I3 kill switch: `PGRUST_RUNTIME_DISTINCT_TOUCH_EPOCH=0`
+/// restores the sort+dedup touched-group accounting pass exactly
+/// (default ON; window-grain accounting mechanics only — the accounted
+/// totals are identical either way).
+fn pd_touch_epoch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_TOUCH_EPOCH").map_or(true, |v| v != "0")
+    })
+}
+
+/// dedupsub I3 kill switch: `PGRUST_RUNTIME_DISTINCT_GROW_PROJECT=0`
+/// restores the pure doubling-rehash growth ladder exactly (default ON;
+/// probe-table geometry only — set contents and value order are identical
+/// for any projection).
+fn pd_grow_project_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_GROW_PROJECT").map_or(true, |v| v != "0")
+    })
+}
 
 /// batch-insert lane: L1 prefetch hint (lanetable's idiom, copied — the
 /// stringhash2 seam owns the table-internal machinery; this is driver-side).
@@ -455,6 +488,15 @@ pub struct PdBuilder<'mcx> {
     stage_g: Vec<u32>,
     stage_v: Vec<i64>,
     stage_touch: Vec<u32>,
+    /// dedupsub I3 touched-group dedup: per-group window stamp (index =
+    /// group, value = the `touch_epoch` that last touched it; 0 = never).
+    /// Replaces the per-window sort+dedup of `stage_g` (measured ~4.5-5.4%
+    /// of q9/q10 rt16 cycles) with an O(window) stamp pass.
+    touch_stamp: Vec<u32>,
+    touch_epoch: u32,
+    /// dedupsub I3 projection input: staged values fed so far (the
+    /// denominator of expected_worker_rows / staged_rows).
+    staged_rows: u64,
 }
 
 impl<'mcx> PdBuilder<'mcx> {
@@ -483,6 +525,9 @@ impl<'mcx> PdBuilder<'mcx> {
             stage_g: Vec::new(),
             stage_v: Vec::new(),
             stage_touch: Vec::new(),
+            touch_stamp: Vec::new(),
+            touch_epoch: 0,
+            staged_rows: 0,
         }
     }
 
@@ -563,12 +608,57 @@ impl<'mcx> PdBuilder<'mcx> {
                 self.dsets.get_unchecked_mut(g).insert_i64(v);
             }
         }
-        // Touched-group set-memory delta accounting (nsets == 1: set index
-        // == group index).
+        self.staged_rows += n as u64;
+        // Touched-group dedup (nsets == 1: set index == group index).
+        // dedupsub I3: an O(window) epoch-stamp pass replaces the per-window
+        // sort+dedup (quicksort measured 5.38%/4.48% of q9/q10 rt16 cycles).
+        // stage_touch ends up in first-touch order instead of sorted order —
+        // a non-surface: it only drives the delta re-account below, whose
+        // sum is order-invariant, and the projection reserve (geometry).
         self.stage_touch.clear();
-        self.stage_touch.extend_from_slice(&self.stage_g);
-        self.stage_touch.sort_unstable();
-        self.stage_touch.dedup();
+        if pd_touch_epoch_enabled() {
+            self.touch_epoch = self.touch_epoch.wrapping_add(1);
+            if self.touch_epoch == 0 {
+                // u32 wrap (~4.4e9 windows — unreachable in practice, exact
+                // anyway): forget all stamps and restart the epoch clock.
+                self.touch_stamp.iter_mut().for_each(|s| *s = 0);
+                self.touch_epoch = 1;
+            }
+            let ep = self.touch_epoch;
+            for &g in &self.stage_g {
+                let s = &mut self.touch_stamp[g as usize];
+                if *s != ep {
+                    *s = ep;
+                    self.stage_touch.push(g);
+                }
+            }
+        } else {
+            self.stage_touch.extend_from_slice(&self.stage_g);
+            self.stage_touch.sort_unstable();
+            self.stage_touch.dedup();
+        }
+        // dedupsub I3 projection reserve: pre-size each touched BIG set's
+        // probe table for its projected final length — one jump instead of
+        // the doubling-rehash ladder (IntSet::grow measured 5.09%/3.99% of
+        // q9/q10 rt16 cycles). Projection: linear extrapolation of the
+        // set's length over the worker's expected row share, ratio clamped
+        // (early windows / estimate error), target capped at the share
+        // itself (a set can never exceed the rows that feed it). Runs
+        // BEFORE the re-account so the reserved capacity is metered in this
+        // window (honest budget accounting).
+        let expected = self.spec.expected_worker_rows;
+        if expected > 0 && pd_grow_project_enabled() {
+            let ratio =
+                (expected as f64 / self.staged_rows.max(1) as f64).clamp(1.0, 64.0);
+            for &g in &self.stage_touch {
+                let d = &mut self.dsets[g as usize];
+                let len = d.len();
+                if len >= PD_PROJECT_MIN {
+                    let proj = ((len as f64 * ratio) as usize).min(expected as usize);
+                    d.reserve_projected(proj);
+                }
+            }
+        }
         for &g in &self.stage_touch {
             let g = g as usize;
             let m = self.dsets[g].mem_bytes();
@@ -705,6 +795,9 @@ impl<'mcx> PdBuilder<'mcx> {
             self.dsets.push(DistinctSet::new());
         }
         self.set_mem.push(0);
+        if self.stage_on {
+            self.touch_stamp.push(0);
+        }
         self.table[slot_idx] = g + 1;
         self.base_mem += self.spec.nkeys() * 8
             + 2 * self.spec.vocab.len() * 8
@@ -1011,16 +1104,33 @@ impl<'mcx> PdBuilder<'mcx> {
         let nsets = spec.sets.len();
         let n = self.ngroups();
         let total_sets = n * nsets;
-        let mut set_ints: Vec<i64> = Vec::new();
+        let plain = spec.nkeys() == 0;
+        // dedupsub reserve wave (vecaudit boardable item): O(ngroups)
+        // counting pre-pass — exact export sizes are already known from the
+        // sets, so every export vec allocates once instead of doubling
+        // through multi-MB copies.
+        let (tot_ints, tot_spans, tot_blob) = self.dsets.iter().enumerate().fold(
+            (0usize, 0usize, 0usize),
+            |(ti, ts, tb), (si, d)| match spec.sets[si % nsets.max(1)].kind {
+                DistinctKeyKind::Bytes => {
+                    let nb = d.n_bytes();
+                    let blob: usize =
+                        (0..nb).map(|i| d.bytes_span(i).1 as usize).sum::<usize>();
+                    (ti, ts + nb, tb + blob)
+                }
+                _ => (ti + d.ints().len(), ts, tb),
+            },
+        );
+        let mut set_ints: Vec<i64> = Vec::with_capacity(tot_ints);
         let mut set_int_offs: Vec<u32> = Vec::with_capacity(total_sets + 1);
-        let mut set_blob: Vec<u8> = Vec::new();
-        let mut set_spans: Vec<PdSpan> = Vec::new();
+        let mut set_blob: Vec<u8> = Vec::with_capacity(tot_blob);
+        let mut set_spans: Vec<PdSpan> = Vec::with_capacity(tot_spans);
         let mut set_span_offs: Vec<u32> = Vec::with_capacity(total_sets + 1);
         let mut set_null: Vec<bool> = Vec::with_capacity(total_sets);
-        let mut elem_parts: Vec<u32> = Vec::new();
+        let mut elem_parts: Vec<u32> =
+            Vec::with_capacity(if plain { total_sets * (PD_ELEM_PARTS + 1) } else { 0 });
         set_int_offs.push(0);
         set_span_offs.push(0);
-        let plain = spec.nkeys() == 0;
         for (si, d) in self.dsets.iter().enumerate() {
             set_null.push(d.seen_null);
             match spec.sets[si % nsets.max(1)].kind {
@@ -1044,13 +1154,15 @@ impl<'mcx> PdBuilder<'mcx> {
                         }
                         elem_parts.extend(starts.iter().map(|&s| base + s));
                         for &i in &idx {
-                            let (content, h) = {
-                                let (off, len, h) = d.bytes_span(i as usize);
-                                (d.bytes_content(off, len).to_vec(), h)
-                            };
-                            let off = set_blob.len() as u32;
-                            set_blob.extend_from_slice(&content);
-                            set_spans.push(PdSpan { off, len: content.len() as u32, hash: h });
+                            // dedupsub reserve wave: extend straight from
+                            // the set's blob — `d` and `set_blob` are
+                            // disjoint, the old per-value to_vec bought
+                            // nothing (vecaudit l.1049 item).
+                            let (off, len, h) = d.bytes_span(i as usize);
+                            let content = d.bytes_content(off, len);
+                            let noff = set_blob.len() as u32;
+                            set_blob.extend_from_slice(content);
+                            set_spans.push(PdSpan { off: noff, len, hash: h });
                         }
                     } else {
                         for i in 0..d.n_bytes() {
@@ -1298,6 +1410,15 @@ fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'
 /// semantics stay single-sourced.
 fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMerged<'static> {
     let mut m = PdBucketMerger::new(spec);
+    // dedupsub reserve wave: the union is bounded by the donors' bucket-b
+    // group counts (partition indexes — O(tables) reads).
+    m.seed_groups(
+        tables
+            .iter()
+            .filter_map(|t| t.parts.as_ref())
+            .map(|p| (p.starts[b + 1] - p.starts[b]) as usize)
+            .sum(),
+    );
     for &t in tables {
         m.absorb(t, b);
     }
@@ -1348,6 +1469,33 @@ impl<'s> PdBucketMerger<'s> {
             },
             table: vec![0; 64],
             hashes: Vec::new(),
+        }
+    }
+
+    /// dedupsub reserve wave (vecaudit boardable item): pre-size the
+    /// bucket-local probe table and output vecs from an UPPER BOUND on the
+    /// merged group count (union ≤ Σ donors; the caller reads it off the
+    /// partition indexes). One allocation instead of the 64-doubling ladder
+    /// with its full-table rehash sweeps. Empty-merger only; 0 or the
+    /// GROW_PROJECT kill switch = today's ladder exactly. Geometry only —
+    /// group order stays first-seen across donors, verdicts unchanged.
+    pub fn seed_groups(&mut self, upper: usize) {
+        debug_assert_eq!(self.out.ngroups, 0, "seed before any absorb");
+        if upper == 0 || !pd_grow_project_enabled() {
+            return;
+        }
+        let nkeys = self.spec.nkeys();
+        let nvocab = self.spec.vocab.len();
+        let nsets = self.spec.sets.len();
+        self.out.keys.reserve(upper * nkeys);
+        self.out.keynulls.reserve(upper);
+        self.out.states.reserve(upper * 2 * nvocab);
+        self.out.dsets.reserve(upper * nsets);
+        self.hashes.reserve(upper);
+        // 7/8 max load (absorb's grow law): cap ≥ (upper+1)*8/7 never grows.
+        let cap = ((upper + 1) * 8 / 7 + 1).next_power_of_two().max(64);
+        if cap > self.table.len() {
+            self.table = vec![0u32; cap];
         }
     }
 
@@ -1453,7 +1601,20 @@ impl<'s> PdBucketMerger<'s> {
             for j in 0..nsets {
                 let si = g * nsets + j;
                 let dset = out.dsets[dst * nsets + j].as_mut().unwrap();
-                for &v in t.set_ints(si) {
+                let vals = t.set_ints(si);
+                // dedupsub I3, combine face: the union is bounded by
+                // held + incoming — an EXACT pre-size (no projection
+                // needed), one jump instead of the per-absorb doubling
+                // ladder. Int values only (bytes sets pass an empty
+                // `vals`; the emptiness guards in reserve_projected keep
+                // bytes/replay arms untouched).
+                if !vals.is_empty() && pd_grow_project_enabled() {
+                    let target = dset.len() + vals.len();
+                    if target >= PD_PROJECT_MIN {
+                        dset.reserve_projected(target);
+                    }
+                }
+                for &v in vals {
                     dset.insert_i64(v);
                 }
                 for (content, _) in t.set_bytes(si) {
@@ -1602,6 +1763,25 @@ fn pd_elem_claim_loop(ctx: &PdElemCtx<'_>) {
         }
         let (j, p) = (w / PD_ELEM_PARTS, w % PD_ELEM_PARTS);
         let mut dset: DistinctSet<'static> = DistinctSet::new();
+        // dedupsub reserve wave: the partition's union is bounded by the
+        // donors' slice lengths (int elements) — exact-bound pre-size, one
+        // jump instead of the per-donor ladder.
+        if pd_grow_project_enabled() {
+            let int_upper: usize = ctx
+                .tables
+                .iter()
+                .map(|t| {
+                    let parts =
+                        &t.elem_parts[j * (PD_ELEM_PARTS + 1)..(j + 1) * (PD_ELEM_PARTS + 1)];
+                    (parts[p + 1] - parts[p]) as usize
+                })
+                .sum();
+            if !matches!(ctx.spec.sets[j].kind, DistinctKeyKind::Bytes)
+                && int_upper >= PD_PROJECT_MIN
+            {
+                dset.reserve_projected(int_upper);
+            }
+        }
         for t in ctx.tables {
             let parts = &t.elem_parts[j * (PD_ELEM_PARTS + 1)..(j + 1) * (PD_ELEM_PARTS + 1)];
             match ctx.spec.sets[j].kind {
@@ -1619,9 +1799,13 @@ fn pd_elem_claim_loop(ctx: &PdElemCtx<'_>) {
                 }
             }
         }
-        let mut blob = Vec::new();
-        let mut spans = Vec::new();
-        for i in 0..dset.n_bytes() {
+        // dedupsub reserve wave: exact-size the bytes re-export (spans
+        // count and blob total are known from the merged set).
+        let nb = dset.n_bytes();
+        let blob_total: usize = (0..nb).map(|i| dset.bytes_span(i).1 as usize).sum();
+        let mut blob = Vec::with_capacity(blob_total);
+        let mut spans = Vec::with_capacity(nb);
+        for i in 0..nb {
             let (off, len, h) = dset.bytes_span(i);
             let noff = blob.len() as u32;
             blob.extend_from_slice(dset.bytes_content(off, len));
@@ -3084,6 +3268,7 @@ mod tests {
             ],
             max_att: 4,
             worker_budget: usize::MAX,
+            expected_worker_rows: 0,
         })
     }
 
@@ -3163,6 +3348,7 @@ mod tests {
             sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
             max_att: 2,
             worker_budget: usize::MAX,
+            expected_worker_rows: 0,
         });
         let rows = 3 * PD_STAGE_BATCH + 137; // partial trailing window
         let drive = |staged: bool| -> PdHandedTable {
@@ -3210,6 +3396,7 @@ mod tests {
                 sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Bytes }],
                 max_att: 2,
                 worker_budget: usize::MAX,
+                expected_worker_rows: 0,
             }),
             usize::MAX,
             None,
@@ -3241,6 +3428,80 @@ mod tests {
             }
         }
         assert!(crossed, "tiny budget must cross");
+    }
+
+    /// dedupsub I3: with the projection reserve LIVE (expected_worker_rows
+    /// set, a dominant group crossing PD_PROJECT_MIN inside the staged
+    /// windows), the frozen table is byte-identical to the per-row oracle
+    /// (projection never fires there — the geometry-is-non-surface pin).
+    /// Also pins the epoch-stamp accounting totals against the builder's
+    /// exact recomputed set memory.
+    #[test]
+    fn staged_projection_identity() {
+        let mk_spec = |expected: u64| {
+            Arc::new(PdSpec {
+                key_atts: vec![0],
+                key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+                vocab: vec![],
+                sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+                max_att: 2,
+                worker_budget: usize::MAX,
+                expected_worker_rows: expected,
+            })
+        };
+        let rows = (12 * PD_STAGE_BATCH + 331) as i64;
+        let drive = |spec: &Arc<PdSpec>, staged: bool| -> PdHandedTable {
+            let mut b = PdBuilder::new(Arc::clone(spec), usize::MAX, None);
+            b.set_batch_insert(staged);
+            for i in 0..rows {
+                // ~92% of rows to group 0 (its set crosses PD_PROJECT_MIN);
+                // 12 tail groups stay small (no-reserve face).
+                let k = [if i % 13 == 0 { 1 + (i % 12) } else { 0 }];
+                let h = key_hash(&k, 0);
+                let (found, slot) = b.probe(&k, 0, h, &KeySrc::None);
+                let g = match found {
+                    Some(g) => g,
+                    None => b.create_group(&k, 0, h, slot, &KeySrc::None),
+                } as usize;
+                let v =
+                    if i % 89 == 0 { None } else { Some(i.wrapping_mul(6364136223846793005) + 3) };
+                if staged {
+                    assert!(matches!(b.stage_push(g, v).unwrap(), PdFeed::Ok));
+                } else {
+                    match v {
+                        Some(v) => b.dsets[g].insert_i64(v),
+                        None => b.dsets[g].seen_null = true,
+                    }
+                }
+            }
+            if staged {
+                // Accounting pin BEFORE freeze: the delta-accounted total
+                // must equal the exact recomputed sum (epoch-stamp dedup and
+                // projection reserves both metered).
+                b.flush_staged();
+                let exact: usize = b.dsets.iter().map(|d| d.mem_bytes()).sum();
+                assert_eq!(b.total_set_mem, exact, "delta accounting drifted");
+                assert!(
+                    b.dsets[0].len() >= PD_PROJECT_MIN,
+                    "test shape: dominant set must cross the projection gate"
+                );
+            }
+            b.freeze().unwrap()
+        };
+        let spec = mk_spec(2 * rows as u64);
+        let oracle = drive(&spec, false);
+        let proj = drive(&spec, true);
+        assert_eq!(oracle.ngroups, proj.ngroups);
+        assert_eq!(oracle.keys, proj.keys);
+        assert_eq!(oracle.states, proj.states);
+        assert_eq!(oracle.set_ints, proj.set_ints, "value arrays identical incl. order");
+        assert_eq!(oracle.set_int_offs, proj.set_int_offs);
+        assert_eq!(oracle.set_null, proj.set_null);
+        // Unknown expectation (0): projection inert, same identity.
+        let spec0 = mk_spec(0);
+        let o0 = drive(&spec0, false);
+        let p0 = drive(&spec0, true);
+        assert_eq!(o0.set_ints, p0.set_ints);
     }
 
     /// M3.5 §4 round-trip: drain values → records → rebuild → merge with the
@@ -3474,6 +3735,7 @@ mod tests {
             sets: vec![PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 }],
             max_att: 3,
             worker_budget: usize::MAX,
+            expected_worker_rows: 0,
         })
     }
 
@@ -3780,6 +4042,7 @@ mod tests {
                 .collect(),
             max_att: 8,
             worker_budget: usize::MAX,
+            expected_worker_rows: 0,
         }
     }
 
