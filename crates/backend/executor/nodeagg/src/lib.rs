@@ -71,7 +71,7 @@ pub use compact::{
     agg_hash_compact_sink_admissible, agg_hash_compact_sink_would_refuse,
     agg_hash_compact_try_arm, agg_hash_compact_try_arm_mk, agg_hash_compact_try_arm_mk1,
     agg_hash_compact_try_arm_reduced,
-    agg_hash_spill_unlikely, mk_numeric_datum_bits, mk_numeric_i64_bits,
+    agg_hash_spill_unlikely, mk_keys2_lane, mk_numeric_datum_bits, mk_numeric_i64_bits,
     mk_numeric_key_bits, mk_numeric_mant_abs_max, CompactArm, MkComp, MkCompKind, MkShape,
     RedDerived, RedOp, RedShape,
 };
