@@ -94,6 +94,13 @@ pub(super) struct AggSinkLocal {
     /// real socket placement (the finalize NUMAC marker's agreement term).
     /// Behavior never reads it.
     numa_votes: [u32; 2],
+    /// agg192-contention CPROBE: lifetime cap/pressure flushes of this Local
+    /// and their bytes (runs are drained by spill epochs, so `runs.len()` at
+    /// seal undercounts). Thread-owned; emitted on the AGGSEAL marker line —
+    /// discriminates DOP-scaled bounded-cap flush amplification (real extra
+    /// work) from shared-line contention (stall-only inflation).
+    probe_flushes: u64,
+    probe_flush_bytes: u64,
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -854,8 +861,10 @@ impl runtime::ParallelSink for AggSink {
             // Marker channel (PGRUST_MORSEL_MARKERS=1, the WFIN sibling):
             // the single-threaded seal's duration — the phase the 3-set arm
             // parallelizes; its A/B evidence line.
+            let flushes: u64 = locals.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|dur_us={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us={}",
                 locals.len(),
                 t0.elapsed().as_micros()
             );
@@ -1569,6 +1578,19 @@ impl runtime::SealedParallelSink for AggSink {
     fn sealed_ready(&self, sealed: &mut Vec<AggSinkLocal>) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        if agg_markers_on() {
+            // The 3-set arm's AGGSEAL sibling line (single-threaded here by
+            // last-worker-out of the freeze set): the flush-amplification
+            // census the CPROBE channel reads (see AggSinkLocal doc).
+            let rows: usize =
+                sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
+            eprintln!(
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us=0",
+                sealed.len(),
+            );
         }
         if self.try_adopt_census(sealed) {
             return;
@@ -2454,6 +2476,8 @@ fn sink_drain_range<'mcx>(
         if let Some((run, intern_reset)) =
             ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
         {
+            local.probe_flushes += 1;
+            local.probe_flush_bytes += run.bytes() as u64;
             local.run_bytes += run.bytes();
             local.runs.push(run);
             // The flush RESET the compact table: every cached code -> state
@@ -2525,6 +2549,8 @@ fn sink_drain_range<'mcx>(
                     if let Some((run, intern_reset)) =
                         ::nodeagg::sink::agg_sink_flush_now(agg)
                     {
+                        local.probe_flushes += 1;
+                        local.probe_flush_bytes += run.bytes() as u64;
                         local.run_bytes += run.bytes();
                         local.runs.push(run);
                         if intern_reset {
@@ -3307,6 +3333,76 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 /// estimate gate (fail-closed to serial), never an engagement the final
 /// gate would reject, and word-keyed spill-armed shapes vacate that gate
 /// entirely.
+/// agg192-contention (48xl window-B verdict 2): the locality cap was
+/// DOP-INDEPENDENT — ~64K entries ≈ 3.6-3.9MB per worker table, which is
+/// locality-correct for ONE worker but aggregates to ~690MB of live
+/// random-probed table bytes at 191 workers, spilling the shared SLC
+/// between 64 and 128 workers. The measured signature: instructions and
+/// LLC-miss COUNTS flat, stall_backend_mem x4-5, system-wide miss RATE
+/// saturating at ~1.7-1.9 G/s and then COLLAPSING at 191 (q19 1.24 G/s <
+/// its own 128-dop rate — queueing overload = the 191<128 regression).
+/// Fix: above the 16-worker anchor, scale the locality bound so the
+/// AGGREGATE stays at the anchor's working set (cap x 16 / dop), floored
+/// (default 16K entries ≈ 0.9MB — near-L2-resident per worker at any DOP)
+/// so flush cadence and the per-flush dict/intern-cache resets stay sane.
+/// dop <= 16 is UNCHANGED by construction (the mt16 official channel is
+/// byte-flat). `PGRUST_RUNTIME_AGG_DOPCAP=0` restores the DOP-independent
+/// bound; `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` is the ladder A/B knob.
+fn agg_dopcap_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Per-worker floor for the DOP-scaled locality bound (see
+/// [`agg_dopcap_enabled`]) — BYTE-denominated (cache-budget lit-review
+/// refinement 2, Schuhknecht VLDB15 class: the flush scatter's output
+/// shares the private cache with the table, so the floor must be a byte
+/// budget, not an entry count — an entry floor silently overflows L2 on
+/// state-heavy shapes). Default 1MB of table bytes at the sink's own
+/// entry estimate (16+8+state+16): ≈18K entries on the q19-class 56B
+/// entry, proportionally fewer on heavy states — table + flush output +
+/// scan batch fit a Neoverse-V2 core's private 2MB L2 with headroom.
+/// `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` overrides the BYTE budget (A/B knob).
+fn agg_dopcap_floor_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|f| *f >= 64 * 1024)
+            .unwrap_or(1 << 20)
+    })
+}
+
+/// The DOP anchor: at or below this width the locality bound is exactly
+/// the calibrated per-worker cap (the q36-ladder 64K / mid-NDV 1M bands);
+/// above it the AGGREGATE working set is held at the anchor's.
+const DOPCAP_ANCHOR: u32 = 16;
+
+/// Budget-size ladder knob (`PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR`, default
+/// [`DOPCAP_ANCHOR`]): scales the AGGREGATE budget for the calibration
+/// ladder Michael chartered (8 = 0.5x, 32 = 2x the anchor working set) —
+/// the budget-response curve adjudicates whether the anchor sits at the
+/// knee per width, and a 2x-helps-at-96-but-hurts-at-191 shape is the
+/// per-socket-split signature. CALIBRATION/A-B channel on the stride/
+/// decay env precedent, not product surface — the ratified anchor stays
+/// the compiled constant. Clamped to [2, 191] so a typo cannot disable
+/// the budget outright (the kill switch is DOPCAP=0). The dop<=anchor
+/// early-out uses the SAME value, so a widened anchor also widens the
+/// unscaled band (exactly the 2x-aggregate semantics).
+fn agg_dopcap_anchor() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|a| a.clamp(2, 191))
+            .unwrap_or(DOPCAP_ANCHOR)
+    })
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -3322,7 +3418,21 @@ fn sink_cap_engaged(
         return base;
     }
     match sink_locality_cap_for(est_groups) {
-        Some(l) => base.min(l),
+        Some(l) => {
+            let mut l = l;
+            let anchor = agg_dopcap_anchor();
+            if agg_dopcap_enabled() && dop as u32 > anchor {
+                let scaled =
+                    ((l as u64 * anchor as u64) / (dop as u64).max(1)) as u32;
+                // Byte-denominated floor at THIS shape's entry estimate
+                // (the same 16+8+state+16 arithmetic as sink_cap_for).
+                let entry = 16u64 + 8 + state_bytes as u64 + 16;
+                let floor = (agg_dopcap_floor_bytes() / entry.max(1))
+                    .clamp(1 << 12, u32::MAX as u64) as u32;
+                l = scaled.max(floor).min(l);
+            }
+            base.min(l)
+        }
         None => base,
     }
 }
