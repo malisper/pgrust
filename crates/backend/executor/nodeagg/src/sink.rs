@@ -319,6 +319,114 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
     }
 }
 
+/// Freeze a COMBINE-MERGED bucket table into a self-contained single-bucket
+/// run (numa-combine two-level pass A). Every non-NULL row of `t` belongs to
+/// bucket `b` by construction — the caller merged only bucket-`b` arrivals —
+/// and the run preserves the table's INSERTION ORDER verbatim: the first-seen
+/// discipline composes across the second-level merge exactly because a
+/// partial run replays its half's arrivals in the flat pass's own order.
+/// Handles all three key reprs; the NULL group (word modes,
+/// `b == SINK_NULL_BUCKET` only — the two-level arm routes the NULL bucket
+/// flat, but the conversion stays total) rides out-of-band as every run's
+/// NULL face does. State blocks are copied VERBATIM — callers hold the
+/// all-byval gate (a byref block would dangle past the pass-A claim).
+/// Bytes-mode rows re-derive [`sink_hash_bytes`] from their canonical image
+/// (bit-identical to the flush-side hash — same function, same bytes); GID
+/// words are dropped (`keys` empty ⇒ the final merge always bytes-probes,
+/// byte-invisible by the GID map's own contract).
+pub fn sink_run_from_bucket_table(b: usize, t: &LaneAggTable) -> SinkRun {
+    debug_assert!(b < SINK_NBUCKETS);
+    let state_words = t.state_bytes() / 8;
+    let n = t.nrows();
+    let bytes_mode = t.repr() == KeyRepr::Bytes;
+    let key_words = if bytes_mode { 0 } else { table_key_words(t) };
+    let mut keys: Vec<u64> = Vec::new();
+    let mut key_offs: Vec<u32> = Vec::new();
+    let mut key_bytes: Vec<u8> = Vec::new();
+    let mut hashes: Vec<u64> = Vec::new();
+    let mut states: Vec<u64> = Vec::with_capacity(n * state_words);
+    let mut null_states: Option<Vec<u64>> = None;
+    if bytes_mode {
+        key_offs.reserve(n + 1);
+        key_offs.push(0);
+        hashes.reserve(n);
+    } else {
+        keys.reserve(n * key_words);
+    }
+    // SAFETY (both closures below): row `i < nrows`; the row's state block is
+    // `state_words` u64s, 8-aligned by the LaneAggTable state layout.
+    let push_states = |states: &mut Vec<u64>, i: usize| unsafe {
+        states.extend_from_slice(core::slice::from_raw_parts(
+            t.row_states(i).cast::<u64>().cast_const(),
+            state_words,
+        ));
+    };
+    let mut scratch = [0u8; 8];
+    for i in 0..n {
+        if bytes_mode {
+            let k = t
+                .row_key_bytes(i, &mut scratch)
+                .expect("canonical shapes are non-nullable");
+            let h = sink_hash_bytes(k);
+            debug_assert_eq!(bucket_of(h), b, "merged bucket table carries a foreign row");
+            key_bytes.extend_from_slice(k);
+            key_offs.push(key_bytes.len() as u32);
+            hashes.push(h);
+            push_states(&mut states, i);
+        } else {
+            match row_key_words(t, i) {
+                Some([w0, w1]) => {
+                    debug_assert_eq!(
+                        bucket_of(sink_hash(w0, w1)),
+                        b,
+                        "merged bucket table carries a foreign row"
+                    );
+                    keys.push(w0);
+                    if key_words == 2 {
+                        keys.push(w1);
+                    }
+                    push_states(&mut states, i);
+                }
+                None => {
+                    debug_assert_eq!(b, SINK_NULL_BUCKET);
+                    let mut block = vec![0u64; state_words];
+                    // SAFETY: as push_states.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            t.row_states(i).cast::<u64>().cast_const(),
+                            block.as_mut_ptr(),
+                            state_words,
+                        );
+                    }
+                    null_states = Some(block);
+                }
+            }
+        }
+    }
+    let nonnull = if bytes_mode {
+        key_offs.len() - 1
+    } else {
+        keys.len() / key_words
+    } as u32;
+    // Single-bucket geometry: all rows in `b`.
+    let mut starts = vec![0u32; SINK_NBUCKETS + 1];
+    for s in starts[b + 1..].iter_mut() {
+        *s = nonnull;
+    }
+    SinkRun {
+        key_words,
+        state_words,
+        starts,
+        keys,
+        states,
+        null_states,
+        key_offs,
+        key_bytes,
+        hashes,
+        gid_gen: 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical key bytes (text-bearing Multi shapes — the C2 car).
 // ---------------------------------------------------------------------------
@@ -3783,6 +3891,193 @@ mod tests {
         assert_eq!(t.row_key_int(2), Some(same[2]));
         // same[0] merged across both locals.
         assert_eq!(read_group(&t, Some(same[0])), Some((2, 0)));
+    }
+
+    /// Row (count, max) via the toy AggPerGroup pair.
+    fn row_counts(t: &LaneAggTable, row: usize) -> (i64, i64) {
+        let pg = t.row_states(row).cast_const().cast::<AggPerGroup>();
+        unsafe { ((*pg).trans_value.as_i64(), (*pg.add(1)).trans_value.as_i64()) }
+    }
+
+    /// numa-combine item 1, the superset-lemma-style order law: merging
+    /// CONTIGUOUS halves of the locals slice into partial single-bucket runs
+    /// ([`sink_run_from_bucket_table`]) and re-merging the two partials is
+    /// ROW-FOR-ROW identical (keys, insertion order, states) to the flat
+    /// pass — first-seen order composes across contiguous halves. Word keys.
+    #[test]
+    fn two_level_partial_runs_match_flat_combine() {
+        // Four locals with overlapping keys, mixed faces: l0 run+remainder,
+        // l1 remainder, l2 run, l3 remainder. No NULL group — the two-level
+        // arm routes SINK_NULL_BUCKET flat (SinkRun carries NULLs
+        // out-of-band, which would move the NULL group's first-seen slot).
+        let mut t0 = mk_table(32);
+        for k in 0..600 {
+            bump(&mut t0, Some(k), 1, k);
+        }
+        let run0 = sink_flush_table(&mut t0);
+        for k in 300..900 {
+            bump(&mut t0, Some(k), 2, 2 * k);
+        }
+        let part0 = sink_partition_remainder(&t0);
+        let mut t1 = mk_table(32);
+        for k in (0..1200).step_by(3) {
+            bump(&mut t1, Some(k), 1, 5);
+        }
+        let part1 = sink_partition_remainder(&t1);
+        let mut t2 = mk_table(32);
+        for k in 450..1050 {
+            bump(&mut t2, Some(k), 4, 3 * k);
+        }
+        let run2 = sink_flush_table(&mut t2);
+        let part2 = sink_partition_remainder(&t2);
+        let mut t3 = mk_table(32);
+        for k in (1..1500).step_by(7) {
+            bump(&mut t3, Some(k), 1, k + 1);
+        }
+        let part3 = sink_partition_remainder(&t3);
+
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run0),
+                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run2),
+                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, gid_gen: 0 }),
+            },
+        ];
+        let combines = test_combines();
+        for b in 0..SINK_NBUCKETS {
+            let flat = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            // Pass A: contiguous halves → partial single-bucket runs.
+            let m0 = sink_combine_bucket(b, 1, STATE_BYTES, &locals[..2], &combines).unwrap();
+            let m1 = sink_combine_bucket(b, 1, STATE_BYTES, &locals[2..], &combines).unwrap();
+            let r0 = sink_run_from_bucket_table(b, &m0);
+            let r1 = sink_run_from_bucket_table(b, &m1);
+            assert_eq!(r0.nrows(), m0.nrows());
+            assert_eq!(r1.nrows(), m1.nrows());
+            // Final: 2-way merge of the partials, socket order.
+            let partial_views = [
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r0), remainder: None },
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r1), remainder: None },
+            ];
+            let two =
+                sink_combine_bucket(b, 1, STATE_BYTES, &partial_views, &combines).unwrap();
+            assert_eq!(two.nrows(), flat.nrows(), "bucket {b} row count");
+            for row in 0..flat.nrows() {
+                assert_eq!(
+                    two.row_key_int(row),
+                    flat.row_key_int(row),
+                    "bucket {b} row {row} key/order"
+                );
+                assert_eq!(
+                    row_counts(&two, row),
+                    row_counts(&flat, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
+    }
+
+    /// The two-level order law over CANONICAL BYTES keys (text-bearing
+    /// shapes): partial runs re-derive the flush-side hash from the
+    /// canonical image, and per-worker intern-id skew across the halves
+    /// still merges on bytes — row-for-row identical to the flat pass.
+    #[test]
+    fn two_level_partial_runs_match_flat_combine_canon() {
+        // Worker intern orders deliberately DIFFER (the canonical-bytes
+        // hazard); texts span the packed8 (len <= 8) and arena arms.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w1, Some(1), b"apple", 1);
+        bump_canon(&mut w1, Some(1), b"banana", 2);
+        bump_canon(&mut w1, Some(2), b"apple", 3);
+        let run1 = sink_flush_table_canon(&mut w1);
+        bump_canon(&mut w1, Some(1), b"apple", 10);
+        bump_canon(&mut w1, Some(3), b"a-rather-long-canonical-key", 5);
+        let mut h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w2, Some(9), b"zzz", 7);
+        bump_canon(&mut w2, Some(1), b"banana", 20);
+        bump_canon(&mut w2, Some(1), b"apple", 30);
+        let mut h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+
+        let mut w3 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w3, Some(3), b"a-rather-long-canonical-key", 100);
+        bump_canon(&mut w3, Some(1), b"banana", 1);
+        bump_canon(&mut w3, Some(4), b"", 6);
+        let mut h3 = SinkTableHandle(w3);
+        let part3 = h3.partition_remainder();
+
+        let mut w4 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w4, Some(2), b"apple", 2);
+        bump_canon(&mut w4, Some(9), b"zzz", 3);
+        let run4 = sink_flush_table_canon(&mut w4);
+        bump_canon(&mut w4, Some(4), b"", 4);
+        let mut h4 = SinkTableHandle(w4);
+        let part4 = h4.partition_remainder();
+
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run1),
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h2.remainder_view(&part2)) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h3.remainder_view(&part3)) },
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run4),
+                remainder: Some(h4.remainder_view(&part4)),
+            },
+        ];
+        let combines = test_combines();
+        let mut groups = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let flat = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            let m0 = sink_combine_bucket(b, 0, STATE_BYTES, &locals[..2], &combines).unwrap();
+            let m1 = sink_combine_bucket(b, 0, STATE_BYTES, &locals[2..], &combines).unwrap();
+            let r0 = sink_run_from_bucket_table(b, &m0);
+            let r1 = sink_run_from_bucket_table(b, &m1);
+            assert_eq!(r0.key_words, 0);
+            assert_eq!(r0.hashes.len(), r0.nrows(), "carried-hash law on the partial run");
+            let partial_views = [
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r0), remainder: None },
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r1), remainder: None },
+            ];
+            let two =
+                sink_combine_bucket(b, 0, STATE_BYTES, &partial_views, &combines).unwrap();
+            assert_eq!(two.nrows(), flat.nrows(), "bucket {b} row count");
+            groups += flat.nrows();
+            let (mut sa, mut sb) = ([0u8; 8], [0u8; 8]);
+            for row in 0..flat.nrows() {
+                assert_eq!(
+                    two.row_key_bytes(row, &mut sa).map(<[u8]>::to_vec),
+                    flat.row_key_bytes(row, &mut sb).map(<[u8]>::to_vec),
+                    "bucket {b} row {row} canonical key/order"
+                );
+                assert_eq!(
+                    row_counts(&two, row),
+                    row_counts(&flat, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
+        assert_eq!(groups, 6, "distinct (int8, text) groups across the corpus");
     }
 
     #[test]

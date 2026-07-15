@@ -47,15 +47,16 @@
 
 use core::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
     sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
-    sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
-    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, sink_topn_merge_fragments,
+    sink_resolve_combines, sink_route_records, sink_run_from_bucket_table, sink_run_from_spill,
+    sink_run_spill_bucket, sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge,
+    sink_topn_merge_fragments,
     LaneAggTable, SinkCombineFn, SinkEmitAcc, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
     SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand, SinkTopnSpec, SINK_NBUCKETS,
     SINK_NULL_BUCKET,
@@ -87,6 +88,12 @@ pub(super) struct AggSinkLocal {
     /// the sink is EA-armed (`sink.ea_scan_node.is_some()`); rides the Local
     /// through SEAL exactly like the agg state it sits beside.
     instr: super::runtime_instr::InstrumentPartial,
+    /// numa-combine diagnostic (sampled only when the two-level arm is
+    /// engaged): per-morsel socket-half votes of the ACCEPT worker driving
+    /// this Local — measures how well the pool-half locals split tracks
+    /// real socket placement (the finalize NUMAC marker's agreement term).
+    /// Behavior never reads it.
+    numa_votes: [u32; 2],
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -246,12 +253,218 @@ struct AggSink {
     /// mode and on every non-EA path: zero clock reads.
     ea_timer: bool,
     ea_epoch: std::time::Instant,
+    /// Two-level socket-local combine (numa-combine item 1): Some = the
+    /// engaged claims-shape (armed at construction — kill switch + DOP
+    /// threshold + all-byval combines). None = the flat 256-partition pass,
+    /// byte-and-time identical to before the lane.
+    numa: Option<NumaCombine>,
 }
 
 // SAFETY: out_emit cells are written only by the exclusive claimer of their
 // partition (the runtime's exactly-once combine claim) and read only by
-// finalize, which happens-after every combine by last-worker-out.
+// finalize, which happens-after every combine by last-worker-out. The
+// numa-combine partial slots have the same discipline one level down: slot
+// (h,b) is written only by the pass-A claim that popped (h,b) (cursor
+// fetch_add = exactly-once ownership) and consumed only by bucket b's
+// elected FINAL claim, whose counter Acquire pairs with the writers'
+// Release increments.
 unsafe impl Sync for AggSink {}
+
+// ---------------------------------------------------------------------------
+// Two-level socket-local combine (numa-combine lane, item 1).
+// ---------------------------------------------------------------------------
+
+/// The engaged claims-shape's shared state. The partition space doubles to
+/// `2 × SINK_NBUCKETS` CLAIM CREDITS; each credit pops one pass-A item
+/// (half h, bucket b) from the per-half cursors — SELF-STEERED: the claiming
+/// worker samples its own socket and drains its own half's cursor first,
+/// then steals. Pass-A merges bucket b across ONLY half h's sealed locals
+/// and freezes the result into a single-bucket partial [`SinkRun`]; the
+/// claim that completes a bucket's SECOND partial is elected to run the
+/// FINAL stage (2-way partial merge + the unchanged combine tail) at once.
+///
+/// Credit/item accounting: 512 credits, 512 items; a `fetch_add` pop < 256
+/// owns its item exactly once, and a credit that finds both cursors ≥ 256
+/// has proven every item is already popped — no loss, no dup, no waiting.
+///
+/// Byte identity vs the flat pass: first-seen order COMPOSES across
+/// contiguous locals halves (partial-0 replays half 0's arrivals in the
+/// flat order, partial-1 follows — a key first seen in half 1 trails every
+/// half-0-first key in both shapes), and the all-byval gate keeps state
+/// regrouping bit-exact (the whitelist is int adds / min-max / bool —
+/// associative). Covered by sink.rs `two_level_partial_runs_match_flat_*`.
+struct NumaCombine {
+    /// Pass-A claim cursors, one per locals half.
+    cursors: [AtomicU32; 2],
+    /// Per-bucket completion counters; 1→2 elects the FINAL claim.
+    done: Vec<AtomicU8>,
+    /// `2 × SINK_NBUCKETS` partial slots (h-major); single writer per slot
+    /// (the popping claim), single consumer (the elected final).
+    partials: Vec<UnsafeCell<Option<SinkRun>>>,
+    /// Observability (NUMAC finalize marker; behavior never reads these).
+    steer_hit: AtomicU64,
+    steer_miss: AtomicU64,
+    /// Buckets whose final ran the FLAT body (ineligible: NULL bucket,
+    /// <2 locals, frozen engagement, over-budget verdict, or a pass-A
+    /// asymmetry after an error).
+    finals_flat: AtomicU64,
+    partial_ns: AtomicU64,
+    final_ns: AtomicU64,
+    /// Live partial-run bytes (transient retained state between a bucket's
+    /// pass-A and its final) + the observed peak.
+    partial_bytes: AtomicUsize,
+    partial_bytes_peak: AtomicUsize,
+}
+
+// SAFETY: the partial slots are single-writer / single-consumer by the
+// claims discipline (cursor-pop = exactly-once slot ownership; the 1→2
+// counter election = exactly-once consumption, Acquire-paired with the
+// writers' Release increments — see the AggSink Sync comment); every other
+// field is an atomic.
+unsafe impl Sync for NumaCombine {}
+
+impl NumaCombine {
+    fn new() -> NumaCombine {
+        NumaCombine {
+            cursors: [AtomicU32::new(0), AtomicU32::new(0)],
+            done: (0..SINK_NBUCKETS).map(|_| AtomicU8::new(0)).collect(),
+            partials: (0..2 * SINK_NBUCKETS).map(|_| UnsafeCell::new(None)).collect(),
+            steer_hit: AtomicU64::new(0),
+            steer_miss: AtomicU64::new(0),
+            finals_flat: AtomicU64::new(0),
+            partial_ns: AtomicU64::new(0),
+            final_ns: AtomicU64::new(0),
+            partial_bytes: AtomicUsize::new(0),
+            partial_bytes_peak: AtomicUsize::new(0),
+        }
+    }
+
+    /// Pop one pass-A item, own half first. `None` = every item is popped
+    /// (this credit's work is done).
+    fn pop(&self, my: usize) -> Option<(usize, usize)> {
+        debug_assert!(my < 2);
+        for (attempt, h) in [my, 1 - my].into_iter().enumerate() {
+            let b = self.cursors[h].fetch_add(1, Ordering::Relaxed) as usize;
+            if b < SINK_NBUCKETS {
+                if attempt == 0 {
+                    self.steer_hit.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.steer_miss.fetch_add(1, Ordering::Relaxed);
+                }
+                return Some((h, b));
+            }
+        }
+        None
+    }
+
+    fn note_partial_bytes(&self, n: usize) {
+        let live = self.partial_bytes.fetch_add(n, Ordering::Relaxed) + n;
+        self.partial_bytes_peak.fetch_max(live, Ordering::Relaxed);
+    }
+
+    fn release_partial_bytes(&self, n: usize) {
+        self.partial_bytes.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
+/// `PGRUST_RUNTIME_AGG_NUMA_COMBINE` kill switch (default ON): 0/off = the
+/// flat 256-partition combine everywhere, byte-and-time identical to the
+/// pre-lane binary.
+fn numa_combine_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_RUNTIME_AGG_NUMA_COMBINE_DOP` engagement threshold (default 96 —
+/// the 48xl two-socket regime; the flat pass is byte-identical below it, so
+/// small DOPs keep the exact t21 shape). Lower it to force the engaged
+/// shape through the 16-thread byte gates.
+fn numa_combine_dop_min() -> i32 {
+    static N: OnceLock<i32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE_DOP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(96)
+    })
+}
+
+/// The claiming thread's socket HALF (0/1), for claim steering and the
+/// locals-split agreement diagnostic. Linux: `sched_getcpu` + the
+/// /sys/devices/system/node/*/cpulist map (nodes split into two halves for
+/// >2-node topologies; single-node machines map everything to 0 — the
+/// steering degrades to a plain shared cursor, still correct). Elsewhere:
+/// `None` (callers fall back to the claim credit's own half — deterministic,
+/// which is what the non-Linux unit/e2e environments want).
+fn numa_current_half() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn sched_getcpu() -> core::ffi::c_int;
+        }
+        static MAP: OnceLock<Vec<u8>> = OnceLock::new();
+        let map = MAP.get_or_init(|| {
+            let mut nodes: Vec<Vec<usize>> = Vec::new();
+            for node in 0..1024usize {
+                let Ok(list) = std::fs::read_to_string(format!(
+                    "/sys/devices/system/node/node{node}/cpulist"
+                )) else {
+                    break;
+                };
+                let mut cpus = Vec::new();
+                for part in list.trim().split(',').filter(|s| !s.is_empty()) {
+                    let mut ends = part.splitn(2, '-');
+                    let lo: usize = match ends.next().and_then(|s| s.parse().ok()) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let hi: usize =
+                        ends.next().and_then(|s| s.parse().ok()).unwrap_or(lo);
+                    cpus.extend(lo..=hi);
+                }
+                nodes.push(cpus);
+            }
+            let nnodes = nodes.len().max(1);
+            let ncpus = nodes.iter().map(|c| c.iter().max().map_or(0, |m| m + 1)).max().unwrap_or(0);
+            let mut map = vec![0u8; ncpus];
+            for (n, cpus) in nodes.iter().enumerate() {
+                let half = u8::from(n >= nnodes.div_ceil(2));
+                for &c in cpus {
+                    map[c] = half;
+                }
+            }
+            map
+        });
+        // SAFETY: no preconditions; vDSO-backed on Linux.
+        let cpu = unsafe { sched_getcpu() };
+        if cpu >= 0 {
+            return Some(map.get(cpu as usize).copied().unwrap_or(0) as usize);
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The engaged shape's locals split: CONTIGUOUS halves of the sealed slice
+/// (slot order). Contiguity is load-bearing — it is what makes first-seen
+/// order compose (see [`NumaCombine`]); a sampled per-Local socket grouping
+/// would be nondeterministic run-to-run AND break the flat-order identity.
+fn numa_half_slice(locals: &[AggSinkLocal], h: usize) -> &[AggSinkLocal] {
+    let mid = locals.len() / 2;
+    if h == 0 {
+        &locals[..mid]
+    } else {
+        &locals[mid..]
+    }
+}
 
 /// Top-N materialization modes (topn-winners-only §3.2). `WinnersOnly` is
 /// the product default when the spec arms: each combine claim materializes
@@ -566,6 +779,13 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // numa two-level diagnostic (engaged only): one socket-half vote per
+        // morsel — the finalize NUMAC marker's locals-split agreement term.
+        if self.numa.is_some() {
+            if let Some(h) = numa_current_half() {
+                local.numa_votes[h] += 1;
+            }
+        }
         let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, worker, range)));
         match r {
             Ok(Ok(())) => {}
@@ -643,7 +863,14 @@ impl runtime::ParallelSink for AggSink {
     }
 
     fn partitions(&self) -> u64 {
-        SINK_NBUCKETS as u64
+        // numa two-level (item 1): the partition space doubles to CLAIM
+        // CREDITS — one per (half, bucket) pass-A item; bucket finals are
+        // elected inline by the second finisher.
+        if self.numa.is_some() {
+            2 * SINK_NBUCKETS as u64
+        } else {
+            SINK_NBUCKETS as u64
+        }
     }
 
     fn combine(&self, part: u64, _worker: usize, locals: &[AggSinkLocal]) {
@@ -658,6 +885,203 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<CombineOutcome> {
+            // Two-level socket-local shape (numa-combine item 1): `part` is
+            // a CLAIM CREDIT, not a bucket — the pass-A pop decides the
+            // (half, bucket) this claim serves. Flat shape: `part` IS the
+            // bucket, exactly the t21 body.
+            match &self.numa {
+                Some(nc) => self.combine_numa(nc, part, locals),
+                None => self.combine_bucket_flat(part as usize, locals),
+            }
+        }));
+        match r {
+            Ok(Ok(CombineOutcome::Done)) => {}
+            Ok(Ok(CombineOutcome::OverBudget)) => {
+                lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
+                self.refuse_budget();
+            }
+            Ok(Ok(CombineOutcome::TopnDeclined)) => {
+                // Winners-only refusal (§3.2 step 3): fail-closed, count-
+                // gated ≈0 (structurally unreachable on cbstore feeds —
+                // sort-b decision 6). The e2e leg-R gate greps this line.
+                lane_trace(
+                    "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
+                );
+                self.refuse_topn();
+            }
+            Ok(Err(e)) => self.fail(e),
+            Err(_panic) => {
+                self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
+            }
+        }
+    }
+
+    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
+    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
+    /// Locals drop with the plumbing right after.
+    fn finalize(&self, locals: &[AggSinkLocal]) {
+        if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        // numa-combine NUMAC marker (WFIN sibling, PGRUST_MORSEL_MARKERS=1):
+        // steering + phase attribution + the locals-split/socket agreement
+        // votes, read before the Locals drop.
+        if let Some(nc) = &self.numa {
+            if agg_markers_on() {
+                let mid = locals.len() / 2;
+                let (mut agree, mut votes) = (0u64, 0u64);
+                for (i, l) in locals.iter().enumerate() {
+                    let h = usize::from(i >= mid);
+                    agree += u64::from(l.numa_votes[h]);
+                    votes += u64::from(l.numa_votes[0]) + u64::from(l.numa_votes[1]);
+                }
+                eprintln!(
+                    "MORSEL|NUMAC|locals={}|steer_hit={}|steer_miss={}|finals_flat={}|partial_ms={}|final_ms={}|partial_peak_bytes={}|half_agree={agree}/{votes}",
+                    locals.len(),
+                    nc.steer_hit.load(Ordering::Relaxed),
+                    nc.steer_miss.load(Ordering::Relaxed),
+                    nc.finals_flat.load(Ordering::Relaxed),
+                    nc.partial_ns.load(Ordering::Relaxed) / 1_000_000,
+                    nc.final_ns.load(Ordering::Relaxed) / 1_000_000,
+                    nc.partial_bytes_peak.load(Ordering::Relaxed),
+                );
+            }
+        }
+        self.finalize_publish(locals)
+    }
+}
+
+impl AggSink {
+    /// One credit of the engaged two-level shape: pop a pass-A item (own
+    /// socket half first), build that half's single-bucket partial, and —
+    /// when this claim completes the bucket's SECOND partial — run the
+    /// bucket's FINAL stage immediately (election by counter; exactly once).
+    fn combine_numa(
+        &self,
+        nc: &NumaCombine,
+        credit: u64,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<CombineOutcome> {
+        // Steering: real socket where we can sample it; the credit's own
+        // half elsewhere (deterministic — the non-Linux test environments).
+        let my = numa_current_half()
+            .unwrap_or(usize::from(credit >= SINK_NBUCKETS as u64));
+        let Some((h, b)) = nc.pop(my) else {
+            return Ok(CombineOutcome::Done);
+        };
+        let t0 = std::time::Instant::now();
+        if self.numa_bucket_eligible(b, locals) {
+            let merged = self.merge_bucket_subset(b, numa_half_slice(locals, h))?;
+            let run = sink_run_from_bucket_table(b, &merged);
+            nc.note_partial_bytes(run.bytes());
+            // SAFETY: (h,b) was popped exactly once (cursor fetch_add) —
+            // this claim is the slot's single writer; the elected final's
+            // counter Acquire pairs with our Release increment below.
+            unsafe { *nc.partials[h * SINK_NBUCKETS + b].get() = Some(run) };
+        }
+        nc.partial_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        // Election: the claim that brings the bucket to 2 partials runs the
+        // final. AcqRel: Release publishes our partial store, Acquire sees
+        // the sibling's.
+        if nc.done[b].fetch_add(1, Ordering::AcqRel) + 1 < 2 {
+            return Ok(CombineOutcome::Done);
+        }
+        if self.failed.load(Ordering::SeqCst) {
+            return Ok(CombineOutcome::Done);
+        }
+        let t0 = std::time::Instant::now();
+        // SAFETY: bucket b's final runs exactly once (the 1→2 election);
+        // both pass-A writers have released their slots.
+        let p0 = unsafe { (*nc.partials[b].get()).take() };
+        let p1 = unsafe { (*nc.partials[SINK_NBUCKETS + b].get()).take() };
+        let out = match (p0, p1) {
+            (Some(r0), Some(r1)) => {
+                nc.release_partial_bytes(r0.bytes() + r1.bytes());
+                let views = [
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r0),
+                        remainder: None,
+                    },
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r1),
+                        remainder: None,
+                    },
+                ];
+                let ctr = self.topn.is_some();
+                let tb = ctr.then(std::time::Instant::now);
+                // t22 merge graft: spankey combine_ns also meters the numa
+                // final-stage merge (observational CTR band; the flat path's
+                // timer in merge_bucket_subset reproduces spankey's original
+                // placement byte-for-byte at <96 DOP).
+                let spk_tb = ::nodeagg::spankey::spankey_t0();
+                let merged = sink_combine_bucket(
+                    b,
+                    self.key_words,
+                    self.state_bytes,
+                    &views,
+                    &self.combines,
+                )?;
+                ::nodeagg::spankey::spankey_lap(
+                    &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
+                    spk_tb,
+                );
+                if let Some(tb) = tb {
+                    self.topn_ctr
+                        .build_ns
+                        .fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                self.combine_tail(b, merged, locals.len())
+            }
+            (p0, p1) => {
+                // Ineligible bucket (both claims computed the same verdict:
+                // NULL bucket, <2 locals, frozen, over budget) — or a pass-A
+                // asymmetry behind an in-flight failure. Either way the flat
+                // body is correct and self-contained: pass A only READS the
+                // sealed locals, so nothing was consumed.
+                if let Some(r) = &p0 {
+                    nc.release_partial_bytes(r.bytes());
+                }
+                if let Some(r) = &p1 {
+                    nc.release_partial_bytes(r.bytes());
+                }
+                drop((p0, p1));
+                nc.finals_flat.fetch_add(1, Ordering::Relaxed);
+                self.combine_bucket_flat(b, locals)
+            }
+        };
+        nc.final_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        out
+    }
+
+    /// Whether bucket `b` takes the two-level pass. MUST be a pure function
+    /// of the sealed state (both halves' claims compute it independently and
+    /// their verdicts have to agree): the NULL bucket is routed flat (a
+    /// partial run carries the NULL group out-of-band, which would move its
+    /// first-seen slot), single-local shapes keep the pass-through arm,
+    /// FROZEN engagements keep the member-filter arm on tiny tables, and an
+    /// over-budget verdict routes to the flat body's combine-split.
+    fn numa_bucket_eligible(&self, b: usize, locals: &[AggSinkLocal]) -> bool {
+        if b == SINK_NULL_BUCKET || locals.len() < 2 {
+            return false;
+        }
+        if self.freeze.as_ref().is_some_and(|f| f.frozen()) {
+            return false;
+        }
+        let (rows, content) = self.bucket_estimate(b, locals);
+        est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
+            <= self.budget
+    }
+
+    /// The flat (t21) per-bucket combine body: pass-through arm, pre-build
+    /// size check, combine-split fallback, in-memory merge, tail.
+    fn combine_bucket_flat(
+        &self,
+        b: usize,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<CombineOutcome> {
+        {
             // SINGLE-LOCAL PASS-THROUGH (dop1-tax fix 3): exactly one sealed
             // Local and zero flushed runs — the merged bucket table would be
             // a verbatim re-insert of the Local's rows, so emit straight
@@ -698,7 +1122,7 @@ impl runtime::ParallelSink for AggSink {
                             &self.emit,
                             t.table(),
                             p,
-                            part as usize,
+                            b,
                         )?;
                         if let Some(t0) = t0 {
                             self.topn_ctr
@@ -706,58 +1130,13 @@ impl runtime::ParallelSink for AggSink {
                                 .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                             self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
                         }
-                        self.retain_bucket(part, buf, locals.len())?;
+                        self.retain_bucket(b as u64, buf, locals.len())?;
                         return Ok(CombineOutcome::Done);
                     }
                 }
             }
-            let b = part as usize;
-            let state_words = self.state_bytes / 8;
-            let canon = self.key_words == 0;
-            // Canonical (bytes-mode) spill faces carry variable-width
-            // records: divide by the MINIMUM record width (over-counts
-            // rows — the safe direction, the distinct record's discipline).
-            let row_bytes = if canon {
-                ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
-            } else {
-                sink_spill_row_bytes(self.key_words, state_words)
-            };
-            // Pre-build size check (M3.5 §3), from the DIRECTORY + in-memory
-            // counts only — nothing is read from disk before this decision.
-            // Rows over-count duplicates across faces, so the check is
-            // conservative in the safe direction. Canonical shapes add a
-            // KEY-CONTENT term (their merged table owns the byte images):
-            // spill part lengths and run key-byte ranges are O(1) directory
-            // reads; the remainder's share is approximated by its table's
-            // retained memory scaled to the bucket's row fraction —
-            // over-counting (entry+state overhead included), never under.
-            let mut rows = 0usize;
-            let mut content = 0usize;
-            for l in locals {
-                if let Some(sp) = &l.spill {
-                    let blen = sp.file.part_len(b as u32) as usize;
-                    rows += blen / row_bytes;
-                    if canon {
-                        content += blen;
-                    }
-                }
-                for r in &l.runs {
-                    rows += (r.starts[b + 1] - r.starts[b]) as usize;
-                    if canon {
-                        content += (r.key_offs[r.starts[b + 1] as usize]
-                            - r.key_offs[r.starts[b] as usize])
-                            as usize;
-                    }
-                }
-                if let (Some(t), Some(p)) = (&l.table, &l.part) {
-                    let brows = (p.starts[b + 1] - p.starts[b]) as usize;
-                    rows += brows;
-                    if canon && brows > 0 {
-                        let n = t.table().nrows().max(1);
-                        content += t.mem_used() / n * brows;
-                    }
-                }
-            }
+            // Pre-build size check (M3.5 §3) — see [`Self::bucket_estimate`].
+            let (rows, content) = self.bucket_estimate(b, locals);
             if est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
                 > self.budget
             {
@@ -796,7 +1175,7 @@ impl runtime::ParallelSink for AggSink {
                 }
                 let mut sel = winners_split.then(|| SplitSel {
                     spec: self.topn.as_ref().expect("winners split has a spec"),
-                    part: part as u16,
+                    part: b as u16,
                     lists: Vec::new(),
                 });
                 let mut acc = SinkEmitAcc::default();
@@ -807,81 +1186,164 @@ impl runtime::ParallelSink for AggSink {
                 }
                 if let Some(sel) = sel {
                     let bound = sel.spec.bound as usize;
-                    // SAFETY: partition `part` is claimed exactly once
-                    // (runtime contract); this is its single writer.
+                    // SAFETY: bucket `b` is combined exactly once (runtime
+                    // claim / numa final election); this is its single
+                    // writer.
                     unsafe {
-                        *self.topn_cands[part as usize].get() =
+                        *self.topn_cands[b].get() =
                             sink_topn_merge_fragments(sel.lists, bound);
                     }
                 }
                 // R3: the split result is retained emit content like any
                 // other combine result — meter it (retain_bucket is the
                 // single writer of the claimed partition's slot).
-                self.retain_bucket(part, acc.finish(), locals.len())?;
+                self.retain_bucket(b as u64, acc.finish(), locals.len())?;
                 return Ok(CombineOutcome::Done);
             }
-            // In-memory path: rebuild each Local's spilled face for this
-            // bucket — open-by-name on THIS thread (the file is frozen:
-            // combine deps-follows accept), one synthesized run per Local
-            // plus its in-memory NULL blocks in the NULL bucket.
-            let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
-            for l in locals {
-                let mut v: Vec<SinkRun> = Vec::new();
-                if let Some(sp) = &l.spill {
-                    let ctx = ::mcx::MemoryContext::new("m35-agg-spill-read");
-                    if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
-                        let bytes = r.read_to_end()?;
-                        r.close()?;
-                        v.push(if canon {
-                            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
-                        } else {
-                            sink_run_from_spill(b, self.key_words, state_words, &bytes)?
-                        });
-                    }
-                    if b == SINK_NULL_BUCKET {
-                        for nb in &sp.null_blocks {
-                            v.push(sink_null_only_run(self.key_words, state_words, nb.clone()));
-                        }
+            // In-memory path — see [`Self::merge_bucket_subset`].
+            let merged = self.merge_bucket_subset(b, locals)?;
+            self.combine_tail(b, merged, locals.len())
+        }
+    }
+
+    /// Pre-build size estimate of bucket `b` across `locals` — (rows,
+    /// canonical key content), from the DIRECTORY + in-memory counts only;
+    /// nothing is read from disk before the caller's decision. Rows
+    /// over-count duplicates across faces, so the check is conservative in
+    /// the safe direction. Canonical shapes add a KEY-CONTENT term (their
+    /// merged table owns the byte images): spill part lengths and run
+    /// key-byte ranges are O(1) directory reads; the remainder's share is
+    /// approximated by its table's retained memory scaled to the bucket's
+    /// row fraction — over-counting (entry+state overhead included), never
+    /// under. Pure function of the sealed state (the numa two-level arm
+    /// relies on both halves' claims computing the same verdict).
+    fn bucket_estimate(&self, b: usize, locals: &[AggSinkLocal]) -> (usize, usize) {
+        let state_words = self.state_bytes / 8;
+        let canon = self.key_words == 0;
+        // Canonical (bytes-mode) spill faces carry variable-width records:
+        // divide by the MINIMUM record width (over-counts rows — the safe
+        // direction, the distinct record's discipline).
+        let row_bytes = if canon {
+            ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+        } else {
+            sink_spill_row_bytes(self.key_words, state_words)
+        };
+        let mut rows = 0usize;
+        let mut content = 0usize;
+        for l in locals {
+            if let Some(sp) = &l.spill {
+                let blen = sp.file.part_len(b as u32) as usize;
+                rows += blen / row_bytes;
+                if canon {
+                    content += blen;
+                }
+            }
+            for r in &l.runs {
+                rows += (r.starts[b + 1] - r.starts[b]) as usize;
+                if canon {
+                    content += (r.key_offs[r.starts[b + 1] as usize]
+                        - r.key_offs[r.starts[b] as usize])
+                        as usize;
+                }
+            }
+            if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                let brows = (p.starts[b + 1] - p.starts[b]) as usize;
+                rows += brows;
+                if canon && brows > 0 {
+                    let n = t.table().nrows().max(1);
+                    content += t.mem_used() / n * brows;
+                }
+            }
+        }
+        (rows, content)
+    }
+
+    /// In-memory merge of bucket `b` across `locals` — a CONTIGUOUS slice of
+    /// the sealed vec (the whole slice = the flat pass; a half = the numa
+    /// two-level pass A; first-seen order composes only because the slices
+    /// are contiguous). Rebuilds each Local's spilled face for this bucket —
+    /// open-by-name on THIS thread (the file is frozen: combine
+    /// deps-follows accept), one synthesized run per Local plus its
+    /// in-memory NULL blocks in the NULL bucket.
+    fn merge_bucket_subset(
+        &self,
+        b: usize,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<LaneAggTable> {
+        let state_words = self.state_bytes / 8;
+        let canon = self.key_words == 0;
+        let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
+        for l in locals {
+            let mut v: Vec<SinkRun> = Vec::new();
+            if let Some(sp) = &l.spill {
+                let ctx = ::mcx::MemoryContext::new("m35-agg-spill-read");
+                if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
+                    let bytes = r.read_to_end()?;
+                    r.close()?;
+                    v.push(if canon {
+                        ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+                    } else {
+                        sink_run_from_spill(b, self.key_words, state_words, &bytes)?
+                    });
+                }
+                if b == SINK_NULL_BUCKET {
+                    for nb in &sp.null_blocks {
+                        v.push(sink_null_only_run(self.key_words, state_words, nb.clone()));
                     }
                 }
-                synth.push(v);
             }
-            // Std-collections audit note: this views Vec is a per-claim
-            // allocation, but the combine morsel space is a FIXED 256
-            // partitions x dop-sized views — bounded per engagement,
-            // independent of data volume (accepted; a borrowed view cannot
-            // be retained across claims without lifetime erasure).
-            let views: Vec<SinkLocalView<'_>> = locals
-                .iter()
-                .zip(synth.iter())
-                .map(|(l, s)| SinkLocalView {
-                    spilled: s,
-                    runs: &l.runs,
-                    remainder: match (&l.table, &l.part) {
-                        (Some(t), Some(p)) => Some(t.remainder_view(p)),
-                        _ => None,
-                    },
-                })
-                .collect();
-            let ctr = self.topn.is_some();
-            let t0 = ctr.then(std::time::Instant::now);
-            let spk_t0 = ::nodeagg::spankey::spankey_t0();
-            let merged = sink_combine_bucket(
-                b,
-                self.key_words,
-                self.state_bytes,
-                &views,
-                &self.combines,
-            )?;
-            ::nodeagg::spankey::spankey_lap(
-                &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
-                spk_t0,
-            );
-            if let Some(t0) = t0 {
-                self.topn_ctr
-                    .build_ns
-                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
+            synth.push(v);
+        }
+        // Std-collections audit note: this views Vec is a per-claim
+        // allocation, but the combine morsel space is a FIXED 256
+        // partitions x dop-sized views — bounded per engagement,
+        // independent of data volume (accepted; a borrowed view cannot
+        // be retained across claims without lifetime erasure).
+        let views: Vec<SinkLocalView<'_>> = locals
+            .iter()
+            .zip(synth.iter())
+            .map(|(l, s)| SinkLocalView {
+                spilled: s,
+                runs: &l.runs,
+                remainder: match (&l.table, &l.part) {
+                    (Some(t), Some(p)) => Some(t.remainder_view(p)),
+                    _ => None,
+                },
+            })
+            .collect();
+        let t0 = self.topn.is_some().then(std::time::Instant::now);
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
+        let merged = sink_combine_bucket(
+            b,
+            self.key_words,
+            self.state_bytes,
+            &views,
+            &self.combines,
+        )?;
+        ::nodeagg::spankey::spankey_lap(
+            &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
+            spk_t0,
+        );
+        if let Some(t0) = t0 {
+            self.topn_ctr
+                .build_ns
+                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        Ok(merged)
+    }
+
+    /// The combine tail, shared by the flat body and the numa final stage:
+    /// freeze member filter → top-N selection → emit materialization →
+    /// retain. Single writer of bucket `b`'s output slots (the caller holds
+    /// the exactly-once claim/election).
+    fn combine_tail(
+        &self,
+        b: usize,
+        merged: LaneAggTable,
+        nlocals: usize,
+    ) -> PgResult<CombineOutcome> {
+        {
+            let locals_len = nlocals;
             // Freeze member filter (band-2a q18): a FROZEN engagement emits
             // ONLY set members — pre-freeze stragglers are undercounted
             // past the freeze point and must never leave the sink. Rows
@@ -902,7 +1364,7 @@ impl runtime::ParallelSink for AggSink {
                     fz.note_stragglers((merged.nrows() - rows.len()) as u64);
                     let buf =
                         ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
-                    self.retain_bucket(part, buf, locals.len())?;
+                    self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
             }
@@ -923,7 +1385,7 @@ impl runtime::ParallelSink for AggSink {
                     let selected = if topn_fault_decline() {
                         None // leg-R fault injection: the unreachable decline
                     } else {
-                        sink_topn_candidates(&merged, spec, part as u16)
+                        sink_topn_candidates(&merged, spec, b as u16)
                     };
                     let Some(mut cands) = selected else {
                         return Ok(CombineOutcome::TopnDeclined);
@@ -945,16 +1407,17 @@ impl runtime::ParallelSink for AggSink {
                             .expect("candidate row present in its own row set")
                             as u32;
                     }
-                    // SAFETY: partition `part` is claimed exactly once
-                    // (runtime contract); this is its single writer.
-                    unsafe { *self.topn_cands[part as usize].get() = cands };
+                    // SAFETY: bucket `b` is combined exactly once (runtime
+                    // claim / numa final election); this is its single
+                    // writer.
+                    unsafe { *self.topn_cands[b].get() = cands };
                     let t0 = std::time::Instant::now();
                     let buf = ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
                     self.topn_ctr
                         .emit_ns
                         .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
-                    self.retain_bucket(part, buf, locals.len())?;
+                    self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
                 // FullDrain: candidate row indices == full emit buf row
@@ -964,16 +1427,17 @@ impl runtime::ParallelSink for AggSink {
                     let selected = if topn_fault_decline() {
                         None // leg-R fault injection: FullDrain must degrade
                     } else {
-                        sink_topn_candidates(&merged, spec, part as u16)
+                        sink_topn_candidates(&merged, spec, b as u16)
                     };
                     match selected {
-                        // SAFETY: partition `part` is claimed exactly once
-                        // (runtime contract); this is its single writer.
+                        // SAFETY: bucket `b` is combined exactly once
+                        // (runtime claim / numa final election); this is its
+                        // single writer.
                         Some(c) => {
                             self.topn_ctr
                                 .cand_rows
                                 .fetch_add(c.len() as u64, Ordering::Relaxed);
-                            unsafe { *self.topn_cands[part as usize].get() = c }
+                            unsafe { *self.topn_cands[b].get() = c }
                         }
                         None => self.topn_degraded.store(true, Ordering::Release),
                     }
@@ -982,7 +1446,7 @@ impl runtime::ParallelSink for AggSink {
                         .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
-            let t0 = ctr.then(std::time::Instant::now);
+            let t0 = self.topn.is_some().then(std::time::Instant::now);
             let buf = sink_emit_bucket(&self.emit, &merged)?;
             if let Some(t0) = t0 {
                 self.topn_ctr
@@ -990,38 +1454,16 @@ impl runtime::ParallelSink for AggSink {
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
             }
-            self.retain_bucket(part, buf, locals.len())?;
+            self.retain_bucket(b as u64, buf, locals_len)?;
             Ok(CombineOutcome::Done)
-        }));
-        match r {
-            Ok(Ok(CombineOutcome::Done)) => {}
-            Ok(Ok(CombineOutcome::OverBudget)) => {
-                lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
-                self.refuse_budget();
-            }
-            Ok(Ok(CombineOutcome::TopnDeclined)) => {
-                // Winners-only refusal (§3.2 step 3): fail-closed, count-
-                // gated ≈0 (structurally unreachable on cbstore feeds —
-                // sort-b decision 6). The e2e leg-R gate greps this line.
-                lane_trace(
-                    "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
-                );
-                self.refuse_topn();
-            }
-            Ok(Err(e)) => self.fail(e),
-            Err(_panic) => {
-                self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
-            }
         }
     }
 
-    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
-    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
-    /// Locals drop with the plumbing right after.
-    fn finalize(&self, locals: &[AggSinkLocal]) {
-        if self.failed.load(Ordering::SeqCst) {
-            return;
-        }
+    /// Publish (the ParallelSink::finalize body): the adopted table (TRUE
+    /// TABLE ADOPT — the pointer hand-off) or the 256 emit buffers, moved
+    /// out (O(partitions), the §6 contract). Locals drop with the plumbing
+    /// right after.
+    fn finalize_publish(&self, locals: &[AggSinkLocal]) {
         // EA-on-morsels: merge the accept-phase instrument partials before
         // the Locals drop (O(workers) sums — the §6-of-m2-sinks minimal-
         // finalize ruling holds). Runs on the adopt path too — the
@@ -3570,6 +4012,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         ea_instr: Mutex::new(None),
         ea_timer: ea && super::runtime_instr::ea_timer(estate),
         ea_epoch: std::time::Instant::now(),
+        // Two-level socket-local combine (numa-combine item 1): kill switch
+        // + DOP threshold (default 96 — engages on the 48xl regime, never
+        // at mt16 defaults) + the all-byval gate (partial-run state blocks
+        // are copied verbatim across claims; byref blocks would dangle, and
+        // the byval whitelist is what makes half-regrouping bit-exact).
+        numa: (numa_combine_enabled() && dop >= numa_combine_dop_min() && !byref_states)
+            .then(NumaCombine::new),
     });
     engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink)
 }
@@ -4095,5 +4544,89 @@ mod topn_mode_tests {
         }
         // Unknown encodings decode fail-closed to FullDrain.
         assert_eq!(TopnMode::decode(97), TopnMode::FullDrain);
+    }
+}
+
+#[cfg(test)]
+mod numa_combine_tests {
+    use super::{NumaCombine, SINK_NBUCKETS};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// The credit/item law: 2×SINK_NBUCKETS pops (any mix of preferred
+    /// halves) own each (half, bucket) item EXACTLY once; every later pop
+    /// proves exhaustion (None). Serial form of the claims argument.
+    #[test]
+    fn pop_owns_every_item_exactly_once() {
+        let nc = NumaCombine::new();
+        let mut seen = vec![false; 2 * SINK_NBUCKETS];
+        for credit in 0..2 * SINK_NBUCKETS {
+            // Adversarial preference mix: alternate + skew.
+            let my = usize::from(credit % 3 == 0);
+            let (h, b) = nc.pop(my).expect("credits == items");
+            let slot = h * SINK_NBUCKETS + b;
+            assert!(!seen[slot], "item ({h},{b}) popped twice");
+            seen[slot] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "every item popped");
+        assert_eq!(nc.pop(0), None, "exhaustion proven");
+        assert_eq!(nc.pop(1), None);
+    }
+
+    /// Steering preference: with items available on both halves, a pop
+    /// serves its own half first; once the own half drains, it steals.
+    #[test]
+    fn pop_prefers_own_half_then_steals() {
+        let nc = NumaCombine::new();
+        for _ in 0..SINK_NBUCKETS {
+            let (h, _) = nc.pop(1).unwrap();
+            assert_eq!(h, 1, "own half first");
+        }
+        assert_eq!(nc.steer_hit.load(Ordering::Relaxed), SINK_NBUCKETS as u64);
+        // Half 1 drained: half-1 workers steal from half 0.
+        let (h, _) = nc.pop(1).unwrap();
+        assert_eq!(h, 0, "steal after own half drains");
+        assert_eq!(nc.steer_miss.load(Ordering::Relaxed), 1);
+    }
+
+    /// The concurrent claims argument end-to-end: N threads race pops and
+    /// the per-bucket 1→2 election; every item is owned once, every bucket
+    /// elects exactly one FINAL, and no thread ever waits (a None pop is
+    /// terminal for that credit).
+    #[test]
+    fn concurrent_pop_and_election() {
+        let nc = Arc::new(NumaCombine::new());
+        let nthreads = 8;
+        let credits = 2 * SINK_NBUCKETS / nthreads;
+        let mut handles = Vec::new();
+        for t in 0..nthreads {
+            let nc = Arc::clone(&nc);
+            handles.push(std::thread::spawn(move || {
+                let mut popped = Vec::new();
+                let mut finals = Vec::new();
+                for c in 0..credits {
+                    let my = usize::from((t + c) % 2 == 1);
+                    let (h, b) = nc.pop(my).expect("credits == items");
+                    popped.push((h, b));
+                    if nc.done[b].fetch_add(1, Ordering::AcqRel) + 1 == 2 {
+                        finals.push(b);
+                    }
+                }
+                (popped, finals)
+            }));
+        }
+        let mut all_popped = vec![0u32; 2 * SINK_NBUCKETS];
+        let mut all_finals = vec![0u32; SINK_NBUCKETS];
+        for h in handles {
+            let (popped, finals) = h.join().unwrap();
+            for (hh, b) in popped {
+                all_popped[hh * SINK_NBUCKETS + b] += 1;
+            }
+            for b in finals {
+                all_finals[b] += 1;
+            }
+        }
+        assert!(all_popped.iter().all(|&c| c == 1), "each item owned exactly once");
+        assert!(all_finals.iter().all(|&c| c == 1), "each bucket elects exactly one final");
     }
 }
