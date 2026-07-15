@@ -201,6 +201,24 @@ impl SortBatch {
 
 // ---- run reader + k-way merge ----------------------------------------------
 
+/// loadcommit C2a: non-blocking kernel readahead hint for a run file's
+/// upcoming window (pure hint — zero effect on the bytes read). Linux
+/// only; a no-op elsewhere.
+#[cfg(target_os = "linux")]
+fn fadvise_willneed(f: &std::fs::File, off: u64, len: u64) {
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        libc::posix_fadvise(
+            f.as_raw_fd(),
+            off as libc::off_t,
+            len as libc::off_t,
+            libc::POSIX_FADV_WILLNEED,
+        );
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
+
 struct RunReader {
     r: BufReader<std::fs::File>,
     key_w: usize,
@@ -208,6 +226,13 @@ struct RunReader {
     key: Vec<u8>,
     row: Vec<u8>,
     live: bool,
+    /// loadcommit C2a (PGRUST_PARALLEL_COPY_FILL_FADV): consumed bytes,
+    /// readahead window (0 = off), the consumption mark that re-arms the
+    /// advise, and the high-water offset already advised.
+    pos: u64,
+    fadv_win: u64,
+    fadv_mark: u64,
+    advised_to: u64,
 }
 
 impl RunReader {
@@ -219,9 +244,41 @@ impl RunReader {
             key: vec![0; key_w],
             row: Vec::new(),
             live: false,
+            pos: 0,
+            fadv_win: 0,
+            fadv_mark: 0,
+            advised_to: 0,
         };
         rr.advance()?;
         Ok(rr)
+    }
+
+    /// loadcommit C2a: arm the sliding readahead window and advise the
+    /// first stretch immediately (the open() above already consumed the
+    /// first entry, so `pos` is live).
+    fn set_fadvise(&mut self, win: u64) {
+        if win == 0 {
+            return;
+        }
+        self.fadv_win = win;
+        fadvise_willneed(self.r.get_ref(), self.pos, win);
+        self.advised_to = self.pos + win;
+        self.fadv_mark = self.pos + (1 << 20);
+    }
+
+    /// Slide the advised window ahead of consumption; re-armed every ~1 MB
+    /// consumed (one branch per row otherwise).
+    #[inline]
+    fn fadv_tick(&mut self) {
+        if self.fadv_win == 0 || self.pos < self.fadv_mark {
+            return;
+        }
+        let end = self.pos + self.fadv_win;
+        if end > self.advised_to {
+            fadvise_willneed(self.r.get_ref(), self.advised_to, end - self.advised_to);
+            self.advised_to = end;
+        }
+        self.fadv_mark = self.pos + (1 << 20);
     }
 
     fn advance(&mut self) -> PgResult<()> {
@@ -244,6 +301,8 @@ impl RunReader {
         self.row.resize(rowlen, 0);
         self.r.read_exact(&mut self.row).map_err(|e| io_err("run read", e))?;
         self.live = true;
+        self.pos += (self.key_w + 4 + rowlen) as u64;
+        self.fadv_tick();
         Ok(())
     }
 }
@@ -324,6 +383,13 @@ impl RunMerge {
     /// loadcommit C0: arm the per-row advance timer (default off).
     pub fn set_timed(&mut self, on: bool) {
         self.stats.timed = on;
+    }
+
+    /// loadcommit C2a: arm per-run sliding kernel readahead (0 = off).
+    pub fn set_fadvise(&mut self, win: u64) {
+        for rr in &mut self.readers {
+            rr.set_fadvise(win);
+        }
     }
 
     /// (advance seconds — 0.0 unless timed, run bytes consumed).
@@ -424,6 +490,13 @@ impl RunMergeV2 {
     /// loadcommit C0: arm the per-row advance timer (default off).
     pub fn set_timed(&mut self, on: bool) {
         self.stats.timed = on;
+    }
+
+    /// loadcommit C2a: arm per-run sliding kernel readahead (0 = off).
+    pub fn set_fadvise(&mut self, win: u64) {
+        for rr in &mut self.readers {
+            rr.set_fadvise(win);
+        }
     }
 
     /// (advance seconds — 0.0 unless timed, run bytes consumed).
@@ -674,6 +747,7 @@ mod tests {
     fn assert_v2_matches_v1(paths: &[std::path::PathBuf], kw: usize) {
         let mut v1 = RunMerge::open(paths, kw).unwrap();
         v1.set_timed(true);
+        v1.set_fadvise(1 << 20); // C2a hint path (no-op off-Linux)
         let (mut key, mut row) = (Vec::new(), Vec::new());
         let mut ref_arena: Vec<u8> = Vec::new();
         let mut ref_lens: Vec<u32> = Vec::new();
@@ -683,6 +757,7 @@ mod tests {
         }
         let mut v2 = RunMergeV2::open(paths, kw).unwrap();
         v2.set_timed(true);
+        v2.set_fadvise(1 << 20);
         let mut arena: Vec<u8> = Vec::new();
         let mut lens: Vec<u32> = Vec::new();
         while let Some(l) = v2.next_row_into(&mut arena).unwrap() {
