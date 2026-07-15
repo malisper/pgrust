@@ -152,6 +152,19 @@ pub(super) struct RuntimeDistinctShared {
     /// M3.5 spill arm: the engagement's spill set (None = spill disabled →
     /// budget crossings refuse exactly as before).
     spill_set: Option<Arc<::spillset::SpillSet>>,
+    /// LOCALITY CAP (distinct-sidecar-cap lane — the q36-radix medicine on
+    /// the DISTINCT-sidecar working set): Some(bytes) = a worker whose
+    /// per-group distinct sets hold >= cap bytes drains them through the
+    /// EXISTING spill-epoch machinery (256-partition contiguous value
+    /// records) and resets the sets, keeping every accept-side set probe
+    /// cache-resident; the combine's per-partition replay re-dedups
+    /// cross-epoch duplicates into cache-resident bucket tables. Resolved
+    /// once at engage: DOP>1 AND the spill arm is live (the epoch drain is
+    /// the pressure law's own machinery — a locality flush is just an early
+    /// epoch). None = today's behavior exactly (budget-crossing epochs
+    /// only). The pressure law itself is untouched: a real budget crossing
+    /// still spills (or refuses) through the same path.
+    locality_cap: Option<usize>,
     /// Spill observability (gate-record counters, the R4 line).
     spill_epochs: AtomicU64,
     spilled_bytes: AtomicU64,
@@ -898,6 +911,11 @@ struct PdAcceptSink<'a> {
     tmp: EcxtId,
     reset_tmp: bool,
     crossed: bool,
+    /// Locality-cap memo: the cap is armed on the engagement but THIS
+    /// Local's shape refused the epoch drain (not spill-eligible / arm
+    /// off) — stop re-probing per row; behavior degrades to today's
+    /// budget-only cadence exactly.
+    locality_denied: bool,
     /// EA-on-morsels row funnel (Some only under EXPLAIN ANALYZE): scanned
     /// tallied window-grain in accept_batch, survivors per emitted row.
     tally: Option<&'a mut EaRowTally>,
@@ -911,7 +929,14 @@ impl PdAcceptSink<'_> {
     /// values so accept continues bounded. `Ok(false)` = refused (arm off,
     /// or a shape/economics face we cannot spill exactly): the caller falls
     /// through to the phase-1 Crossed abort, fail-closed.
-    fn try_spill_epoch(&mut self) -> PgResult<bool> {
+    ///
+    /// `locality` = the flush was cap-triggered, not budget-triggered
+    /// (distinct-sidecar-cap lane): the group-table-dominated
+    /// worthwhileness gate is vacated — the cap on `spill_freeable_bytes`
+    /// IS the worthwhileness predicate (the flush releases exactly the
+    /// capped set memory by construction) — and a refusal is benign (the
+    /// caller keeps accepting under the budget law; never a crossing).
+    fn try_spill_epoch(&mut self, locality: bool) -> PgResult<bool> {
         // Every refusal below names its branch on the trace channel (the agg
         // arm's refuse(why) pattern — inc-3a followup: the battery -82184
         // fail-closed was invisible without a reason line).
@@ -934,7 +959,7 @@ impl PdAcceptSink<'_> {
         // deterministically refused legitimate value-dominated shapes (the
         // q9-class lockstep corpus; see the PdBuilder doc).
         let budget = self.shared.spec.worker_budget;
-        if pd.pd_spill_freeable_bytes() < budget / 4 {
+        if !locality && pd.pd_spill_freeable_bytes() < budget / 4 {
             trace_feed("runtime-distinct: spill refused (group-table-dominated crossing)");
             return Ok(false);
         }
@@ -958,6 +983,12 @@ impl PdAcceptSink<'_> {
         self.shared
             .spilled_bytes
             .fetch_add(file.spilled_bytes() - before, Ordering::Relaxed);
+        if locality {
+            trace_feed(&format!(
+                "runtime-distinct: locality cap engaged (cap={})",
+                self.shared.locality_cap.unwrap_or(0)
+            ));
+        }
         Ok(true)
     }
 }
@@ -975,8 +1006,23 @@ impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
         if self.reset_tmp {
             estate.reset_expr_context(self.tmp);
         }
-        if crossed && !self.try_spill_epoch()? {
-            self.crossed = true;
+        if crossed {
+            if !self.try_spill_epoch(false)? {
+                self.crossed = true;
+            }
+        } else if let Some(cap) = self.shared.locality_cap {
+            // Locality flush (distinct-sidecar-cap): bound the per-worker
+            // set working footprint at `cap` bytes through an EARLY spill
+            // epoch. A refusal (shape not spill-eligible) is memoized and
+            // benign — accept continues under the budget law exactly as
+            // today. One field load + compare per row when disarmed-by-shape
+            // or under the cap.
+            if !self.locality_denied
+                && self.local.pd.pd_spill_freeable_bytes() >= cap
+                && !self.try_spill_epoch(true)?
+            {
+                self.locality_denied = true;
+            }
         }
         Ok(SinkFeed::NeedMore)
     }
@@ -1073,6 +1119,7 @@ impl RuntimeDistinctShared {
                         tmp,
                         reset_tmp,
                         crossed: false,
+                        locality_denied: false,
                         tally: ea.then_some(&mut ipb.rows),
                     };
                     let fed = drain_pipeline(
@@ -1349,6 +1396,38 @@ fn ensure_hooks_registered() {
 fn distinct_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
+}
+
+/// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): unset/0 = OFF (the
+/// budget-epoch cadence exactly — the DEFAULT), N = working-set bound
+/// (floored at 64KB). Engagement is further gated at engage(): DOP>1 AND
+/// the spill arm live (the epoch drain is the spill machinery; a dead arm
+/// means no flush target, and a single Local has no duplicate-group tax to
+/// convert — the q36-radix DOP1 law).
+///
+/// MEASURED REFUSAL as a default (2026-07-14 q9/q10/q14 @100M mt16 cap
+/// ladder, notes/distinct-sidecar-cap.md): every cap point 2MB-32MB is
+/// +17..21% WORSE than off on q9/q10 (hot 0.79/0.93 -> 0.94-0.99/
+/// 1.09-1.13) and cap-FLAT — no knee. The distinct-sidecar working set is
+/// not a latency lever there: at matched memory the baseline never spills
+/// and its sets merge ONCE through the freeze partition law, while the
+/// locality regime adds epoch write + full replay re-probe for near-unique
+/// (group,value) pairs whose accept probes were not DRAM-bound enough to
+/// repay (the bandwidth study's instruction-parity reading). Outputs
+/// byte-MATCHED on all four cap arms at 100M — the mechanism is correct,
+/// just unprofitable; the env channel stays for shapes that may differ
+/// (C3/q36-radix measured-refusal precedent).
+fn distinct_locality_cap() -> Option<usize> {
+    static N: OnceLock<Option<usize>> = OnceLock::new();
+    *N.get_or_init(|| {
+        match std::env::var("PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            None | Some(0) => None,
+            Some(c) => Some(c.max(64 << 10)),
+        }
+    })
 }
 
 /// Runtime-sink per-Local budget (bytes) — the FULL chartered R3 envelope:
@@ -1763,6 +1842,13 @@ fn engage<'mcx>(
     } else {
         None
     };
+    // Locality cap (distinct-sidecar-cap lane): resolved once per
+    // engagement — DOP>1 with a live spill arm only (fn doc).
+    let locality_cap = if dop > 1 && spill_set.is_some() {
+        distinct_locality_cap()
+    } else {
+        None
+    };
 
     let payload = Arc::new(RuntimeDistinctShared {
         rt,
@@ -1789,6 +1875,7 @@ fn engage<'mcx>(
         crossed: AtomicBool::new(false),
         merged_bytes: AtomicUsize::new(0),
         spill_set,
+        locality_cap,
         spill_epochs: AtomicU64::new(0),
         spilled_bytes: AtomicU64::new(0),
         combine_splits: AtomicU64::new(0),
