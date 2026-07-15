@@ -365,3 +365,79 @@ fn tbm_iterator_wrapper() {
     it.end_iterate();
     assert!(it.exhausted());
 }
+
+/// bitmap-morsels: disjoint range windows over the frozen arrays visit
+/// exactly the shared iterator's result multiset (blockno, lossy, recheck,
+/// offsets) — window order is segmented (pages then chunks), content
+/// identical. Exercises exact pages, a lossy chunk expansion, and the
+/// window-boundary mid-chunk-vs-entry contract (windows split at ENTRY
+/// granularity, never inside a chunk).
+#[test]
+fn range_iterator_windows_cover_shared_content() {
+    let ctx = MemoryContext::new("t");
+    let mut tbm = TIDBitmap::new(ctx.mcx(), 1024 * 1024);
+    // Exact pages scattered around a lossy chunk region.
+    let mut tids = alloc::vec::Vec::new();
+    for blk in [3u32, 9, 700, 1200, 5000] {
+        tids.push(tid(blk, 1));
+        tids.push(tid(blk, 7));
+    }
+    tbm.add_tuples(&tids, false).unwrap();
+    // A lossy chunk: pages 256..261 marked whole-page.
+    for blk in 256u32..261 {
+        tbm.add_page(blk).unwrap();
+    }
+    let st = tbm.prepare_shared_iterate().unwrap();
+    let (npages, nchunks) = st.entry_counts();
+    let total = npages + nchunks;
+    assert!(nchunks >= 1, "expected a lossy chunk (got {nchunks})");
+
+    let collect = |res: TbmIterateResult<'_>| {
+        let mut offs = alloc::vec::Vec::new();
+        if !res.lossy {
+            let mut buf = [0 as OffsetNumber; TBM_MAX_TUPLES_PER_PAGE];
+            let n = res.extract_page_tuples(&mut buf);
+            offs.extend_from_slice(&buf[..n]);
+        }
+        (res.blockno, res.lossy, res.recheck, offs)
+    };
+
+    // Reference: the shared iterator's full walk.
+    let mut expected = alloc::vec::Vec::new();
+    {
+        let mut it = TbmSharedIterator::attach(alloc::sync::Arc::clone(&st));
+        while let Some(r) = it.next() {
+            expected.push(collect(r));
+        }
+    }
+    expected.sort();
+
+    // Range windows of width 2 over the segmented entry space.
+    let mut got = alloc::vec::Vec::new();
+    let mut start = 0u64;
+    while start < total {
+        let end = (start + 2).min(total);
+        let mut w = TbmRangeIterator::new(alloc::sync::Arc::clone(&st), start, end);
+        while let Some(r) = w.next() {
+            got.push(collect(r));
+        }
+        start = end;
+    }
+    got.sort();
+    assert_eq!(got, expected);
+
+    // And through the unified iterator's range arm.
+    let mut it = TbmIterator::range(TbmRangeIterator::new(
+        alloc::sync::Arc::clone(&st),
+        0,
+        total,
+    ));
+    assert!(!it.exhausted());
+    let mut n = 0;
+    while it.next(None).is_some() {
+        n += 1;
+    }
+    assert_eq!(n, expected.len());
+    it.end_iterate();
+    assert!(it.exhausted());
+}

@@ -37,6 +37,7 @@
 mod exprkey;
 mod runtime_agg;
 mod runtime_agg_sorted;
+mod runtime_bitmap;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
@@ -1344,6 +1345,20 @@ impl<'mcx> Operator<'mcx> for IndexOnlyScanEmit {
 /// Try to let the lane own a `BitmapHeapScan`. The caller must have already
 /// run the bitmap setup (the arm does, unconditionally, before this).
 #[inline]
+/// bitmap-morsels lane: the runtime bitmap-heap arm (plain Agg root over a
+/// serial-plan Bitmap Heap Scan, morselized claims over the frozen shared
+/// bitmap). Refusal falls through to the UNCHANGED serial paths (including
+/// the fused agg-over-bitmap batch drive) byte-identically; admission +
+/// refuse-set live in `runtime_bitmap`. Dispatched from procnode's agg_arm
+/// BEFORE the bitmap is built (the arm builds it once, leader-side).
+pub fn try_own_agg_over_bitmap_heap_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    b: &mut crate::procnode::BitmapHeapPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    runtime_bitmap::try_own_plain_agg_over_bitmap_runtime(agg, b, estate)
+}
+
 pub fn try_own_bitmap_heap_scan<'mcx>(
     bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
