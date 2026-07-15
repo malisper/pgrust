@@ -274,9 +274,37 @@ impl Ord for HeapEntry {
     }
 }
 
+/// Fill-phase decomposition accumulators (loadcommit C0). `t_advance`
+/// (run read+decode inside the merge) is only accumulated when `timed`
+/// (PGRUST_PARALLEL_COPY_FILL_SPLIT=1 via the copy driver) — two clock
+/// reads per row that are otherwise a single untaken branch. `bytes`
+/// (run bytes consumed: key + len prefix + row) is one add per row,
+/// always accumulated.
+#[derive(Default)]
+struct FillStats {
+    timed: bool,
+    t_advance: std::time::Duration,
+    bytes: u64,
+}
+
+impl FillStats {
+    #[inline]
+    fn advance(&mut self, rr: &mut RunReader) -> PgResult<()> {
+        if self.timed {
+            let t0 = std::time::Instant::now();
+            let r = rr.advance();
+            self.t_advance += t0.elapsed();
+            r
+        } else {
+            rr.advance()
+        }
+    }
+}
+
 pub struct RunMerge {
     readers: Vec<RunReader>,
     heap: BinaryHeap<HeapEntry>,
+    stats: FillStats,
 }
 
 impl RunMerge {
@@ -290,7 +318,17 @@ impl RunMerge {
             }
             readers.push(rr);
         }
-        Ok(RunMerge { readers, heap })
+        Ok(RunMerge { readers, heap, stats: FillStats::default() })
+    }
+
+    /// loadcommit C0: arm the per-row advance timer (default off).
+    pub fn set_timed(&mut self, on: bool) {
+        self.stats.timed = on;
+    }
+
+    /// (advance seconds — 0.0 unless timed, run bytes consumed).
+    pub fn fill_stats(&self) -> (f64, u64) {
+        (self.stats.t_advance.as_secs_f64(), self.stats.bytes)
     }
 
     /// Copy the next entry (global key order) into the caller's buffers.
@@ -302,11 +340,123 @@ impl RunMerge {
         key.extend_from_slice(&rr.key);
         row.clear();
         row.extend_from_slice(&rr.row);
-        rr.advance()?;
+        self.stats.bytes += (rr.key_w + 4 + rr.row.len()) as u64;
+        self.stats.advance(rr)?;
+        let rr = &self.readers[top.run];
         if rr.live {
             self.heap.push(HeapEntry { key: rr.key.clone(), run: top.run });
         }
         Ok(true)
+    }
+}
+
+// ---- loser-tree k-way merge (loadcommit C1, opt-in fill V2) -----------------
+
+/// Merge order shared by `RunMerge` (heap) and `RunMergeV2` (loser tree):
+/// live runs ascending by (key bytes, run index); exhausted runs rank
+/// last (mutually ordered by run index — deterministic, never emitted).
+/// Identical total order => identical emitted row sequence => the V2 fill
+/// is byte-identity-safe by construction (oracle:
+/// `v2_matches_heap_reference`).
+#[inline]
+fn v2_less(readers: &[RunReader], a: u32, b: u32) -> bool {
+    let ra = &readers[a as usize];
+    let rb = &readers[b as usize];
+    match (ra.live, rb.live) {
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => a < b,
+        (true, true) => (ra.key.as_slice(), a) < (rb.key.as_slice(), b),
+    }
+}
+
+/// loadcommit C1 (PGRUST_PARALLEL_COPY_FILL_V2=1, default OFF): loser-tree
+/// k-way merge replacing the BinaryHeap fill. Differences from `RunMerge`,
+/// none of them order-affecting:
+///   - zero per-row allocation (the heap clones the key `Vec` per row);
+///   - ~log2(k) key comparisons per row (heap: ~2*log2(k)), each against
+///     the reader-resident key (no copies);
+///   - rows are appended straight into the caller's batch arena (the heap
+///     path copies key+row into pump-local buffers first).
+pub struct RunMergeV2 {
+    readers: Vec<RunReader>,
+    /// Tournament tree over k = readers.len() leaves: internal node x in
+    /// 1..k holds the LOSER run index of the match played there; node x's
+    /// children are 2x and 2x+1; run i's leaf is node k+i. `winner` is the
+    /// current overall winner (u32::MAX when k == 0).
+    losers: Vec<u32>,
+    winner: u32,
+    stats: FillStats,
+}
+
+impl RunMergeV2 {
+    pub fn open(paths: &[std::path::PathBuf], key_w: usize) -> PgResult<RunMergeV2> {
+        let mut readers = Vec::with_capacity(paths.len());
+        for p in paths {
+            readers.push(RunReader::open(p, key_w)?);
+        }
+        let k = readers.len();
+        let mut losers = vec![u32::MAX; k.max(1)];
+        let winner = if k == 0 {
+            u32::MAX
+        } else {
+            Self::build(&readers, &mut losers, k, 1)
+        };
+        Ok(RunMergeV2 { readers, losers, winner, stats: FillStats::default() })
+    }
+
+    /// Play the tournament under node x, storing losers; returns the winner.
+    fn build(readers: &[RunReader], losers: &mut [u32], k: usize, x: usize) -> u32 {
+        if x >= k {
+            return (x - k) as u32;
+        }
+        let a = Self::build(readers, losers, k, 2 * x);
+        let b = Self::build(readers, losers, k, 2 * x + 1);
+        if v2_less(readers, a, b) {
+            losers[x] = b;
+            a
+        } else {
+            losers[x] = a;
+            b
+        }
+    }
+
+    /// loadcommit C0: arm the per-row advance timer (default off).
+    pub fn set_timed(&mut self, on: bool) {
+        self.stats.timed = on;
+    }
+
+    /// (advance seconds — 0.0 unless timed, run bytes consumed).
+    pub fn fill_stats(&self) -> (f64, u64) {
+        (self.stats.t_advance.as_secs_f64(), self.stats.bytes)
+    }
+
+    /// Append the next row (global key order) to `arena`; returns its
+    /// byte length, or None at end of merge.
+    pub fn next_row_into(&mut self, arena: &mut Vec<u8>) -> PgResult<Option<u32>> {
+        if self.winner == u32::MAX || !self.readers[self.winner as usize].live {
+            return Ok(None);
+        }
+        let w = self.winner as usize;
+        let k = self.readers.len();
+        {
+            let rr = &self.readers[w];
+            arena.extend_from_slice(&rr.row);
+            self.stats.bytes += (rr.key_w + 4 + rr.row.len()) as u64;
+        }
+        let len = self.readers[w].row.len() as u32;
+        self.stats.advance(&mut self.readers[w])?;
+        // Replay the path from run w's leaf to the root.
+        let mut cur = self.winner;
+        let mut node = (k + w) >> 1;
+        while node >= 1 {
+            if v2_less(&self.readers, self.losers[node], cur) {
+                std::mem::swap(&mut self.losers[node], &mut cur);
+            }
+            node >>= 1;
+        }
+        self.winner = cur;
+        Ok(Some(len))
     }
 }
 
@@ -463,6 +613,119 @@ mod tests {
         for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
             assert_eq!((g.0, g.1), (w.0, w.1), "key order diverged at row {i}");
             assert_eq!(g.2, w.2, "row payload diverged at row {i}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- loadcommit C1: the V2 fill oracle ---------------------------------
+
+    /// Spill `runs` sorted runs of `(i32, i64, text)` rows; `dup_keys`
+    /// collapses the key domain so exact key duplicates appear ACROSS runs
+    /// (the run-index tiebreak leg). Returns (paths, key_w).
+    fn spill_random_runs(
+        dir: &std::path::Path,
+        runs: usize,
+        rows_per_run: usize,
+        dup_keys: bool,
+        seed: u64,
+    ) -> (Vec<std::path::PathBuf>, usize) {
+        let codec = RowCodec::new(vec![ColType::I32, ColType::I64, ColType::Text]);
+        let keys = [(0u16, CbSortKeyKind::Int32), (1, CbSortKeyKind::Int64)];
+        let kw = fixed_key_width(&keys).unwrap();
+        let mut x: u64 = seed;
+        let mut step = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x
+        };
+        let mut keep = Vec::new();
+        let mut paths = Vec::new();
+        for r in 0..runs {
+            let mut batch = SortBatch::new(kw);
+            for i in 0..rows_per_run {
+                let (a, b) = if dup_keys {
+                    // 5x3 key domain: every key occurs in essentially every
+                    // run; payload still distinguishes provenance.
+                    ((step() % 5) as i32, (step() % 3) as i64)
+                } else {
+                    ((step() as i32) % 1000, step() as i64)
+                };
+                let vals = [
+                    Datum::from_i32(a),
+                    Datum::from_i64(b),
+                    text_datum(format!("r{r}/{i}").as_bytes(), &mut keep),
+                ];
+                let mut key = Vec::with_capacity(kw);
+                encode_sort_key(&keys, &vals, &mut key);
+                let mut img = Vec::new();
+                codec.serialize_row(&vals, &mut img).unwrap();
+                batch.push(&key, &img);
+            }
+            batch.sort();
+            let p = dir.join(format!("run-{r}"));
+            batch.spill_run(&p).unwrap();
+            paths.push(p);
+        }
+        (paths, kw)
+    }
+
+    /// Byte-stream both merges over the same runs; assert identical row
+    /// sequences (concatenated bytes AND per-row lens) and identical
+    /// run-bytes accounting. V1 (BinaryHeap) is the reference.
+    fn assert_v2_matches_v1(paths: &[std::path::PathBuf], kw: usize) {
+        let mut v1 = RunMerge::open(paths, kw).unwrap();
+        v1.set_timed(true);
+        let (mut key, mut row) = (Vec::new(), Vec::new());
+        let mut ref_arena: Vec<u8> = Vec::new();
+        let mut ref_lens: Vec<u32> = Vec::new();
+        while v1.next_entry(&mut key, &mut row).unwrap() {
+            ref_arena.extend_from_slice(&row);
+            ref_lens.push(row.len() as u32);
+        }
+        let mut v2 = RunMergeV2::open(paths, kw).unwrap();
+        v2.set_timed(true);
+        let mut arena: Vec<u8> = Vec::new();
+        let mut lens: Vec<u32> = Vec::new();
+        while let Some(l) = v2.next_row_into(&mut arena).unwrap() {
+            lens.push(l);
+        }
+        assert_eq!(lens, ref_lens, "V2 row lengths diverge from the heap reference");
+        assert_eq!(arena, ref_arena, "V2 row bytes diverge from the heap reference");
+        assert_eq!(v2.fill_stats().1, v1.fill_stats().1, "run-bytes accounting diverges");
+    }
+
+    #[test]
+    fn v2_matches_heap_reference() {
+        let dir = tmpdir("v2ref");
+        let (paths, kw) = spill_random_runs(&dir, 13, 700, false, 42);
+        assert_v2_matches_v1(&paths, kw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_matches_heap_reference_on_cross_run_key_ties() {
+        let dir = tmpdir("v2tie");
+        let (paths, kw) = spill_random_runs(&dir, 9, 400, true, 7);
+        assert_v2_matches_v1(&paths, kw);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_edges_empty_single_and_uneven_runs() {
+        // No runs at all.
+        let mut v2 = RunMergeV2::open(&[], 12).unwrap();
+        let mut arena = Vec::new();
+        assert!(v2.next_row_into(&mut arena).unwrap().is_none());
+        assert!(arena.is_empty());
+        // Single run (no internal tournament nodes).
+        let dir = tmpdir("v2edge");
+        let (paths, kw) = spill_random_runs(&dir, 1, 257, false, 3);
+        assert_v2_matches_v1(&paths, kw);
+        // Non-power-of-two run counts sweep the uneven-depth tree shapes.
+        for runs in [2usize, 3, 5, 6, 7] {
+            let d2 = tmpdir(&format!("v2edge{runs}"));
+            let (paths, kw) = spill_random_runs(&d2, runs, 100 + runs * 17, true, runs as u64);
+            assert_v2_matches_v1(&paths, kw);
+            let _ = std::fs::remove_dir_all(&d2);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
