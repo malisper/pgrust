@@ -99,6 +99,7 @@ use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 use ::types_tuple::MinimalTupleData;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_agg::ExitBump;
 use super::runtime_scan::{exprs_parallel_safe, CbstoreGranuleSource};
 use super::stats::{self, RefuseReason, ShapeClass};
@@ -1919,6 +1920,14 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeHjShared
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     let _exit = ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("hashjoin");
+    // F1 fail-closed accounting: a helper that cannot participate must NEVER
+    // vanish silently — every early exit below counts itself as a refusal
+    // (the leader's started==0 && refused>=launched probe is its fallback
+    // signal) and traces why.
     let Some(target) = payload.pcxt_shared.get() else {
         lane_trace("runtime-hashjoin: helper refused (no pcxt shared)");
         payload.refused.fetch_add(1, Ordering::SeqCst);
@@ -1945,7 +1954,23 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeHjShared
         Ok(()) => {}
         Err(e) => {
             if entered.get() {
+                // Budget refusals are NOT query errors (the leader falls
+                // back to the serial arm); the leader drops any recorded
+                // secondary errors on that path.
                 payload.fail(e);
+                // F1 liveness (the agg-arm wedge mechanism, closed here
+                // too): a helper that errored BEFORE joining the drive
+                // (build_worker_exec failure) has aborted the RG via
+                // fail() — but an aborted PINNED RG still needs a driver to
+                // run invalidate/finalize/complete, or the leader parks on
+                // its recheck cadence until the reap. Drive the closed
+                // generation to completion here (pure protocol cleanup,
+                // the drain_rg discipline); post-drive errors find it
+                // already complete and skip.
+                if rg.try_outcome().is_none() {
+                    rg.abort();
+                    let _ = payload.rt.drive_pinned(&mut local, &rg);
+                }
             } else {
                 lane_trace(&format!(
                     "runtime-hashjoin: helper bind refused: {}",
@@ -2099,49 +2124,75 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_hashjoin_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::HashJoin);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    // Done-repulls (the post-completion pull that exits via agg_is_done
+    // below) are not offers — see the scan arm's identical gate.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+    }
+    // M5-1 refusal funnel: every admission exit names its gate for the
+    // router's consolidated taxonomy (previously silent early returns).
+    fn refuse(reason: &'static str) {
+        router::tick_refused(ArmClass::HashJoin, reason);
+    }
 
     // --- Node shape: HashJoin over two lane-fusible cbstore SeqScans; a
     // fresh (untouched) join; phase-1 join types; subplan/param-free exprs.
     let crate::procnode::PlanStateNode::SeqScan(outer_ss) = &mut *hj.outer else {
+        refuse("outer-not-seqscan");
         return Ok(None);
     };
     let hash = &mut *hj.hash;
     let crate::procnode::PlanStateNode::SeqScan(inner_ss) = &mut *hash.child else {
+        refuse("inner-not-seqscan");
         return Ok(None);
     };
     if !shared_join_admissible(&hj.state, &hash.state) {
         stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("join-shape");
         return Ok(None);
     }
     if !::nodehashjoin::lane_join_untouched(&hj.state, &hash.state) {
+        refuse("join-touched");
         return Ok(None);
     }
     if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        refuse("partials-not-order-insensitive-exact");
         return Ok(None);
     }
     if !seq_scan_fusible(outer_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(outer_ss) {
+        refuse("outer-scan-not-fusible");
         return Ok(None);
     }
     if !seq_scan_fusible(inner_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(inner_ss) {
+        refuse("inner-scan-not-fusible");
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
+        refuse("instrumented-or-epq");
         return Ok(None);
     }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refuse("in-parallel-mode");
         return Ok(None);
     }
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refuse("params");
         return Ok(None);
     }
-    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(None) };
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refuse("no-plannedstmt");
+        return Ok(None);
+    };
     if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refuse("params");
         return Ok(None);
     }
     // Agg must be the plan root; its child the HashJoin; the join's children
@@ -2180,6 +2231,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         || !exprs_parallel_safe(join_plan.join.plan.qual.iter())?
         || !exprs_parallel_safe(join_plan.join.plan.targetlist.iter())?
     {
+        refuse("exprs-not-parallel-safe");
         return Ok(None);
     }
     if !estate
@@ -2187,6 +2239,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         .as_deref()
         .is_some_and(::types_snapshot::IsMVCCSnapshot)
     {
+        refuse("non-mvcc-snapshot");
         return Ok(None);
     }
     let policy = parallel::query_task_policy_probe();
@@ -2195,6 +2248,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         || policy.serializable
         || policy.pending_invalidations
     {
+        refuse("binder-policy");
         return Ok(None);
     }
 
@@ -2227,6 +2281,9 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         if !hj_spill_enabled() {
             lane_trace("runtime-hashjoin: REFUSED (estimated nbatch > 1) — serial arm");
             stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+            // M5-1 refusal funnel: the spill kill switch restores the
+            // phase-1 refusal — name the gate for the router taxonomy.
+            refuse("estimated-multi-batch");
             return Ok(None);
         }
         // Headroomed sizing (§5.3: round-0 splits should be rare): level-0
@@ -2248,6 +2305,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
                 "runtime-hashjoin: REFUSED (estimated batches {want} exceed the spill batch cap) — serial arm"
             ));
             stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+            refuse("spill-batch-cap");
             return Ok(None);
         }
         spill_batches = Some(want);
@@ -2258,14 +2316,17 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     let Some((outer_granules, outer_starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(outer_ss, estate)?
     else {
+        refuse("geometry");
         return Ok(None);
     };
     let Some((_inner_granules, inner_starts)) =
         ::nodeseqscan::seq_scan_cb_granule_geometry(inner_ss, estate)?
     else {
+        refuse("geometry");
         return Ok(None);
     };
     if outer_granules < min_granules().max(2 * dop as u64) {
+        refuse("tiny-input-floor");
         return Ok(None);
     }
     if ::nodeagg::agg_is_done(agg) {
@@ -2280,7 +2341,10 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             | ::types_nodes::JoinType::JOIN_RIGHT_ANTI
     );
 
-    engage(
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
+    let r = engage(
         agg,
         estate,
         rt,
@@ -2291,7 +2355,12 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         envelope,
         fill_inner,
         spill_batches,
-    )
+    )?;
+    router::tick(
+        ArmClass::HashJoin,
+        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2526,10 +2595,10 @@ fn engage_ceremony<'mcx>(
             }
         }
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets,
-        });
+        }, router::session_affinity_token());
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
@@ -2592,13 +2661,19 @@ fn engage_ceremony<'mcx>(
                     "runtime hash-join helpers exited before completing the join",
                 )));
             }
-            // LIVENESS REAP (inc-2c class, chartered for the new arms): a
-            // pinned RG is invisible to pool workers, so once every launched
-            // helper has exited without the RG completing, nobody will ever
-            // step it and the leader would park forever. Two consecutive
-            // sightings let a mid-settlement completion land first — belt
-            // only: an exit bump happens-after its drive's completion, and
-            // abort + drain on a completed RG are benign no-ops.
+            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
+            // arm class; the agg leg-4d wedge): a pinned RG is invisible to
+            // pool workers, so once every launched helper has exited
+            // without the RG completing, NOBODY will ever step it and the
+            // leader parks forever (the all-stopped probe above cannot see
+            // helpers that exited their drive but parked back to the pool).
+            // Reap: abort + drain the closed generation ourselves; the next
+            // try_wait surfaces Aborted and the existing error/budget/
+            // fallback handling below decides. Two consecutive sightings
+            // before reaping let a mid-settlement completion land first —
+            // belt only: a helper's exit bump happens-after its drive's
+            // completion, and abort + drive_pinned on a completed RG are
+            // benign no-ops.
             if payload.exited.load(Ordering::SeqCst) >= launched as usize {
                 if all_exited_seen && waiter.try_wait().is_none() {
                     lane_trace(
@@ -2623,8 +2698,11 @@ fn engage_ceremony<'mcx>(
                 all_exited_seen = true;
             }
             // A raised cancel disposition (statement_timeout /
-            // pg_cancel_backend) surfaces from the latch quantum (F1 defect
-            // layer 2b): abort + drain the RG, then propagate.
+            // pg_cancel_backend) surfaces from the latch quantum as an Err
+            // (F1 defect layer 2b): abort + drain the RG, then propagate —
+            // exactly the CFI branch above. Discarding it made this park
+            // loop uncancellable (the F1 chaos finding the quantum's
+            // contract documents; fixed at the M5-2 consolidation).
             if let Err(e) = parallel::wait_parallel_finish_quantum() {
                 rg.abort();
                 drain_rg(rt, &rg);
