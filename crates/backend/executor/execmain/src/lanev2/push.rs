@@ -274,10 +274,12 @@ pub(super) trait BatchEmit<'mcx> {
 /// the real breakers, which are structurally `NeedMore`). The capacity-one
 /// `RootAdapter` (the PG pull face) stays per-row by design.
 ///
-/// Byte-identity: the default impl is literally the per-row feed loop the
-/// operator ran before (same emit, same accept, same order); overrides must
-/// keep the same per-row delegation in the same order — dispatch granularity
-/// is the ONLY change.
+/// Byte-identity: the default impl is the per-row feed loop the operator ran
+/// before (same emit, same accept, same order), word-skipping positions the
+/// feed's `live_sel` snapshot proves emit-dead (a cleared bit = `emit`
+/// returns None with no observable effect, so the surviving feed stream is
+/// identical); overrides must keep the same per-row delegation in the same
+/// order — dispatch granularity and emit-dead skips are the ONLY changes.
 pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
     /// Feed staged rows `pos..n` through `emit` into the sink.
     fn accept_batch<E: BatchEmit<'mcx>>(
@@ -287,7 +289,14 @@ pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
         n: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
-        for i in pos..n {
+        // Word-skip the feed's qual-survivor snapshot (`live_sel`): a
+        // cleared bit answers `emit` with None and no observable effect, so
+        // skipping it is feed-stream-identical — the per-row emit ceremony
+        // collapses to one word test per 64 rows on selective quals (the
+        // q22 sort-feed lever, generalized; CFI cadence for skipped rows
+        // follows the page-level staging check, the topk-cut precedent).
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             if let Some(slot) = emit.emit(i, estate)? {
                 match self.accept(slot, estate)? {
                     SinkFeed::NeedMore => {}
@@ -299,8 +308,8 @@ pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 

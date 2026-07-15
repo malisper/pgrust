@@ -914,47 +914,74 @@ fn build_morsel_body(
                     break;
                 }
                 ::postgres_seams::check_for_interrupts::call()?;
-                for i in 0..n {
-                    let Some(slot_id) =
-                        ::nodeseqscan::seq_scan_batch_emit(inner_ss, estate, i)?
-                    else {
-                        continue;
-                    };
-                    match (&spill, router_guard.as_mut()) {
-                        (Some(sp), Some(guard)) => {
-                            shared_build_hash_tuple(hstate, estate, slot_id, |h, bytes| {
-                                let b = batch_of(h, sp.log2n);
-                                if b == 0 && !sp.batch0_demoted.load(Ordering::Relaxed) {
-                                    match local.push(h, bytes) {
-                                        Ok(()) => return Ok(()),
-                                        Err(BudgetExceeded) => {
-                                            // §5.2: demote at the crossing
-                                            // point; this row and later
-                                            // batch-0 rows go to the file.
-                                            sp.batch0_demoted.store(true, Ordering::SeqCst);
-                                            lane_trace(
-                                                "runtime-hashjoin: batch 0 crossed the envelope — demoted to a file batch",
-                                            );
+                // Emit-dead word skip over the staged qual bitmap (see the
+                // probe morsel): the surviving build stream is identical.
+                let skip = {
+                    let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                    ::nodeseqscan::seq_scan_batch_skip_sel(inner_ss).map(|s| {
+                        w[..s.len()].copy_from_slice(s);
+                        w
+                    })
+                };
+                // Walk error carrier: `Some(e)` = a real error (rethrown);
+                // `None` = the local build crossed its envelope (the loop's
+                // former `break`).
+                let walk = ::exectuples::for_each_live(
+                    skip.as_ref().map(|w| &w[..]),
+                    0,
+                    n,
+                    |i| -> Result<(), Option<Box<::types_error::PgError>>> {
+                        let Some(slot_id) =
+                            ::nodeseqscan::seq_scan_batch_emit(inner_ss, estate, i)
+                                .map_err(Some)?
+                        else {
+                            return Ok(());
+                        };
+                        match (&spill, router_guard.as_mut()) {
+                            (Some(sp), Some(guard)) => {
+                                shared_build_hash_tuple(hstate, estate, slot_id, |h, bytes| {
+                                    let b = batch_of(h, sp.log2n);
+                                    if b == 0 && !sp.batch0_demoted.load(Ordering::Relaxed) {
+                                        match local.push(h, bytes) {
+                                            Ok(()) => return Ok(()),
+                                            Err(BudgetExceeded) => {
+                                                // §5.2: demote at the crossing
+                                                // point; this row and later
+                                                // batch-0 rows go to the file.
+                                                sp.batch0_demoted.store(true, Ordering::SeqCst);
+                                                lane_trace(
+                                                    "runtime-hashjoin: batch 0 crossed the envelope — demoted to a file batch",
+                                                );
+                                            }
                                         }
                                     }
+                                    let router = guard.get_or_insert_with(|| {
+                                        BatchRouter::new(
+                                            &sp.set,
+                                            ::spillset::SpillSet::file_name("hj-in", 0, slot),
+                                            sp.nbatch,
+                                        )
+                                    });
+                                    router.put(b, h, bytes)
+                                })
+                                .map_err(Some)?;
+                            }
+                            _ => {
+                                if shared_build_accept(hstate, estate, slot_id, local)
+                                    .map_err(Some)?
+                                    .is_err()
+                                {
+                                    return Err(None);
                                 }
-                                let router = guard.get_or_insert_with(|| {
-                                    BatchRouter::new(
-                                        &sp.set,
-                                        ::spillset::SpillSet::file_name("hj-in", 0, slot),
-                                        sp.nbatch,
-                                    )
-                                });
-                                router.put(b, h, bytes)
-                            })?;
-                        }
-                        _ => {
-                            if shared_build_accept(hstate, estate, slot_id, local)?.is_err() {
-                                crossed = true;
-                                break;
                             }
                         }
-                    }
+                        Ok(())
+                    },
+                );
+                match walk {
+                    Ok(()) => {}
+                    Err(Some(e)) => return Err(e),
+                    Err(None) => crossed = true,
                 }
                 if crossed {
                     break;
@@ -1048,10 +1075,23 @@ fn probe_morsel_body(
                     break;
                 }
                 ::postgres_seams::check_for_interrupts::call()?;
-                for i in 0..n {
+                // Emit-dead word skip over the staged qual bitmap: a cleared
+                // skip-sel bit is a row `seq_scan_batch_emit` rejects with no
+                // observable effect (definitive even under requal), so the
+                // surviving probe stream is identical. Snapshot the words —
+                // the emit below re-borrows the scan mutably.
+                let skip = {
+                    let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                    ::nodeseqscan::seq_scan_batch_skip_sel(outer_ss).map(|s| {
+                        w[..s.len()].copy_from_slice(s);
+                        w
+                    })
+                };
+                let skip = skip.as_ref().map(|w| &w[..]);
+                ::exectuples::for_each_live(skip, 0, n, |i| -> PgResult<()> {
                     let Some(slot_id) = ::nodeseqscan::seq_scan_batch_emit(outer_ss, estate, i)?
                     else {
-                        continue;
+                        return Ok(());
                     };
                     match (&spill, &frozen, router_guard.as_mut()) {
                         (Some(sp), Some(fp), Some(guard)) => {
@@ -1096,7 +1136,8 @@ fn probe_morsel_body(
                             )?;
                         }
                     }
-                }
+                    Ok(())
+                })?;
             }
             // Frozen-before-read for the leaf probe sets.
             if let Some(mut guard) = router_guard {
