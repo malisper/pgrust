@@ -225,7 +225,7 @@ struct GatherScratch {
 /// Dict-coded view of one staged window column: u32 codes into the
 /// per-row-group dictionary of decoded text Datums, plus the STABLE
 /// DICTIONARY IDENTITY key (`epoch` = row-group index; dict content per RG
-/// is immutable and the scan pins its `Rc<Part>`, so the key is stable
+/// is immutable and the scan pins its `Arc<Part>`, so the key is stable
 /// across rescans). Slices live until the granule's next decode of a
 /// different (rg, granule) key — granule-long, covering every window staged
 /// from it.
@@ -396,7 +396,7 @@ struct CondState {
 
 pub struct CbScanDescData<'mcx> {
     pub rs_base: TableScanDescData<'mcx>,
-    part: Option<std::rc::Rc<Part>>,
+    part: Option<std::sync::Arc<Part>>,
     coltypes: Vec<ColType>,
     needed: Vec<bool>,
     needed_idx: Vec<u16>,
@@ -608,7 +608,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     #[doc(hidden)]
     pub fn new_with_part(
         rs_base: TableScanDescData<'mcx>,
-        part: Option<std::rc::Rc<Part>>,
+        part: Option<std::sync::Arc<Part>>,
         coltypes: Vec<ColType>,
     ) -> CbScanDescData<'mcx> {
         let ncols = coltypes.len();
@@ -714,7 +714,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// pipelines): (total granules, row-group start prefix sums — the hard
     /// morsel boundaries, since row group == dictionary epoch). None = empty
     /// table. The starts vector is returned BY VALUE (nrgs+1 u64s) so the
-    /// Send+Sync morsel source never carries the thread-bound Rc<Part>.
+    /// Send+Sync morsel source never carries an Rc-era thread-bound Part (now Arc-shared; kept by value for interface stability).
     pub fn granule_geometry(&self) -> Option<(u64, Vec<u64>)> {
         let part = self.part.as_ref()?;
         Some((part.total_granules(), part.granule_starts().to_vec()))
@@ -2008,7 +2008,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             if soa.dict_want(c) {
                 // Zero-decode dict lane: codes + RG dictionary + epoch =
                 // rg index (dict content per RG is immutable and the scan
-                // pins its Rc<Part>, so the epoch key is stable across
+                // pins its Arc<Part>, so the epoch key is stable across
                 // rescans). Values/isnull cells stay stale per the
                 // set_dict_lane contract.
                 // v7 stitch: local -> part-global codes for this (rg, col),
@@ -2255,7 +2255,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// the chunk is dict-encoded and already decoded (codes-only decode):
     /// per-row u32 codes into the per-row-group dictionary of decoded text
     /// Datums, plus the identity key. `epoch` = row-group index — dict
-    /// content per RG is immutable and the scan pins its `Rc<Part>`, so the
+    /// content per RG is immutable and the scan pins its `Arc<Part>`, so the
     /// key is stable across rescans and per-code memos keyed on it stay
     /// valid for the life of the scan. `sorted` = codes are byte-rank order
     /// (CHUNK_FLAG_DICT_SORTED), gating dict-code range predicates.
