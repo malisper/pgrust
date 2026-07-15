@@ -155,6 +155,10 @@ pub(super) struct RuntimeScanShared {
     /// ROWS mode and on every non-EA path: zero clock reads.
     ea_timer: bool,
     ea_epoch: std::time::Instant,
+    /// bitmap-morsels: the frozen shared bitmap + mode mapping — Some ONLY
+    /// on the bitmap arm's engagements (runtime_bitmap.rs); None on every
+    /// scan-arm path (dead-when-off). Set at construction, read per claim.
+    bitmap: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
 }
 
 impl RuntimeScanShared {
@@ -215,6 +219,10 @@ enum DriveMode {
     /// fold plan's export exactly like Fold (`agg_runtime_partial_
     /// admissible` requires zero residuals — fail-closed).
     PerRowFold,
+    /// bitmap-morsels: the runtime bitmap arm's per-row drive — the node's
+    /// UNCHANGED serial fetch+recheck+qual+projection path over a claimed
+    /// window of the frozen shared bitmap (runtime_bitmap::drain_claim).
+    BitmapPerRow,
 }
 
 struct WorkerExec {
@@ -361,6 +369,33 @@ impl RuntimeScanShared {
                         )));
                     };
                     let aps = &mut **aps;
+                    // bitmap-morsels arm: claimed-window drive over the
+                    // frozen shared bitmap (runtime_bitmap::drain_claim —
+                    // the node's unchanged serial per-row path), then the
+                    // same cumulative partial export as the scan arm below
+                    // (EA never admits this arm: no instr block).
+                    if let crate::procnode::PlanStateNode::BitmapHeapScan(b) = &mut aps.outer {
+                        let Some(ctx) = self.bitmap.as_ref() else {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime bitmap morsel without a bitmap context",
+                            )));
+                        };
+                        super::runtime_bitmap::drain_claim(
+                            ctx,
+                            &mut aps.agg,
+                            b,
+                            estate,
+                            range.start..range.end,
+                        )?;
+                        let slot = worker - self.pins_base;
+                        let mut g =
+                            self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                        return agg_runtime_export_partial_into(
+                            &aps.agg,
+                            g.get_or_insert_with(Default::default),
+                        );
+                    }
                     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut aps.outer else {
                         return Err(Box::new(PgError::new(
                             ERROR,
@@ -424,6 +459,11 @@ impl RuntimeScanShared {
                             }
                             DriveMode::PerRowFold => {
                                 perrow_fold_drain(&mut aps.agg, ss, estate)?
+                            }
+                            // Dispatched to runtime_bitmap::drain_claim
+                            // before this match (BitmapHeapScan outer).
+                            DriveMode::BitmapPerRow => {
+                                unreachable!("bitmap arm returns above")
                             }
                         }
                         seg = seg_end;
@@ -1009,6 +1049,20 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                         )));
                     };
                     let aps = &mut **aps;
+                    // bitmap-morsels arm: no staging, no fold plan — the
+                    // per-claim drive is the node's serial row path; the
+                    // leader proved admission on the identical plan.
+                    if matches!(&aps.outer, crate::procnode::PlanStateNode::BitmapHeapScan(_)) {
+                        if payload.bitmap.is_none() {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime bitmap worker without a bitmap context",
+                            )));
+                        }
+                        super::runtime_bitmap::worker_shape_check(&aps.agg)?;
+                        ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
+                        return Ok(DriveMode::BitmapPerRow);
+                    }
                     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut aps.outer else {
                         return Err(Box::new(PgError::new(
                             ERROR,
@@ -1124,6 +1178,11 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                         // Derived above from a failed Fold prefix arm, never
                         // by drive_mode.
                         DriveMode::PerRowFold => unreachable!("derived mode"),
+                        // BitmapHeapScan outers early-return above, never
+                        // reaching drive_mode.
+                        DriveMode::BitmapPerRow => {
+                            unreachable!("bitmap arm returns above")
+                        }
                     }
                     ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
                     Ok(mode)
@@ -1911,6 +1970,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         rg_starts,
         ea_scan_node,
         ea_timer,
+        None,
     )?;
     router::tick(
         class,
@@ -1938,7 +1998,7 @@ fn ea_refused<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn engage<'mcx>(
+pub(super) fn engage<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
@@ -1949,6 +2009,7 @@ fn engage<'mcx>(
     rg_starts: Option<Arc<Vec<u64>>>,
     ea_scan_node: Option<i32>,
     ea_timer: bool,
+    bitmap_ctx: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -1986,6 +2047,7 @@ fn engage<'mcx>(
         }),
         ea_timer,
         ea_epoch: std::time::Instant::now(),
+        bitmap: bitmap_ctx,
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (cbstore).
