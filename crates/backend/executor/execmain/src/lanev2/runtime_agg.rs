@@ -630,24 +630,54 @@ impl runtime::ParallelSink for AggSink {
             }
             let b = part as usize;
             let state_words = self.state_bytes / 8;
-            let row_bytes = sink_spill_row_bytes(self.key_words, state_words);
+            let canon = self.key_words == 0;
+            // Canonical (bytes-mode) spill faces carry variable-width
+            // records: divide by the MINIMUM record width (over-counts
+            // rows — the safe direction, the distinct record's discipline).
+            let row_bytes = if canon {
+                ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+            } else {
+                sink_spill_row_bytes(self.key_words, state_words)
+            };
             // Pre-build size check (M3.5 §3), from the DIRECTORY + in-memory
             // counts only — nothing is read from disk before this decision.
             // Rows over-count duplicates across faces, so the check is
-            // conservative in the safe direction.
+            // conservative in the safe direction. Canonical shapes add a
+            // KEY-CONTENT term (their merged table owns the byte images):
+            // spill part lengths and run key-byte ranges are O(1) directory
+            // reads; the remainder's share is approximated by its table's
+            // retained memory scaled to the bucket's row fraction —
+            // over-counting (entry+state overhead included), never under.
             let mut rows = 0usize;
+            let mut content = 0usize;
             for l in locals {
                 if let Some(sp) = &l.spill {
-                    rows += sp.file.part_len(b as u32) as usize / row_bytes;
+                    let blen = sp.file.part_len(b as u32) as usize;
+                    rows += blen / row_bytes;
+                    if canon {
+                        content += blen;
+                    }
                 }
                 for r in &l.runs {
                     rows += (r.starts[b + 1] - r.starts[b]) as usize;
+                    if canon {
+                        content += (r.key_offs[r.starts[b + 1] as usize]
+                            - r.key_offs[r.starts[b] as usize])
+                            as usize;
+                    }
                 }
-                if let (Some(_), Some(p)) = (&l.table, &l.part) {
-                    rows += (p.starts[b + 1] - p.starts[b]) as usize;
+                if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                    let brows = (p.starts[b + 1] - p.starts[b]) as usize;
+                    rows += brows;
+                    if canon && brows > 0 {
+                        let n = t.table().nrows().max(1);
+                        content += t.mem_used() / n * brows;
+                    }
                 }
             }
-            if est_table_bytes(self, rows) > self.budget {
+            if est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
+                > self.budget
+            {
                 // inc-2b: recursive combine-split by deeper hash bits —
                 // stream every face through sub-bucket routing files and
                 // combine each sub-partition bounded; depth cap → refusal.
@@ -719,7 +749,11 @@ impl runtime::ParallelSink for AggSink {
                     if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
                         let bytes = r.read_to_end()?;
                         r.close()?;
-                        v.push(sink_run_from_spill(b, self.key_words, state_words, &bytes)?);
+                        v.push(if canon {
+                            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+                        } else {
+                            sink_run_from_spill(b, self.key_words, state_words, &bytes)?
+                        });
                     }
                     if b == SINK_NULL_BUCKET {
                         for nb in &sp.null_blocks {
@@ -1242,7 +1276,25 @@ impl SubRouter {
         if records.is_empty() {
             return Ok(());
         }
-        sink_route_records(records, self.key_words, self.state_words, self.depth, &mut self.bufs)?;
+        if self.key_words == 0 {
+            // Canonical bytes records route by their STORED hash (the C2
+            // record carries it — value-derived, deeper bits of the same
+            // hash partition groups exactly).
+            ::nodeagg::sink::sink_route_records_bytes(
+                records,
+                self.state_words,
+                self.depth,
+                &mut self.bufs,
+            )?;
+        } else {
+            sink_route_records(
+                records,
+                self.key_words,
+                self.state_words,
+                self.depth,
+                &mut self.bufs,
+            )?;
+        }
         self.staged += records.len();
         if self.staged >= SPLIT_FLUSH_BYTES {
             self.flush()?;
@@ -1296,6 +1348,66 @@ pub(super) fn stream_part_rows(
         }
         filled += n;
         let usable = filled / row_bytes * row_bytes;
+        if usable > 0 {
+            f(&buf[..usable])?;
+            buf.copy_within(usable..filled, 0);
+            filled -= usable;
+        }
+    }
+}
+
+/// Stream one spilled partition of CANONICAL BYTES records in RECORD-ALIGNED
+/// chunks: each record self-describes its length (`rec_len` at offset 0,
+/// 8-aligned), so the reader carries partial tails across reads (the
+/// distinct sink's `stream_part_dst` discipline) and hands `f` only whole
+/// records. Fail-closed on a torn tail or a malformed header.
+fn stream_part_records(
+    file: &::spillset::SpillFile,
+    part: u32,
+    state_words: usize,
+    mut f: impl FnMut(&[u8]) -> PgResult<()>,
+) -> PgResult<()> {
+    let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let min_rec = ::nodeagg::sink::sink_canon_min_record_bytes(state_words);
+    let mut buf = vec![0u8; SPLIT_READ_CHUNK.max(min_rec * 2)];
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            // One record larger than the buffer: grow (bounded by the
+            // record's own rec_len validation downstream).
+            buf.resize(buf.len() * 2, 0);
+        }
+        let n = rd.read(&mut buf[filled..])?;
+        if n == 0 {
+            rd.close()?;
+            if filled != 0 {
+                return Err(::nodeagg::sink::sink_shape_error(
+                    "torn canonical spill record (partial tail) in split stream",
+                ));
+            }
+            return Ok(());
+        }
+        filled += n;
+        // Usable prefix: whole records only (each header read fail-closed).
+        let mut usable = 0usize;
+        while filled - usable >= 8 {
+            let rec_len = u64::from_ne_bytes(
+                buf[usable..usable + 8].try_into().expect("8 bytes"),
+            ) as usize;
+            // Sanity cap: a legit record is a ≤1GB varlena + states; a
+            // larger rec_len is corruption — fail closed before the grow
+            // loop could chase it.
+            if rec_len < min_rec || rec_len % 8 != 0 || rec_len > (1usize << 31) {
+                return Err(::nodeagg::sink::sink_shape_error(
+                    "malformed canonical spill record header in split stream",
+                ));
+            }
+            if filled - usable < rec_len {
+                break;
+            }
+            usable += rec_len;
+        }
         if usable > 0 {
             f(&buf[..usable])?;
             buf.copy_within(usable..filled, 0);
@@ -1394,6 +1506,7 @@ fn split_views_and_emit(
     sink.combine_splits.fetch_add(1, Ordering::Relaxed);
     sink.split_depth_max.fetch_max(1, Ordering::Relaxed);
     let state_words = sink.state_bytes / 8;
+    let canon = sink.key_words == 0;
     let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
     let mut router = SubRouter::new(sink, set, b, 1);
     let mut scratch: Vec<u8> = Vec::new();
@@ -1401,6 +1514,8 @@ fn split_views_and_emit(
     for l in locals {
         for r in &l.runs {
             scratch.clear();
+            // Bytes-mode runs serialize the canonical record (the encode
+            // dispatches on the run's own key_words).
             sink_run_spill_bucket(r, b, &mut scratch);
             router.absorb(&scratch)?;
             if b == SINK_NULL_BUCKET {
@@ -1411,16 +1526,30 @@ fn split_views_and_emit(
         }
         if let (Some(t), Some(p)) = (&l.table, &l.part) {
             scratch.clear();
-            sink_remainder_spill_bucket(t.table(), p, b, &mut scratch);
+            if canon {
+                ::nodeagg::sink::sink_remainder_spill_bucket_canon(
+                    &t.remainder_view(p),
+                    b,
+                    &mut scratch,
+                )?;
+            } else {
+                sink_remainder_spill_bucket(t.table(), p, b, &mut scratch);
+            }
             router.absorb(&scratch)?;
-            if b == SINK_NULL_BUCKET {
+            if b == SINK_NULL_BUCKET && !canon {
                 if let Some(nb) = sink_remainder_null_block(t.table()) {
                     null_runs.push(sink_null_only_run(sink.key_words, state_words, nb));
                 }
             }
         }
         if let Some(sp) = &l.spill {
-            stream_part_rows(&sp.file, b as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            if canon {
+                stream_part_records(&sp.file, b as u32, state_words, |chunk| {
+                    router.absorb(chunk)
+                })?;
+            } else {
+                stream_part_rows(&sp.file, b as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            }
             if b == SINK_NULL_BUCKET {
                 for nb in &sp.null_blocks {
                     null_runs.push(sink_null_only_run(sink.key_words, state_words, nb.clone()));
@@ -1461,21 +1590,36 @@ fn split_subparts_and_emit(
     sel: &mut Option<SplitSel<'_>>,
 ) -> PgResult<SplitOutcome> {
     let state_words = sink.state_bytes / 8;
-    let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
+    let canon = sink.key_words == 0;
+    let row_bytes = if canon {
+        ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+    } else {
+        sink_spill_row_bytes(sink.key_words, state_words)
+    };
     for s in 0..SINK_NBUCKETS {
         let blen = file.part_len(s as u32) as usize;
         if blen == 0 {
             continue;
         }
         let rows = blen / row_bytes;
-        if est_table_bytes(sink, rows) > sink.budget {
+        // Canonical sub-partitions add the content term (blen bounds the
+        // key content — headers/states over-count, the safe direction).
+        let est = est_table_bytes(sink, rows)
+            .saturating_add(if canon { blen.saturating_mul(3) / 2 } else { 0 });
+        if est > sink.budget {
             if depth + 1 > spill_split_depth_cap() {
                 return Ok(SplitOutcome::DepthCap);
             }
             sink.combine_splits.fetch_add(1, Ordering::Relaxed);
             sink.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
             let mut router = SubRouter::new(sink, set, b, depth + 1);
-            stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            if canon {
+                stream_part_records(file, s as u32, state_words, |chunk| {
+                    router.absorb(chunk)
+                })?;
+            } else {
+                stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            }
             router.flush()?;
             match split_subparts_and_emit(sink, b, set, &router.file, depth + 1, acc, sel)? {
                 SplitOutcome::Done => {}
@@ -1487,7 +1631,11 @@ fn split_subparts_and_emit(
         let Some(mut rd) = file.read_part(ctx.mcx(), s as u32)? else { continue };
         let bytes = rd.read_to_end()?;
         rd.close()?;
-        let synth = sink_run_from_spill(b, sink.key_words, state_words, &bytes)?;
+        let synth = if canon {
+            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+        } else {
+            sink_run_from_spill(b, sink.key_words, state_words, &bytes)?
+        };
         let view = [SinkLocalView {
             spilled: core::slice::from_ref(&synth),
             runs: &[],
@@ -2240,13 +2388,18 @@ fn arm_sink_build<'mcx>(
             (
                 None,
                 Some(lshape),
-                Some(super::exprkey::SinkXkKind::Multi { dict_input_att }),
+                Some(super::exprkey::SinkXkKind::Multi { dict_input_att: _ }),
             ) => {
-                // The q19 class: the serial build's own mk arm sequence
-                // under the sink cap; every divergence from the leader's
-                // snapshot is an error (combine + emit plans were built off
-                // that exact shape).
-                if ::nodeagg::agg_hash_compact_try_arm_mk(agg, false, dict_input_att)
+                // The q19/q40 class: the serial build's own mk arm sequence
+                // under the sink cap (CaseDict shapes arm their two Intern
+                // atts through the shared pool — the serial feed's exact
+                // call); every divergence from the leader's snapshot is an
+                // error (combine + emit plans were built off that exact
+                // shape).
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Multi kind carries intern atts");
+                if ::nodeagg::agg_hash_compact_try_arm_mk_multi(agg, false, &atts[..n_atts])
                     != ::nodeagg::CompactArm::Armed
                 {
                     return Err(shape_err("worker mk arm refused under the sink cap"));
@@ -2488,20 +2641,28 @@ fn runtime_agg_text_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_AGG_TEXT2` kill switch (default ON): TWO-text canonical
+/// shapes (the CaseDict q40 class — canon-sink car 1: length-prefixed
+/// canonical tails). Off, two-Intern shapes refuse the sink exactly as
+/// before the car (serial CaseDict arm unchanged — the attribution channel).
+fn runtime_agg_text2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// The sink's packed-shape component gates (leader admission): non-nullable
-/// image; at most ONE Intern (text) component (the canonical tail decodes
-/// unambiguously only then); any non-Int component class (Intern/Numeric)
-/// rides the text-car kill switch.
+/// image; at most TWO Intern (text) components — ONE decodes as the raw
+/// canonical tail (the historical image), TWO ride the length-prefixed
+/// multi-tail encoding (canon-sink car 1, `PGRUST_RUNTIME_AGG_TEXT2`); any
+/// non-Int component class (Intern/Numeric) rides the text-car kill switch.
 fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
     if shape.nullable {
         return false;
     }
-    let n_intern = shape
-        .comps
-        .iter()
-        .filter(|c| c.kind == ::nodeagg::MkCompKind::Intern)
-        .count();
-    if n_intern > 1 {
+    let n_intern = shape.n_intern();
+    if n_intern > 2 || (n_intern == 2 && !runtime_agg_text2_enabled()) {
         return false;
     }
     let all_int = shape
@@ -2674,20 +2835,26 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 red = Some(shape);
                 mk = None;
             }
-            super::exprkey::SinkXkKind::Multi { dict_input_att } => {
-                // q19 class: packed multi-key over the projected scan
-                // (int/numeric components + at most one text through the
-                // canonical-bytes lane). Cap-aware admission probe — no
-                // table armed on the leader (see the Mk comment below).
-                // Spill-armed admission: mk_admit_n vacates its estimate
-                // refusal only for word-keyed (Intern-free) shapes.
+            super::exprkey::SinkXkKind::Multi { dict_input_att: _ } => {
+                // q19/q40 class: packed multi-key over the projected scan
+                // (int/numeric components + one or two texts through the
+                // canonical-bytes lane; CaseDict shapes carry TWO Intern
+                // atts — the bare text Var and the computed key). Cap-aware
+                // admission probe — no table armed on the leader (see the
+                // Mk comment below). Spill-armed admission: mk_admit_n
+                // vacates its estimate refusal for word-keyed shapes and —
+                // under the canonical spill record's kill switch — for
+                // Intern-bearing shapes too (canon-sink car 3).
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Multi kind carries intern atts");
                 ::nodeagg::sink::agg_sink_set_cap_spill(
                     agg,
                     sink_cap_for(state_bytes, budget, ngroups_limit),
                     agg_spill_enabled(),
                 );
                 let admitted =
-                    ::nodeagg::agg_hash_compact_mk_admit(agg, false, dict_input_att);
+                    ::nodeagg::agg_hash_compact_mk_admit_multi(agg, false, &atts[..n_atts]);
                 ::nodeagg::sink::agg_sink_clear_cap(agg);
                 let Ok((shape, _numgroups)) = admitted else {
                     refuse(estate, ea, node_id, "expr-key mk admission");
@@ -2809,11 +2976,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
-    // Spill-armed word-keyed engagements vacate the estimate half of the
-    // gate on BOTH sides (the workers arm under `sink_spill_ok`) — the
-    // predicate below must match the worker flag exactly (F1 invariant).
-    let spill_admission =
-        agg_spill_enabled() && !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
+    // Spill-armed engagements vacate the estimate half of the gate on BOTH
+    // sides (the workers arm under `sink_spill_ok`) — the predicate below
+    // must match the worker flag exactly (F1 invariant). Canonical
+    // (Intern-bearing) shapes spill through the C2 bytes record since
+    // canon-sink car 3; its kill switch restores the historical exclusion.
+    let spill_admission = agg_spill_enabled()
+        && (!mk.as_ref().is_some_and(|s| s.intern_comp().is_some())
+            || ::nodeagg::sink::sink_spill_canon_enabled());
     if !::nodeagg::agg_hash_compact_sink_admissible(
         agg,
         sink_cap_for(state_bytes, budget, ngroups_limit),
@@ -2903,12 +3073,17 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // refusal→engagement charter); PGRUST_RUNTIME_AGG_SPILL=0 restores the
     // phase-1 refusal exactly. SpillSet creation is leader-side (fd
     // substrate guaranteed); a creation failure fail-closes to refusal.
-    // COMPOSITION GATE (train-13, m35 x c3): the spill record contract is
-    // word-mode fixed-width (key_words x 8 + states) — canonical
-    // bytes-keyed shapes (key_words == 0) cannot round-trip their key
-    // bytes through it, so text-bearing engagements keep the phase-1
-    // budget refusal (fail-closed; the C2 spill record is a later car).
-    let spill_set = if agg_spill_enabled() && !canon {
+    // COMPOSITION GATE LIFTED (canon-sink car 3): canonical bytes-keyed
+    // shapes (key_words == 0) spill through the C2 BYTES record
+    // (variable-width, length-prefixed content, hash-carrying — the
+    // distinct sink's record-v2 pattern on the AGG side), so text-bearing
+    // engagements ride the same pressure/flush/split laws as word keys.
+    // PGRUST_RUNTIME_AGG_SPILL_CANON=0 restores the train-13 exclusion
+    // (canonical engagements keep the phase-1 budget refusal). The
+    // predicate MUST stay equal to `spill_admission` above (F1 invariant).
+    let spill_set = if agg_spill_enabled()
+        && (!canon || ::nodeagg::sink::sink_spill_canon_enabled())
+    {
         match ::spillset::SpillSet::create() {
             Ok(s) => Some(s),
             Err(_) => {
@@ -2950,6 +3125,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 && b <= ::nodeagg::sink::SINK_FREEZE_MAX_BOUND
                 && mk.as_ref().is_some_and(|s| {
                     !s.nullable
+                        // Belt: the freeze snapshot parses a SINGLE raw text
+                        // tail; two-intern shapes never reach the Mk drain
+                        // (ExprKey-only), but fail closed if that changes.
+                        && s.n_intern() <= 1
                         && s.comps.iter().all(|c| {
                             !matches!(c.kind, ::nodeagg::MkCompKind::Numeric { .. })
                         })

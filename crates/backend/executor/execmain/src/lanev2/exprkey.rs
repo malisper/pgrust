@@ -1963,17 +1963,36 @@ impl ExprKeyState {
         match &self.kind {
             ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(SinkXkKind::Single),
             ExprKeyKind::Reduced { shape, .. } => Some(SinkXkKind::Reduced(shape.clone())),
-            ExprKeyKind::Multi(m) if m.case_dict.is_some() => {
-                // CaseDict shapes are serial-only: their packed image
-                // carries TWO Intern components, and the sink's canonical
-                // bytes decode exactly ONE text tail.
-                None
-            }
             ExprKeyKind::Multi(m) => {
+                // CaseDict shapes (TWO Intern components) are sink-admissible
+                // since canon-sink car 1: the canonical image length-prefixes
+                // multi-text tails, so the two tails decode unambiguously.
+                // The leader's `mk_shape_sink_ok` still owns the component
+                // gates (and the two-text kill switch).
                 Some(SinkXkKind::Multi { dict_input_att: m.dict_input_att })
             }
             ExprKeyKind::Dict { .. } => None,
         }
+    }
+
+    /// The Multi kind's Intern (text) component input atts, in the packed
+    /// arm's order — the `agg_hash_compact_{mk_admit,try_arm_mk}_multi`
+    /// argument (mirrors `exprkey_build_fold_feed`'s own arm sequence:
+    /// the bare text Var first, then the CaseDict computed key). Empty for
+    /// intern-free Multi shapes; `None` for non-Multi kinds.
+    pub(super) fn sink_mk_intern_atts(&self) -> Option<([u16; 2], usize)> {
+        let ExprKeyKind::Multi(m) = &self.kind else { return None };
+        let mut atts = [0u16; 2];
+        let mut n = 0usize;
+        if let Some(a) = m.dict_input_att {
+            atts[n] = a;
+            n += 1;
+        }
+        if m.case_dict.is_some() {
+            atts[n] = self.key_out;
+            n += 1;
+        }
+        Some((atts, n))
     }
 
     /// Sticky per-build refusal flag (arith trap / range guard).
