@@ -23,6 +23,7 @@
 # Optional environment:
 #   PGRUST_BIN   pgrust postgres binary (default: target/release/postgres)
 #   PGRUST_PSQL  psql client to use     (default: auto-detect, see above)
+#   PGRUST_WAL_LEVEL  server wal_level override (for logical-decoding tests)
 #   PGPORT       postmaster port        (default: 55434)
 #   OUTDIR       output directory        (default: a temp dir)
 #   STOP_AFTER   stop after this test name (debugging)
@@ -132,10 +133,16 @@ echo "running pgrust --initdb ..." >&2
 
 # --- boot the pgrust server ----------------------------------------------------
 ulimit -s 65520 2>/dev/null || true
-"$PGRUST_BIN" -D "$DATADIR" -F -c listen_addresses= -k "$SOCK" -p "$PORT" \
-    -c io_method=sync -c max_stack_depth=60000 \
-    -c checkpoint_timeout=3600 -c autovacuum=on \
-    -c max_logical_replication_workers=0 >"$PM_LOG" 2>&1 &
+server_args=(
+    -D "$DATADIR" -F -c listen_addresses= -k "$SOCK" -p "$PORT"
+    -c io_method=sync -c max_stack_depth=60000
+    -c checkpoint_timeout=3600 -c autovacuum=on
+    -c max_logical_replication_workers=0
+)
+if [ -n "${PGRUST_WAL_LEVEL:-}" ]; then
+    server_args+=(-c "wal_level=$PGRUST_WAL_LEVEL")
+fi
+"$PGRUST_BIN" "${server_args[@]}" >"$PM_LOG" 2>&1 &
 pm=$!
 
 cleanup() {

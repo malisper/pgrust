@@ -1,0 +1,19 @@
+-- This anti-join shape over an unnested bigint array with ordinality must
+-- return the first missing value without crashing.
+CREATE TABLE anti_join_target (
+  id bigint PRIMARY KEY
+);
+SELECT candidate
+FROM unnest(ARRAY[1]::bigint[]) WITH ORDINALITY AS t(candidate, rank)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM anti_join_target
+  WHERE id = t.candidate
+)
+ORDER BY rank
+LIMIT 1;
+ candidate 
+-----------
+         1
+(1 row)
+
