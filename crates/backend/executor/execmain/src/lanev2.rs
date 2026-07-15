@@ -2507,6 +2507,17 @@ fn zerocnt_enabled() -> bool {
     })
 }
 
+/// Footer-stat fold-drive meta arm kill switch (whole-RG / whole-granule
+/// aggregate answers under an all-rows-passing zone proof): default ON under
+/// the lane; `PGRUST_LANE_V2_FOLDMETA=0`/`off` disarms (byte-identity-safe
+/// A/B — declined units stage and fold from decoded lanes identically).
+fn foldmeta_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_FOLDMETA").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Zero-count qual transition filter: under `col <> 0` / `col = 0` a
 /// transition is footer-answerable iff it is a COUNT (rows arrives
 /// qual-adjusted: N - zeros or zeros) or a SUM/AVG-family fold over the QUAL
@@ -2643,6 +2654,149 @@ fn try_meta_agg_answer<'mcx>(
     Ok(Some(::nodeagg::exec_agg_meta(agg, estate, res.rows, &res.minmax, &res.sums)?))
 }
 
+/// Footer-stat fold-drive meta arm (the footer-stat consumption lane): the
+/// PLAIN fold drive's whole-RG / whole-granule metadata shortcut. Once per
+/// serial drain, admission proves (a) every admitted transition is
+/// footer-answerable over an all-rows-passing unit (`lanefold::
+/// agg_meta_cols` — count / plain int min-max / affine divk==1 int sum-avg
+/// via the v4 RG footer sums / bare int8 sum-avg / plain octet_length
+/// sum-avg via the v7 length stats), and (b) the scan's zone quals ARE the
+/// whole qual with the staged bitmap owning it (`seq_scan_agg_meta_qual_ok`)
+/// — so a unit whose every zone verdict is AllPass folds from footer
+/// metadata with NO decode. Guarded plans re-prove each unit against the
+/// unit's exact footer (min, max) — a failed interval declines the unit,
+/// which then stages and fold/demotes exactly as before (check_guards'
+/// value domain over an all-passing unit IS the footer extreme pair).
+struct FoldMetaArm {
+    mm_cols: Vec<u16>,
+    sum_cols: Vec<u16>,
+    len_cols: Vec<u16>,
+    // (col, lo, hi) integer guard intervals; col is always in mm_cols.
+    guards: Vec<(u16, i64, i64)>,
+    mm: Vec<(i64, i64)>,
+    sums: Vec<i128>,
+    lens: Vec<i64>,
+    rg_units: u64,
+    granule_units: u64,
+}
+
+fn plain_fold_meta_arm<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<FoldMetaArm> {
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) || !foldmeta_enabled() {
+        return None;
+    }
+    // RG xmin visibility folds against the scan snapshot: MVCC only (the
+    // metaagg arm's own gate).
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        return None;
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    let cols = ::lanefold::agg_meta_cols(plan)?;
+    if !::nodeseqscan::seq_scan_agg_meta_qual_ok(ss) {
+        return None;
+    }
+    let guards: Vec<(u16, i64, i64)> =
+        plan.guards.iter().map(|g| (g.col, g.lo, g.hi)).collect();
+    let (nmm, nsum, nlen) = (cols.mm_cols.len(), cols.sum_cols.len(), cols.len_cols.len());
+    Some(FoldMetaArm {
+        mm_cols: cols.mm_cols,
+        sum_cols: cols.sum_cols,
+        len_cols: cols.len_cols,
+        guards,
+        mm: vec![(0, 0); nmm],
+        sums: vec![0; nsum],
+        lens: vec![0; nlen],
+        rg_units: 0,
+        granule_units: 0,
+    })
+}
+
+/// Consume 0+ whole scan units (row groups / granules) from footer metadata
+/// at the drain loop's head: peek; while the upcoming unit is wholly visible
+/// and every zone qual is AllPass over its footer extremes (all rows pass
+/// the whole qual — the arm's admission proved the zone quals mirror it),
+/// re-prove any guard intervals, fold the transitions from (rows, footer
+/// (min, max), footer sums, Σ octet_length) and skip the unit's decode
+/// entirely. Stops at a mid-granule position, a non-meta unit, a failed
+/// guard re-proof, or scan end. Byte-identity: the unit's rows are exactly
+/// the rows next_window would stage, all selected (AllPass bitmap) and
+/// non-fallback (nothing staged); `fold_agg_meta`'s state mutations are
+/// `fold_batch`'s own over that selection (see its bit-equality contract).
+fn agg_plain_fold_meta_units<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    arm: &mut FoldMetaArm,
+) -> PgResult<()> {
+    loop {
+        let step = ::nodeseqscan::seq_scan_agg_meta_peek(
+            ss,
+            estate,
+            &arm.mm_cols,
+            &arm.sum_cols,
+            &arm.len_cols,
+            &mut arm.mm,
+            &mut arm.sums,
+            &mut arm.lens,
+        )?;
+        let rows = match step {
+            ::tableam::CbAggMetaStep::MetaRg { rows } => rows as i64,
+            ::tableam::CbAggMetaStep::MetaGranule { rows } => rows as i64,
+            _ => return Ok(()),
+        };
+        // Data-level guard re-proof against the unit's exact footer
+        // (min, max): a failed interval declines — the unit stages and the
+        // per-batch check_guards/demote machinery owns it byte-identically.
+        let guards_ok = arm.guards.iter().all(|&(col, lo, hi)| {
+            let i = arm.mm_cols.iter().position(|&c| c == col).expect("guard col staged");
+            lo <= arm.mm[i].0 && arm.mm[i].1 <= hi
+        });
+        if !guards_ok {
+            return Ok(());
+        }
+        debug_assert!(rows > 0);
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("meta arm proved the plan");
+        let aggcx = ::nodeagg::agg_aggcontext(agg);
+        let pos = |cols: &[u16], c: u16| {
+            cols.iter().position(|&x| x == c).expect("meta arm staged every column")
+        };
+        // SAFETY: pergroup contract identical to the drain's fold_batch call
+        // (once-allocated single-group pergroup array, live AvgAccum
+        // transarray, NULL-or-live Int128AggState with `aggcx` its
+        // aggcontext); admissibility proven by agg_meta_cols in
+        // plain_fold_meta_arm; guarded intervals re-proved above.
+        unsafe {
+            ::lanefold::fold_agg_meta(
+                plan,
+                rows,
+                |c| arm.mm[pos(&arm.mm_cols, c)],
+                |c| arm.sums[pos(&arm.sum_cols, c)],
+                |c| arm.lens[pos(&arm.len_cols, c)],
+                ::nodeagg::agg_plain_pergroup_base(agg),
+                aggcx,
+            )?;
+        }
+        match step {
+            ::tableam::CbAggMetaStep::MetaRg { .. } => {
+                ::nodeseqscan::seq_scan_agg_meta_consume_rg(ss);
+                arm.rg_units += 1;
+            }
+            _ => {
+                ::nodeseqscan::seq_scan_agg_meta_consume_granule(ss);
+                arm.granule_units += 1;
+            }
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+    }
+}
+
 /// Feed for the plain fold drive: per staged page batch, compose the row
 /// selection and fold the admitted transitions whole-batch with
 /// `lanefold::fold_batch` into the single pergroup array. One
@@ -2733,7 +2887,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
+    // Footer-stat meta arm (serial drains only; the EA tally is a runtime
+    // channel and runtime claims are granule-ranged, which the scan-side
+    // peek refuses anyway — the structural gate keeps the funnel exact).
+    let mut meta_arm = if EA { None } else { plain_fold_meta_arm(agg, ss, estate) };
     loop {
+        if let Some(arm) = meta_arm.as_mut() {
+            agg_plain_fold_meta_units(agg, ss, estate, arm)?;
+        }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
             // End of scan: drop the scan slot's buffer pin (SeqScanSource
@@ -2890,6 +3051,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                     aggcx,
                 )?;
             }
+        }
+    }
+    if let Some(arm) = &meta_arm {
+        if arm.rg_units + arm.granule_units > 0 {
+            lane_trace(&format!(
+                "plainagg footer meta-fold: {} rgs + {} granules",
+                arm.rg_units, arm.granule_units
+            ));
         }
     }
     Ok(())
