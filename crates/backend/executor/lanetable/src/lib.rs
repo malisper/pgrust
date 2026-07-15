@@ -98,7 +98,7 @@ fn probe_lookahead(shape_default: usize) -> usize {
 }
 
 /// Long-key arena projection channel (stringhash2 re-charter inc-0, see
-/// [`LaneAggTable::reserve_arena`]): default ON;
+/// [`LaneAggTable::reserve_arena_projection`]): default ON;
 /// `PGRUST_LANE_V2_ARENA_RESERVE=0` falls back to `Vec`'s amortized
 /// doubling (the same-pod A/B arm). Read once per process.
 #[inline]
@@ -501,7 +501,7 @@ pub struct LaneAggTable {
     null_row: Option<usize>,
     total_members: usize,
     /// Construction-time `capacity_hint` (expected member count), kept for
-    /// the long-key arena projection in [`Self::reserve_arena`].
+    /// the long-key arena projection in [`Self::reserve_arena_projection`].
     expected_members: usize,
     /// Two-level conversion gate. `with_config` tables convert at
     /// [`TWO_LEVEL_THRESHOLD`]; [`Self::with_flat_capacity`] tables never
@@ -1558,7 +1558,7 @@ impl LaneAggTable {
         } else {
             let off = self.arena.len() as u64;
             if self.arena.len() + key.len() > self.arena.capacity() {
-                self.reserve_arena(key.len());
+                self.reserve_arena_projection(key.len());
             }
             self.arena.extend_from_slice(key);
             off
@@ -1601,7 +1601,7 @@ impl LaneAggTable {
     /// projection (same-pod A/B channel).
     #[cold]
     #[inline(never)]
-    fn reserve_arena(&mut self, add: usize) {
+    fn reserve_arena_projection(&mut self, add: usize) {
         if !arena_reserve_enabled() {
             return; // extend_from_slice falls back to Vec doubling
         }
