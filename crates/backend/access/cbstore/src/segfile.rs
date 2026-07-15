@@ -171,6 +171,17 @@ pub struct SegMap {
     maplen: usize,
 }
 
+// SAFETY (coldio lane, process-shared mappings): the mapping is PROT_READ
+// over sealed segment bytes for its whole lifetime — no &mut access exists
+// (bytes() hands out &[u8] only) and Drop's munmap runs exactly once when
+// the last holder goes away. Concurrent readers on any thread are the mmap
+// contract itself.
+// [partdir lane note: this impl block is textually identical to coldio's
+// inc-1 hunk (branch coldio @ 3eaa1d556) so the train merge reconciles to
+// one copy; their SHARED_MAPS registry is theirs alone.]
+unsafe impl Send for SegMap {}
+unsafe impl Sync for SegMap {}
+
 impl SegMap {
     pub fn open(base: &str) -> PgResult<Option<SegMap>> {
         let mut files: Vec<File> = Vec::new();
