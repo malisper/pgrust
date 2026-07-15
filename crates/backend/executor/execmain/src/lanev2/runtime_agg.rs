@@ -101,6 +101,117 @@ pub(super) struct AggSinkLocal {
     /// work) from shared-line contention (stall-only inflation).
     probe_flushes: u64,
     probe_flush_bytes: u64,
+    /// α-gate controller state (cachebudget lane; see the module section by
+    /// [`alpha_gate_floor`]). Thread-owned like everything else here; rides
+    /// the Local through SEAL for the AGGSEAL observability sums only —
+    /// behavior after seal never reads it.
+    alpha: AlphaGate,
+}
+
+/// Per-Local α-gate state (Müller ADAPTIVE): a pure function of this
+/// worker's OWN fold/flush stream — no shared reads, no shared writes.
+#[derive(Default)]
+struct AlphaGate {
+    /// Rows folded into the table since the last flush (any kind).
+    window_rows: u64,
+    /// Demoted: this Local's flush threshold is the sink's `alpha_floor`.
+    demoted: bool,
+    /// Rows folded since the demote (the re-probe budget's clock).
+    rows_since_demote: u64,
+    /// Observability (AGGSEAL marker sums): demote / collapse-restore /
+    /// hysteresis re-probe transition counts.
+    demotes: u64,
+    restores: u64,
+    reprobes: u64,
+}
+
+/// Summed α-gate transition counts for an AGGSEAL marker line.
+fn alpha_sums(locals: &[AggSinkLocal]) -> (u64, u64, u64) {
+    locals.iter().fold((0, 0, 0), |(d, r, p), l| {
+        (d + l.alpha.demotes, r + l.alpha.restores, p + l.alpha.reprobes)
+    })
+}
+
+impl AlphaGate {
+    /// The effective flush threshold for this Local right now. Undemoted
+    /// (or controller unarmed): exactly `sink.cap` — the incumbent cadence.
+    #[inline]
+    fn cap(&self, sink: &AggSink) -> u32 {
+        match sink.alpha_floor {
+            Some(f) if self.demoted => f,
+            _ => sink.cap,
+        }
+    }
+
+    /// Fold accounting, once per staged batch (survivor count — rows that
+    /// actually probed the table; qual-dropped rows never touch it).
+    #[inline]
+    fn absorbed(&mut self, rows: usize) {
+        self.window_rows += rows as u64;
+        if self.demoted {
+            self.rows_since_demote += rows as u64;
+        }
+    }
+
+    /// A CAP flush fired with `entries` distinct groups in the run:
+    /// adjudicate α = window_rows / entries against α₀ and transition.
+    #[inline]
+    fn on_cap_flush(&mut self, entries: usize, sink: &AggSink) {
+        self.adjudicate(
+            entries,
+            sink.alpha_floor,
+            sink.cap,
+            agg_alpha0_x100(),
+            agg_alpha_reprobe_mult(),
+        );
+    }
+
+    /// The controller core (env-free for the unit tests; the knobs arrive
+    /// as arguments).
+    fn adjudicate(
+        &mut self,
+        entries: usize,
+        alpha_floor: Option<u32>,
+        full_cap: u32,
+        alpha0_x100: u64,
+        reprobe_mult: u64,
+    ) {
+        let rows = self.window_rows;
+        self.window_rows = 0;
+        if alpha_floor.is_none() || entries == 0 {
+            return;
+        }
+        // α ≥ α₀ ⟺ rows × 100 ≥ entries × α₀×100 (integer, no fp).
+        let collapse_ok = rows.saturating_mul(100) >= (entries as u64) * alpha0_x100;
+        if self.demoted {
+            if collapse_ok {
+                // The floor window itself collapsed — the phase changed;
+                // give the table its budget share back immediately.
+                self.demoted = false;
+                self.restores += 1;
+            } else if reprobe_mult > 0
+                && self.rows_since_demote >= reprobe_mult.saturating_mul(full_cap as u64)
+            {
+                // Müller hysteresis: one full-cap probe window — the NEXT
+                // fill re-adjudicates (and re-demotes if α is still low,
+                // restarting this clock).
+                self.demoted = false;
+                self.reprobes += 1;
+            }
+        } else if !collapse_ok {
+            self.demoted = true;
+            self.rows_since_demote = 0;
+            self.demotes += 1;
+        }
+    }
+
+    /// A non-cap (budget-pressure) flush emptied the table: the fill window
+    /// restarts; no adjudication (the window didn't reach the threshold —
+    /// its α is not the fill-window statistic the controller is defined on).
+    #[inline]
+    fn on_pressure_flush(&mut self) {
+        self.window_rows = 0;
+    }
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -137,6 +248,10 @@ struct AggSink {
     /// must match — the emit plan's MultiComp columns came from it).
     mk: Option<::nodeagg::MkShape>,
     cap: u32,
+    /// α-gate demoted flush threshold (cachebudget lane; [`alpha_gate_floor`]
+    /// — Some arms the per-Local controller, None = structurally off for
+    /// this engagement). Fixed at construction like `cap`.
+    alpha_floor: Option<u32>,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
     key_words: usize,
@@ -863,8 +978,9 @@ impl runtime::ParallelSink for AggSink {
             // parallelizes; its A/B evidence line.
             let flushes: u64 = locals.iter().map(|l| l.probe_flushes).sum();
             let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(locals);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}",
                 locals.len(),
                 t0.elapsed().as_micros()
             );
@@ -1587,8 +1703,9 @@ impl runtime::SealedParallelSink for AggSink {
                 sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
             let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(sealed);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us=0",
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0",
                 sealed.len(),
             );
         }
@@ -2472,10 +2589,13 @@ fn sink_drain_range<'mcx>(
     };
     loop {
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
-        // held across this point), budget-check table + runs.
+        // held across this point), budget-check table + runs. The threshold
+        // is the α-gate's per-Local effective cap (== sink.cap until a fill
+        // window adjudicates a demote — flush WHEN only, never results).
         if let Some((run, intern_reset)) =
-            ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
+            ::nodeagg::sink::agg_sink_flush_if_due(agg, local.alpha.cap(sink))
         {
+            local.alpha.on_cap_flush(run.nrows(), sink);
             local.probe_flushes += 1;
             local.probe_flush_bytes += run.bytes() as u64;
             local.run_bytes += run.bytes();
@@ -2549,6 +2669,7 @@ fn sink_drain_range<'mcx>(
                     if let Some((run, intern_reset)) =
                         ::nodeagg::sink::agg_sink_flush_now(agg)
                     {
+                        local.alpha.on_pressure_flush();
                         local.probe_flushes += 1;
                         local.probe_flush_bytes += run.bytes() as u64;
                         local.run_bytes += run.bytes();
@@ -2611,6 +2732,9 @@ fn sink_drain_range<'mcx>(
             )? {
                 return Err(AcceptFail::Budget);
             }
+            // α numerator (batched route contract as the EA count below:
+            // idxs holds this batch's survivors — the rows that probed).
+            local.alpha.absorbed(idxs.len());
             if ea {
                 // The sink-legal expr-key route is the batched one (per-row
                 // routing errors above): idxs holds this batch's survivors.
@@ -2642,6 +2766,10 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
+            // α numerator staging: scan_mk_batch's survivor-less PREWHERE
+            // window returns BEFORE survivor collection — pre-clear so the
+            // count below can never re-read a previous batch's survivors.
+            mks.rows.clear();
             if !super::scan_mk_batch(
                 agg,
                 ss,
@@ -2665,10 +2793,17 @@ fn sink_drain_range<'mcx>(
                     "worker mk feed demoted mid-build",
                 )));
             }
+            // α numerator: the mk feed's own survivor collection (freeze-
+            // filtered rows never probed — they were dropped before the
+            // pack; survivor-less windows counted 0 via the pre-clear).
+            local.alpha.absorbed(mks.rows.len());
             continue;
         }
         let ScanK2Scratch { rows, keys, knull, .. } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
+        // α numerator: both K2 legs (dict window and plain keys) fold
+        // exactly these survivors.
+        local.alpha.absorbed(rows.len());
         if ea {
             local.instr.rows.survived += rows.len() as u64;
         }
@@ -3403,6 +3538,100 @@ fn agg_dopcap_anchor() -> u32 {
     })
 }
 
+// ---------------------------------------------------------------------------
+// α-gate controller (cachebudget lane — Müller et al., SIGMOD 2015 "Cache-
+// Efficient Aggregation: Hashing Is Sorting", the ADAPTIVE controller,
+// adapted to the sink's bounded-Local flush discipline).
+//
+// The DOP-aware budget (agg192-contention) sizes every worker's locality
+// table as a share of the shared cache — but a share is only WORTH holding
+// when the table actually collapses rows (repeat keys fold in place). When
+// a worker's key stream is near-unique, the table is a WRITE BUFFER: every
+// row inserts, nothing folds, and its cache residency buys nothing while
+// still charging the aggregate SLC budget the other workers' tables need
+// (the window-B root cause, at any width). Müller's runtime signal
+// adjudicates this per worker with zero synchronization: at table FILL
+// compute the collapse ratio α = rows-absorbed / distinct-entries-flushed.
+// α below α₀ ⇒ demote that worker's flush threshold to the byte-denominated
+// L2 floor (agg192's — the flush scatter shares the private cache, so the
+// floor is bytes at the shape's entry estimate) and flush through; α at or
+// above α₀ ⇒ keep the budget share. Re-probe after ~10× the full table's
+// row volume (Müller's hysteresis: one full-cap fill window re-adjudicates
+// a phase change; a wrong re-probe costs footprint only — the retained
+// capacity means no realloc).
+//
+// Byte-identity law: the effective cap changes only WHEN flushes happen —
+// flush cadence is semantics-free (the dopcap precedent: runs merge
+// first-seen, W≡F≡D and selection totality are cadence-independent) — and
+// the controller is per-Local thread-owned state with ZERO new shared
+// writes (the condcache lesson). Demotion requires a first full-cap FILL,
+// so engagements that never fill (low NDV, adopt/pass-through shapes) are
+// byte-and-time identical by construction. Freeze-armed (LIMIT-k) shapes
+// are structurally excluded at engagement (bounded output, nothing to buy).
+// Kill switch: PGRUST_RUNTIME_AGG_ALPHAGATE=0.
+// ---------------------------------------------------------------------------
+
+fn agg_alphagate_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// α₀ ×100 (`PGRUST_RUNTIME_AGG_ALPHA0`, default 2.0): the collapse ratio
+/// below which a filled table is adjudicated a write buffer. 2.0 = each
+/// entry absorbed under two rows across the fill window — the table at most
+/// halved its flush volume, too little to earn a shared-cache share (the
+/// demote trades ≤2× sequential flush bytes for the aggregate footprint).
+/// The 48xl calibration ladder sweeps this knob (composes with agg192's
+/// DOPCAP_ANCHOR ladder).
+fn agg_alpha0_x100() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA0")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|a| a.is_finite() && *a >= 1.0 && *a <= 100.0)
+            .map(|a| (a * 100.0) as u64)
+            .unwrap_or(200)
+    })
+}
+
+/// Re-probe row multiple (`PGRUST_RUNTIME_AGG_ALPHA_REPROBE`, default 10 —
+/// Müller's "periodically re-probe after processing ~10× the cache volume
+/// of input"): a demoted Local restores the full threshold for one probe
+/// window after `mult × full-cap` rows. 0 = never re-probe (a demote is
+/// then sticky until a floor window shows collapse).
+fn agg_alpha_reprobe_mult() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA_REPROBE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+    })
+}
+
+/// The α-gate's demoted flush threshold for this engagement, resolved ONCE
+/// at construction: `Some(floor_entries)` arms the controller. Reuses
+/// agg192's byte-denominated L2 floor (`PGRUST_RUNTIME_AGG_DOPCAP_FLOOR`,
+/// default 1MB at the shape's own 16+8+state+16 entry estimate) — the same
+/// "table + flush scatter fit the private L2" constant, deliberately shared
+/// so the calibration ladder moves both together. None (controller off):
+/// kill switch; serial (dop ≤ 1 — one table cannot oversubscribe the SLC);
+/// fixed-cap A/B override (PGRUST_RUNTIME_AGG_CAP stays authoritative, the
+/// locality-bound law); freeze-armed shapes (caller gates); or a floor at/
+/// above the engaged cap (nothing to demote to).
+fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
+    if !agg_alphagate_enabled() || dop <= 1 || sink_cap_override().is_some() {
+        return None;
+    }
+    let entry = 16u64 + 8 + state_bytes as u64 + 16;
+    let floor =
+        (agg_dopcap_floor_bytes() / entry.max(1)).clamp(1 << 12, u32::MAX as u64) as u32;
+    (floor < cap).then_some(floor)
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -4076,6 +4305,15 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         red,
         mk,
         cap: sink_cap,
+        // Freeze-armed (LIMIT-k admission) shapes stay on the incumbent
+        // cadence: their live group set is k-bounded post-freeze, so the
+        // α-gate has no footprint to reclaim and the freeze-window byte
+        // surface stays untouched.
+        alpha_floor: if freeze.is_some() {
+            None
+        } else {
+            alpha_gate_floor(state_bytes, sink_cap, dop)
+        },
         budget,
         key_words,
         state_bytes,
@@ -4654,6 +4892,111 @@ mod topn_mode_tests {
         }
         // Unknown encodings decode fail-closed to FullDrain.
         assert_eq!(TopnMode::decode(97), TopnMode::FullDrain);
+    }
+}
+
+#[cfg(test)]
+mod alpha_gate_tests {
+    use super::AlphaGate;
+
+    const FLOOR: Option<u32> = Some(16_384);
+    const CAP: u32 = 65_536;
+    const A0: u64 = 200; // α₀ = 2.0
+    const RP: u64 = 10;
+
+    fn fill_and_flush(g: &mut AlphaGate, rows: u64, entries: usize) {
+        g.absorbed(rows as usize);
+        g.adjudicate(entries, FLOOR, CAP, A0, RP);
+    }
+
+    /// Write-buffer window (α ≈ 1) demotes; a collapsing floor window
+    /// (α ≥ α₀) restores immediately — the phase-change fast path.
+    #[test]
+    fn demote_then_collapse_restore() {
+        let mut g = AlphaGate::default();
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // α = 1.0
+        assert!(g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 0));
+        // Floor window with strong collapse: 3 rows/entry.
+        fill_and_flush(&mut g, 3 * 16_384, 16_384);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 1, 0));
+    }
+
+    /// The α₀ boundary is INCLUSIVE-keep: exactly α₀ keeps the share
+    /// (rows×100 ≥ entries×α₀×100), just under demotes.
+    #[test]
+    fn alpha0_boundary() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, 2 * CAP as u64, CAP as usize); // α = 2.0
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, 2 * CAP as u64 - 1, CAP as usize); // just under
+        assert!(g.demoted);
+    }
+
+    /// Müller hysteresis: a demoted Local with persistently low α re-probes
+    /// (full threshold restored) only after reprobe_mult × full-cap rows,
+    /// then re-demotes on the next low-α full window, restarting the clock.
+    #[test]
+    fn reprobe_after_ten_cache_volumes() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // demote
+        assert!(g.demoted);
+        // Floor windows at α=1: 10×CAP rows = 40 floor fills before the
+        // re-probe budget is met.
+        let mut reprobed_at = None;
+        for i in 0..50 {
+            fill_and_flush(&mut g, 16_384, 16_384);
+            if !g.demoted {
+                reprobed_at = Some(i);
+                break;
+            }
+        }
+        // 10 × 65_536 rows / 16_384 rows-per-window = 40 windows.
+        assert_eq!(reprobed_at, Some(39));
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 1));
+        // The probe window fails again → re-demote, clock restarted.
+        fill_and_flush(&mut g, CAP as u64, CAP as usize);
+        assert!(g.demoted);
+        assert_eq!(g.demotes, 2);
+        assert_eq!(g.rows_since_demote, 0);
+    }
+
+    /// reprobe_mult = 0 pins a low-α demote (sticky mode).
+    #[test]
+    fn reprobe_zero_is_sticky() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, FLOOR, CAP, A0, 0);
+        assert!(g.demoted);
+        for _ in 0..1000 {
+            g.absorbed(16_384);
+            g.adjudicate(16_384, FLOOR, CAP, A0, 0);
+        }
+        assert!(g.demoted);
+        assert_eq!(g.reprobes, 0);
+    }
+
+    /// Unarmed controller (alpha_floor = None) never transitions and the
+    /// effective threshold never leaves sink.cap — the kill-switch/serial/
+    /// freeze identity. Pressure flushes reset the window without
+    /// adjudication.
+    #[test]
+    fn unarmed_and_pressure_identity() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, None, CAP, A0, RP);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (0, 0, 0));
+        // Pressure flush: window resets, no verdict.
+        g.absorbed(100);
+        g.on_pressure_flush();
+        assert_eq!(g.window_rows, 0);
+        assert!(!g.demoted);
+        // Empty run (entries = 0) never adjudicates.
+        g.adjudicate(0, FLOOR, CAP, A0, RP);
+        assert!(!g.demoted);
     }
 }
 
