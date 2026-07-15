@@ -750,6 +750,16 @@ impl Part {
         self.zerocnt_off != 0 && self.rgs[rg].flags & RG_FLAG_ZEROCNT != 0
     }
 
+    /// EVERY committed RG carries exact v7 zero/empty counts — the
+    /// sufficient plan-time condition for the meta zero-count qual answer
+    /// (scan.rs meta_agg refuses whole-part on the first visible RG
+    /// without them, so a single preserved v<=6 RG voids the arm). O(nrgs)
+    /// flag walk over the already-parsed directory (~1.5K RGs at 100M —
+    /// noise next to the footer serves this rides beside).
+    pub fn zerocnt_all_rgs(&self) -> bool {
+        self.zerocnt_off != 0 && self.rgs.iter().all(|rg| rg.flags & RG_FLAG_ZEROCNT != 0)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         self.map.bytes()
     }
