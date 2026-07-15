@@ -831,10 +831,12 @@ fn standby_absorbs_io_released_permit() {
 // ---- kill switch / config ---------------------------------------------------
 
 #[test]
-fn kill_switch_defaults_off() {
-    // The suite never sets PGRUST_RUNTIME; default must be OFF (M0: nothing
-    // engages the runtime in production paths).
-    assert!(!runtime_enabled());
+fn kill_switch_defaults_on() {
+    // The suite never sets PGRUST_RUNTIME; since the M5 boarding flip the
+    // pool defaults ON (PGRUST_RUNTIME=0 is the kill switch — the OnceLock
+    // cache makes the killed branch a boot-time property, exercised by the
+    // fleet batteries that boot with the switch thrown).
+    assert!(runtime_enabled());
 }
 
 #[test]
