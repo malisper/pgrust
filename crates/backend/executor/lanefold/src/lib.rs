@@ -1198,6 +1198,36 @@ fn sum_apply(pg: &mut AggPerGroup, delta: i64) {
     pg.trans_value_is_null = false;
 }
 
+/// avgpack (the nodeagg SINK builds' inline AvgInt8 representation): the
+/// transno's 16-byte `AggPerGroup` slot IS the state, reinterpreted as
+/// `[count: i64, sum: i64]` — no aggcontext transarray exists for a packed
+/// transno. Same arithmetic as [`avg_apply`] (C `int4_avg_accum`'s element
+/// adds), only the storage moved. The slot carries no null flags: AvgInt8
+/// states are never SQL-null (non-null `{0,0}` initval, strict transfn) and
+/// `count == 0` encodes the all-NULL-input group (C's `int8_avg` finalizes
+/// exactly that to NULL).
+#[inline(always)]
+fn avg_apply_packed(pg: &mut AggPerGroup, c: i64, delta: i64) {
+    const {
+        assert!(core::mem::size_of::<AggPerGroup>() == 16);
+        assert!(core::mem::align_of::<AggPerGroup>() == 8);
+    }
+    let w = (pg as *mut AggPerGroup).cast::<i64>();
+    // SAFETY: the slot is 16 repr(C) bytes, 8-aligned — two i64 words; the
+    // caller admitted this transno as packed (sink build contract).
+    unsafe {
+        *w = (*w).wrapping_add(c);
+        *w.add(1) = (*w.add(1)).wrapping_add(delta);
+    }
+}
+
+/// Whether `transno` is packed under `avgpack_mask` (bit per transno; the
+/// mask's builder never sets bits for transnos >= 64).
+#[inline(always)]
+fn avgpack_of(mask: u64, transno: u16) -> bool {
+    (transno as u32) < 64 && (mask >> transno) & 1 == 1
+}
+
 #[inline(always)]
 fn avg_apply(pg: &mut AggPerGroup, c: i64, delta: i64) {
     assert!(!pg.trans_value_is_null, "avg transarray is never NULL");
@@ -2417,7 +2447,7 @@ pub unsafe fn fold_rows_grouped(
     aggcxt: Mcx<'_>,
 ) -> PgResult<()> {
     // SAFETY: forwarded caller contract.
-    unsafe { fold_rows_grouped_mm(plan, cols, idxs, groups, aggcxt, None) }
+    unsafe { fold_rows_grouped_mm(plan, cols, idxs, groups, aggcxt, None, 0) }
 }
 
 /// `fold_rows_grouped` with the str MIN/MAX dict-code memo (lane-v2-
@@ -2433,6 +2463,10 @@ pub unsafe fn fold_rows_grouped(
 /// As `fold_rows_grouped`; a passed `mm` additionally requires the
 /// `col_codes` contract for every answered column and the scratch's
 /// generation to have been invalidated after any out-of-band advance.
+/// `avgpack_mask` bits name AvgAccum transnos whose pergroup slot holds the
+/// PACKED inline `[count, sum]` state ([`avg_apply_packed`]) instead of a
+/// transarray pointer — nodeagg sink builds only; every other caller passes
+/// 0. A mask bit on a non-AvgAccum transno is a caller bug.
 pub unsafe fn fold_rows_grouped_mm(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
@@ -2440,6 +2474,7 @@ pub unsafe fn fold_rows_grouped_mm(
     groups: &[NonNull<AggPerGroup>],
     aggcxt: Mcx<'_>,
     mut mm: Option<&mut StrMmScratch>,
+    avgpack_mask: u64,
 ) -> PgResult<()> {
     debug_assert_eq!(idxs.len(), groups.len());
     for t in plan.trans.iter() {
@@ -2501,6 +2536,11 @@ pub unsafe fn fold_rows_grouped_mm(
                 LaneKind::CountStar | LaneKind::Int128AvgAccum => unreachable!(),
                 LaneKind::CountAny => count_apply(pg, 1),
                 LaneKind::Sum => sum_apply(pg, xform(t, lane_value(values, w, i))),
+                // avgpack_of is loop-invariant per transition (LLVM
+                // unswitches with the kind).
+                LaneKind::AvgAccum if avgpack_of(avgpack_mask, t.transno) => {
+                    avg_apply_packed(pg, 1, xform(t, lane_value(values, w, i)));
+                }
                 LaneKind::AvgAccum => avg_apply(pg, 1, xform(t, lane_value(values, w, i))),
                 LaneKind::Min | LaneKind::Max => {
                     let v = xform(t, lane_value(values, w, i));
@@ -2675,7 +2715,9 @@ pub unsafe fn code_trans_vals(plan: &LanePlan<'_>, d: Datum, out: &mut Vec<i64>)
 ///
 /// # Safety
 /// As `fold_rows_grouped` for `pergroup_base`/`aggcxt`; `strd` is a live
-/// inline varlena when the plan carries str kinds; `n >= 1`.
+/// inline varlena when the plan carries str kinds; `n >= 1`. `avgpack_mask`
+/// as `fold_rows_grouped_mm` (packed inline AvgAccum slots — sink builds
+/// only; other callers pass 0).
 pub unsafe fn fold_code_group(
     plan: &LanePlan<'_>,
     vals: &[i64],
@@ -2683,6 +2725,7 @@ pub unsafe fn fold_code_group(
     n: i64,
     pergroup_base: NonNull<AggPerGroup>,
     aggcxt: Mcx<'_>,
+    avgpack_mask: u64,
 ) -> PgResult<()> {
     debug_assert!(n >= 1 && vals.len() == plan.trans.len());
     for (ti, t) in plan.trans.iter().enumerate() {
@@ -2691,6 +2734,9 @@ pub unsafe fn fold_code_group(
         match t.kind {
             LaneKind::CountStar | LaneKind::CountAny => count_apply(pg, n),
             LaneKind::Sum => sum_apply(pg, (n).wrapping_mul(vals[ti])),
+            LaneKind::AvgAccum if avgpack_of(avgpack_mask, t.transno) => {
+                avg_apply_packed(pg, n, (n).wrapping_mul(vals[ti]));
+            }
             LaneKind::AvgAccum => avg_apply(pg, n, (n).wrapping_mul(vals[ti])),
             LaneKind::Int128AvgAccum => {
                 let st = int128_state(pg, aggcxt)?;

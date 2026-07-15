@@ -1781,6 +1781,8 @@ fn ch_flush<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // avgpack: packed inline AvgAccum slots (sink worker builds only).
+    let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
     for &code in &ch.touched {
         let c = code as usize;
         let n = ch.hist[c] as i64;
@@ -1798,7 +1800,7 @@ fn ch_flush<'mcx>(
         // aggcx is the node's agg context; strd is a live inline varlena
         // image copy for str plans (begin_epoch/simg discipline); guards
         // proven per code at first touch.
-        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx)? };
+        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx, avgpack_mask)? };
     }
     ch.touched.clear();
     // The advances above bypassed the per-group str memo.

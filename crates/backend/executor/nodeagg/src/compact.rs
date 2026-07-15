@@ -227,6 +227,14 @@ pub(crate) struct CompactHash {
     /// combine; across generations the words are ambiguous and the combine's
     /// per-worker map resets.
     pub(crate) intern_gen: u64,
+    /// avgpack (SINK builds only): bit per transno whose state is the PACKED
+    /// inline `[count, sum]` image in the row's 16-byte `AggPerGroup` slot
+    /// instead of an aggcontext transarray pointer
+    /// ([`crate::sink::sink_avgpack_mask`]). Decided at TABLE CREATION —
+    /// `ph.sink_cap` is installed before the worker's try_arm — so one
+    /// table never mixes representations. 0 everywhere else (the serial
+    /// arm, the leader's own node, migration-eligible builds).
+    pub(crate) avgpack_mask: u64,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -249,6 +257,7 @@ pub(crate) fn compact_hash_for_tests(
         canon_hashes: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
+        avgpack_mask: 0,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -435,6 +444,9 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     if single_word_spillrisk(ph, numgroups) && !(ph.sink_cap.is_some() && ph.sink_spill_ok) {
         return CompactArm::SpillRisk;
     }
+    // avgpack: packed inline AvgInt8 states, SINK builds only (decided at
+    // table creation — before any group seeds).
+    let avgpack_mask = if ph.sink_cap.is_some() { node.avgpack_shape_mask } else { 0 };
     // Entry layout by planner group estimate. Inline16 resolves hits from
     // the entry line alone (key inline; the probe never touches the payload
     // row) — ONE serialized miss per hit instead of Salt8's entry→row
@@ -469,6 +481,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         canon_hashes: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
+        avgpack_mask,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -558,6 +571,9 @@ fn try_arm_mk_n(
     let two_words = shape.two_words;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let additionalsize = ph.hashtable.additionalsize();
+    // avgpack: packed inline AvgInt8 states, SINK builds only (decided at
+    // table creation — before any group seeds).
+    let avgpack_mask = if ph.sink_cap.is_some() { node.avgpack_shape_mask } else { 0 };
     let (repr, layout) = if two_words {
         // Int128 is Salt8-only (2 key words cannot inline into a 16-B slot).
         (::lanetable::KeyRepr::Int128, ::lanetable::EntryLayout::Salt8)
@@ -587,6 +603,7 @@ fn try_arm_mk_n(
         canon_hashes: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
+        avgpack_mask,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -813,6 +830,9 @@ pub fn agg_hash_compact_try_arm_reduced(
     debug_assert_eq!(shape.keys.iter().filter(|d| d.is_none()).count(), 1);
     debug_assert!(matches!(shape.width, 2 | 4 | 8));
     let additionalsize = ph.hashtable.additionalsize();
+    // avgpack: packed inline AvgInt8 states, SINK builds only (decided at
+    // table creation — before any group seeds).
+    let avgpack_mask = if ph.sink_cap.is_some() { node.avgpack_shape_mask } else { 0 };
     // Same layout policy as compact v1 (single-word key).
     let layout = if numgroups <= (1 << 22) {
         ::lanetable::EntryLayout::Inline16
@@ -838,6 +858,7 @@ pub fn agg_hash_compact_try_arm_reduced(
         canon_hashes: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
+        avgpack_mask,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -917,6 +938,7 @@ pub fn agg_hash_compact_batch<'mcx>(
     let AggStateData { perhash, trans_init, trans_typ, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
+    let avgpack_mask = ch.avgpack_mask;
     let CompactHash { table, key, keys: ckeys, states, hashes, new_rows, .. } = ch;
     // Single-word datum-lane probes: compact v1 and the reduced (redundant-
     // key) mode — the latter's key lane is the representative key.
@@ -968,7 +990,7 @@ pub fn agg_hash_compact_batch<'mcx>(
     }
     // Seed the new groups' states — initialize_hash_entry's datumCopy loop
     // verbatim, writing into the compact row's zeroed state bytes.
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
     groups.extend(states.iter().map(|&s| {
         // SAFETY: probe never returns null state pointers.
         unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
@@ -1027,17 +1049,28 @@ pub fn agg_hash_compact_backstop<'mcx>(
 }
 
 /// initialize_hash_entry's datumCopy loop over the batch's NEW groups,
-/// writing into the compact rows' zeroed state bytes.
+/// writing into the compact rows' zeroed state bytes. avgpack: a masked
+/// transno seeds the PACKED inline `[count = 0, sum = 0]` image (the `{0,0}`
+/// initval's exact state) instead of datumCopying a 40-byte transarray into
+/// the aggcontext — the byref floor kill (sink builds only; the mask is 0
+/// everywhere else).
 fn seed_new_groups(
     aggctx: ::mcx::Mcx<'_>,
     trans_init: &[::datum::NullableDatum],
     trans_typ: &[crate::TransTyp],
     states: &[*mut u8],
     new_rows: &[u32],
+    avgpack_mask: u64,
 ) -> PgResult<()> {
     for &i in new_rows.iter() {
         let pergroup = states[i as usize].cast::<AggPerGroup>();
         for (transno, init) in trans_init.iter().enumerate() {
+            if transno < 64 && (avgpack_mask >> transno) & 1 == 1 {
+                // SAFETY: the row's state block holds numtrans 16-byte
+                // slots, 8-aligned (lanetable contract).
+                unsafe { pergroup.add(transno).cast::<[i64; 2]>().write([0, 0]) };
+                continue;
+            }
             let typ = trans_typ[transno];
             let value = if !init.isnull && !typ.byval {
                 // SAFETY: node-lifetime initval datum copied into the
@@ -1079,12 +1112,13 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if !s.two_words));
     {
+        let avgpack_mask = ch.avgpack_mask;
         let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
         states.clear();
         new_rows.clear();
         groups.clear();
         table.probe_int_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
         groups.extend(states.iter().map(|&s| {
             // SAFETY: probe never returns null state pointers.
             unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
@@ -1115,12 +1149,13 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     let ch = ph.compact.as_mut().expect("compact batch requires an armed table");
     debug_assert!(matches!(&ch.key, CompactKeySpec::Multi(s) if s.two_words));
     {
+        let avgpack_mask = ch.avgpack_mask;
         let CompactHash { table, states, hashes, new_rows, .. } = &mut *ch;
         states.clear();
         new_rows.clear();
         groups.clear();
         table.probe_i128_batch(keys, ::lanetable::PrefetchMode::Adaptive, hashes, states, new_rows);
-        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows)?;
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
         groups.extend(states.iter().map(|&s| {
             // SAFETY: probe never returns null state pointers.
             unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
@@ -1515,6 +1550,10 @@ fn compact_migrate<'mcx>(
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.take().expect("migration requires an armed table");
+    // avgpack: packed inline states exist only on SINK builds, which never
+    // migrate (the backstop errors on `sink_cap` before reaching here) —
+    // the C tuplehash copy below would carry a packed slot it cannot read.
+    debug_assert_eq!(ch.avgpack_mask, 0, "packed avgpack states in a compact migration");
     {
         // Same switch as lanev2's trace helpers (observability only).
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
