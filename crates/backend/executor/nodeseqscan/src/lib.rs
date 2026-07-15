@@ -1238,14 +1238,16 @@ pub fn seq_scan_refsort_batch_masks<'a, 'mcx>(
 /// otherwise.
 #[inline]
 pub fn seq_scan_batch_dict_codes_global(
-    node: &SeqScanState<'_>,
+    node: &mut SeqScanState<'_>,
     c: usize,
 ) -> Option<::exectuples::SoaDictLane> {
-    let sd = node.ss.ss_currentScanDesc.as_ref()?;
-    let b = node.batch_soa.as_deref()?;
-    if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
-        return None;
+    {
+        let b = node.batch_soa.as_deref()?;
+        if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
+            return None;
+        }
     }
+    let sd = node.ss.ss_currentScanDesc.as_mut()?;
     ::tableam::table_scan_batch_dict_codes_global(sd, c as u16)
 }
 

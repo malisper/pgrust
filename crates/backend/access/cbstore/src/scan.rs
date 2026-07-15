@@ -1967,7 +1967,16 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// unchanged. Consumers gate order use on `table.has_stitch()` and
     /// fail closed otherwise.
     #[inline]
-    pub fn staged_codes_lane_global(&self, c: usize) -> Option<::exectuples::SoaDictLane> {
+    pub fn staged_codes_lane_global(&mut self, c: usize) -> Option<::exectuples::SoaDictLane> {
+        // The key column may sit outside every other consumer's read set for
+        // this window (no qual on it, past the fixed-width deform's
+        // coverage, no per-row emit ran): complete its decode first —
+        // needed-set columns only (a key column is always in the needed
+        // set), idempotent per (rg, granule) via `decode_col`'s gkey check.
+        if c >= self.cols.len() || !self.needed[c] {
+            return None;
+        }
+        self.ensure_col(c);
         let mut lane = self.staged_codes_lane(c)?;
         if self.scan_uid != 0 {
             let ndict = self.cols[c].dict.len();
