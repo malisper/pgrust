@@ -19,8 +19,28 @@ use crate::rg::{ResourceGroup, TaskSetWork};
 use crate::sizing::SizerShared;
 use crate::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+/// Cache-line isolation for hot shared atomics (agg192-contention, 48xl
+/// finding #1): 128 bytes = one Neoverse prefetch pair, so a padded field
+/// never shares a transfer unit with its neighbors. Layout-only — no
+/// semantic or switchable behavior; `Deref` keeps use sites unchanged.
+#[repr(align(128))]
+pub(crate) struct CachePadded<T>(pub(crate) T);
+
+impl<T> std::ops::Deref for CachePadded<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 /// Runtime state of one published task set (one pipeline of one RG occupying
 /// one scheduler slot at one sequence number).
+///
+/// Hot-line layout (agg192-contention): `cursor` (CASed per claim by every
+/// worker), `sizer` (a Mutex locked twice per morsel), and `active_workers`
+/// (SeqCst RMW twice per task + a load per claim) each own a padded line —
+/// previously all three plus `fin_counter` packed into one/two cache lines,
+/// a single transfer unit absorbing every claim/task RMW of 191 workers.
 pub(crate) struct TaskSetRt {
     pub(crate) rg: Arc<ResourceGroup>,
     /// Index of this task set within its RG.
@@ -32,13 +52,13 @@ pub(crate) struct TaskSetRt {
     pub(crate) seq: u64,
     /// Morsel claiming cursor: next unclaimed granule. Claims advance it by
     /// CAS of whole boundary-clamped ranges; `cursor >= total` ⇔ exhausted.
-    pub(crate) cursor: AtomicU64,
+    pub(crate) cursor: CachePadded<AtomicU64>,
     /// Shared duration-adaptive sizing state (per-pipeline state machine).
-    pub(crate) sizer: SizerShared,
+    pub(crate) sizer: CachePadded<SizerShared>,
     /// Workers currently executing a task of this set (W of the photo
     /// finish). Distinct from the pin board: pins are the finalization
     /// protocol's ground truth; this is a sizing input only.
-    pub(crate) active_workers: AtomicU64,
+    pub(crate) active_workers: CachePadded<AtomicU64>,
     /// Finalization counter of the last-worker-out protocol. The coordinator
     /// adds the number of successfully-marked workers; each marked worker
     /// subtracts one when it finishes its in-flight task. MAY GO TRANSIENTLY
@@ -87,14 +107,19 @@ const PIN_MARK: u64 = 1 << 63;
 
 /// The global published-target state array of the finalization protocol:
 /// entry w = what worker w is (about to be) working on.
+/// Entries are cache-line padded (agg192-contention): every worker writes
+/// its own entry once per step (publish + settle) — unpadded, 8 workers
+/// shared one line, ping-ponging it on every step of every drive at 191
+/// workers. Coordinator `mark` scans stay correct (reads/CASes each padded
+/// entry individually).
 pub(crate) struct PinBoard {
-    entries: Box<[AtomicU64]>,
+    entries: Box<[CachePadded<AtomicU64>]>,
 }
 
 impl PinBoard {
     pub(crate) fn new(nworkers: usize) -> PinBoard {
         PinBoard {
-            entries: (0..nworkers).map(|_| AtomicU64::new(PIN_EMPTY)).collect(),
+            entries: (0..nworkers).map(|_| CachePadded(AtomicU64::new(PIN_EMPTY))).collect(),
         }
     }
 
@@ -150,6 +175,7 @@ impl PinBoard {
 /// All stride fields are Relaxed and ADVISORY: they order the pick, never
 /// execution safety — a stale pick revalidates through the slot word into
 /// Retry, exactly like a stale maintenance-mask hit.
+#[repr(align(128))]
 pub(crate) struct Slot {
     pub(crate) word: AtomicU64,
     /// Priority-weighted virtual time of the occupying RG. Reset to the
