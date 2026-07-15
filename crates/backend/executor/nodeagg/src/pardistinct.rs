@@ -307,6 +307,28 @@ pub fn pd_clear_thread_registry() {
 // ===========================================================================
 
 const INIT_TABLE: usize = 64;
+
+/// batch-insert lane: staged-window size for the batched distinct-set
+/// insert schedule (one scan batch — the -075a micro-probe's window).
+const PD_STAGE_BATCH: usize = 1024;
+
+/// batch-insert lane: L1 prefetch hint (lanetable's idiom, copied — the
+/// stringhash2 seam owns the table-internal machinery; this is driver-side).
+#[inline(always)]
+fn pd_prefetch(p: *const u8) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: prfm is a hint; any address is allowed.
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: prefetch is a hint; any address is allowed.
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(p as *const i8);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let _ = p;
+}
 /// Fixed per-group overhead estimate (table slot, hash, vec headers).
 const GROUP_FIXED_COST: usize = 48;
 
@@ -417,6 +439,22 @@ pub struct PdBuilder<'mcx> {
     /// re-evict only once memory GROWS past this (epoch cadence).
     evict_floor: usize,
     frozen: bool,
+    /// batch-insert lane: staged-window batched distinct-set inserts (the
+    /// q9/q10 accept-side stall fix — micro-probe job -075a: accept-side
+    /// ~-28% cycles from miss-chain overlap across the per-group sets).
+    /// Admitted at construction only (`set_batch_insert`): single int-kind
+    /// set, grouped shape. `stage_g/stage_v` hold the deferred (group,
+    /// value) pairs in ROW ORDER; `flush_staged` replays them through the
+    /// same `insert_i64` kernel with header+cell look-ahead prefetch, so
+    /// set contents, value-append order, and every downstream byte are
+    /// IDENTICAL to the per-row path — only the insert *schedule*, the
+    /// set-memory accounting cadence, and the budget-crossing check move to
+    /// window grain (the plain drive's documented one-batch-overshoot
+    /// contract, agg_plain_distinct_insert_batch).
+    stage_on: bool,
+    stage_g: Vec<u32>,
+    stage_v: Vec<i64>,
+    stage_touch: Vec<u32>,
 }
 
 impl<'mcx> PdBuilder<'mcx> {
@@ -441,7 +479,104 @@ impl<'mcx> PdBuilder<'mcx> {
             ever_spilled: false,
             evict_floor: 0,
             frozen: false,
+            stage_on: false,
+            stage_g: Vec::new(),
+            stage_v: Vec::new(),
+            stage_touch: Vec::new(),
         }
+    }
+
+    /// Arm the staged batch-insert schedule (fail-closed shape admission:
+    /// grouped, exactly one distinct set, int-kind). No-op for every other
+    /// shape — those keep the per-row path byte-for-byte.
+    pub fn set_batch_insert(&mut self, on: bool) {
+        self.stage_on = on
+            && self.spec.nkeys() > 0
+            && self.spec.sets.len() == 1
+            && !matches!(self.spec.sets[0].kind, DistinctKeyKind::Bytes);
+        if self.stage_on {
+            self.stage_g.reserve(PD_STAGE_BATCH);
+            self.stage_v.reserve(PD_STAGE_BATCH);
+        }
+    }
+
+    /// Whether the staged schedule is armed (trace/e2e visibility).
+    pub fn batch_insert_armed(&self) -> bool {
+        self.stage_on
+    }
+
+    /// Staged-schedule accept tail: fold a NULL immediately (order-free),
+    /// stage a value, flush + window-grain crossing check on a full window.
+    /// The testable seam (accept minus the slot plumbing).
+    #[inline]
+    fn stage_push(&mut self, g: usize, v: Option<i64>) -> PgResult<PdFeed> {
+        debug_assert!(self.stage_on);
+        let Some(v) = v else {
+            self.dsets[g].seen_null = true;
+            return Ok(PdFeed::Ok);
+        };
+        self.stage_g.push(g as u32);
+        self.stage_v.push(v);
+        if self.stage_v.len() >= PD_STAGE_BATCH {
+            self.flush_staged();
+            // Window-grain crossing check (the plain drive's
+            // one-batch-overshoot contract).
+            if self.mem() > self.budget.max(self.evict_floor) {
+                if self.mcx.is_some() {
+                    self.evict_sets()?;
+                    return Ok(PdFeed::Ok);
+                }
+                return Ok(PdFeed::Crossed);
+            }
+        }
+        Ok(PdFeed::Ok)
+    }
+
+    /// Replay the staged (group, value) window through the per-row insert
+    /// kernel with look-ahead prefetch (header at 16, set cell at 8 — the
+    /// -075a micro-probe figures), then re-account set memory for the
+    /// touched groups (delta accounting, window grain).
+    fn flush_staged(&mut self) {
+        let n = self.stage_v.len();
+        if n == 0 {
+            return;
+        }
+        const LH_HDR: usize = 16;
+        const LH_CELL: usize = 8;
+        debug_assert_eq!(self.spec.sets.len(), 1);
+        for i in 0..n {
+            // SAFETY: staged group ids index dsets (created at accept);
+            // look-ahead indices bounds-checked; prefetches are hints.
+            unsafe {
+                if i + LH_HDR < n {
+                    let gh = *self.stage_g.get_unchecked(i + LH_HDR) as usize;
+                    pd_prefetch(self.dsets.as_ptr().add(gh) as *const u8);
+                }
+                if i + LH_CELL < n {
+                    let gc = *self.stage_g.get_unchecked(i + LH_CELL) as usize;
+                    self.dsets
+                        .get_unchecked(gc)
+                        .prefetch_i64(*self.stage_v.get_unchecked(i + LH_CELL));
+                }
+                let g = *self.stage_g.get_unchecked(i) as usize;
+                let v = *self.stage_v.get_unchecked(i);
+                self.dsets.get_unchecked_mut(g).insert_i64(v);
+            }
+        }
+        // Touched-group set-memory delta accounting (nsets == 1: set index
+        // == group index).
+        self.stage_touch.clear();
+        self.stage_touch.extend_from_slice(&self.stage_g);
+        self.stage_touch.sort_unstable();
+        self.stage_touch.dedup();
+        for &g in &self.stage_touch {
+            let g = g as usize;
+            let m = self.dsets[g].mem_bytes();
+            self.total_set_mem = self.total_set_mem + m - self.set_mem[g];
+            self.set_mem[g] = m;
+        }
+        self.stage_g.clear();
+        self.stage_v.clear();
     }
 
     #[inline]
@@ -706,6 +841,28 @@ impl<'mcx> PdBuilder<'mcx> {
         // Distinct-set collects (after the immutable-borrow block: bytes
         // inserts may need the estate for detoast).
         let nsets = self.spec.sets.len();
+        if self.stage_on {
+            // batch-insert lane: defer the (single, int-kind) set insert to
+            // the staged window; NULLs fold immediately (order-free).
+            // Value-append order inside every set stays row order.
+            debug_assert_eq!(nsets, 1);
+            let PdSetSpec { att, kind } = self.spec.sets[0];
+            let (value, isnull) = {
+                let base = estate.slot_mut(id).base();
+                (base.tts_values[att as usize], base.tts_isnull[att as usize])
+            };
+            let v = if isnull {
+                None
+            } else {
+                Some(match kind {
+                    DistinctKeyKind::Int16 => value.as_i16() as i64,
+                    DistinctKeyKind::Int32 => value.as_i32() as i64,
+                    DistinctKeyKind::Int64 => value.as_i64(),
+                    DistinctKeyKind::Bytes => unreachable!("bytes shapes are not admitted"),
+                })
+            };
+            return self.stage_push(g, v);
+        }
         if nsets != 0 {
             let mut sets_mem = 0usize;
             for j in 0..nsets {
@@ -799,6 +956,7 @@ impl<'mcx> PdBuilder<'mcx> {
     /// Fold a HANDED table into this (leader) builder — the serial merge
     /// path (spill-capable through the same eviction lever).
     pub fn merge_handed(&mut self, t: &PdHandedTable) -> PgResult<()> {
+        self.flush_staged();
         let spec = self.spec.clone();
         let nkeys = spec.nkeys();
         let nvocab = spec.vocab.len();
@@ -847,6 +1005,7 @@ impl<'mcx> PdBuilder<'mcx> {
     pub fn freeze(mut self) -> PgResult<PdHandedTable> {
         debug_assert!(!self.frozen);
         debug_assert!(!self.ever_spilled, "frozen tables are in-memory only");
+        self.flush_staged();
         self.frozen = true;
         let spec = self.spec.clone();
         let nsets = spec.sets.len();
@@ -1599,9 +1758,28 @@ pub struct PdSinkLocal {
 // doc.
 unsafe impl Send for PdSinkLocal {}
 
+/// batch-insert lane kill switch: `PGRUST_RUNTIME_DISTINCT_BATCH_INSERT=0`
+/// restores the per-row insert schedule exactly (default ON; engagement is
+/// additionally shape-admitted per [`PdBuilder::set_batch_insert`]).
+pub fn pd_batch_insert_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_BATCH_INSERT").map_or(true, |v| v != "0")
+    })
+}
+
 impl PdSinkLocal {
     pub fn new(spec: Arc<PdSpec>, budget: usize) -> PdSinkLocal {
-        PdSinkLocal { builder: PdBuilder::new(spec, budget, None) }
+        let mut builder = PdBuilder::new(spec, budget, None);
+        if pd_batch_insert_enabled() {
+            builder.set_batch_insert(true);
+        }
+        PdSinkLocal { builder }
+    }
+
+    /// Whether the staged batch-insert schedule is armed (trace visibility).
+    pub fn batch_insert_armed(&self) -> bool {
+        self.builder.batch_insert_armed()
     }
 
     /// Feed one row (the worker accept). `PdFeed::Crossed` = the worker
@@ -2491,6 +2669,9 @@ impl PdBuilder<'_> {
     /// [`Self::spill_reset_values`] only after its epoch write COMMITS.
     fn spill_emit(&self, emit: &mut dyn FnMut(u32, &[u8]) -> PgResult<()>) -> PgResult<()> {
         debug_assert!(self.spill_eligible());
+        // batch-insert lane: spill epochs fire only from a post-flush
+        // crossing, so the staged window is empty here by construction.
+        debug_assert!(self.stage_v.is_empty(), "spill_emit with a staged window");
         let nkeys = self.spec.nkeys();
         let nsets = self.spec.sets.len();
         let n = self.ngroups();
@@ -2965,6 +3146,101 @@ mod tests {
             .collect();
         rows.sort();
         rows
+    }
+
+    /// batch-insert lane: the staged (deferred, look-ahead-prefetched)
+    /// insert schedule is BYTE-IDENTICAL to the per-row path — same frozen
+    /// keys/values arrays in the same order (value-append order per set is
+    /// row order in both schedules), same seen_null faces, same states —
+    /// including partial trailing windows and mid-window duplicates, and a
+    /// crossing (budget) parity leg on the window-grain contract.
+    #[test]
+    fn staged_batch_insert_freeze_identity() {
+        let spec = Arc::new(PdSpec {
+            key_atts: vec![0],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+            vocab: vec![],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+            max_att: 2,
+            worker_budget: usize::MAX,
+        });
+        let rows = 3 * PD_STAGE_BATCH + 137; // partial trailing window
+        let drive = |staged: bool| -> PdHandedTable {
+            let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
+            b.set_batch_insert(staged);
+            assert_eq!(b.batch_insert_armed(), staged, "admission on this spec");
+            for i in 0..rows as i64 {
+                let k = [i % 257]; // ~257 groups
+                let h = key_hash(&k, 0);
+                let (found, slot) = b.probe(&k, 0, h, &KeySrc::None);
+                let g = match found {
+                    Some(g) => g,
+                    None => b.create_group(&k, 0, h, slot, &KeySrc::None),
+                } as usize;
+                // near-unique values + planted duplicates + NULL face
+                let v = if i % 97 == 0 { Some(42) } else { Some(i * 104729 + 1) };
+                let v = if i % 61 == 0 { None } else { v };
+                if staged {
+                    assert!(matches!(b.stage_push(g, v).unwrap(), PdFeed::Ok));
+                } else {
+                    match v {
+                        Some(v) => b.dsets[g].insert_i64(v),
+                        None => b.dsets[g].seen_null = true,
+                    }
+                }
+            }
+            b.freeze().unwrap()
+        };
+        let a = drive(false);
+        let s = drive(true);
+        assert_eq!(a.ngroups, s.ngroups);
+        assert_eq!(a.keys, s.keys);
+        assert_eq!(a.keynulls, s.keynulls);
+        assert_eq!(a.states, s.states);
+        assert_eq!(a.set_ints, s.set_ints, "value arrays byte-identical incl. order");
+        assert_eq!(a.set_int_offs, s.set_int_offs);
+        assert_eq!(a.set_null, s.set_null);
+
+        // Shape refusals: bytes set / multi-set specs must not arm.
+        let mut nb = PdBuilder::new(
+            Arc::new(PdSpec {
+                key_atts: vec![0],
+                key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+                vocab: vec![],
+                sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Bytes }],
+                max_att: 2,
+                worker_budget: usize::MAX,
+            }),
+            usize::MAX,
+            None,
+        );
+        nb.set_batch_insert(true);
+        assert!(!nb.batch_insert_armed(), "bytes sets refuse");
+        let mut nm = PdBuilder::new(spill_test_spec(), usize::MAX, None);
+        nm.set_batch_insert(true);
+        assert!(!nm.batch_insert_armed(), "multi-set specs refuse");
+
+        // Window-grain crossing: a tiny budget reports Crossed only at a
+        // flush boundary, with the staging drained (worker arm, mcx None).
+        let mut c = PdBuilder::new(Arc::clone(&spec), 4096, None);
+        c.set_batch_insert(true);
+        let mut crossed = false;
+        'outer: for i in 0..(2 * PD_STAGE_BATCH) as i64 {
+            let k = [i % 7];
+            let h = key_hash(&k, 0);
+            let (found, slot) = c.probe(&k, 0, h, &KeySrc::None);
+            let g = match found {
+                Some(g) => g,
+                None => c.create_group(&k, 0, h, slot, &KeySrc::None),
+            } as usize;
+            if matches!(c.stage_push(g, Some(i * 31 + 1)).unwrap(), PdFeed::Crossed) {
+                assert!(c.stage_v.is_empty(), "Crossed only post-flush");
+                assert_eq!((i + 1) as usize % PD_STAGE_BATCH, 0, "window-grain check");
+                crossed = true;
+                break 'outer;
+            }
+        }
+        assert!(crossed, "tiny budget must cross");
     }
 
     /// M3.5 §4 round-trip: drain values → records → rebuild → merge with the
