@@ -36,6 +36,14 @@ pub const ZSTD_LEVEL_DEFAULT: i32 = 3;
 pub struct CbWriterOpts {
     // (column index, sort-key kind) in declared cluster-key order.
     pub cluster_key: Vec<(u16, CbSortKeyKind)>,
+    // load-r2 PRESORT instrument (PGRUST_COPY_PRESORT="col,col,..."; default
+    // unset): sort-on-ingest exactly like cluster_key but WITHOUT any format
+    // surface — no RG_FLAG_CLUSTERED, no footer cluster_key stanza — so a
+    // load of unsorted input under presort must produce a part byte-identical
+    // to a plain load of the same rows fed pre-sorted by the same key. Only
+    // resolved when the relation declares no cluster_key; parallel COPY
+    // admission refuses it (sort-on-ingest drains serially).
+    pub presort_key: Vec<(u16, CbSortKeyKind)>,
     // Per-column codec choice (explicit override or the table default).
     pub codec: Vec<CodecChoice>,
     pub zstd_level: i32,
@@ -86,6 +94,7 @@ impl CbWriterOpts {
     pub fn plain(ncols: usize) -> CbWriterOpts {
         CbWriterOpts {
             cluster_key: Vec::new(),
+            presort_key: Vec::new(),
             // Train #8 ingest default: LZ4 (matches CbstoreOptions::default).
             codec: vec![CodecChoice::Lz4; ncols],
             zstd_level: ZSTD_LEVEL_DEFAULT,
@@ -125,6 +134,7 @@ pub fn writer_opts_of(
     let mut out = CbWriterOpts::plain(coltypes.len());
     let Some(o) = rel.rd_options.as_ref().and_then(|o| o.cbstore()) else {
         apply_intcodec_cols_env(rel, &mut out.delta)?;
+        apply_presort_env(rel, coltypes, &mut out)?;
         return Ok(out);
     };
     out.zstd_level = o.zstd_level;
@@ -162,7 +172,35 @@ pub fn writer_opts_of(
         };
     }
     apply_intcodec_cols_env(rel, &mut out.delta)?;
+    apply_presort_env(rel, coltypes, &mut out)?;
     Ok(out)
+}
+
+// load-r2 presort instrument: PGRUST_COPY_PRESORT="col,col,..." engages the
+// cluster-key ingest sorter WITHOUT the cluster-key format surface (see
+// CbWriterOpts::presort_key). A declared cluster_key wins; the env is then
+// ignored (the reloption is the table's contract).
+fn apply_presort_env(
+    rel: &::types_rel::Relation<'_>,
+    coltypes: &[ColType],
+    out: &mut CbWriterOpts,
+) -> PgResult<()> {
+    if !out.cluster_key.is_empty() {
+        return Ok(());
+    }
+    let Ok(cols) = std::env::var("PGRUST_COPY_PRESORT") else {
+        return Ok(());
+    };
+    for name in cols.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let idx = col_index_of(rel, name)?;
+        out.presort_key.push((idx, sort_kind_of(coltypes[idx as usize])));
+    }
+    if out.presort_key.len() > CB_CLUSTER_KEY_MAX_COLS {
+        return Err(Box::new(PgError::error(format!(
+            "cbstore: PGRUST_COPY_PRESORT supports at most {CB_CLUSTER_KEY_MAX_COLS} columns"
+        ))));
+    }
+    Ok(())
 }
 
 // ---- codec engine ----------------------------------------------------------
@@ -542,9 +580,13 @@ fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     );
     let cid = xact_seams::get_current_command_id::call(false)?;
     let mut w = open_writer_inner(file, xid, cid, frozen_ok, coltypes, fingerprint, opts)?;
-    if !w.opts.cluster_key.is_empty() {
+    if !w.opts.cluster_key.is_empty() || !w.opts.presort_key.is_empty() {
+        // presort_key is only resolved when no cluster_key is declared
+        // (apply_presort_env), so exactly one of the two is non-empty here.
+        let key_src =
+            if w.opts.cluster_key.is_empty() { &w.opts.presort_key } else { &w.opts.cluster_key };
         let keys: Vec<(i16, CbSortKeyKind)> =
-            w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
+            key_src.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
         // SAFETY: lifetime erasure on the relcache tupdesc; the COPY/INSERT
         // statement keeps the relation open for the writer's lifetime (the
         // begin_index_btree contract), and the stale-xid check in
@@ -804,7 +846,11 @@ impl CbWriter {
         // final order, so their metadata is exact for the sorted part).
         if let Some(mut sorter) = self.sorter.take() {
             sorter.sort()?;
-            self.draining_clustered = true;
+            // Presort (env instrument) drains WITHOUT the cluster-key format
+            // surface: no RG_FLAG_CLUSTERED, and the footer stanza already
+            // stamps from opts.cluster_key (empty) — the drained part must be
+            // byte-identical to a plain load of pre-sorted input.
+            self.draining_clustered = !self.opts.cluster_key.is_empty();
             let mut values = vec![Datum::null(); self.ncols];
             let mut isnull = vec![false; self.ncols];
             while sorter.next_row(&mut values, &mut isnull)? {
@@ -1306,6 +1352,18 @@ impl RgChunkEncoder {
 /// BEFORE opening: cbstore AM, no cluster key — `writer_opts_of`).
 pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     open_writer(rel)
+}
+
+/// load-r2 L3-1: the parallel load-sort opens the writer PLAIN — the sort
+/// happens upstream in the COPY workers (memcmp-key runs + k-way merge),
+/// and the merged rows drain through append_row/seal exactly like a plain
+/// load of pre-sorted input (byte-identity contract). The presort sorter
+/// the open installed is dropped here; opts.presort_key stays as the
+/// caller's key-spec record.
+pub fn begin_parallel_ingest_presorted(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
+    let mut w = open_writer(rel)?;
+    w.sorter = None;
+    Ok(w)
 }
 
 impl CbWriter {
@@ -3000,6 +3058,81 @@ mod cluster_key_tests {
             assert_eq!(g, r, "row {i} of {}", rows.len());
         }
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // load-r2 presort instrument: a shuffled ingest drained through
+    // presort_key must be BYTE-IDENTICAL to a plain writer fed the same rows
+    // pre-sorted by the same key — no RG_FLAG_CLUSTERED on any RG, footer
+    // cluster_key empty. Duplicate whole rows ride along (a full-key tie here
+    // is a byte-equal row, so tie order cannot perturb the bytes).
+    #[test]
+    fn presort_drain_is_byte_identical_to_presorted_plain_load() {
+        seams_once();
+        let coltypes = vec![ColType::I64, ColType::Text];
+        let n = RG_ROWS + 777;
+        let uniq = (n - 300) as u64;
+        let rows: Vec<(i64, Vec<u8>)> = (0..n)
+            .map(|i| {
+                let r = crate::hll::mix64(i as u64 % uniq); // tail duplicates head
+                ((r % 1000) as i64, format!("k{:04}", r % 300).into_bytes())
+            })
+            .collect();
+
+        // Reference: plain writer, rows fed PRE-SORTED by (text C, then int).
+        let mut sorted_rows = rows.clone();
+        sorted_rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let path_a = tmp("presort-ref");
+        {
+            let mut w = open_writer_inner(
+                SegFile::open_rw(&path_a).unwrap(), 1, 0, true, coltypes.clone(), 0x5aa5,
+                CbWriterOpts::plain(2),
+            )
+            .unwrap();
+            let mut keep = Vec::new();
+            for (v, t) in &sorted_rows {
+                let vals = [Datum::from_i64(*v), text_datum(t, &mut keep)];
+                w.ingest_row(&vals, &[false, false]).unwrap();
+            }
+            w.finish().unwrap();
+        }
+
+        // Armed: presort writer, same rows fed in ingest (adversarial) order.
+        let path_b = tmp("presort-armed");
+        {
+            let mut opts = CbWriterOpts::plain(2);
+            opts.presort_key = vec![(1, CbSortKeyKind::TextC), (0, CbSortKeyKind::Int64)];
+            let mut w = open_writer_inner(
+                SegFile::open_rw(&path_b).unwrap(), 1, 0, true, coltypes, 0x5aa5, opts,
+            )
+            .unwrap();
+            let keys: Vec<(i16, CbSortKeyKind)> =
+                w.opts.presort_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
+            w.sorter = Some(
+                ::tuplesort_seams::cbstore_ingest_sort::call(tup_desc(), &keys, 65536).unwrap(),
+            );
+            let mut keep = Vec::new();
+            for (v, t) in &rows {
+                let vals = [Datum::from_i64(*v), text_datum(t, &mut keep)];
+                w.ingest_row(&vals, &[false, false]).unwrap();
+            }
+            // Nothing sealed before the drain: rows live in the sorter.
+            assert_eq!(w.rgs.len(), 0);
+            assert_eq!(w.nbuf, 0);
+            w.finish().unwrap();
+        }
+
+        assert_eq!(
+            std::fs::read(&path_a).unwrap(),
+            std::fs::read(&path_b).unwrap(),
+            "presort part must be byte-identical to the presorted plain load"
+        );
+        let part = crate::reader::Part::open(&path_b, 2).unwrap().unwrap();
+        assert_eq!(part.cluster_key, Vec::<u16>::new());
+        for rg in &part.rgs {
+            assert_eq!(rg.flags & RG_FLAG_CLUSTERED, 0, "presort must not stamp CLUSTERED");
+        }
+        std::fs::remove_file(&path_a).unwrap();
+        std::fs::remove_file(&path_b).unwrap();
     }
 
     // No cluster key: ingest_row appends directly (no sorter detour).
