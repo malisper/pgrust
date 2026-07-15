@@ -15,39 +15,62 @@ use ::types_tuple::{
 use crate::*;
 
 const INT4OID: u32 = 23;
+const INT8OID: u32 = 20;
 const INT4_LT: u32 = 97;
+const INT8_LT: u32 = 412;
 const INTEGER_BTREE_FAM: u32 = 1976;
 const BTREE_AM: u32 = 403;
 const F_BTINT4SORTSUPPORT: u32 = 3130;
+const F_BTINT8SORTSUPPORT: u32 = 3131;
 
 static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
         syscache_seams::lookup_pg_type_shape::set(|typid| {
-            Ok((typid == INT4OID).then_some(PgTypeShape {
-                typlen: 4,
-                typbyval: true,
-                typalign: TYPALIGN_INT,
-                typstorage: TYPSTORAGE_PLAIN,
-                typcollation: 0,
-            }))
+            Ok(match typid {
+                INT4OID => Some(PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                INT8OID => Some(PgTypeShape {
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                _ => None,
+            })
         });
         syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
-            assert_eq!(opno, INT4_LT);
+            // int4 `<` (the plans' key-0) and int8 `<` (the refsort rule-2
+            // ref tie-break column).
+            let ty = match opno {
+                INT4_LT => INT4OID,
+                INT8_LT => INT8OID,
+                other => panic!("unexpected operator lookup {other}"),
+            };
             let mut v = PgVec::new_in(mcx);
             v.push(syscache_seams::PgAmopMemberShape {
                 amopfamily: INTEGER_BTREE_FAM,
-                amoplefttype: INT4OID,
-                amoprighttype: INT4OID,
+                amoplefttype: ty,
+                amoprighttype: ty,
                 amopstrategy: 1,
                 amopmethod: BTREE_AM,
             });
             Ok(v)
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
-            assert_eq!((opfamily, left, right, procnum), (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2));
-            Ok(F_BTINT4SORTSUPPORT)
+            assert_eq!((opfamily, procnum), (INTEGER_BTREE_FAM, 2));
+            Ok(match (left, right) {
+                (INT4OID, INT4OID) => F_BTINT4SORTSUPPORT,
+                (INT8OID, INT8OID) => F_BTINT8SORTSUPPORT,
+                other => panic!("unexpected amproc lookup {other:?}"),
+            })
         });
     });
 }
@@ -501,7 +524,7 @@ fn refsort_feed_gather_emit_and_rescan() {
     let mcx = estate.es_query_cxt;
 
     let kdesc = refsort_key_desc(mcx);
-    sort_lane_begin_refsort(&mut node, kdesc.clone()).unwrap();
+    sort_lane_begin_refsort(&mut node, kdesc.clone(), false).unwrap();
     assert_eq!(
         sort_lane_refsort_key_desc(&node).unwrap().natts,
         2,
@@ -577,6 +600,30 @@ fn refsort_feed_gather_emit_and_rescan() {
     assert!(sort_lane_next(&mut node, &mut estate).unwrap().is_none());
 }
 
+/// Rule-2 refsort (lazytopn): the ref column joins the comparator — the
+/// bounded selection is the (key, ref-ascending) TOTAL ORDER, so full-key
+/// ties at the LIMIT cut select the physically-earliest refs and emit in
+/// ref order, independent of put order. Under the plain single-key
+/// comparator the same feed's tie survivors are heap-shape arbitrary (the
+/// Q25 rule-2 landing's KEY FACT) — this pins the rule-2 leg exactly.
+#[test]
+fn refsort_rule2_ties_select_earliest_refs_in_ref_order() {
+    let (mut node, mut estate, _desc, _feed) = setup(2, vec![], 0);
+    sort_set_tuple_bound(&mut node, 2);
+    let mcx = estate.es_query_cxt;
+    sort_lane_begin_refsort(&mut node, refsort_key_desc(mcx), true).unwrap();
+    // Three full-key ties (key 1) put in NON-ref order + one worse key.
+    // Rule-2 order: (1,100) < (1,102) < (1,103) < (2,101); bound 2 keeps
+    // the two physically-earliest tie members.
+    for (key, rg, row) in [(1i32, 7u32, 103u32), (2, 7, 101), (1, 7, 100), (1, 7, 102)] {
+        sort_lane_put_refsort(&mut node, Datum::from_i32(key), false, refsort_encode(rg, row))
+            .unwrap();
+    }
+    sort_lane_finish(&mut node, &mut estate).unwrap();
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 100)));
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 102)));
+}
+
 /// The demote reset (`sort_lane_reset_for_refeed`) drops the narrow sort,
 /// the marker, and the buffer; the sticky refusal flag survives.
 #[test]
@@ -584,7 +631,7 @@ fn refsort_reset_for_refeed_clears_state_and_refusal_sticks() {
     let (mut node, mut estate, desc, _feed) = setup(2, vec![], 0);
     sort_set_tuple_bound(&mut node, 4);
     let mcx = estate.es_query_cxt;
-    sort_lane_begin_refsort(&mut node, refsort_key_desc(mcx)).unwrap();
+    sort_lane_begin_refsort(&mut node, refsort_key_desc(mcx), false).unwrap();
     sort_lane_put_refsort(&mut node, Datum::from_i32(9), false, refsort_encode(1, 2)).unwrap();
     assert!(!sort_lane_refsort_refused(&node));
     sort_lane_refsort_refuse(&mut node);
