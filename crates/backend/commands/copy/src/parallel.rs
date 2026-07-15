@@ -1057,8 +1057,11 @@ fn admit<'mcx>(
         Err(_) => refuse!("unsupported cbstore column type (serial raises the error)"),
     };
     match cbstore::writer::writer_opts_of(rel, &coltypes) {
-        Ok(opts) if opts.cluster_key.is_empty() => {}
-        Ok(_) => refuse!("cluster_key (sort-on-ingest is serial)"),
+        Ok(opts) if opts.cluster_key.is_empty() && opts.presort_key.is_empty() => {}
+        Ok(opts) if !opts.cluster_key.is_empty() => {
+            refuse!("cluster_key (sort-on-ingest is serial)")
+        }
+        Ok(_) => refuse!("PGRUST_COPY_PRESORT (sort-on-ingest is serial)"),
         Err(_) => refuse!("cbstore reloption error (serial raises it)"),
     }
     // File-source size floor (frontend streams engage regardless).
