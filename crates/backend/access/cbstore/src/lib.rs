@@ -106,6 +106,15 @@ pub fn footer_col_bytes(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<
     Ok(part_cache::cached_part(rel)?.map(|p| p.col_bytes().to_vec()))
 }
 
+// Every committed RG carries exact v7 zero/empty counts (q2box lane): the
+// plan-time answerability probe for the meta zero-count qual arm
+// (scan.rs meta_agg refuses whole-part on any RG without them). Served
+// from the session part cache like its siblings above; None while the
+// table has no committed footer.
+pub fn footer_zerocnt_all(rel: &::types_rel::Relation<'_>) -> PgResult<Option<bool>> {
+    Ok(part_cache::cached_part(rel)?.map(|p| p.zerocnt_all_rgs()))
+}
+
 pub fn unsupported(what: &str) -> Box<PgError> {
     Box::new(
         PgError::error(format!("cbstore does not support {what}"))
