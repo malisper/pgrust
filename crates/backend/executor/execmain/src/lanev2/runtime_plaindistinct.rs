@@ -766,6 +766,9 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "granule floor");
         return Ok(None);
     }
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }

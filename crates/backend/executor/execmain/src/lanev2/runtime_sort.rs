@@ -1510,6 +1510,9 @@ pub(super) fn try_own_sort<'mcx>(
         refused("granule floor");
         return Ok(false);
     }
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
 
     // --- Engage.
     // Router counter choke point (M5-1): Engaged = ceremony entered;
