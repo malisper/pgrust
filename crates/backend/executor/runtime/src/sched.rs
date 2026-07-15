@@ -277,6 +277,23 @@ pub struct DriveLocal {
     pub first_claim_ns: u64,
     /// Clock at the end of the last executed morsel (the WFIN t_us).
     pub last_end_ns: u64,
+    // ---- CPROBE accumulators (agg192-contention): plain thread-owned
+    // counters, always accumulated (a handful of u64 adds on owned memory);
+    // EMITTED only under PGRUST_RUNTIME_CPROBE=1 (see Runtime::drive_pinned).
+    /// Steps that returned [`Step::Retry`] (invalidated-slot windows).
+    pub steps_retry: u64,
+    /// Wall ns spent in the retry re-step loop (armed probe only; 0 when
+    /// the probe is off — the clock is not read).
+    pub retry_spin_ns: u64,
+    /// Claim-cursor CAS failures (contended `TaskSetRt::cursor`).
+    pub cas_retries: u64,
+    /// Pinned-drive slow-path membership lookups (stale slot-word cache —
+    /// one global mutex acquisition each).
+    pub pinned_lookups: u64,
+    /// Wall ns waiting in execution-permit acquire (armed probe only).
+    pub permit_wait_ns: u64,
+    /// Parks taken by this driver.
+    pub parks: u64,
 }
 
 /// Thread-local scheduling bookkeeping (one per worker, owned by the worker
@@ -293,6 +310,8 @@ pub struct WorkerLocal {
     /// Per-slot WFIN accumulation (marker contract; see [`markers_enabled`]).
     /// Untouched (empty vec) when markers are off.
     wfin: Vec<Option<WfinStat>>,
+    /// Per-slot batched stats accumulation (see [`StatAcc`]). Always on.
+    stat: Vec<Option<StatAcc>>,
     /// Pinned-drive fast path: the last (slot, seq) this local drove for its
     /// pinned RG. Revalidated by one slot-word read per step; the membership
     /// lock is touched only when it goes stale (publish/finalize events).
@@ -322,6 +341,11 @@ impl WorkerLocal {
     pub fn set_session_token(&mut self, token: u64) {
         self.session_token = token;
     }
+
+    /// Pin-board lane / worker index (CPROBE line identity).
+    pub(crate) fn worker_id(&self) -> usize {
+        self.worker
+    }
 }
 
 /// `PGRUST_MORSEL_MARKERS=1` arms the acceptance-instrument marker channel:
@@ -336,6 +360,32 @@ fn markers_enabled() -> bool {
         matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
     })
 }
+
+/// agg192-contention step-loop fix kill switch: `PGRUST_RUNTIME_STEP_V2=0`
+/// restores the per-step permit acquire/release + unthrottled Retry spin
+/// (the pre-fix loops, byte-identical). Default ON. Read once.
+pub(crate) fn step_v2() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STEP_V2").map_or(true, |v| v.trim() != "0"))
+}
+
+/// `PGRUST_RUNTIME_CPROBE=1` arms the contention-probe marker channel: one
+/// `MORSEL|CPROBE|…` line per pinned driver per drive (parsed off server
+/// stderr like WFIN). Default OFF: counters still accumulate (plain
+/// thread-owned u64 adds), but no clock reads and no emission.
+pub(crate) fn cprobe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CPROBE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Consecutive Retry steps a driver spins (yield) before parking on the
+/// pre-captured epoch. Retry windows are invalidated-slot waits (seal /
+/// last-out / straggler tails); publish and completion both wake_all, so
+/// the park is lost-wakeup-free. Small: each spin is a full step's global
+/// ceremony — the 48xl finding-#1 storm.
+pub(crate) const RETRY_PARK_AFTER: u32 = 16;
 
 /// Claim-coalescing target for whole-boundary sources (dop1-tax fix 1):
 /// a claim spans up to `PGRUST_RUNTIME_COALESCE_EPOCHS / active_workers`
@@ -368,6 +418,33 @@ fn endgame_split_enabled() -> bool {
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_ENDGAME_SPLIT").map_or(true, |v| v.trim() != "0")
     })
+}
+
+/// Batched stats accumulator (agg192-contention hygiene, coordinator-
+/// approved 2026-07-15): the per-task global/per-RG observability ticks
+/// (tasks, morsels, granules, sizing decisions) accumulate thread-locally
+/// per (worker, published task set) and flush on the same boundaries as
+/// WFIN (seq change, observed exhaustion, idle transition, drive exit,
+/// stop) — at 191 workers the per-task Relaxed RMWs on the packed
+/// RuntimeStats/RgStats lines were ~10 shared-line hits per task per
+/// worker. EXCEPTION kept synchronous: the FIRST task claim of each
+/// (worker, task set) ticks `rg.stats.tasks_claimed` immediately — the
+/// helper-death liveness backstop's `claimed == 0` fallback-vs-error gate
+/// (runtime_agg.rs and siblings) must see claimed work even if a helper
+/// later dies holding an unflushed accumulator. Counts stay EXACT for
+/// every reader that observes completion (all flush points precede the
+/// participant's exit); safety never reads these (M0 contract).
+struct StatAcc {
+    seq: u64,
+    ts: Arc<TaskSetRt>,
+    /// Claims BEYOND the first (the first is flushed synchronously, see
+    /// the struct doc).
+    tasks_claimed: u64,
+    tasks_completed: u64,
+    morsels: u64,
+    granules: u64,
+    /// Sizing-decision ticks: [ramp, default, shutdown].
+    sizing: [u64; 3],
 }
 
 /// One worker's accumulated participation in one published task set.
@@ -577,6 +654,7 @@ impl Scheduler {
             } else {
                 Vec::new()
             },
+            stat: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
@@ -597,6 +675,7 @@ impl Scheduler {
             } else {
                 Vec::new()
             },
+            stat: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
@@ -845,9 +924,9 @@ impl Scheduler {
             index,
             slot,
             seq,
-            cursor: AtomicU64::new(0),
-            sizer: crate::sizing::SizerShared::new(),
-            active_workers: AtomicU64::new(0),
+            cursor: crate::taskset::CachePadded(AtomicU64::new(0)),
+            sizer: crate::taskset::CachePadded(crate::sizing::SizerShared::new()),
+            active_workers: crate::taskset::CachePadded(AtomicU64::new(0)),
             fin_counter: crate::sync::atomic::AtomicI64::new(0),
             finalized: AtomicBool::new(false),
             c0,
@@ -1013,11 +1092,15 @@ impl Scheduler {
     /// parks on an epoch captured BEFORE the call.
     pub(crate) fn worker_step(&self, local: &mut WorkerLocal) -> Step {
         if self.stop.load(Ordering::SeqCst) {
+            // Stop = a flush boundary (StatAcc contract): the loop exits.
+            self.stat_flush_all(local);
             return Step::Stop;
         }
         let Some(slot) = self.pick_slot(local) else {
-            // Idle transition: nothing is runnable — any WFIN accumulation
-            // still held is this worker's final word on those sets.
+            // Idle transition: nothing is runnable — any WFIN/stats
+            // accumulation still held is this worker's final word on those
+            // sets.
+            self.stat_flush_all(local);
             local.wfin_flush_all();
             return Step::Idle;
         };
@@ -1069,6 +1152,9 @@ impl Scheduler {
                 Some(slot)
             }
             _ => {
+                // CPROBE: stale-cache membership lookup (one global mutex
+                // acquisition; per-iteration during invalidated-slot spins).
+                local.drive.pinned_lookups += 1;
                 let found = {
                     let m = lock(&self.membership);
                     if self.dag.load(Ordering::Relaxed) {
@@ -1112,6 +1198,8 @@ impl Scheduler {
         let Some(slot) = slot else {
             // Queued behind other RGs, or completed: the caller re-tests
             // completion and parks on an epoch captured before this call.
+            // Idle = a flush boundary (StatAcc contract).
+            self.stat_flush_all(local);
             return Step::Idle;
         };
 
@@ -1138,6 +1226,110 @@ impl Scheduler {
         // Protocol step 4: settle own pin; pay any marker debt.
         self.settle(local.worker);
         step
+    }
+
+    // ---- batched stats (see [`StatAcc`]) -----------------------------------
+
+    fn stat_flush(&self, acc: StatAcc) {
+        // Zero-guarded: fetch_add(0) is still a shared-line RMW.
+        if acc.tasks_claimed > 0 {
+            RuntimeStats::add(&self.stats.tasks_claimed, acc.tasks_claimed);
+            RuntimeStats::add(&acc.ts.rg.stats.tasks_claimed, acc.tasks_claimed);
+        }
+        if acc.tasks_completed > 0 {
+            RuntimeStats::add(&self.stats.tasks_completed, acc.tasks_completed);
+            RuntimeStats::add(&acc.ts.rg.stats.tasks_completed, acc.tasks_completed);
+        }
+        if acc.morsels > 0 {
+            RuntimeStats::add(&self.stats.morsels_claimed, acc.morsels);
+            RuntimeStats::add(&acc.ts.rg.stats.morsels_claimed, acc.morsels);
+        }
+        if acc.granules > 0 {
+            RuntimeStats::add(&self.stats.granules_executed, acc.granules);
+            RuntimeStats::add(&acc.ts.rg.stats.granules_executed, acc.granules);
+        }
+        if acc.sizing[0] > 0 {
+            RuntimeStats::add(&self.stats.sizing_ramp, acc.sizing[0]);
+        }
+        if acc.sizing[1] > 0 {
+            RuntimeStats::add(&self.stats.sizing_default, acc.sizing[1]);
+        }
+        if acc.sizing[2] > 0 {
+            RuntimeStats::add(&self.stats.sizing_shutdown, acc.sizing[2]);
+        }
+    }
+
+    fn stat_flush_slot(&self, local: &mut WorkerLocal, slot: usize) {
+        if let Some(acc) = local.stat[slot].take() {
+            self.stat_flush(acc);
+        }
+    }
+
+    pub(crate) fn stat_flush_all(&self, local: &mut WorkerLocal) {
+        for slot in 0..local.stat.len() {
+            self.stat_flush_slot(local, slot);
+        }
+    }
+
+    /// Record one task claim: the FIRST claim of a (worker, task set)
+    /// participation ticks synchronously (the helper-death `claimed == 0`
+    /// gate — [`StatAcc`] doc); the rest accumulate.
+    fn stat_task_claimed(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) {
+        let slot = ts.slot;
+        match &mut local.stat[slot] {
+            Some(a) if a.seq == ts.seq => a.tasks_claimed += 1,
+            other => {
+                if let Some(old) = other.take() {
+                    self.stat_flush(old);
+                }
+                RuntimeStats::tick(&self.stats.tasks_claimed);
+                RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
+                *other = Some(StatAcc {
+                    seq: ts.seq,
+                    ts: Arc::clone(ts),
+                    tasks_claimed: 0,
+                    tasks_completed: 0,
+                    morsels: 0,
+                    granules: 0,
+                    sizing: [0; 3],
+                });
+            }
+        }
+    }
+
+    /// Fold a completed task's morsel/granule/sizing counts + the completion
+    /// into the slot accumulator (installed by [`Self::stat_task_claimed`]).
+    fn stat_task_done(
+        &self,
+        local: &mut WorkerLocal,
+        ts: &Arc<TaskSetRt>,
+        morsels: u64,
+        granules: u64,
+        sizing: [u64; 3],
+    ) {
+        match &mut local.stat[ts.slot] {
+            Some(a) if a.seq == ts.seq => {
+                a.tasks_completed += 1;
+                a.morsels += morsels;
+                a.granules += granules;
+                for i in 0..3 {
+                    a.sizing[i] += sizing[i];
+                }
+            }
+            // No accumulator (impossible after stat_task_claimed, kept
+            // fail-open): flush synchronously.
+            _ => {
+                self.stat_flush(StatAcc {
+                    seq: ts.seq,
+                    ts: Arc::clone(ts),
+                    tasks_claimed: 0,
+                    tasks_completed: 1,
+                    morsels,
+                    granules,
+                    sizing,
+                });
+            }
+        }
     }
 
     /// Revalidate the slot word (single atomic read on the cached path) and
@@ -1169,8 +1361,9 @@ impl Scheduler {
     /// driven; [`TaskEnd::Starved`] ⇔ an open stream source has nothing
     /// claimable (park, producer wakes).
     fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> TaskEnd {
-        RuntimeStats::tick(&self.stats.tasks_claimed);
-        RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
+        // Batched (StatAcc): first claim of the participation synchronous,
+        // the rest thread-local until a flush boundary.
+        self.stat_task_claimed(local, ts);
         // Submit→first-service instrument (§3.5): CAS-once at the RG's first
         // task admission (one Relaxed load per task thereafter).
         if ts.rg.first_service_ns.load(Ordering::Relaxed) == 0 {
@@ -1186,6 +1379,11 @@ impl Scheduler {
         // input (tails192 #4) — identity at ≤32 by construction, so 16-core
         // pods and the mt16 vectors size exactly as before.
         let task_width = ts.active_workers.fetch_add(1, Ordering::SeqCst) + 1;
+        // Per-task observability counts, folded into the slot's StatAcc
+        // after the task (declared here so both match arms share the fold).
+        let mut t_morsels = 0u64;
+        let mut t_granules = 0u64;
+        let mut t_sizing = [0u64; 3];
 
         // Generation gate (H1): a task of an aborted (closed) generation is
         // unconsumable — the merged lifecycle's fail-closed armed join
@@ -1208,8 +1406,6 @@ impl Scheduler {
                 // sub-task granularity. Budget/flush metering (the sink
                 // lanes' safety accounting) lives operator-side and is
                 // untouched.
-                let mut t_morsels = 0u64;
-                let mut t_granules = 0u64;
                 let mut t_cpu_ns = 0u64;
                 loop {
                     // Morsel-boundary cancel point (Leis-style): an abort is
@@ -1218,7 +1414,12 @@ impl Scheduler {
                         end = TaskEnd::Exhausted;
                         break;
                     }
-                    let range = match self.claim_morsel(ts, &mut sizer) {
+                    let range = match self.claim_morsel(
+                        ts,
+                        &mut sizer,
+                        &mut local.drive,
+                        &mut t_sizing,
+                    ) {
                         Claim::Range(range) => range,
                         Claim::Starved => {
                             end = TaskEnd::Starved;
@@ -1357,10 +1558,6 @@ impl Scheduler {
                             }
                         }
                     }
-                    RuntimeStats::add(&self.stats.morsels_claimed, t_morsels);
-                    RuntimeStats::add(&ts.rg.stats.morsels_claimed, t_morsels);
-                    RuntimeStats::add(&self.stats.granules_executed, t_granules);
-                    RuntimeStats::add(&ts.rg.stats.granules_executed, t_granules);
                 }
                 // Armed-outcome discipline: a worker's task ends
                 // successfully even when it drained an abort — failure is
@@ -1373,12 +1570,15 @@ impl Scheduler {
         };
 
         ts.active_workers.fetch_sub(1, Ordering::SeqCst);
-        RuntimeStats::tick(&self.stats.tasks_completed);
-        RuntimeStats::tick(&ts.rg.stats.tasks_completed);
+        // Batched (StatAcc): completion + morsel/granule/sizing fold; an
+        // observed exhaustion ends this worker's participation (no claim
+        // can succeed past an exhausted cursor), so flush the slot then.
+        self.stat_task_done(local, ts, t_morsels, t_granules, t_sizing);
+        if matches!(end, TaskEnd::Exhausted) {
+            self.stat_flush_slot(local, ts.slot);
+        }
         // WFIN marker channel (off = one branch): fold this task into the
-        // slot's accumulator; an observed exhaustion ends this worker's
-        // participation (no claim can succeed past an exhausted cursor), so
-        // flush its line here.
+        // slot's accumulator, same flush boundary.
         if !local.wfin.is_empty() {
             let now = self.clock.now_ns();
             local.wfin_observe(ts, now.saturating_sub(task_t0), now);
@@ -1389,7 +1589,13 @@ impl Scheduler {
         end
     }
 
-    fn claim_morsel(&self, ts: &TaskSetRt, sizer: &mut TaskSizer) -> Claim {
+    fn claim_morsel(
+        &self,
+        ts: &TaskSetRt,
+        sizer: &mut TaskSizer,
+        drive: &mut DriveLocal,
+        sizing_acc: &mut [u64; 3],
+    ) -> Claim {
         // Stream sources: claimable up to the producer's watermark; only a
         // CLOSED stream's watermark is exhaustion (closed read before the
         // watermark inside stream_state — see the MorselSource contract).
@@ -1492,14 +1698,17 @@ impl Scheduler {
                 .compare_exchange(cur, end, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                let counter = match decision {
-                    SizingDecision::Ramp => &self.stats.sizing_ramp,
-                    SizingDecision::Default => &self.stats.sizing_default,
-                    SizingDecision::Shutdown => &self.stats.sizing_shutdown,
-                };
-                RuntimeStats::tick(counter);
+                // Batched (StatAcc): folded into the slot accumulator at
+                // task end, flushed at the WFIN-class boundaries.
+                sizing_acc[match decision {
+                    SizingDecision::Ramp => 0,
+                    SizingDecision::Default => 1,
+                    SizingDecision::Shutdown => 2,
+                }] += 1;
                 return Claim::Range(cur..end);
             }
+            // CPROBE: contended-cursor evidence (thread-owned counter).
+            drive.cas_retries += 1;
         }
     }
 
