@@ -4814,6 +4814,10 @@ fn scan_mk_batch<'mcx>(
     for (j, comp) in shape.comps.iter().enumerate() {
         let att = comp.att as usize;
         let off_bits = comp.off as u32 * 8;
+        // spankey copy-tax band timer (measurement only): Intern components
+        // (datum views + code_ids + DictLazy ensures + intern resolves) vs
+        // word components, per batch.
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
         match comp.kind {
             ::nodeagg::MkCompKind::Int { width } => {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -4936,6 +4940,15 @@ fn scan_mk_batch<'mcx>(
                 }
             }
         }
+        {
+            use ::nodeagg::spankey::{spankey_lap, SPANKEY_CTRS as S};
+            let ctr = if matches!(comp.kind, ::nodeagg::MkCompKind::Intern) {
+                &S.pack_intern_ns
+            } else {
+                &S.pack_word_ns
+            };
+            spankey_lap(ctr, spk_t0);
+        }
     }
     // Split the accumulator into the packed key lane and probe.
     if shape.two_words {
@@ -4956,7 +4969,9 @@ fn scan_mk_batch<'mcx>(
     // plan column (a dict component is never in `plan.cols` — admission);
     // the plan is unguarded; each pergroup was installed by the compact
     // probe within this batch.
+    let spk_t0 = ::nodeagg::spankey::spankey_t0();
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.fold_ns, spk_t0);
     // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
     // table reaches the bound wins the CAS and publishes its first `bound`
     // groups' canonical keys. Correct from ANY table state — nothing was
