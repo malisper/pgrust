@@ -1020,3 +1020,80 @@ fn dict_table_epoch_identity() {
     assert_eq!(rg1.datum(0).as_i64(), 1);
     assert_eq!(rg1.datum(1).as_i64(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// for_each_live: the shared word-skip iterator (wordskip-general lane) must
+// visit EXACTLY the positions the plain pos..n loop keeps under a per-row
+// bit test — same positions, same order — for arbitrary masks, pos offsets,
+// ragged tails, and EXACT-LENGTH word slices (nwords = ceil(n/64), the
+// `seq_scan_batch_skip_sel` shape), and must stop at the first Err exactly
+// where the plain loop's `?` would.
+// ---------------------------------------------------------------------------
+#[test]
+fn for_each_live_matches_plain_loop_on_set_bits() {
+    let mut seed = 0x2545F4914F6CDD1Du64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..500u32 {
+        let n: u32 = match case % 6 {
+            0 => 1,
+            1 => 63,
+            2 => 64,
+            3 => 65,
+            4 => 128,
+            _ => (rng() % (64 * SOA_BM_WORDS as u64 - 1) + 1) as u32,
+        };
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let nwords = (n as usize).div_ceil(64);
+        let mut words: Vec<u64> = (0..nwords)
+            .map(|_| match case % 4 {
+                0 => 0,
+                1 => !0,
+                _ => rng(),
+            })
+            .collect();
+        // Producer contract: bits at/past n are zero.
+        if n % 64 != 0 {
+            words[nwords - 1] &= (1u64 << (n % 64)) - 1;
+        }
+        let expected: Vec<u32> = (pos..n)
+            .filter(|&i| words[(i / 64) as usize] & (1u64 << (i % 64)) != 0)
+            .collect();
+        let mut got = Vec::new();
+        for_each_live::<()>(Some(&words), pos, n, |i| {
+            got.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, expected, "case {case} n={n} pos={pos}");
+        // None mask = the plain dense loop.
+        let mut all = Vec::new();
+        for_each_live::<()>(None, pos, n, |i| {
+            all.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(all, (pos..n).collect::<Vec<_>>());
+        // Err stops the walk at that position (the plain loop's `?`).
+        if !expected.is_empty() {
+            let stop_at = expected[(rng() % expected.len() as u64) as usize];
+            let mut seen = Vec::new();
+            let r = for_each_live(Some(&words), pos, n, |i| {
+                if i == stop_at {
+                    return Err(i);
+                }
+                seen.push(i);
+                Ok(())
+            });
+            assert_eq!(r, Err(stop_at));
+            assert_eq!(
+                seen,
+                expected.iter().copied().take_while(|&i| i != stop_at).collect::<Vec<_>>()
+            );
+        }
+    }
+}

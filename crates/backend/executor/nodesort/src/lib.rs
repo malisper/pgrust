@@ -814,42 +814,17 @@ pub trait SortLaneBatchFeed<'mcx> {
 /// Word-granular: an all-clear word advances 64 positions in one compare —
 /// the selective-qual sort feed's per-row emit ceremony (ExprContext reset,
 /// CFI, bitmap re-test per row) collapses to one word test per 64 rows.
+/// One shared implementation: `exectuples::for_each_live` (the wordskip
+/// generalization of this q22 helper); the differential test below stays
+/// the put-stream-identity gate at this seam.
 #[inline(always)]
 fn for_each_put(
     live: Option<&[u64; exectuples::SOA_BM_WORDS]>,
     pos: u32,
     n: u32,
-    mut f: impl FnMut(u32) -> PgResult<()>,
+    f: impl FnMut(u32) -> PgResult<()>,
 ) -> PgResult<()> {
-    let Some(words) = live else {
-        for i in pos..n {
-            f(i)?;
-        }
-        return Ok(());
-    };
-    if pos >= n {
-        return Ok(());
-    }
-    let last = ((n - 1) / 64) as usize;
-    let mut w = (pos / 64) as usize;
-    // Mask off bits below `pos` in the first word; bits at/past `n` are
-    // zero by the producer's contract (belt: mask the last word anyway).
-    let mut bits = words[w] & (!0u64 << (pos % 64));
-    loop {
-        if w == last && n % 64 != 0 {
-            bits &= (1u64 << (n % 64)) - 1;
-        }
-        while bits != 0 {
-            let i = (w as u32) * 64 + bits.trailing_zeros();
-            bits &= bits - 1;
-            f(i)?;
-        }
-        if w == last {
-            return Ok(());
-        }
-        w += 1;
-        bits = words[w];
-    }
+    exectuples::for_each_live(live.map(|w| &w[..]), pos, n, f)
 }
 
 /// Batch-granular feed leg (breaker `BatchSink::accept_batch`): put every

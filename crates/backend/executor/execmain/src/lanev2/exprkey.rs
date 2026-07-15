@@ -2111,11 +2111,12 @@ fn exprkey_batch<'mcx>(
                 });
             }
             let batch = ::lanestitch::Batch { nrows: n, lanes };
+            // Word-level SelVec build: `all(n)` masks bits at/past n, so
+            // ANDing the whole-qual words is exactly the per-row
+            // clear-on-cleared-bit walk (wordskip lane: no per-row test).
             let mut sv = ::lanestitch::SelVec::all(n);
-            for i in 0..n {
-                if sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
-                    sv.clear(i);
-                }
+            for (w, s) in sv.words[..nwords].iter_mut().zip(sel[..nwords].iter()) {
+                *w &= *s;
             }
             xk.key_vals.clear();
             xk.key_vals.resize(n as usize, ::datum::Datum::null());
@@ -2956,12 +2957,22 @@ fn per_row_batch<'mcx>(
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    for i in 0..n {
+    // Emit-dead word skip over the staged qual bitmap: a cleared skip-sel
+    // bit is a row the emit rejects with no observable effect (definitive
+    // even under requal) — same accepted rows, same order, same errors.
+    let skip = {
+        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+        ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+            w[..s.len()].copy_from_slice(s);
+            w
+        })
+    };
+    ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
         if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
             ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Rebuild the projected row in the memoized stage slot: needed columns from

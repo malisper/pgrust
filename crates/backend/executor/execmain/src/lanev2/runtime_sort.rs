@@ -695,15 +695,30 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
             ok.then_some((fb, selw))
         };
         let max_resno = self.keys.iter().map(|k| k.resno_outer).max().unwrap_or(0);
-        for i in pos..n {
-            if let Some((fb, selw)) = &fast {
-                let w = (i / 64) as usize;
-                let bit = 1u64 << (i % 64);
-                if let Some(selw) = selw {
-                    if selw[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
+        // Composed skip mask, word-skipped by `for_each_live`: the fast
+        // leg's exact qual-cleared rows and the feed's qual-survivor
+        // snapshot (`live_sel` — cleared bits answer `emit` with None, and
+        // cover the no-fast/requal legs) each produce nothing, so skipping
+        // them keeps the surviving observation stream identical.
+        let skip = {
+            let mut skip: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let selw = fast.as_ref().and_then(|(_, s)| *s);
+            for m in [emit.live_sel(), selw].into_iter().flatten() {
+                match &mut skip {
+                    None => skip = Some(m),
+                    Some(acc) => {
+                        for (a, b) in acc.iter_mut().zip(m.iter()) {
+                            *a &= *b;
+                        }
                     }
                 }
+            }
+            skip
+        };
+        ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
+            if let Some((fb, _)) = &fast {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
                 if fb[w] & bit == 0 {
                     // Clean staged row: every key straight from its SoA
                     // column (re-borrowed per key — batch-stable).
@@ -716,11 +731,11 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                         self.obs[ki] = (key_i64(d, key.width), isnull);
                     }
                     self.push_obs(rg, row0 + i);
-                    continue;
+                    return Ok(());
                 }
                 // Forced-fallback row: exact per-row emit below.
             }
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             {
                 let slot = estate.slot_mut(id);
                 ::exectuples::slot_getsomeattrs(slot, max_resno as i32 + 1);
@@ -733,8 +748,8 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                 }
             }
             self.push_obs(rg, row0 + i);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -813,10 +828,14 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
         };
         ::postgres_seams::check_for_interrupts::call()?;
         let nk = self.keys.len();
-        for i in pos..n {
+        // Emit-dead word skip (`live_sel`): a cleared bit answers `emit`
+        // with None and no observable effect — same surviving rows, same
+        // run-buffer order.
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             // The per-row emit leg: qual verdict + projection + detoast —
             // C semantics, C's errors on C's row. None = qual-filtered.
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             let bufrow = self.local.buf.nrows as u32;
             {
                 let slot = estate.slot_mut(id);
@@ -848,7 +867,8 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
                 ),
                 bufrow,
             });
-        }
+            Ok(())
+        })?;
         if self.local.bytes() > self.budget {
             self.budget_broke = true;
         }

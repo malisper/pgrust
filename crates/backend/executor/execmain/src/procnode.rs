@@ -1956,6 +1956,14 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     ) -> PgResult<Option<u32>> {
         ::nodeseqscan::seq_scan_batch_qual_count(self.ss, estate, n)
     }
+
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
+    }
 }
 
 impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
@@ -1972,6 +1980,14 @@ impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mc
     #[inline]
     fn slot(&self) -> ExecSlotId {
         self.outer_slot
+    }
+
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
     }
 }
 
@@ -2060,6 +2076,17 @@ impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanProjBatchSource<'_,
     #[inline]
     fn slot(&self) -> ExecSlotId {
         self.result_slot
+    }
+
+    // Skipping a fetch-dead row elides only its ExprContext reset — the
+    // interleaved reset frees nothing (nothing allocated since the previous
+    // reset), so every surviving fetch sees identical context state.
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
     }
 }
 
