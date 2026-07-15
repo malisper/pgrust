@@ -449,10 +449,8 @@ pub struct CbScanDescData<'mcx> {
     // with the staged prefix's canonical fingerprint. None = unarmed.
     cond: Option<Box<CondState>>,
     // Claim-time readahead env gate (PGRUST_CBSTORE_READAHEAD; default on),
-    // read once per scan. STRUCTURAL SCOPE GUARD: the flag is only ever
-    // consulted inside claim_next_rg's PARALLEL arm — serial scans never
-    // advise regardless of the env (arm A serial-vs-CH-mt1 stays
-    // prefetch-free per Michael's standing directive).
+    // read once per scan — the global kill switch for every advise path
+    // (legacy parallel arm, claim drive, serial drive, footer sections).
     readahead: bool,
     // Claim-drive readahead depth (cold-readahead lane): on a NEW row group
     // entered through `set_granule_range` (a runtime morsel claim), advise
@@ -462,12 +460,10 @@ pub struct CbScanDescData<'mcx> {
     // RG switch, no queue, no allocation — the advised bytes are exactly
     // what the scan is about to read anyway.
     ra_claims: usize,
-    // Serial physical-order drive readahead — OPT-IN, DEFAULT OFF
-    // (PGRUST_CBSTORE_READAHEAD_SERIAL=1). Michael's standing directive
-    // keeps arm A (serial-vs-CH-mt1) structurally prefetch-free; this knob
-    // exists so the cold-readahead lane can measure the serial cold
-    // first-touch term on explicit A/B arms. Flipping the default is an
-    // escalation with those numbers, never a lane decision.
+    // Serial physical-order drive readahead — DEFAULT ON (ratified
+    // 2026-07-15, superseding the historical arm-A no-prefetch convention;
+    // see env_readahead_serial). PGRUST_CBSTORE_READAHEAD_SERIAL=0 is the
+    // opt-out; the global kill switch also silences it.
     ra_serial: bool,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
@@ -519,8 +515,7 @@ fn env_off(name: &str) -> bool {
 }
 
 // Claim-time readahead gate: default ON; PGRUST_CBSTORE_READAHEAD=0/off is
-// the kill switch. Parallel scans only — the serial guard is structural
-// (claim_next_rg's serial arm never consults this).
+// the global kill switch across every advise path.
 fn env_readahead_on() -> bool {
     !matches!(
         std::env::var("PGRUST_CBSTORE_READAHEAD").as_deref(),
@@ -541,13 +536,16 @@ fn env_readahead_claims() -> usize {
     }
 }
 
-// Serial physical-order drive readahead — OPT-IN, DEFAULT OFF. See the
-// ra_serial field note (Michael's standing arm-A directive; the cold-
-// readahead lane's A/B knob).
+// Serial physical-order drive readahead — DEFAULT ON since 2026-07-15:
+// Michael ratified flipping the historical arm-A no-prefetch convention
+// after the cold-readahead lane's paired serial 100M A/B (cold geomean
+// -23.2%, hot flat, outputs byte-identical; notes/cold-readahead-lane.md).
+// PGRUST_CBSTORE_READAHEAD_SERIAL=0/off restores the historical
+// prefetch-free serial arm for comparisons.
 fn env_readahead_serial() -> bool {
-    matches!(
+    !matches!(
         std::env::var("PGRUST_CBSTORE_READAHEAD_SERIAL").as_deref(),
-        Ok("1") | Ok("on") | Ok("ON"),
+        Ok("0") | Ok("off") | Ok("OFF"),
     )
 }
 
@@ -894,12 +892,12 @@ impl<'mcx> CbScanDescData<'mcx> {
             None => {
                 let r = self.serial_next;
                 self.serial_next += 1;
-                // Serial readahead — OPT-IN, DEFAULT OFF (ra_serial;
-                // PGRUST_CBSTORE_READAHEAD_SERIAL=1). The structural arm-A
-                // prohibition (Michael's standing directive) holds at the
-                // default: this branch is a no-op unless the knob is set,
-                // and it counts into rgs_claim_readahead, never
-                // rgs_readahead (the serial guard tests' channel).
+                // Serial readahead — DEFAULT ON (ra_serial; ratified
+                // 2026-07-15, superseding the historical arm-A structural
+                // prohibition). Counts into rgs_claim_readahead, never
+                // rgs_readahead — the legacy counter stays a parallel-
+                // Gather-arm channel. PGRUST_CBSTORE_READAHEAD_SERIAL=0
+                // restores the historical prefetch-free serial arm.
                 if self.readahead && self.ra_serial {
                     self.advise_claim_window(r);
                 }
