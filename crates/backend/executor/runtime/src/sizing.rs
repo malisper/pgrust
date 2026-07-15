@@ -36,6 +36,63 @@ impl Default for SizingParams {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Claim-duration DOP scaling (tails192, 48xl charter item #4).
+//
+// At high pipeline width the ~2ms claim cadence multiplies into shared-
+// scheduler pressure: 191 workers x ~2ms claims ~= 95K shared-cursor touches
+// per second, all CASing the same TaskSet cursor (the 48xl in-drive cycle-
+// inflation family, notes/48xl-first-run-2026-07-15.md §3). Scale the
+// per-task duration TARGET with the live width: identity at W <= 32
+// (16-thread behavior unchanged by construction), linear ramp above, x2.5
+// at 191 (2ms -> 5ms). The photo-finish floor t_min is deliberately NOT
+// scaled — end-game claims still shrink to the same 500us floor, so the
+// finish-spread posture is preserved (the elasticity oracle for this knob).
+//
+// DEFAULT OFF (opt-in PGRUST_RUNTIME_TMAX_DOPSCALE=1): the 48xl window-C
+// A/B (2026-07-15, notes/tails192-lane.md) measured NO wall win from this
+// lever at any width on q19/q33 and a +18% q33@191 REGRESSION (iso-A
+// exonerated the endgame split; dopscale-on was the delta). Suspected
+// mechanism: a fast zone-skipped first epoch seeds tput high and the
+// duration-targeted spanning oversizes claims of HEAVY epochs. Re-enable
+// only behind a heavy-epoch guard + a fresh A/B (the recorded increment-2
+// candidate: contention-responsive growth, which self-corrects).
+// (env, not a GUC — pg_settings byte-identity law, the TMAX_US precedent.)
+// ---------------------------------------------------------------------------
+pub const DOPSCALE_W0: u64 = 32; // identity at or below this width
+pub const DOPSCALE_W1: u64 = 191; // full multiplier at or above this width
+pub const DOPSCALE_MAX_X: f64 = 2.5; // t_max multiplier at W1
+
+pub fn dopscale_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_TMAX_DOPSCALE").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// The pure width→params ramp (unit-tested independent of the env gate).
+pub fn dopscale_ramp(params: SizingParams, w: u64) -> SizingParams {
+    if w <= DOPSCALE_W0 {
+        return params;
+    }
+    let frac = ((w - DOPSCALE_W0) as f64 / (DOPSCALE_W1 - DOPSCALE_W0) as f64).min(1.0);
+    let x = 1.0 + (DOPSCALE_MAX_X - 1.0) * frac;
+    SizingParams { t_max_ns: ((params.t_max_ns as f64) * x) as u64, t_min_ns: params.t_min_ns }
+}
+
+impl SizingParams {
+    /// Width-scaled params for one task: t_max ramps with the live worker
+    /// count, t_min (photo-finish floor) is untouched. Identity for
+    /// `w <= DOPSCALE_W0` and unless the opt-in is set (default OFF — the
+    /// window-C q33@191 verdict above).
+    pub fn scaled_for_width(self, w: u64) -> SizingParams {
+        if !dopscale_enabled() {
+            return self;
+        }
+        dopscale_ramp(self, w)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Startup,
