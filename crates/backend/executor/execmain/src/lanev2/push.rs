@@ -256,6 +256,15 @@ pub(super) trait BatchEmit<'mcx> {
         None
     }
 
+    /// Column-independent staged-batch masks for the refsort fast leg:
+    /// `(fallback_words, sel_words)` — see
+    /// `nodeseqscan::seq_scan_refsort_batch_masks` for the soundness
+    /// contract. Default `None` = no certified masks (the caller fails
+    /// closed or takes the per-row emit path).
+    fn refsort_batch_masks(&self, _n: u32) -> Option<(&[u64], Option<&[u64]>)> {
+        None
+    }
+
     /// Survivor-bit snapshot of the CURRENT staged batch's qual selection:
     /// a CLEARED bit means `emit(i)` returns `None` with no observable
     /// side effect (the staged qual verdict already rejected row i without

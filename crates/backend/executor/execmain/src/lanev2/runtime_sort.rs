@@ -148,19 +148,37 @@ fn sort_keys_and_map<'mcx>(
         None => (0..natts as u16).collect(),
         // Projected scans admit only the pure Var-copy census (a computing
         // column deferred past the accept could elide C's error).
-        Some(p) => {
-            let cols = p.pi_state.scan_proj_cols()?;
-            if cols.any_arith() || cols.n as usize != natts {
-                return None;
+        Some(p) => match p.pi_state.scan_proj_cols() {
+            Some(cols) => {
+                if cols.any_arith() || cols.n as usize != natts {
+                    return None;
+                }
+                cols.cols[..natts]
+                    .iter()
+                    .map(|c| match *c {
+                        ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<u16>>>()?
             }
-            cols.cols[..natts]
-                .iter()
-                .map(|c| match *c {
-                    ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
-                    _ => None,
-                })
-                .collect::<Option<Vec<u16>>>()?
-        }
+            // A single-column pure-Var projection compiles to a
+            // JustAssignVar KERNEL (no step program => no scan_proj_cols
+            // census) — the datum-shaped DictCode admission (Q26's exact
+            // shape; the sortkey_direct census, same pattern).
+            None => match p.pi_state.kernel() {
+                ::execexpr::Kernel::JustAssignVar {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                }
+                | ::execexpr::Kernel::JustAssignVarVirt {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                } if natts == 1 => vec![attnum],
+                _ => return None,
+            },
+        },
     };
     // Every key: int-family operator (the POD-heap encoding vocabulary —
     // the adaptive walk's own list; timestamps/dates ride their I8/I4 cmp
@@ -734,29 +752,13 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                 ::nodesort::sink::TOPN_MAX_KEYS] = [None; ::nodesort::sink::TOPN_MAX_KEYS];
             let mut ok = true;
             for (ki, key) in self.keys.iter().enumerate() {
-                match emit.refsort_key_batch(key.attno_scan, n) {
-                    Some((_, _, fallback, sel)) => {
-                        for (w, &word) in fallback.iter().enumerate() {
-                            fb[w] |= word;
-                        }
-                        if ki == 0 {
-                            selw = sel.map(|s| {
-                                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                                w[..s.len()].copy_from_slice(s);
-                                w
-                            });
-                        }
-                    }
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                }
-                // DictCode key: the window must ALSO answer a stitched
-                // code lane (dict window + part-global byte-rank codes) —
-                // Raw windows and unstitched parts cannot serve order via
-                // codes (dict-code-flow.md §2.2 Law D / degrade ladder).
                 if key.dictcode {
+                    // DictCode key: observations come from the stitched
+                    // code lane of the window — NEVER from SoA datum cells
+                    // (a text column may sit past the fixed-width deform's
+                    // coverage; the code lane reads the scan's own staged
+                    // window). Raw windows and unstitched parts cannot
+                    // serve order via codes (dict-code-flow.md §2.2 Law D).
                     match emit.refsort_dictcode_batch(key.attno_scan) {
                         Some(l) if l.table.has_stitch() => dlanes[ki] = Some(l),
                         _ => {
@@ -764,6 +766,31 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                             break;
                         }
                     }
+                    continue;
+                }
+                // Int-family key: the SoA datum cells must be certified
+                // clean-readable (the incumbent law, per key).
+                if emit.refsort_key_batch(key.attno_scan, n).is_none() {
+                    ok = false;
+                    break;
+                }
+            }
+            // Batch masks (whole-qual sel verdict + forced-fallback), once
+            // per batch — column-independent (a dictcode-only spec never
+            // calls the key-batch accessor).
+            if ok {
+                match emit.refsort_batch_masks(n) {
+                    Some((fallback, sel)) => {
+                        for (w, &word) in fallback.iter().enumerate() {
+                            fb[w] |= word;
+                        }
+                        selw = sel.map(|s| {
+                            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                            w[..s.len()].copy_from_slice(s);
+                            w
+                        });
+                    }
+                    None => ok = false,
                 }
             }
             ok.then_some((fb, selw, dlanes))
