@@ -252,7 +252,7 @@ pub(super) trait BatchEmit<'mcx> {
     /// semantics must additionally gate on `table.has_stitch()` and fail
     /// closed otherwise. Default: never serves (only the cbstore-backed
     /// seqscan emit face can).
-    fn refsort_dictcode_batch(&self, _col: u16) -> Option<::exectuples::SoaDictLane> {
+    fn refsort_dictcode_batch(&mut self, _col: u16) -> Option<::exectuples::SoaDictLane> {
         None
     }
 

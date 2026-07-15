@@ -943,7 +943,7 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     }
 
     #[inline]
-    fn refsort_dictcode_batch(&self, col: u16) -> Option<::exectuples::SoaDictLane> {
+    fn refsort_dictcode_batch(&mut self, col: u16) -> Option<::exectuples::SoaDictLane> {
         ::nodeseqscan::seq_scan_batch_dict_codes_global(self.node, col as usize)
     }
 

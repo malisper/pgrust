@@ -1518,7 +1518,7 @@ pub fn table_scan_batch_dict_codes<'mcx>(
 /// dictionaries — always `None`.
 #[inline]
 pub fn table_scan_batch_dict_codes_global<'mcx>(
-    scan: &TableScanDesc<'mcx>,
+    scan: &mut TableScanDesc<'mcx>,
     c: u16,
 ) -> Option<::exectuples::SoaDictLane> {
     match scan {
