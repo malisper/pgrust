@@ -2806,22 +2806,22 @@ fn agg_locality_ndv_enabled() -> bool {
 /// The q36-band (mid-NDV) locality cap — see [`agg_locality_ndv_enabled`].
 const SINK_LOCALITY_CAP_WIDE: u32 = 1 << 20;
 
-/// `PGRUST_RUNTIME_AGG_LOCALITY_CANON=1` (default OFF — the probe channel):
-/// extend the locality cap to CANONICAL (Intern-bearing) Mk shapes (the q17
-/// class: 17M UserID×SearchPhrase groups; the q40 CaseDict residual). The
-/// canonical flush/SEAL/combine machinery exists since train-17
-/// text-kernels (canon shapes already flush at the BUDGET cap); the
-/// train-19 exclusion was the car3/car4 seam, not a mechanism gap. Canon
-/// flushes materialize canonical bytes and reset the intern table, so the
-/// per-flush cost is higher — default stays OFF until the q17/q40 ladder
-/// proves the trade (byte gates mandatory: q17/q40 have no ratified tie
-/// class).
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CANON` (default ON since train-20): extend
+/// the locality cap to CANONICAL (Intern-bearing) Mk shapes (the q17 class:
+/// 17M UserID×SearchPhrase groups; the q40 CaseDict residual). The canonical
+/// flush/SEAL/combine machinery exists since train-17 text-kernels (canon
+/// shapes already flush at the BUDGET cap); the train-19 exclusion was the
+/// car3/car4 seam, not a mechanism gap. Default flipped ON at the train-20
+/// merge: the lane's ladder measured q17 -28% (byte-MATCH) and the
+/// canon-family guard pair (q13/q15/q17/q19/q37/q40 @100M mt16, jobs
+/// -1784092204-0df8 vs -1784092208-06ce) adjudicated ZERO regressions with
+/// q19 -30%. `=0`/`off` restores the exclusion.
 fn agg_locality_canon_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CANON").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
