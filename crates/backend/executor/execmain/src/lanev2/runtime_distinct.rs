@@ -1401,6 +1401,20 @@ fn distinct_topn_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET` kill switch (default ON): 0/off
+/// restores the serial-halved budget-fit admission exactly (the K2 100M
+/// budget refusal — q14@100M falls back to the vector's non-runtime arm;
+/// the rollback/A-B attribution channel for the dop-budget face).
+fn distinct_topn_dopbudget_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// Kernel-2 admission — arm the distinct sink's bounded selection from the
 /// PLAN-SIDE consumer shape: the leader pstmt's root must be exactly
 /// `Limit(COUNT-option, Const count, no offset) → Sort(single int8-kernel
@@ -1586,13 +1600,27 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // near-unique class's conversion; hashgrouped.rs economics doc).
     let paremit_cols =
         if distinct_paremit_enabled() { ::nodeagg::pd_paremit_cols(agg) } else { None };
-    if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical_sink(
-            agg,
-            super::pardistinct_force(),
-            sort.plan.plan.plan_rows,
-            paremit_cols.is_some(),
-        )
+    if !::nodeagg::agg_hashgroup_admissible(agg) {
+        refused(estate, ea, node_id, "hashgroup admission/economics");
+        return Ok(None);
+    }
+    // Economics, serial-halved fit term first (the pre-lane sizing): a PASS
+    // here is final. A FAIL is only provisional when the K2 dop-budget face
+    // (economical_sink doc) can still apply — the paremit/topn probes below
+    // are plan reads only, so deferring the refusal costs nothing and keeps
+    // every non-K2 shape refusing exactly as before, same reason string.
+    let econ_serial = ::nodeagg::agg_hashgroup_economical_sink(
+        agg,
+        super::pardistinct_force(),
+        sort.plan.plan.plan_rows,
+        paremit_cols.is_some(),
+        None,
+    );
+    if !econ_serial
+        && !(distinct_topn_dopbudget_enabled()
+            && distinct_topn_enabled()
+            && distinct_spill_enabled()
+            && paremit_cols.is_some())
     {
         refused(estate, ea, node_id, "hashgroup admission/economics");
         return Ok(None);
@@ -1650,6 +1678,28 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         (Some(_), Some(cols)) => distinct_topn_arm(agg, estate, &spec, cols),
         _ => None,
     };
+    // Deferred economics (the K2 dop-budget face — economical_sink doc): a
+    // serial-halved-term FAIL above survives only if the full bounded-memory
+    // stack actually resolved (live paremit recipe + armed K2 selection) AND
+    // the estimate fits the sink's real union bound (per-Local R3 envelope ×
+    // dop — the same bound the combine enforces dynamically; splits + value
+    // spill bound each partition, the selection bounds the leader).
+    if !econ_serial {
+        let admit = paremit.is_some()
+            && topn.is_some()
+            && ::nodeagg::agg_hashgroup_economical_sink(
+                agg,
+                super::pardistinct_force(),
+                sort.plan.plan.plan_rows,
+                true,
+                Some((runtime_distinct_worker_budget(), dop as u32)),
+            );
+        if !admit {
+            refused(estate, ea, node_id, "hashgroup admission/economics");
+            return Ok(None);
+        }
+        lane_trace(&format!("runtime-distinct: topn dop-budget admission (dop={dop})"));
+    }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
