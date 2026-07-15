@@ -70,6 +70,14 @@ tupdesc = { path = "../../access/common/tupdesc" }
 types_trigger = { path = "../../../_support/types/types_trigger" }
 trigger = { path = "../trigger" }
 libc = "0.2"
+# Morsel-parallel COPY (parallel.rs): runtime stream source + pinned RG,
+# full-identity helpers, cbstore chunk encoders, leader-latch wakes.
+runtime = { path = "../../executor/runtime" }
+parallel = { path = "../../access/transam/parallel" }
+latch = { path = "../../storage/ipc/latch" }
+types_storage = { path = "../../../_support/types/types_storage" }
+cbstore = { path = "../../access/cbstore" }
+memchr = "2"
 
 [dev-dependencies]
 guc_tables = { path = "../../utils/misc/guc_tables" }

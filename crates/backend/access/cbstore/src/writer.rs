@@ -319,20 +319,109 @@ enum ColBuilder {
 /// the column is not dict-encoded — a partial global code space would break
 /// the part-scope facts consumers rely on.
 struct StitchCol {
-    ids: HashMap<Box<[u8]>, u32>,
+    ids: HashMap<Box<[u8]>, u32, DictBuild>,
     rg_maps: Vec<Vec<u32>>,
     poisoned: bool,
 }
 
 impl StitchCol {
     fn new() -> StitchCol {
-        StitchCol { ids: HashMap::new(), rg_maps: Vec::new(), poisoned: false }
+        StitchCol {
+            ids: HashMap::with_hasher(DictBuild::new()),
+            rg_maps: Vec::new(),
+            poisoned: false,
+        }
     }
 
     fn poison(&mut self) {
         self.poisoned = true;
-        self.ids = HashMap::new();
+        self.ids = HashMap::with_hasher(DictBuild::new());
         self.rg_maps = Vec::new();
+    }
+}
+
+// ---- PGRUST_CBSTORE_FASTHASH (load-speed prototype, DEFAULT OFF) -----------
+// The ingest dictionary passes (per-RG dict build + the v7 stitch intern
+// table) hash every text value through std's SipHash — measured ~8% of the
+// 10M ClickBench COPY wall (load-speed lane perf, 2026-07-14). The maps only
+// DEDUP: dict order is byte-sorted after the build and stitch ids are
+// re-ranked byte-sorted at finish(), so the hasher never reaches the on-disk
+// bytes — output is byte-identical either way. FASTHASH=1 swaps in an
+// FxHash-style multiply-mix byte hasher (dedup-grade quality is sufficient;
+// a collision only costs a memcmp probe).
+fn fasthash_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_CBSTORE_FASTHASH").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+const FXK: u64 = 0x517cc1b727220a95;
+
+enum DictHasher {
+    Sip(std::collections::hash_map::DefaultHasher),
+    Fast(u64),
+}
+
+impl std::hash::Hasher for DictHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        match self {
+            DictHasher::Sip(h) => h.finish(),
+            DictHasher::Fast(h) => {
+                // final avalanche (murmur3 fmix64) so hashbrown's bucket bits
+                // (low) and control byte (high 7) both see mixed entropy
+                let mut v = *h;
+                v ^= v >> 33;
+                v = v.wrapping_mul(0xff51afd7ed558ccd);
+                v ^ (v >> 33)
+            }
+        }
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        match self {
+            DictHasher::Sip(h) => std::hash::Hasher::write(h, bytes),
+            DictHasher::Fast(h) => {
+                let mut chunks = bytes.chunks_exact(8);
+                for c in &mut chunks {
+                    let w = u64::from_le_bytes(c.try_into().unwrap());
+                    *h = (h.rotate_left(5) ^ w).wrapping_mul(FXK);
+                }
+                let r = chunks.remainder();
+                if !r.is_empty() {
+                    let mut buf = [0u8; 8];
+                    buf[..r.len()].copy_from_slice(r);
+                    // fold the tail length in so "ab" and "ab\0" differ
+                    buf[7] ^= r.len() as u8;
+                    *h = (h.rotate_left(5) ^ u64::from_le_bytes(buf)).wrapping_mul(FXK);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DictBuild {
+    fast: bool,
+    sip: std::collections::hash_map::RandomState,
+}
+
+impl DictBuild {
+    fn new() -> DictBuild {
+        DictBuild { fast: fasthash_enabled(), sip: std::collections::hash_map::RandomState::new() }
+    }
+}
+
+impl std::hash::BuildHasher for DictBuild {
+    type Hasher = DictHasher;
+    #[inline]
+    fn build_hasher(&self) -> DictHasher {
+        if self.fast {
+            DictHasher::Fast(0)
+        } else {
+            DictHasher::Sip(std::hash::BuildHasher::build_hasher(&self.sip))
+        }
     }
 }
 
@@ -621,53 +710,17 @@ impl CbWriter {
     /// callers reach this through multi_insert/tuple_insert (via ingest_row).
     #[doc(hidden)]
     pub fn append_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
-        for c in 0..self.ncols {
-            if isnull[c] {
-                return Err(Box::new(
-                    PgError::error("cbstore does not support NULL values".to_string())
-                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-                ));
-            }
-            match &mut self.builders[c] {
-                ColBuilder::Int(b) => {
-                    let v = match self.coltypes[c] {
-                        ColType::I16 => values[c].as_i16() as i64,
-                        ColType::I32 | ColType::Date => values[c].as_i32() as i64,
-                        ColType::I64 | ColType::Timestamp => values[c].as_i64(),
-                        ColType::Text => unreachable!(),
-                    };
-                    if let Some(ndv) = &mut self.ndv {
-                        ndv[c].add_i64(v);
-                    }
-                    if let Some(sorted) = &mut self.sorted {
-                        if sorted[c] && self.has_prev && v < self.prev_int[c] {
-                            sorted[c] = false;
-                        }
-                        self.prev_int[c] = v;
-                    }
-                    b.vals.push(v);
-                }
-                ColBuilder::Text(b) => {
-                    let bytes = varlena_bytes(values[c])?;
-                    if let Some(ndv) = &mut self.ndv {
-                        ndv[c].add_bytes(bytes);
-                    }
-                    if let Some(sorted) = &mut self.sorted {
-                        if sorted[c] {
-                            if self.has_prev && bytes < self.prev_text[c].as_slice() {
-                                sorted[c] = false;
-                            } else {
-                                self.prev_text[c].clear();
-                                self.prev_text[c].extend_from_slice(bytes);
-                            }
-                        }
-                    }
-                    let off = b.blob.len() as u32;
-                    b.blob.extend_from_slice(bytes);
-                    b.offs.push((off, bytes.len() as u32));
-                }
-            }
-        }
+        append_row_into(
+            &self.coltypes,
+            &mut self.builders,
+            self.ndv.as_mut(),
+            self.sorted.as_mut(),
+            &mut self.prev_int,
+            &mut self.prev_text,
+            self.has_prev,
+            values,
+            isnull,
+        )?;
         self.has_prev = true;
         self.nbuf += 1;
         if self.nbuf == RG_ROWS {
@@ -680,110 +733,67 @@ impl CbWriter {
         if self.nbuf == 0 {
             return Ok(());
         }
-        let nrows = self.nbuf;
-        let ngranules = nrows.div_ceil(GRANULE_ROWS) as u32;
         let flags = (if self.frozen { RG_FLAG_FROZEN } else { 0 })
             | RG_FLAG_SUMS
             | RG_FLAG_LENSTATS
             | RG_FLAG_ZEROCNT
             | (if self.draining_clustered { RG_FLAG_CLUSTERED } else { 0 });
-        let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
-        // rg_header placeholder; length patched at the end.
-        put_u32(&mut body, CB_RG_MAGIC);
-        put_u32(&mut body, nrows as u32);
-        put_u32(&mut body, self.xid);
-        put_u32(&mut body, flags);
-        put_u64(&mut body, 0);
-        put_u64(&mut body, 0);
-
-        let mut chunk_meta: Vec<(u64, i64, i64)> = Vec::with_capacity(self.ncols);
-        let mut sums: Vec<i128> = Vec::with_capacity(self.ncols);
+        // Capture dict entries only where the column's stitch is live (a
+        // poisoned or absent stitch skips the boxed-key allocations, exactly
+        // as the inline interning did).
+        let capture: Vec<bool> = (0..self.ncols)
+            .map(|c| {
+                self.stitch
+                    .as_ref()
+                    .is_some_and(|s| s[c].as_ref().is_some_and(|st| !st.poisoned))
+            })
+            .collect();
         let builders = std::mem::take(&mut self.builders);
-        for (c, b) in builders.iter().enumerate() {
-            while body.len() % 64 != 0 {
-                body.push(0);
-            }
-            let chunk_off = body.len() as u64;
-            let cc = CodecCtx::new(self.opts.codec[c], self.opts.zstd_level, self.opts.delta[c]);
-            let (min, max) = match b {
-                ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
-                ColBuilder::Text(tb) => {
-                    let stitch = self.stitch.as_mut().and_then(|s| s[c].as_mut());
-                    encode_text_chunk(&mut body, tb, ngranules, &cc, stitch)
-                }
-            };
-            chunk_meta.push((chunk_off, min, max));
-            sums.push(match b {
-                ColBuilder::Int(ib) => ib.vals.iter().map(|&v| v as i128).sum(),
-                ColBuilder::Text(_) => 0,
-            });
-            let _ = c;
-        }
-        // v7 per-granule length stats, straight off the buffered per-row
-        // (off, len) ranges (exact octet_length: the stored payload byte
-        // count). Granule slots past the last row stay zero. cbstore stores
-        // no NULLs (append_row errors), so nonnull = granule rows.
-        let nlencols = self.coltypes.iter().filter(|t| t.is_text()).count();
-        let mut lenstats: Vec<(u64, u32, u32)> = Vec::new();
-        if nlencols > 0 {
-            lenstats = vec![(0u64, 0u32, 0u32); GRANULES_PER_RG * nlencols];
-            let mut rank = 0usize;
-            for b in builders.iter() {
-                let ColBuilder::Text(tb) = b else { continue };
-                for g in 0..nrows.div_ceil(GRANULE_ROWS) {
-                    let lo = g * GRANULE_ROWS;
-                    let hi = (lo + GRANULE_ROWS).min(nrows);
-                    let mut sum = 0u64;
-                    let mut empty = 0u32;
-                    for &(_, len) in &tb.offs[lo..hi] {
-                        sum += len as u64;
-                        empty += (len == 0) as u32;
-                    }
-                    lenstats[g * nlencols + rank] = (sum, (hi - lo) as u32, empty);
-                }
-                rank += 1;
-            }
-        }
-        // v7 per-granule zero/empty counts, off the same buffered values as
-        // the sums/minmax pass (no extra decode; ints count value == 0, text
-        // counts the empty string). Granule slots past the RG's last row
-        // stay zero (partial RGs zero-pad).
-        let mut zerocnt = vec![0u32; GRANULES_PER_RG * self.ncols];
-        for (c, b) in builders.iter().enumerate() {
-            for g in 0..nrows.div_ceil(GRANULE_ROWS) {
-                let lo = g * GRANULE_ROWS;
-                let hi = (lo + GRANULE_ROWS).min(nrows);
-                let zc = match b {
-                    ColBuilder::Int(ib) => {
-                        ib.vals[lo..hi].iter().filter(|&&v| v == 0).count()
-                    }
-                    ColBuilder::Text(tb) => {
-                        tb.offs[lo..hi].iter().filter(|&&(_, len)| len == 0).count()
-                    }
-                };
-                zerocnt[g * self.ncols + c] = zc as u32;
-            }
-        }
-        // Patch total RG length.
-        let total = align64(body.len() as u64);
-        body[16..24].copy_from_slice(&total.to_le_bytes());
-        body.resize(total as usize, 0);
-
+        let mut sealed =
+            seal_rg_body(&self.coltypes, &self.opts, &builders, self.nbuf, self.xid, flags, &capture);
+        self.register_stitch(&mut sealed);
         let file_off = align64(self.write_off);
-        self.file.write_all_at(&body, file_off)?;
-        self.write_off = file_off + total;
+        self.file.write_all_at(&sealed.body, file_off)?;
+        self.write_off = file_off + sealed.body.len() as u64;
         self.rgs.push(FooterRg {
             file_off,
-            nrows: nrows as u32,
+            nrows: sealed.nrows,
             xmin: self.xid,
             flags,
-            chunks: chunk_meta,
-            sums,
-            lenstats,
-            zerocnt,
+            chunks: sealed.chunks,
+            sums: sealed.sums,
+            lenstats: sealed.lenstats,
+            zerocnt: sealed.zerocnt,
         });
         self.reset_builders();
         Ok(())
+    }
+
+    /// v7 stitch registration for one sealed RG (serial seal and parallel
+    /// ordered commit share it): intern captured dict entries in local-code
+    /// order; a dict-less text RG poisons the column.
+    fn register_stitch(&mut self, sealed: &mut SealedRg) {
+        let Some(cols) = self.stitch.as_mut() else { return };
+        for c in 0..self.ncols {
+            let Some(st) = cols[c].as_mut() else { continue };
+            if st.poisoned {
+                continue;
+            }
+            match sealed.dicts[c].take() {
+                Some(entries) => {
+                    let mut rg_map: Vec<u32> = Vec::with_capacity(entries.len());
+                    for e in entries {
+                        let next = st.ids.len() as u32;
+                        rg_map.push(*st.ids.entry(e).or_insert(next));
+                    }
+                    st.rg_maps.push(rg_map);
+                }
+                // Not dict-encoded: the column's global code space would be
+                // partial — drop the stitch for the whole column (consumers
+                // fail open to the per-epoch paths).
+                None => st.poison(),
+            }
+        }
     }
 
     /// pub for the test-support writer (`open_writer_at`).
@@ -943,6 +953,452 @@ impl CbWriter {
         self.write_header(footer_off)?;
         self.file.sync_data()?;
         Ok(())
+    }
+}
+
+/// One row into the per-column builders + optional NDV/sorted trackers —
+/// the serial writer and the parallel chunk encoder share it (byte-identical
+/// parts demand one implementation of the tracking rules).
+#[allow(clippy::too_many_arguments)]
+fn append_row_into(
+    coltypes: &[ColType],
+    builders: &mut [ColBuilder],
+    mut ndv: Option<&mut Vec<Hll>>,
+    mut sorted: Option<&mut Vec<bool>>,
+    prev_int: &mut [i64],
+    prev_text: &mut [Vec<u8>],
+    has_prev: bool,
+    values: &[Datum],
+    isnull: &[bool],
+) -> PgResult<()> {
+    for c in 0..coltypes.len() {
+        if isnull[c] {
+            return Err(Box::new(
+                PgError::error("cbstore does not support NULL values".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        match &mut builders[c] {
+            ColBuilder::Int(b) => {
+                let v = match coltypes[c] {
+                    ColType::I16 => values[c].as_i16() as i64,
+                    ColType::I32 | ColType::Date => values[c].as_i32() as i64,
+                    ColType::I64 | ColType::Timestamp => values[c].as_i64(),
+                    ColType::Text => unreachable!(),
+                };
+                if let Some(ndv) = ndv.as_deref_mut() {
+                    ndv[c].add_i64(v);
+                }
+                if let Some(sorted) = sorted.as_deref_mut() {
+                    if sorted[c] && has_prev && v < prev_int[c] {
+                        sorted[c] = false;
+                    }
+                    prev_int[c] = v;
+                }
+                b.vals.push(v);
+            }
+            ColBuilder::Text(b) => {
+                let bytes = varlena_bytes(values[c])?;
+                if let Some(ndv) = ndv.as_deref_mut() {
+                    ndv[c].add_bytes(bytes);
+                }
+                if let Some(sorted) = sorted.as_deref_mut() {
+                    if sorted[c] {
+                        if has_prev && bytes < prev_text[c].as_slice() {
+                            sorted[c] = false;
+                        } else {
+                            prev_text[c].clear();
+                            prev_text[c].extend_from_slice(bytes);
+                        }
+                    }
+                }
+                let off = b.blob.len() as u32;
+                b.blob.extend_from_slice(bytes);
+                b.offs.push((off, bytes.len() as u32));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One sealed row group's encoded image + footer-side metadata, produced
+/// from buffered builders alone — no file handle, no part-lifetime state.
+/// The serial writer's seal_rg and the parallel COPY chunk encoder both
+/// seal through [`seal_rg_body`]: byte-identical parts demand exactly one
+/// implementation.
+pub struct SealedRg {
+    pub(crate) body: Vec<u8>,
+    pub(crate) nrows: u32,
+    pub(crate) flags: u32,
+    pub(crate) chunks: Vec<(u64, i64, i64)>,
+    pub(crate) sums: Vec<i128>,
+    pub(crate) lenstats: Vec<(u64, u32, u32)>,
+    pub(crate) zerocnt: Vec<u32>,
+    /// Per-column captured dict entries (byte-sorted local-code order);
+    /// None for int columns, non-dict text chunks, and un-captured columns.
+    pub(crate) dicts: Vec<Option<Vec<Box<[u8]>>>>,
+}
+
+/// Encode one RG from its builders: body image (header, per-column chunks,
+/// length patched, align64-padded) + footer metadata (chunk minmax/offsets,
+/// sums, v7 lenstats/zerocnt) + captured dicts per `capture` column.
+fn seal_rg_body(
+    coltypes: &[ColType],
+    opts: &CbWriterOpts,
+    builders: &[ColBuilder],
+    nbuf: usize,
+    xid: TransactionId,
+    flags: u32,
+    capture: &[bool],
+) -> SealedRg {
+    let ncols = coltypes.len();
+    let nrows = nbuf;
+    let ngranules = nrows.div_ceil(GRANULE_ROWS) as u32;
+    let mut body: Vec<u8> = Vec::with_capacity(1 << 20);
+    // rg_header placeholder; length patched at the end.
+    put_u32(&mut body, CB_RG_MAGIC);
+    put_u32(&mut body, nrows as u32);
+    put_u32(&mut body, xid);
+    put_u32(&mut body, flags);
+    put_u64(&mut body, 0);
+    put_u64(&mut body, 0);
+
+    let mut chunk_meta: Vec<(u64, i64, i64)> = Vec::with_capacity(ncols);
+    let mut sums: Vec<i128> = Vec::with_capacity(ncols);
+    let mut dicts: Vec<Option<Vec<Box<[u8]>>>> = (0..ncols).map(|_| None).collect();
+    for (c, b) in builders.iter().enumerate() {
+        while body.len() % 64 != 0 {
+            body.push(0);
+        }
+        let chunk_off = body.len() as u64;
+        let cc = CodecCtx::new(opts.codec[c], opts.zstd_level, opts.delta[c]);
+        let (min, max) = match b {
+            ColBuilder::Int(ib) => encode_int_chunk(&mut body, &ib.vals, ngranules, &cc),
+            ColBuilder::Text(tb) => {
+                let (min, max, cap) =
+                    encode_text_chunk(&mut body, tb, ngranules, &cc, capture[c]);
+                dicts[c] = cap;
+                (min, max)
+            }
+        };
+        chunk_meta.push((chunk_off, min, max));
+        sums.push(match b {
+            ColBuilder::Int(ib) => ib.vals.iter().map(|&v| v as i128).sum(),
+            ColBuilder::Text(_) => 0,
+        });
+    }
+    // v7 per-granule length stats, straight off the buffered per-row
+    // (off, len) ranges (exact octet_length: the stored payload byte
+    // count). Granule slots past the last row stay zero. cbstore stores
+    // no NULLs (append_row errors), so nonnull = granule rows.
+    let nlencols = coltypes.iter().filter(|t| t.is_text()).count();
+    let mut lenstats: Vec<(u64, u32, u32)> = Vec::new();
+    if nlencols > 0 {
+        lenstats = vec![(0u64, 0u32, 0u32); GRANULES_PER_RG * nlencols];
+        let mut rank = 0usize;
+        for b in builders.iter() {
+            let ColBuilder::Text(tb) = b else { continue };
+            for g in 0..nrows.div_ceil(GRANULE_ROWS) {
+                let lo = g * GRANULE_ROWS;
+                let hi = (lo + GRANULE_ROWS).min(nrows);
+                let mut sum = 0u64;
+                let mut empty = 0u32;
+                for &(_, len) in &tb.offs[lo..hi] {
+                    sum += len as u64;
+                    empty += (len == 0) as u32;
+                }
+                lenstats[g * nlencols + rank] = (sum, (hi - lo) as u32, empty);
+            }
+            rank += 1;
+        }
+    }
+    // v7 per-granule zero/empty counts, off the same buffered values as
+    // the sums/minmax pass (no extra decode; ints count value == 0, text
+    // counts the empty string). Granule slots past the RG's last row
+    // stay zero (partial RGs zero-pad).
+    let mut zerocnt = vec![0u32; GRANULES_PER_RG * ncols];
+    for (c, b) in builders.iter().enumerate() {
+        for g in 0..nrows.div_ceil(GRANULE_ROWS) {
+            let lo = g * GRANULE_ROWS;
+            let hi = (lo + GRANULE_ROWS).min(nrows);
+            let zc = match b {
+                ColBuilder::Int(ib) => ib.vals[lo..hi].iter().filter(|&&v| v == 0).count(),
+                ColBuilder::Text(tb) => {
+                    tb.offs[lo..hi].iter().filter(|&&(_, len)| len == 0).count()
+                }
+            };
+            zerocnt[g * ncols + c] = zc as u32;
+        }
+    }
+    // Patch total RG length.
+    let total = align64(body.len() as u64);
+    body[16..24].copy_from_slice(&total.to_le_bytes());
+    body.resize(total as usize, 0);
+    SealedRg {
+        body,
+        nrows: nrows as u32,
+        flags,
+        chunks: chunk_meta,
+        sums,
+        lenstats,
+        zerocnt,
+        dicts,
+    }
+}
+
+// ---- parallel COPY ingest (morsel-parallel COPY lane) ----------------------
+//
+// Shape (docs/design/load-speed-2026-07.md §5 lever 1): N workers each
+// parse+convert+encode WHOLE 65,536-row RGs off input chunks; ONE ordered
+// committer (the COPY leader) owns the file, the footer chain, and every
+// part-lifetime tracker (NDV sketches, sorted trackers, the v7 stitch
+// interner) — commits happen in INPUT ORDER, so the part is byte-identical
+// to a serial COPY of the same stream.
+
+/// The immutable per-statement encode plan the leader hands its workers:
+/// everything a chunk encoder needs, none of the part-lifetime state.
+pub struct ParallelIngestPlan {
+    pub xid: TransactionId,
+    /// RG flags every parallel-sealed RG carries (frozen decided at writer
+    /// open; never RG_FLAG_CLUSTERED — cluster-key tables refuse parallel).
+    pub flags: u32,
+    pub coltypes: Vec<ColType>,
+    pub opts: CbWriterOpts,
+    /// Part tracks NDV (fresh part): workers carry per-chunk HLL sketches.
+    pub want_ndv: bool,
+    /// Part tracks sorted-asc: workers carry per-chunk order probes.
+    pub want_sorted: bool,
+    /// Per-column stitch capture (text columns of a stitch-active writer).
+    pub capture: Vec<bool>,
+}
+
+/// Per-chunk sorted-order probe for one column: chunk-internal sortedness +
+/// the chunk's first/last values, letting the ordered committer replay the
+/// serial tracker across chunk seams exactly.
+pub struct ColOrderProbe {
+    pub sorted: bool,
+    pub first_int: i64,
+    pub last_int: i64,
+    pub first_text: Vec<u8>,
+    pub last_text: Vec<u8>,
+}
+
+/// One worker-encoded row group, ready for the ordered committer.
+pub struct EncodedRg {
+    sealed: SealedRg,
+    hll: Option<Vec<Hll>>,
+    probe: Option<Vec<ColOrderProbe>>,
+}
+
+impl EncodedRg {
+    pub fn nrows(&self) -> u32 {
+        self.sealed.nrows
+    }
+
+    /// Encoded body bytes (in-flight memory accounting).
+    pub fn body_len(&self) -> usize {
+        self.sealed.body.len()
+    }
+}
+
+/// Worker-side chunk encoder: append parsed rows, seal into an [`EncodedRg`].
+/// Exactly one RG per encoder — the segmentator cuts chunks at RG_ROWS row
+/// boundaries so RG seams fall exactly where the serial writer's would.
+pub struct RgChunkEncoder {
+    plan: std::sync::Arc<ParallelIngestPlan>,
+    builders: Vec<ColBuilder>,
+    nbuf: usize,
+    hll: Option<Vec<Hll>>,
+    sorted: Option<Vec<bool>>,
+    prev_int: Vec<i64>,
+    prev_text: Vec<Vec<u8>>,
+    first_int: Vec<i64>,
+    first_text: Vec<Vec<u8>>,
+    has_prev: bool,
+}
+
+impl RgChunkEncoder {
+    pub fn new(plan: std::sync::Arc<ParallelIngestPlan>) -> RgChunkEncoder {
+        let ncols = plan.coltypes.len();
+        let builders = plan
+            .coltypes
+            .iter()
+            .map(|t| {
+                if t.is_text() {
+                    ColBuilder::Text(TextBuilder { offs: Vec::new(), blob: Vec::new() })
+                } else {
+                    ColBuilder::Int(IntBuilder { vals: Vec::new() })
+                }
+            })
+            .collect();
+        RgChunkEncoder {
+            builders,
+            nbuf: 0,
+            hll: plan.want_ndv.then(|| (0..ncols).map(|_| Hll::default()).collect()),
+            sorted: plan.want_sorted.then(|| vec![true; ncols]),
+            prev_int: vec![0; ncols],
+            prev_text: vec![Vec::new(); ncols],
+            first_int: vec![0; ncols],
+            first_text: vec![Vec::new(); ncols],
+            has_prev: false,
+            plan,
+        }
+    }
+
+    pub fn append_row(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
+        debug_assert!(self.nbuf < RG_ROWS, "chunk encoder overfilled past one RG");
+        append_row_into(
+            &self.plan.coltypes,
+            &mut self.builders,
+            self.hll.as_mut(),
+            self.sorted.as_mut(),
+            &mut self.prev_int,
+            &mut self.prev_text,
+            self.has_prev,
+            values,
+            isnull,
+        )?;
+        if !self.has_prev {
+            // First row: the probe's chunk-first values (prev_* just took
+            // them — text prev updates on the first row because the chunk
+            // tracker starts sorted).
+            self.first_int.copy_from_slice(&self.prev_int);
+            self.first_text.clone_from(&self.prev_text);
+        }
+        self.has_prev = true;
+        self.nbuf += 1;
+        Ok(())
+    }
+
+    pub fn rows(&self) -> usize {
+        self.nbuf
+    }
+
+    pub fn seal(self) -> EncodedRg {
+        assert!(self.nbuf > 0, "sealing an empty chunk encoder");
+        let sealed = seal_rg_body(
+            &self.plan.coltypes,
+            &self.plan.opts,
+            &self.builders,
+            self.nbuf,
+            self.plan.xid,
+            self.plan.flags,
+            &self.plan.capture,
+        );
+        let probe = self.sorted.map(|sorted| {
+            (0..self.plan.coltypes.len())
+                .map(|c| ColOrderProbe {
+                    sorted: sorted[c],
+                    first_int: self.first_int[c],
+                    last_int: self.prev_int[c],
+                    first_text: self.first_text[c].clone(),
+                    last_text: self.prev_text[c].clone(),
+                })
+                .collect()
+        });
+        EncodedRg { sealed, hll: self.hll, probe }
+    }
+}
+
+/// Parallel COPY (leader): a writer for ordered RG commits. The ordinary
+/// open path — header init / append-to-committed-part invalidation / freeze
+/// decision all identical to serial COPY. The caller owns admission (checked
+/// BEFORE opening: cbstore AM, no cluster key — `writer_opts_of`).
+pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
+    open_writer(rel)
+}
+
+impl CbWriter {
+    /// The encode plan for this writer's parallel workers; None when the
+    /// writer sorts on ingest (cluster key) — that drain is serial by
+    /// construction and admission should have refused already.
+    pub fn parallel_ingest_plan(&self) -> Option<ParallelIngestPlan> {
+        if self.sorter.is_some() {
+            return None;
+        }
+        Some(ParallelIngestPlan {
+            xid: self.xid,
+            flags: (if self.frozen { RG_FLAG_FROZEN } else { 0 })
+                | RG_FLAG_SUMS
+                | RG_FLAG_LENSTATS
+                | RG_FLAG_ZEROCNT,
+            coltypes: self.coltypes.clone(),
+            opts: self.opts.clone(),
+            want_ndv: self.ndv.is_some(),
+            want_sorted: self.sorted.is_some(),
+            capture: (0..self.ncols)
+                .map(|c| self.stitch.as_ref().is_some_and(|s| s[c].is_some()))
+                .collect(),
+        })
+    }
+
+    /// Ordered commit of one worker-encoded RG (input order — the caller's
+    /// contract). Replays exactly what the serial seal path does: body write
+    /// at align64(write_off), footer row, stitch interning in RG order, NDV
+    /// sketch union (register-identical to serial adds), sorted-tracker
+    /// stitching across the chunk seam.
+    pub fn commit_encoded_rg(&mut self, enc: EncodedRg) -> PgResult<()> {
+        debug_assert!(self.nbuf == 0, "ordered commit into a writer with buffered rows");
+        debug_assert!(self.sorter.is_none(), "ordered commit into a sorting writer");
+        let mut sealed = enc.sealed;
+        self.register_stitch(&mut sealed);
+        let file_off = align64(self.write_off);
+        self.file.write_all_at(&sealed.body, file_off)?;
+        self.write_off = file_off + sealed.body.len() as u64;
+        if let Some(ndv) = &mut self.ndv {
+            let hll = enc
+                .hll
+                .as_ref()
+                .expect("parallel plan carries NDV sketches when the part tracks NDV");
+            for (n, h) in ndv.iter_mut().zip(hll.iter()) {
+                n.merge(h);
+            }
+        }
+        if let Some(sorted) = &mut self.sorted {
+            let probes = enc
+                .probe
+                .as_ref()
+                .expect("parallel plan carries order probes when the part tracks sorted");
+            for c in 0..self.ncols {
+                if !sorted[c] {
+                    continue;
+                }
+                let p = &probes[c];
+                let seam_broken = self.has_prev
+                    && match self.coltypes[c] {
+                        ColType::Text => p.first_text.as_slice() < self.prev_text[c].as_slice(),
+                        _ => p.first_int < self.prev_int[c],
+                    };
+                if !p.sorted || seam_broken {
+                    sorted[c] = false;
+                } else {
+                    match self.coltypes[c] {
+                        ColType::Text => self.prev_text[c].clone_from(&p.last_text),
+                        _ => self.prev_int[c] = p.last_int,
+                    }
+                }
+            }
+        }
+        if sealed.nrows > 0 {
+            self.has_prev = true;
+        }
+        self.rgs.push(FooterRg {
+            file_off,
+            nrows: sealed.nrows,
+            xmin: self.xid,
+            flags: sealed.flags,
+            chunks: sealed.chunks,
+            sums: sealed.sums,
+            lenstats: sealed.lenstats,
+            zerocnt: sealed.zerocnt,
+        });
+        Ok(())
+    }
+
+    /// Statement-end publish for the parallel driver (the ordinary finish:
+    /// stitch blobs, footer, header, durable).
+    pub fn finish_parallel_ingest(&mut self) -> PgResult<()> {
+        self.finish()
     }
 }
 
@@ -1282,17 +1738,26 @@ pub(crate) fn encode_int_chunk(
 // images, 4-byte aligned, so decode publishes pointers with no copies.
 //   Dict:    codes[n] (1/2/4 B) | dict_off[ndv] u32 | blob
 //   RawText: off[n] u32 | blob
+//
+// `capture_dict` requests the RG's dict entries back (byte-sorted local-code
+// order) for the caller's v7 stitch registration: Some(entries) ⇔ the chunk
+// dict-encoded. The caller owns the poison-on-None rule (a non-dict RG kills
+// the column's global code space). Interning used to happen inline here; the
+// capture split lets the parallel COPY workers encode RGs while the ordered
+// committer owns the part-lifetime stitch state — same allocations (one
+// boxed key per dict entry), same bytes.
 fn encode_text_chunk(
     body: &mut Vec<u8>,
     tb: &TextBuilder,
     ngranules: u32,
     cc: &CodecCtx,
-    stitch: Option<&mut StitchCol>,
-) -> (i64, i64) {
+    capture_dict: bool,
+) -> (i64, i64, Option<Vec<Box<[u8]>>>) {
     let n = tb.offs.len();
 
     // Dictionary pass over the row set.
-    let mut dict: HashMap<&[u8], u32> = HashMap::with_capacity(1024);
+    let mut dict: HashMap<&[u8], u32, DictBuild> =
+        HashMap::with_capacity_and_hasher(1024, DictBuild::new());
     let mut order: Vec<(u32, u32)> = Vec::new();
     let mut codes: Vec<u32> = Vec::with_capacity(n);
     let mut dict_blob_len = 0usize;
@@ -1330,6 +1795,7 @@ fn encode_text_chunk(
         max = max.max(gmax);
     }
 
+    let mut captured: Option<Vec<Box<[u8]>>> = None;
     if use_dict {
         // Byte-order dict sort + code remap (CHUNK_FLAG_DICT_SORTED): codes
         // become rank order so a LIKE-prefix can evaluate as a code-range
@@ -1345,19 +1811,15 @@ fn encode_text_chunk(
         for c in codes.iter_mut() {
             *c = remap[*c as usize];
         }
-        // v7 stitch registration: intern this RG's dict entries (in local
-        // code = byte-rank order) into the column's part-lifetime id space.
-        if let Some(st) = stitch {
-            if !st.poisoned {
-                let mut rg_map: Vec<u32> = Vec::with_capacity(ndv);
-                for &(off, len) in &order {
-                    let s = &tb.blob[off as usize..(off + len) as usize];
-                    let next = st.ids.len() as u32;
-                    let id = *st.ids.entry(Box::from(s)).or_insert(next);
-                    rg_map.push(id);
-                }
-                st.rg_maps.push(rg_map);
-            }
+        // v7 stitch capture: the RG's dict entries in local code = byte-rank
+        // order, for the caller's part-lifetime interning.
+        if capture_dict {
+            captured = Some(
+                order
+                    .iter()
+                    .map(|&(off, len)| Box::from(&tb.blob[off as usize..(off + len) as usize]))
+                    .collect(),
+            );
         }
         // Compressed-dict candidate: one frame over the varlena-image dict
         // blob (codec from the v6 menu, sampled on the blob itself), taken on
@@ -1491,12 +1953,10 @@ fn encode_text_chunk(
             body.extend_from_slice(&dict_blob);
         }
     } else {
-        // Non-dict RG: the column's global code space would be partial —
-        // drop the stitch for the whole column (consumers fail open to the
-        // per-epoch paths).
-        if let Some(st) = stitch {
-            st.poison();
-        }
+        // Non-dict RG: captured stays None — the caller poisons the
+        // column's stitch (a partial global code space would break the
+        // part-scope facts consumers rely on).
+        //
         // Compressed-text candidate (S3 footprint step): per-granule frames
         // (codec from the v6 menu, sampled on granule 0's blob) over the
         // varlena-image blob, granule-relative offsets; decode is
@@ -1590,7 +2050,7 @@ fn encode_text_chunk(
             }
         }
     }
-    (min, max)
+    (min, max, captured)
 }
 
 const VARLENA_IMG_HDR: usize = 4;
@@ -2075,7 +2535,7 @@ mod dict_sort_tests {
             b"\xff", b"ab", b"abz", b"", b"apple", b"a", b"ab\xff\xff",
         ];
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&rows), 1, &test_codec_ctx(), None);
+        encode_text_chunk(&mut body, &tb_of(&rows), 1, &test_codec_ctx(), false);
         let (hdr, codes, entries) = parse_dict_chunk(&body, rows.len());
         assert!(matches!(hdr.encoding, Encoding::Dict | Encoding::Lz4Dict));
         assert_ne!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
@@ -2098,7 +2558,7 @@ mod dict_sort_tests {
             .collect();
         let refs: Vec<&[u8]> = rows.iter().map(|v| &v[..]).collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of(&refs), 1, &test_codec_ctx(), None);
+        encode_text_chunk(&mut body, &tb_of(&refs), 1, &test_codec_ctx(), false);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert!(matches!(hdr.encoding, Encoding::RawText | Encoding::Lz4Text));
         assert_eq!(hdr.flags & CHUNK_FLAG_DICT_SORTED, 0);
@@ -2194,7 +2654,7 @@ mod codec_tests {
         }
         let cc = CodecCtx::new(CodecChoice::Zstd, ZSTD_LEVEL_DEFAULT, false);
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb, 1, &cc, None);
+        encode_text_chunk(&mut body, &tb, 1, &cc, false);
         let cv = ChunkView::at(&body, 0, rows.len() as u32);
         assert_eq!(cv.hdr.encoding, Encoding::Lz4Dict);
         assert_eq!(cv.hdr.codec, Codec::Zstd);
@@ -2606,7 +3066,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("http://example.com/some/long/path/{i}?pad=aaaaaaaaaaaaaaaaaaaaaaaaaaaa").into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), None);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), false);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Text, "test premise: Lz4Text admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -2621,7 +3081,7 @@ mod lz4_decode_seat_tests {
             .map(|i| format!("searchterm-{:04}-cccccccccccccccccccccccccccc", i % 300).into_bytes())
             .collect();
         let mut body = Vec::new();
-        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), None);
+        encode_text_chunk(&mut body, &tb_of_owned(&rows), n.div_ceil(GRANULE_ROWS) as u32, &CodecCtx::new(CodecChoice::Lz4, ZSTD_LEVEL_DEFAULT, false), false);
         let hdr = ChunkHeader::decode(&body[..CB_CHUNK_HEADER_LEN]);
         assert_eq!(hdr.encoding, Encoding::Lz4Dict, "test premise: Lz4Dict admitted");
         assert_eq!(decode_all(&body, n), rows);
@@ -2670,7 +3130,7 @@ mod dict_frames_tests {
     fn encode(rows: &[Vec<u8>], cc: &CodecCtx) -> Vec<u8> {
         let mut body = Vec::new();
         let ng = rows.len().div_ceil(GRANULE_ROWS) as u32;
-        encode_text_chunk(&mut body, &tb(rows), ng, cc, None);
+        encode_text_chunk(&mut body, &tb(rows), ng, cc, false);
         body
     }
 
@@ -2970,6 +3430,136 @@ mod stitch_tests {
         assert_eq!(part.rgs.len(), 2);
         assert_eq!(part.stitch_gndv(1), 0, "append invalidates the stitch");
         assert!(part.stitch(0, 1).is_none() && part.stitch(1, 1).is_none());
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod parallel_ingest_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-paringest-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    // Deterministic row generator: int col (ascending — stays sorted), int
+    // col that breaks EXACTLY at the first RG_ROWS seam (exercises the
+    // committer's cross-chunk seam stitch), low-NDV text (dict + stitch),
+    // high-NDV unique text (non-dict -> stitch poison path).
+    fn row(i: usize) -> (i64, i64, String, String) {
+        let seam_breaker = if i < RG_ROWS { i as i64 } else { (i as i64) - RG_ROWS as i64 - 1 };
+        (
+            i as i64,
+            seam_breaker,
+            format!("k{:04}", (i * 2_654_435_761) % 4_099),
+            format!("unique-{i:08}-{}", i * 31),
+        )
+    }
+
+    fn datums<'a>(
+        r: &'a (i64, i64, String, String),
+        vbuf: &'a mut Vec<u8>,
+        vbuf2: &'a mut Vec<u8>,
+    ) -> [Datum; 4] {
+        // Text datums as raw 4B-U varlena images (test-support shape used by
+        // put_text_rows above).
+        fn varlena(buf: &mut Vec<u8>, s: &[u8]) -> Datum {
+            buf.clear();
+            buf.extend_from_slice(&::datum::set_varsize_4b(4 + s.len()));
+            buf.extend_from_slice(s);
+            Datum::from_usize(buf.as_ptr() as usize)
+        }
+        [
+            Datum::from_i64(r.0),
+            Datum::from_i64(r.1),
+            varlena(vbuf, r.2.as_bytes()),
+            varlena(vbuf2, r.3.as_bytes()),
+        ]
+    }
+
+    const COLS: [ColType; 4] = [ColType::I64, ColType::I64, ColType::Text, ColType::Text];
+
+    /// THE ACCEPTANCE ORACLE IN MINIATURE: chunk-encoded RGs committed in
+    /// input order produce a part BYTE-IDENTICAL to the serial writer's —
+    /// across full/partial RGs, dict + non-dict text (stitch intern AND
+    /// poison), NDV sketches, and a sorted tracker broken exactly at the
+    /// chunk seam.
+    #[test]
+    fn parallel_commit_is_byte_identical_to_serial() {
+        let n = 2 * RG_ROWS + 1_234;
+        let isnull = [false; 4];
+
+        // Serial part.
+        let path_a = tmp("serial");
+        let mut wa = open_writer_at(&path_a, COLS.to_vec()).unwrap();
+        let (mut b1, mut b2) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let r = row(i);
+            let vals = datums(&r, &mut b1, &mut b2);
+            wa.append_row(&vals, &isnull).unwrap();
+        }
+        wa.finish().unwrap();
+
+        // Parallel-shaped part: chunk encoders sealed off RG_ROWS row
+        // chunks, committed in input order.
+        let path_b = tmp("parallel");
+        let mut wb = open_writer_at(&path_b, COLS.to_vec()).unwrap();
+        let plan = std::sync::Arc::new(wb.parallel_ingest_plan().expect("no sorter"));
+        let mut i = 0;
+        while i < n {
+            let hi = (i + RG_ROWS).min(n);
+            let mut enc = RgChunkEncoder::new(std::sync::Arc::clone(&plan));
+            for j in i..hi {
+                let r = row(j);
+                let vals = datums(&r, &mut b1, &mut b2);
+                enc.append_row(&vals, &isnull).unwrap();
+            }
+            wb.commit_encoded_rg(enc.seal()).unwrap();
+            i = hi;
+        }
+        wb.finish_parallel_ingest().unwrap();
+
+        let a = std::fs::read(&path_a).unwrap();
+        let b = std::fs::read(&path_b).unwrap();
+        assert_eq!(a.len(), b.len(), "part sizes differ");
+        assert!(a == b, "parallel-committed part is not byte-identical to serial");
+        std::fs::remove_file(&path_a).unwrap();
+        std::fs::remove_file(&path_b).unwrap();
+    }
+
+    /// Same oracle under PGRUST_CBSTORE_FASTHASH semantics is covered by the
+    /// FASTHASH prototype's own evidence (maps only dedup); here pin the
+    /// sorted-seam rule directly: col 1 breaks at the seam, col 0 stays
+    /// sorted — read back through the footer.
+    #[test]
+    fn parallel_commit_sorted_seam() {
+        let n = RG_ROWS + 8;
+        let isnull = [false; 4];
+        let path = tmp("seam");
+        let mut w = open_writer_at(&path, COLS.to_vec()).unwrap();
+        let plan = std::sync::Arc::new(w.parallel_ingest_plan().unwrap());
+        let (mut b1, mut b2) = (Vec::new(), Vec::new());
+        let mut i = 0;
+        while i < n {
+            let hi = (i + RG_ROWS).min(n);
+            let mut enc = RgChunkEncoder::new(std::sync::Arc::clone(&plan));
+            for j in i..hi {
+                let r = row(j);
+                let vals = datums(&r, &mut b1, &mut b2);
+                enc.append_row(&vals, &isnull).unwrap();
+            }
+            w.commit_encoded_rg(enc.seal()).unwrap();
+            i = hi;
+        }
+        w.finish_parallel_ingest().unwrap();
+        let part = crate::reader::Part::open(&path, COLS.len()).unwrap().unwrap();
+        // col0 ascending; col1 breaks exactly at the RG seam; col2 hashes
+        // unsorted; col3's zero-padded uniques are lexicographically ascending.
+        assert_eq!(part.sorted, vec![1, 0, 0, 1]);
         std::fs::remove_file(&path).unwrap();
     }
 }

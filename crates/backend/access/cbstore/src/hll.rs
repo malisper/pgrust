@@ -38,6 +38,18 @@ impl Hll {
         self.add_hash(h.finish());
     }
 
+    /// Union with another sketch (parallel COPY: per-chunk worker sketches
+    /// fold into the part sketch). Registers are per-bucket maxima, so a
+    /// merge of per-chunk adds is REGISTER-IDENTICAL to the serial add
+    /// sequence — the footer NDV estimate is byte-identical either way.
+    pub fn merge(&mut self, other: &Hll) {
+        for (r, &o) in self.regs.iter_mut().zip(other.regs.iter()) {
+            if o > *r {
+                *r = o;
+            }
+        }
+    }
+
     pub fn estimate(&self) -> u64 {
         let m = M as f64;
         let alpha = 0.7213 / (1.0 + 1.079 / m);

@@ -26,7 +26,10 @@ pub use scan::{
     CbAggMetaStep, CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, MetaZeroQual,
     ZoneCmp, ZoneQual,
 };
-pub use writer::{coltypes_of, finish_bulk_insert, multi_insert, tuple_insert};
+pub use writer::{
+    begin_parallel_ingest, coltypes_of, finish_bulk_insert, multi_insert, tuple_insert, CbWriter,
+    ColOrderProbe, EncodedRg, ParallelIngestPlan, RgChunkEncoder,
+};
 
 pub fn rel_main_path(rel: &::types_rel::Relation<'_>) -> String {
     relpath::GetRelationPath(

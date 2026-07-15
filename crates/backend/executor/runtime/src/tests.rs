@@ -2695,3 +2695,103 @@ fn dag_threaded_pool_query_shares() {
     }
     pool.shutdown();
 }
+// ---- stream-fed sources (parallel COPY's segmentator feed) -----------------
+
+/// Stream source under a REAL pool: a producer publishes granules in bursts
+/// (workers starve and park between bursts), then closes. Every granule
+/// executes exactly once, claims are single-granule (one chunk per claim),
+/// and the RG completes only after the close.
+#[test]
+fn stream_source_pool_exact() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 4,
+        standbys: 2,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let total = 96u64;
+    let work = SyntheticWork::new(total, None, 0);
+    let source = Arc::new(StreamSource::new());
+    let (_h, waiter) = rt.submit(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+
+    // Producer: bursts of 8 with pauses (parked-worker wake coverage).
+    let psrc = Arc::clone(&source);
+    let prt = Arc::clone(&rt);
+    let producer = std::thread::spawn(move || {
+        let mut upto = 0u64;
+        while upto < total {
+            upto = (upto + 8).min(total);
+            psrc.publish(upto);
+            prt.notify_source_progress();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        psrc.close();
+        prt.notify_source_progress();
+    });
+
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    producer.join().unwrap();
+    work.assert_all_executed_once();
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    for r in work.claims.lock().unwrap().iter() {
+        assert_eq!(r.end - r.start, 1, "stream claims must be single-chunk, got {r:?}");
+    }
+    pool.shutdown();
+}
+
+/// An EMPTY stream (closed at watermark 0) completes with no morsels.
+#[test]
+fn stream_source_empty_completes() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 2,
+        standbys: 1,
+        slots: 4,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let work = SyntheticWork::new(0, None, 0);
+    let source = Arc::new(StreamSource::new());
+    let (_h, waiter) = rt.submit(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+    source.close();
+    rt.notify_source_progress();
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    assert!(work.claims.lock().unwrap().is_empty());
+    pool.shutdown();
+}
+
+/// Abort with STARVED (parked) workers on a never-closed stream: the
+/// producer's error path closes + wakes; workers observe the abort at the
+/// claim boundary and the RG completes Aborted with cleanup finalization
+/// suppressed (finalize never runs on aborted RGs).
+#[test]
+fn stream_source_abort_wakes_starved_workers() {
+    let rt = Runtime::new(RuntimeConfig {
+        workers: 4,
+        standbys: 2,
+        slots: 8,
+        sizing: SizingParams::default(),
+        trace: false,
+    });
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+    let work = SyntheticWork::new(16, None, 0);
+    let source = Arc::new(StreamSource::new());
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+    source.publish(16);
+    rt.notify_source_progress();
+    // Wait until the published prefix drains and workers starve-park.
+    while work.claims.lock().unwrap().iter().map(|r| r.end - r.start).sum::<u64>() < 16 {
+        std::thread::yield_now();
+    }
+    // Producer error path: abort, then close + wake (the documented order).
+    h.abort();
+    source.close();
+    rt.notify_source_progress();
+    assert_eq!(waiter.wait(), RgOutcome::Aborted);
+    assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+    work.assert_all_executed_once();
+    pool.shutdown();
+}

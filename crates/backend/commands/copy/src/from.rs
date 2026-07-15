@@ -34,6 +34,9 @@ use crate::{
 pub(crate) enum CopySrc<'mcx, 's> {
     File { fd: i32, filename: &'s str },
     Frontend { msgbuf: StringInfo<'mcx> },
+    /// Parallel COPY worker: one segmentator-cut input chunk (whole rows,
+    /// in-memory). EOF at the chunk's end.
+    Chunk(crate::parallel::ChunkCursor),
 }
 
 pub struct CopyFromState<'mcx, 's> {
@@ -437,6 +440,22 @@ pub fn CopyFrom<'mcx>(
             PgError::error(format!("cannot insert into foreign table \"{}\"", rel.name()))
                 .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
+    }
+    // Morsel-parallel COPY (parallel.rs; PGRUST_PARALLEL_COPY=1, cbstore
+    // text loads): admission refusals (triggers included — fail-closed,
+    // traced) fall through to the serial body, byte-identically. Errors
+    // return UNWRAPPED — the workers attached the exact line contexts
+    // already, and the leader-side cstate's read cursor never moved (a
+    // second copy_from_error_context would fabricate "line 0"). Engagement
+    // implies no triggers, so the early return skips no trigger work;
+    // partitioned targets never reach here.
+    if relkind == RELKIND_RELATION {
+        if let Some(processed) =
+            crate::parallel::copy_from_parallel(mcx, cstate, rel, trigdesc.is_some())?
+        {
+            debug_assert!(trigdesc.is_none(), "parallel COPY engaged on a trigger-bearing rel");
+            return Ok(processed);
+        }
     }
     // C forces CIM_SINGLE on a partitioned target with BEFORE/INSTEAD row
     // triggers (copyfrom.c:995-1005) or statement-level transition tables
