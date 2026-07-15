@@ -198,6 +198,44 @@ fn bytes_prefix_lengths_distinct() {
     assert_eq!(seen[0], (b"".to_vec(), 2));
 }
 
+/// Arena projection (re-charter inc-0): drive the long-key arena through
+/// multiple reservation events under BOTH hint regimes (well-hinted and
+/// wildly-exceeded hint = doubling fallback) and verify contents/offsets/
+/// group identity are untouched — the reserve is capacity-only.
+#[test]
+fn bytes_arena_reserve_preserves_contents() {
+    for hint in [64usize, 40_000] {
+        let mut t = LaneAggTable::new(KeyRepr::Bytes, 8, hint);
+        let card = 20_000usize;
+        let mut reference: HashMap<Vec<u8>, i64> = HashMap::new();
+        for i in 0..(card * 2) {
+            // Mixed inline/long keys, long lengths varied 9..~60 B so the
+            // arena grows unevenly (projection sees a moving average).
+            let j = i % card;
+            let k = if j % 4 == 0 {
+                format!("s{:06}", j)
+            } else {
+                format!("long-key-{:06}-{}", j, "x".repeat(j % 48))
+            }
+            .into_bytes();
+            let pr = t.probe_bytes(&k, t.hash_key_bytes(&k));
+            // SAFETY: zeroed 8-byte states.
+            unsafe { *states_i64(pr.states) += 1 };
+            *reference.entry(k).or_insert(0) += 1;
+        }
+        assert_eq!(t.len(), reference.len(), "hint {hint}");
+        let mut scratch = [0u8; 8];
+        for i in 0..t.nrows() {
+            let k = t.row_key_bytes(i, &mut scratch).unwrap().to_vec();
+            // SAFETY: live row.
+            let c = unsafe { *states_i64(t.row_states(i)) };
+            assert_eq!(reference[&k], c, "hint {hint} key {:?}", String::from_utf8_lossy(&k));
+        }
+        // Capacity is accounted (mem_used) and must at least hold the arena.
+        assert!(t.mem_used() > 0);
+    }
+}
+
 #[test]
 fn bytes_two_level_conversion() {
     let mut t = LaneAggTable::new(KeyRepr::Bytes, 8, 64);

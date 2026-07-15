@@ -97,6 +97,20 @@ fn probe_lookahead(shape_default: usize) -> usize {
     .unwrap_or(shape_default)
 }
 
+/// Long-key arena projection channel (stringhash2 re-charter inc-0, see
+/// [`LaneAggTable::reserve_arena`]): default ON;
+/// `PGRUST_LANE_V2_ARENA_RESERVE=0` falls back to `Vec`'s amortized
+/// doubling (the same-pod A/B arm). Read once per process.
+#[inline]
+fn arena_reserve_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_ARENA_RESERVE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 // C3 lane note (2026-07-13, notes/hot-c3-probe-prefetch.md): a two-stage
 // row-line prefetch for the Salt8/Int128 runs (read the hinted home slot
 // d ahead, prefetch the row its ref points at) was built and MEASURED
@@ -486,6 +500,9 @@ pub struct LaneAggTable {
     /// The NULL group's row (out-of-band — CH ZeroValueStorage idiom).
     null_row: Option<usize>,
     total_members: usize,
+    /// Construction-time `capacity_hint` (expected member count), kept for
+    /// the long-key arena projection in [`Self::reserve_arena`].
+    expected_members: usize,
 }
 
 /// Probe outcome: pointer to the row's state bytes + whether the group is
@@ -561,6 +578,7 @@ impl LaneAggTable {
             buckets,
             null_row: None,
             total_members: 0,
+            expected_members: capacity_hint,
         }
     }
 
@@ -1473,6 +1491,9 @@ impl LaneAggTable {
             packed
         } else {
             let off = self.arena.len() as u64;
+            if self.arena.len() + key.len() > self.arena.capacity() {
+                self.reserve_arena(key.len());
+            }
             self.arena.extend_from_slice(key);
             off
         };
@@ -1491,6 +1512,45 @@ impl LaneAggTable {
         self.total_members += 1;
         // SAFETY: states follow the key words in the fresh zeroed row.
         Probe { states: unsafe { p.add(self.key_words).cast() }, is_new: true }
+    }
+
+    /// Grow the long-key arena toward its PROJECTED final size instead of
+    /// letting `Vec` double (stringhash2 re-charter inc-0; vecaudit census
+    /// handoff, CONTESTED:stringhash2 — accepted): the arena is
+    /// `Vec::new()` at construction and fed one `extend_from_slice` per new
+    /// > 8 B key, so every doubling memcpies the ENTIRE arena — on
+    /// q34/q35-class tables (~18M URL-length keys per build) that is a
+    /// hundreds-of-MB realloc-copy stream, while `capacity_hint` sized only
+    /// the entry sets. The projection scales the observed
+    /// arena-bytes-per-member by the construction-time member hint, so a
+    /// well-hinted build takes one large reservation in place of
+    /// ~log2(final/first) full-arena copies; a missing or exceeded hint
+    /// falls back to 2x geometric growth (amortized cost unchanged, never
+    /// worse than the old shape). Offsets, contents, group ids and
+    /// iteration order are untouched — capacity only, so results are
+    /// byte-identical by construction. NOTE [`Self::mem_used`] accounts
+    /// `arena.capacity()`: the projection lands in memory accounting
+    /// earlier than doubling would, bounded by what the build reaches
+    /// anyway plus hint skew. `PGRUST_LANE_V2_ARENA_RESERVE=0` kills the
+    /// projection (same-pod A/B channel).
+    #[cold]
+    #[inline(never)]
+    fn reserve_arena(&mut self, add: usize) {
+        if !arena_reserve_enabled() {
+            return; // extend_from_slice falls back to Vec doubling
+        }
+        let len = self.arena.len();
+        let members = self.total_members.max(1);
+        let expected = self.expected_members.max(members);
+        let projected = len
+            .saturating_mul(expected)
+            .checked_div(members)
+            .unwrap_or(len)
+            .saturating_add(add);
+        let target = projected
+            .max(self.arena.capacity().saturating_mul(2))
+            .max(len + add);
+        self.arena.reserve(target - len);
     }
 
     /// Batched byte-key probe — [`Self::probe_int_batch`]'s Bytes twin
