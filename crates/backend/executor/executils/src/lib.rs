@@ -578,6 +578,16 @@ pub trait BatchSource<'mcx> {
     ) -> PgResult<Option<u32>> {
         Ok(None)
     }
+    /// Fetch-dead skip snapshot of the CURRENT staged batch: a CLEARED bit
+    /// is a position `fetch_tuple` rejects with no observable effect (the
+    /// staged qual bitmap's verdict — definitive even for hybrid requal
+    /// quals, whose survivors carry SET bits and re-check per row), so a
+    /// batch drain may word-skip cleared positions without the call
+    /// (`exectuples::for_each_live` — the wordskip lane's shared idiom).
+    /// Default `None` = no live bitmap; every position must be fetched.
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

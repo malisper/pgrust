@@ -51,9 +51,10 @@ use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
     sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
     sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
-    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, SinkCombineFn, SinkEmitBuf,
-    SinkEmitPlan, SinkKeySpec, SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand,
-    SinkTopnSpec, SINK_NBUCKETS, SINK_NULL_BUCKET,
+    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, sink_topn_merge_fragments,
+    LaneAggTable, SinkCombineFn, SinkEmitAcc, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
+    SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand, SinkTopnSpec, SINK_NBUCKETS,
+    SINK_NULL_BUCKET,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -141,12 +142,14 @@ struct AggSink {
     /// degrade to the full drain (correct either way — winners are a drain
     /// filter, never a data transform).
     topn_degraded: AtomicBool,
-    /// Top-N materialization mode (topn-winners-only inc-2), meaningful only
-    /// when `topn` is armed. Resolved by the §3.2 ladder: leader admission
-    /// (spill-armed / kill switch → FullDrain) then SEAL (pass-through shape
-    /// → FullDrain) — IMMUTABLE once the first combine claim runs (SEAL
-    /// happens-before every combine by last-worker-out). Encoded as
-    /// `TOPN_MODE_*` in an AtomicU8 because SEAL writes through `&self`.
+    /// Top-N materialization mode (topn-winners-only inc-2; winners-phase2
+    /// lifts the spill-armed exclusion), meaningful only when `topn` is
+    /// armed. Resolved by the §3.2 ladder: leader admission (kill switch, or
+    /// spill-armed under `WINNERS_SPILL=0`, → FullDrain) then SEAL
+    /// (pass-through shape → FullDrain) — IMMUTABLE once the first combine
+    /// claim runs (SEAL happens-before every combine by last-worker-out).
+    /// Encoded as `TOPN_MODE_*` in an AtomicU8 because SEAL writes through
+    /// `&self`.
     topn_mode: AtomicU8,
     /// WinnersOnly selection declined (NULL/pending order transvalue): the
     /// whole attempt is REFUSED → R5 serial rerun (demote=refusal doctrine;
@@ -163,6 +166,13 @@ struct AggSink {
     /// across all workers (worker-time, not wall — divide by the engaged
     /// DOP for a critical-path estimate).
     topn_ctr: TopnCounters,
+    /// LIMIT-k-no-ORDER group-admission freeze (band-2a q18 class; see the
+    /// sink.rs section doc): armed only on the Mk drain from a bare
+    /// Limit-over-Agg bound; structurally never co-armed with `topn`.
+    /// Workers install/consult it through [`scan_mk_batch`]; the combine
+    /// filters merged buckets to set members; seal/passthrough/adopt fast
+    /// paths are skipped once FROZEN (their tables may carry stragglers).
+    freeze: Option<Arc<::nodeagg::sink::SinkFreeze>>,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -262,11 +272,19 @@ impl TopnMode {
     }
 }
 
-/// §3.2 step 1 — leader-admission mode resolution: spill-armed engagements
-/// keep FullDrain (phase-1 H3 exclusion: the m35 combine-split emits
-/// piecemeal and keeps its free degrade), as does the kill switch.
-fn resolve_topn_mode_admission(spill_armed: bool, winners_enabled: bool) -> TopnMode {
-    if spill_armed || !winners_enabled {
+/// §3.2 step 1 — leader-admission mode resolution. PHASE 2 (winners-phase2,
+/// split×selection): spill-armed engagements now resolve WinnersOnly too —
+/// the m35 combine-split composes with the selection (per-fragment candidate
+/// lists, merged before truncation; see `split_leaf_emit`), so the phase-1
+/// H3 exclusion is lifted. `PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL=0`
+/// restores the phase-1 arm exactly (spill-armed → FullDrain — the A/B
+/// attribution channel); the kill switch still forces FullDrain everywhere.
+fn resolve_topn_mode_admission(
+    spill_armed: bool,
+    winners_enabled: bool,
+    winners_spill_enabled: bool,
+) -> TopnMode {
+    if !winners_enabled || (spill_armed && !winners_spill_enabled) {
         TopnMode::FullDrain
     } else {
         TopnMode::WinnersOnly
@@ -294,6 +312,19 @@ fn topn_winners_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL` (default ON): 0/off restores the
+/// ratified phase-1 spill-armed exclusion (spill-armed engagements ride
+/// FullDrain) — the winners-phase2 A/B and rollback channel.
+fn topn_winners_spill_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL").as_deref(),
             Ok("0") | Ok("off")
         )
     })
@@ -476,7 +507,13 @@ impl runtime::ParallelSink for AggSink {
         // the drain is serial-faithful AND cache-linear), no combine work,
         // no emit materialization. Memory: the table was charged during
         // accept; no partition index is ever built.
-        if self.adopt_shape {
+        // Freeze composition: a FROZEN engagement's tables can carry
+        // pre-freeze straggler groups (undercounted past the freeze point) —
+        // the wholesale table hand-off cannot filter them, so it stands
+        // down and the combine's member filter runs instead. An armed-but-
+        // never-frozen freeze dropped nothing — the adopt stays valid.
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        if self.adopt_shape && !frozen {
             if let [l] = &mut *locals {
                 if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
                     let t = l.table.take().expect("checked Some");
@@ -489,7 +526,7 @@ impl runtime::ParallelSink for AggSink {
         for l in locals.iter_mut() {
             // Canonical (text-bearing) shapes partition by canonical bytes;
             // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_ref().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
             // R3 accounting (m2-integration audit): the SEAL index is
             // per-Local retained memory that lives through the whole combine
             // phase — charge it like a run. Crossing = budget refusal (R5
@@ -549,8 +586,13 @@ impl runtime::ParallelSink for AggSink {
             // takes the merge arm below; no plan/DOP special-casing.
             // M3.5 composition: a spilled face disqualifies the arm too —
             // spilled epochs live on the Local's file, not its table.
+            // Freeze composition: a FROZEN engagement's Local tables can
+            // carry pre-freeze stragglers — the pass-through emits verbatim
+            // and cannot filter, so it stands down (the merge arm below
+            // runs the member filter; frozen tables are tiny).
+            let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
             if let [l] = locals {
-                if l.runs.is_empty() && l.spill.is_none() {
+                if l.runs.is_empty() && l.spill.is_none() && !frozen {
                     if let (Some(t), Some(p)) = (&l.table, &l.part) {
                         // Top-N composition (m3-sort-b car 1) selects on the
                         // MERGED table; the pass-through never builds one, so
@@ -589,52 +631,111 @@ impl runtime::ParallelSink for AggSink {
             }
             let b = part as usize;
             let state_words = self.state_bytes / 8;
-            let row_bytes = sink_spill_row_bytes(self.key_words, state_words);
+            let canon = self.key_words == 0;
+            // Canonical (bytes-mode) spill faces carry variable-width
+            // records: divide by the MINIMUM record width (over-counts
+            // rows — the safe direction, the distinct record's discipline).
+            let row_bytes = if canon {
+                ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+            } else {
+                sink_spill_row_bytes(self.key_words, state_words)
+            };
             // Pre-build size check (M3.5 §3), from the DIRECTORY + in-memory
             // counts only — nothing is read from disk before this decision.
             // Rows over-count duplicates across faces, so the check is
-            // conservative in the safe direction.
+            // conservative in the safe direction. Canonical shapes add a
+            // KEY-CONTENT term (their merged table owns the byte images):
+            // spill part lengths and run key-byte ranges are O(1) directory
+            // reads; the remainder's share is approximated by its table's
+            // retained memory scaled to the bucket's row fraction —
+            // over-counting (entry+state overhead included), never under.
             let mut rows = 0usize;
+            let mut content = 0usize;
             for l in locals {
                 if let Some(sp) = &l.spill {
-                    rows += sp.file.part_len(b as u32) as usize / row_bytes;
+                    let blen = sp.file.part_len(b as u32) as usize;
+                    rows += blen / row_bytes;
+                    if canon {
+                        content += blen;
+                    }
                 }
                 for r in &l.runs {
                     rows += (r.starts[b + 1] - r.starts[b]) as usize;
+                    if canon {
+                        content += (r.key_offs[r.starts[b + 1] as usize]
+                            - r.key_offs[r.starts[b] as usize])
+                            as usize;
+                    }
                 }
-                if let (Some(_), Some(p)) = (&l.table, &l.part) {
-                    rows += (p.starts[b + 1] - p.starts[b]) as usize;
+                if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                    let brows = (p.starts[b + 1] - p.starts[b]) as usize;
+                    rows += brows;
+                    if canon && brows > 0 {
+                        let n = t.table().nrows().max(1);
+                        content += t.mem_used() / n * brows;
+                    }
                 }
             }
-            if est_table_bytes(self, rows) > self.budget {
+            if est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
+                > self.budget
+            {
                 // inc-2b: recursive combine-split by deeper hash bits —
                 // stream every face through sub-bucket routing files and
                 // combine each sub-partition bounded; depth cap → refusal.
                 let Some(set) = &self.spill_set else {
                     return Ok(CombineOutcome::OverBudget);
                 };
-                // Top-N composition: the split emits sub-partition tables
-                // piecemeal (no single merged table to select on) — an armed
-                // spec degrades globally to the full drain. Winners-only
-                // phase-1 exclusion (§3.3): the split requires the spill arm,
-                // and spill-armed engagements resolve FullDrain at admission,
-                // so this degrade is always mode-consistent.
-                if self.topn.is_some() {
-                    debug_assert_eq!(
-                        self.topn_mode(),
-                        TopnMode::FullDrain,
-                        "combine-split implies the spill arm, which resolves FullDrain"
-                    );
+                // Freeze composition: the split emits sub-partition tables
+                // piecemeal and cannot run the member filter — a FROZEN
+                // engagement refuses instead (unreachable by arithmetic:
+                // frozen tables hold <= bound + first-batch stragglers,
+                // orders below any budget; fail-closed, never
+                // silent-wrong).
+                if self.freeze.as_ref().is_some_and(|f| f.frozen()) {
+                    return Ok(CombineOutcome::OverBudget);
+                }
+                // Top-N × split composition (winners-phase2 §split×selection):
+                //  * WinnersOnly — each split LEAF (a disjoint sub-partition
+                //    of this partition's groups) runs the selection on its
+                //    own merged fragment table and materializes ONLY its
+                //    candidates; the fragment candidate lists merge BEFORE
+                //    truncation into this partition's local list (superset
+                //    lemma one level deeper — sink_topn_merge_fragments).
+                //    A leaf decline REFUSES the attempt (R5), same as the
+                //    in-memory WinnersOnly arm — rows are already gone from
+                //    other claims' compact bufs.
+                //  * FullDrain — decision-1 verbatim: the split emits
+                //    piecemeal with no selection, and the armed spec
+                //    degrades globally to the plain full drain.
+                let winners_split =
+                    self.topn.is_some() && self.topn_mode() == TopnMode::WinnersOnly;
+                if self.topn.is_some() && !winners_split {
                     self.topn_degraded.store(true, Ordering::Release);
                 }
-                let mut out = SinkEmitBuf::default();
-                if !split_views_and_emit(self, b, set, locals, &mut out)? {
-                    return Ok(CombineOutcome::OverBudget);
+                let mut sel = winners_split.then(|| SplitSel {
+                    spec: self.topn.as_ref().expect("winners split has a spec"),
+                    part: part as u16,
+                    lists: Vec::new(),
+                });
+                let mut acc = SinkEmitAcc::default();
+                match split_views_and_emit(self, b, set, locals, &mut acc, &mut sel)? {
+                    SplitOutcome::DepthCap => return Ok(CombineOutcome::OverBudget),
+                    SplitOutcome::Declined => return Ok(CombineOutcome::TopnDeclined),
+                    SplitOutcome::Done => {}
+                }
+                if let Some(sel) = sel {
+                    let bound = sel.spec.bound as usize;
+                    // SAFETY: partition `part` is claimed exactly once
+                    // (runtime contract); this is its single writer.
+                    unsafe {
+                        *self.topn_cands[part as usize].get() =
+                            sink_topn_merge_fragments(sel.lists, bound);
+                    }
                 }
                 // R3: the split result is retained emit content like any
                 // other combine result — meter it (retain_bucket is the
                 // single writer of the claimed partition's slot).
-                self.retain_bucket(part, out, locals.len())?;
+                self.retain_bucket(part, acc.finish(), locals.len())?;
                 return Ok(CombineOutcome::Done);
             }
             // In-memory path: rebuild each Local's spilled face for this
@@ -649,7 +750,11 @@ impl runtime::ParallelSink for AggSink {
                     if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
                         let bytes = r.read_to_end()?;
                         r.close()?;
-                        v.push(sink_run_from_spill(b, self.key_words, state_words, &bytes)?);
+                        v.push(if canon {
+                            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+                        } else {
+                            sink_run_from_spill(b, self.key_words, state_words, &bytes)?
+                        });
                     }
                     if b == SINK_NULL_BUCKET {
                         for nb in &sp.null_blocks {
@@ -689,6 +794,30 @@ impl runtime::ParallelSink for AggSink {
                 self.topn_ctr
                     .build_ns
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+            // Freeze member filter (band-2a q18): a FROZEN engagement emits
+            // ONLY set members — pre-freeze stragglers are undercounted
+            // past the freeze point and must never leave the sink. Rows
+            // ascend (sink_emit_bucket_rows contract). Structurally
+            // disjoint from the topn arm below (never co-armed).
+            if let Some(fz) = &self.freeze {
+                if let Some(entries) = fz.entries() {
+                    let shape = self
+                        .mk
+                        .as_ref()
+                        .expect("freeze arms only on the Mk drain");
+                    let rows = ::nodeagg::sink::sink_freeze_member_rows(
+                        &merged,
+                        self.key_words,
+                        shape,
+                        entries,
+                    );
+                    fz.note_stragglers((merged.nrows() - rows.len()) as u64);
+                    let buf =
+                        ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
+                    self.retain_bucket(part, buf, locals.len())?;
+                    return Ok(CombineOutcome::Done);
+                }
             }
             // Combine-phase top-N (car 1 + the winners-only amendment):
             // select this partition's winners on the merged raw states
@@ -1004,6 +1133,10 @@ fn accept_morsel_body(
                 if let Some(t) = local.table.take() {
                     ::nodeagg::sink::agg_sink_put_table(&mut aps.agg, t);
                 }
+                // Sink-owned table: arm the batch-tail canonical hashing
+                // (idempotent; the first morsel's table arms during the
+                // drain below, so mark again before reclaiming it).
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 let drained = sink_drain_range(
                     sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
                     stage_slot, mk, mks,
@@ -1026,6 +1159,7 @@ fn accept_morsel_body(
                 }
                 // Reclaim on EVERY path — the Local owns the table between
                 // morsels and at SEAL.
+                ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
                 if let Some(t) = ::nodeagg::sink::agg_sink_take_table(&mut aps.agg) {
                     local.table = Some(t);
                 }
@@ -1143,7 +1277,25 @@ impl SubRouter {
         if records.is_empty() {
             return Ok(());
         }
-        sink_route_records(records, self.key_words, self.state_words, self.depth, &mut self.bufs)?;
+        if self.key_words == 0 {
+            // Canonical bytes records route by their STORED hash (the C2
+            // record carries it — value-derived, deeper bits of the same
+            // hash partition groups exactly).
+            ::nodeagg::sink::sink_route_records_bytes(
+                records,
+                self.state_words,
+                self.depth,
+                &mut self.bufs,
+            )?;
+        } else {
+            sink_route_records(
+                records,
+                self.key_words,
+                self.state_words,
+                self.depth,
+                &mut self.bufs,
+            )?;
+        }
         self.staged += records.len();
         if self.staged >= SPLIT_FLUSH_BYTES {
             self.flush()?;
@@ -1205,21 +1357,157 @@ pub(super) fn stream_part_rows(
     }
 }
 
+/// Stream one spilled partition of CANONICAL BYTES records in RECORD-ALIGNED
+/// chunks: each record self-describes its length (`rec_len` at offset 0,
+/// 8-aligned), so the reader carries partial tails across reads (the
+/// distinct sink's `stream_part_dst` discipline) and hands `f` only whole
+/// records. Fail-closed on a torn tail or a malformed header.
+fn stream_part_records(
+    file: &::spillset::SpillFile,
+    part: u32,
+    state_words: usize,
+    mut f: impl FnMut(&[u8]) -> PgResult<()>,
+) -> PgResult<()> {
+    let ctx = ::mcx::MemoryContext::new("m35-agg-split-read");
+    let Some(mut rd) = file.read_part(ctx.mcx(), part)? else { return Ok(()) };
+    let min_rec = ::nodeagg::sink::sink_canon_min_record_bytes(state_words);
+    let mut buf = vec![0u8; SPLIT_READ_CHUNK.max(min_rec * 2)];
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            // One record larger than the buffer: grow (bounded by the
+            // record's own rec_len validation downstream).
+            buf.resize(buf.len() * 2, 0);
+        }
+        let n = rd.read(&mut buf[filled..])?;
+        if n == 0 {
+            rd.close()?;
+            if filled != 0 {
+                return Err(::nodeagg::sink::sink_shape_error(
+                    "torn canonical spill record (partial tail) in split stream",
+                ));
+            }
+            return Ok(());
+        }
+        filled += n;
+        // Usable prefix: whole records only (each header read fail-closed).
+        let mut usable = 0usize;
+        while filled - usable >= 8 {
+            let rec_len = u64::from_ne_bytes(
+                buf[usable..usable + 8].try_into().expect("8 bytes"),
+            ) as usize;
+            // Sanity cap: a legit record is a ≤1GB varlena + states; a
+            // larger rec_len is corruption — fail closed before the grow
+            // loop could chase it.
+            if rec_len < min_rec || rec_len % 8 != 0 || rec_len > (1usize << 31) {
+                return Err(::nodeagg::sink::sink_shape_error(
+                    "malformed canonical spill record header in split stream",
+                ));
+            }
+            if filled - usable < rec_len {
+                break;
+            }
+            usable += rec_len;
+        }
+        if usable > 0 {
+            f(&buf[..usable])?;
+            buf.copy_within(usable..filled, 0);
+            filled -= usable;
+        }
+    }
+}
+
+/// Split verdicts, threaded up the recursion.
+enum SplitOutcome {
+    Done,
+    /// Depth-cap overflow — the caller refuses (OverBudget → R5 rerun).
+    DepthCap,
+    /// A split leaf's winners-only selection declined (fault injection; the
+    /// NULL-order decline is structurally unreachable on cbstore feeds) —
+    /// the caller refuses through the topn channel (R5 rerun).
+    Declined,
+}
+
+/// Split×selection context (winners-phase2): the per-FRAGMENT candidate
+/// lists of one split partition, collected across leaves and truncate-merged
+/// by the caller into the partition's local candidate list.
+struct SplitSel<'a> {
+    spec: &'a SinkTopnSpec,
+    part: u16,
+    lists: Vec<Vec<SinkTopnCand>>,
+}
+
+/// One split LEAF's emit: winners-only (`sel` Some) selects the fragment
+/// table's candidates first and materializes ONLY those rows — candidate
+/// `row` payloads remapped to the accumulator's compact indices (fragment
+/// rows land at `acc.nrows() + i` in `emit_rows`'s ascending order) — while
+/// FullDrain (`sel` None) materializes the whole fragment. Returns false on
+/// a selection decline. Counters mirror the in-memory arm: `cand_rows`
+/// counts MATERIALIZED candidates (so the `mat_rows == cand_rows` compact-
+/// materialization law holds on split shapes too; the partition's stored
+/// list is truncated separately by the fragment merge).
+fn split_leaf_emit(
+    sink: &AggSink,
+    t: &LaneAggTable,
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<bool> {
+    let ctr = sink.topn.is_some();
+    let Some(s) = sel else {
+        let t0 = ctr.then(std::time::Instant::now);
+        acc.emit_table(&sink.emit, t)?;
+        if let Some(t0) = t0 {
+            sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            sink.topn_ctr.mat_rows.fetch_add(t.nrows() as u64, Ordering::Relaxed);
+        }
+        return Ok(true);
+    };
+    let ts = std::time::Instant::now();
+    let selected = if topn_fault_decline() {
+        None // leg fault injection: the unreachable decline, split leaf form
+    } else {
+        sink_topn_candidates(t, s.spec, s.part)
+    };
+    sink.topn_ctr.select_ns.fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let Some(mut cands) = selected else {
+        return Ok(false);
+    };
+    let mut rows: Vec<u32> = cands.iter().map(|c| c.row).collect();
+    rows.sort_unstable();
+    let base = acc.nrows() as u32;
+    for c in &mut cands {
+        c.row = base
+            + rows
+                .binary_search(&c.row)
+                .expect("candidate row present in its own row set") as u32;
+    }
+    let t0 = std::time::Instant::now();
+    acc.emit_rows(&sink.emit, t, &rows)?;
+    sink.topn_ctr.emit_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    sink.topn_ctr.mat_rows.fetch_add(rows.len() as u64, Ordering::Relaxed);
+    sink.topn_ctr.cand_rows.fetch_add(cands.len() as u64, Ordering::Relaxed);
+    s.lists.push(cands);
+    Ok(true)
+}
+
 /// inc-2b top level: route every face of over-budget partition `b` into a
 /// depth-1 sub-bucket file, then combine each sub-partition (recursing where
-/// still too big), emitting into `out`. Returns false on depth-cap overflow
-/// (the caller refuses → R5 serial rerun). NULL faces never route — they
-/// merge through one bounded mini-combine at the end.
+/// still too big), emitting each leaf into `acc` (winners-only leaves emit
+/// candidates only — `split_leaf_emit`). NULL faces never route — they merge
+/// through one bounded mini-combine at the end (a leaf like any other: the
+/// NULL group rides the selection's null tier).
 fn split_views_and_emit(
     sink: &AggSink,
     b: usize,
     set: &Arc<::spillset::SpillSet>,
     locals: &[AggSinkLocal],
-    out: &mut SinkEmitBuf,
-) -> PgResult<bool> {
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<SplitOutcome> {
     sink.combine_splits.fetch_add(1, Ordering::Relaxed);
     sink.split_depth_max.fetch_max(1, Ordering::Relaxed);
     let state_words = sink.state_bytes / 8;
+    let canon = sink.key_words == 0;
     let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
     let mut router = SubRouter::new(sink, set, b, 1);
     let mut scratch: Vec<u8> = Vec::new();
@@ -1227,6 +1515,8 @@ fn split_views_and_emit(
     for l in locals {
         for r in &l.runs {
             scratch.clear();
+            // Bytes-mode runs serialize the canonical record (the encode
+            // dispatches on the run's own key_words).
             sink_run_spill_bucket(r, b, &mut scratch);
             router.absorb(&scratch)?;
             if b == SINK_NULL_BUCKET {
@@ -1237,16 +1527,30 @@ fn split_views_and_emit(
         }
         if let (Some(t), Some(p)) = (&l.table, &l.part) {
             scratch.clear();
-            sink_remainder_spill_bucket(t.table(), p, b, &mut scratch);
+            if canon {
+                ::nodeagg::sink::sink_remainder_spill_bucket_canon(
+                    &t.remainder_view(p),
+                    b,
+                    &mut scratch,
+                )?;
+            } else {
+                sink_remainder_spill_bucket(t.table(), p, b, &mut scratch);
+            }
             router.absorb(&scratch)?;
-            if b == SINK_NULL_BUCKET {
+            if b == SINK_NULL_BUCKET && !canon {
                 if let Some(nb) = sink_remainder_null_block(t.table()) {
                     null_runs.push(sink_null_only_run(sink.key_words, state_words, nb));
                 }
             }
         }
         if let Some(sp) = &l.spill {
-            stream_part_rows(&sp.file, b as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            if canon {
+                stream_part_records(&sp.file, b as u32, state_words, |chunk| {
+                    router.absorb(chunk)
+                })?;
+            } else {
+                stream_part_rows(&sp.file, b as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            }
             if b == SINK_NULL_BUCKET {
                 for nb in &sp.null_blocks {
                     null_runs.push(sink_null_only_run(sink.key_words, state_words, nb.clone()));
@@ -1255,16 +1559,24 @@ fn split_views_and_emit(
         }
     }
     router.flush()?;
-    if !split_subparts_and_emit(sink, b, set, &router.file, 1, out)? {
-        return Ok(false);
+    match split_subparts_and_emit(sink, b, set, &router.file, 1, acc, sel)? {
+        SplitOutcome::Done => {}
+        other => return Ok(other),
     }
     if !null_runs.is_empty() {
         // The NULL group: one bounded mini-combine over its blocks only.
+        let ctr = sink.topn.is_some();
+        let t0 = ctr.then(std::time::Instant::now);
         let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
-        out.append(sink_emit_bucket(&sink.emit, &t)?);
+        if let Some(t0) = t0 {
+            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if !split_leaf_emit(sink, &t, acc, sel)? {
+            return Ok(SplitOutcome::Declined);
+        }
     }
-    Ok(true)
+    Ok(SplitOutcome::Done)
 }
 
 /// Combine each sub-partition of a routed split file; sub-partitions still
@@ -1275,27 +1587,44 @@ fn split_subparts_and_emit(
     set: &Arc<::spillset::SpillSet>,
     file: &::spillset::SpillFile,
     depth: u32,
-    out: &mut SinkEmitBuf,
-) -> PgResult<bool> {
+    acc: &mut SinkEmitAcc,
+    sel: &mut Option<SplitSel<'_>>,
+) -> PgResult<SplitOutcome> {
     let state_words = sink.state_bytes / 8;
-    let row_bytes = sink_spill_row_bytes(sink.key_words, state_words);
+    let canon = sink.key_words == 0;
+    let row_bytes = if canon {
+        ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+    } else {
+        sink_spill_row_bytes(sink.key_words, state_words)
+    };
     for s in 0..SINK_NBUCKETS {
         let blen = file.part_len(s as u32) as usize;
         if blen == 0 {
             continue;
         }
         let rows = blen / row_bytes;
-        if est_table_bytes(sink, rows) > sink.budget {
+        // Canonical sub-partitions add the content term (blen bounds the
+        // key content — headers/states over-count, the safe direction).
+        let est = est_table_bytes(sink, rows)
+            .saturating_add(if canon { blen.saturating_mul(3) / 2 } else { 0 });
+        if est > sink.budget {
             if depth + 1 > spill_split_depth_cap() {
-                return Ok(false);
+                return Ok(SplitOutcome::DepthCap);
             }
             sink.combine_splits.fetch_add(1, Ordering::Relaxed);
             sink.split_depth_max.fetch_max((depth + 1) as u64, Ordering::Relaxed);
             let mut router = SubRouter::new(sink, set, b, depth + 1);
-            stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            if canon {
+                stream_part_records(file, s as u32, state_words, |chunk| {
+                    router.absorb(chunk)
+                })?;
+            } else {
+                stream_part_rows(file, s as u32, row_bytes, |chunk| router.absorb(chunk))?;
+            }
             router.flush()?;
-            if !split_subparts_and_emit(sink, b, set, &router.file, depth + 1, out)? {
-                return Ok(false);
+            match split_subparts_and_emit(sink, b, set, &router.file, depth + 1, acc, sel)? {
+                SplitOutcome::Done => {}
+                other => return Ok(other),
             }
             continue;
         }
@@ -1303,16 +1632,27 @@ fn split_subparts_and_emit(
         let Some(mut rd) = file.read_part(ctx.mcx(), s as u32)? else { continue };
         let bytes = rd.read_to_end()?;
         rd.close()?;
-        let synth = sink_run_from_spill(b, sink.key_words, state_words, &bytes)?;
+        let synth = if canon {
+            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+        } else {
+            sink_run_from_spill(b, sink.key_words, state_words, &bytes)?
+        };
         let view = [SinkLocalView {
             spilled: core::slice::from_ref(&synth),
             runs: &[],
             remainder: None,
         }];
+        let ctr = sink.topn.is_some();
+        let t0 = ctr.then(std::time::Instant::now);
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
-        out.append(sink_emit_bucket(&sink.emit, &t)?);
+        if let Some(t0) = t0 {
+            sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if !split_leaf_emit(sink, &t, acc, sel)? {
+            return Ok(SplitOutcome::Declined);
+        }
     }
-    Ok(true)
+    Ok(SplitOutcome::Done)
 }
 
 /// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
@@ -1669,7 +2009,17 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
-            if !super::scan_mk_batch(agg, ss, mk, mks, idxs, groups, n, estate)? {
+            if !super::scan_mk_batch(
+                agg,
+                ss,
+                mk,
+                mks,
+                idxs,
+                groups,
+                n,
+                sink.freeze.as_deref(),
+                estate,
+            )? {
                 let demotable = mk
                     .shape
                     .comps
@@ -2043,13 +2393,18 @@ fn arm_sink_build<'mcx>(
             (
                 None,
                 Some(lshape),
-                Some(super::exprkey::SinkXkKind::Multi { dict_input_att }),
+                Some(super::exprkey::SinkXkKind::Multi { dict_input_att: _ }),
             ) => {
-                // The q19 class: the serial build's own mk arm sequence
-                // under the sink cap; every divergence from the leader's
-                // snapshot is an error (combine + emit plans were built off
-                // that exact shape).
-                if ::nodeagg::agg_hash_compact_try_arm_mk(agg, false, dict_input_att)
+                // The q19/q40 class: the serial build's own mk arm sequence
+                // under the sink cap (CaseDict shapes arm their two Intern
+                // atts through the shared pool — the serial feed's exact
+                // call); every divergence from the leader's snapshot is an
+                // error (combine + emit plans were built off that exact
+                // shape).
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Multi kind carries intern atts");
+                if ::nodeagg::agg_hash_compact_try_arm_mk_multi(agg, false, &atts[..n_atts])
                     != ::nodeagg::CompactArm::Armed
                 {
                     return Err(shape_err("worker mk arm refused under the sink cap"));
@@ -2217,6 +2572,82 @@ fn sink_cap_override() -> Option<u32> {
     })
 }
 
+/// LOCALITY CAP (q36-radix lane): the high-NDV accept-latency bound. At
+/// 100M/dop15 the budget-derived cap (~22M entries at matched memory) lets a
+/// q36-class Local grow to ~5-6M Salt8 entries (hundreds of MB): every
+/// accept probe is a dependent DRAM miss (the dop16-bandwidth-ceiling study's
+/// memory-LATENCY class — 55% stall_backend_mem at 3.6% bandwidth), and the
+/// combine then re-merges ~dop× duplicated groups from the SEAL remainders
+/// at the same latency. Bounding the worker table keeps accept probes
+/// cache-resident and converts the surplus into bucket-partitioned SinkRuns
+/// (sequential writes) that the 256-bucket combine merges into per-bucket
+/// cache-resident tables — the radix/partition-first program on the
+/// machinery that already exists (flush-at-cap + counting-sorted runs +
+/// bucket-claim combine).
+///
+/// Engagement: WORD-KEYED shapes at DOP>1 only.
+///   * Canonical (Intern-bearing) shapes keep the budget cap: their flush
+///     materializes canonical bytes and resets the intern table (wide-
+///     vocabulary bounding) — the canon-sink lane owns that surface.
+///   * DOP1 keeps the budget cap: the single-Local pass-through/adopt fast
+///     path requires zero flushed runs (the dop1-tax ledger), and one Local
+///     has no duplicate-group tax to convert.
+/// Low-NDV shapes are unaffected by construction (tables below the bound
+/// never flush; the bound only engages where the table would outgrow it).
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CAP`: 0 = off (budget cap exactly), N =
+/// entry bound override. Default = the wave-1 ladder knee (see
+/// notes/q36-radix-lane.md).
+fn sink_locality_cap() -> Option<u32> {
+    static N: OnceLock<Option<u32>> = OnceLock::new();
+    *N.get_or_init(|| {
+        match std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        {
+            Some(0) => None,
+            Some(c) => Some(c.max(1024)),
+            None => Some(SINK_LOCALITY_CAP_DEFAULT),
+        }
+    })
+}
+
+/// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
+/// monotone improvement control→64K (q36 0.378→0.234 = 2.30x→1.40x CH-mt16;
+/// q16 0.468→0.270), knee flattening 256K→64K, guards (q21/q38) flat-or-
+/// better. 64K = the historical exchange-class cap (tranche-proven).
+/// 32K/16K extension arms recorded in the lane note; env overrides.
+const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
+
+/// The ENGAGED sink cap: the budget-derived cap ([`sink_cap_for`]) bounded
+/// by the locality cap on word-keyed DOP>1 engagements. This is the single
+/// authority for the leader admissibility gate AND the sink's constructed
+/// `cap` (workers arm off `sink.cap`) — the F1 invariant: leader and worker
+/// verdicts must be computed from the SAME cap. The early cap-aware Mk
+/// admission probes keep the plain budget cap (the shape — and with it
+/// word-keyedness — is not yet known there); the divergence is one-sided:
+/// a larger probe cap can only manufacture a REFUSAL at the probe's
+/// estimate gate (fail-closed to serial), never an engagement the final
+/// gate would reject, and word-keyed spill-armed shapes vacate that gate
+/// entirely.
+fn sink_cap_engaged(
+    state_bytes: usize,
+    budget: usize,
+    ngroups_limit: u64,
+    dop: i32,
+    word_keyed: bool,
+) -> u32 {
+    let base = sink_cap_for(state_bytes, budget, ngroups_limit);
+    // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
+    // channel and stays authoritative — the locality bound never rewrites it.
+    if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
+        return base;
+    }
+    match sink_locality_cap() {
+        Some(l) => base.min(l),
+        None => base,
+    }
+}
+
 /// Sink flush cap (worker table bound, entries) — BUDGET-DERIVED (dop1-tax
 /// inc-3b). The fixed 64K exchange-class cap forced ~17 flush cycles on
 /// q36@10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
@@ -2291,20 +2722,28 @@ fn runtime_agg_text_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_AGG_TEXT2` kill switch (default ON): TWO-text canonical
+/// shapes (the CaseDict q40 class — canon-sink car 1: length-prefixed
+/// canonical tails). Off, two-Intern shapes refuse the sink exactly as
+/// before the car (serial CaseDict arm unchanged — the attribution channel).
+fn runtime_agg_text2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// The sink's packed-shape component gates (leader admission): non-nullable
-/// image; at most ONE Intern (text) component (the canonical tail decodes
-/// unambiguously only then); any non-Int component class (Intern/Numeric)
-/// rides the text-car kill switch.
+/// image; at most TWO Intern (text) components — ONE decodes as the raw
+/// canonical tail (the historical image), TWO ride the length-prefixed
+/// multi-tail encoding (canon-sink car 1, `PGRUST_RUNTIME_AGG_TEXT2`); any
+/// non-Int component class (Intern/Numeric) rides the text-car kill switch.
 fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
     if shape.nullable {
         return false;
     }
-    let n_intern = shape
-        .comps
-        .iter()
-        .filter(|c| c.kind == ::nodeagg::MkCompKind::Intern)
-        .count();
-    if n_intern > 1 {
+    let n_intern = shape.n_intern();
+    if n_intern > 2 || (n_intern == 2 && !runtime_agg_text2_enabled()) {
         return false;
     }
     let all_int = shape
@@ -2312,6 +2751,17 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
         .iter()
         .all(|c| matches!(c.kind, ::nodeagg::MkCompKind::Int { .. }));
     all_int || runtime_agg_text_enabled()
+}
+
+/// `PGRUST_RUNTIME_AGG_FREEZE` kill switch (default ON): the LIMIT-k-no-
+/// ORDER group-admission freeze (band-2a q18 class). Off, bare-Limit bounds
+/// are ignored and those engagements run the plain full drain exactly as
+/// before the car.
+fn agg_freeze_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
+    })
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
@@ -2327,7 +2777,7 @@ fn min_granules() -> u64 {
 
 /// Find the Node of `agg.plan` inside the leader's plan tree (worker pstmts
 /// root at the Agg subtree; the Agg need not be the leader plan's root).
-fn find_agg_node<'mcx>(
+pub(super) fn find_agg_node<'mcx>(
     root: Node<'mcx>,
     target: *const ::types_nodes::plannodes::Agg<'mcx>,
 ) -> Option<Node<'mcx>> {
@@ -2359,6 +2809,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: Option<&super::ExprKeyState>,
     topn: Option<SinkTopnSpec>,
+    freeze_bound: Option<u32>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
@@ -2472,20 +2923,26 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 red = Some(shape);
                 mk = None;
             }
-            super::exprkey::SinkXkKind::Multi { dict_input_att } => {
-                // q19 class: packed multi-key over the projected scan
-                // (int/numeric components + at most one text through the
-                // canonical-bytes lane). Cap-aware admission probe — no
-                // table armed on the leader (see the Mk comment below).
-                // Spill-armed admission: mk_admit_n vacates its estimate
-                // refusal only for word-keyed (Intern-free) shapes.
+            super::exprkey::SinkXkKind::Multi { dict_input_att: _ } => {
+                // q19/q40 class: packed multi-key over the projected scan
+                // (int/numeric components + one or two texts through the
+                // canonical-bytes lane; CaseDict shapes carry TWO Intern
+                // atts — the bare text Var and the computed key). Cap-aware
+                // admission probe — no table armed on the leader (see the
+                // Mk comment below). Spill-armed admission: mk_admit_n
+                // vacates its estimate refusal for word-keyed shapes and —
+                // under the canonical spill record's kill switch — for
+                // Intern-bearing shapes too (canon-sink car 3).
+                let (atts, n_atts) = xk
+                    .sink_mk_intern_atts()
+                    .expect("Multi kind carries intern atts");
                 ::nodeagg::sink::agg_sink_set_cap_spill(
                     agg,
                     sink_cap_for(state_bytes, budget, ngroups_limit),
                     agg_spill_enabled(),
                 );
                 let admitted =
-                    ::nodeagg::agg_hash_compact_mk_admit(agg, false, dict_input_att);
+                    ::nodeagg::agg_hash_compact_mk_admit_multi(agg, false, &atts[..n_atts]);
                 ::nodeagg::sink::agg_sink_clear_cap(agg);
                 let Ok((shape, _numgroups)) = admitted else {
                     refuse(estate, ea, node_id, "expr-key mk admission");
@@ -2607,16 +3064,24 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // erroring pre-drive and stranding the pinned RG nobody would ever
     // drain. The leader runs the SAME numbers, so admission must refuse
     // here, fail-closed to the serial arm, before anything launches.
-    // Spill-armed word-keyed engagements vacate the estimate half of the
-    // gate on BOTH sides (the workers arm under `sink_spill_ok`) — the
-    // predicate below must match the worker flag exactly (F1 invariant).
-    let spill_admission =
-        agg_spill_enabled() && !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
-    if !::nodeagg::agg_hash_compact_sink_admissible(
-        agg,
-        sink_cap_for(state_bytes, budget, ngroups_limit),
-        spill_admission,
-    ) {
+    // Spill-armed engagements vacate the estimate half of the gate on BOTH
+    // sides (the workers arm under `sink_spill_ok`) — the predicate below
+    // must match the worker flag exactly (F1 invariant). Canonical
+    // (Intern-bearing) shapes spill through the C2 bytes record since
+    // canon-sink car 3; its kill switch restores the historical exclusion.
+    let spill_admission = agg_spill_enabled()
+        && (!mk.as_ref().is_some_and(|s| s.intern_comp().is_some())
+            || ::nodeagg::sink::sink_spill_canon_enabled());
+    // Word-keyedness for the locality cap = the canonical predicate below
+    // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
+    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes are
+    // excluded from the cap by construction (train-19 car3/car4 seam).
+    let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
+    let sink_cap = sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed);
+    if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
+        lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
+    }
+    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap, spill_admission) {
         refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -2701,12 +3166,17 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // refusal→engagement charter); PGRUST_RUNTIME_AGG_SPILL=0 restores the
     // phase-1 refusal exactly. SpillSet creation is leader-side (fd
     // substrate guaranteed); a creation failure fail-closes to refusal.
-    // COMPOSITION GATE (train-13, m35 x c3): the spill record contract is
-    // word-mode fixed-width (key_words x 8 + states) — canonical
-    // bytes-keyed shapes (key_words == 0) cannot round-trip their key
-    // bytes through it, so text-bearing engagements keep the phase-1
-    // budget refusal (fail-closed; the C2 spill record is a later car).
-    let spill_set = if agg_spill_enabled() && !canon {
+    // COMPOSITION GATE LIFTED (canon-sink car 3): canonical bytes-keyed
+    // shapes (key_words == 0) spill through the C2 BYTES record
+    // (variable-width, length-prefixed content, hash-carrying — the
+    // distinct sink's record-v2 pattern on the AGG side), so text-bearing
+    // engagements ride the same pressure/flush/split laws as word keys.
+    // PGRUST_RUNTIME_AGG_SPILL_CANON=0 restores the train-13 exclusion
+    // (canonical engagements keep the phase-1 budget refusal). The
+    // predicate MUST stay equal to `spill_admission` above (F1 invariant).
+    let spill_set = if agg_spill_enabled()
+        && (!canon || ::nodeagg::sink::sink_spill_canon_enabled())
+    {
         match ::spillset::SpillSet::create() {
             Ok(s) => Some(s),
             Err(_) => {
@@ -2732,11 +3202,47 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         None
     };
+    // LIMIT-k-no-ORDER group-admission freeze (band-2a q18): armed only on
+    // the unprojected Mk drain — the one worker feed carrying the filter
+    // hooks — with a small bound, no composed top-N (structurally exclusive:
+    // topn derives from a Sort consumer, the bound from a bare Limit), a
+    // non-nullable all-Int/one-Intern image (Numeric components demote
+    // mid-build, which the membership filter must never race), and the kill
+    // switch on. Declines keep the plain full drain, byte-identically.
+    let freeze = match freeze_bound {
+        Some(b)
+            if drain == SinkDrain::Mk
+                && topn.is_none()
+                && agg_freeze_enabled()
+                && b >= 1
+                && b <= ::nodeagg::sink::SINK_FREEZE_MAX_BOUND
+                && mk.as_ref().is_some_and(|s| {
+                    !s.nullable
+                        // Belt: the freeze snapshot parses a SINGLE raw text
+                        // tail; two-intern shapes never reach the Mk drain
+                        // (ExprKey-only), but fail closed if that changes.
+                        && s.n_intern() <= 1
+                        && s.comps.iter().all(|c| {
+                            !matches!(c.kind, ::nodeagg::MkCompKind::Numeric { .. })
+                        })
+                }) =>
+        {
+            lane_trace(&format!("runtime-agg freeze: armed (bound={b})"));
+            Some(Arc::new(::nodeagg::sink::SinkFreeze::new(b)))
+        }
+        Some(b) => {
+            lane_trace(&format!(
+                "runtime-agg freeze: declined (bound={b}; drain/shape/switch gate)"
+            ));
+            None
+        }
+        None => None,
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
         mk,
-        cap: sink_cap_for(state_bytes, budget, ngroups_limit),
+        cap: sink_cap,
         budget,
         key_words,
         state_bytes,
@@ -2747,13 +3253,21 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         topn,
         topn_cands: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(Vec::new())).collect(),
         topn_degraded: AtomicBool::new(false),
-        // §3.2 step 1 (meaningful only when `topn` armed): spill-armed
-        // engagements and the kill switch keep decision-1 FullDrain.
+        // §3.2 step 1 (meaningful only when `topn` armed): the kill switch
+        // keeps decision-1 FullDrain; spill-armed engagements compose
+        // (phase 2 split×selection) unless WINNERS_SPILL=0 restores the
+        // phase-1 exclusion.
         topn_mode: AtomicU8::new(
-            resolve_topn_mode_admission(spill_set.is_some(), topn_winners_enabled()).encode(),
+            resolve_topn_mode_admission(
+                spill_set.is_some(),
+                topn_winners_enabled(),
+                topn_winners_spill_enabled(),
+            )
+            .encode(),
         ),
         topn_refused: AtomicBool::new(false),
         topn_ctr: TopnCounters::default(),
+        freeze,
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
@@ -3137,6 +3651,21 @@ fn engage_ceremony<'mcx>(
                             c.emit_ns.load(Ordering::Relaxed) / 1_000,
                         ));
                     }
+                    // Freeze evidence line (e2e legs grep this): FROZEN
+                    // engagements emit exactly `bound` member groups.
+                    if let Some(fz) = &sink.freeze {
+                        if fz.frozen() {
+                            lane_trace(&format!(
+                                "runtime-agg freeze: engaged bound={} dropped_rows={} \
+                                 stragglers={}",
+                                fz.bound(),
+                                fz.dropped(),
+                                fz.stragglers()
+                            ));
+                        } else {
+                            lane_trace("runtime-agg freeze: armed, never froze (full drain)");
+                        }
+                    }
                     ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, natts, winners);
                 }
                 SinkPublished::Table(table) => {
@@ -3217,13 +3746,17 @@ mod topn_mode_tests {
     /// never ride it — covered by the e2e tranche's adopt legs.)
     #[test]
     fn mode_resolution_matrix() {
-        // Admission: spill-armed → FullDrain regardless of the switch.
-        assert_eq!(resolve_topn_mode_admission(true, true), TopnMode::FullDrain);
-        assert_eq!(resolve_topn_mode_admission(true, false), TopnMode::FullDrain);
-        // Kill switch off → FullDrain.
-        assert_eq!(resolve_topn_mode_admission(false, false), TopnMode::FullDrain);
-        // Product default: armed, spill-disarmed, switch on → WinnersOnly.
-        assert_eq!(resolve_topn_mode_admission(false, true), TopnMode::WinnersOnly);
+        // Kill switch off → FullDrain regardless of everything else.
+        assert_eq!(resolve_topn_mode_admission(true, false, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, false, true), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, false, false), TopnMode::FullDrain);
+        // Phase 2 (split×selection): spill-armed engagements compose.
+        assert_eq!(resolve_topn_mode_admission(true, true, true), TopnMode::WinnersOnly);
+        // WINNERS_SPILL=0 restores the ratified phase-1 exclusion exactly.
+        assert_eq!(resolve_topn_mode_admission(true, true, false), TopnMode::FullDrain);
+        assert_eq!(resolve_topn_mode_admission(false, true, false), TopnMode::WinnersOnly);
+        // Product default: armed, spill-disarmed, switches on → WinnersOnly.
+        assert_eq!(resolve_topn_mode_admission(false, true, true), TopnMode::WinnersOnly);
         // SEAL: the pass-through census (1 Local, no runs, no spill face)
         // forces FullDrain; a widened engagement keeps the admission mode.
         assert_eq!(

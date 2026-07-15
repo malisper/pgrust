@@ -107,6 +107,11 @@ struct CbScanInfo {
     /// Unlike `zone`, this is a SEMANTIC recognition — the metaagg arm
     /// answers the whole node from it, so it must equal the full qual.
     zero_qual: Option<::tableam::MetaZeroQual>,
+    /// EVERY conjunct of the scan qual lowered to a zone qual (`zone` IS
+    /// the full qual, not an advisory subset). Grants the footer-stat agg
+    /// meta arm its all-rows-pass proof: an AllPass zone verdict on every
+    /// entry proves the whole qual over the unit's rows.
+    zone_covers_qual: bool,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -969,6 +974,35 @@ pub fn seq_scan_cb_dictgroup_arm<'mcx>(
     seq_scan_cb_columnar_arm(node, estate, prefix, Some(key))
 }
 
+/// Whether a PREWHERE lane owns this scan's staged batch AND its forced
+/// prefix covers `prefix` columns (the filtered grouped-distinct batch
+/// feed's staging question: a covered live lane already fills every prefix
+/// column for survivor windows — `lane_fill_wanted` is unmasked, dict-tier
+/// qual columns gather back to Raw post-qual — so no further staging arm is
+/// needed or legal; an uncovered/absent lane sends the caller to its own
+/// columnar arm).
+pub fn seq_scan_cb_lane_covers(node: &SeqScanState<'_>, prefix: i32) -> bool {
+    node.batch_soa
+        .as_deref()
+        .is_some_and(|b| b.lane.is_some() && b.plan.ncols() as i32 >= prefix)
+}
+
+/// EXTRA dict-lane registration (band-2a CaseDict, q40 class): opt ANOTHER
+/// column into dict lanes on the ALREADY-ARMED columnar batch — the CASE
+/// source column, read per (epoch, code) beside the primary dict-group key.
+/// Call with/after [`seq_scan_cb_columnar_arm`], before the first window
+/// (the fill reads `dict_want` per window). `false` = no armed batch (the
+/// caller refuses its feed; nothing was changed).
+pub fn seq_scan_cb_dict_want_extra(node: &mut SeqScanState<'_>, c: u16) -> bool {
+    match node.batch_soa.as_deref_mut() {
+        Some(b) if (c as usize) < b.plan.ncols() as usize => {
+            b.soa.set_dict_want(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The dict-group columnar arm generalized over the dict registration
 /// (expr-key grouping tranche): `dict_key = None` arms the same offset-free
 /// columnar staging with NO column opted into dict lanes — every window
@@ -1182,6 +1216,57 @@ pub fn seq_scan_batch_dict_codes(
         return None;
     }
     ::tableam::table_scan_batch_dict_codes(sd, c as u16)
+}
+
+/// Column-independent half of `seq_scan_refsort_key_batch`'s certification:
+/// `(fallback_words, sel_words)` for the CURRENT staged batch — the exact
+/// whole-qual selection verdict plus the forced-fallback mask, with NO
+/// claim about any column's datum cells (the DictCode sort-key class reads
+/// its observations from the dict-code side channel, never from SoA datum
+/// cells — docs/design/dict-code-flow.md inc-1). `sel` soundness is exactly
+/// the key-batch accessor's: `Some` iff the scan HAS a qual and the armed
+/// bitmap is the WHOLE qual's verdict (no hybrid requal tail); `None` with
+/// no qual = every staged row survives; a qual-bearing batch without an
+/// exact bitmap refuses wholesale. Forced-fallback rows carry SET sel bits
+/// and must take the per-row emit (or the caller's own fail-closed path).
+pub fn seq_scan_refsort_batch_masks<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+    n: u32,
+) -> Option<(&'a [u64], Option<&'a [u64]>)> {
+    let b = node.batch_soa.as_deref()?;
+    let sel = if node.ss.qual.is_some() {
+        if !(b.qual_armed && !b.lane_requal && b.nwords > 0) {
+            return None;
+        }
+        Some(&b.sel[..])
+    } else {
+        None
+    };
+    if b.soa.nrows() < n {
+        return None;
+    }
+    Some((b.soa.fallback_words(), sel))
+}
+
+/// `seq_scan_batch_dict_codes` with the v7 part-global stitch published
+/// when the scan carries one — the DictCode sort-key side channel
+/// (docs/design/dict-code-flow.md inc-1). Same audit guards as the
+/// per-epoch accessor (no still-up dict-lane answer, no length staging);
+/// consumers gate order use on `table.has_stitch()` and fail closed
+/// otherwise.
+#[inline]
+pub fn seq_scan_batch_dict_codes_global(
+    node: &mut SeqScanState<'_>,
+    c: usize,
+) -> Option<::exectuples::SoaDictLane> {
+    {
+        let b = node.batch_soa.as_deref()?;
+        if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
+            return None;
+        }
+    }
+    let sd = node.ss.ss_currentScanDesc.as_mut()?;
+    ::tableam::table_scan_batch_dict_codes_global(sd, c as u16)
 }
 
 /// Physical rowref base of the CURRENT staged batch (tie-ordering rule 2,
@@ -1879,6 +1964,57 @@ pub fn seq_scan_granule_meta_peek<'mcx>(
 pub fn seq_scan_granule_meta_consume(node: &mut SeqScanState<'_>) {
     let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
     ::tableam::table_scan_granule_meta_consume(sd);
+}
+
+/// Footer-stat agg meta arm's QUAL admission (the all-rows-pass proof's
+/// executor half): true iff this cbstore scan's zone quals are the ENTIRE
+/// scan qual — either there is no qual at all (vacuous), or every conjunct
+/// lowered to a zone qual AND the staged drive owns the whole qual as a
+/// bitmap (`qual_armed && !lane_requal`, the fold drive's own bitmap-mode
+/// signal: no hybrid-requal tail re-runs any clause per row). Under that
+/// grant, an AllPass zone verdict on every pushed entry proves every row of
+/// the unit passes — the fold over the unit is the fold over an all-ones
+/// selection. Call AFTER `arm_scan_staging` (the batch/lane arming decides
+/// `qual_armed`).
+pub fn seq_scan_agg_meta_qual_ok(node: &SeqScanState<'_>) -> bool {
+    let Some(cb) = node.cb_scan.as_deref() else { return false };
+    if node.ss.qual.is_none() {
+        return cb.zone.is_empty();
+    }
+    cb.zone_covers_qual
+        && node.batch_soa.as_deref().is_some_and(|b| b.qual_armed && !b.lane_requal)
+}
+
+/// Footer-stat aggregate metadata peek (cbstore; see
+/// `CbScanDescData::agg_meta_peek`). A missing desc reads as NotMeta.
+#[allow(clippy::too_many_arguments)]
+pub fn seq_scan_agg_meta_peek<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mm_cols: &[u16],
+    sum_cols: &[u16],
+    len_cols: &[u16],
+    mm: &mut [(i64, i64)],
+    sums: &mut [i128],
+    lens: &mut [i64],
+) -> PgResult<::tableam::CbAggMetaStep> {
+    node.ensure_scandesc(estate)?;
+    let Some(sd) = node.ss.ss_currentScanDesc.as_mut() else {
+        return Ok(::tableam::CbAggMetaStep::NotMeta);
+    };
+    ::tableam::table_scan_agg_meta_peek(sd, mm_cols, sum_cols, len_cols, mm, sums, lens)
+}
+
+/// Consume the row group the peek just answered (`MetaRg`; never decoded).
+pub fn seq_scan_agg_meta_consume_rg(node: &mut SeqScanState<'_>) {
+    let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
+    ::tableam::table_scan_agg_meta_consume_rg(sd);
+}
+
+/// Consume the granule the peek just answered (`MetaGranule`; never decoded).
+pub fn seq_scan_agg_meta_consume_granule(node: &mut SeqScanState<'_>) {
+    let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
+    ::tableam::table_scan_agg_meta_consume_granule(sd);
 }
 
 pub fn seq_scan_next_pagebatch<'mcx>(
@@ -3481,7 +3617,8 @@ fn cb_scan_info<'mcx>(
         },
         _ => None,
     };
-    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual })
+    let zone_covers_qual = nquals > 0 && zone.len() == nquals;
+    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual, zone_covers_qual })
 }
 
 /// M3 runtime-sort key-only staged accept (docs/design/m3-sort.md inc-4

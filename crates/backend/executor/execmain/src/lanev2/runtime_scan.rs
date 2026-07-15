@@ -1347,16 +1347,26 @@ fn census_drain<'mcx>(
                 }
             }
         } else {
-            // No staged bitmap/SoA (scalar qual, unstaged batch): the full
-            // per-row path for every row.
-            for i in 0..n {
+            // No whole-qual bitmap/SoA (scalar qual, unstaged batch, or a
+            // requal tail): the full per-row path, word-skipping emit-dead
+            // rows when a skip-sel bitmap is staged (requal-safe — cleared
+            // bits are definitive rejections).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     if let Some(t) = tally.as_deref_mut() {
                         t.survived += 1;
                     }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
         }
     }
     Ok(())
@@ -1418,11 +1428,24 @@ fn perrow_fold_drain<'mcx>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        for i in 0..n {
+        // Emit-dead word skip over the staged kernel-qual bitmap (when the
+        // RowFeed arm staged one): a cleared skip-sel bit is a row the emit
+        // rejects with no observable effect — same rows, same order, same
+        // errors; the per-filtered-row emit call collapses to one word test
+        // per 64 rows. Words snapshotted (the emit re-borrows the scan).
+        let skip = {
+            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+            ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                w[..s.len()].copy_from_slice(s);
+                w
+            })
+        };
+        ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
             if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                 ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
             }
-        }
+            Ok(())
+        })?;
     }
     Ok(())
 }

@@ -37,9 +37,11 @@
 mod exprkey;
 mod router;
 mod runtime_agg;
+mod runtime_agg_sorted;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
+mod runtime_plaindistinct;
 mod runtime_scan;
 mod runtime_sort;
 mod push;
@@ -974,6 +976,16 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     }
 
     #[inline]
+    fn refsort_dictcode_batch(&mut self, col: u16) -> Option<::exectuples::SoaDictLane> {
+        ::nodeseqscan::seq_scan_batch_dict_codes_global(self.node, col as usize)
+    }
+
+    #[inline]
+    fn refsort_batch_masks(&self, n: u32) -> Option<(&[u64], Option<&[u64]>)> {
+        ::nodeseqscan::seq_scan_refsort_batch_masks(self.node, n)
+    }
+
+    #[inline]
     fn rowref_base(&self) -> Option<u64> {
         ::nodeseqscan::seq_scan_batch_rowref_base(self.node)
     }
@@ -1585,6 +1597,12 @@ pub enum AggLaneChoice {
     /// runtime gates (MVCC snapshot, AM answerability, guard-interval
     /// re-proof) fall back to the per-row drive byte-identically.
     Meta,
+    /// q28-sorted-arm: the ordered-grouped RUNTIME sink engaged and the
+    /// stitched parallel result was adopted — every subsequent pull drains
+    /// it (`agg_sorted_sink_emit_next`). Memoized like the serial choices:
+    /// the engagement ran once, at the first pull, before anything was
+    /// consumed.
+    SortedSink,
 }
 
 ::mcx::forget_safe_nodrop!(AggLaneChoice);
@@ -1670,6 +1688,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
                             ss,
                             xk.as_deref(),
                             None,
+                            None,
                             estate,
                         )?);
                 if engaged {
@@ -1702,7 +1721,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
-    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, None, estate)?;
+    agg_seq_scan_build_if_needed(agg, ss, c, stage_slot, xk, None, None, estate)?;
     // Probe phase (every call): the breaker is now the source of pipeline
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
@@ -2115,12 +2134,22 @@ fn agg_hash_build_fold_feed<'mcx>(
         if demote {
             // The per-row program advances the admitted str transitions
             // behind the memo's back — drop every memo (StrMmScratch doc).
+            // Emit-dead word skip (skip-sel: cleared bits are definitive
+            // rejections, even under requal) — same accepted rows/order.
             mm_scratch.invalidate();
-            for i in 0..n {
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         // K2 deferred batched probe, per batch: only when EVERY staged row
@@ -2167,7 +2196,7 @@ fn agg_hash_build_fold_feed<'mcx>(
                     .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
                 if all_lane {
                     if scan_mk_batch(
-                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, estate,
+                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, None, estate,
                     )? {
                         // As the K2 arm: the mk fold bypassed the memo.
                         mm_scratch.invalidate();
@@ -2537,6 +2566,17 @@ fn zerocnt_enabled() -> bool {
     })
 }
 
+/// Footer-stat fold-drive meta arm kill switch (whole-RG / whole-granule
+/// aggregate answers under an all-rows-passing zone proof): default ON under
+/// the lane; `PGRUST_LANE_V2_FOLDMETA=0`/`off` disarms (byte-identity-safe
+/// A/B — declined units stage and fold from decoded lanes identically).
+fn foldmeta_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_FOLDMETA").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Zero-count qual transition filter: under `col <> 0` / `col = 0` a
 /// transition is footer-answerable iff it is a COUNT (rows arrives
 /// qual-adjusted: N - zeros or zeros) or a SUM/AVG-family fold over the QUAL
@@ -2673,6 +2713,149 @@ fn try_meta_agg_answer<'mcx>(
     Ok(Some(::nodeagg::exec_agg_meta(agg, estate, res.rows, &res.minmax, &res.sums)?))
 }
 
+/// Footer-stat fold-drive meta arm (the footer-stat consumption lane): the
+/// PLAIN fold drive's whole-RG / whole-granule metadata shortcut. Once per
+/// serial drain, admission proves (a) every admitted transition is
+/// footer-answerable over an all-rows-passing unit (`lanefold::
+/// agg_meta_cols` — count / plain int min-max / affine divk==1 int sum-avg
+/// via the v4 RG footer sums / bare int8 sum-avg / plain octet_length
+/// sum-avg via the v7 length stats), and (b) the scan's zone quals ARE the
+/// whole qual with the staged bitmap owning it (`seq_scan_agg_meta_qual_ok`)
+/// — so a unit whose every zone verdict is AllPass folds from footer
+/// metadata with NO decode. Guarded plans re-prove each unit against the
+/// unit's exact footer (min, max) — a failed interval declines the unit,
+/// which then stages and fold/demotes exactly as before (check_guards'
+/// value domain over an all-passing unit IS the footer extreme pair).
+struct FoldMetaArm {
+    mm_cols: Vec<u16>,
+    sum_cols: Vec<u16>,
+    len_cols: Vec<u16>,
+    // (col, lo, hi) integer guard intervals; col is always in mm_cols.
+    guards: Vec<(u16, i64, i64)>,
+    mm: Vec<(i64, i64)>,
+    sums: Vec<i128>,
+    lens: Vec<i64>,
+    rg_units: u64,
+    granule_units: u64,
+}
+
+fn plain_fold_meta_arm<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<FoldMetaArm> {
+    if !::nodeseqscan::seq_scan_is_cbstore(ss) || !foldmeta_enabled() {
+        return None;
+    }
+    // RG xmin visibility folds against the scan snapshot: MVCC only (the
+    // metaagg arm's own gate).
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        return None;
+    }
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    let cols = ::lanefold::agg_meta_cols(plan)?;
+    if !::nodeseqscan::seq_scan_agg_meta_qual_ok(ss) {
+        return None;
+    }
+    let guards: Vec<(u16, i64, i64)> =
+        plan.guards.iter().map(|g| (g.col, g.lo, g.hi)).collect();
+    let (nmm, nsum, nlen) = (cols.mm_cols.len(), cols.sum_cols.len(), cols.len_cols.len());
+    Some(FoldMetaArm {
+        mm_cols: cols.mm_cols,
+        sum_cols: cols.sum_cols,
+        len_cols: cols.len_cols,
+        guards,
+        mm: vec![(0, 0); nmm],
+        sums: vec![0; nsum],
+        lens: vec![0; nlen],
+        rg_units: 0,
+        granule_units: 0,
+    })
+}
+
+/// Consume 0+ whole scan units (row groups / granules) from footer metadata
+/// at the drain loop's head: peek; while the upcoming unit is wholly visible
+/// and every zone qual is AllPass over its footer extremes (all rows pass
+/// the whole qual — the arm's admission proved the zone quals mirror it),
+/// re-prove any guard intervals, fold the transitions from (rows, footer
+/// (min, max), footer sums, Σ octet_length) and skip the unit's decode
+/// entirely. Stops at a mid-granule position, a non-meta unit, a failed
+/// guard re-proof, or scan end. Byte-identity: the unit's rows are exactly
+/// the rows next_window would stage, all selected (AllPass bitmap) and
+/// non-fallback (nothing staged); `fold_agg_meta`'s state mutations are
+/// `fold_batch`'s own over that selection (see its bit-equality contract).
+fn agg_plain_fold_meta_units<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    arm: &mut FoldMetaArm,
+) -> PgResult<()> {
+    loop {
+        let step = ::nodeseqscan::seq_scan_agg_meta_peek(
+            ss,
+            estate,
+            &arm.mm_cols,
+            &arm.sum_cols,
+            &arm.len_cols,
+            &mut arm.mm,
+            &mut arm.sums,
+            &mut arm.lens,
+        )?;
+        let rows = match step {
+            ::tableam::CbAggMetaStep::MetaRg { rows } => rows as i64,
+            ::tableam::CbAggMetaStep::MetaGranule { rows } => rows as i64,
+            _ => return Ok(()),
+        };
+        // Data-level guard re-proof against the unit's exact footer
+        // (min, max): a failed interval declines — the unit stages and the
+        // per-batch check_guards/demote machinery owns it byte-identically.
+        let guards_ok = arm.guards.iter().all(|&(col, lo, hi)| {
+            let i = arm.mm_cols.iter().position(|&c| c == col).expect("guard col staged");
+            lo <= arm.mm[i].0 && arm.mm[i].1 <= hi
+        });
+        if !guards_ok {
+            return Ok(());
+        }
+        debug_assert!(rows > 0);
+        let plan = ::nodeagg::agg_lanefold_plan(agg).expect("meta arm proved the plan");
+        let aggcx = ::nodeagg::agg_aggcontext(agg);
+        let pos = |cols: &[u16], c: u16| {
+            cols.iter().position(|&x| x == c).expect("meta arm staged every column")
+        };
+        // SAFETY: pergroup contract identical to the drain's fold_batch call
+        // (once-allocated single-group pergroup array, live AvgAccum
+        // transarray, NULL-or-live Int128AggState with `aggcx` its
+        // aggcontext); admissibility proven by agg_meta_cols in
+        // plain_fold_meta_arm; guarded intervals re-proved above.
+        unsafe {
+            ::lanefold::fold_agg_meta(
+                plan,
+                rows,
+                |c| arm.mm[pos(&arm.mm_cols, c)],
+                |c| arm.sums[pos(&arm.sum_cols, c)],
+                |c| arm.lens[pos(&arm.len_cols, c)],
+                ::nodeagg::agg_plain_pergroup_base(agg),
+                aggcx,
+            )?;
+        }
+        match step {
+            ::tableam::CbAggMetaStep::MetaRg { .. } => {
+                ::nodeseqscan::seq_scan_agg_meta_consume_rg(ss);
+                arm.rg_units += 1;
+            }
+            _ => {
+                ::nodeseqscan::seq_scan_agg_meta_consume_granule(ss);
+                arm.granule_units += 1;
+            }
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+    }
+}
+
 /// Feed for the plain fold drive: per staged page batch, compose the row
 /// selection and fold the admitted transitions whole-batch with
 /// `lanefold::fold_batch` into the single pergroup array. One
@@ -2763,7 +2946,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
+    // Footer-stat meta arm (serial drains only; the EA tally is a runtime
+    // channel and runtime claims are granule-ranged, which the scan-side
+    // peek refuses anyway — the structural gate keeps the funnel exact).
+    let mut meta_arm = if EA { None } else { plain_fold_meta_arm(agg, ss, estate) };
     loop {
+        if let Some(arm) = meta_arm.as_mut() {
+            agg_plain_fold_meta_units(agg, ss, estate, arm)?;
+        }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
             // End of scan: drop the scan slot's buffer pin (SeqScanSource
@@ -2826,14 +3016,25 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             }
         }
         if demote {
-            for i in 0..n {
+            // Emit-dead word skip (skip-sel: cleared bits are definitive
+            // rejections, even under requal) — same accepted rows/order,
+            // same survived tally (skipped rows emit None).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     if EA {
                         tally.survived += 1;
                     }
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
@@ -2872,9 +3073,20 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                 }
             }
         } else {
-            for i in 0..n {
+            // Residual/requal per-row walk, with the emit-dead word skip
+            // (skip-sel: cleared bits are definitive rejections even under
+            // requal — the surviving emit stream and fold selection are
+            // identical).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
-                    continue;
+                    return Ok(());
                 };
                 if EA {
                     tally.survived += 1;
@@ -2888,7 +3100,8 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                         ::nodeagg::agg_plain_build_accept_resid(agg, estate, slot)?;
                     }
                 }
-            }
+                Ok(())
+            })?;
         }
         if rows[..nwords].iter().any(|w| *w != 0) {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
@@ -2920,6 +3133,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                     aggcx,
                 )?;
             }
+        }
+    }
+    if let Some(arm) = &meta_arm {
+        if arm.rg_units + arm.granule_units > 0 {
+            lane_trace(&format!(
+                "plainagg footer meta-fold: {} rgs + {} granules",
+                arm.rg_units, arm.granule_units
+            ));
         }
     }
     Ok(())
@@ -3026,13 +3247,17 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
         if !self.key_direct {
-            // Default per-row delegation loop, verbatim.
-            for i in pos..n {
+            // Default per-row delegation loop with the emit-dead word skip
+            // (`live_sel`: a cleared bit answers `emit` with None and no
+            // observable effect — the BatchSink default's contract).
+            let live = emit.live_sel();
+            let live = live.as_ref().map(|w| &w[..]);
+            return ::exectuples::for_each_live(live, pos, n, |i| -> PgResult<()> {
                 if let Some(slot) = emit.emit(i, estate)? {
                     ::nodeagg::agg_plain_build_accept(self.agg, estate, slot)?;
                 }
-            }
-            return Ok(());
+                Ok(())
+            });
         }
         // Dict-coded text window (the cbstore zero-decode lane): consume
         // codes+dict for the whole window — the key's datum cells are stale
@@ -3168,6 +3393,18 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
+    // Runtime plain-distinct sink probe (band-2b): DOP-parallel partitioned
+    // distinct sets over the scan subtree. Refusal falls through to the
+    // serial drive, value-identically.
+    if let Some(scan_node) = agg.plan.plan.lefttree {
+        if scan_node.node_tag() == ::types_nodes::NodeTag::T_SeqScan {
+            if let Some(r) = runtime_plaindistinct::try_own_plain_distinct_runtime(
+                agg, ss, scan_node, false, estate,
+            )? {
+                return Ok(Some(r));
+            }
+        }
+    }
     // One OWNED tick per lane-owned plain-agg build event (the gate's
     // aggbuild floor counts builds; this drive runs the whole feed inside
     // one call).
@@ -3261,6 +3498,25 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     }
     // C's CHECK_FOR_INTERRUPTS at the would-be ExecSort feed entry.
     ::postgres_seams::check_for_interrupts::call()?;
+    // Runtime plain-distinct sink probe (band-2b): DOP-parallel partitioned
+    // distinct sets over the scan subtree — the skip-sort law already ratified
+    // above covers the parallel arrival-order relaxation too. Refusal falls
+    // through to the serial skip-sort drive, value-identically.
+    {
+        let scan_node = s.state.plan.plan.lefttree;
+        if let Some(scan_node) = scan_node {
+            if scan_node.node_tag() == ::types_nodes::NodeTag::T_SeqScan {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *s.outer else {
+                    unreachable!("matched SeqScan above")
+                };
+                if let Some(r) = runtime_plaindistinct::try_own_plain_distinct_runtime(
+                    agg, ss, scan_node, true, estate,
+                )? {
+                    return Ok(Some(r));
+                }
+            }
+        }
+    }
     stats::tick_owned(ShapeClass::AggBuild);
     trace_feed("plain-agg distinct-set skip-sort drive engaged");
     // Arm set-mode for the presorted entries BEFORE any input (sticky;
@@ -3304,6 +3560,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     stage_slot: &mut Option<ExecSlotId>,
     xk: &mut Option<Box<ExprKeyState>>,
     sink_topn: Option<::nodeagg::sink::SinkTopnSpec>,
+    sink_freeze: Option<u32>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert_ne!(c, AggLaneChoice::Refuse);
@@ -3317,8 +3574,17 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
     // build byte-identically. `sink_topn` (m3-sort-b car 1): the sort feed's
     // resolved combine-phase top-N spec — None from the other chains.
+    // `sink_freeze` (band-2a q18): the Limit-over-agg chain's LIMIT-k-no-
+    // ORDER bound (offset+count) — None from the other chains.
     if c == AggLaneChoice::Fold {
-        if runtime_agg::try_engage_hashagg_runtime(agg, ss, xk.as_deref(), sink_topn, estate)? {
+        if runtime_agg::try_engage_hashagg_runtime(
+            agg,
+            ss,
+            xk.as_deref(),
+            sink_topn,
+            sink_freeze,
+            estate,
+        )? {
             return Ok(());
         }
     } else if sink_topn.is_some() {
@@ -3563,11 +3829,22 @@ fn scan_collect_survivors<'mcx>(
             }
         }
         None => {
-            for i in 0..n {
+            // Per-row emit collection, word-skipping emit-dead rows
+            // (skip-sel cleared bits are definitive rejections even under
+            // requal — the collected survivor set/order is identical).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)?.is_some() {
                     rows.push(i);
                 }
-            }
+                Ok(())
+            })?;
         }
     }
     Ok(())
@@ -3999,6 +4276,92 @@ struct MkScratch {
     // (scan-stable gepoch, never cleared within one scan).
     epoch: Option<(bool, u64)>,
     code_ids: Vec<Option<u32>>,
+    /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
+    /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
+    /// cache. `None` until this worker observes FROZEN.
+    fz: Option<MkFreezeSnap>,
+    /// Per-survivor candidate-mask scratch (reused across batches).
+    fz_mask: Vec<u64>,
+}
+
+/// One worker's parsed view of the frozen canonical set ([`MkScratch::fz`]).
+/// Entry order matches the shared set; masks are bit-per-entry (bound <= 64
+/// by [`::nodeagg::sink::SINK_FREEZE_MAX_BOUND`]).
+struct MkFreezeSnap {
+    /// All-entries mask: (1 << k) - 1 (k = 64 => u64::MAX).
+    full: u64,
+    /// Per Int component (aligned with `shape.comps`; None for the Intern
+    /// component): each entry's canonical (sign-extended) value.
+    comp_vals: Vec<Option<Vec<i64>>>,
+    /// The Intern component's text payload per entry (empty when the shape
+    /// has no Intern component — word-keyed shapes).
+    texts: Vec<Vec<u8>>,
+    has_intern: bool,
+    /// Per-epoch dict code -> member mask (the code_ids identity discipline,
+    /// retargeted to the text bytes — intern-table resets do NOT invalidate
+    /// it, so it rolls on its own identity).
+    code_epoch: Option<(bool, u64)>,
+    code_mask: Vec<Option<u64>>,
+}
+
+impl MkFreezeSnap {
+    /// Parse the shared canonical entries against the armed shape. Entry
+    /// encoding = the seal/flush canonical bytes: `packed_bytes` LE image
+    /// bytes (Intern id bytes zeroed) + the text tail (Intern shapes only).
+    fn build(shape: &::nodeagg::MkShape, entries: &[Vec<u8>]) -> MkFreezeSnap {
+        let k = entries.len();
+        debug_assert!(k >= 1 && k <= 64);
+        // The snapshot parses a SINGLE raw text tail (`e[pb..]`); multi-tail
+        // canonical images (two-Intern shapes, canon-sink car 1) are
+        // length-prefixed and never reach the freeze (arming excludes them
+        // — the Mk drain cannot produce a two-Intern shape).
+        debug_assert!(shape.n_intern() <= 1, "freeze snapshot is single-tail");
+        let full = if k == 64 { u64::MAX } else { (1u64 << k) - 1 };
+        let pb = shape.packed_bytes as usize;
+        let mut comp_vals: Vec<Option<Vec<i64>>> = Vec::with_capacity(shape.comps.len());
+        for comp in &shape.comps {
+            match comp.kind {
+                ::nodeagg::MkCompKind::Int { width } => {
+                    let mut vals = Vec::with_capacity(k);
+                    for e in entries {
+                        debug_assert!(e.len() >= pb);
+                        let mut w = [0u8; 8];
+                        let off = comp.off as usize;
+                        w[..width as usize].copy_from_slice(&e[off..off + width as usize]);
+                        let raw = u64::from_le_bytes(w);
+                        // Sign-extend at the component width (canonical i64).
+                        let shift = 64 - (width as u32) * 8;
+                        vals.push(((raw << shift) as i64) >> shift);
+                    }
+                    comp_vals.push(Some(vals));
+                }
+                _ => comp_vals.push(None),
+            }
+        }
+        let has_intern = shape.intern_comp().is_some();
+        let texts = entries.iter().map(|e| e[pb..].to_vec()).collect();
+        MkFreezeSnap {
+            full,
+            comp_vals,
+            texts,
+            has_intern,
+            code_epoch: None,
+            code_mask: Vec::new(),
+        }
+    }
+
+    /// The member mask for one text payload (linear over <= 64 entries;
+    /// called once per (epoch, code) through the cache, or per row on raw
+    /// windows).
+    fn text_mask(&self, bytes: &[u8]) -> u64 {
+        let mut m = 0u64;
+        for (e, t) in self.texts.iter().enumerate() {
+            if t.as_slice() == bytes {
+                m |= 1u64 << e;
+            }
+        }
+        m
+    }
 }
 
 /// SINGLE-TEXT sink admission (M2 C2 car, sink-only — the serial lane's
@@ -4236,6 +4599,7 @@ fn scan_mk_batch<'mcx>(
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
     n: u32,
+    freeze: Option<&::nodeagg::sink::SinkFreeze>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     if !::nodeagg::agg_hash_compact_backstop(agg, estate)? {
@@ -4288,8 +4652,142 @@ fn scan_mk_batch<'mcx>(
         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
         return Ok(false);
     }
-    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids } = mks;
+    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids, fz, fz_mask } = mks;
     scan_collect_survivors(ss, estate, n, rows)?;
+    // FREEZE FILTER (band-2a q18, LIMIT-k-no-ORDER): once FROZEN, drop
+    // survivors whose key is not in the frozen set BEFORE any interning or
+    // packing — post-freeze per-row work collapses to a per-(epoch, code)
+    // mask lookup + tiny int compares. Component-major like the pack loop;
+    // a row's final nonzero mask == full key equality with some entry.
+    if let Some(fzc) = freeze {
+        debug_assert!(!mk.shape.nullable, "freeze arming excludes nullable shapes");
+        if fz.is_none() {
+            if let Some(entries) = fzc.entries() {
+                *fz = Some(MkFreezeSnap::build(&mk.shape, entries));
+            }
+        }
+        if let Some(snap) = fz.as_mut() {
+            let n_before = rows.len();
+            fz_mask.clear();
+            fz_mask.resize(rows.len(), snap.full);
+            for (j, comp) in mk.shape.comps.iter().enumerate() {
+                let att = comp.att as usize;
+                match comp.kind {
+                    ::nodeagg::MkCompKind::Int { width } => {
+                        let vals =
+                            snap.comp_vals[j].as_ref().expect("Int comp carries entry values");
+                        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .expect("multi-key feed requires the armed SoA");
+                        let values = soa.col_values(att);
+                        for (k, &i) in rows.iter().enumerate() {
+                            let m = fz_mask[k];
+                            if m == 0 {
+                                continue;
+                            }
+                            let v = match width {
+                                2 => values[i as usize].as_i16() as i64,
+                                4 => values[i as usize].as_i32() as i64,
+                                _ => values[i as usize].as_i64(),
+                            };
+                            let mut keep = 0u64;
+                            let mut mm = m;
+                            while mm != 0 {
+                                let e = mm.trailing_zeros() as usize;
+                                if vals[e] == v {
+                                    keep |= 1u64 << e;
+                                }
+                                mm &= mm - 1;
+                            }
+                            fz_mask[k] = keep;
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Intern => {
+                        let mcx = estate.es_query_cxt;
+                        let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                            .and_then(|soa| soa.dict_lane(att));
+                        match lane {
+                            Some(lane) => {
+                                // The code_ids identity discipline retargeted
+                                // to member masks (text-derived — intern
+                                // resets never invalidate it).
+                                let ndict = lane.table.ndict as usize;
+                                let global = lane.table.has_stitch();
+                                let (ident, size) = if global {
+                                    ((true, lane.table.gepoch), lane.table.gndv as usize)
+                                } else {
+                                    ((false, lane.table.epoch), ndict)
+                                };
+                                if snap.code_epoch != Some(ident) {
+                                    snap.code_epoch = Some(ident);
+                                    snap.code_mask.clear();
+                                    snap.code_mask.resize(size, None);
+                                }
+                                for (k, &i) in rows.iter().enumerate() {
+                                    if fz_mask[k] == 0 {
+                                        continue;
+                                    }
+                                    let local = lane.code(i as usize);
+                                    let code = if global {
+                                        lane.table.global_code(local) as usize
+                                    } else {
+                                        local as usize
+                                    };
+                                    let cm = match snap.code_mask[code] {
+                                        Some(m) => m,
+                                        None => {
+                                            let d = lane.table.datum(local);
+                                            // SAFETY: as the pack loop's dict
+                                            // branch — live non-null text
+                                            // varlena for the staged window.
+                                            let v = unsafe {
+                                                ::types_fmgr::datum_varlena_packed(d, mcx)
+                                            }?;
+                                            let m = snap.text_mask(v.data());
+                                            snap.code_mask[code] = Some(m);
+                                            m
+                                        }
+                                    };
+                                    fz_mask[k] &= cm;
+                                }
+                            }
+                            None => {
+                                // Raw-answered window: per-row text compare
+                                // (correct, colder — the dict path owns the
+                                // hot shape).
+                                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                                    .expect("multi-key feed requires the armed SoA");
+                                let values = soa.col_values(att);
+                                for (k, &i) in rows.iter().enumerate() {
+                                    if fz_mask[k] == 0 {
+                                        continue;
+                                    }
+                                    let d = values[i as usize];
+                                    // SAFETY: staged non-null live text
+                                    // varlena (as the pack loop's raw branch).
+                                    let v =
+                                        unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                                    fz_mask[k] &= snap.text_mask(v.data());
+                                }
+                            }
+                        }
+                    }
+                    ::nodeagg::MkCompKind::Numeric { .. } => {
+                        unreachable!("freeze arming excludes Numeric components")
+                    }
+                }
+            }
+            // Compact the survivor list to members (order-preserving).
+            let mut w = 0usize;
+            for k in 0..rows.len() {
+                if fz_mask[k] != 0 {
+                    rows[w] = rows[k];
+                    w += 1;
+                }
+            }
+            rows.truncate(w);
+            fzc.note_dropped((n_before - w) as u64);
+        }
+    }
     // Pack pre-pass, component-major over the survivors (each component
     // lane streams once), into the REUSED u128 accumulator.
     packbuf.clear();
@@ -4441,6 +4939,34 @@ fn scan_mk_batch<'mcx>(
     // the plan is unguarded; each pergroup was installed by the compact
     // probe within this batch.
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
+    // table reaches the bound wins the CAS and publishes its first `bound`
+    // groups' canonical keys. Correct from ANY table state — nothing was
+    // dropped anywhere before FROZEN, so every present group is exact-so-far
+    // and set members keep counting everywhere after.
+    if let Some(fzc) = freeze {
+        if !fzc.frozen()
+            && ::nodeagg::agg_hash_compact_ngroups(agg)
+                .is_some_and(|ng| ng >= fzc.bound() as usize)
+            && fzc.try_begin_install()
+        {
+            match ::nodeagg::sink::sink_freeze_extract(agg, fzc.bound()) {
+                Some(entries) => {
+                    lane_trace(&format!(
+                        "runtime-agg freeze: installed (bound={})",
+                        fzc.bound()
+                    ));
+                    fzc.publish(entries);
+                }
+                None => {
+                    // Fail OPEN: no drops ever happen; the engagement drains
+                    // fully (correct, just unoptimized).
+                    lane_trace("runtime-agg freeze: install extraction failed — disabled");
+                    fzc.disable();
+                }
+            }
+        }
+    }
     Ok(true)
 }
 
@@ -4768,6 +5294,7 @@ fn sort_feed_if_needed<'mcx>(
                         &mut aps.lane_stage_slot,
                         &mut aps.lane_exprkey,
                         sink_topn,
+                        None,
                         estate,
                     )?;
                     true
@@ -6666,10 +7193,6 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
         if let Some(tk) = self.topk.as_mut() {
             cutmask = tk.batch_mask(self.sort, &*emit, pos, n)?;
         }
-        let keep = |sel: &Option<[u64; ::exectuples::SOA_BM_WORDS]>, i: u32| match sel {
-            Some(m) => m[(i / 64) as usize] & (1u64 << (i % 64)) != 0,
-            None => true,
-        };
         // Fast leg availability for THIS batch: exact whole-qual selection
         // (or no qual) + the key column's staged datum cells ready. The
         // bitmap words are snapshotted locally (they are per-batch-stable;
@@ -6685,18 +7208,30 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
             });
             (fb, selw)
         });
-        for i in pos..n {
-            if !keep(&cutmask, i) {
-                continue;
-            }
-            if let Some((fb, selw)) = &fast {
-                let w = (i / 64) as usize;
-                let bit = 1u64 << (i % 64);
-                if let Some(selw) = selw {
-                    if selw[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
+        // Composed skip mask, word-skipped by `for_each_live`: top-k cut
+        // rows, the fast leg's exact qual-cleared rows, and the feed's
+        // qual-survivor snapshot (`live_sel` — cleared bits answer `emit`
+        // with None; covers the no-fast/requal legs) each produce nothing,
+        // so skipping them keeps the surviving put stream identical.
+        let skip = {
+            let mut skip: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let selw = fast.as_ref().and_then(|(_, s)| *s);
+            for m in [cutmask, emit.live_sel(), selw].into_iter().flatten() {
+                match &mut skip {
+                    None => skip = Some(m),
+                    Some(acc) => {
+                        for (a, b) in acc.iter_mut().zip(m.iter()) {
+                            *a &= *b;
+                        }
                     }
                 }
+            }
+            skip
+        };
+        ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
+            if let Some((fb, _)) = &fast {
+                let w = (i / 64) as usize;
+                let bit = 1u64 << (i % 64);
                 if fb[w] & bit == 0 {
                     // Clean staged row: key straight from the SoA column —
                     // value/null identical to the emit + slot read below.
@@ -6706,13 +7241,12 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
                             .expect("refsort key batch stable within a staged batch");
                         (kvals[i as usize], knulls[i as usize])
                     };
-                    ::nodesort::sort_lane_put_refsort(
+                    return ::nodesort::sort_lane_put_refsort(
                         self.sort,
                         key,
                         isnull,
                         ::nodesort::refsort_encode(rg, row0 + i),
-                    )?;
-                    continue;
+                    );
                 }
                 // Forced-fallback row (stale cells / kernel-undecidable):
                 // fall through to the exact per-row emit.
@@ -6720,7 +7254,7 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
             // Per-row emit leg: the exact qual (C detoast semantics, C's
             // errors on C's row) + the Var projection; key from the
             // projected output slot cell.
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             let (key, isnull) = {
                 let slot = estate.slot_mut(id);
                 ::exectuples::slot_getsomeattrs(slot, self.key_resno as i32 + 1);
@@ -6732,8 +7266,8 @@ impl<'mcx> BatchSink<'mcx> for RefSortSink<'_, 'mcx> {
                 key,
                 isnull,
                 ::nodesort::refsort_encode(rg, row0 + i),
-            )?;
-        }
+            )
+        })?;
         // Zone-adaptive bound feedback (identical to the wide sink's tail).
         if let Some((bkey, false)) = ::nodesort::sort_lane_topk_boundary(self.sort) {
             emit.push_topk_bound(bkey);
@@ -7150,6 +7684,22 @@ fn distincthash_span_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH` kill switch (default ON): admit
+/// TEXT/VARCHAR grouping keys to the batched fast leg (named-kernels-
+/// distinct kernel 1 — the filtered grouped-distinct batch feed, CB
+/// q11/q12). Off = the historical int-keys-only batch gate; the text-key
+/// arm then rides the per-row path exactly as before this lane (the A/B
+/// attribution channel; results byte-identical either way).
+fn distincthash_textbatch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -7391,34 +7941,32 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         }
                     }
                 }
-                // Post-degrade remainder: the exact per-row path.
-                for j in i..n {
-                    let w = (j / 64) as usize;
-                    let bit = 1u64 << (j % 64);
-                    if let Some(s) = &selw {
-                        if s[w] & bit == 0 {
-                            continue; // qual-filtered
+                // Post-degrade remainder: the exact per-row path (word-skip
+                // over the same qual-filtered continues, stream-identical).
+                ::exectuples::for_each_live(
+                    selw.as_ref().map(|w| &w[..]),
+                    i,
+                    n,
+                    |j| -> PgResult<()> {
+                        self.slow_rows += 1;
+                        if let Some(slot) = emit.emit(j, estate)? {
+                            self.accept(slot, estate)?;
                         }
-                    }
-                    self.slow_rows += 1;
-                    if let Some(slot) = emit.emit(j, estate)? {
-                        self.accept(slot, estate)?;
-                    }
-                }
+                        Ok(())
+                    },
+                )?;
                 return Ok(());
             }
             let mut keyd = [::datum::Datum::null(); 32];
             let mut keyn = [false; 32];
             let mut args: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.arg_cols.len()];
             let mut folds: Vec<(::datum::Datum, bool)> = vec![(::datum::Datum::null(), false); cols.fold_cols.len()];
-            for i in pos..n {
+            // Word-skip the qual-filtered continues (exact whole-qual
+            // verdict; same surviving rows, same order — the SPAN control
+            // stays byte-identical to the span form).
+            ::exectuples::for_each_live(selw.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
                 let w = (i / 64) as usize;
                 let bit = 1u64 << (i % 64);
-                if let Some(s) = &selw {
-                    if s[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
-                    }
-                }
                 if self.degraded || fb[w] & bit != 0 {
                     // Post-degrade remainder / forced-fallback row: the
                     // exact per-row path (emit re-checks + C detoast).
@@ -7426,7 +7974,7 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     if let Some(slot) = emit.emit(i, estate)? {
                         self.accept(slot, estate)?;
                     }
-                    continue;
+                    return Ok(());
                 }
                 // SAFETY: per the snapshot contract above; `i < n` and every
                 // view spans `n` staged rows.
@@ -7464,14 +8012,17 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                         }
                     }
                 }
-            }
+                Ok(())
+            })?;
             return Ok(());
         }
-        // Per-row delegation loop (the default impl, verbatim).
+        // Per-row delegation loop (the default impl, incl. its emit-dead
+        // word skip; slow_rows stays window-grain, unchanged by skips).
         if self.batch.is_some() {
             self.slow_rows += (n - pos) as u64;
         }
-        for i in pos..n {
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             if let Some(slot) = emit.emit(i, estate)? {
                 match self.accept(slot, estate)? {
                     SinkFeed::NeedMore => {}
@@ -7482,8 +8033,8 @@ impl<'mcx> BatchSink<'mcx> for HashGroupDistinctSink<'_, 'mcx> {
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -7558,19 +8109,24 @@ fn try_hashgroup_build<'mcx>(
     if text_keys > 0 {
         trace_feed("hash-grouped distinct arm: text group keys armed");
     }
-    arm_scan_staging(
-        ss,
-        estate,
-        ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
-    )?;
-    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-    // Batched fast-leg admission (conversion 3): the all-set-mode bare-Var
-    // int shape + every needed outer column a bare Var of a scan column
-    // (identity for bare scans; through the projection classification
-    // otherwise — the staged scan cell is then the projected outer cell).
-    let batch = if distincthash_batch_enabled() {
-        ::nodeagg::agg_hashgroup_batch_shape(agg, distincthash_fold_enabled()).and_then(
-            |shape| {
+    // Filtered grouped-distinct batch feed (named-kernels-distinct): the
+    // batched fast leg's staged views need (a) the PREWHERE lane's forced
+    // prefix to COVER the key/arg/fold columns — the lane arms first-wins
+    // and never widens (`seq_scan_cb_prewhere_arm` keeps an armed lane), so
+    // the ask must ride the FIRST arm — and (b) the lane fill to
+    // materialize those columns (`lane_fill_wanted` masks non-lane-read
+    // columns once a lane program arms). Resolve the batch column map
+    // BEFORE the staging arm, pre-arm PREWHERE with the covering ask on
+    // qual-bearing cbstore scans, and register the feed's columns as lane
+    // reads. Every refusal leaves the per-row path byte-identically (the
+    // views refuse per batch).
+    let batch_cols = if distincthash_batch_enabled() {
+        ::nodeagg::agg_hashgroup_batch_shape(
+            agg,
+            distincthash_fold_enabled(),
+            distincthash_textbatch_enabled(),
+        )
+        .and_then(|shape| {
                 let map = |att: u16| -> Option<u16> {
                     match ss.ss.ps_ProjInfo.as_ref() {
                         None => Some(att),
@@ -7605,19 +8161,16 @@ fn try_hashgroup_build<'mcx>(
                     ::nodeagg::agg_hashgroup_arm_fold(agg, shape.vocab);
                 }
                 Some(cols)
-            },
-        )
+        })
     } else {
         None
     };
-    if let Some(b) = &batch {
-        trace_feed("hash-grouped distinct batch accept armed");
-        // The fast leg reads staged SoA cells. Qual-less cbstore scans have
-        // no PREWHERE lane and the RowFeed arm stages no SoA plan — arm the
-        // offset-free columnar staging covering the key+arg columns
-        // (codedgroup's arm precedent; idempotent/co-arm-aware, false on
-        // heap). Failure just leaves the per-row path (the views refuse
-        // per batch).
+    // Pre-arm PREWHERE with the feed's covering column ask (qual-bearing
+    // cbstore scans; a no-qual/refused arm returns false and the ordinary
+    // staging below proceeds). Idempotent with `arm_scan_staging`'s own
+    // PREWHERE arm — an armed lane is kept there, and the ask=0 re-arm
+    // early-returns.
+    if let Some(b) = &batch_cols {
         let ask = b
             .key_cols
             .iter()
@@ -7626,8 +8179,44 @@ fn try_hashgroup_build<'mcx>(
             .map(|&c| c as i32 + 1)
             .max()
             .unwrap_or(0);
-        let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
+        if ::nodeseqscan::seq_scan_is_cbstore(ss)
+            && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)?
+        {
+            trace_feed("hash-grouped distinct batch feed: prewhere pre-armed");
+        }
     }
+    arm_scan_staging(
+        ss,
+        estate,
+        ScanFeedShape::RowFeed { ctx: "hashgroup distinct feed", stitch: true },
+    )?;
+    let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
+    let batch = match batch_cols {
+        Some(b) => {
+            trace_feed("hash-grouped distinct batch accept armed");
+            let ask = b
+                .key_cols
+                .iter()
+                .chain(b.arg_cols.iter())
+                .chain(b.fold_cols.iter())
+                .map(|&c| c as i32 + 1)
+                .max()
+                .unwrap_or(0);
+            // A live PREWHERE lane whose forced prefix covers the feed's
+            // ask already stages everything the views read (survivor
+            // completing deform fills every prefix column; the qual's
+            // dict lanes gather back to Raw post-qual). Otherwise arm the
+            // offset-free columnar staging covering the key+arg columns
+            // (codedgroup's arm precedent; idempotent/co-arm-aware, false
+            // on heap). Failure just leaves the per-row path (the views
+            // refuse per batch).
+            if !::nodeseqscan::seq_scan_cb_lane_covers(ss, ask) {
+                let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, ask, None);
+            }
+            Some(b)
+        }
+        None => None,
+    };
     // Force a forward child read for the feed's duration (`sort_feed`'s
     // discipline — this drain replaces the sort's own feed).
     let dir = estate.es_direction;
@@ -7668,6 +8257,18 @@ fn hashgroup_emit<'mcx>(
             Some(Some(id)) => return Ok(Some(id)),
         }
     }
+}
+
+/// Emit loop over the runtime distinct sink's PAREMIT buckets (pardistinct
+/// paremit section doc): pre-formed rows in the plan Sort's prefix order,
+/// one row per pull — no HAVING on admitted shapes, so there is no
+/// group-rejected continue arm. CFI per group, the pull loop's cadence.
+fn pdemit_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    ::postgres_seams::check_for_interrupts::call()?;
+    ::nodeagg::agg_pdemit_emit_next(agg, estate)
 }
 
 // ===========================================================================
@@ -7905,12 +8506,21 @@ fn codedgroup_drive<'mcx>(
         ::postgres_seams::check_for_interrupts::call()?;
         if degraded {
             // Post-degrade remainder: the narrow-sort arm's per-row feed
-            // (emit = qual verdicts + projection, one evaluation per row).
-            for i in 0..n {
+            // (emit = qual verdicts + projection, one evaluation per row),
+            // word-skipping emit-dead rows (skip-sel cleared bits).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodesort::sort_lane_put(sort, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         }
         // Slot-free survivor collection FIRST (`scan_collect_survivors`'
@@ -7968,12 +8578,21 @@ fn codedgroup_drive<'mcx>(
         let Some(lane) = lane.filter(|_| all_lane && survivors_decidable) else {
             degrade_codedgroup(agg, sort, outer_desc, k, estate)?;
             degraded = true;
-            // This batch is wholly unconsumed: feed it per-row.
-            for i in 0..n {
+            // This batch is wholly unconsumed: feed it per-row, word-
+            // skipping emit-dead rows (skip-sel cleared bits).
+            let skip = {
+                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                    w[..s.len()].copy_from_slice(s);
+                    w
+                })
+            };
+            ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
                     ::nodesort::sort_lane_put(sort, estate, slot)?;
                 }
-            }
+                Ok(())
+            })?;
             continue;
         };
         let (consumed, keep) = {
@@ -8046,8 +8665,12 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
         return Ok(None);
     }
     // Mid-emit resume of a prior EA-engaged build (the serial top's
-    // hashgroup resume, verbatim — the sink adopts through hashgroup emit;
-    // the bypassed Sort must never be fed from the consumed scan).
+    // hashgroup resume, verbatim — the sink adopts through hashgroup emit
+    // or the paremit bucket merge; the bypassed Sort must never be fed
+    // from the consumed scan).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -8126,6 +8749,9 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // Hash-grouped arm mid-emit resume — BEFORE the dynamic gates (the arm's
     // section doc: the plan's Sort was bypassed and must never be fed from
     // the now-exhausted scan; the gates cannot flip mid-node here).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
@@ -8601,14 +9227,36 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
     if !seq_scan_fusible(ss, estate)? {
         return Ok(None);
     }
+    // Rescan re-decide: the engagement is per-execution — a rescan dropped
+    // the adopted emit state (exec_rescan_agg) and reset agg_done, so a
+    // memoized SortedSink with neither is a FRESH build: re-probe the
+    // engagement (or fall to a serial decide) instead of draining a state
+    // that no longer exists.
+    if *choice == Some(AggLaneChoice::SortedSink)
+        && !::nodeagg::sortedsink::agg_sorted_sink_emitting(agg)
+        && !::nodeagg::agg_is_done(agg)
+    {
+        *choice = None;
+    }
     let c = match *choice {
         Some(c) => c,
         None => {
-            let c = decide_sorted_agg_lane(agg, ss, estate)?;
+            // M2 runtime ORDERED-GROUPED arm first (q28-sorted-arm; armed
+            // only under PGRUST_RUNTIME=1 + pgrust.runtime_agg_pool > 0 —
+            // absent, two cheap gate reads and fall through). Engagement
+            // runs the whole parallel attempt here, before anything is
+            // consumed; every refusal/fallback keeps the serial decide
+            // below byte-identical.
+            let c = if runtime_agg_sorted::try_engage_sortedagg_runtime(agg, ss, estate)? {
+                AggLaneChoice::SortedSink
+            } else {
+                let c = decide_sorted_agg_lane(agg, ss, estate)?;
+                // One OWNED tick per memoized ownership decision (the sorted
+                // stream's build event; the per-group pulls all ride it).
+                stats::tick_owned(ShapeClass::AggBuild);
+                c
+            };
             *choice = Some(c);
-            // One OWNED tick per memoized ownership decision (the sorted
-            // stream's build event; the per-group pulls all ride it).
-            stats::tick_owned(ShapeClass::AggBuild);
             c
         }
     };
@@ -8620,6 +9268,7 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
         return Ok(Some(None));
     }
     Ok(Some(match c {
+        AggLaneChoice::SortedSink => runtime_agg_sorted::sorted_sink_emit_step(agg, estate)?,
         AggLaneChoice::Fold => sorted_fold_step(agg, ss, estate)?,
         _ => sorted_perrow_step(agg, ss, estate)?,
     }))
@@ -9109,20 +9758,20 @@ fn sorted_fold_window<'mcx>(
                     key_vals[k] = soa.col_values(keys.cols[k].0 as usize);
                     key_nulls[k] = soa.col_isnull(keys.cols[k].0 as usize);
                 }
-                let mut ev = Ev::End;
-                let mut j = i;
-                while j < n {
-                    if sel[(j / 64) as usize] & (1u64 << (j % 64)) == 0 {
-                        j += 1;
-                        continue;
-                    }
+                // Word-skip the qual-rejected positions (the bitmap IS the
+                // verdict here): an all-clear selection word advances 64
+                // rows in one compare — the run-extension events fire at
+                // exactly the same survivor positions in the same order.
+                let walk = ::exectuples::for_each_live(
+                    Some(&sel[..nwords]),
+                    i,
+                    n,
+                    |j| -> Result<(), Ev> {
                     if fb[(j / 64) as usize] & (1u64 << (j % 64)) != 0 {
-                        ev = Ev::Fallback(j);
-                        break;
+                        return Err(Ev::Fallback(j));
                     }
                     if !*group_open {
-                        ev = Ev::Boundary(j);
-                        break;
+                        return Err(Ev::Boundary(j));
                     }
                     let same = (0..nkeys).all(|k| {
                         let (cv, cn) = cur_key[k];
@@ -9134,17 +9783,17 @@ fn sorted_fold_window<'mcx>(
                         }
                     });
                     if !same {
-                        ev = Ev::Boundary(j);
-                        break;
+                        return Err(Ev::Boundary(j));
                     }
                     run[(j / 64) as usize] |= 1u64 << (j % 64);
                     run_any = true;
-                    j += 1;
+                    Ok(())
+                    },
+                );
+                match walk {
+                    Err(ev) => ev,
+                    Ok(()) => Ev::End,
                 }
-                if matches!(ev, Ev::End) {
-                    debug_assert_eq!(j, n);
-                }
-                ev
             };
             // Phase B: fold the accumulated run, then the per-row event.
             flush_run!();
@@ -11369,6 +12018,19 @@ pub fn try_own_limit<'mcx>(
                 let built = match &mut aps.outer {
                     crate::procnode::PlanStateNode::SeqScan(ss) => {
                         let c = aps.lane_choice.expect("admission decided the agg lane choice");
+                        // band-2a q18: the Limit-over-Agg chain is the one
+                        // chain that knows the bare-LIMIT bound — derive the
+                        // group-admission freeze bound (offset + count,
+                        // recomputed by the prologue above). There is no
+                        // Sort between this Limit and the Agg by
+                        // construction, so ANY `bound` groups with exact
+                        // aggregates satisfy the query (the ratified q18
+                        // membership class); the sink's arming gates
+                        // (Mk-drain shape, bound ceiling, kill switch)
+                        // decline everything else, and a decline keeps
+                        // today's full drain byte-identically.
+                        let sink_freeze = ::nodelimit::lane_limit_total_bound(&l.state)
+                            .and_then(|b| u32::try_from(b).ok());
                         agg_seq_scan_build_if_needed(
                             &mut aps.agg,
                             ss,
@@ -11376,6 +12038,7 @@ pub fn try_own_limit<'mcx>(
                             &mut aps.lane_stage_slot,
                             &mut aps.lane_exprkey,
                             None,
+                            sink_freeze,
                             estate,
                         )?;
                         true
@@ -12678,6 +13341,9 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Mid-emit resume — BEFORE the dynamic gates (the hashgrouped arm's
     // discipline: the fragment was consumed; nothing may re-pull it).
+    if ::nodeagg::agg_pdemit_emitting(agg) {
+        return Ok(Some(pdemit_emit(agg, estate)?));
+    }
     if ::nodeagg::agg_hashgroup_emitting(agg) {
         return Ok(Some(hashgroup_emit(agg, estate)?));
     }
