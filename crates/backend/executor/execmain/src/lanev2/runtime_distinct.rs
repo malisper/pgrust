@@ -280,10 +280,13 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
     type Sealed = DistinctSealed;
 
     fn fork(&self, _worker: usize) -> DistinctSinkLocal {
-        DistinctSinkLocal {
-            pd: PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget),
-            spill: None,
+        let pd = PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget);
+        if _worker == 0 && pd.batch_insert_armed() {
+            // batch-insert lane engagement trace (e2e leg pin; once per
+            // engagement — worker 0's fork).
+            trace_feed("runtime-distinct: batched set-insert armed");
         }
+        DistinctSinkLocal { pd, spill: None }
     }
 
     fn accept_local(

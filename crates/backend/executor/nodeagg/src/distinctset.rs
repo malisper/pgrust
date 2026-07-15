@@ -270,6 +270,20 @@ impl<'mcx> DistinctSet<'mcx> {
         self.len()
     }
 
+    /// batch-insert lane: prefetch the probe line an `insert_i64(k)` will
+    /// touch (look-ahead driver hint — no semantic effect). Promoted arm
+    /// prefetches the IntSet cell; the legacy arm prefetches the slot word
+    /// (its `ints` deref stays a miss — legacy tables promote at
+    /// `should_promote` anyway, so the window is short-lived).
+    #[inline(always)]
+    pub(crate) fn prefetch_i64(&self, k: i64) {
+        // Promoted arm only: pre-promotion tables (Empty/Legacy) are small
+        // and cache-resident — a hint there is pure overhead.
+        if let ProbeTab::Int(t) = &self.table {
+            t.prefetch(k);
+        }
+    }
+
     /// Bytes the set holds (capacities — actual allocation, the conservative
     /// figure the work_mem budget check wants).
     pub(crate) fn mem_bytes(&self) -> usize {

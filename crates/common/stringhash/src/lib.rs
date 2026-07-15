@@ -1106,6 +1106,35 @@ impl IntSet {
         }
     }
 
+    /// Prefetch the home cell line `insert(k)` will probe (a hint — no
+    /// semantic effect; empty tables no-op). Batched-driver look-ahead
+    /// entry (batch-insert lane; SEAM: stringhash2 owns table-internal
+    /// batch machinery — this is the minimal read-only hook, flagged for
+    /// their review at merge).
+    #[inline(always)]
+    pub fn prefetch(&self, k: i64) {
+        if self.cells.cap == 0 {
+            return;
+        }
+        let pos = (hash8(k as u64) as usize) & self.mask;
+        // SAFETY: mask keeps pos in bounds; prefetch is a hint.
+        unsafe {
+            let p = self.cells.get(pos) as *const i64;
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!(
+                "prfm pldl1keep, [{0}]",
+                in(reg) p,
+                options(nostack, preserves_flags)
+            );
+            #[cfg(target_arch = "x86_64")]
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                p as *const i8,
+            );
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            let _ = p;
+        }
+    }
+
     #[cold]
     fn grow(&mut self) {
         let old_n = self.cells.cap;
