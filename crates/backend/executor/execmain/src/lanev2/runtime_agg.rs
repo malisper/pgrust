@@ -2567,6 +2567,82 @@ fn sink_cap_override() -> Option<u32> {
     })
 }
 
+/// LOCALITY CAP (q36-radix lane): the high-NDV accept-latency bound. At
+/// 100M/dop15 the budget-derived cap (~22M entries at matched memory) lets a
+/// q36-class Local grow to ~5-6M Salt8 entries (hundreds of MB): every
+/// accept probe is a dependent DRAM miss (the dop16-bandwidth-ceiling study's
+/// memory-LATENCY class — 55% stall_backend_mem at 3.6% bandwidth), and the
+/// combine then re-merges ~dop× duplicated groups from the SEAL remainders
+/// at the same latency. Bounding the worker table keeps accept probes
+/// cache-resident and converts the surplus into bucket-partitioned SinkRuns
+/// (sequential writes) that the 256-bucket combine merges into per-bucket
+/// cache-resident tables — the radix/partition-first program on the
+/// machinery that already exists (flush-at-cap + counting-sorted runs +
+/// bucket-claim combine).
+///
+/// Engagement: WORD-KEYED shapes at DOP>1 only.
+///   * Canonical (Intern-bearing) shapes keep the budget cap: their flush
+///     materializes canonical bytes and resets the intern table (wide-
+///     vocabulary bounding) — the canon-sink lane owns that surface.
+///   * DOP1 keeps the budget cap: the single-Local pass-through/adopt fast
+///     path requires zero flushed runs (the dop1-tax ledger), and one Local
+///     has no duplicate-group tax to convert.
+/// Low-NDV shapes are unaffected by construction (tables below the bound
+/// never flush; the bound only engages where the table would outgrow it).
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CAP`: 0 = off (budget cap exactly), N =
+/// entry bound override. Default = the wave-1 ladder knee (see
+/// notes/q36-radix-lane.md).
+fn sink_locality_cap() -> Option<u32> {
+    static N: OnceLock<Option<u32>> = OnceLock::new();
+    *N.get_or_init(|| {
+        match std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        {
+            Some(0) => None,
+            Some(c) => Some(c.max(1024)),
+            None => Some(SINK_LOCALITY_CAP_DEFAULT),
+        }
+    })
+}
+
+/// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
+/// monotone improvement control→64K (q36 0.378→0.234 = 2.30x→1.40x CH-mt16;
+/// q16 0.468→0.270), knee flattening 256K→64K, guards (q21/q38) flat-or-
+/// better. 64K = the historical exchange-class cap (tranche-proven).
+/// 32K/16K extension arms recorded in the lane note; env overrides.
+const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
+
+/// The ENGAGED sink cap: the budget-derived cap ([`sink_cap_for`]) bounded
+/// by the locality cap on word-keyed DOP>1 engagements. This is the single
+/// authority for the leader admissibility gate AND the sink's constructed
+/// `cap` (workers arm off `sink.cap`) — the F1 invariant: leader and worker
+/// verdicts must be computed from the SAME cap. The early cap-aware Mk
+/// admission probes keep the plain budget cap (the shape — and with it
+/// word-keyedness — is not yet known there); the divergence is one-sided:
+/// a larger probe cap can only manufacture a REFUSAL at the probe's
+/// estimate gate (fail-closed to serial), never an engagement the final
+/// gate would reject, and word-keyed spill-armed shapes vacate that gate
+/// entirely.
+fn sink_cap_engaged(
+    state_bytes: usize,
+    budget: usize,
+    ngroups_limit: u64,
+    dop: i32,
+    word_keyed: bool,
+) -> u32 {
+    let base = sink_cap_for(state_bytes, budget, ngroups_limit);
+    // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
+    // channel and stays authoritative — the locality bound never rewrites it.
+    if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
+        return base;
+    }
+    match sink_locality_cap() {
+        Some(l) => base.min(l),
+        None => base,
+    }
+}
+
 /// Sink flush cap (worker table bound, entries) — BUDGET-DERIVED (dop1-tax
 /// inc-3b). The fixed 64K exchange-class cap forced ~17 flush cycles on
 /// q36@10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
@@ -2984,11 +3060,16 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     let spill_admission = agg_spill_enabled()
         && (!mk.as_ref().is_some_and(|s| s.intern_comp().is_some())
             || ::nodeagg::sink::sink_spill_canon_enabled());
-    if !::nodeagg::agg_hash_compact_sink_admissible(
-        agg,
-        sink_cap_for(state_bytes, budget, ngroups_limit),
-        spill_admission,
-    ) {
+    // Word-keyedness for the locality cap = the canonical predicate below
+    // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
+    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes are
+    // excluded from the cap by construction (train-19 car3/car4 seam).
+    let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
+    let sink_cap = sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed);
+    if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
+        lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
+    }
+    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap, spill_admission) {
         refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -3149,7 +3230,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         drain,
         red,
         mk,
-        cap: sink_cap_for(state_bytes, budget, ngroups_limit),
+        cap: sink_cap,
         budget,
         key_words,
         state_bytes,
