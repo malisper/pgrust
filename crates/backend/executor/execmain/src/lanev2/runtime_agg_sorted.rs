@@ -386,7 +386,25 @@ fn drive_claim<'mcx>(
             "sorted claim drive entered with a pending boundary tuple",
         )));
     }
+    // Granule length-stats meta-fold (lane-v2-lenfooter), the serial fold
+    // drive's between-windows arm threaded into the claim: whole INTERIOR
+    // granules of the OPEN group are answered from v7 footer metadata with
+    // no decode. Sound inside a claim because the scan is range-bound
+    // (seq_scan_set_morsel_range) and granule_meta_peek stops at the
+    // claim's range_end — coverage stays exact and disjoint. Byte-identity
+    // is the serial arm's own argument verbatim (fold_granule_meta is
+    // bit-equal to fold_batch over the granule's selection), and the
+    // claim's edge-group PARTIALS read the same pergroup states the fold
+    // mutates.
+    let meta = super::sorted_fold_meta_ctx(agg, ss, keys);
     loop {
+        // Between windows: consume whole interior granules of the open
+        // group from footer metadata first (the serial drive's order).
+        if group_open {
+            if let Some(mf) = &meta {
+                super::sorted_fold_meta_granules(agg, ss, keys, &cur_key, mf, estate)?;
+            }
+        }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
         if n == 0 {
             break;
