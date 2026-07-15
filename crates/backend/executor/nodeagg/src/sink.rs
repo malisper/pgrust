@@ -3940,22 +3940,22 @@ mod tests {
             SinkLocalView {
                 spilled: &[],
                 runs: core::slice::from_ref(&run0),
-                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, canon_store: None, gid_gen: 0 }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: core::slice::from_ref(&run2),
-                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, canon_store: None, gid_gen: 0 }),
             },
         ];
         let combines = test_combines();
