@@ -108,30 +108,43 @@ impl Drop for IoGuard<'_> {
 /// Protocol: capture `epoch()` BEFORE looking for work; if no work is found,
 /// `park(seen)` blocks only while the epoch is unchanged. Every publish of
 /// new work bumps the epoch and notifies.
+/// agg192-contention: the epoch is an ATOMIC, not mutex-guarded state —
+/// `epoch()` runs on EVERY worker-loop / pinned-drive iteration of every
+/// worker (191 at DOP-192), and the former `Mutex<u64>` made that a global
+/// lock acquisition per step (48xl finding #1 shared-line class). The
+/// eventcount protocol is unchanged and still lost-wakeup-free:
+/// - `park(seen)` re-checks the epoch UNDER the mutex before waiting, and
+///   `Condvar::wait` releases that mutex atomically;
+/// - `wake_all` bumps the epoch FIRST (SeqCst), then takes the mutex to
+///   notify — either the parker sees the new epoch at its under-lock check,
+///   or it is already waitable (inside `wait`, mutex released) when the
+///   waker acquires the mutex, so the notify reaches it.
 pub struct ParkLot {
-    epoch: Mutex<u64>,
+    epoch: atomic::AtomicU64,
+    m: Mutex<()>,
     cv: Condvar,
 }
 
 impl ParkLot {
     pub fn new() -> Self {
-        ParkLot { epoch: Mutex::new(0), cv: Condvar::new() }
+        ParkLot { epoch: atomic::AtomicU64::new(0), m: Mutex::new(()), cv: Condvar::new() }
     }
 
     pub fn epoch(&self) -> u64 {
-        *lock(&self.epoch)
+        self.epoch.load(atomic::Ordering::SeqCst)
     }
 
     pub fn park(&self, seen: u64) {
-        let mut g = lock(&self.epoch);
-        while *g == seen {
+        let mut g = lock(&self.m);
+        while self.epoch.load(atomic::Ordering::SeqCst) == seen {
             g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
         }
     }
 
     pub fn wake_all(&self) {
-        let mut g = lock(&self.epoch);
-        *g = g.wrapping_add(1);
+        // Bump BEFORE the mutex (see the struct doc's lost-wakeup argument).
+        self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
+        let g = lock(&self.m);
         drop(g);
         self.cv.notify_all();
     }
