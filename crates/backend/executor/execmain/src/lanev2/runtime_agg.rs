@@ -2752,18 +2752,89 @@ fn sink_cap_override() -> Option<u32> {
 /// `PGRUST_RUNTIME_AGG_LOCALITY_CAP`: 0 = off (budget cap exactly), N =
 /// entry bound override. Default = the wave-1 ladder knee (see
 /// notes/q36-radix-lane.md).
-fn sink_locality_cap() -> Option<u32> {
-    static N: OnceLock<Option<u32>> = OnceLock::new();
+fn sink_locality_cap() -> LocalityCap {
+    static N: OnceLock<LocalityCap> = OnceLock::new();
     *N.get_or_init(|| {
         match std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
         {
-            Some(0) => None,
-            Some(c) => Some(c.max(1024)),
-            None => Some(SINK_LOCALITY_CAP_DEFAULT),
+            Some(0) => LocalityCap::Off,
+            Some(c) => LocalityCap::Fixed(c.max(1024)),
+            None => LocalityCap::Default,
         }
     })
+}
+
+/// The locality-cap env verdict: `Fixed` = an explicit
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CAP=N` (the pure A/B channel — the
+/// NDV-adaptive rule never rewrites it), `Default` = unset (the adaptive
+/// rule applies), `Off` = the 0 kill switch.
+#[derive(Clone, Copy)]
+enum LocalityCap {
+    Off,
+    Default,
+    Fixed(u32),
+}
+
+/// NDV-ADAPTIVE locality cap (distinct-sidecar-cap lane — the q36-radix
+/// close-out's flagged refinement): the 64K-vs-1M adjudication (repeat pair
+/// -3aef/-2af4, reproduced against r2 exactly) showed a REAL per-query
+/// split, not pod drift — q36 (9.76M est groups) runs ~10% faster at 1M,
+/// q16 (17.6M) ~16% faster at 64K, q33 (~1e8) cap-flat 256K-1M. Mechanism
+/// reading: at the higher NDV the worker table re-fills quickly at ANY cap,
+/// so the smallest (L2-resident) table wins outright; in the mid band the
+/// duplicate-absorption of a larger (L3-resident) table repays its slower
+/// probes. Rule (defended by the ladder in notes/distinct-sidecar-cap.md):
+///   est >= 12M            -> 64K (SINK_LOCALITY_CAP_DEFAULT; today's cap)
+///   2M <= est < 12M       -> 1M  (SINK_LOCALITY_CAP_WIDE; the q36 band)
+///   est < 2M              -> 64K (cap barely binds; tranche-proven regime)
+/// `PGRUST_RUNTIME_AGG_LOCALITY_NDV=0` kills adaptivity (fixed 64K default,
+/// train-19 behavior exactly); an explicit LOCALITY_CAP=N is authoritative.
+fn agg_locality_ndv_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_NDV").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The q36-band (mid-NDV) locality cap — see [`agg_locality_ndv_enabled`].
+const SINK_LOCALITY_CAP_WIDE: u32 = 1 << 20;
+
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CANON=1` (default OFF — the probe channel):
+/// extend the locality cap to CANONICAL (Intern-bearing) Mk shapes (the q17
+/// class: 17M UserID×SearchPhrase groups; the q40 CaseDict residual). The
+/// canonical flush/SEAL/combine machinery exists since train-17
+/// text-kernels (canon shapes already flush at the BUDGET cap); the
+/// train-19 exclusion was the car3/car4 seam, not a mechanism gap. Canon
+/// flushes materialize canonical bytes and reset the intern table, so the
+/// per-flush cost is higher — default stays OFF until the q17/q40 ladder
+/// proves the trade (byte gates mandatory: q17/q40 have no ratified tie
+/// class).
+fn agg_locality_canon_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CANON").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// Resolve the engaged locality bound for this shape's plan-estimated group
+/// count. `None` = no locality bound (kill switch).
+fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
+    match sink_locality_cap() {
+        LocalityCap::Off => None,
+        LocalityCap::Fixed(c) => Some(c),
+        LocalityCap::Default => {
+            if agg_locality_ndv_enabled() && (2_000_000..12_000_000).contains(&est_groups) {
+                Some(SINK_LOCALITY_CAP_WIDE)
+            } else {
+                Some(SINK_LOCALITY_CAP_DEFAULT)
+            }
+        }
+    }
 }
 
 /// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
@@ -2790,6 +2861,7 @@ fn sink_cap_engaged(
     ngroups_limit: u64,
     dop: i32,
     word_keyed: bool,
+    est_groups: u64,
 ) -> u32 {
     let base = sink_cap_for(state_bytes, budget, ngroups_limit);
     // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
@@ -2797,7 +2869,7 @@ fn sink_cap_engaged(
     if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
         return base;
     }
-    match sink_locality_cap() {
+    match sink_locality_cap_for(est_groups) {
         Some(l) => base.min(l),
         None => base,
     }
@@ -3222,10 +3294,18 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             || ::nodeagg::sink::sink_spill_canon_enabled());
     // Word-keyedness for the locality cap = the canonical predicate below
     // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
-    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes are
-    // excluded from the cap by construction (train-19 car3/car4 seam).
+    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes
+    // stayed excluded from the cap at train-19 (car3/car4 seam);
+    // PGRUST_RUNTIME_AGG_LOCALITY_CANON=1 opts them in (the q17/q40 probe
+    // channel — see [`agg_locality_canon_enabled`]).
     let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
-    let sink_cap = sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed);
+    let cap_shape_ok = word_keyed || agg_locality_canon_enabled();
+    // Plan-estimated group count for the NDV-adaptive locality rule (the
+    // same leader estimate the compact layout law reads; the adaptive bands
+    // in [`sink_locality_cap_for`] were calibrated on this figure).
+    let est_groups = agg.plan.numGroups.max(1) as u64;
+    let sink_cap =
+        sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, cap_shape_ok, est_groups);
     if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
         lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
     }
