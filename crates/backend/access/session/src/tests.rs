@@ -348,7 +348,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      worker executor slot (built inside the query-task binding, torn
     //      down on every drive exit path) — same drive-scoped class and
     //      argument as WORKER_EXEC slots 4-6.
-    assert_eq!(count_tree(crates), 475, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 476, re-pinned at sorted-arm-census (conductor debt: the q28-sorted-
+    // arm car landed WITHOUT this re-pin — train-18-integration @ 34ad7a33b
+    // fails this suite; verified pre-existing by running it at the base
+    // with the census lane's diff reverted):
+    //   17. executor/execmain/src/lanev2/runtime_agg_sorted.rs
+    //      WORKER_EXEC — the ordered-grouped (sorted-agg) sink helper's
+    //      drive-scoped worker executor slot (built inside the query-task
+    //      binding via build_worker_exec, torn down on every drive exit
+    //      path incl. the F1 unwind arms) — same drive-scoped class and
+    //      argument as WORKER_EXEC slots 4-6 and 16.
+    assert_eq!(count_tree(crates), 476, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
