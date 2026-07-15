@@ -277,6 +277,23 @@ pub struct DriveLocal {
     pub first_claim_ns: u64,
     /// Clock at the end of the last executed morsel (the WFIN t_us).
     pub last_end_ns: u64,
+    // ---- CPROBE accumulators (agg192-contention): plain thread-owned
+    // counters, always accumulated (a handful of u64 adds on owned memory);
+    // EMITTED only under PGRUST_RUNTIME_CPROBE=1 (see Runtime::drive_pinned).
+    /// Steps that returned [`Step::Retry`] (invalidated-slot windows).
+    pub steps_retry: u64,
+    /// Wall ns spent in the retry re-step loop (armed probe only; 0 when
+    /// the probe is off — the clock is not read).
+    pub retry_spin_ns: u64,
+    /// Claim-cursor CAS failures (contended `TaskSetRt::cursor`).
+    pub cas_retries: u64,
+    /// Pinned-drive slow-path membership lookups (stale slot-word cache —
+    /// one global mutex acquisition each).
+    pub pinned_lookups: u64,
+    /// Wall ns waiting in execution-permit acquire (armed probe only).
+    pub permit_wait_ns: u64,
+    /// Parks taken by this driver.
+    pub parks: u64,
 }
 
 /// Thread-local scheduling bookkeeping (one per worker, owned by the worker
@@ -322,6 +339,11 @@ impl WorkerLocal {
     pub fn set_session_token(&mut self, token: u64) {
         self.session_token = token;
     }
+
+    /// Pin-board lane / worker index (CPROBE line identity).
+    pub(crate) fn worker_id(&self) -> usize {
+        self.worker
+    }
 }
 
 /// `PGRUST_MORSEL_MARKERS=1` arms the acceptance-instrument marker channel:
@@ -336,6 +358,32 @@ fn markers_enabled() -> bool {
         matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
     })
 }
+
+/// agg192-contention step-loop fix kill switch: `PGRUST_RUNTIME_STEP_V2=0`
+/// restores the per-step permit acquire/release + unthrottled Retry spin
+/// (the pre-fix loops, byte-identical). Default ON. Read once.
+pub(crate) fn step_v2() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STEP_V2").map_or(true, |v| v.trim() != "0"))
+}
+
+/// `PGRUST_RUNTIME_CPROBE=1` arms the contention-probe marker channel: one
+/// `MORSEL|CPROBE|…` line per pinned driver per drive (parsed off server
+/// stderr like WFIN). Default OFF: counters still accumulate (plain
+/// thread-owned u64 adds), but no clock reads and no emission.
+pub(crate) fn cprobe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CPROBE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Consecutive Retry steps a driver spins (yield) before parking on the
+/// pre-captured epoch. Retry windows are invalidated-slot waits (seal /
+/// last-out / straggler tails); publish and completion both wake_all, so
+/// the park is lost-wakeup-free. Small: each spin is a full step's global
+/// ceremony — the 48xl finding-#1 storm.
+pub(crate) const RETRY_PARK_AFTER: u32 = 16;
 
 /// Claim-coalescing target for whole-boundary sources (dop1-tax fix 1):
 /// a claim spans up to `PGRUST_RUNTIME_COALESCE_EPOCHS / active_workers`
@@ -827,9 +875,9 @@ impl Scheduler {
             index,
             slot,
             seq,
-            cursor: AtomicU64::new(0),
-            sizer: crate::sizing::SizerShared::new(),
-            active_workers: AtomicU64::new(0),
+            cursor: crate::taskset::CachePadded(AtomicU64::new(0)),
+            sizer: crate::taskset::CachePadded(crate::sizing::SizerShared::new()),
+            active_workers: crate::taskset::CachePadded(AtomicU64::new(0)),
             fin_counter: crate::sync::atomic::AtomicI64::new(0),
             finalized: AtomicBool::new(false),
             c0,
@@ -1051,6 +1099,9 @@ impl Scheduler {
                 Some(slot)
             }
             _ => {
+                // CPROBE: stale-cache membership lookup (one global mutex
+                // acquisition; per-iteration during invalidated-slot spins).
+                local.drive.pinned_lookups += 1;
                 let found = {
                     let m = lock(&self.membership);
                     if self.dag.load(Ordering::Relaxed) {
@@ -1197,7 +1248,7 @@ impl Scheduler {
                         end = TaskEnd::Exhausted;
                         break;
                     }
-                    let range = match self.claim_morsel(ts, &mut sizer) {
+                    let range = match self.claim_morsel(ts, &mut sizer, &mut local.drive) {
                         Claim::Range(range) => range,
                         Claim::Starved => {
                             end = TaskEnd::Starved;
@@ -1368,7 +1419,7 @@ impl Scheduler {
         end
     }
 
-    fn claim_morsel(&self, ts: &TaskSetRt, sizer: &mut TaskSizer) -> Claim {
+    fn claim_morsel(&self, ts: &TaskSetRt, sizer: &mut TaskSizer, drive: &mut DriveLocal) -> Claim {
         // Stream sources: claimable up to the producer's watermark; only a
         // CLOSED stream's watermark is exhaustion (closed read before the
         // watermark inside stream_state — see the MorselSource contract).
@@ -1444,6 +1495,8 @@ impl Scheduler {
                 RuntimeStats::tick(counter);
                 return Claim::Range(cur..end);
             }
+            // CPROBE: contended-cursor evidence (thread-owned counter).
+            drive.cas_retries += 1;
         }
     }
 

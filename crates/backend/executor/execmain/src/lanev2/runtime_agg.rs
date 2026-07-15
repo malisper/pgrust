@@ -87,6 +87,13 @@ pub(super) struct AggSinkLocal {
     /// the sink is EA-armed (`sink.ea_scan_node.is_some()`); rides the Local
     /// through SEAL exactly like the agg state it sits beside.
     instr: super::runtime_instr::InstrumentPartial,
+    /// agg192-contention CPROBE: lifetime cap/pressure flushes of this Local
+    /// and their bytes (runs are drained by spill epochs, so `runs.len()` at
+    /// seal undercounts). Thread-owned; emitted on the AGGSEAL marker line —
+    /// discriminates DOP-scaled bounded-cap flush amplification (real extra
+    /// work) from shared-line contention (stall-only inflation).
+    probe_flushes: u64,
+    probe_flush_bytes: u64,
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -634,8 +641,10 @@ impl runtime::ParallelSink for AggSink {
             // Marker channel (PGRUST_MORSEL_MARKERS=1, the WFIN sibling):
             // the single-threaded seal's duration — the phase the 3-set arm
             // parallelizes; its A/B evidence line.
+            let flushes: u64 = locals.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|dur_us={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us={}",
                 locals.len(),
                 t0.elapsed().as_micros()
             );
@@ -1122,6 +1131,19 @@ impl runtime::SealedParallelSink for AggSink {
     fn sealed_ready(&self, sealed: &mut Vec<AggSinkLocal>) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        if agg_markers_on() {
+            // The 3-set arm's AGGSEAL sibling line (single-threaded here by
+            // last-worker-out of the freeze set): the flush-amplification
+            // census the CPROBE channel reads (see AggSinkLocal doc).
+            let rows: usize =
+                sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
+            eprintln!(
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us=0",
+                sealed.len(),
+            );
         }
         if self.try_adopt_census(sealed) {
             return;
@@ -2007,6 +2029,8 @@ fn sink_drain_range<'mcx>(
         if let Some((run, intern_reset)) =
             ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
         {
+            local.probe_flushes += 1;
+            local.probe_flush_bytes += run.bytes() as u64;
             local.run_bytes += run.bytes();
             local.runs.push(run);
             // The flush RESET the compact table: every cached code -> state
@@ -2078,6 +2102,8 @@ fn sink_drain_range<'mcx>(
                     if let Some((run, intern_reset)) =
                         ::nodeagg::sink::agg_sink_flush_now(agg)
                     {
+                        local.probe_flushes += 1;
+                        local.probe_flush_bytes += run.bytes() as u64;
                         local.run_bytes += run.bytes();
                         local.runs.push(run);
                         if intern_reset {
