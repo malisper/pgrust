@@ -865,6 +865,7 @@ impl runtime::ParallelSink for AggSink {
                 .collect();
             let ctr = self.topn.is_some();
             let t0 = ctr.then(std::time::Instant::now);
+            let spk_t0 = ::nodeagg::spankey::spankey_t0();
             let merged = sink_combine_bucket(
                 b,
                 self.key_words,
@@ -872,6 +873,10 @@ impl runtime::ParallelSink for AggSink {
                 &views,
                 &self.combines,
             )?;
+            ::nodeagg::spankey::spankey_lap(
+                &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
+                spk_t0,
+            );
             if let Some(t0) = t0 {
                 self.topn_ctr
                     .build_ns
@@ -3907,6 +3912,11 @@ fn engage_ceremony<'mcx>(
                             c.emit_ns.load(Ordering::Relaxed) / 1_000,
                         ));
                     }
+                    // spankey copy-tax decomposition (measurement only,
+                    // PGRUST_SPANKEY_CTR=1): print-and-reset per engagement.
+                    if let Some(s) = ::nodeagg::spankey::spankey_report_reset() {
+                        lane_trace(&s);
+                    }
                     // Freeze evidence line (e2e legs grep this): FROZEN
                     // engagements emit exactly `bound` member groups.
                     if let Some(fz) = &sink.freeze {
@@ -3929,6 +3939,9 @@ fn engage_ceremony<'mcx>(
                     lane_trace(&format!(
                         "runtime-agg: complete (table adopt), groups={rows}"
                     ));
+                    if let Some(s) = ::nodeagg::spankey::spankey_report_reset() {
+                        lane_trace(&s);
+                    }
                     ::nodeagg::sink::agg_sink_adopt_table(agg, table, sink.emit.clone());
                 }
             }
