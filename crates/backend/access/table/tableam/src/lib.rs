@@ -1479,6 +1479,15 @@ pub fn table_scan_condcache_store(scan: &mut TableScanDesc<'_>, sel: &[u64]) {
     }
 }
 
+/// Fold the scan's per-scan condition-cache stat cells into the process
+/// counters (before a `condcache_stats` read; scan teardown folds anyway).
+pub fn table_scan_condcache_fold_stats(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.condcache_fold_stats(),
+    }
+}
+
 /// Page-batch scan feed (upstream batch scan API, CF 6176): 0 = exhausted.
 pub fn table_scan_getnextpagebatch<'mcx>(scan: &mut TableScanDesc<'mcx>) -> PgResult<u32> {
     match scan {
