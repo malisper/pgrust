@@ -39,6 +39,26 @@ pub enum config_var_val {
     Enumval(i32),
 }
 
+impl PartialEq for config_var_val {
+    /// Exact-representation equality (Realval compares by bit pattern, so the
+    /// relation stays reflexive under NaN and never conflates values with
+    /// distinct representations). Used by the pin re-mint dedup
+    /// (layers::current_query_pin): "equal" must imply the captured states
+    /// are interchangeable, so the compare is conservative — bitwise on
+    /// floats, discriminant-strict across types.
+    fn eq(&self, other: &Self) -> bool {
+        use config_var_val::*;
+        match (self, other) {
+            (Boolval(a), Boolval(b)) => a == b,
+            (Intval(a), Intval(b)) => a == b,
+            (Realval(a), Realval(b)) => a.to_bits() == b.to_bits(),
+            (Stringval(a), Stringval(b)) => a == b,
+            (Enumval(a), Enumval(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct config_var_value {
     pub val: Option<config_var_val>,

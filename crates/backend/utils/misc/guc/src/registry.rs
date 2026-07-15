@@ -1191,6 +1191,25 @@ impl CapturedGuc {
     pub fn value(&self) -> &config_var_val {
         &self.val
     }
+
+    /// Conservative content equality for the pin re-mint dedup
+    /// (layers::current_query_pin): true only when binding `self` and
+    /// binding `other` are indistinguishable to a worker. `extra` compares
+    /// by Arc identity (a content-equal but re-minted hook extra is a dedup
+    /// MISS, never a false hit — int/bool/enum vars, the SET-churn
+    /// clientele, carry no extra).
+    pub(crate) fn content_eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.val == other.val
+            && self.scontext == other.scontext
+            && self.source == other.source
+            && self.srole == other.srole
+            && match (&self.extra, &other.extra) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
 }
 
 fn current_value(record: &GucVariable) -> config_var_val {

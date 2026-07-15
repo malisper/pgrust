@@ -274,6 +274,58 @@ fn query_pin_caches_per_statement_window_and_ignores_republish() {
 }
 
 #[test]
+fn query_pin_remint_dedup_preserves_identity_on_content_equal_state() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    guc::layers::reset_layers_for_tests();
+    setup_seams();
+    guc::store::initialize_guc_options().unwrap();
+    guc::layers::ensure_base_current();
+
+    guc::SetConfigOption(
+        "enable_incremental_sort",
+        Some("off"),
+        GucContext::PGC_USERSET,
+        GucSource::PGC_S_SESSION,
+    )
+    .unwrap();
+    let pin1 = guc::layers::current_query_pin();
+
+    // A no-op SET (same value, same source) bumps the store mutation counter
+    // but re-mints content-identical state: the dedup must serve the SAME
+    // Arc — pin identity is the standing-gang sticky-binding key.
+    guc::SetConfigOption(
+        "enable_incremental_sort",
+        Some("off"),
+        GucContext::PGC_USERSET,
+        GucSource::PGC_S_SESSION,
+    )
+    .unwrap();
+    let pin2 = guc::layers::current_query_pin();
+    assert!(
+        std::sync::Arc::ptr_eq(&pin1, &pin2),
+        "no-op SET must dedup to the cached pin (content-equal re-mint)"
+    );
+
+    // A content CHANGE must still mint a new pin (dedup never hides real
+    // state movement).
+    guc::SetConfigOption(
+        "enable_incremental_sort",
+        Some("on"),
+        GucContext::PGC_USERSET,
+        GucSource::PGC_S_SESSION,
+    )
+    .unwrap();
+    let pin3 = guc::layers::current_query_pin();
+    assert!(!std::sync::Arc::ptr_eq(&pin2, &pin3), "content change must mint a new pin");
+    assert!(
+        pin3.session_vars()
+            .iter()
+            .any(|v| v.name() == "enable_incremental_sort"),
+        "the SET must be captured in the new pin"
+    );
+}
+
+#[test]
 fn worker_pin_bind_reproduces_leader_state_and_base() {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     guc::layers::reset_layers_for_tests();
