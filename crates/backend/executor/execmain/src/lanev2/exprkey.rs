@@ -2555,7 +2555,7 @@ fn exprkey_mk_batch<'mcx>(
         };
         let fast_kernel = m.fast.is_some();
         let MultiKeyChain { case_dict, mks, .. } = &mut **m;
-        let super::MkScratch { packbuf, keys1, keys2, epoch, code_ids, .. } = mks;
+        let super::MkScratch { packbuf, keys1, epoch, code_ids, .. } = mks;
         packbuf.clear();
         packbuf.resize(rows.len(), 0u128);
         'comps: for comp in shape.comps.iter() {
@@ -2822,14 +2822,12 @@ fn exprkey_mk_batch<'mcx>(
                 }
             }
         }
-        if !unpackable {
-            if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-            } else {
-                keys1.clear();
-                keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
-            }
+        if !unpackable && !shape.two_words {
+            // One-word shapes narrow u128 -> i64 (a real stride change).
+            // Two-word shapes probe the accumulator in place at the probe
+            // block below (mk_keys2_lane — mkaccept inc-1).
+            keys1.clear();
+            keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
         }
     }
     if unpackable {
@@ -2845,7 +2843,9 @@ fn exprkey_mk_batch<'mcx>(
             unreachable!("mk batch requires the Multi kind")
         };
         if shape.two_words {
-            ::nodeagg::agg_hash_compact_batch_mk2(agg, &m.mks.keys2, groups)?;
+            let super::MkScratch { packbuf, keys2, .. } = &mut m.mks;
+            let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+            ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
         } else {
             ::nodeagg::agg_hash_compact_batch_mk1(agg, &m.mks.keys1, groups)?;
         }

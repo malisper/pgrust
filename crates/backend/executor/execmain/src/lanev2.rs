@@ -4934,11 +4934,11 @@ fn scan_mk_batch<'mcx>(
             }
         }
     }
-    // Split the accumulator into the packed key lane and probe.
+    // Split the accumulator into the packed key lane and probe (two-word
+    // shapes view the accumulator in place — mkaccept inc-1).
     if shape.two_words {
-        keys2.clear();
-        keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-        ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+        let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+        ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
     } else {
         keys1.clear();
         keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
@@ -11447,11 +11447,12 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
                     }
                 }
             }
-            // Split the accumulator into the packed key lane and probe.
+            // Split the accumulator into the packed key lane and probe
+            // (two-word shapes view the accumulator in place — mkaccept
+            // inc-1).
             if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-                ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+                let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+                ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
             } else {
                 keys1.clear();
                 keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
