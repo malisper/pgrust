@@ -3391,7 +3391,6 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse(estate, ea, node_id, "granule floor");
         return Ok(false);
     }
-
     // --- Engage.
     // Canonical (text-bearing) shapes merge on canonical key BYTES:
     // key_words 0 = the combine's bytes mode.
@@ -3402,6 +3401,43 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 })
     };
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill:
+    // PGRUST_RUNTIME_ELASTIC_DOP=0). BYREF-FLOOR GUARD (cross-lane
+    // constraint, proportionality-audit @ a39910a0b, q33@dop2 172s
+    // root-cause): byref state classes (AvgInt8/PolyInt128) accumulate an
+    // UNSPILLABLE per-Local aggcontext floor ~= est_groups/W x per-group
+    // bytes, while agg_sink_budget_pressure refuses at hash_mem_limit/2 —
+    // a per-worker CONSTANT. Narrowing W raises the floor toward the trip
+    // and a refusal costs a wasted drive + TRUE-serial rerun (~100x wall).
+    // Never narrow below the floor-safe width:
+    //   w_floor = ceil(est_groups x per_group_bytes / (budget/2))
+    // per_group_bytes = state_bytes + key_words*8 + 48 (row + aggcontext
+    // headroom — deliberately conservative: it only makes elastic narrow
+    // LESS; the audit's root fix packs these classes inline and will
+    // retire the term). est_groups = the same leader plan estimate the
+    // locality law reads (coordinate: proportionality-audit).
+    let dop = {
+        let elastic = super::runtime_scan::elastic_dop(dop, total_granules);
+        if elastic < dop && byref_states {
+            let half_budget = (budget as u64 / 2).max(1);
+            let per_group = state_bytes as u64 + (key_words as u64) * 8 + 48;
+            let w_floor = est_groups
+                .saturating_mul(per_group)
+                .div_ceil(half_budget)
+                .max(1)
+                .min(dop as u64) as i32;
+            let guarded = elastic.max(w_floor);
+            if guarded > elastic {
+                lane_trace(&format!(
+                    "runtime-agg: elastic byref-floor guard {elastic}->{guarded} (est_groups={est_groups})"
+                ));
+            }
+            guarded
+        } else {
+            elastic
+        }
+    };
     // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
     // the adopted table's rows must be self-contained past helper teardown
     // (a byref transvalue points into a worker aggcontext).
@@ -3574,6 +3610,12 @@ fn engage<'mcx>(
         query_id: AtomicU64::new(0),
     });
 
+    // Arming-phase decomposition spans (tails192 #5): the agg arm had NO
+    // l.* gtrace coverage while its submit->first-service window measures
+    // 2.0-5.7ms at 16-core (vs the scan arm's 0.25ms standing channel) --
+    // the launched-helper ceremony is the at-191 tiny-query tax suspect.
+    // PGRUST_GATHER_TRACE-gated, free when off.
+    parallel::gtrace("l.agg.engage.begin");
     xact::EnterParallelMode();
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
@@ -3581,6 +3623,7 @@ fn engage<'mcx>(
     let engaged =
         engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, &sink);
     xact::ExitParallelMode();
+    parallel::gtrace("l.agg.engage.end");
     if let Ok(done) = &engaged {
         router::tick(
             ArmClass::Agg,
@@ -3615,11 +3658,13 @@ fn engage_ceremony<'mcx>(
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
+        parallel::gtrace("l.agg.dsm.end");
         let nworkers = parallel::nworkers(pcxt);
         if nworkers <= 0 {
             return Ok(EngageOutcome::Fallback);
         }
         parallel::InstallQueryTaskBinding(pcxt, parallel::QueryTaskBindingPolicy::default())?;
+        parallel::gtrace("l.agg.qtb.end");
         payload
             .pcxt_shared
             .set(parallel::shared_for(pcxt))
@@ -3651,10 +3696,12 @@ fn engage_ceremony<'mcx>(
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
+        parallel::gtrace("l.agg.sink.end");
         let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: qid,
             tasksets,
         }, router::session_affinity_token());
+        parallel::gtrace("l.agg.submit.end");
         payload
             .rg
             .set(rg.downgrade())
@@ -3665,6 +3712,7 @@ fn engage_ceremony<'mcx>(
         *mut_submitted = Some(rg.clone());
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
+        parallel::gtrace("l.agg.launch.end");
         if launched <= 0 {
             lane_trace("runtime-agg: zero workers launched");
             drain_rg(rt, &rg);
