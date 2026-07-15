@@ -36,6 +36,49 @@ impl Default for SizingParams {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Claim-duration DOP scaling (tails192, 48xl charter item #4).
+//
+// At high pipeline width the ~2ms claim cadence multiplies into shared-
+// scheduler pressure: 191 workers x ~2ms claims ~= 95K shared-cursor touches
+// per second, all CASing the same TaskSet cursor (the 48xl in-drive cycle-
+// inflation family, notes/48xl-first-run-2026-07-15.md §3). Scale the
+// per-task duration TARGET with the live width: identity at W <= 32
+// (16-thread behavior unchanged by construction), linear ramp above, x2.5
+// at 191 (2ms -> 5ms). The photo-finish floor t_min is deliberately NOT
+// scaled — end-game claims still shrink to the same 500us floor, so the
+// finish-spread posture is preserved (the elasticity oracle for this knob).
+//
+// Kill switch: PGRUST_RUNTIME_TMAX_DOPSCALE=0 (env, not a GUC — pg_settings
+// byte-identity law, the TMAX_US precedent). The base t_max stays
+// PGRUST_RUNTIME_TMAX_US.
+// ---------------------------------------------------------------------------
+pub const DOPSCALE_W0: u64 = 32; // identity at or below this width
+pub const DOPSCALE_W1: u64 = 191; // full multiplier at or above this width
+pub const DOPSCALE_MAX_X: f64 = 2.5; // t_max multiplier at W1
+
+pub fn dopscale_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_TMAX_DOPSCALE").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+impl SizingParams {
+    /// Width-scaled params for one task: t_max ramps with the live worker
+    /// count, t_min (photo-finish floor) is untouched. Identity for
+    /// `w <= DOPSCALE_W0` or under the kill switch.
+    pub fn scaled_for_width(self, w: u64) -> SizingParams {
+        if w <= DOPSCALE_W0 || !dopscale_enabled() {
+            return self;
+        }
+        let frac =
+            ((w - DOPSCALE_W0) as f64 / (DOPSCALE_W1 - DOPSCALE_W0) as f64).min(1.0);
+        let x = 1.0 + (DOPSCALE_MAX_X - 1.0) * frac;
+        SizingParams { t_max_ns: ((self.t_max_ns as f64) * x) as u64, t_min_ns: self.t_min_ns }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Startup,

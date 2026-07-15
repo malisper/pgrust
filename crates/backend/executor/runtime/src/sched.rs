@@ -1164,7 +1164,10 @@ impl Scheduler {
             );
         }
         let task_t0 = if local.wfin.is_empty() { 0 } else { self.clock.now_ns() };
-        ts.active_workers.fetch_add(1, Ordering::SeqCst);
+        // Live width AFTER this worker joins: the claim-duration DOP scaling
+        // input (tails192 #4) — identity at ≤32 by construction, so 16-core
+        // pods and the mt16 vectors size exactly as before.
+        let task_width = ts.active_workers.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Generation gate (H1): a task of an aborted (closed) generation is
         // unconsumable — the merged lifecycle's fail-closed armed join
@@ -1177,7 +1180,7 @@ impl Scheduler {
             }
             Ok(participant) => {
                 local.drive.tasks += 1;
-                let mut sizer = TaskSizer::new(self.params, ts.c0);
+                let mut sizer = TaskSizer::new(self.params.scaled_for_width(task_width), ts.c0);
                 let mut end = TaskEnd::Budget;
                 // Per-task observability accumulators (dop1-tax fix 5):
                 // morsel/granule/cpu counters are EXACT but flushed to the
@@ -1423,6 +1426,29 @@ impl Scheduler {
                             if end >= total || end >= fair_end {
                                 break;
                             }
+                            end = ts.source().next_boundary_after(end).min(total);
+                        }
+                    }
+                    // Claim-duration DOP scaling at HIGH width (tails192
+                    // #4): whole-claims sources discard the sizer's size —
+                    // one epoch per claim — so at W>32 the shared-cursor
+                    // touch rate scales with W at flat per-epoch cost
+                    // (191 × ~2ms ≈ 95K touches/s, the 48xl in-drive
+                    // inflation family). `want` already carries the
+                    // width-scaled t_max target (TaskSizer is constructed
+                    // with scaled params): span additional WHOLE epochs
+                    // (dict-epoch rules hold inside a claim, same as the
+                    // low-width coalesce above) until the claim reaches the
+                    // duration target, under the same fair-share clamp so
+                    // late claims still shrink toward one epoch. Identity
+                    // at W ≤ 32 and under PGRUST_RUNTIME_TMAX_DOPSCALE=0;
+                    // Startup/Shutdown phases untouched (photo finish keeps
+                    // its posture).
+                    if workers > crate::sizing::DOPSCALE_W0
+                        && crate::sizing::dopscale_enabled()
+                    {
+                        let fair_end = cur + ((total - cur) / workers).max(1);
+                        while end < total && end < fair_end && end - cur < want {
                             end = ts.source().next_boundary_after(end).min(total);
                         }
                     }
