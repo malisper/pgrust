@@ -209,13 +209,48 @@ pub fn current_query_pin() -> Arc<GucQuerySnapshot> {
                 return cached.pin.clone();
             }
         }
-        let pin = Arc::new(GucQuerySnapshot {
-            base: session_base(),
-            session: store::capture_session_gucs(),
-        });
+        let base = session_base();
+        let session = store::capture_session_gucs();
+        // Content-equal re-mint DEDUP: SET/RESET churn that lands back on
+        // identical session state (a no-op SET, or the benchmark protocol's
+        // per-try RESET ALL + identical forcing prefix) bumps the mutation
+        // counter but re-mints a content-identical snapshot. Reusing the
+        // cached Arc preserves pin IDENTITY — the standing-gang sticky
+        // binding key (parallel::query_task_guard keys on Arc::ptr_eq), so
+        // gang workers sticky-resume (~10us) instead of full-rebinding
+        // (~300us + ~260us eviction) per engagement. Equality is
+        // conservative (CapturedGuc::content_eq: exact values, bitwise
+        // floats, extras by Arc identity); the cache is already dropped on
+        // base adoption (set_session_base), so a dedup hit can never serve
+        // a pre-adoption pin. PGRUST_GUC_PIN_DEDUP=0 kills the dedup (the
+        // counter-keyed cache above is unchanged).
+        if pin_dedup_enabled() {
+            if let Some(cached) = slot.as_mut() {
+                if Arc::ptr_eq(&cached.pin.base, &base)
+                    && cached.pin.session.len() == session.len()
+                    && cached
+                        .pin
+                        .session
+                        .iter()
+                        .zip(session.iter())
+                        .all(|(a, b)| a.content_eq(b))
+                {
+                    cached.mutations = mutations;
+                    return cached.pin.clone();
+                }
+            }
+        }
+        let pin = Arc::new(GucQuerySnapshot { base, session });
         *slot = Some(CachedPin { mutations, pin: pin.clone() });
         pin
     })
+}
+
+/// Kill switch for the content-equal pin re-mint dedup (default ON;
+/// PGRUST_GUC_PIN_DEDUP=0 disables). Read once per process.
+fn pin_dedup_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_GUC_PIN_DEDUP").map_or(true, |v| v.trim() != "0"))
 }
 
 /// Worker side: apply a leader's pin onto this thread's store (assign hooks
