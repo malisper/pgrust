@@ -455,43 +455,7 @@ pub struct PdBuilder<'mcx> {
     stage_g: Vec<u32>,
     stage_v: Vec<i64>,
     stage_touch: Vec<u32>,
-    /// inc-3 (gbyp): group-partitioned PASS-THROUGH runs — when the
-    /// miss-adaptive sampler observes the near-unique class, staged flushes
-    /// append (g, v) to these 256 buckets (keyed by the freeze partition
-    /// law's `hashes[g] >> 56`) instead of probing the per-group sets;
-    /// dedup happens at the combine's bucket claim (design interim in
-    /// notes/batch-insert-lane.md, inc-3). Armed only on top of `stage_on`
-    /// (`pt_allowed`); `pt_mode` is the sampler state.
-    pt_allowed: bool,
-    pt_mode: PtMode,
-    /// Insert mode: consecutive qualifying windows toward engagement.
-    /// PassThrough mode: windows since the last probe window.
-    pt_streak: u32,
-    pt_runs: Vec<(Vec<u32>, Vec<i64>)>,
-    pt_run_rows: usize,
-    /// Ever engaged (seal-time trace visibility).
-    pt_engaged_ever: bool,
 }
-
-/// inc-3 sampler state (hysteresis spec in the design interim).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum PtMode {
-    /// Normal staged inserts; every flush measures miss_frac.
-    Insert,
-    /// Pass-through engaged; every PT_PROBE_EVERY-th window re-measures.
-    PassThrough,
-}
-
-/// inc-3 sampler constants: engage after PT_WARMUP consecutive windows
-/// with news >= PT_HI_PCT% of the window; while engaged, every
-/// PT_PROBE_EVERY-th window runs as a probe (normal inserts +
-/// measurement) and a result below PT_LO_PCT% reverts to Insert.
-const PT_WARMUP: u32 = 4;
-const PT_PROBE_EVERY: u32 = 64;
-const PT_HI_PCT: usize = 98;
-const PT_LO_PCT: usize = 90;
-/// Accounted bytes per run entry (u32 group + i64 value).
-const PT_ENTRY_BYTES: usize = 12;
 
 impl<'mcx> PdBuilder<'mcx> {
     pub fn new(spec: Arc<PdSpec>, budget: usize, mcx: Option<Mcx<'mcx>>) -> Self {
@@ -519,33 +483,7 @@ impl<'mcx> PdBuilder<'mcx> {
             stage_g: Vec::new(),
             stage_v: Vec::new(),
             stage_touch: Vec::new(),
-            pt_allowed: false,
-            pt_mode: PtMode::Insert,
-            pt_streak: 0,
-            pt_runs: Vec::new(),
-            pt_run_rows: 0,
-            pt_engaged_ever: false,
         }
-    }
-
-    /// Arm the inc-3 pass-through schedule on top of the staged one
-    /// (requires `set_batch_insert(true)` admission; no-op otherwise).
-    pub fn set_passthrough(&mut self, on: bool) {
-        self.pt_allowed = on && self.stage_on;
-    }
-
-    /// Test hook: force the sampler state (parity oracles).
-    #[cfg(test)]
-    fn force_passthrough(&mut self) {
-        assert!(self.pt_allowed, "force_passthrough without admission");
-        self.pt_mode = PtMode::PassThrough;
-        self.pt_engaged_ever = true;
-        self.pt_streak = 1; // off the probe-window phase
-    }
-
-    /// Whether pass-through ever engaged (seal-time trace visibility).
-    pub fn passthrough_engaged(&self) -> bool {
-        self.pt_engaged_ever
     }
 
     /// Arm the staged batch-insert schedule (fail-closed shape admission:
@@ -584,16 +522,6 @@ impl<'mcx> PdBuilder<'mcx> {
             // Window-grain crossing check (the plain drive's
             // one-batch-overshoot contract).
             if self.mem() > self.budget.max(self.evict_floor) {
-                // inc-3 pressure-law composition: fold pass-through runs
-                // back into the sets FIRST, so eviction/spill/Crossed see
-                // exactly the per-row-schedule state (spill records never
-                // carry runs). Dedup-heavy runs shrink mem (re-check may
-                // clear the crossing); unique-heavy ones grow it and the
-                // existing law escalates as usual.
-                self.fold_runs_into_sets();
-                if self.mem() <= self.budget.max(self.evict_floor) {
-                    return Ok(PdFeed::Ok);
-                }
                 if self.mcx.is_some() {
                     self.evict_sets()?;
                     return Ok(PdFeed::Ok);
@@ -613,60 +541,9 @@ impl<'mcx> PdBuilder<'mcx> {
         if n == 0 {
             return;
         }
-        if !self.pt_allowed {
-            self.flush_insert(false);
-            return;
-        }
-        // inc-3 sampler routing (design interim's hysteresis spec).
-        match self.pt_mode {
-            PtMode::PassThrough => {
-                self.pt_streak = self.pt_streak.wrapping_add(1);
-                if self.pt_streak % PT_PROBE_EVERY != 0 {
-                    self.flush_to_runs();
-                    return;
-                }
-                // Probe window: normal inserts + measurement.
-                let news = self.flush_insert(true);
-                if news * 100 < n * PT_LO_PCT {
-                    self.pt_mode = PtMode::Insert;
-                    self.pt_streak = 0;
-                }
-            }
-            PtMode::Insert => {
-                let news = self.flush_insert(true);
-                if news * 100 >= n * PT_HI_PCT {
-                    self.pt_streak += 1;
-                } else {
-                    self.pt_streak = 0;
-                }
-                if self.pt_streak >= PT_WARMUP {
-                    self.pt_mode = PtMode::PassThrough;
-                    self.pt_engaged_ever = true;
-                    self.pt_streak = 1; // phase off the probe-window modulus
-                }
-            }
-        }
-    }
-
-    /// The staged insert pass (batched kernel + delta accounting). When
-    /// `measure`, also returns how many staged values were NEW (the inc-3
-    /// sampler's miss figure) via touched-group len deltas.
-    fn flush_insert(&mut self, measure: bool) -> usize {
-        let n = self.stage_v.len();
         const LH_HDR: usize = 16;
         const LH_CELL: usize = 8;
         debug_assert_eq!(self.spec.sets.len(), 1);
-        // Touched groups first (accounting + the measured before-pass).
-        self.stage_touch.clear();
-        self.stage_touch.extend_from_slice(&self.stage_g);
-        self.stage_touch.sort_unstable();
-        self.stage_touch.dedup();
-        let mut before = 0usize;
-        if measure {
-            for &g in &self.stage_touch {
-                before += self.dsets[g as usize].len();
-            }
-        }
         for i in 0..n {
             // SAFETY: staged group ids index dsets (created at accept);
             // look-ahead indices bounds-checked; prefetches are hints.
@@ -687,73 +564,19 @@ impl<'mcx> PdBuilder<'mcx> {
             }
         }
         // Touched-group set-memory delta accounting (nsets == 1: set index
-        // == group index) + the measured after-pass.
-        let mut after = 0usize;
+        // == group index).
+        self.stage_touch.clear();
+        self.stage_touch.extend_from_slice(&self.stage_g);
+        self.stage_touch.sort_unstable();
+        self.stage_touch.dedup();
         for &g in &self.stage_touch {
             let g = g as usize;
-            if measure {
-                after += self.dsets[g].len();
-            }
             let m = self.dsets[g].mem_bytes();
             self.total_set_mem = self.total_set_mem + m - self.set_mem[g];
             self.set_mem[g] = m;
         }
         self.stage_g.clear();
         self.stage_v.clear();
-        after - before
-    }
-
-    /// inc-3 pass-through flush: append the staged window to the 256
-    /// group-hash run buckets (freeze partition law's `hashes[g] >> 56`) —
-    /// no set probes; dedup happens at the combine's bucket claim.
-    fn flush_to_runs(&mut self) {
-        let n = self.stage_v.len();
-        if self.pt_runs.is_empty() {
-            self.pt_runs = (0..PD_GROUP_PARTS).map(|_| (Vec::new(), Vec::new())).collect();
-        }
-        for i in 0..n {
-            // SAFETY: staged group ids index hashes (created at accept);
-            // bucket < 256 by construction.
-            unsafe {
-                let g = *self.stage_g.get_unchecked(i);
-                let b = (*self.hashes.get_unchecked(g as usize) >> 56) as usize;
-                let (rg, rv) = self.pt_runs.get_unchecked_mut(b);
-                rg.push(g);
-                rv.push(*self.stage_v.get_unchecked(i));
-            }
-        }
-        self.pt_run_rows += n;
-        self.stage_g.clear();
-        self.stage_v.clear();
-    }
-
-    /// inc-3 pressure-law composition: fold every run entry back into the
-    /// per-group sets (bounded, crossing-path only), reset the sampler,
-    /// and re-account set memory — after this the builder is in EXACTLY a
-    /// per-row-schedule state, so the existing eviction/spill/Crossed law
-    /// runs verbatim and spill_emit never sees runs.
-    #[cold]
-    #[inline(never)]
-    fn fold_runs_into_sets(&mut self) {
-        if self.pt_run_rows == 0 {
-            return;
-        }
-        for b in 0..self.pt_runs.len() {
-            let (rg, rv) = core::mem::take(&mut self.pt_runs[b]);
-            for (&g, &v) in rg.iter().zip(rv.iter()) {
-                self.dsets[g as usize].insert_i64(v);
-            }
-        }
-        self.pt_run_rows = 0;
-        self.pt_mode = PtMode::Insert;
-        self.pt_streak = 0;
-        // Full set-memory re-account (crossing path — rare; nsets == 1).
-        self.total_set_mem = 0;
-        for g in 0..self.dsets.len() {
-            let m = self.dsets[g].mem_bytes();
-            self.set_mem[g] = m;
-            self.total_set_mem += m;
-        }
     }
 
     #[inline]
@@ -765,13 +588,8 @@ impl<'mcx> PdBuilder<'mcx> {
     fn mem(&self) -> usize {
         // The key arena is GROUP IDENTITY (like base_mem): it never spills
         // and never resets, so a crossing it drives is group-table-dominated
-        // for the spill worthwhileness gate — exactly right. inc-3 run
-        // entries count too (pressure law: pass-through retention is
-        // budgeted like set retention; a crossing folds them back first).
-        self.base_mem
-            + self.total_set_mem
-            + self.key_arena.capacity()
-            + self.pt_run_rows * PT_ENTRY_BYTES
+        // for the spill worthwhileness gate — exactly right.
+        self.base_mem + self.total_set_mem + self.key_arena.capacity()
     }
 
     pub fn mem_bytes(&self) -> usize {
@@ -1143,11 +961,6 @@ impl<'mcx> PdBuilder<'mcx> {
         let nkeys = spec.nkeys();
         let nvocab = spec.vocab.len();
         let nsets = spec.sets.len();
-        // inc-3 (defensive — run-carrying tables flow through the runtime
-        // sink's bucket combine, not this serial merge): local->dst map
-        // for a run replay after the group walk.
-        let mut gmap: Vec<u32> =
-            if t.run_starts.is_empty() { Vec::new() } else { Vec::with_capacity(t.ngroups) };
         for g in 0..t.ngroups {
             let words = &t.keys[g * nkeys..(g + 1) * nkeys];
             let nulls = t.keynulls[g];
@@ -1179,26 +992,6 @@ impl<'mcx> PdBuilder<'mcx> {
             }
             self.total_set_mem = self.total_set_mem + sets_mem - self.set_mem[dst];
             self.set_mem[dst] = sets_mem;
-            if self.mem() > self.budget.max(self.evict_floor) && self.mcx.is_some() {
-                self.evict_sets()?;
-            }
-            if !t.run_starts.is_empty() {
-                gmap.push(dst as u32);
-            }
-        }
-        // inc-3 (defensive): replay the table's runs through the map.
-        if !t.run_starts.is_empty() {
-            debug_assert_eq!(nsets, 1, "runs are produced by 1-set admission only");
-            for b in 0..PD_GROUP_PARTS {
-                let (rg, rv) = t.run_slice(b);
-                for (&g, &v) in rg.iter().zip(rv.iter()) {
-                    let dst = gmap[g as usize] as usize;
-                    self.dsets[dst].insert_i64(v);
-                    let m = self.dsets[dst].mem_bytes();
-                    self.total_set_mem = self.total_set_mem + m - self.set_mem[dst];
-                    self.set_mem[dst] = m;
-                }
-            }
             if self.mem() > self.budget.max(self.evict_floor) && self.mcx.is_some() {
                 self.evict_sets()?;
             }
@@ -1313,22 +1106,6 @@ impl<'mcx> PdBuilder<'mcx> {
         } else {
             None
         };
-        // inc-3: pack the pass-through runs bucket-ordered (freeze
-        // partition law alignment — combine claim b replays slice b).
-        let (run_g, run_v, run_starts) = if self.pt_run_rows != 0 {
-            let mut rg: Vec<u32> = Vec::with_capacity(self.pt_run_rows);
-            let mut rv: Vec<i64> = Vec::with_capacity(self.pt_run_rows);
-            let mut starts: Vec<u32> = Vec::with_capacity(PD_GROUP_PARTS + 1);
-            starts.push(0);
-            for (bg, bv) in &self.pt_runs {
-                rg.extend_from_slice(bg);
-                rv.extend_from_slice(bv);
-                starts.push(rg.len() as u32);
-            }
-            (rg, rv, starts)
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
         Ok(PdHandedTable {
             ngroups: n,
             keys: core::mem::take(&mut self.keys),
@@ -1344,9 +1121,6 @@ impl<'mcx> PdBuilder<'mcx> {
             set_null,
             elem_parts,
             parts,
-            run_g,
-            run_v,
-            run_starts,
         })
     }
 
@@ -1410,15 +1184,6 @@ pub struct PdHandedTable {
     /// set_ints/set_spans (laid consecutively per set).
     elem_parts: Vec<u32>,
     parts: Option<PdPartition>,
-    /// inc-3 pass-through runs, bucket-ordered by the freeze partition
-    /// law's group-hash top-8 bits: entry i is (local group `run_g[i]`,
-    /// value `run_v[i]`); bucket b spans `run_starts[b]..run_starts[b+1]`.
-    /// Empty on every non-pass-through table (incl. spill-synthesized
-    /// ones) — the combine's bucket claim replays them into the merged
-    /// per-group sets (dedup at combine; design interim inc-3).
-    run_g: Vec<u32>,
-    run_v: Vec<i64>,
-    run_starts: Vec<u32>,
 }
 
 impl PdHandedTable {
@@ -1446,18 +1211,6 @@ impl PdHandedTable {
             + self.set_blob.len()
             + self.set_spans.len() * core::mem::size_of::<PdSpan>()
             + self.set_null.len()
-            + self.run_g.len() * PT_ENTRY_BYTES
-    }
-
-    /// inc-3: bucket `b`'s pass-through run slice (empty when the table
-    /// carries no runs — every non-pass-through producer).
-    #[inline]
-    fn run_slice(&self, b: usize) -> (&[u32], &[i64]) {
-        if self.run_starts.is_empty() {
-            return (&[], &[]);
-        }
-        let (s, e) = (self.run_starts[b] as usize, self.run_starts[b + 1] as usize);
-        (&self.run_g[s..e], &self.run_v[s..e])
     }
 }
 
@@ -1607,15 +1360,6 @@ impl<'s> PdBucketMerger<'s> {
         let nsets = self.spec.sets.len();
         let has_bytes = self.spec.has_bytes_keys();
         let key_kinds = &self.spec.key_kinds;
-        // inc-3: local-group -> output-group map for the run replay
-        // (populated by the group walk below; a run entry's group is
-        // always in the same table's bucket b — groups are created at
-        // accept before any run activity).
-        let mut gmap: Vec<(u32, u32)> = Vec::new();
-        let has_runs = !t.run_starts.is_empty() && {
-            let (rg, _) = t.run_slice(b);
-            !rg.is_empty()
-        };
         let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
@@ -1718,24 +1462,6 @@ impl<'s> PdBucketMerger<'s> {
                 if t.set_null[si] {
                     dset.seen_null = true;
                 }
-            }
-            if has_runs {
-                gmap.push((g as u32, dst as u32));
-            }
-        }
-        // inc-3: replay this table's pass-through run slice into the SAME
-        // persistent per-group merged sets (dedup here — the -7ab7 gbyp
-        // shape; the bucket's live working set is ~ngroups/256 sets).
-        if has_runs {
-            debug_assert_eq!(nsets, 1, "runs are produced by 1-set admission only");
-            gmap.sort_unstable();
-            let (rg, rv) = t.run_slice(b);
-            for (&g, &v) in rg.iter().zip(rv.iter()) {
-                let i = gmap
-                    .binary_search_by_key(&g, |&(lg, _)| lg)
-                    .expect("run group exists in its own bucket");
-                let dst = gmap[i].1 as usize;
-                out.dsets[dst].as_mut().unwrap().insert_i64(v);
             }
         }
     }
@@ -2042,24 +1768,11 @@ pub fn pd_batch_insert_enabled() -> bool {
     })
 }
 
-/// inc-3 kill switch: `PGRUST_RUNTIME_DISTINCT_PASSTHROUGH=0` disables the
-/// miss-adaptive group-partitioned pass-through (default ON; requires the
-/// staged schedule and its shape admission).
-pub fn pd_passthrough_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_DISTINCT_PASSTHROUGH").map_or(true, |v| v != "0")
-    })
-}
-
 impl PdSinkLocal {
     pub fn new(spec: Arc<PdSpec>, budget: usize) -> PdSinkLocal {
         let mut builder = PdBuilder::new(spec, budget, None);
         if pd_batch_insert_enabled() {
             builder.set_batch_insert(true);
-            if pd_passthrough_enabled() {
-                builder.set_passthrough(true);
-            }
         }
         PdSinkLocal { builder }
     }
@@ -2067,11 +1780,6 @@ impl PdSinkLocal {
     /// Whether the staged batch-insert schedule is armed (trace visibility).
     pub fn batch_insert_armed(&self) -> bool {
         self.builder.batch_insert_armed()
-    }
-
-    /// Whether inc-3 pass-through ever engaged (seal-time trace).
-    pub fn passthrough_engaged(&self) -> bool {
-        self.builder.passthrough_engaged()
     }
 
     /// Feed one row (the worker accept). `PdFeed::Crossed` = the worker
@@ -2962,11 +2670,8 @@ impl PdBuilder<'_> {
     fn spill_emit(&self, emit: &mut dyn FnMut(u32, &[u8]) -> PgResult<()>) -> PgResult<()> {
         debug_assert!(self.spill_eligible());
         // batch-insert lane: spill epochs fire only from a post-flush
-        // crossing, so the staged window is empty here by construction —
-        // and inc-3 runs were folded back before the crossing escalated
-        // (the canon spill record never carries runs).
+        // crossing, so the staged window is empty here by construction.
         debug_assert!(self.stage_v.is_empty(), "spill_emit with a staged window");
-        debug_assert!(self.pt_run_rows == 0, "spill_emit with pass-through runs");
         let nkeys = self.spec.nkeys();
         let nsets = self.spec.sets.len();
         let n = self.ngroups();
@@ -3441,182 +3146,6 @@ mod tests {
             .collect();
         rows.sort();
         rows
-    }
-
-    fn one_set_spec() -> Arc<PdSpec> {
-        Arc::new(PdSpec {
-            key_atts: vec![0],
-            key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
-            vocab: vec![],
-            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
-            max_att: 2,
-            worker_budget: usize::MAX,
-        })
-    }
-
-    /// Drive one (group-key, value) row through the staged path (the
-    /// accept kernel minus the slot plumbing): probe/create + stage_push.
-    fn stage_row(b: &mut PdBuilder<'static>, key: i64, v: Option<i64>) -> PdFeed {
-        let k = [key];
-        let h = key_hash(&k, 0);
-        let (found, slot) = b.probe(&k, 0, h, &KeySrc::None);
-        let g = match found {
-            Some(g) => g,
-            None => b.create_group(&k, 0, h, slot, &KeySrc::None),
-        } as usize;
-        b.stage_push(g, v).unwrap()
-    }
-
-    /// inc-3 oracle: pass-through (forced) and per-row schedules produce
-    /// EQUAL merged results — groups, states, set contents, null faces —
-    /// across multiple workers with duplicates (intra- and cross-worker)
-    /// and NULLs, on every bucket.
-    #[test]
-    fn passthrough_merged_equivalence() {
-        let spec = one_set_spec();
-        let rows = 4 * PD_STAGE_BATCH + 331;
-        let build = |salt: i64, pt: bool| -> PdHandedTable {
-            let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-            b.set_batch_insert(true);
-            b.set_passthrough(pt);
-            if pt {
-                b.force_passthrough();
-            }
-            for i in 0..rows as i64 {
-                let key = (i * 13 + salt) % 401; // ~401 groups
-                // Near-unique values with planted dups + NULL face.
-                let v = if i % 89 == 0 {
-                    Some(7) // heavy cross-worker duplicate
-                } else if i % 61 == 0 {
-                    None
-                } else {
-                    Some(i * 104729 + salt * 31 + 1)
-                };
-                assert!(matches!(stage_row(&mut b, key, v), PdFeed::Ok));
-            }
-            b.freeze().unwrap()
-        };
-        let reference: Vec<PdHandedTable> = vec![build(0, false), build(5, false)];
-        let pt_tables: Vec<PdHandedTable> = vec![build(0, true), build(5, true)];
-        assert!(pt_tables.iter().any(|t| !t.run_starts.is_empty()), "runs were produced");
-        let m_ref = pd_concat_buckets(
-            &spec,
-            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &reference, b)).collect(),
-        );
-        let m_pt = pd_concat_buckets(
-            &spec,
-            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &pt_tables, b)).collect(),
-        );
-        assert_eq!(canon(&spec, &m_ref), canon(&spec, &m_pt));
-        // Defensive serial-merge face: merge_handed over run-carrying
-        // tables equals the reference too.
-        let mut serial = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-        for t in &pt_tables {
-            serial.merge_handed(t).unwrap();
-        }
-        let m_serial = serial.into_merged();
-        let mut c_serial = canon(&spec, &m_serial);
-        let mut c_ref = canon(&spec, &m_ref);
-        c_serial.sort();
-        c_ref.sort();
-        assert_eq!(c_ref, c_serial);
-    }
-
-    /// inc-3 pressure-law composition: a budget crossing with runs present
-    /// folds them back into the sets BEFORE escalating — Crossed is
-    /// reported with zero retained runs, and the frozen table carries none.
-    #[test]
-    fn passthrough_crossing_folds_runs() {
-        let spec = one_set_spec();
-        let mut b = PdBuilder::new(Arc::clone(&spec), 16384, None);
-        b.set_batch_insert(true);
-        b.set_passthrough(true);
-        b.force_passthrough();
-        let mut crossed = false;
-        for i in 0..(64 * PD_STAGE_BATCH) as i64 {
-            if matches!(stage_row(&mut b, i % 11, Some(i * 31 + 1)), PdFeed::Crossed) {
-                crossed = true;
-                break;
-            }
-        }
-        assert!(crossed, "tiny budget must cross");
-        assert_eq!(b.pt_run_rows, 0, "runs folded before Crossed");
-        assert_eq!(b.pt_mode, PtMode::Insert, "sampler reset on fold");
-        let t = b.freeze().unwrap();
-        assert!(t.run_starts.is_empty(), "no runs on the frozen table");
-    }
-
-    /// inc-3 sampler: near-unique engages after warmup; dup-heavy never
-    /// engages; dup-heavy AFTER engagement reverts at the probe window.
-    #[test]
-    fn passthrough_sampler_hysteresis() {
-        let spec = one_set_spec();
-        // (a) near-unique: engages.
-        let mut a = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-        a.set_batch_insert(true);
-        a.set_passthrough(true);
-        for i in 0..(8 * PD_STAGE_BATCH) as i64 {
-            stage_row(&mut a, i % 7, Some(i * 104729 + 1));
-        }
-        assert!(a.passthrough_engaged(), "near-unique engages");
-        assert!(a.pt_run_rows > 0, "runs accumulate after engagement");
-        // (b) dup-heavy (100 distinct values): never engages.
-        let mut d = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-        d.set_batch_insert(true);
-        d.set_passthrough(true);
-        for i in 0..(16 * PD_STAGE_BATCH) as i64 {
-            stage_row(&mut d, i % 7, Some(i % 100));
-        }
-        assert!(!d.passthrough_engaged(), "dup-heavy never engages");
-        assert_eq!(d.pt_run_rows, 0);
-        // (c) engage on unique, then a dup-heavy phase reverts at the probe
-        // window and run growth STOPS (bounded by the probe cadence).
-        let mut c = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-        c.set_batch_insert(true);
-        c.set_passthrough(true);
-        let mut i = 0i64;
-        for _ in 0..(8 * PD_STAGE_BATCH) {
-            stage_row(&mut c, i % 7, Some(i * 104729 + 1));
-            i += 1;
-        }
-        assert!(c.passthrough_engaged());
-        // Dup phase: run growth must stop within PT_PROBE_EVERY windows.
-        for _ in 0..((PT_PROBE_EVERY as usize + 2) * PD_STAGE_BATCH) {
-            stage_row(&mut c, i % 7, Some(i % 100));
-            i += 1;
-        }
-        let runs_at_revert = c.pt_run_rows;
-        assert_eq!(c.pt_mode, PtMode::Insert, "probe window reverts on dups");
-        for _ in 0..(4 * PD_STAGE_BATCH) {
-            stage_row(&mut c, i % 7, Some(i % 100));
-            i += 1;
-        }
-        assert_eq!(c.pt_run_rows, runs_at_revert, "no run growth after revert");
-        // The final merged result still equals a per-row reference over the
-        // same stream (adaptive schedule is content-invariant).
-        let total = i;
-        let mut r = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
-        r.set_batch_insert(true); // staged non-pt reference (inc-2 oracle)
-        let mut j = 0i64;
-        for _ in 0..(8 * PD_STAGE_BATCH) {
-            stage_row(&mut r, j % 7, Some(j * 104729 + 1));
-            j += 1;
-        }
-        while j < total {
-            stage_row(&mut r, j % 7, Some(j % 100));
-            j += 1;
-        }
-        let tc = vec![c.freeze().unwrap()];
-        let tr = vec![r.freeze().unwrap()];
-        let mc = pd_concat_buckets(
-            &spec,
-            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tc, b)).collect(),
-        );
-        let mr = pd_concat_buckets(
-            &spec,
-            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &tr, b)).collect(),
-        );
-        assert_eq!(canon(&spec, &mr), canon(&spec, &mc));
     }
 
     /// batch-insert lane: the staged (deferred, look-ahead-prefetched)
