@@ -454,6 +454,21 @@ pub struct CbScanDescData<'mcx> {
     // advise regardless of the env (arm A serial-vs-CH-mt1 stays
     // prefetch-free per Michael's standing directive).
     readahead: bool,
+    // Claim-drive readahead depth (cold-readahead lane): on a NEW row group
+    // entered through `set_granule_range` (a runtime morsel claim), advise
+    // the claimed RG's own needed-column extents plus this many RGs ahead.
+    // 0 = hook off. Gated by `readahead` (the global kill switch) at every
+    // use. Bounded by construction: at most (1 + depth) madvise spans per
+    // RG switch, no queue, no allocation — the advised bytes are exactly
+    // what the scan is about to read anyway.
+    ra_claims: usize,
+    // Serial physical-order drive readahead — OPT-IN, DEFAULT OFF
+    // (PGRUST_CBSTORE_READAHEAD_SERIAL=1). Michael's standing directive
+    // keeps arm A (serial-vs-CH-mt1) structurally prefetch-free; this knob
+    // exists so the cold-readahead lane can measure the serial cold
+    // first-touch term on explicit A/B arms. Flipping the default is an
+    // escalation with those numbers, never a lane decision.
+    ra_serial: bool,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
     // Subset of granules_pruned attributed to a bloom rejection (the granule
@@ -468,6 +483,10 @@ pub struct CbScanDescData<'mcx> {
     // Row groups whose chunk extents were advised (claim-time readahead).
     // Test/observability channel: a serial scan must always read 0 here.
     pub rgs_readahead: u64,
+    // Row groups advised by the CLAIM-DRIVE / serial hooks (cold-readahead
+    // lane) — separate from `rgs_readahead` so the legacy serial guard
+    // (readahead_scope.rs: serial physical drive reads 0) stays exact.
+    pub rgs_claim_readahead: u64,
     // Granules answered wholesale from footer metadata (never decoded):
     // the sorted-fold v7 length-stats arm plus the plain-fold footer-stat
     // arm (agg_meta_peek — whole-RG consumes count the RG's granules).
@@ -506,6 +525,29 @@ fn env_readahead_on() -> bool {
     !matches!(
         std::env::var("PGRUST_CBSTORE_READAHEAD").as_deref(),
         Ok("0") | Ok("off") | Ok("OFF"),
+    )
+}
+
+// Claim-drive readahead depth: RGs advised AHEAD of a claimed row group
+// (own RG always advised when the hook is on). Default 1. "0"/"off"
+// disables the claim-drive hook; the global PGRUST_CBSTORE_READAHEAD=0
+// kill switch disables every advise. Read at scan construction (same
+// contract as env_readahead_on — tests set/unset around construction).
+fn env_readahead_claims() -> usize {
+    match std::env::var("PGRUST_CBSTORE_READAHEAD_CLAIMS").as_deref() {
+        Ok("off") | Ok("OFF") => 0,
+        Ok(s) => s.trim().parse::<usize>().map_or(1, |n| n.min(8)),
+        Err(_) => 1,
+    }
+}
+
+// Serial physical-order drive readahead — OPT-IN, DEFAULT OFF. See the
+// ra_serial field note (Michael's standing arm-A directive; the cold-
+// readahead lane's A/B knob).
+fn env_readahead_serial() -> bool {
+    matches!(
+        std::env::var("PGRUST_CBSTORE_READAHEAD_SERIAL").as_deref(),
+        Ok("1") | Ok("on") | Ok("ON"),
     )
 }
 
@@ -601,6 +643,8 @@ impl<'mcx> CbScanDescData<'mcx> {
             adaptive: None,
             cond: None,
             readahead: env_readahead_on(),
+            ra_claims: env_readahead_claims(),
+            ra_serial: env_readahead_serial(),
             granules_pruned: 0,
             granules_bloom_pruned: 0,
             granules_scanned: 0,
@@ -609,6 +653,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             granules_bound_skipped: 0,
             adaptive_probe_reverts: 0,
             rgs_readahead: 0,
+            rgs_claim_readahead: 0,
             granules_meta: 0,
             rg_switches: 0,
             dict_builds: 0,
@@ -718,6 +763,18 @@ impl<'mcx> CbScanDescData<'mcx> {
         // successive claims land in the same row group; everything at
         // granule grain resets per claim.
         if !(self.rg_claimed && self.rg == rg) {
+            // Claim-drive readahead (cold-readahead lane): the runtime
+            // morsel drive's analog of claim_next_rg's parallel-arm advise
+            // (this entry point is the pool workers' claim funnel — the
+            // runtime crate's own doc names the missing readahead as the
+            // M1 gap). Advise own RG + ra_claims ahead on the RG switch
+            // only (whole-boundary claims make that once per RG; coalesced
+            // multi-epoch claims advance rg per segment and re-advise the
+            // remainder ahead). PGRUST_CBSTORE_READAHEAD=0 kills it;
+            // PGRUST_CBSTORE_READAHEAD_CLAIMS=off disables just this hook.
+            if self.readahead && self.ra_claims > 0 {
+                self.advise_claim_window(rg);
+            }
             self.rg = rg;
             self.rg_checked = false;
             self.rg_switches += 1;
@@ -837,6 +894,15 @@ impl<'mcx> CbScanDescData<'mcx> {
             None => {
                 let r = self.serial_next;
                 self.serial_next += 1;
+                // Serial readahead — OPT-IN, DEFAULT OFF (ra_serial;
+                // PGRUST_CBSTORE_READAHEAD_SERIAL=1). The structural arm-A
+                // prohibition (Michael's standing directive) holds at the
+                // default: this branch is a no-op unless the knob is set,
+                // and it counts into rgs_claim_readahead, never
+                // rgs_readahead (the serial guard tests' channel).
+                if self.readahead && self.ra_serial {
+                    self.advise_claim_window(r);
+                }
                 r
             }
         }
@@ -847,12 +913,37 @@ impl<'mcx> CbScanDescData<'mcx> {
     // byte is touched (extents come from footer metadata), and RGs the scan
     // would prune wholesale (zone-refused) are skipped rather than fetched.
     fn advise_rg(&mut self, rg: usize) {
-        let Some(part) = self.part.as_ref() else { return };
-        if rg >= part.rgs.len() || self.needed_idx.is_empty() || !self.rg_zone_ok(rg) {
-            return;
-        }
-        if part.advise_willneed(rg, &self.needed_idx) {
+        if self.advise_rg_extents(rg) {
             self.rgs_readahead += 1;
+        }
+    }
+
+    // Claim-drive / serial-drive variant (cold-readahead lane): identical
+    // advise, separate counter — the legacy serial guard (readahead_scope
+    // tests) keeps its exact `rgs_readahead == 0` invariant.
+    fn advise_rg_claim(&mut self, rg: usize) {
+        if self.advise_rg_extents(rg) {
+            self.rgs_claim_readahead += 1;
+        }
+    }
+
+    fn advise_rg_extents(&mut self, rg: usize) -> bool {
+        let Some(part) = self.part.as_ref() else { return false };
+        if rg >= part.rgs.len() || self.needed_idx.is_empty() || !self.rg_zone_ok(rg) {
+            return false;
+        }
+        part.advise_willneed(rg, &self.needed_idx)
+    }
+
+    // Claim-schedule-driven readahead (cold-readahead lane): entering row
+    // group `rg` through a claim, advise its own needed-column extents
+    // (the kernel streams the RG body in behind the granule-by-granule
+    // decode — the cold first-touch overlap) plus `ra_claims` RGs ahead
+    // (cross-RG overlap at the claim tail). Zone-refused RGs are skipped
+    // by advise_rg_extents; out-of-range successors fall out of bounds.
+    fn advise_claim_window(&mut self, rg: usize) {
+        for r in rg..=rg.saturating_add(self.ra_claims) {
+            self.advise_rg_claim(r);
         }
     }
 

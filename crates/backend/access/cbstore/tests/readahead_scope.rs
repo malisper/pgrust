@@ -293,3 +293,106 @@ fn advise_extents_cover_every_rg_and_column_subset() {
     assert!(!part.advise_willneed(0, &[]));
     std::fs::remove_file(&path).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Claim-drive / serial readahead (cold-readahead lane): the runtime morsel
+// drive's set_granule_range hook and the OPT-IN serial knob, counted in
+// rgs_claim_readahead so the legacy serial guard above stays exact.
+// ---------------------------------------------------------------------------
+
+// Drive the scan claim-by-claim through set_granule_range (whole-RG claims,
+// the runtime drive's whole_boundary_claims shape); returns staged rows.
+fn drive_claims(scan: &mut CbScanDescData<'_>) -> usize {
+    let (_total, starts) = scan.granule_geometry().unwrap();
+    let mut staged = 0usize;
+    for w in starts.windows(2) {
+        scan.set_granule_range(w[0], w[1]).unwrap();
+        loop {
+            let n = scan.next_window().unwrap();
+            if n == 0 {
+                break;
+            }
+            staged += n as usize;
+        }
+    }
+    staged
+}
+
+#[test]
+fn claim_drive_advises_own_and_next_rg() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("claimdrive");
+    let part = open_part(&path);
+    let nrgs = part.rgs.len();
+    assert!(nrgs >= 3, "fixture must span row groups");
+    let ctx = MemoryContext::new("cbreadahead-claim");
+    let mcx = ctx.mcx();
+    // Defaults: readahead ON, claim depth 1, serial knob OFF.
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41014, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    // Per RG switch: own RG + 1 ahead, out-of-range successor of the last
+    // RG skipped => 2*(nrgs-1) + 1.
+    assert_eq!(scan.rgs_claim_readahead, (2 * (nrgs - 1) + 1) as u64);
+    assert_eq!(scan.rgs_readahead, 0, "legacy counter untouched by the claim drive");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn claim_drive_kill_switches() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("claimkill");
+    let part = open_part(&path);
+    let ctx = MemoryContext::new("cbreadahead-claimkill");
+    let mcx = ctx.mcx();
+    // Global kill switch silences the claim drive too.
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD", "0");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41015, None),
+        Some(part.clone()),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD");
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "PGRUST_CBSTORE_READAHEAD=0 must kill claim advises");
+    drop(scan);
+    // Hook-scoped switch: PGRUST_CBSTORE_READAHEAD_CLAIMS=off.
+    let ctx2 = MemoryContext::new("cbreadahead-claimoff");
+    let mcx2 = ctx2.mcx();
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD_CLAIMS", "off");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx2, 41016, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD_CLAIMS");
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "CLAIMS=off must disable the claim hook");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn serial_readahead_is_opt_in() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("serialoptin");
+    let part = open_part(&path);
+    let ctx = MemoryContext::new("cbreadahead-serialoptin");
+    let mcx = ctx.mcx();
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD_SERIAL", "1");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41017, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD_SERIAL");
+    assert_eq!(drive(&mut scan), n_rows);
+    assert!(scan.rgs_claim_readahead > 0, "opted-in serial drive must advise");
+    assert_eq!(
+        scan.rgs_readahead, 0,
+        "serial advises count into rgs_claim_readahead, never the legacy channel"
+    );
+    std::fs::remove_file(&path).unwrap();
+}

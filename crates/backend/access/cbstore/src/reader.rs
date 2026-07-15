@@ -155,6 +155,19 @@ fn footer_eager() -> bool {
     })
 }
 
+// Footer-section readahead gate (cold-readahead lane): shares the scan
+// readahead's kill switch — PGRUST_CBSTORE_READAHEAD=0/off disables the
+// pre-pread WILLNEED hints on the lazy footer path. Default ON.
+fn footer_readahead() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_READAHEAD").as_deref(),
+            Ok("0") | Ok("off") | Ok("OFF"),
+        )
+    })
+}
+
 // PGRUST_CBSTORE_FOOTER_DEBUG=1: one CBFOOTER| line per footer read to
 // stderr (bytes read vs body length, lazy/eager, wall us) — the read-path
 // lane's decomposition channel.
@@ -229,6 +242,17 @@ pub fn read_footer_rgs(
             (stitch_off, stitch_off + lay.stitch_len(nrgs, ncols, version)),
             (body_len - 16, body_len),
         ];
+        // Overlap the section preads (cold-readahead lane): hint every
+        // materialized range up front so the kernel fetches the later
+        // sections while the first (largest) pread drains. Advisory only;
+        // shares the scan readahead's kill switch.
+        if footer_readahead() {
+            for &(s, e) in &ranges {
+                if e > s {
+                    file.advise_willneed(footer_off + s as u64, (e - s) as u64);
+                }
+            }
+        }
         bytes_read = 0;
         for &(s, e) in &ranges {
             if e > s {
