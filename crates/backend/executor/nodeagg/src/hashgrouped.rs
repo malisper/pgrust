@@ -1523,7 +1523,7 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
             }
         }
         if fb[w] & bit != 0 {
-            return Err(HgSpanStop::NeedSlot { at: i, absorbed });
+            return HgSpanStop::NeedSlot { at: i, absorbed };
         }
         let ii = i as usize;
         let Some((words, nulls)) = hg_stage_batch_keys(hg, |j| {
@@ -1593,10 +1593,11 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
         }
         absorbed += 1;
         if hg.mem() > hg.budget {
-            return Err(HgSpanStop::Budget { at: i, absorbed });
+            return HgSpanStop::Budget { at: i, absorbed };
         }
         i += 1;
     }
+    HgSpanStop::Done { absorbed }
 }
 
 /// Number of staged fold cells a vocab consumes (arg-bearing entries only).
