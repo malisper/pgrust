@@ -134,6 +134,20 @@ fn sort_encoders(rt: &runtime::Runtime) -> usize {
     req.unwrap_or(dop(rt) as usize).clamp(1, 32)
 }
 
+/// load-r3 M2: column-sharded stitch pool threads
+/// (PGRUST_PARALLEL_COPY_STITCH_POOL=<n>, default 0 = inline stitch —
+/// measured 2026-07-15: inline stitch = 44.7 s intern on the ordered-commit
+/// path + 35.5 s rank/blob at finish, of the 165 s 100M parsort wall).
+fn stitch_pool_threads() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_STITCH_POOL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -1551,6 +1565,13 @@ pub(crate) fn copy_from_parallel<'mcx>(
         // Belt+braces: admission already refused cluster keys.
         return Ok(None);
     };
+    // load-r3 M2: column-sharded stitch pool (opt-in). AFTER the plan — the
+    // plan snapshots capture flags from the writer's live stitch builders.
+    let sp = stitch_pool_threads();
+    if sp > 0 {
+        writer.install_stitch_pool(sp)?;
+        ptrace(&format!("stitch pool requested threads={sp}"));
+    }
 
     let shared = Arc::new(ParCopyShared {
         rt,

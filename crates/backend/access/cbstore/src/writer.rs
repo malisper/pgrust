@@ -376,6 +376,95 @@ impl StitchCol {
         self.ids = HashMap::with_hasher(DictBuild::new());
         self.rg_maps = Vec::new();
     }
+
+    /// Finalize one column: byte-rank the interned ids and build the per-RG
+    /// local->global blob images (EXACTLY the bytes finish() writes). None =
+    /// the column writes no stitch (poisoned / empty), matching the inline
+    /// stanza's skip.
+    fn finalize(self) -> Option<(u64, Vec<Vec<u8>>)> {
+        if self.poisoned || self.ids.is_empty() {
+            return None;
+        }
+        let gndv = self.ids.len();
+        let mut by_bytes: Vec<(Box<[u8]>, u32)> = self.ids.into_iter().collect();
+        by_bytes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut rank = vec![0u32; gndv];
+        for (r, &(_, id)) in by_bytes.iter().enumerate() {
+            rank[id as usize] = r as u32;
+        }
+        let blobs = self
+            .rg_maps
+            .iter()
+            .map(|map| {
+                let mut blob: Vec<u8> = Vec::with_capacity(map.len() * 4);
+                for &gid in map {
+                    put_u32(&mut blob, rank[gid as usize]);
+                }
+                blob
+            })
+            .collect();
+        Some((gndv as u64, blobs))
+    }
+}
+
+// ---- load-r3 M2: column-sharded stitch pool (parallel COPY opt-in) ---------
+// The inline stitch pipeline costs ~80 s of the 165 s 100M parsort wall
+// (intern 44.7 s on the ordered-commit path + rank/blob 35.5 s at finish,
+// measured 2026-07-15). Both stages are per-COLUMN independent: interning
+// order only matters WITHIN a column (first-seen ids in RG order), and the
+// final blobs are byte-rank coded (internal ids never reach disk). The pool
+// shards live text columns across worker threads; each column is owned by
+// exactly one thread and fed over a FIFO channel in commit order, so its
+// intern order — and therefore every on-disk byte — is identical to the
+// inline path. Engaged only via CbWriter::install_stitch_pool (parallel COPY
+// driver, env opt-in); absent = inline code verbatim.
+enum StitchMsg {
+    Rg { col: usize, entries: Option<Vec<Box<[u8]>>> },
+}
+
+struct StitchPool {
+    txs: Vec<std::sync::mpsc::Sender<StitchMsg>>,
+    handles: Vec<std::thread::JoinHandle<Vec<(usize, u64, Vec<Vec<u8>>)>>>,
+    /// col -> owning thread index (None = int column / no stitch).
+    assign: Vec<Option<usize>>,
+}
+
+impl Drop for StitchPool {
+    fn drop(&mut self) {
+        // Abort path: close the channels and reap the threads (pure
+        // computation; they exit on channel close).
+        self.txs.clear();
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+fn stitch_pool_thread(owned: Vec<(usize, StitchCol)>, rx: std::sync::mpsc::Receiver<StitchMsg>) -> Vec<(usize, u64, Vec<Vec<u8>>)> {
+    let mut cols: HashMap<usize, StitchCol> = owned.into_iter().collect();
+    while let Ok(StitchMsg::Rg { col, entries }) = rx.recv() {
+        let Some(st) = cols.get_mut(&col) else { continue };
+        if st.poisoned {
+            continue;
+        }
+        match entries {
+            Some(entries) => {
+                let mut rg_map: Vec<u32> = Vec::with_capacity(entries.len());
+                for e in entries {
+                    let next = st.ids.len() as u32;
+                    rg_map.push(*st.ids.entry(e).or_insert(next));
+                }
+                st.rg_maps.push(rg_map);
+            }
+            None => st.poison(),
+        }
+    }
+    let mut out: Vec<(usize, u64, Vec<Vec<u8>>)> = cols
+        .into_iter()
+        .filter_map(|(c, st)| st.finalize().map(|(gndv, blobs)| (c, gndv, blobs)))
+        .collect();
+    out.sort_by_key(|x| x.0);
+    out
 }
 
 // ---- PGRUST_CBSTORE_FASTHASH (load-speed prototype, DEFAULT OFF) -----------
@@ -510,6 +599,10 @@ pub struct CbWriter {
     // NDV/sorted invalidation precedent) or when stitch writing is disabled.
     // Int columns hold None slots.
     stitch: Option<Vec<Option<StitchCol>>>,
+    // load-r3 M2: column-sharded stitch pool (install_stitch_pool). When
+    // present it REPLACES self.stitch for the ordered-commit path; None =
+    // inline interning verbatim.
+    stitch_pool: Option<StitchPool>,
     // load-r3 M0: commit_encoded_rg phase-wall accumulators (RG granularity,
     // negligible cost, always accumulated; the parallel COPY leader's trace
     // line reads them via commit_phase_split()).
@@ -659,6 +752,7 @@ fn open_writer_inner(
         sorter: None,
         draining_clustered: false,
         stitch: None,
+        stitch_pool: None,
         commit_stitch: std::time::Duration::ZERO,
         commit_pwrite: std::time::Duration::ZERO,
         commit_meta: std::time::Duration::ZERO,
@@ -889,32 +983,50 @@ impl CbWriter {
         let mut stitch_gndv = vec![0u64; self.ncols];
         let mut stitch_dir = vec![(0u64, 0u32); nrgs * self.ncols];
         let ft0 = std::time::Instant::now();
-        if let Some(cols) = self.stitch.take() {
-            for (c, st) in cols.into_iter().enumerate() {
-                let Some(st) = st else { continue };
-                if st.poisoned || st.ids.is_empty() || st.rg_maps.len() != nrgs {
-                    continue;
-                }
-                let gndv = st.ids.len();
-                let mut by_bytes: Vec<(Box<[u8]>, u32)> = st.ids.into_iter().collect();
-                by_bytes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                let mut rank = vec![0u32; gndv];
-                for (r, &(_, id)) in by_bytes.iter().enumerate() {
-                    rank[id as usize] = r as u32;
-                }
-                for (rg, map) in st.rg_maps.iter().enumerate() {
-                    let mut blob: Vec<u8> = Vec::with_capacity(map.len() * 4);
-                    for &gid in map {
-                        put_u32(&mut blob, rank[gid as usize]);
-                    }
-                    let off = align64(self.write_off);
-                    self.file.write_all_at(&blob, off)?;
-                    self.write_off = off + blob.len() as u64;
-                    self.finish_blob_bytes += blob.len() as u64;
-                    stitch_dir[rg * self.ncols + c] = (off, map.len() as u32);
-                }
-                stitch_gndv[c] = gndv as u64;
+        let finalized: Vec<(usize, u64, Vec<Vec<u8>>)> = if let Some(mut pool) =
+            self.stitch_pool.take()
+        {
+            // load-r3 M2: close the feed channels; the threads finalize
+            // their columns (byte-rank + blob images) in parallel.
+            pool.txs.clear();
+            let handles: Vec<_> = pool.handles.drain(..).collect();
+            drop(pool);
+            let mut results: Vec<(usize, u64, Vec<Vec<u8>>)> = Vec::new();
+            for h in handles {
+                let r = h.join().map_err(|_| {
+                    Box::new(PgError::error("stitch pool thread panicked".to_string()))
+                })?;
+                results.extend(r);
             }
+            // Column-ascending = the inline stanza's write order exactly.
+            results.sort_by_key(|x| x.0);
+            results
+        } else if let Some(cols) = self.stitch.take() {
+            cols.into_iter()
+                .enumerate()
+                .filter_map(|(c, st)| {
+                    let st = st?;
+                    if st.rg_maps.len() != nrgs {
+                        return None;
+                    }
+                    st.finalize().map(|(gndv, blobs)| (c, gndv, blobs))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (c, gndv, blobs) in finalized {
+            if blobs.len() != nrgs {
+                continue;
+            }
+            for (rg, blob) in blobs.iter().enumerate() {
+                let off = align64(self.write_off);
+                self.file.write_all_at(blob, off)?;
+                self.write_off = off + blob.len() as u64;
+                self.finish_blob_bytes += blob.len() as u64;
+                stitch_dir[rg * self.ncols + c] = (off, (blob.len() / 4) as u32);
+            }
+            stitch_gndv[c] = gndv;
         }
         let ft1 = std::time::Instant::now();
         self.finish_stitch += ft1 - ft0;
@@ -1430,6 +1542,52 @@ impl CbWriter {
         })
     }
 
+    /// load-r3 M2: shard the live stitch columns across `nthreads` worker
+    /// threads (see StitchPool). MUST be called AFTER parallel_ingest_plan
+    /// (the plan snapshots capture flags from self.stitch). No-op unless
+    /// this is a fresh part with live stitch builders and no committed RGs —
+    /// the fail-closed refusal leaves the inline path verbatim.
+    pub fn install_stitch_pool(&mut self, nthreads: usize) -> PgResult<()> {
+        if self.stitch_pool.is_some() || !self.rgs.is_empty() {
+            return Ok(());
+        }
+        let live = self
+            .stitch
+            .as_ref()
+            .map(|s| s.iter().filter(|c| c.is_some()).count())
+            .unwrap_or(0);
+        if live == 0 {
+            return Ok(());
+        }
+        let n = nthreads.clamp(1, 16).min(live);
+        let cols = self.stitch.take().expect("live > 0");
+        let mut assign: Vec<Option<usize>> = vec![None; self.ncols];
+        let mut per_thread: Vec<Vec<(usize, StitchCol)>> = (0..n).map(|_| Vec::new()).collect();
+        let mut next = 0usize;
+        for (c, st) in cols.into_iter().enumerate() {
+            if let Some(st) = st {
+                assign[c] = Some(next % n);
+                per_thread[next % n].push((c, st));
+                next += 1;
+            }
+        }
+        let mut txs = Vec::with_capacity(n);
+        let mut handles = Vec::with_capacity(n);
+        for owned in per_thread {
+            let (tx, rx) = std::sync::mpsc::channel::<StitchMsg>();
+            let h = std::thread::Builder::new()
+                .name("cb-stitch".into())
+                .spawn(move || stitch_pool_thread(owned, rx))
+                .map_err(|e| {
+                    Box::new(PgError::error(format!("stitch pool spawn failed: {e}")))
+                })?;
+            txs.push(tx);
+            handles.push(h);
+        }
+        self.stitch_pool = Some(StitchPool { txs, handles, assign });
+        Ok(())
+    }
+
     /// Ordered commit of one worker-encoded RG (input order — the caller's
     /// contract). Replays exactly what the serial seal path does: body write
     /// at align64(write_off), footer row, stitch interning in RG order, NDV
@@ -1440,7 +1598,21 @@ impl CbWriter {
         debug_assert!(self.sorter.is_none(), "ordered commit into a sorting writer");
         let mut sealed = enc.sealed;
         let t0 = std::time::Instant::now();
-        self.register_stitch(&mut sealed);
+        if let Some(pool) = &self.stitch_pool {
+            // Column-sharded interning: hand each captured dict to its
+            // owning thread (FIFO per column = RG order = identical ids).
+            for c in 0..self.ncols {
+                let Some(t) = pool.assign[c] else { continue };
+                let entries = sealed.dicts[c].take();
+                if pool.txs[t].send(StitchMsg::Rg { col: c, entries }).is_err() {
+                    return Err(Box::new(PgError::error(
+                        "stitch pool thread exited early".to_string(),
+                    )));
+                }
+            }
+        } else {
+            self.register_stitch(&mut sealed);
+        }
         let t1 = std::time::Instant::now();
         self.commit_stitch += t1 - t0;
         let file_off = align64(self.write_off);
@@ -3721,6 +3893,29 @@ mod parallel_ingest_tests {
         assert!(a == b, "parallel-committed part is not byte-identical to serial");
         std::fs::remove_file(&path_a).unwrap();
         std::fs::remove_file(&path_b).unwrap();
+
+        // load-r3 M2: the same commits through the column-sharded stitch
+        // pool (2 threads over 2 text columns) — bytes must equal serial.
+        let path_c = tmp("stitchpool");
+        let mut wc = open_writer_at(&path_c, COLS.to_vec()).unwrap();
+        let plan = std::sync::Arc::new(wc.parallel_ingest_plan().expect("no sorter"));
+        wc.install_stitch_pool(2).unwrap();
+        let mut i = 0;
+        while i < n {
+            let hi = (i + RG_ROWS).min(n);
+            let mut enc = RgChunkEncoder::new(std::sync::Arc::clone(&plan));
+            for j in i..hi {
+                let r = row(j);
+                let vals = datums(&r, &mut b1, &mut b2);
+                enc.append_row(&vals, &isnull).unwrap();
+            }
+            wc.commit_encoded_rg(enc.seal()).unwrap();
+            i = hi;
+        }
+        wc.finish_parallel_ingest().unwrap();
+        let c = std::fs::read(&path_c).unwrap();
+        assert!(c == a, "stitch-pool part is not byte-identical to serial");
+        std::fs::remove_file(&path_c).unwrap();
     }
 
     /// Same oracle under PGRUST_CBSTORE_FASTHASH semantics is covered by the
