@@ -483,6 +483,12 @@ impl DictEvalProg {
                     memo[c as usize] = None;
                 }
                 if memo.len() < ndict {
+                    // Domain-work tripwire: growth is domain-sized.
+                    let grow = ndict - memo.len();
+                    exectuples::domain_work_tick(
+                        grow * core::mem::size_of::<Option<NullableDatum>>(),
+                        grow,
+                    );
                     memo.resize(ndict, None);
                 }
                 #[cfg(debug_assertions)]
@@ -492,6 +498,13 @@ impl DictEvalProg {
                 );
             }
             OutForm::Value { memo } => {
+                // Domain-work tripwire: full-domain reset (eager progs and
+                // the kill-switch arm) — the exposure this lane closed for
+                // the lazy default.
+                exectuples::domain_work_tick(
+                    ndict * core::mem::size_of::<Option<NullableDatum>>(),
+                    ndict,
+                );
                 memo.clear();
                 memo.resize(ndict, None);
             }
@@ -671,6 +684,10 @@ fn prepare_views(
 // PgResult error here is a seam/representation surprise, not C's error).
 fn fill_eager(p: &mut DictEvalProg, lane: SoaDictLane) -> Result<(), ()> {
     // Whole-dict sweep: materialize a lazy sub-framed dict up front.
+    // Domain-work tripwire: the eager fill IS domain-sized by design
+    // (proof-carrying arm) — metered so its query-class exposure stays
+    // visible next to the touched counters.
+    exectuples::domain_work_tick(0, lane.table.ndict as usize);
     lane.table.ensure_all();
     for code in 0..lane.table.ndict as usize {
         // SAFETY: dict covers ndict entries (SoaDictLane contract).

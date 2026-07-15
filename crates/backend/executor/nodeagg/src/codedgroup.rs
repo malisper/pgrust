@@ -236,6 +236,10 @@ impl CodedGroupState<'_> {
             self.close_epoch();
             self.cur_epoch = Some(ident);
             if self.code_map.len() < map_size {
+                // Domain-work tripwire: the GROWTH is domain-sized (the
+                // first build in GLOBAL mode is the gndv-sized member).
+                let grow = map_size - self.code_map.len();
+                ::exectuples::domain_work_tick(grow * 4, grow);
                 self.code_map.resize(map_size, 0);
             }
         } else {
@@ -243,6 +247,9 @@ impl CodedGroupState<'_> {
             self.cur_epoch = Some(ident);
             self.code_map.clear();
             self.code_map.resize(map_size, 0);
+            // Domain-work tripwire: the kill-switch arm re-zeroes the
+            // whole domain per roll — the exposure this lane closed.
+            ::exectuples::domain_work_tick(map_size * 4, map_size);
         }
     }
 
