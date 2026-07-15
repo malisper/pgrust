@@ -69,9 +69,16 @@ pub fn footer_rows(rel: &::types_rel::Relation<'_>) -> PgResult<Option<u64>> {
 
 // Ingest-time per-column NDV from the part footer (v2 parts only); per-entry
 // 0 = unknown. ANALYZE prefers these over the sampled Duj1 estimate.
+// Served from the session part cache like footer_rows/footer_sorted: the
+// planner asks on EVERY plan of a cbstore rel (plancat footer-NDV group-key
+// estimation), and the standalone part_footer_ndv path re-read + re-parsed
+// the entire footer from disk per call (~2MB / ~1.3ms on the 100M bank —
+// the dominant term of the ~1.9ms per-query plan constant; fixed-overhead
+// audit 2026-07-14). Pre-v2 parts carry an empty ndv vec on Part — mapped
+// back to None to preserve part_footer_ndv's exact contract.
 pub fn footer_ndv(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<u64>>> {
-    let ncols = writer::coltypes_of(rel)?.len();
-    reader::part_footer_ndv(&rel_main_path(rel), ncols)
+    Ok(part_cache::cached_part(rel)?
+        .and_then(|p| if p.ndv.is_empty() { None } else { Some(p.ndv.clone()) }))
 }
 
 // v5 whole-part per-column sorted-asc flags for planner pathkey derivation;

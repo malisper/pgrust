@@ -367,6 +367,13 @@ pub struct Part {
     // v5 per-column sorted flags (1 = part rows non-decreasing); all-0 on
     // pre-v5 parts.
     pub sorted: Vec<u8>,
+    // Ingest-time per-column NDV from the footer (v2+; per-entry 0 =
+    // unknown). Empty on pre-v2 parts. Kept on the cached Part so the
+    // planner's footer-NDV consumer never re-reads the footer per plan
+    // (fixed-overhead audit 2026-07-14: the standalone part_footer_ndv
+    // path re-read + re-parsed the whole ~2MB 100M footer on EVERY
+    // planning of a cbstore rel — ~1.3ms of a ~1.9ms plan constant).
+    pub ndv: Vec<u64>,
     // v6 declared cluster key (zero-based column indexes, key order); empty
     // on pre-v6 parts or when none was declared. Per-RG sortedness under it
     // is RG_FLAG_CLUSTERED.
@@ -420,7 +427,7 @@ impl Part {
         if footer_off == 0 {
             return Ok(None);
         }
-        let (rgs, _footer_end, _ndv, sorted, cluster_key, lenflags, stitch) =
+        let (rgs, _footer_end, ndv, sorted, cluster_key, lenflags, stitch) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         let Some(map) = SegMap::open(path)? else { return Ok(None) };
@@ -495,6 +502,7 @@ impl Part {
             ncols,
             footer_off,
             sorted,
+            ndv,
             cluster_key,
             sums_off,
             lenstats_off,
