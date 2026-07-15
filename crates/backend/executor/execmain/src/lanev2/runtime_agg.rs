@@ -68,7 +68,7 @@ use ::types_nodes::NodeTag;
 
 use super::router::{self, ArmClass, ArmCounter};
 use super::stats::{self, RefuseReason, ShapeClass};
-use super::{lane_trace, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
+use super::{lane_trace, lane_trace_enabled, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
 
 // ---------------------------------------------------------------------------
 // The sink: ParallelSink impl + engagement-shared control state.
@@ -2550,10 +2550,36 @@ fn sink_drain_range<'mcx>(
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                        // RESIDUAL pressure after flush+spill = the
+                        // unspillable floor (q33's byref aggcontext class,
+                        // proportionality-audit). One counted line makes
+                        // every future envelope cliff self-diagnosing —
+                        // without it the refusal is silent and only shows
+                        // as a 10-15x serial-rerun wall.
+                        if lane_trace_enabled() {
+                            lane_trace(&format!(
+                                "runtime-agg: budget-refused (residual) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                                local.run_bytes,
+                                ::nodeagg::sink::agg_sink_table_mem(agg),
+                                ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                                sink.budget,
+                            ));
+                        }
                         return Err(AcceptFail::Budget);
                     }
                 }
-                None => return Err(AcceptFail::Budget),
+                None => {
+                    if lane_trace_enabled() {
+                        lane_trace(&format!(
+                            "runtime-agg: budget-refused (spill disarmed) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                            local.run_bytes,
+                            ::nodeagg::sink::agg_sink_table_mem(agg),
+                            ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                            sink.budget,
+                        ));
+                    }
+                    return Err(AcceptFail::Budget);
+                }
             }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
