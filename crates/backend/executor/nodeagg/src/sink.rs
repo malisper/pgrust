@@ -341,7 +341,9 @@ fn compact_canon_shape(ch: &crate::compact::CompactHash) -> Option<&MkShape> {
 /// everything; covers the per-row test/fallback insert paths). Word shapes
 /// return immediately.
 pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) {
-    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactHash {
+        table, key, intern, canon_hashes, canon_store, canon_offs, ..
+    } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else { return };
     if shape.intern_comp().is_none() {
         return;
@@ -355,15 +357,37 @@ pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) 
     let spk_t0 = crate::spankey::spankey_t0();
     let start = canon_hashes.len();
     let mut spk_bytes = 0u64;
-    let mut scratch: Vec<u8> = Vec::with_capacity(64);
-    canon_hashes.reserve(n - canon_hashes.len());
-    for row in canon_hashes.len()..n {
-        scratch.clear();
-        canon_row_bytes_append(table, shape, intern, row, &mut scratch);
-        if spk_t0.is_some() {
-            spk_bytes += scratch.len() as u64;
+    canon_hashes.reserve(n - start);
+    if crate::spankey::spankey_store_enabled() {
+        // STORE-ONCE (spankey step 2): the image this hash pass had to
+        // build anyway is KEPT — flush pass-1 and the combine remainder
+        // face read it verbatim instead of re-running word-unpack +
+        // intern-reverse-chase + tail assembly per consumer. Alignment:
+        // the switch is process-constant, so the store covers rows 0..n.
+        if canon_offs.is_empty() {
+            canon_offs.push(0);
         }
-        canon_hashes.push(sink_hash_bytes(&scratch));
+        debug_assert_eq!(canon_offs.len(), start + 1, "store aligned with hashes");
+        canon_offs.reserve(n - start);
+        for row in start..n {
+            let base = canon_store.len();
+            canon_row_bytes_append(table, shape, intern, row, canon_store);
+            canon_offs.push(canon_store.len() as u32);
+            if spk_t0.is_some() {
+                spk_bytes += (canon_store.len() - base) as u64;
+            }
+            canon_hashes.push(sink_hash_bytes(&canon_store[base..]));
+        }
+    } else {
+        let mut scratch: Vec<u8> = Vec::with_capacity(64);
+        for row in start..n {
+            scratch.clear();
+            canon_row_bytes_append(table, shape, intern, row, &mut scratch);
+            if spk_t0.is_some() {
+                spk_bytes += scratch.len() as u64;
+            }
+            canon_hashes.push(sink_hash_bytes(&scratch));
+        }
     }
     if spk_t0.is_some() {
         use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
@@ -479,7 +503,9 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // q13/q19 profiles put at ~14% of the engaged 16-thread query.
     compact_extend_canon_hashes(ch);
     let gid_gen = ch.intern_gen;
-    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactHash {
+        table, key, intern, canon_hashes, canon_store, canon_offs, ..
+    } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else {
         unreachable!("canonical flush requires a Multi shape")
     };
@@ -490,19 +516,36 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
     let mut byte_counts = [0usize; SINK_NBUCKETS];
-    let mut scratch: Vec<u8> = Vec::new();
-    let mut scratch_offs: Vec<u32> = Vec::with_capacity(n + 1);
-    scratch_offs.push(0);
-    for i in 0..n {
-        let base = scratch.len();
-        canon_row_bytes_append(table, shape, intern, i, &mut scratch);
-        let img = &scratch[base..];
-        debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
-        let h = hashes[i];
-        counts[bucket_of(h)] += 1;
-        byte_counts[bucket_of(h)] += img.len();
-        scratch_offs.push(scratch.len() as u32);
-    }
+    // STORE-ONCE (spankey step 2): the accept-time extension already
+    // materialized every row's image — pass 1 collapses to per-bucket
+    // counting off the stored offsets (no rebuild). Kill switch off (or
+    // non-sink test paths without a store): build the local scratch as
+    // before, IDENTICAL bytes by the stored-hash law either way.
+    let mut lscratch: Vec<u8> = Vec::new();
+    let mut loffs: Vec<u32> = Vec::with_capacity(n + 1);
+    let (scratch, scratch_offs): (&[u8], &[u32]) = if canon_offs.len() == n + 1 {
+        for i in 0..n {
+            let img = &canon_store[canon_offs[i] as usize..canon_offs[i + 1] as usize];
+            debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+            let h = hashes[i];
+            counts[bucket_of(h)] += 1;
+            byte_counts[bucket_of(h)] += img.len();
+        }
+        (&canon_store[..], &canon_offs[..])
+    } else {
+        loffs.push(0);
+        for i in 0..n {
+            let base = lscratch.len();
+            canon_row_bytes_append(table, shape, intern, i, &mut lscratch);
+            let img = &lscratch[base..];
+            debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+            let h = hashes[i];
+            counts[bucket_of(h)] += 1;
+            byte_counts[bucket_of(h)] += img.len();
+            loffs.push(lscratch.len() as u32);
+        }
+        (&lscratch[..], &loffs[..])
+    };
     let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
     let mut acc = 0u32;
     starts.push(0);
@@ -562,8 +605,11 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // out contiguously — slot s's key ends exactly where slot s+1 begins.
     debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
     table.reset();
-    // The epoch's rows are gone — the stored hashes restart with them.
+    // The epoch's rows are gone — the stored hashes AND the store-once
+    // canonical images restart with them.
     canon_hashes.clear();
+    canon_store.clear();
+    canon_offs.clear();
     if spk_t0.is_some() {
         use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
         spankey_add(&S.flush_canon_rows, n as u64);
@@ -1521,6 +1567,14 @@ pub struct SinkRemainder<'a> {
     pub table: &'a LaneAggTable,
     pub part: &'a SinkPart,
     pub canon: Option<(&'a MkShape, &'a LaneAggTable)>,
+    /// STORE-ONCE canonical images (spankey step 2): row i's image at
+    /// `store[offs[i]..offs[i+1]]`, built once at the accept-time hash
+    /// extension. `Some` iff the Local's store covers every table row
+    /// (kill switch off ⇒ `None` ⇒ the incumbent per-arrival
+    /// `canon_row_bytes` rebuild — identical bytes by the stored-hash
+    /// law). Self-contained copies, safe to read cross-thread with the
+    /// table (the canonical IMAGE law).
+    pub canon_store: Option<(&'a [u8], &'a [u32])>,
     /// GID-merge car (canonical shapes): the Local's CURRENT intern-table
     /// generation — remainder rows sit in the live table, so their packed
     /// words are generation-current by construction. 0 for word shapes.
@@ -1849,6 +1903,12 @@ fn sink_combine_bucket_impl(
                 let (shape, intern) = rem
                     .canon
                     .ok_or_else(|| sink_shape_error("bytes-mode remainder without a canon face"))?;
+                // STORE-ONCE (spankey step 2): read the accept-time image
+                // verbatim instead of the per-arrival rebuild (word-unpack
+                // + intern-reverse-chase + tail assembly). Identical bytes
+                // by the stored-hash law; kill switch off ⇒ `None` ⇒ the
+                // incumbent rebuild.
+                let stored = rem.canon_store;
                 if use_gid {
                     gmap.roll(rem.gid_gen);
                 }
@@ -1869,22 +1929,37 @@ fn sink_combine_bucket_impl(
                             }
                             continue;
                         }
-                        canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                        let img: &[u8] = match stored {
+                            Some((sb, so)) => {
+                                &sb[so[row as usize] as usize..so[row as usize + 1] as usize]
+                            }
+                            None => {
+                                canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                                &canon
+                            }
+                        };
                         if spk {
                             spk_rows += 1;
-                            spk_bytes += canon.len() as u64;
+                            spk_bytes += img.len() as u64;
                         }
-                        let dst =
-                            absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
+                        let dst = absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
-                    canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                    let img: &[u8] = match stored {
+                        Some((sb, so)) => {
+                            &sb[so[row as usize] as usize..so[row as usize + 1] as usize]
+                        }
+                        None => {
+                            canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                            &canon
+                        }
+                    };
                     if spk {
                         spk_rows += 1;
-                        spk_bytes += canon.len() as u64;
+                        spk_bytes += img.len() as u64;
                     }
-                    absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
+                    absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
                 }
                 debug_assert!(!part.has_null, "canonical shapes are non-nullable");
             } else {
@@ -2732,6 +2807,8 @@ impl SinkTableHandle {
         self.0.table.mem_used()
             + self.0.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
             + self.0.canon_hashes.capacity() * 8
+            + self.0.canon_store.capacity()
+            + self.0.canon_offs.capacity() * 4
     }
 
     /// The combine-visible remainder face over this handle (+ the canonical
@@ -2745,7 +2822,18 @@ impl SinkTableHandle {
                 .expect("canonical shapes carry the intern table");
             (shape, intern)
         });
-        SinkRemainder { table: &self.0.table, part, canon, gid_gen: self.0.intern_gen }
+        // STORE-ONCE face (spankey step 2): published only when the store
+        // covers every row (accept-time extension ran with the switch on).
+        let canon_store = (canon.is_some()
+            && self.0.canon_offs.len() == self.0.table.nrows() + 1)
+            .then(|| (&self.0.canon_store[..], &self.0.canon_offs[..]));
+        SinkRemainder {
+            table: &self.0.table,
+            part,
+            canon,
+            canon_store,
+            gid_gen: self.0.intern_gen,
+        }
     }
 }
 
@@ -2885,6 +2973,9 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     };
     let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+        // Store-once canonical images (spankey): zero under the kill switch.
+        + ch.canon_store.capacity()
+        + ch.canon_offs.capacity() * 4
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):
     // at small work_mem the margin shrinks with the limit instead of
@@ -2906,6 +2997,8 @@ pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
         .map_or(0, |ch| {
             ch.table.mem_used()
                 + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+                + ch.canon_store.capacity()
+                + ch.canon_offs.capacity() * 4
         })
 }
 
@@ -3593,8 +3686,8 @@ mod tests {
         assert!(!part2.has_null);
 
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
         ];
         let combines = test_combines();
         let mut merged: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
@@ -3670,8 +3763,8 @@ mod tests {
         bump(&mut t2, Some(same[0]), 1, 0);
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
         ];
         let combines = test_combines();
         let t = sink_combine_bucket(want_bucket, 1, STATE_BYTES, &locals, &combines).unwrap();
@@ -3934,7 +4027,7 @@ mod tests {
             ],
         };
         let locals =
-            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, gid_gen: 0 }) }];
+            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, canon_store: None, gid_gen: 0 }) }];
         let combines = test_combines();
         let mut total_rows = 0usize;
         for b in 0..SINK_NBUCKETS {
@@ -4429,7 +4522,7 @@ mod tests {
             let locals = [SinkLocalView {
                 spilled: core::slice::from_ref(&run1),
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
             }];
             let direct = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
 
