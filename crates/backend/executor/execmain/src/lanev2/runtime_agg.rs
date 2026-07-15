@@ -2891,11 +2891,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
     // Single/Reduced/K2/all-int Mk — merges on key words).
     let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
-    if !::nodeagg::agg_hash_compact_sink_admissible(
-        agg,
-        sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed),
-        spill_admission,
-    ) {
+    let sink_cap = sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed);
+    if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
+        lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
+    }
+    if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap, spill_admission) {
         refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
@@ -3047,7 +3047,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         drain,
         red,
         mk,
-        cap: sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed),
+        cap: sink_cap,
         budget,
         key_words,
         state_bytes,
