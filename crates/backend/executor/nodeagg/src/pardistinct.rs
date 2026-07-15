@@ -471,9 +471,6 @@ pub struct PdBuilder<'mcx> {
     pt_run_rows: usize,
     /// Ever engaged (seal-time trace visibility).
     pt_engaged_ever: bool,
-    /// Forced mode: pass-through from row 0, no probe-window revert (the
-    /// mechanism-transfer A/B channel; PGRUST_RUNTIME_DISTINCT_PASSTHROUGH=force).
-    pt_force: bool,
 }
 
 /// inc-3 sampler state (hysteresis spec in the design interim).
@@ -491,31 +488,8 @@ enum PtMode {
 /// measurement) and a result below PT_LO_PCT% reverts to Insert.
 const PT_WARMUP: u32 = 4;
 const PT_PROBE_EVERY: u32 = 64;
-
-/// Engagement threshold (percent of the window that are NEW values);
-/// env-overridable measurement channel PGRUST_RUNTIME_DISTINCT_PT_HI.
-fn pt_hi_pct() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_DISTINCT_PT_HI")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&v| v >= 50 && v <= 100)
-            .unwrap_or(98)
-    })
-}
-
-/// Probe-window revert threshold; PGRUST_RUNTIME_DISTINCT_PT_LO.
-fn pt_lo_pct() -> usize {
-    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_DISTINCT_PT_LO")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&v| v >= 10 && v <= 100)
-            .unwrap_or(90)
-    })
-}
+const PT_HI_PCT: usize = 98;
+const PT_LO_PCT: usize = 90;
 /// Accounted bytes per run entry (u32 group + i64 value).
 const PT_ENTRY_BYTES: usize = 12;
 
@@ -551,7 +525,6 @@ impl<'mcx> PdBuilder<'mcx> {
             pt_runs: Vec::new(),
             pt_run_rows: 0,
             pt_engaged_ever: false,
-            pt_force: false,
         }
     }
 
@@ -561,17 +534,12 @@ impl<'mcx> PdBuilder<'mcx> {
         self.pt_allowed = on && self.stage_on;
     }
 
-    /// Force pass-through from row 0 (no sampler, no probe-window revert)
-    /// — the mechanism-transfer measurement channel (A/B decoupled from
-    /// threshold tuning) and the parity oracles' hook. Byte-safe by the
-    /// merged-equivalence law regardless of data shape.
-    pub fn force_passthrough(&mut self) {
-        if !self.pt_allowed {
-            return;
-        }
+    /// Test hook: force the sampler state (parity oracles).
+    #[cfg(test)]
+    fn force_passthrough(&mut self) {
+        assert!(self.pt_allowed, "force_passthrough without admission");
         self.pt_mode = PtMode::PassThrough;
         self.pt_engaged_ever = true;
-        self.pt_force = true;
         self.pt_streak = 1; // off the probe-window phase
     }
 
@@ -652,10 +620,6 @@ impl<'mcx> PdBuilder<'mcx> {
         // inc-3 sampler routing (design interim's hysteresis spec).
         match self.pt_mode {
             PtMode::PassThrough => {
-                if self.pt_force {
-                    self.flush_to_runs();
-                    return;
-                }
                 self.pt_streak = self.pt_streak.wrapping_add(1);
                 if self.pt_streak % PT_PROBE_EVERY != 0 {
                     self.flush_to_runs();
@@ -663,14 +627,14 @@ impl<'mcx> PdBuilder<'mcx> {
                 }
                 // Probe window: normal inserts + measurement.
                 let news = self.flush_insert(true);
-                if news * 100 < n * pt_lo_pct() {
+                if news * 100 < n * PT_LO_PCT {
                     self.pt_mode = PtMode::Insert;
                     self.pt_streak = 0;
                 }
             }
             PtMode::Insert => {
                 let news = self.flush_insert(true);
-                if news * 100 >= n * pt_hi_pct() {
+                if news * 100 >= n * PT_HI_PCT {
                     self.pt_streak += 1;
                 } else {
                     self.pt_streak = 0;
@@ -781,13 +745,8 @@ impl<'mcx> PdBuilder<'mcx> {
             }
         }
         self.pt_run_rows = 0;
-        if self.pt_force {
-            // Forced mode stays engaged (measurement channel semantics).
-            self.pt_streak = 1;
-        } else {
-            self.pt_mode = PtMode::Insert;
-            self.pt_streak = 0;
-        }
+        self.pt_mode = PtMode::Insert;
+        self.pt_streak = 0;
         // Full set-memory re-account (crossing path — rare; nsets == 1).
         self.total_set_mem = 0;
         for g in 0..self.dsets.len() {
@@ -2083,23 +2042,13 @@ pub fn pd_batch_insert_enabled() -> bool {
     })
 }
 
-/// inc-3 env channel: `PGRUST_RUNTIME_DISTINCT_PASSTHROUGH` = `0` (off) /
-/// `force` (pass-through from row 0, no sampler — measurement channel) /
-/// anything else or unset (adaptive default). Requires the staged schedule
-/// and its shape admission either way.
-#[derive(Clone, Copy, PartialEq)]
-pub enum PdPtEnv {
-    Off,
-    Adaptive,
-    Force,
-}
-
-pub fn pd_passthrough_mode() -> PdPtEnv {
-    static M: std::sync::OnceLock<PdPtEnv> = std::sync::OnceLock::new();
-    *M.get_or_init(|| match std::env::var("PGRUST_RUNTIME_DISTINCT_PASSTHROUGH") {
-        Ok(v) if v == "0" => PdPtEnv::Off,
-        Ok(v) if v == "force" => PdPtEnv::Force,
-        _ => PdPtEnv::Adaptive,
+/// inc-3 kill switch: `PGRUST_RUNTIME_DISTINCT_PASSTHROUGH=0` disables the
+/// miss-adaptive group-partitioned pass-through (default ON; requires the
+/// staged schedule and its shape admission).
+pub fn pd_passthrough_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_PASSTHROUGH").map_or(true, |v| v != "0")
     })
 }
 
@@ -2108,13 +2057,8 @@ impl PdSinkLocal {
         let mut builder = PdBuilder::new(spec, budget, None);
         if pd_batch_insert_enabled() {
             builder.set_batch_insert(true);
-            match pd_passthrough_mode() {
-                PdPtEnv::Off => {}
-                PdPtEnv::Adaptive => builder.set_passthrough(true),
-                PdPtEnv::Force => {
-                    builder.set_passthrough(true);
-                    builder.force_passthrough();
-                }
+            if pd_passthrough_enabled() {
+                builder.set_passthrough(true);
             }
         }
         PdSinkLocal { builder }
