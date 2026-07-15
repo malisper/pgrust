@@ -415,6 +415,7 @@ impl Runtime {
         let mut idle = 0u32;
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                self.sched.stat_flush_all(local);
                 return Some(outcome);
             }
             self.execution_permits().acquire();
@@ -426,6 +427,7 @@ impl Runtime {
                 Step::Idle => {
                     idle += 1;
                     if idle >= max_idle {
+                        self.sched.stat_flush_all(local);
                         return rg.try_outcome();
                     }
                     std::thread::sleep(std::time::Duration::from_micros(500));
@@ -455,9 +457,10 @@ impl Runtime {
         let mut retries = 0u32;
         let outcome = loop {
             if let Some(outcome) = rg.try_outcome() {
-                // WFIN marker channel: the drive is over — flush any
-                // participation this driver still holds (a worker whose last
-                // task did not observe exhaustion emits here).
+                // Drive over — flush any WFIN/stats accumulation this
+                // driver still holds (a worker whose last task did not
+                // observe exhaustion emits here).
+                self.sched.stat_flush_all(local);
                 local.wfin_flush_all();
                 break outcome;
             }
@@ -533,6 +536,7 @@ impl Runtime {
     fn drive_pinned_v1(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                self.sched.stat_flush_all(local);
                 local.wfin_flush_all();
                 return outcome;
             }
