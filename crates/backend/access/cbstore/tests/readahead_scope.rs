@@ -184,8 +184,8 @@ fn write_part(tag: &str) -> (String, usize) {
     (path, n_rows)
 }
 
-fn open_part(path: &str) -> Rc<cbstore::reader::Part> {
-    Rc::new(cbstore::reader::Part::open(path, 2).unwrap().expect("part exists"))
+fn open_part(path: &str) -> std::sync::Arc<cbstore::reader::Part> {
+    std::sync::Arc::new(cbstore::reader::Part::open(path, 2).unwrap().expect("part exists"))
 }
 
 // Drive next_window to exhaustion; returns total staged rows.

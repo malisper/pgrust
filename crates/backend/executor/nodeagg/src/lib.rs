@@ -58,6 +58,7 @@ pub mod plainpd;
 pub mod sink;
 pub mod runtime_partial;
 pub mod sortedsink;
+pub mod spankey;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,

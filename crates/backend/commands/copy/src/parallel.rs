@@ -77,6 +77,30 @@ macro_rules! refuse {
     }};
 }
 
+/// load-r2 L3-1: PGRUST_PARALLEL_COPY_SORT=1 lets a PGRUST_COPY_PRESORT
+/// load engage the PARALLEL sort pipeline (workers spill memcmp-key runs,
+/// leader k-way merges into the plain writer). Default OFF: presort loads
+/// refuse to the serial sort-on-ingest path verbatim.
+fn sort_flag_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_PARALLEL_COPY_SORT").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Per-worker in-memory (key,row) batch budget before a run spill
+/// (PGRUST_PARALLEL_COPY_SORT_MEM, MB; default 256, floor 1 — the floor
+/// exists for the e2e battery's multi-run coverage, not for production).
+fn sort_budget() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_SORT_MEM")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(256)
+            .max(1)
+            * (1 << 20)
+    })
+}
+
 /// Worker gang size: PGRUST_PARALLEL_COPY_DOP, default = the runtime pool's
 /// execution width, clamped to the external-lane budget.
 fn dop(rt: &runtime::Runtime) -> i32 {
@@ -96,6 +120,18 @@ fn window(k: i32) -> u64 {
         std::env::var("PGRUST_PARALLEL_COPY_WINDOW").ok().and_then(|v| v.trim().parse().ok())
     });
     req.unwrap_or((2 * k as u64) + 4).max(2)
+}
+
+/// Sort-merge encode threads (PGRUST_PARALLEL_COPY_SORT_ENCODERS,
+/// default = the COPY dop).
+fn sort_encoders(rt: &runtime::Runtime) -> usize {
+    static N: OnceLock<Option<usize>> = OnceLock::new();
+    let req = *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_SORT_ENCODERS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+    });
+    req.unwrap_or(dop(rt) as usize).clamp(1, 32)
 }
 
 /// Segmentator read-block bytes.
@@ -529,6 +565,23 @@ pub(crate) struct ParCopyShared {
     refused: AtomicUsize,
     started: AtomicUsize,
     leader_proc: types_core::ProcNumber,
+    /// load-r2 L3-1 sort mode (parallel load sort): Some = workers spill
+    /// sorted (key,row) runs instead of encoding RGs; the leader merges
+    /// after the RG completes. None = the landed encode pipeline verbatim.
+    sort: Option<ParCopySort>,
+    /// Registered run files (paths pushed BEFORE their spill starts so
+    /// every file is cleanup-tracked); leader takes them for the merge.
+    sort_runs: Mutex<Vec<std::path::PathBuf>>,
+    sort_run_seq: AtomicU64,
+}
+
+/// Sort-mode plan: the presort key spec in memcmp-key terms.
+struct ParCopySort {
+    keys: Vec<(u16, cbstore::sortkey::CbSortKeyKind)>,
+    key_w: usize,
+    budget: usize,
+    /// Statement-unique run-file name component.
+    nonce: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -608,6 +661,15 @@ struct ParCopyWorkerCx<'a, 'mcx> {
     inserted_cols: types_nodes::Bitmapset<'mcx>,
     /// Per-row datum arena, reset after every appended row.
     row_cx: MemoryContext,
+    /// load-r2 L3-1 sort mode: this worker's (key,row) batch + codec.
+    sort_state: Option<WorkerSortState>,
+}
+
+struct WorkerSortState {
+    batch: cbstore::loadsort::SortBatch,
+    codec: cbstore::loadsort::RowCodec,
+    keybuf: Vec<u8>,
+    rowbuf: Vec<u8>,
 }
 
 thread_local! {
@@ -688,7 +750,11 @@ impl ParCopyShared {
             st.cur_attval_off = None;
         }
 
-        let mut enc = cbstore::RgChunkEncoder::new(Arc::clone(&self.plan));
+        let mut enc = if self.sort.is_none() {
+            Some(cbstore::RgChunkEncoder::new(Arc::clone(&self.plan)))
+        } else {
+            None
+        };
         let mut since_cfi = 0u32;
         loop {
             since_cfi += 1;
@@ -723,14 +789,68 @@ impl ParCopyShared {
                 Some(&wcx.inserted_cols),
             )?;
             let base = wcx.slot.base();
-            enc.append_row(&base.tts_values, &base.tts_isnull)?;
+            if let Some(enc) = enc.as_mut() {
+                enc.append_row(&base.tts_values, &base.tts_isnull)?;
+            } else {
+                // Sort mode: (memcmp key, row image) into this worker's
+                // batch; spill a sorted run at the budget. NULLs refuse
+                // HERE with the worker's exact line context (serial cites
+                // its buffered-flush line — the recorded parallel-copy
+                // divergence rule 2 class; message/sqlstate identical).
+                let sort = self.sort.as_ref().unwrap();
+                let st = wcx
+                    .sort_state
+                    .as_mut()
+                    .expect("sort mode without a worker sort state");
+                let ncols = self.plan.coltypes.len();
+                if base.tts_isnull[..ncols].iter().any(|&n| n) {
+                    return Err(Box::new(
+                        PgError::error("cbstore does not support NULL values".to_string())
+                            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                st.keybuf.clear();
+                cbstore::sortkey::encode_sort_key(&sort.keys, &base.tts_values, &mut st.keybuf);
+                st.rowbuf.clear();
+                st.codec.serialize_row(&base.tts_values, &mut st.rowbuf)?;
+                st.batch.push(&st.keybuf, &st.rowbuf);
+                if st.batch.bytes() >= sort.budget {
+                    self.spill_worker_batch(st)?;
+                }
+            }
         }
+        let Some(enc) = enc else { return Ok(None) };
         if enc.rows() == 0 {
             // A final chunk holding only the end-of-copy marker line (or an
             // empty stream tail): nothing to encode.
             return Ok(None);
         }
         Ok(Some(enc.seal()))
+    }
+
+    /// Sort + spill the worker's current batch as one run file. The path is
+    /// registered BEFORE the write so teardown can always unlink it.
+    fn spill_worker_batch(&self, st: &mut WorkerSortState) -> PgResult<()> {
+        if st.batch.is_empty() {
+            return Ok(());
+        }
+        let sort = self.sort.as_ref().expect("spill without sort mode");
+        let dir = std::path::Path::new("base/pgsql_tmp");
+        std::fs::create_dir_all(dir).map_err(|e| {
+            Box::new(PgError::error(format!("parallel load-sort temp dir: {e}")))
+        })?;
+        let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
+        let path = dir.join(format!(
+            "pgsql_tmp{}.parcopysort.{:x}.{}.run",
+            std::process::id(),
+            sort.nonce,
+            seq
+        ));
+        self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
+        st.batch.sort();
+        st.batch.spill_run(&path)?;
+        ptrace(&format!("sort run spilled seq={seq}"));
+        Ok(())
     }
 }
 
@@ -887,6 +1007,12 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             volatile_defexprs: false,
         };
         let slot = tableam::table_slot_create(mcx, &rel)?;
+        let sort_state = shared.sort.as_ref().map(|sp| WorkerSortState {
+            batch: cbstore::loadsort::SortBatch::new(sp.key_w),
+            codec: cbstore::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
+            keybuf: Vec::with_capacity(sp.key_w),
+            rowbuf: Vec::new(),
+        });
         Ok(ParCopyWorkerCx {
             mcx,
             rel: &rel,
@@ -896,6 +1022,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             virtual_nn: None,
             inserted_cols,
             row_cx: MemoryContext::new_bump("ParallelCopyRowEval"),
+            sort_state,
         })
     })();
     let mut wcx = match build {
@@ -925,6 +1052,19 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
     let _outcome = shared.rt.drive_pinned(&mut lane_local, &rg);
     WORKER_CX.with(|c| c.set(std::ptr::null_mut()));
 
+    // Sort mode: flush this worker's final batch as its last run. Skipped
+    // when the statement is already failing (hard error or any recorded
+    // data error — the COPY raises regardless; the leader never merges).
+    if let Some(st) = wcx.sort_state.as_mut() {
+        if !shared.failed_hard.load(Ordering::SeqCst)
+            && shared.error_floor.load(Ordering::SeqCst) == u64::MAX
+        {
+            if let Err(e) = shared.spill_worker_batch(st) {
+                shared.fail_hard(e);
+            }
+        }
+    }
+
     drop(wcx);
     table::table_close(rel, types_rel::lock::RowExclusiveLock)?;
 
@@ -943,6 +1083,247 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
 // ---------------------------------------------------------------------------
 // Leader: admission + the ceremony (segment/publish/commit loop).
 // ---------------------------------------------------------------------------
+
+/// Sort-mode phase 2: k-way merge every spilled run, encode in parallel,
+/// commit in order (load-r2 L3-1 step d + lever-i overlap).
+///
+/// Three concurrent roles under one scope (measured 100M split @ dfb8d6115:
+/// fill 43.1s / send-block 0.01s / done-wait 0.2s / commit 60.1s — the fill
+/// pump and the ordered commit were serialized on one thread; overlapped
+/// they cost ~max of the two):
+///   PUMP (spawned): streams rows in global memcmp-key order out of the
+///     RunMerge into exactly RG_ROWS-row batches -> bounded work channel.
+///   ENCODERS (spawned pool): RgChunkEncoder per batch (the landed
+///     worker-encode machinery, byte-proven by its seam oracle).
+///   LEADER (this thread): drains the done channel, commits EncodedRgs in
+///     batch order via commit_encoded_rg, CFIs per message.
+/// Returns the merged row count.
+fn merge_sorted_runs(
+    writer: &mut cbstore::CbWriter,
+    shared: &Arc<ParCopyShared>,
+) -> PgResult<u64> {
+    let sort = shared.sort.as_ref().expect("merge without sort mode");
+    let paths =
+        std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
+    let mut merge = cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?;
+    // Eager unlink: the open fds keep the data; a crash from here leaves
+    // no orphan files.
+    for p in &paths {
+        let _ = std::fs::remove_file(p);
+    }
+    let nenc = sort_encoders(shared.rt);
+    ptrace(&format!("sort merge over {} runs encoders={nenc}", paths.len()));
+
+    const RG: usize = cbstore::format::RG_ROWS;
+    struct Batch {
+        idx: u64,
+        arena: Vec<u8>,
+        lens: Vec<u32>,
+    }
+    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<Batch>(nenc + 1);
+    let work_rx = Mutex::new(work_rx);
+    let (done_tx, done_rx) =
+        std::sync::mpsc::channel::<(u64, PgResult<cbstore::EncodedRg>)>();
+    let abort = std::sync::atomic::AtomicBool::new(false);
+
+    let key_w = sort.key_w;
+    let t_merge = std::time::Instant::now();
+    let mut first_err: Option<Box<PgError>> = None;
+    let mut committed = 0u64;
+    let mut t_commit = std::time::Duration::ZERO;
+
+    let (n_rows, batches) = std::thread::scope(|scope| {
+        for _ in 0..nenc {
+            let rx = &work_rx;
+            let tx = done_tx.clone();
+            let plan = Arc::clone(&shared.plan);
+            scope.spawn(move || {
+                let codec = cbstore::loadsort::RowCodec::new(plan.coltypes.clone());
+                let ncols = plan.coltypes.len();
+                let mut arena: Vec<u8> = Vec::new();
+                let mut values = vec![::datum::Datum::null(); ncols];
+                let isnull = vec![false; ncols];
+                loop {
+                    let b = {
+                        let g = rx.lock().unwrap_or_else(|p| p.into_inner());
+                        g.recv()
+                    };
+                    let Ok(b) = b else { break };
+                    let r = catch_unwind(AssertUnwindSafe(
+                        || -> PgResult<cbstore::EncodedRg> {
+                            let mut enc =
+                                cbstore::RgChunkEncoder::new(Arc::clone(&plan));
+                            let mut off = 0usize;
+                            for &l in &b.lens {
+                                let l = l as usize;
+                                arena.clear();
+                                codec.deserialize_row(
+                                    &b.arena[off..off + l],
+                                    &mut arena,
+                                    &mut values,
+                                )?;
+                                enc.append_row(&values, &isnull)?;
+                                off += l;
+                            }
+                            Ok(enc.seal())
+                        },
+                    ));
+                    let r = match r {
+                        Ok(r) => r,
+                        Err(_) => Err(Box::new(PgError::new(
+                            ERROR,
+                            "parallel load-sort encoder panicked",
+                        ))),
+                    };
+                    let failed = r.is_err();
+                    if tx.send((b.idx, r)).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(done_tx); // encoder clones remain; done_rx closes when they exit
+
+        // PUMP: owns the RunMerge and the work sender; exits (dropping the
+        // sender) at end of input, on error, or on the leader's abort flag.
+        let abort_ref = &abort;
+        let pump = scope.spawn(move || -> (PgResult<()>, u64, u64) {
+            let mut key: Vec<u8> = Vec::with_capacity(key_w);
+            let mut row: Vec<u8> = Vec::new();
+            let mut cur = Batch { idx: 0, arena: Vec::new(), lens: Vec::new() };
+            let mut sent = 0u64;
+            let mut n_rows = 0u64;
+            let mut t_fill = std::time::Duration::ZERO;
+            let mut t_send = std::time::Duration::ZERO;
+            let r = (|| -> PgResult<()> {
+                loop {
+                    if abort_ref.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    let t0 = std::time::Instant::now();
+                    let mut merge_done = false;
+                    while cur.lens.len() < RG {
+                        match merge.next_entry(&mut key, &mut row) {
+                            Ok(true) => {
+                                cur.arena.extend_from_slice(&row);
+                                cur.lens.push(row.len() as u32);
+                                n_rows += 1;
+                            }
+                            Ok(false) => {
+                                merge_done = true;
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    t_fill += t0.elapsed();
+                    if !cur.lens.is_empty() {
+                        let t1 = std::time::Instant::now();
+                        let full = std::mem::replace(
+                            &mut cur,
+                            Batch { idx: sent + 1, arena: Vec::new(), lens: Vec::new() },
+                        );
+                        if work_tx.send(full).is_err() {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "parallel load-sort encoder pool exited early",
+                            )));
+                        }
+                        sent += 1;
+                        t_send += t1.elapsed();
+                    }
+                    if merge_done {
+                        return Ok(());
+                    }
+                }
+            })();
+            ptrace(&format!(
+                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent}",
+                t_fill.as_secs_f64(),
+                t_send.as_secs_f64(),
+            ));
+            (r, n_rows, sent)
+        });
+        // work_tx moved into the pump; when it finishes, the channel closes
+        // and the encoders drain out, closing done_rx.
+
+        // LEADER: ordered commits off the done channel.
+        let mut pending: BTreeMap<u64, cbstore::EncodedRg> = BTreeMap::new();
+        for (idx, r) in done_rx.iter() {
+            if let Err(e) = postgres_seams::check_for_interrupts::call() {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                abort.store(true, Ordering::SeqCst);
+            }
+            match r {
+                Ok(enc) => {
+                    pending.insert(idx, enc);
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    abort.store(true, Ordering::SeqCst);
+                }
+            }
+            if first_err.is_some() {
+                pending.clear();
+                continue; // keep draining so the pool can exit
+            }
+            let t2 = std::time::Instant::now();
+            while pending.keys().next() == Some(&committed) {
+                let enc = pending.remove(&committed).unwrap();
+                if let Err(e) = writer.commit_encoded_rg(enc) {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    abort.store(true, Ordering::SeqCst);
+                    pending.clear();
+                    break;
+                }
+                committed += 1;
+                if committed % 16 == 0 {
+                    pgstat_progress_update_param(
+                        PROGRESS_COPY_TUPLES_PROCESSED,
+                        (committed * RG as u64) as i64,
+                    );
+                }
+            }
+            t_commit += t2.elapsed();
+        }
+        let (pr, n_rows, sent) = pump.join().unwrap_or_else(|_| {
+            (
+                Err(Box::new(PgError::new(ERROR, "parallel load-sort pump panicked"))),
+                0,
+                0,
+            )
+        });
+        if let Err(e) = pr {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+        (n_rows, sent)
+    });
+
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    if committed != batches {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "parallel load-sort merge lost batches (committed != sent)",
+        )));
+    }
+    ptrace(&format!(
+        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed}",
+        t_merge.elapsed().as_secs_f64(),
+        t_commit.as_secs_f64(),
+    ));
+    pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n_rows as i64);
+    Ok(n_rows)
+}
 
 fn vacuum_style_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<ParCopyShared>() else { return };
@@ -990,7 +1371,7 @@ fn admit<'mcx>(
     cstate: &CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     has_triggers: bool,
-) -> PgResult<Option<(&'static Arc<runtime::Runtime>, i32)>> {
+) -> PgResult<Option<(&'static Arc<runtime::Runtime>, i32, Option<ParCopySort>)>> {
     // Macro-compatible shim: refuse! returns Ok(None) from THIS fn.
     if !flag_enabled() || !runtime::runtime_enabled() {
         return Ok(None);
@@ -1056,11 +1437,31 @@ fn admit<'mcx>(
         Ok(t) => t,
         Err(_) => refuse!("unsupported cbstore column type (serial raises the error)"),
     };
-    match cbstore::writer::writer_opts_of(rel, &coltypes) {
-        Ok(opts) if opts.cluster_key.is_empty() => {}
-        Ok(_) => refuse!("cluster_key (sort-on-ingest is serial)"),
+    let sort = match cbstore::writer::writer_opts_of(rel, &coltypes) {
+        Ok(opts) if opts.cluster_key.is_empty() && opts.presort_key.is_empty() => None,
+        Ok(opts) if !opts.cluster_key.is_empty() => {
+            refuse!("cluster_key (sort-on-ingest is serial)")
+        }
+        Ok(opts) => {
+            // PGRUST_COPY_PRESORT: the parallel load-sort pipeline, behind
+            // its own flag; int-class fixed-width keys only. Every refusal
+            // = the serial sort-on-ingest path verbatim (L3-0, byte-proven).
+            if !sort_flag_enabled() {
+                refuse!("PGRUST_COPY_PRESORT (sort-on-ingest is serial; PGRUST_PARALLEL_COPY_SORT=1 engages the parallel sort)");
+            }
+            let Some(key_w) = cbstore::sortkey::fixed_key_width(&opts.presort_key) else {
+                refuse!("PGRUST_COPY_PRESORT text key (parallel load-sort is int-class only)");
+            };
+            static SORT_NONCE: AtomicU64 = AtomicU64::new(1);
+            Some(ParCopySort {
+                keys: opts.presort_key,
+                key_w,
+                budget: sort_budget(),
+                nonce: SORT_NONCE.fetch_add(1, Ordering::SeqCst),
+            })
+        }
         Err(_) => refuse!("cbstore reloption error (serial raises it)"),
-    }
+    };
     // File-source size floor (frontend streams engage regardless).
     if let CopySrc::File { fd, .. } = &cstate.src {
         let size = fd::with_allocated_stdio(*fd, |f| f.metadata().map(|m| m.len()).unwrap_or(0))
@@ -1073,7 +1474,7 @@ fn admit<'mcx>(
     if k < 1 {
         refuse!("dop < 1");
     }
-    Ok(Some((rt, k)))
+    Ok(Some((rt, k, sort)))
 }
 
 enum Ceremony {
@@ -1093,13 +1494,19 @@ pub(crate) fn copy_from_parallel<'mcx>(
     rel: &Relation<'mcx>,
     has_triggers: bool,
 ) -> PgResult<Option<u64>> {
-    let Some((rt, k)) = admit(cstate, rel, has_triggers)? else {
+    let Some((rt, k, sort)) = admit(cstate, rel, has_triggers)? else {
         return Ok(None);
     };
 
     // Writer open BEFORE EnterParallelMode (xid/cid assignment); identical
     // to the serial open (header init, freeze decision, append handling).
-    let mut writer = cbstore::begin_parallel_ingest(rel)?;
+    // Sort mode opens PLAIN (the sort happens upstream in the workers; the
+    // merged drain through append_row is the L3-0 byte-proven path).
+    let mut writer = if sort.is_some() {
+        cbstore::writer::begin_parallel_ingest_presorted(rel)?
+    } else {
+        cbstore::begin_parallel_ingest(rel)?
+    };
     let Some(plan) = writer.parallel_ingest_plan() else {
         // Belt+braces: admission already refused cluster keys.
         return Ok(None);
@@ -1127,8 +1534,27 @@ pub(crate) fn copy_from_parallel<'mcx>(
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         leader_proc: init_small::globals::MyProcNumber(),
+        sort,
+        sort_runs: Mutex::new(Vec::new()),
+        sort_run_seq: AtomicU64::new(0),
     });
     ensure_hooks_registered();
+
+    // Sort-run cleanup on EVERY exit path (error unwind included): any
+    // registered, not-yet-consumed run file is unlinked (missing = fine —
+    // the merge eagerly unlinks after open).
+    struct RunCleanup(Arc<ParCopyShared>);
+    impl Drop for RunCleanup {
+        fn drop(&mut self) {
+            let paths = std::mem::take(
+                &mut *self.0.sort_runs.lock().unwrap_or_else(|p| p.into_inner()),
+            );
+            for p in paths {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let _run_cleanup = RunCleanup(Arc::clone(&shared));
 
     xact::EnterParallelMode();
     let r = ceremony(cstate, &mut writer, &shared, rt, k);
@@ -1361,6 +1787,25 @@ fn ceremony(
             )));
         }
         debug_assert_eq!(next_commit, published, "ordered commit hole");
+
+        // load-r2 L3-1 sort mode: every parsed row lives in the run files;
+        // workers flush their FINAL run post-drive (after the RG outcome),
+        // so wait for actual worker exit, then k-way merge the runs into
+        // the plain writer — the serial presort drain byte-path.
+        if shared.sort.is_some() {
+            let t_parse = std::time::Instant::now();
+            while !parallel::parallel_workers_all_stopped(pcxt) {
+                postgres_seams::check_for_interrupts::call()?;
+                parallel::ProcessParallelMessages()?;
+                parallel::wait_parallel_finish_quantum()?;
+            }
+            parallel::ProcessParallelMessages()?;
+            if let Some(e) = shared.take_hard_error() {
+                return Err(e);
+            }
+            ptrace(&format!("sort phase: worker drain {:.2}s", t_parse.elapsed().as_secs_f64()));
+            processed = merge_sorted_runs(writer, shared)?;
+        }
         Ok(Ceremony::Done(processed))
     })(&mut submitted);
 
