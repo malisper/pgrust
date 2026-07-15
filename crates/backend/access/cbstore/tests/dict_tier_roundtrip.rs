@@ -228,7 +228,7 @@ fn dict_tier_roundtrip_over_real_part() {
     }
     w.finish().unwrap();
 
-    let part = Rc::new(cbstore::reader::Part::open(&path, 2).unwrap().expect("part exists"));
+    let part = std::sync::Arc::new(cbstore::reader::Part::open(&path, 2).unwrap().expect("part exists"));
     assert_eq!(part.total_rows(), n_rows as u64);
 
     let ctx = MemoryContext::new("cbdicttier");
@@ -294,7 +294,7 @@ fn dict_tier_roundtrip_over_real_part() {
     let mut lq2 = translate_scan_qual(&qual, true).unwrap();
     let mut scan2 = CbScanDescData::new_with_part(
         scan_base(mcx),
-        Some(Rc::new(cbstore::reader::Part::open(&path, 2).unwrap().unwrap())),
+        Some(std::sync::Arc::new(cbstore::reader::Part::open(&path, 2).unwrap().unwrap())),
         vec![ColType::I64, ColType::Text],
     );
     let mut soa2 = SoaBatch::new_in(mcx, 2);

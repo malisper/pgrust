@@ -161,6 +161,62 @@ pub fn count_miss() {
     MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Kill switch: PGRUST_CONDCACHE_SHARED_STATS=1 restores the eager
+/// per-window fetch_add on the shared statics (pre-lane behavior).
+fn shared_stats() -> bool {
+    static EAGER: OnceLock<bool> = OnceLock::new();
+    *EAGER.get_or_init(|| std::env::var_os("PGRUST_CONDCACHE_SHARED_STATS").is_some_and(|v| v == "1"))
+}
+
+/// Per-scan hit/miss stat cells. The process counters are observational
+/// only (eviction is last_used-LRU, admission is the byte budget — neither
+/// reads hits/misses), but the per-window `count_hit` fetch_add on the
+/// shared statics was a 16-worker cache-line ping-pong worth 88% of q21's
+/// cycles at 100M mt16 (suite-profile census U7). Each scan counts in its
+/// own plain cells and folds into the globals once at teardown (`Drop`) or
+/// at an explicit stats read (`fold`).
+#[derive(Default)]
+pub struct LocalStats {
+    hits: u64,
+    misses: u64,
+}
+
+impl LocalStats {
+    #[inline]
+    pub fn count(&mut self, hit: bool) {
+        if shared_stats() {
+            if hit {
+                count_hit();
+            } else {
+                count_miss();
+            }
+        } else if hit {
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+        }
+    }
+
+    /// Publish the local counts into the process counters and zero the
+    /// cells (idempotent — safe to call before drop).
+    pub fn fold(&mut self) {
+        if self.hits > 0 {
+            HITS.fetch_add(self.hits, Ordering::Relaxed);
+            self.hits = 0;
+        }
+        if self.misses > 0 {
+            MISSES.fetch_add(self.misses, Ordering::Relaxed);
+            self.misses = 0;
+        }
+    }
+}
+
+impl Drop for LocalStats {
+    fn drop(&mut self) {
+        self.fold();
+    }
+}
+
 /// (hits, misses, insertions, evictions) — cumulative process counters.
 pub fn stats() -> (u64, u64, u64, u64) {
     (
@@ -295,6 +351,29 @@ mod tests {
         assert!(!b2.lookup(0, &mut out), "re-inserted entry starts empty");
         // Restore the default so co-resident tests keep caching.
         set_capacity(100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn local_stats_stay_scan_local_until_fold_and_drop_folds_remainder() {
+        // Serialized with the other counter-touching tests; HITS/MISSES are
+        // only ever bumped by this test within the crate's unit suite, so
+        // deltas are exact under the lock.
+        let _g = capacity_lock();
+        let (h0, m0, _, _) = stats();
+        let mut ls = LocalStats::default();
+        ls.count(true);
+        ls.count(true);
+        ls.count(false);
+        let (h1, m1, _, _) = stats();
+        assert_eq!((h1, m1), (h0, m0), "counts stay scan-local until fold");
+        ls.fold();
+        ls.fold(); // idempotent
+        let (h2, m2, _, _) = stats();
+        assert_eq!((h2 - h0, m2 - m0), (2, 1));
+        ls.count(false);
+        drop(ls);
+        let (h3, m3, _, _) = stats();
+        assert_eq!((h3 - h0, m3 - m0), (2, 2), "drop folds the remainder");
     }
 
     #[test]
