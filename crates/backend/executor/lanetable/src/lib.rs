@@ -1504,10 +1504,13 @@ impl LaneAggTable {
     /// misses across rows. Semantics are `probe_bytes` row-for-row: same
     /// probe order, same insert positions, same group ids.
     ///
-    /// Prefetch engages only above [`PREFETCH_MIN_TABLE_BYTES`] (below it the
-    /// entry array is cache-resident and hints are pure overhead) and honors
-    /// the `PGRUST_LANE_V2_PROBE_LOOKAHEAD` kill channel (0 = no hints —
-    /// the fused run still hoists locals, matching the int idiom).
+    /// The two-phase shape engages only above [`PREFETCH_MIN_TABLE_BYTES`]:
+    /// below it the entry array is cache-resident and the batch machinery is
+    /// pure overhead (pod micro-probe, job -1385: disengaged fused run +9.5%
+    /// at card 1e4 vs per-row; engaged batch −34..−61% at DRAM-bound cards)
+    /// — small tables take a plain per-row probe loop, identical semantics.
+    /// `PGRUST_LANE_V2_PROBE_LOOKAHEAD` remains the hint kill channel
+    /// (0 = engaged run with no hints).
     pub fn probe_bytes_batch(
         &mut self,
         keys: &[&[u8]],
@@ -1517,6 +1520,16 @@ impl LaneAggTable {
     ) {
         debug_assert_eq!(self.repr, KeyRepr::Bytes);
         out.reserve(keys.len());
+        if self.entry_bytes() <= PREFETCH_MIN_TABLE_BYTES {
+            for (i, &k) in keys.iter().enumerate() {
+                let pr = self.probe_bytes(k, self.hash_key_bytes(k));
+                out.push(pr.states);
+                if pr.is_new {
+                    new_out.push(i as u32);
+                }
+            }
+            return;
+        }
         hashes.clear();
         hashes.reserve(keys.len());
         // Hash-kind branch hoisted out of the loop (see probe_int_batch).
@@ -1532,11 +1545,7 @@ impl LaneAggTable {
                 }
             }
         }
-        let la = if self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES {
-            probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4)
-        } else {
-            0
-        };
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
         let hs: &[u64] = hashes;
         self.probe_fold_bytes_hashed_run(keys, hs, la, &mut |states, i, is_new| {
             out.push(states);
@@ -1559,12 +1568,20 @@ impl LaneAggTable {
         new_out: &mut Vec<u32>,
     ) {
         debug_assert_eq!(self.repr, KeyRepr::Bytes);
+        debug_assert_eq!(keys.len(), hashes.len());
         out.reserve(keys.len());
-        let la = if self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES {
-            probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4)
-        } else {
-            0
-        };
+        // Same size gate as probe_bytes_batch (job -1385 control verdict).
+        if self.entry_bytes() <= PREFETCH_MIN_TABLE_BYTES {
+            for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
+                let pr = self.probe_bytes(k, h);
+                out.push(pr.states);
+                if pr.is_new {
+                    new_out.push(i as u32);
+                }
+            }
+            return;
+        }
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
         self.probe_fold_bytes_hashed_run(keys, hashes, la, &mut |states, i, is_new| {
             out.push(states);
             if is_new {
