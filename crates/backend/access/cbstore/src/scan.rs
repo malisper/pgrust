@@ -1372,6 +1372,13 @@ impl<'mcx> CbScanDescData<'mcx> {
         let nrgs = part.rgs.len();
         loop {
             if !self.rg_claimed {
+                // Granule-range drive (a runtime morsel claim): the range IS
+                // the claim — never walk past it or claim another RG (the
+                // serial_next cursor belongs to the whole-scan drive).
+                // Mirrors next_window's ranged loop head exactly.
+                if self.range_end.is_some() {
+                    return Ok(CbGranuleMetaStep::Exhausted);
+                }
                 self.rg = self.claim_next_rg();
                 self.rg_claimed = true;
                 self.granule = 0;
@@ -1387,15 +1394,25 @@ impl<'mcx> CbScanDescData<'mcx> {
             let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
             if !self.rg_checked {
                 // Zone quals are empty here; the visibility gate and prune
-                // accounting are next_window's verbatim.
+                // accounting are next_window's verbatim (ranged: charge only
+                // the claim's granules — the rest of the RG belongs to other
+                // claims).
                 if !self.rg_visible(self.rg)? {
-                    self.granules_pruned += ngranules as u64;
+                    self.granules_pruned += match self.range_end {
+                        Some(end) => (end - self.granule) as u64,
+                        None => ngranules as u64,
+                    };
                     self.rg_claimed = false;
                     continue;
                 }
                 self.rg_checked = true;
             }
-            if self.granule >= ngranules {
+            if self.granule >= self.range_end.unwrap_or(usize::MAX).min(ngranules) {
+                // Ranged exhaustion keeps the RG claim (same-RG carry-over,
+                // next_window's own contract).
+                if self.range_end.is_some() {
+                    return Ok(CbGranuleMetaStep::Exhausted);
+                }
                 self.rg_claimed = false;
                 continue;
             }
