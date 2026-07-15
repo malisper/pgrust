@@ -352,6 +352,24 @@ fn coalesce_epochs() -> u64 {
     })
 }
 
+/// End-game terminal sub-RG split (tails192 #6, 48xl finding): at high
+/// width the whole-boundary rule floors terminal claims at ONE whole RG,
+/// making the photo-finish inert — the last few heavy RGs run on a
+/// shrinking worker set while the rest of the crowd idles (48xl q19/q33:
+/// 180-250ms finish skew = 30-45% of the drive at {96,191}). When the
+/// remaining tail has fewer whole RGs than live workers, fall back to
+/// sizer-driven granule claims INSIDE the RG (never across granules) —
+/// dict-rebuild duplication is bounded to the last < W claims, the regime
+/// the drive-scaling law never measured (its +78% was steady-state
+/// splitting). Engages only at width > 32 (16-core behavior unchanged by
+/// construction). Kill switch: PGRUST_RUNTIME_ENDGAME_SPLIT=0.
+fn endgame_split_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ENDGAME_SPLIT").map_or(true, |v| v.trim() != "0")
+    })
+}
+
 /// One worker's accumulated participation in one published task set.
 struct WfinStat {
     seq: u64,
@@ -1395,7 +1413,19 @@ impl Scheduler {
             // epoch is executed by 2+ workers, each rebuilding the epoch's
             // dictionary/memo state (the measured q21 DOP15 +78% busy
             // inflation). The sizer still observes for phase/stats.
-            let end = if ts.whole_claims {
+            // End-game terminal sub-RG split (tails192 #6): the whole-RG
+            // floor below makes the Shutdown sizing inert; when the tail
+            // holds fewer whole RGs than live workers, claim sizer-sized
+            // granule ranges inside the RG instead (photo-finish restored,
+            // dict duplication bounded to the last < W claims). The Ramp
+            // gate keeps first claims whole (no cold-start splitting);
+            // width > 32 keeps 16-core byte behavior unchanged.
+            let terminal_split = ts.whole_claims
+                && workers > crate::sizing::DOPSCALE_W0
+                && decision != SizingDecision::Ramp
+                && endgame_split_enabled()
+                && (total - cur) < workers.saturating_mul(bound - cur);
+            let end = if ts.whole_claims && !terminal_split {
                 // Claim coalescing (dop1-tax fix 1): at LOW live width the
                 // per-claim drive re-entry (scan reposition + drain prologue
                 // + partial export, ~30-45µs each on q21-class shapes) is
