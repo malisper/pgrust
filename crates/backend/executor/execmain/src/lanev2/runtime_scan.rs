@@ -1694,6 +1694,46 @@ pub(super) fn min_granules() -> u64 {
     })
 }
 
+/// DOP-elastic admission (tails192 #5, 48xl finding: tiny queries pay a
+/// +5-8ms arming tax at 191). Admission was BINARY — engage at the full
+/// pool or refuse to serial. Elastic: arm `ceil(total_granules /
+/// granules-per-worker)` workers, bounded by the pool — a drive whose work
+/// cannot feed the crowd never arms it. The refusal floors are UNCHANGED
+/// and still computed against the POOL dop (a refusal means "not worth any
+/// gang", independent of this sizing). gpw default 64 = the min_granules
+/// engagement floor: a worker bringing less than one floor's worth of
+/// granules cannot pay for its own arming. Scope-gated to pools > 32:
+/// 16-core behavior (fleet, mt16 vectors, e2e dop censuses) is identity
+/// by construction; only wide pools shrink.
+/// Kill switch PGRUST_RUNTIME_ELASTIC_DOP=0; tune PGRUST_RUNTIME_ELASTIC_GPW.
+pub(super) fn elastic_dop(dop: i32, total_granules: u64) -> i32 {
+    // Wide-pool scope gate (mirrors sizing::DOPSCALE_W0): elastic sizing is
+    // the DOP-191 arming-tax fix; at pool <= 32 admission behavior is
+    // UNCHANGED -- the 16-core fleet, the mt16 vectors, and the e2e dop
+    // censuses (launched == asked, runtime-sort leg 2) are identity by
+    // construction. Caught by tranche-sort leg2-dop-census at 8b79874ce:
+    // a 74-granule fixture at dop=4 engaged 2/2.
+    if dop <= 32 {
+        return dop;
+    }
+    static GPW: OnceLock<Option<u64>> = OnceLock::new();
+    let gpw = *GPW.get_or_init(|| {
+        if std::env::var("PGRUST_RUNTIME_ELASTIC_DOP").is_ok_and(|v| v.trim() == "0") {
+            return None;
+        }
+        Some(
+            std::env::var("PGRUST_RUNTIME_ELASTIC_GPW")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|&g| g > 0)
+                .unwrap_or(64),
+        )
+    });
+    let Some(gpw) = gpw else { return dop };
+    let need = total_granules.div_ceil(gpw).max(1);
+    need.min(dop as u64) as i32
+}
+
 /// Direct-morsel-drive arm kill (rowdrive car 1): PGRUST_RUNTIME_ROWDRIVE=0
 /// disables the storeless-count carve-out; the fold/census arms are
 /// untouched. Layered UNDER PGRUST_RUNTIME + the pool GUC like every arm
@@ -1951,6 +1991,9 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Engage.
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; the drive arms only what the work can feed.
+    let dop = elastic_dop(dop, total_granules);
     let ea_scan_node = ea.then_some(scan_plan.scan.plan.plan_node_id);
     let ea_timer = ea && runtime_instr::ea_timer(estate);
     // Router class resolution (M5-1): heap shapes re-class here — the entry
