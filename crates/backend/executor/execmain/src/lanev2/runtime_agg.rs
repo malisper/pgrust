@@ -252,6 +252,9 @@ struct AggSink {
     /// — Some arms the per-Local controller, None = structurally off for
     /// this engagement). Fixed at construction like `cap`.
     alpha_floor: Option<u32>,
+    /// Per-socket shared-table EXPERIMENT face (cachebudget D2, hard
+    /// default-OFF; see [`SharedAggFace`]). None on every default boot.
+    shared: Option<SharedAggFace>,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
     key_words: usize,
@@ -943,6 +946,11 @@ impl runtime::ParallelSink for AggSink {
     fn seal(&self, locals: &mut [AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        // Shared-table experiment drain (single-threaded here; before the
+        // adopt census — injected runs correctly decline the adopt).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(locals);
         }
         let t0 = agg_markers_on().then(std::time::Instant::now);
         // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
@@ -1694,6 +1702,11 @@ impl runtime::SealedParallelSink for AggSink {
     fn sealed_ready(&self, sealed: &mut Vec<AggSinkLocal>) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        // Shared-table experiment drain (single-threaded here by
+        // last-worker-out; before the adopt census).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(sealed);
         }
         if agg_markers_on() {
             // The 3-set arm's AGGSEAL sibling line (single-threaded here by
@@ -2598,8 +2611,14 @@ fn sink_drain_range<'mcx>(
             local.alpha.on_cap_flush(run.nrows(), sink);
             local.probe_flushes += 1;
             local.probe_flush_bytes += run.bytes() as u64;
-            local.run_bytes += run.bytes();
-            local.runs.push(run);
+            // Shared-table EXPERIMENT (D2, default OFF): an absorbed run's
+            // rows live in the socket table — the run is DROPPED, holding
+            // no Local memory; a refusal (closed face) is the spill
+            // fallback: the run rides the incumbent path below.
+            if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                local.run_bytes += run.bytes();
+                local.runs.push(run);
+            }
             // The flush RESET the compact table: every cached code -> state
             // pointer is a dangling table row — drop the dict-code cache.
             dgs.invalidate();
@@ -2672,8 +2691,12 @@ fn sink_drain_range<'mcx>(
                         local.alpha.on_pressure_flush();
                         local.probe_flushes += 1;
                         local.probe_flush_bytes += run.bytes() as u64;
-                        local.run_bytes += run.bytes();
-                        local.runs.push(run);
+                        // Shared-table experiment: as at the cap flush —
+                        // absorption drains the pressure outright.
+                        if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                            local.run_bytes += run.bytes();
+                            local.runs.push(run);
+                        }
                         if intern_reset {
                             mks.epoch = None;
                             mks.code_ids.clear();
@@ -3649,6 +3672,105 @@ fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
     (floor < cap).then_some(floor)
 }
 
+// ---------------------------------------------------------------------------
+// Per-socket SHARED aggregate table EXPERIMENT (cachebudget D2, hard
+// default-OFF — docs/design/shared-agg-table-experiment.md §4 and the
+// nodeagg::sink::SharedCountTable section doc). The mid-NDV architecture
+// decider for the next 48xl window; NOT a product default candidate until
+// the measurement spec's verdicts land (and the emit-order law is settled).
+// ---------------------------------------------------------------------------
+
+/// `PGRUST_RUNTIME_AGG_SHARED_TABLE=1` arms the experiment (default OFF).
+fn agg_shared_table_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(), Ok("1"))
+    })
+}
+
+/// Engagement band upper bound in estimated groups
+/// (`PGRUST_RUNTIME_AGG_SHARED_MAX`, default 1M ≈ a socket-SLC share at the
+/// 16B count-entry: 36MB × 0.5 / 16B — the design note's band arithmetic).
+/// The band's LOWER bound is the engaged sink cap itself (below it the
+/// per-worker Locals never fill and today's path is already optimal).
+fn agg_shared_table_max_groups() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1 << 20)
+    })
+}
+
+/// The experiment face: one shared count table per socket half (the
+/// numa-combine socket map; non-Linux / single-node folds to table 0).
+/// Prototype scope (recorded in the design note): single-int-word K2 keys,
+/// COUNT-only states.
+struct SharedAggFace {
+    tables: [::nodeagg::sink::SharedCountTable; 2],
+    /// Observability: runs absorbed / runs kept on the incumbent path
+    /// after a close (the SHAREDAGG marker line).
+    merged_runs: AtomicU64,
+    kept_runs: AtomicU64,
+}
+
+impl SharedAggFace {
+    fn new(est_groups: u64) -> SharedAggFace {
+        // Each socket table can in the worst case hold EVERY group (groups
+        // are not socket-partitioned — both halves may touch a key), so
+        // both size at the estimate; 25% headroom absorbs estimate error
+        // before the close-fallback fires.
+        let cap = (est_groups + est_groups / 4).max(64) as usize;
+        SharedAggFace {
+            tables: [
+                ::nodeagg::sink::SharedCountTable::new(cap),
+                ::nodeagg::sink::SharedCountTable::new(cap),
+            ],
+            merged_runs: AtomicU64::new(0),
+            kept_runs: AtomicU64::new(0),
+        }
+    }
+
+    /// Try to absorb a flushed run into the calling worker's socket table.
+    /// `true` = absorbed (drop the run); `false` = keep it on the incumbent
+    /// runs path (closed face / overflow — the spill fallback).
+    fn absorb(&self, run: &::nodeagg::sink::SinkRun) -> bool {
+        let half = numa_current_half().unwrap_or(0).min(1);
+        if self.tables[half].merge_run(run) {
+            self.merged_runs.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            self.kept_runs.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// SEAL-time drain (single-threaded by the seal contract): inject the
+    /// socket tables' contents as runs on the first sealed Local — the
+    /// combine consumes them exactly like flushed runs.
+    fn drain_into(&self, locals: &mut [AggSinkLocal]) {
+        let Some(l0) = locals.first_mut() else { return };
+        for t in &self.tables {
+            if let Some(run) = t.drain_to_run() {
+                l0.run_bytes += run.bytes();
+                l0.runs.push(run);
+            }
+        }
+        if agg_markers_on() {
+            eprintln!(
+                "MORSEL|SHAREDAGG|members={},{}|closed={},{}|merged_runs={}|kept_runs={}",
+                self.tables[0].reserved(),
+                self.tables[1].reserved(),
+                u8::from(self.tables[0].is_closed()),
+                u8::from(self.tables[1].is_closed()),
+                self.merged_runs.load(Ordering::Relaxed),
+                self.kept_runs.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -4317,6 +4439,29 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         }
         None => None,
     };
+    // Shared-table EXPERIMENT engagement (D2, default OFF): K2 single-int-
+    // word, COUNT-only states, no topn/freeze composition, est groups in
+    // (engaged cap, band max] — below the band Locals never fill; above it
+    // the table cannot be SLC-resident and the incumbent partitioned path
+    // is the right answer (and remains the runtime fallback either way).
+    let shared = if agg_shared_table_enabled()
+        && drain == SinkDrain::K2
+        && key_words == 1
+        && state_bytes == 8
+        && dop > 1
+        && topn.is_none()
+        && freeze.is_none()
+        && ::nodeagg::sink::agg_sink_all_count(agg)
+        && est_groups > sink_cap as u64
+        && est_groups <= agg_shared_table_max_groups()
+    {
+        lane_trace(&format!(
+            "runtime-agg: SHARED-TABLE experiment engaged (est_groups={est_groups})"
+        ));
+        Some(SharedAggFace::new(est_groups))
+    } else {
+        None
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -4331,6 +4476,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         } else {
             alpha_gate_floor(state_bytes, sink_cap, dop)
         },
+        shared,
         budget,
         key_words,
         state_bytes,
