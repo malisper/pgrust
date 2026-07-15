@@ -334,10 +334,6 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None };
         }
-        if pd.passthrough_engaged() {
-            // inc-3 engagement trace (e2e leg pin; once per engaged worker).
-            trace_feed("runtime-distinct: pass-through engaged");
-        }
         let r = catch_unwind(AssertUnwindSafe(|| pd.freeze()));
         match r {
             // freeze() sees a never-spilled builder (its `!ever_spilled`
