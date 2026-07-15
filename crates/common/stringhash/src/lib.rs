@@ -262,15 +262,25 @@ impl<C> RawCells<C> {
     /// contents (and page mappings) are preserved.
     #[cold]
     fn grow_double(&mut self) {
+        self.grow_to(self.cap * 2);
+    }
+
+    /// Extend the allocation to `new_cap` (pow2, > cap), zeroing the new
+    /// tail. `grow_double` generalized for the dedupsub projection reserve:
+    /// one realloc + one tail memset regardless of how many doublings the
+    /// jump replaces (the in-place/mremap fast path is identical).
+    #[cold]
+    fn grow_to(&mut self, new_cap: usize) {
+        debug_assert!(new_cap.is_power_of_two() && new_cap > self.cap);
         unsafe {
             let old_layout = std::alloc::Layout::array::<C>(self.cap).unwrap();
-            let new_bytes = old_layout.size() * 2;
+            let new_bytes = std::alloc::Layout::array::<C>(new_cap).unwrap().size();
             let p = std::alloc::realloc(self.ptr.as_ptr() as *mut u8, old_layout, new_bytes)
                 as *mut C;
             let ptr = std::ptr::NonNull::new(p).expect("stringhash: realloc failed");
-            std::ptr::write_bytes(ptr.as_ptr().add(self.cap), 0, self.cap);
+            std::ptr::write_bytes(ptr.as_ptr().add(self.cap), 0, new_cap - self.cap);
             self.ptr = ptr;
-            self.cap *= 2;
+            self.cap = new_cap;
             advise_huge(self.ptr.as_ptr() as *mut u8, new_bytes);
         }
     }
@@ -1137,8 +1147,22 @@ impl IntSet {
 
     #[cold]
     fn grow(&mut self) {
+        self.grow_to_cap(self.cells.cap * 2);
+    }
+
+    /// Grow to `new_cap` cells (pow2, > cap) with ONE realloc + tail zero +
+    /// in-place rehash — `grow` generalized so a projection reserve can jump
+    /// the whole doubling ladder in one step (dedupsub I3: the ladder's
+    /// rehash volume is ~1x final len and measured ~4-5% of q9/q10 cycles).
+    /// The two rehash loops are ratio-independent: pass 1 reinserts every
+    /// key from the old prefix at its new-mask position; pass 2 fixes the
+    /// chain segment that wrapped past the old end (identical to the 2x
+    /// version — neither loop assumes new_cap == 2*old).
+    #[cold]
+    fn grow_to_cap(&mut self, new_cap: usize) {
         let old_n = self.cells.cap;
-        self.cells.grow_double();
+        debug_assert!(new_cap.is_power_of_two() && new_cap > old_n);
+        self.cells.grow_to(new_cap);
         self.mask = self.cells.cap - 1;
         unsafe {
             for i in 0..old_n {
@@ -1151,6 +1175,27 @@ impl IntSet {
                 self.reinsert(i);
                 i += 1;
             }
+        }
+    }
+
+    /// Projection reserve (dedupsub I3): make the table large enough for
+    /// `target_len` keys under the 50% max-load law, in one jump. A no-op
+    /// when the table is already big enough; an EMPTY set allocates the
+    /// final size directly (zero rehash). Never shrinks. Table geometry is
+    /// a non-surface: contents, value order, and every probe verdict are
+    /// unchanged for any target.
+    pub fn reserve_for(&mut self, target_len: usize) {
+        let needed = target_len
+            .saturating_mul(2)
+            .max(1 << INITIAL_DEGREE)
+            .next_power_of_two();
+        if self.cells.cap == 0 {
+            self.cells.alloc_zeroed(needed);
+            self.mask = self.cells.cap - 1;
+            return;
+        }
+        if needed > self.cells.cap {
+            self.grow_to_cap(needed);
         }
     }
 
@@ -1407,6 +1452,42 @@ impl BytesDedup {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// dedupsub I3: a projection reserve mid-stream must lose nothing (a
+    /// duplicate re-insert of every held key returns false), keep dedup
+    /// exact afterwards, and be a no-op when the table already fits.
+    #[test]
+    fn intset_reserve_for_jump_preserves_contents() {
+        let mut s = IntSet::new();
+        for i in 0..1_000i64 {
+            assert!(s.insert(i * 3 - 500));
+        }
+        let cap_small = s.mem_bytes();
+        s.reserve_for(100_000);
+        assert!(s.mem_bytes() >= 100_000 * 2 * 8, "one jump to final size");
+        for i in 0..1_000i64 {
+            assert!(!s.insert(i * 3 - 500), "held key lost by the jump rehash");
+        }
+        for i in 1_000..100_000i64 {
+            assert!(s.insert(i * 3 - 500));
+        }
+        let cap_big = s.mem_bytes();
+        s.reserve_for(50_000); // smaller target: never shrinks, no-op
+        assert_eq!(s.mem_bytes(), cap_big);
+        assert!(cap_big > cap_small);
+        // Zero-key + boundary keys survive reserve like any other.
+        let mut z = IntSet::new();
+        z.insert(0);
+        z.insert(i64::MIN);
+        z.reserve_for(4_096);
+        assert!(!z.insert(0));
+        assert!(!z.insert(i64::MIN));
+        // Reserve on a fresh set allocates once, then inserts dedup.
+        let mut f = IntSet::new();
+        f.reserve_for(10_000);
+        assert!(f.insert(7));
+        assert!(!f.insert(7));
+    }
 
     fn check_against_reference(keys: &[Vec<u8>]) {
         let mut ours = StringHashMap::new();

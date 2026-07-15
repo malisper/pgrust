@@ -5024,6 +5024,9 @@ pub fn pd_derive_spec(
         sets,
         max_att,
         worker_budget: distinct_set_budget() / 2,
+        // dedupsub I3: unknown here — the runtime sink overrides at engage
+        // (Gather-era arms keep the projection inert).
+        expected_worker_rows: 0,
     }))
 }
 
