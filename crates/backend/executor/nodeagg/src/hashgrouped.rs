@@ -1414,7 +1414,11 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
     // Word-skip the qual-filtered continues (exact whole-qual verdict —
     // same surviving rows in the same order, so probe misses stop at their
     // exact positions; an all-clear word advances 64 rows in one compare).
-    let stop = exectuples::for_each_live(sel, pos, n, |i| {
+    // ONEBODY variant: this row body is large — the two-arm helper
+    // duplicated it into dense+sparse loop copies and the unfiltered leg
+    // (q9/q10) regressed +9%; the single word loop with all-set dense
+    // words keeps one copy at ~2 extra ops per dense row.
+    let stop = exectuples::for_each_live_onebody(sel, pos, n, |i| {
         let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
         if fb[w] & bit != 0 {
             return Err(HgSpanStop::NeedSlot { at: i, absorbed });
