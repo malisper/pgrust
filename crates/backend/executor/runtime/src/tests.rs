@@ -1303,3 +1303,1395 @@ fn maintenance_overtakes_wait_queue() {
     fg2.assert_all_executed_once();
     mt.assert_all_executed_once();
 }
+
+// ---- M5-4 stride/fair-share activation (m5-planner §3, inter-query §5.3) ----
+
+/// Single-RG bit-identity anchor (in-crate half of the M5-4 proof; the
+/// server-level half is regress-diff + select1 on fleet): with exactly one
+/// active RG, the stride pick is FORCED — the claim sequence is identical
+/// between stride ON and OFF, morsel for morsel.
+#[test]
+fn stride_single_rg_claim_sequence_identical() {
+    let run = |stride: bool| -> Vec<Range<u64>> {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(stride);
+        let total = 16_000u64;
+        let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        let claims = work.claims.lock().unwrap();
+        claims.clone()
+    };
+    let on = run(true);
+    let off = run(false);
+    assert_eq!(on, off, "single-RG claim sequence must be identical under stride");
+}
+
+/// Kill switch: PGRUST_RUNTIME_STRIDE=0 (here per-instance set_stride(false))
+/// restores the M0 FIFO pick — with two active RGs and one worker, RG A runs
+/// to completion before RG B's first claim.
+#[test]
+fn stride_off_is_fifo_two_rgs() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(false);
+    let a = SyntheticWork::new(8_000, Some(Arc::clone(&clock)), 1_000);
+    let (_ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(8_000))));
+    let b = SyntheticWork::new(8_000, Some(Arc::clone(&clock)), 1_000);
+    let (_hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(8_000))));
+    let mut local = rt.worker_local(0);
+    while wa.try_wait().is_none() {
+        rt.worker_step(&mut local);
+        if wa.try_wait().is_none() {
+            assert!(
+                b.claims.lock().unwrap().is_empty(),
+                "FIFO (stride off) must not interleave RG B before A completes"
+            );
+        }
+    }
+    while wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    a.assert_all_executed_once();
+    b.assert_all_executed_once();
+}
+
+/// The K-sweep proportional-share gate at equal shares (§3.4 law, M5-4
+/// scope): K concurrent equal-priority RGs on one deterministic worker —
+/// after a fixed number of task boundaries with ALL RGs still active, each
+/// RG's cpu_consumed_ns share error is within one task quantum of 1/K.
+/// (Deterministic virtual clock: the numbers below are exact, not flaky —
+/// they are the in-band evidence the close-out gate table cites.)
+#[test]
+fn stride_equal_share_k_sweep() {
+    for k in [2usize, 3, 4, 8, 16] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        let total = 400_000u64; // 400 ms of virtual CPU per RG — nobody finishes
+        let mut works = Vec::new();
+        let mut handles = Vec::new();
+        let mut waiters = Vec::new();
+        for q in 0..k {
+            let w = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) = rt.submit(QuerySpec {
+                query_id: q as u64 + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            works.push(w);
+            handles.push(h);
+            waiters.push(waiter);
+        }
+        // 20 task boundaries per RG at perfect fairness.
+        let mut local = rt.worker_local(0);
+        for _ in 0..(20 * k) {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        for w in &waiters {
+            assert!(w.try_wait().is_none(), "K-sweep RGs must all still be active");
+        }
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let sum: u64 = cpus.iter().sum();
+        let mean = sum as f64 / k as f64;
+        let mut max_err = 0f64;
+        for c in &cpus {
+            max_err = max_err.max((*c as f64 - mean).abs() / mean);
+        }
+        // One task quantum ≈ t_max (2 ms) against ≈ 20 quanta ⇒ ≤ ~5%; the
+        // startup ramp spends its smaller morsels equally across RGs.
+        assert!(
+            max_err <= 0.06,
+            "K={k}: proportional-share error {max_err:.4} out of band; cpus={cpus:?}"
+        );
+        eprintln!("stride K-sweep K={k}: max share error {max_err:.4} (cpu ns: {cpus:?})");
+        // Drain: abort everything and drive the cleanup to completion.
+        for h in &handles {
+            h.abort();
+        }
+        for w in &waiters {
+            while w.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+    }
+}
+
+/// M5-5 decay trajectory + floor clamp (inter-query §5.4): a single RG's
+/// priority follows p(q) = max(p_min, p0·λ^q) exactly as its consumed CPU
+/// crosses decay-quantum boundaries, and clamps at the p_min floor (reached
+/// at q=4 with the ratified λ=1/2, p_min=p0/16).
+#[test]
+fn decay_priority_trajectory_and_floor() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(true);
+    let qn = 4_000_000u64; // 4 ms CPU per decay quantum (test-tightened)
+    rt.set_decay_quantum_ns(qn);
+    assert_eq!(rt.p_min(), 625, "ratified default floor = p0/16");
+    let total = 400_000u64; // long-lived: never finishes inside the loop
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(h.priority(), 10_000, "fresh RG holds p0");
+    let mut local = rt.worker_local(0);
+    let mut reached_floor_at_q = None;
+    while h.cpu_consumed_ns() < 10 * qn {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        let q = (h.cpu_consumed_ns() / qn).min(63) as i32;
+        let expect = ((10_000f64 * 0.5f64.powi(q)) as u32).max(625);
+        assert_eq!(
+            h.priority(),
+            expect,
+            "after q={q} quanta ({}ns cpu) priority must be max(p_min, p0·λ^q)",
+            h.cpu_consumed_ns()
+        );
+        if expect == 625 && reached_floor_at_q.is_none() {
+            reached_floor_at_q = Some(q);
+        }
+    }
+    assert_eq!(reached_floor_at_q, Some(4), "λ=1/2 floors p0/16 at exactly 4 quanta");
+    assert_eq!(h.priority(), 625, "floor holds: later quanta never lower it further");
+    h.abort();
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+}
+
+/// M5-5 kill switch: decay OFF pins every RG at p0 regardless of consumed
+/// CPU — the M5-4 equal-shares scheduler exactly.
+#[test]
+fn decay_off_keeps_p0() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(false);
+    rt.set_decay_quantum_ns(1_000_000);
+    let total = 100_000u64;
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+        assert_eq!(h.priority(), 10_000, "decay off: priority never moves");
+    }
+    assert!(h.cpu_consumed_ns() >= 50_000_000, "consumed far past many quanta");
+}
+
+/// M5-5 single-RG bit-identity (re-proof at this increment): with one RG
+/// the pick is forced before any pass/stride read, so decay ON vs OFF must
+/// produce the identical claim sequence, morsel for morsel.
+#[test]
+fn decay_single_rg_claim_sequence_identical() {
+    let run = |decay: bool| -> Vec<Range<u64>> {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        rt.set_decay_quantum_ns(1_000_000); // aggressive: many boundaries
+        let total = 16_000u64;
+        let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        let claims = work.claims.lock().unwrap();
+        claims.clone()
+    };
+    assert_eq!(
+        run(true),
+        run(false),
+        "single-RG claim sequence must be identical under decay"
+    );
+}
+
+/// M5-5 K-sweep invariance: with decay ACTIVE (boundaries crossed many
+/// times), K equal RGs consume equally, decay identically, and keep equal
+/// shares — the M5-4 proportional-share gate holds through live decay.
+#[test]
+fn decay_equal_consumption_keeps_equal_shares() {
+    for k in [2usize, 4, 8] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_decay_quantum_ns(2_000_000); // one boundary per ~task
+        let total = 400_000u64;
+        let mut handles = Vec::new();
+        let mut waiters = Vec::new();
+        for q in 0..k {
+            let w = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) = rt.submit(QuerySpec {
+                query_id: q as u64 + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            handles.push(h);
+            waiters.push(waiter);
+        }
+        let mut local = rt.worker_local(0);
+        for _ in 0..(20 * k) {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        for h in &handles {
+            assert!(h.priority() < 10_000, "decay must have engaged (boundaries crossed)");
+        }
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        let mut max_err = 0f64;
+        for c in &cpus {
+            max_err = max_err.max((*c as f64 - mean).abs() / mean);
+        }
+        assert!(
+            max_err <= 0.06,
+            "K={k}: share error {max_err:.4} out of band under live decay; cpus={cpus:?}"
+        );
+        eprintln!("decay K-sweep K={k}: max share error {max_err:.4}");
+        for h in &handles {
+            h.abort();
+        }
+        for w in &waiters {
+            while w.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+    }
+}
+
+/// M5-5 starvation bound + share skew (the §3.4 floor law, unit form): a
+/// batch RG decayed to the p_min floor against a fresh p0 arrival must
+/// (a) keep receiving service with a bounded gap between its tasks —
+/// ≈ p0/p_min boundaries, the starvation bound the lock-wait edge relies
+/// on — and (b) hold a CPU share ≈ p_min/(p_min+p0) = 1/17.
+#[test]
+fn decay_starvation_floor_share_skew() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_decay(true);
+    rt.set_decay_quantum_ns(2_000_000);
+    let total = 40_000_000u64; // 40 s virtual CPU: nobody finishes
+    // Phase 1: batch B runs alone and decays to the floor.
+    let b = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(total))));
+    let mut local = rt.worker_local(0);
+    while hb.priority() > rt.p_min() {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    }
+    assert_eq!(hb.priority(), 625);
+    // Freeze further decay (quantum → ∞) so the fresh arrival keeps p0:
+    // persistent adversarial skew, the §3.4 worst case.
+    rt.set_decay_quantum_ns(u64::MAX);
+    let a = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+    let (ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(total))));
+    assert_eq!(ha.priority(), 10_000);
+    // Phase 2: 340 task boundaries ≈ 20 rotations of the 17-slot cycle.
+    let b_start = hb.cpu_consumed_ns();
+    let a_start = ha.cpu_consumed_ns();
+    let mut last_b = b_start;
+    let mut gap = 0u32;
+    let mut max_gap = 0u32;
+    const BOUNDARIES: u32 = 340;
+    for _ in 0..BOUNDARIES {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        let bc = hb.cpu_consumed_ns();
+        if bc > last_b {
+            last_b = bc;
+            gap = 0;
+        } else {
+            gap += 1;
+            max_gap = max_gap.max(gap);
+        }
+    }
+    // (a) Starvation bound: the floor guarantees B a task at least every
+    // ~p0/p_min = 16 boundaries; allow ramp slack.
+    assert!(
+        max_gap <= 24,
+        "starvation bound violated: floor RG waited {max_gap} boundaries (p0/p_min=16)"
+    );
+    // (b) Proportional skew: B's share ≈ p_min/(p_min+p0) = 1/17 ≈ 0.0588.
+    let b_cpu = (hb.cpu_consumed_ns() - b_start) as f64;
+    let a_cpu = (ha.cpu_consumed_ns() - a_start) as f64;
+    let b_share = b_cpu / (b_cpu + a_cpu);
+    assert!(
+        (0.035..=0.085).contains(&b_share),
+        "floor share {b_share:.4} outside the ≈1/17 band (b={b_cpu} a={a_cpu})"
+    );
+    eprintln!("decay skew: floor share {b_share:.4}, max service gap {max_gap} boundaries");
+    ha.abort();
+    hb.abort();
+    while wa.try_wait().is_none() || wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+}
+
+/// M5-5 latency payoff (the §3.4 MLFQ effect, unit form): a fresh short
+/// query submitted against a decayed 6-query batch background completes in
+/// far fewer task boundaries with decay ON (batch at the floor: the short
+/// query holds ~73% of the pool) than with decay OFF (equal shares: 1/7).
+/// Runs at the RATIFIED constants (50ms quantum, λ=1/2, p_min=625): the
+/// 20ms short query is sub-quantum by definition and never decays.
+#[test]
+fn decay_short_query_latency_under_batch_background() {
+    let run = |decay: bool| -> u32 {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        let batch_total = 40_000_000u64;
+        let mut batch = Vec::new();
+        let mut batch_waiters = Vec::new();
+        for q in 0..6u64 {
+            let w = SyntheticWork::new(batch_total, Some(Arc::clone(&clock)), 1_000);
+            let (h, wt) = rt.submit(QuerySpec {
+                query_id: q + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(batch_total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            batch.push(h);
+            batch_waiters.push(wt);
+        }
+        let mut local = rt.worker_local(0);
+        // Warm the background past the decay horizon: each batch RG needs
+        // 4 quanta = 200ms CPU to floor; 6 RGs × ~100 2ms-tasks ⇒ ~600
+        // boundaries (virtual clock: instant). Decay ON: all six settle to
+        // the floor; OFF: they stay at p0.
+        for _ in 0..700 {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        if decay {
+            for h in &batch {
+                assert_eq!(h.priority(), 625, "background must sit at the floor");
+            }
+        }
+        // Submit the short interactive query (≈ 10 tasks of work) and count
+        // boundaries until it completes.
+        let short = SyntheticWork::new(20_000, Some(Arc::clone(&clock)), 1_000);
+        let (_hs, ws) = rt.submit(QuerySpec {
+            query_id: 99,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(20_000)),
+                work: Arc::clone(&short) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        let mut boundaries = 0u32;
+        while ws.try_wait().is_none() {
+            rt.worker_step(&mut local);
+            boundaries += 1;
+            assert!(boundaries < 10_000, "short query starved");
+        }
+        for h in &batch {
+            h.abort();
+        }
+        for wt in &batch_waiters {
+            while wt.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+        boundaries
+    };
+    let on = run(true);
+    let off = run(false);
+    assert!(
+        on * 2 < off,
+        "MLFQ effect missing: short query took {on} boundaries with decay vs {off} without"
+    );
+    eprintln!("decay latency: short query {on} boundaries (decay on) vs {off} (off)");
+}
+
+/// Session-affine stickiness as pick-tiebreaker (§5.2; ceremony-v2
+/// mechanism): at EQUAL pass, a worker sticky-bound to RG B's leader session
+/// picks B's slot over the lower-index equal-pass slot of RG A. Equal-pass
+/// ONLY (the design's §10 default): once A's pass falls behind, A is picked
+/// regardless of affinity.
+#[test]
+fn stride_session_affinity_tiebreak() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    let a = SyntheticWork::new(8_000, Some(Arc::clone(&clock)), 1_000);
+    let (_ha, _wa) = rt.submit_with_affinity(
+        spec_one(&a, Arc::new(SyntheticMorselSource::new(8_000))),
+        7,
+    );
+    let b = SyntheticWork::new(8_000, Some(Arc::clone(&clock)), 1_000);
+    let (_hb, _wb) = rt.submit_with_affinity(
+        spec_one(&b, Arc::new(SyntheticMorselSource::new(8_000))),
+        9,
+    );
+    let mut local = rt.worker_local(0);
+    local.set_session_token(9);
+    // Both slots joined at watermark 0: equal pass ⇒ affinity must win the
+    // tie and claim from B first.
+    assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    assert!(
+        a.claims.lock().unwrap().is_empty() && !b.claims.lock().unwrap().is_empty(),
+        "equal-pass pick must prefer the session-affine slot"
+    );
+    assert!(rt.stats().affinity_tiebreaks >= 1);
+    // B's pass advanced past A's: the next pick is A (lowest pass beats
+    // affinity — equal-pass-only tiebreak, no pass penalty).
+    assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    assert!(
+        !a.claims.lock().unwrap().is_empty(),
+        "lower pass must beat session affinity (equal-pass-only tiebreak)"
+    );
+}
+
+/// M5-4 slot-reclamation fix: an aborted RG still in the WAIT QUEUE
+/// completes at abort time — promptly, with no slot freeing and no worker
+/// stepping — instead of waiting for an unrelated slot release.
+#[test]
+fn queued_abort_reaped_promptly() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = RuntimeConfig::new(1);
+    cfg.slots = 1;
+    let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+
+    let a = SyntheticWork::new(64, Some(Arc::clone(&clock)), 1_000);
+    let (_ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(64))));
+    let b = SyntheticWork::new(64, Some(Arc::clone(&clock)), 1_000);
+    let (hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(64))));
+    assert!(wb.try_wait().is_none(), "B must be queued (1 slot)");
+
+    // Abort the QUEUED RG: completion must be immediate — no worker has
+    // stepped, no slot has freed.
+    hb.abort();
+    assert_eq!(
+        wb.try_wait(),
+        Some(RgOutcome::Aborted),
+        "aborted queued RG must complete at abort time (slot-reclamation fix)"
+    );
+    let (submit_ns, first_ns, done_ns) = hb.service_times();
+    assert!(submit_ns > 0 && done_ns >= submit_ns, "service timestamps must be recorded");
+    assert_eq!(first_ns, 0, "a reaped queued RG was never serviced");
+    assert!(b.claims.lock().unwrap().is_empty(), "reaped RG must never execute a morsel");
+
+    let stats = rt.stats();
+    assert_eq!(stats.queued_aborts_reaped, 1);
+    assert_eq!(stats.rgs_aborted, 1);
+
+    // The active RG is untouched.
+    let mut local = rt.worker_local(0);
+    while wa.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(wa.wait(), RgOutcome::Completed);
+    a.assert_all_executed_once();
+    // Idempotence: a second abort on the completed RG is a no-op.
+    hb.abort();
+    assert_eq!(rt.stats().queued_aborts_reaped, 1);
+}
+
+/// M4 Maintenance ≤ ~1-task bound RETEST under live stride (m5-planner §3.2
+/// reconciliation): with several foreground RGs mid-flight at UNEQUAL
+/// passes, a submitted maintenance cycle is still picked at the very next
+/// task boundary — the preference is evaluated before the stride pick — and
+/// its pass charges normally.
+#[test]
+fn maintenance_bound_survives_stride() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    let mut fgs = Vec::new();
+    let mut fgw = Vec::new();
+    for q in 0..3u64 {
+        let w = SyntheticWork::new(64_000, Some(Arc::clone(&clock)), 1_000);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: q + 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(64_000)),
+                work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        fgs.push(w);
+        fgw.push(waiter);
+    }
+    let mut local = rt.worker_local(0);
+    // Let the stride pick rotate a few boundaries so passes are unequal.
+    for _ in 0..5 {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    }
+    let mt = SyntheticWork::new(1, Some(Arc::clone(&clock)), 1_000);
+    let (_mh, mw) =
+        rt.submit_maintenance(spec_one(&mt, Arc::new(SyntheticMorselSource::new(1))));
+    // ≤ 1 task boundary to cycle start AND completion (single-morsel body).
+    assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    assert_eq!(
+        mw.try_wait(),
+        Some(RgOutcome::Completed),
+        "maintenance cycle must complete at the first boundary under stride"
+    );
+    mt.assert_all_executed_once();
+    // Drain the foreground RGs.
+    for w in &fgw {
+        while w.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+    }
+    for f in &fgs {
+        f.assert_all_executed_once();
+    }
+}
+
+/// §3.5 submit→service instrument channel: timestamps are recorded and
+/// ordered (submit ≤ first-service ≤ done on the scheduler clock), and the
+/// per-RG CPU readback matches the virtual work exactly.
+#[test]
+fn service_times_and_cpu_readback() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    let total = 8_000u64;
+    let cost = 1_000u64;
+    let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), cost);
+    let (h, waiter) = rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(total))));
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    let (submit_ns, first_ns, done_ns) = h.service_times();
+    assert!(submit_ns > 0, "submit timestamp recorded");
+    assert!(first_ns >= submit_ns, "first service after submit");
+    assert!(done_ns >= first_ns, "done after first service");
+    assert_eq!(h.cpu_consumed_ns(), total * cost, "exact CPU readback (virtual clock)");
+}
+
+/// Threaded fair-share smoke (the MULTI-arm shape, in-crate): K equal-share
+/// RGs on a real pool, CPU shares sampled MID-FLIGHT (at completion the
+/// totals are trivially equal — fixed work per RG). Sampling guard: shares
+/// are only asserted if every RG is still active at the sample point, so
+/// the test cannot flake on a fast machine; the band is deliberately loose
+/// (fairness law's starvation direction) — exact error numbers come from
+/// the deterministic K-sweep above.
+#[test]
+fn stride_threaded_pool_mid_flight_shares() {
+    struct Spin {
+        ns_per_granule: u64,
+    }
+    impl TaskSetWork for Spin {
+        fn run_morsel(&self, _w: usize, range: MorselRange) {
+            let n = range.end - range.start;
+            let t0 = std::time::Instant::now();
+            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
+            while t0.elapsed() < budget {
+                std::hint::spin_loop();
+            }
+        }
+        fn finalize(&self) {}
+    }
+
+    let mut cfg = RuntimeConfig::new(4);
+    cfg.slots = 16;
+    let rt = Runtime::new(cfg);
+    rt.set_stride(true);
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    let k = 6usize;
+    let mut handles = Vec::new();
+    let mut waiters = Vec::new();
+    for q in 0..k {
+        let (h, w) = rt.submit(QuerySpec {
+            query_id: q as u64 + 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(4_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            }],
+        });
+        handles.push(h);
+        waiters.push(w);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let all_active = waiters.iter().all(|w| w.try_wait().is_none());
+    if all_active {
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        eprintln!("stride threaded mid-flight shares (mean {mean:.0}): {cpus:?}");
+        for c in &cpus {
+            assert!(
+                (*c as f64) >= 0.4 * mean && (*c as f64) <= 1.8 * mean,
+                "mid-flight share out of loose band: {c} vs mean {mean:.0} ({cpus:?})"
+            );
+        }
+    } else {
+        eprintln!("stride threaded shares: sample point missed (fast machine) — band skipped");
+    }
+    for w in &waiters {
+        assert_eq!(w.wait(), RgOutcome::Completed);
+    }
+    pool.shutdown();
+}
+
+/// M5-5 lock-wait-fairness (inter-query §6.3, the §3.4/§5.4 gate — CI
+/// form): an adversarial priority-skew + contention workload that WOULD
+/// starve a lock holder under unclamped decay, asserted bounded by p_min.
+/// The lock-wait bound IS the holder's completion bound: whoever queues on
+/// the holder's lock waits exactly until the holder's query completes and
+/// releases it. Deterministic (virtual clock, one worker): a floor-decayed
+/// holder with R remaining work against K fresh-p0 adversaries completes
+/// within tasks(R) × (1 + K·p0/p_min) boundaries — and the bound tightens
+/// proportionally when the floor is raised, proving p_min is the binding
+/// constant (the C-legality window §3.4 relies on).
+#[test]
+fn lock_wait_fairness_pmin_bounds_holder() {
+    let run = |p_min: u32| -> (u32, u32) {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_p_min(p_min);
+        rt.set_decay_quantum_ns(2_000_000);
+        // The HOLDER: enough total work that ~20ms remains after it decays
+        // to the floor (worst-case: it consumed heavily while holding).
+        let holder_total = 40_000u64; // 40 ms virtual CPU
+        let h_work = SyntheticWork::new(holder_total, Some(Arc::clone(&clock)), 1_000);
+        let (hh, hw) =
+            rt.submit(spec_one(&h_work, Arc::new(SyntheticMorselSource::new(holder_total))));
+        let mut local = rt.worker_local(0);
+        while hh.priority() > rt.p_min() {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        assert_eq!(hh.priority(), p_min);
+        let consumed = hh.cpu_consumed_ns();
+        let remaining_ns = holder_total * 1_000 - consumed;
+        // Freeze decay so the adversaries KEEP p0 — sustained maximal skew.
+        rt.set_decay_quantum_ns(u64::MAX);
+        const K: u64 = 8;
+        let adv_total = 40_000_000u64; // 40 s: adversaries never finish
+        let mut adv = Vec::new();
+        let mut adv_waiters = Vec::new();
+        for q in 0..K {
+            let w = SyntheticWork::new(adv_total, Some(Arc::clone(&clock)), 1_000);
+            let (h, wt) = rt.submit(QuerySpec {
+                query_id: 100 + q,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(adv_total)),
+                    work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            adv.push(h);
+            adv_waiters.push(wt);
+        }
+        // Drive until the holder completes (= the lock releases); count
+        // boundaries — the deterministic "wall clock" of the wait.
+        let mut boundaries = 0u32;
+        while hw.try_wait().is_none() {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+            boundaries += 1;
+            assert!(
+                boundaries < 2_000_000,
+                "holder starved outright at p_min={p_min} — the floor failed"
+            );
+        }
+        assert_eq!(hw.wait(), RgOutcome::Completed);
+        // Theory: holder runs 1 task per (1 + K·p0/p_min) boundaries.
+        let holder_tasks = remaining_ns.div_ceil(2_000_000).max(1) as u32; // t_max tasks
+        let rotation = 1 + (K as u32) * 10_000 / p_min;
+        let bound = holder_tasks * rotation * 13 / 10 + rotation; // +30% ramp slack
+        assert!(
+            boundaries <= bound,
+            "p_min={p_min}: lock-holder wait {boundaries} boundaries exceeds the \
+             floor-derived bound {bound} (tasks={holder_tasks}, rotation={rotation})"
+        );
+        for h in &adv {
+            h.abort();
+        }
+        for wt in &adv_waiters {
+            while wt.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+        (boundaries, bound)
+    };
+    // Ratified floor: bounded.
+    let (b625, bound625) = run(625);
+    // Raised floor: the window tightens ~4x — p_min is the binding constant.
+    let (b2500, bound2500) = run(2_500);
+    assert!(
+        b2500 * 3 < b625,
+        "raising p_min 4x must shrink the lock-wait window ~4x (625: {b625}, 2500: {b2500})"
+    );
+    eprintln!(
+        "lock-wait fairness: p_min=625 wait {b625}/{bound625} boundaries; \
+         p_min=2500 wait {b2500}/{bound2500} — floor bounds the window"
+    );
+}
+
+/// M5-5 §3.4 latency-fairness panel, MULTI arm (unit form; the fleet panel
+/// script drives the SQL altitude): a controlled mix of short probes
+/// against a saturating batch background on a REAL 4-worker pool, decay ON
+/// vs OFF. Emits the M0ACCEPT|FAIR verdict line the m0-accept channel
+/// greps. Gate: short-query p50/p95 under load approaches isolated (the
+/// MLFQ effect); batch throughput floor guarded by completion.
+#[test]
+fn multi_fairness_panel_short_latency_under_batch() {
+    struct Spin {
+        ns_per_granule: u64,
+    }
+    impl TaskSetWork for Spin {
+        fn run_morsel(&self, _w: usize, range: MorselRange) {
+            let n = range.end - range.start;
+            let t0 = std::time::Instant::now();
+            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
+            while t0.elapsed() < budget {
+                std::hint::spin_loop();
+            }
+        }
+        fn finalize(&self) {}
+    }
+    // One probe = ~4 ms of work (sub-quantum: never decays).
+    let submit_probe = |rt: &Arc<Runtime>, qid: u64| {
+        rt.submit(QuerySpec {
+            query_id: qid,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(200)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            }],
+        })
+    };
+    let percentile = |xs: &mut Vec<u64>, p: f64| -> u64 {
+        xs.sort_unstable();
+        xs[((xs.len() - 1) as f64 * p) as usize]
+    };
+    let run = |decay: bool| -> (u64, u64, u64, u64) {
+        let mut cfg = RuntimeConfig::new(4);
+        cfg.slots = 16;
+        let rt = Runtime::new(cfg);
+        rt.set_stride(true);
+        rt.set_decay(decay);
+        // Tight quantum so the batch decays within the test's horizon
+        // (real clock; the ratified 50ms/quantum geometry scaled down).
+        rt.set_decay_quantum_ns(5_000_000);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        // Isolated baseline: 8 probes, quiet pool.
+        let mut iso = Vec::new();
+        for i in 0..8u64 {
+            let (h, w) = submit_probe(&rt, 1000 + i);
+            assert_eq!(w.wait(), RgOutcome::Completed);
+            let (s, _f, d) = h.service_times();
+            iso.push(d - s);
+        }
+        // Saturating batch background (~200 ms each); count env-tunable
+        // for fleet calibration.
+        let n_batch: u64 = std::env::var("M5_PANEL_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6);
+        let mut batch = Vec::new();
+        let mut batch_waiters = Vec::new();
+        for q in 0..n_batch {
+            let (h, w) = rt.submit(QuerySpec {
+                query_id: q + 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(10_000)),
+                    work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                    deps: vec![],
+                }],
+            });
+            batch.push(h);
+            batch_waiters.push(w);
+        }
+        // Let the background consume past the decay horizon.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Under-load probes: 8 shorts, controlled spacing.
+        let mut load = Vec::new();
+        for i in 0..8u64 {
+            let (h, w) = submit_probe(&rt, 2000 + i);
+            assert_eq!(w.wait(), RgOutcome::Completed);
+            let (s, _f, d) = h.service_times();
+            load.push(d - s);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Batch background must still complete (throughput floor: no
+        // starvation of the decayed class).
+        for w in &batch_waiters {
+            assert_eq!(w.wait(), RgOutcome::Completed);
+        }
+        pool.shutdown();
+        (
+            percentile(&mut iso, 0.5),
+            percentile(&mut iso, 0.95),
+            percentile(&mut load, 0.5),
+            percentile(&mut load, 0.95),
+        )
+    };
+    let (on_iso_p50, on_iso_p95, on_p50, on_p95) = run(true);
+    let (off_iso_p50, _off_iso_p95, off_p50, off_p95) = run(false);
+    let r50 = on_p50 as f64 / on_iso_p50.max(1) as f64;
+    let r95 = on_p95 as f64 / on_iso_p95.max(1) as f64;
+    let r50_off = off_p50 as f64 / off_iso_p50.max(1) as f64;
+    let verdict = if r95 <= 8.0 && r50 <= 6.0 { "PASS" } else { "FAIL" };
+    eprintln!(
+        "M0ACCEPT|FAIR|arm=multi-unit|decay=on|short_p50_us={}|short_p95_us={}|iso_p50_us={}|\
+         iso_p95_us={}|p50_ratio={r50:.2}|p95_ratio={r95:.2}|off_p50_ratio={r50_off:.2}|\
+         off_p50_us={}|off_p95_us={}|verdict={verdict}",
+        on_p50 / 1000,
+        on_p95 / 1000,
+        on_iso_p50 / 1000,
+        on_iso_p95 / 1000,
+        off_p50 / 1000,
+        off_p95 / 1000,
+    );
+    // Loose CI bands (real threads; the calibrated band is the fleet
+    // panel's): under-load short latency must stay within an order of
+    // magnitude of isolated with decay ON, and must beat decay OFF on p50.
+    assert_eq!(verdict, "PASS", "latency-fairness panel out of band");
+    assert!(
+        on_p50 <= off_p50.max(1) * 2,
+        "decay ON p50 ({on_p50}ns) should not exceed 2x decay OFF p50 ({off_p50}ns)"
+    );
+}
+
+// ---- M5+1 pipeline-DAG dispatch (m5-planner §3.6, increment 1) --------------
+//
+// Independent-subtree overlap: every dependency-satisfied task set publishes
+// concurrently, each in its own slot. OFF (the default) is the sequential
+// walk — the whole pre-existing suite runs with the switch off and is the
+// byte-identity evidence; the tests here exercise ON.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DagEv {
+    Claim(usize),
+    Finalize(usize),
+}
+
+/// SyntheticWork wrapped with a shared event log (claim/finalize order —
+/// the overlap and gating oracles).
+struct DagWork {
+    inner: Arc<SyntheticWork>,
+    log: Arc<Mutex<Vec<DagEv>>>,
+    index: usize,
+}
+
+impl TaskSetWork for DagWork {
+    fn run_morsel(&self, w: usize, range: MorselRange) {
+        self.log.lock().unwrap().push(DagEv::Claim(self.index));
+        self.inner.run_morsel(w, range);
+    }
+    fn finalize(&self) {
+        self.inner.finalize();
+        self.log.lock().unwrap().push(DagEv::Finalize(self.index));
+    }
+}
+
+/// Build a QuerySpec from (granules, deps) shapes over a shared event log.
+fn dag_spec(
+    qid: u64,
+    clock: &Arc<VirtualClock>,
+    log: &Arc<Mutex<Vec<DagEv>>>,
+    shapes: &[(u64, &[usize])],
+) -> (QuerySpec, Vec<Arc<SyntheticWork>>) {
+    let mut tasksets = Vec::new();
+    let mut works = Vec::new();
+    for (i, (total, deps)) in shapes.iter().enumerate() {
+        let inner = SyntheticWork::new(*total, Some(Arc::clone(clock)), 1_000);
+        works.push(Arc::clone(&inner));
+        tasksets.push(TaskSetSpec {
+            source: Arc::new(SyntheticMorselSource::new(*total)),
+            work: Arc::new(DagWork { inner, log: Arc::clone(log), index: i }),
+            deps: deps.to_vec(),
+        });
+    }
+    (QuerySpec { query_id: qid, tasksets }, works)
+}
+
+fn first_pos(log: &[DagEv], ev: DagEv) -> Option<usize> {
+    log.iter().position(|e| *e == ev)
+}
+
+/// Admission publishes EVERY dependency-satisfied pipeline concurrently
+/// (multi-build shape: two independent build sides + a gated probe): both
+/// builds occupy slots before any worker steps; the probe is NOT submitted
+/// (occupies nothing) until both builds finalize; a single worker's claims
+/// INTERLEAVE the two builds (the overlap the increment buys).
+#[test]
+fn dag_admission_fans_out_and_gates() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(6_000, &[]), (6_000, &[]), (2_000, &[0, 1])],
+    );
+    let (_h, waiter) = rt.submit(spec);
+
+    // Both independent builds are published at admission; the gated probe
+    // is not (submission gating: unmet deps ⇒ not submitted anywhere).
+    let s = rt.stats();
+    assert_eq!(s.tasksets_published, 2, "both ready pipelines publish at admission");
+    assert_eq!(s.dag_fanout_publishes, 1, "second build fans out into its own slot");
+
+    let mut local = rt.worker_local(0);
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    let log = log.lock().unwrap();
+    let fin0 = first_pos(&log, DagEv::Finalize(0)).unwrap();
+    let fin1 = first_pos(&log, DagEv::Finalize(1)).unwrap();
+    let c0 = first_pos(&log, DagEv::Claim(0)).unwrap();
+    let c1 = first_pos(&log, DagEv::Claim(1)).unwrap();
+    let c2 = first_pos(&log, DagEv::Claim(2)).unwrap();
+    // Overlap: each build claims before the other finalizes (stride
+    // alternation over the query's equal-pass slots).
+    assert!(c0 < fin1 && c1 < fin0, "independent builds must interleave, got {log:?}");
+    // Barrier: the probe's first claim strictly follows BOTH finalizes.
+    assert!(c2 > fin0 && c2 > fin1, "probe ran before its build barriers, got {log:?}");
+}
+
+/// DAG ON with a dependency CHAIN (single live pipeline throughout — the
+/// ClickBench shape class) produces the exact claim sequence the sequential
+/// walk produces: the flatness anchor.
+#[test]
+fn dag_chain_claim_sequence_identical_to_off() {
+    let run = |dag: bool| -> Vec<Vec<Range<u64>>> {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_dag(dag);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (spec, works) =
+            dag_spec(1, &clock, &log, &[(6_000, &[]), (4_000, &[0]), (2_000, &[1])]);
+        let (_h, waiter) = rt.submit(spec);
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        works.iter().map(|w| w.claims.lock().unwrap().clone()).collect()
+    };
+    assert_eq!(run(true), run(false), "chain claims must be identical under DAG dispatch");
+}
+
+/// Slot-capacity deferral: 3 independent pipelines, 2 scheduler slots — the
+/// third publishes only when one of the query's own pipelines finishes (the
+/// RG always retains a slot; nothing strands, nothing deadlocks), and a
+/// QUEUED second query still gets admitted when a slot frees mid-query.
+#[test]
+fn dag_capacity_defers_and_freed_slot_admits_queued() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = RuntimeConfig::new(1);
+    cfg.slots = 2;
+    let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    // Two long builds + a short one + a sink gated on all three.
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(4_000, &[]), (4_000, &[]), (2_000, &[]), (1_000, &[0, 1, 2])],
+    );
+    let (_h, wa) = rt.submit(spec);
+    assert_eq!(rt.stats().tasksets_published, 2, "capacity caps admission fan-out");
+    assert!(rt.stats().dag_ready_deferred >= 1, "third pipeline defers on slot capacity");
+
+    // A second, single-pipeline query queues behind the full slot array and
+    // completes once a slot frees (FIFO admission is not starved by the
+    // multi-pipeline query's deferred pipelines).
+    let b = SyntheticWork::new(1_000, Some(Arc::clone(&clock)), 1_000);
+    let (_hb, wb) = rt.submit(spec_one(&b, Arc::new(SyntheticMorselSource::new(1_000))));
+
+    let mut local = rt.worker_local(0);
+    while wa.try_wait().is_none() || wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(wa.wait(), RgOutcome::Completed);
+    assert_eq!(wb.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    b.assert_all_executed_once();
+}
+
+/// §3.6 fairness law with pipeline-RGs live: the QUERY is the fair-share
+/// principal — a query with TWO live pipelines gets the same aggregate CPU
+/// share as single-pipeline peers (its slots advance ONE shared account),
+/// not double. Deterministic K-sweep shape: K-1 single-pipeline queries plus
+/// one two-pipeline query on one virtual-clock worker.
+#[test]
+fn dag_query_level_share_k_sweep() {
+    for k in [2usize, 4, 8] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 32;
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        rt.set_dag(true);
+        let total = 400_000u64;
+        let mut handles = Vec::new();
+        let mut waiters = Vec::new();
+        // Query 1: two independent pipelines (never finishes in-window).
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (spec, _works) =
+            dag_spec(1, &clock, &log, &[(total, &[]), (total, &[]), (1, &[0, 1])]);
+        let (h, w) = rt.submit(spec);
+        handles.push(h);
+        waiters.push(w);
+        // Queries 2..=k: single pipeline.
+        for q in 1..k {
+            let w = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) =
+                rt.submit(spec_one(&w, Arc::new(SyntheticMorselSource::new(total))));
+            let _ = q;
+            handles.push(h);
+            waiters.push(waiter);
+        }
+        // 20 task boundaries per SLOT at perfect fairness (k+1 live slots).
+        let mut local = rt.worker_local(0);
+        for _ in 0..(20 * (k + 1)) {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        for w in &waiters {
+            assert!(w.try_wait().is_none(), "K-sweep RGs must all still be active");
+        }
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        let mut max_err = 0f64;
+        for c in &cpus {
+            max_err = max_err.max((*c as f64 - mean).abs() / mean);
+        }
+        // The two-pipeline query's mirror staleness bounds its edge at ~one
+        // task quantum per extra pipeline over the ~20-quanta window.
+        assert!(
+            max_err <= 0.12,
+            "K={k}: query-level share error {max_err:.4} out of band; cpus={cpus:?} \
+             (first query holds TWO live pipelines and must not get 2x)"
+        );
+        eprintln!("dag K-sweep K={k} (query 1 dual-pipeline): max share error {max_err:.4} (cpu ns: {cpus:?})");
+        for h in &handles {
+            h.abort();
+        }
+        for w in &waiters {
+            while w.try_wait().is_none() {
+                rt.worker_step(&mut local);
+            }
+        }
+    }
+}
+
+/// Within-query dependency-depth pick (§3.6): at equal pass (two pipelines
+/// published by one fan-out mirror the same account value), the pick
+/// prefers the DEEPER pipeline even from a higher slot index.
+#[test]
+fn dag_depth_priority_pick() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    // Query A occupies slot 0 briefly, then completes and frees it.
+    let a = SyntheticWork::new(500, Some(Arc::clone(&clock)), 1_000);
+    let (_ha, wa) = rt.submit(spec_one(&a, Arc::new(SyntheticMorselSource::new(500))));
+    // Query B: root in slot 1; its finalize fans out S (shallow, depth 1)
+    // into freed slot 0 and D (deep, depth 2) into retained slot 1 — both
+    // mirroring the same account (equal pass).
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        2,
+        &clock,
+        &log,
+        &[
+            (1_000, &[]),      // 0 = R (root)
+            (2_000, &[0]),     // 1 = S (shallow: only the sink above)
+            (2_000, &[0]),     // 2 = D (deep: Z then the sink)
+            (1_000, &[2]),     // 3 = Z
+            (500, &[1, 3]),    // 4 = sink
+        ],
+    );
+    let (_hb, wb) = rt.submit(spec);
+
+    let mut local = rt.worker_local(0);
+    // Step 1: equal pass across queries -> scan order picks A; A completes
+    // and frees slot 0. Step 2: forced pick of B's root; it exhausts and
+    // fans out D (retained slot 1) + S (freed slot 0) at equal pass.
+    while wa.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    while first_pos(&log.lock().unwrap(), DagEv::Finalize(0)).is_none() {
+        rt.worker_step(&mut local);
+    }
+    // Step 3: equal pass, same query, shallow in the LOWER slot — the
+    // depth refinement must pick the deeper pipeline first.
+    rt.worker_step(&mut local);
+    {
+        let log = log.lock().unwrap();
+        let cs = first_pos(&log, DagEv::Claim(1));
+        let cd = first_pos(&log, DagEv::Claim(2));
+        assert!(
+            cd.is_some() && cs.is_none(),
+            "deeper pipeline must be picked first at equal pass, got {log:?}"
+        );
+    }
+    assert!(rt.stats().dag_depth_picks >= 1, "depth refinement must have decided the pick");
+    while wb.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(wb.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+    }
+}
+
+/// Abort with multiple LIVE pipelines: each published pipeline drains
+/// through its own generation-refusal last-out; the LAST one completes the
+/// RG (exactly once, Aborted); gated pipelines never publish; no finalize
+/// work runs.
+#[test]
+fn dag_abort_with_live_siblings() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[(50_000, &[]), (50_000, &[]), (1_000, &[0, 1])],
+    );
+    let (h, waiter) = rt.submit(spec);
+    let mut local = rt.worker_local(0);
+    // Run a few tasks on the live builds, then abort mid-flight.
+    for _ in 0..4 {
+        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+    }
+    h.abort();
+    while waiter.try_wait().is_none() {
+        rt.worker_step(&mut local);
+    }
+    assert_eq!(waiter.wait(), RgOutcome::Aborted);
+    assert_eq!(rt.stats().rgs_aborted, 1);
+    assert_eq!(rt.stats().rgs_completed, 1);
+    for w in &works {
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 0, "aborted RGs never run finalize work");
+    }
+    let log = log.lock().unwrap();
+    assert!(
+        first_pos(&log, DagEv::Claim(2)).is_none(),
+        "the gated sink must never have published on an aborted RG"
+    );
+}
+
+/// PINNED multi-slot drive (the arm execution mode): a pinned RG's external
+/// driver picks among the RG's live pipelines DEEPEST-FIRST, and the whole
+/// DAG completes through pinned stepping alone.
+#[test]
+fn dag_pinned_drive_prefers_deeper_pipeline() {
+    let clock = Arc::new(VirtualClock::new());
+    let rt = virtual_runtime(1, &clock);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (spec, works) = dag_spec(
+        1,
+        &clock,
+        &log,
+        &[
+            (2_000, &[]),   // 0 = S (shallow: straight to sink)
+            (2_000, &[]),   // 1 = D (deep: Z then sink)
+            (1_000, &[1]),  // 2 = Z
+            (500, &[0, 2]), // 3 = sink
+        ],
+    );
+    let (h, waiter) = rt.submit_pinned(spec);
+    assert_eq!(rt.stats().tasksets_published, 2, "pinned admission fans out too");
+    let lane = rt.acquire_external_lane().expect("lane");
+    let mut local = lane.local();
+    assert_eq!(rt.drive_pinned(&mut local, &h), RgOutcome::Completed);
+    assert_eq!(waiter.wait(), RgOutcome::Completed);
+    for w in &works {
+        w.assert_all_executed_once();
+        assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+    }
+    let log = log.lock().unwrap();
+    let cs = first_pos(&log, DagEv::Claim(0)).unwrap();
+    let cd = first_pos(&log, DagEv::Claim(1)).unwrap();
+    assert!(cd < cs, "pinned driver must start on the deeper pipeline, got {log:?}");
+}
+
+/// Threaded pool end-to-end over the three §3.6 win shapes (multi-build
+/// join, UNION ALL, independent subqueries): completion, exactly-once
+/// execution, dep-ordered finalizes, and real fan-out engagement.
+#[test]
+fn dag_pool_win_shapes_complete() {
+    let shapes: [&[(u64, &[usize])]; 3] = [
+        // multi-build: 3 independent builds + probe gated on all three
+        &[(8_192, &[]), (8_192, &[]), (8_192, &[]), (8_192, &[0, 1, 2])],
+        // UNION ALL: 4 independent branches + a concat sink
+        &[(8_192, &[]), (8_192, &[]), (8_192, &[]), (8_192, &[]), (1_024, &[0, 1, 2, 3])],
+        // independent subqueries: two 2-deep chains joining a final
+        &[(8_192, &[]), (4_096, &[0]), (8_192, &[]), (4_096, &[2]), (2_048, &[1, 3])],
+    ];
+    for (si, shape) in shapes.iter().enumerate() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 2,
+            slots: 16,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_dag(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut tasksets = Vec::new();
+        let mut works = Vec::new();
+        for (i, (total, deps)) in shape.iter().enumerate() {
+            let inner = SyntheticWork::new(*total, None, 0);
+            works.push(Arc::clone(&inner));
+            tasksets.push(TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(*total)),
+                work: Arc::new(DagWork { inner, log: Arc::clone(&log), index: i }),
+                deps: deps.to_vec(),
+            });
+        }
+        let (_h, waiter) = rt.submit(QuerySpec { query_id: si as u64 + 1, tasksets });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+        for w in &works {
+            w.assert_all_executed_once();
+            assert_eq!(w.finalizes.load(Ordering::SeqCst), 1);
+        }
+        // Gating oracle: every pipeline's first claim follows ALL its deps'
+        // finalizes.
+        let log = log.lock().unwrap();
+        for (i, (_, deps)) in shape.iter().enumerate() {
+            let ci = first_pos(&log, DagEv::Claim(i)).unwrap();
+            for &d in deps.iter() {
+                let fd = first_pos(&log, DagEv::Finalize(d)).unwrap();
+                assert!(ci > fd, "shape {si}: pipeline {i} claimed before dep {d} finalized");
+            }
+        }
+        assert!(rt.stats().dag_fanout_publishes >= 1, "shape {si} must fan out");
+    }
+}
+
+/// Threaded-pool leg of the §3.4 fairness panel with pipeline-RGs live
+/// (the stride_threaded_pool_mid_flight_shares instrument extended per
+/// §3.6): K queries on a real pool, ONE of them holding TWO live
+/// independent pipelines the whole window — mid-flight per-QUERY CPU shares
+/// stay in the loose band (the dual-pipeline query must not take 2x).
+#[test]
+fn dag_threaded_pool_query_shares() {
+    struct Spin {
+        ns_per_granule: u64,
+    }
+    impl TaskSetWork for Spin {
+        fn run_morsel(&self, _w: usize, range: MorselRange) {
+            let n = range.end - range.start;
+            let t0 = std::time::Instant::now();
+            let budget = std::time::Duration::from_nanos(self.ns_per_granule * n);
+            while t0.elapsed() < budget {
+                std::hint::spin_loop();
+            }
+        }
+        fn finalize(&self) {}
+    }
+
+    let mut cfg = RuntimeConfig::new(4);
+    cfg.slots = 16;
+    let rt = Runtime::new(cfg);
+    rt.set_stride(true);
+    rt.set_dag(true);
+    let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+
+    let k = 6usize;
+    let mut handles = Vec::new();
+    let mut waiters = Vec::new();
+    // Query 1: TWO independent live pipelines (each half the work of a
+    // single-pipeline peer, so equal aggregate demand) + a tiny gated sink.
+    let (h, w) = rt.submit(QuerySpec {
+        query_id: 1,
+        tasksets: vec![
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            },
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            },
+            TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(64)),
+                work: Arc::new(Spin { ns_per_granule: 1_000 }),
+                deps: vec![0, 1],
+            },
+        ],
+    });
+    handles.push(h);
+    waiters.push(w);
+    for q in 1..k {
+        let (h, w) = rt.submit(QuerySpec {
+            query_id: q as u64 + 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(4_000)),
+                work: Arc::new(Spin { ns_per_granule: 20_000 }),
+                deps: vec![],
+            }],
+        });
+        handles.push(h);
+        waiters.push(w);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let all_active = waiters.iter().all(|w| w.try_wait().is_none());
+    if all_active {
+        let cpus: Vec<u64> = handles.iter().map(|h| h.cpu_consumed_ns()).collect();
+        let mean = cpus.iter().sum::<u64>() as f64 / k as f64;
+        eprintln!("dag threaded query shares (mean {mean:.0}): {cpus:?}");
+        for c in &cpus {
+            assert!(
+                (*c as f64) >= 0.4 * mean && (*c as f64) <= 1.8 * mean,
+                "mid-flight QUERY share out of loose band: {c} vs mean {mean:.0} ({cpus:?}) \
+                 — query 1 holds two live pipelines and must not take 2x"
+            );
+        }
+    } else {
+        eprintln!("dag threaded shares: sample point missed (fast machine) — band skipped");
+    }
+    for w in &waiters {
+        assert_eq!(w.wait(), RgOutcome::Completed);
+    }
+    pool.shutdown();
+}

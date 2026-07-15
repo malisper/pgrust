@@ -65,6 +65,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
 
@@ -2271,6 +2272,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     let _exit = ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("agg");
     // F1 fail-closed accounting: a helper that cannot participate must NEVER
     // vanish silently — every early exit below counts itself as a refusal
     // (the leader's started==0 && refused>=launched probe is its fallback
@@ -3040,11 +3045,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_agg_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Agg);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(false);
     }
     let Some(rt) = runtime::global() else { return Ok(false) };
+    router::tick(ArmClass::Agg, ArmCounter::Offered);
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
     // under EXPLAIN ANALYZE every refusal records its first failing gate for
@@ -3055,6 +3063,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // --- Plan shape gates (fail-closed). Refusals trace AND (under EA)
     // record for the per-node EXPLAIN line.
     fn refuse(estate: &mut EStateData<'_>, ea: bool, node_id: i32, why: &'static str) {
+        // M5-1: every agg-arm refusal feeds the router's consolidated
+        // taxonomy alongside the trace / EA transparency line.
+        router::tick_refused(ArmClass::Agg, why);
         lane_trace(&format!("runtime-agg: refused ({why})"));
         if ea {
             estate.runtime_ea_record_refusal(node_id, "agg", why);
@@ -3065,6 +3076,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     if estate.es_epq_active {
+        router::tick_refused(ArmClass::Agg, "epq");
         return Ok(false);
     }
     // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
@@ -3558,9 +3570,18 @@ fn engage<'mcx>(
     });
 
     xact::EnterParallelMode();
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::Agg, ArmCounter::Engaged);
     let engaged =
         engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, &sink);
     xact::ExitParallelMode();
+    if let Ok(done) = &engaged {
+        router::tick(
+            ArmClass::Agg,
+            if *done { ArmCounter::Completed } else { ArmCounter::Fallback },
+        );
+    }
     engaged
 }
 
@@ -3582,6 +3603,10 @@ fn engage_ceremony<'mcx>(
 ) -> PgResult<bool> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_agg_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
+    // SinkProbe surface (M5-1, the §3.5 lane_trace remainder): captured out
+    // of the ceremony body and reported at RG completion.
+    let mut sink_probe: Option<Arc<runtime::SinkProbe>> = None;
+    let probe_out = &mut sink_probe;
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
@@ -3603,26 +3628,28 @@ fn engage_ceremony<'mcx>(
         // (single-threaded SEAL in the accept set's finalize) exactly.
         let source = Arc::new(CbstoreGranuleSource { starts });
         let tasksets = if parseal_enabled() {
-            let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
+            let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
                 runtime::sealed_sink_tasksets(
                     Arc::clone(sink),
                     source,
                     rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
                     0,
                 );
+            *probe_out = Some(probe);
             vec![accept, freeze, combine]
         } else {
-            let runtime::SinkTaskSets { accept, combine, probe: _probe } =
+            let runtime::SinkTaskSets { accept, combine, probe } =
                 runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
+            *probe_out = Some(probe);
             vec![accept, combine]
         };
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: qid,
             tasksets,
-        });
+        }, router::session_affinity_token());
         payload
             .rg
             .set(rg.downgrade())
@@ -3773,6 +3800,12 @@ fn engage_ceremony<'mcx>(
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
+
+    // SinkProbe report (M5-1): stale_locals_dropped / combine_refusals now
+    // have a surface — router counters + a lane_trace line per engagement.
+    if let Some(probe) = &sink_probe {
+        router::sink_probe_complete(ArmClass::Agg, probe);
+    }
 
     match outcome {
         EngageOutcome::Fallback => {

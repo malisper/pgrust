@@ -21,7 +21,10 @@
 //!   is documented in the design doc — do not build it here);
 //! - no real pipelines (M1 wires cbstore scans through [`MorselSource`] /
 //!   [`TaskSetWork`]); M0 exercises everything with synthetic sources;
-//! - no stride/priority policy (fields present, single-RG FIFO behavior);
+//! - no stride/priority policy (fields present, single-RG FIFO behavior)
+//!   — SUPERSEDED (M5-4): stride/fair-share at equal shares is live (see
+//!   sched.rs module doc; PGRUST_RUNTIME_STRIDE=0 restores FIFO); decaying
+//!   priorities + p_min stay M5-5;
 //! - no readahead (scan-side, M1).
 //!
 //! Thread accounting (§2.8): the pool is `cores + K` threads with exactly
@@ -183,7 +186,9 @@ impl RuntimeConfig {
 /// spawning is layered above (see [`WorkerPool`] and launch_backend's
 /// rtpool glue) so this type stays loom-drivable.
 pub struct Runtime {
-    sched: sched::Scheduler,
+    /// Arc'd so submitted RGs can hold a Weak back-reference for the M5-4
+    /// queued-abort reap (the RG never keeps the scheduler alive).
+    sched: Arc<sched::Scheduler>,
     config: RuntimeConfig,
     /// §2.9 ring registration: worker ordinal → io_uring ring id (None: no
     /// ring — uring unavailable, aio_uring not linked, or worker exited).
@@ -200,14 +205,14 @@ impl Runtime {
     pub fn with_clock(config: RuntimeConfig, clock: Arc<dyn Clock>) -> Arc<Runtime> {
         let nthreads = config.workers + config.standbys;
         Arc::new(Runtime {
-            sched: sched::Scheduler::new(
+            sched: Arc::new(sched::Scheduler::new(
                 nthreads,
                 config.workers,
                 config.slots,
                 config.sizing,
                 clock,
                 config.trace,
-            ),
+            )),
             config,
             #[cfg(not(loom))]
             rings: std::sync::Mutex::new(vec![None; nthreads]),
@@ -227,8 +232,78 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit`] with a leader-session affinity token (M5-4): the
+    /// stride pick's equal-pass tiebreak prefers workers sticky-bound to
+    /// this session (set theirs via [`WorkerLocal::set_session_token`]).
+    /// Token 0 ⇔ no affinity ⇔ plain `submit`. INTEGRATION-TRAIN NOTE:
+    /// [`QuerySpec`] deliberately does NOT carry the token (its literal
+    /// constructors stay source-compatible across lanes); the M5-1 router
+    /// should submit through this entry with the leader's session identity.
+    pub fn submit_with_affinity(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// M5-4 stride toggle (tests / A-B arms). Production default is the
+    /// PGRUST_RUNTIME_STRIDE kill switch, read once at construction:
+    /// ON ⇒ stride/fair-share pick; OFF ⇒ the M0 FIFO pick, byte-identical.
+    pub fn set_stride(&self, on: bool) {
+        self.sched.set_stride(on);
+    }
+
+    pub fn stride_enabled(&self) -> bool {
+        self.sched.stride_enabled()
+    }
+
+    /// M5+1 pipeline-DAG dispatch toggle (tests / A-B arms). Production
+    /// default is the `PGRUST_RUNTIME_PIPELINE_DAG` switch, read once at
+    /// construction — DEFAULT OFF at this increment. ON ⇒ every
+    /// dependency-satisfied task set of an RG is published concurrently,
+    /// each in its own slot (independent-subtree overlap, m5-planner §3.6);
+    /// OFF ⇒ the sequential one-slot task-set walk, byte-identical.
+    pub fn set_dag(&self, on: bool) {
+        self.sched.set_dag(on);
+    }
+
+    pub fn dag_enabled(&self) -> bool {
+        self.sched.dag_enabled()
+    }
+
+    /// M5-5 decaying-priorities toggle (tests / A-B arms). Production
+    /// default is the `PGRUST_RUNTIME_DECAY` kill switch, read once at
+    /// construction — default ON. OFF ⇒ every RG stays at p0: the M5-4
+    /// equal-shares scheduler exactly.
+    pub fn set_decay(&self, on: bool) {
+        self.sched.set_decay(on);
+    }
+
+    pub fn decay_enabled(&self) -> bool {
+        self.sched.decay_enabled()
+    }
+
+    /// M5-5 test hook: tighten the consumed-CPU decay quantum so
+    /// deterministic virtual-clock tests cross decay boundaries. Production
+    /// keeps the ratified constant (50ms CPU).
+    pub fn set_decay_quantum_ns(&self, ns: u64) {
+        self.sched.set_decay_quantum_ns(ns);
+    }
+
+    /// M5-5 test hook: probe alternative starvation floors (adversarial
+    /// skew tests). Production keeps the ratified default (p0/16 = 625).
+    pub fn set_p_min(&self, p: u32) {
+        self.sched.set_p_min(p);
+    }
+
+    pub fn p_min(&self) -> u32 {
+        self.sched.p_min_value()
     }
 
     /// Submit a MAINTENANCE resource group (M4 background-job cycles,
@@ -238,7 +313,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -252,7 +327,22 @@ impl Runtime {
     /// last-worker-out finalization protocol, abort drain, completion — is
     /// the ordinary runtime machinery.
     pub fn submit_pinned(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground);
+        self.submit_pinned_with_affinity(spec, 0)
+    }
+
+    /// [`Runtime::submit_pinned`] with a leader-session affinity token
+    /// (M5-4 × M5-1 integration seam): pinned RGs bypass the stride pick
+    /// today (pool workers never claim from them), so the token is inert
+    /// but RECORDED on the RG's slot — when §2.3 db-pinned pool binding
+    /// retires pinned submission into [`Runtime::submit`], the affinity
+    /// plumbing is already in place and the equal-pass tiebreak engages
+    /// with no arm-side change. Token 0 ⇔ no affinity.
+    pub fn submit_pinned_with_affinity(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 

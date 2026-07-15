@@ -34,9 +34,54 @@
 //! NEXT occupant as valid: the next occupant is published by last-out,
 //! which its own pending decrement blocks.
 //!
-//! Scheduling policy in M0 is single-RG FIFO: pick = lowest-index active
-//! slot; the stride/pass/priority fields exist but are never read
-//! (docs/design/inter-query-scheduling.md §5.2/§5.3 activate them in M5).
+//! Scheduling policy (M5-4, docs/design/inter-query-scheduling.md §5.3 /
+//! docs/design/m5-planner.md §3): STRIDE / FAIR-SHARE at equal shares. The
+//! pick is the lowest-`pass` active slot; each executed task advances its
+//! slot's pass by `stride × cpu_ns` (stride = STRIDE1/priority; every RG
+//! holds p_0 in M5-4, so shares are equal — decaying priorities + p_min are
+//! M5-5). Equal-pass ties prefer the slot whose RG's leader session the
+//! picking worker is sticky-bound to (§5.2 session-affine tiebreak,
+//! equal-pass-only per the design's §10 default), then lowest index. The
+//! M4 Maintenance preference is evaluated BEFORE the stride pick (§3.2
+//! reconciliation) and maintenance passes charge normally, so background
+//! cycles keep their ≤ ~1-task start bound without ever starving foreground.
+//!
+//! Invariants the activation preserves:
+//! - ONE ACTIVE RG ⇒ the pick is forced (the only set bit) with no pass
+//!   reads — provably today's FIFO pick; the single-query benchmark case is
+//!   bit-identical by construction.
+//! - `PGRUST_RUNTIME_STRIDE=0` (kill switch) restores the M0 FIFO
+//!   lowest-index pick outright.
+//! - Pass/stride/session words are Relaxed and ADVISORY: they order the
+//!   pick, never execution safety — a stale pick revalidates through the
+//!   slot word into Retry (same argument as the maintenance mask).
+//!
+//! PIPELINE-DAG DISPATCH (M5+1 increment 1, m5-planner §3.6 — independent-
+//! subtree overlap ONLY; `PGRUST_RUNTIME_PIPELINE_DAG=1`, default OFF):
+//! instead of walking an RG's task sets one slot at a time, publish EVERY
+//! task set whose dependencies have all finalized, each in its own slot —
+//! independent hash-build sides / subqueries / UNION ALL branches overlap. A
+//! task set with unmet deps is NOT SUBMITTED: it occupies no slot, queues
+//! nowhere, and no worker can wait on it — which is the increment's
+//! structural deadlock argument (the wait graph over RUNNING entities has no
+//! dependency edges at all; workers never hold-and-wait across task sets —
+//! one claim, one morsel, permits donated on declared blocking). A
+//! finishing pipeline's finalize marks its dep edge satisfied and publishes
+//! the newly-ready pipelines: the deepest into its own (retained) slot,
+//! the rest into free slots — capacity shortfalls defer (counted), and the
+//! deferred pipeline re-publishes when one of the query's own pipelines
+//! finishes, so the RG always holds ≥1 slot while work remains (progress
+//! guaranteed without any cross-RG wait). Fairness: the QUERY is the
+//! fair-share principal — all of an RG's slots advance ONE stride account
+//! ([`ResourceGroup::pass_account`], the sum of their quanta) mirrored into
+//! each slot's pass word (one-task-bounded staleness, advisory); within a
+//! query at equal pass the pick prefers the DEEPER pipeline (§3.6
+//! dependency-depth priority, ties by submission order). OFF (the kill
+//! switch, this increment's default) is today's sequential walk,
+//! byte-identical; ON with a single-pipeline RG degenerates to the same
+//! pick and pass sequence by construction (the CB-43 flatness anchor).
+//! Streaming across pipeline seams is inc-3 (evidence-gated, NOT here);
+//! tail/ramp readahead overlap is inc-2 (also not here).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -46,13 +91,107 @@ use crate::morsel::MorselRange;
 use crate::rg::{QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
 use crate::stats::{RuntimeStats, RuntimeStatsSnapshot};
-use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::{lock, Mutex, ParkLot, Semaphore};
 use crate::taskset::{PinBoard, Slot, TaskSetRt, WorkerMailbox};
 
 /// Umbra's slot-array bound: 128 concurrently-active resource groups; later
 /// arrivals wait in the FIFO queue.
 pub const DEFAULT_SLOTS: usize = 128;
+
+/// Stride fixed point (M5-4): `stride = STRIDE1 / priority`, and a task's
+/// pass advance is `(cpu_ns × stride) >> PASS_SHIFT` — i.e. advance is
+/// cpu_ns scaled by `(1 << (32 - 16)) / priority`. At p_0 = 10^4 every RG
+/// advances ≈ 6.55 × cpu_ns: equal strides ⇒ equal shares, and u64 passes
+/// have decades of headroom. M5-5's decayed priorities (p ≥ p_min) only
+/// change the `stride_for` input.
+const STRIDE1: u64 = 1 << 32;
+const PASS_SHIFT: u32 = 16;
+
+pub(crate) fn stride_for(priority: u32) -> u64 {
+    STRIDE1 / priority.max(1) as u64
+}
+
+/// M5-4 kill switch: `PGRUST_RUNTIME_STRIDE=0` restores the M0 FIFO
+/// lowest-index pick (byte-identical to the pre-M5-4 scheduler). Default ON.
+/// Read once; tests toggle per-instance via [`crate::Runtime::set_stride`].
+fn stride_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STRIDE").map_or(true, |v| v.trim() != "0"))
+}
+
+/// M5+1 pipeline-DAG dispatch switch: `PGRUST_RUNTIME_PIPELINE_DAG=1` (or
+/// `on`) publishes every dependency-satisfied task set concurrently (see
+/// module doc). DEFAULT OFF at this increment — off is today's sequential
+/// walk, byte-identical. Read once; tests toggle per-instance via
+/// [`crate::Runtime::set_dag`].
+fn dag_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_PIPELINE_DAG").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// M5-5 decaying priorities (inter-query §5.4, MLFQ-via-stride): an RG's
+/// priority decays with its CONSUMED CPU — `p(q) = max(p_min, p0·λ^q)`
+/// where `q = cpu_consumed_ns / decay_quantum_ns`. New/short queries keep
+/// p0 (interactive latency); long queries settle to the p_min fair-share
+/// floor. Constants are ratified in-code (inter-query ruling 2: decay is
+/// automatic, no user input); the env overrides below are TEST/CALIBRATION
+/// knobs on the PGRUST_RUNTIME_STRIDE precedent, not product surface.
+///
+/// Ratified values: λ = 0.5 per 50ms-CPU quantum (one halving per 50ms of
+/// consumed CPU — a sub-50ms interactive query never decays at all);
+/// p_min = p0/16 = 625, i.e. a fully-decayed batch query holds ≥ 1/16 the
+/// stride weight of a fresh arrival (reached after 4 quanta = 200ms CPU).
+/// p_min is LOAD-BEARING for C-legality (inter-query §3.4): it bounds
+/// lock-holder starvation to C's own nondeterministic window; the
+/// lock-wait-fairness test validates exactly this floor.
+const DECAY_LAMBDA_DEFAULT: f64 = 0.5;
+const DECAY_QUANTUM_NS_DEFAULT: u64 = 50_000_000;
+pub(crate) const P_MIN_DEFAULT: u32 = crate::rg::INITIAL_PRIORITY / 16;
+
+/// M5-5 kill switch: `PGRUST_RUNTIME_DECAY=0` pins every RG at p0 (the
+/// M5-4 equal-shares scheduler exactly). Default ON. Read once; tests
+/// toggle per-instance via [`crate::Runtime::set_decay`].
+fn decay_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DECAY").map_or(true, |v| v.trim() != "0"))
+}
+
+fn decay_lambda_default() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DECAY_LAMBDA")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|l| *l > 0.0 && *l < 1.0)
+            .unwrap_or(DECAY_LAMBDA_DEFAULT)
+    })
+}
+
+fn decay_quantum_default() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DECAY_QUANTUM_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|q| *q > 0)
+            .map(|us| us.saturating_mul(1000))
+            .unwrap_or(DECAY_QUANTUM_NS_DEFAULT)
+    })
+}
+
+fn p_min_default() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_PMIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0 && *p <= crate::rg::INITIAL_PRIORITY)
+            .unwrap_or(P_MIN_DEFAULT)
+    })
+}
 
 /// Pin-board lanes reserved for EXTERNAL participant threads (M1: the
 /// query's bound parallel helpers driving `Runtime::drive_pinned`). External
@@ -134,12 +273,31 @@ pub struct WorkerLocal {
     /// pinned RG. Revalidated by one slot-word read per step; the membership
     /// lock is touched only when it goes stale (publish/finalize events).
     pinned_slot: Option<(usize, u64)>,
-    /// INERT until M5: thread-local stride state (SIGMOD'21 §2.3 — each
-    /// worker runs stride scheduling locally over the same slot set).
+    /// STILL INERT after M5-4 (decision recorded): the ratified §5.3 shape
+    /// is per-SLOT pass/stride ("each slot gets a stride/pass"), which M5-4
+    /// activated on [`crate::taskset::Slot`] directly — at task cadence
+    /// (~t_max) one Relaxed fetch_add per task is uncontended, so the
+    /// SIGMOD'21 §2.3 thread-local pass replication (these fields + the
+    /// worker mailboxes) stays dormant until a measured sync cost demands it.
     #[allow(dead_code)]
     local_pass: u64,
     #[allow(dead_code)]
     global_pass: u64,
+    /// Session-affinity token (M5-4): the leader session this worker is
+    /// currently sticky-bound to (ceremony-v2 retention), 0 = none. Feeds
+    /// the equal-pass pick tiebreak; set by the driving thread via
+    /// [`WorkerLocal::set_session_token`].
+    session_token: u64,
+}
+
+impl WorkerLocal {
+    /// Record the leader-session token this worker's thread is sticky-bound
+    /// to (0 = none). Purely a pick-tiebreak preference — never a
+    /// correctness input (a mismatched pick still executes correctly; the
+    /// session bind machinery revalidates its own keys).
+    pub fn set_session_token(&mut self, token: u64) {
+        self.session_token = token;
+    }
 }
 
 /// `PGRUST_MORSEL_MARKERS=1` arms the acceptance-instrument marker channel:
@@ -282,6 +440,31 @@ pub(crate) struct Scheduler {
     /// [`crate::sync::IoGuard`].
     pub(crate) permits: Semaphore,
     stop: AtomicBool,
+    /// M5-4 stride activation switch (env default; tests toggle per
+    /// instance). OFF ⇒ the M0 FIFO lowest-index pick, byte-identical.
+    stride: AtomicBool,
+    /// M5+1 pipeline-DAG dispatch switch (env default, DEFAULT OFF this
+    /// increment; tests toggle per instance). OFF ⇒ the sequential
+    /// one-slot-per-RG task-set walk, byte-identical.
+    dag: AtomicBool,
+    /// M5-5 decaying-priorities switch (env default ON; tests toggle per
+    /// instance). OFF ⇒ every RG stays at p0 — the M5-4 equal-shares
+    /// scheduler exactly.
+    decay: AtomicBool,
+    /// M5-5 decay rate λ ∈ (0,1) per consumed quantum (immutable after
+    /// construction; ratified constant, env-overridable for calibration).
+    decay_lambda: f64,
+    /// M5-5 decay quantum in consumed-CPU ns (atomic: virtual-clock tests
+    /// tighten it per instance to reach decay boundaries deterministically).
+    decay_quantum_ns: AtomicU64,
+    /// M5-5 starvation floor p_min ≥ 1 (atomic: the adversarial-skew tests
+    /// probe alternative floors per instance; production is the ratified
+    /// default).
+    p_min: AtomicU32,
+    /// Global pass watermark (monotone max of charged passes): a NEWLY
+    /// admitted RG's slot pass starts here — standard stride join, no
+    /// credit for queue wait, no monopoly for late arrivals.
+    global_pass: AtomicU64,
     clock: Arc<dyn Clock>,
     params: SizingParams,
     pub(crate) stats: RuntimeStats,
@@ -320,6 +503,13 @@ impl Scheduler {
             external_lanes: std::array::from_fn(|_| AtomicU64::new(0)),
             permits: Semaphore::new(permits),
             stop: AtomicBool::new(false),
+            stride: AtomicBool::new(stride_default()),
+            dag: AtomicBool::new(dag_default()),
+            decay: AtomicBool::new(decay_default()),
+            decay_lambda: decay_lambda_default(),
+            decay_quantum_ns: AtomicU64::new(decay_quantum_default()),
+            p_min: AtomicU32::new(p_min_default()),
+            global_pass: AtomicU64::new(0),
             clock,
             params,
             stats: RuntimeStats::default(),
@@ -348,6 +538,7 @@ impl Scheduler {
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
+            session_token: 0,
         }
     }
 
@@ -367,7 +558,56 @@ impl Scheduler {
             pinned_slot: None,
             local_pass: 0,
             global_pass: 0,
+            session_token: 0,
         }
+    }
+
+    /// M5-4: per-instance stride toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_STRIDE default once at construction).
+    pub(crate) fn set_stride(&self, on: bool) {
+        self.stride.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn stride_enabled(&self) -> bool {
+        self.stride.load(Ordering::Relaxed)
+    }
+
+    /// M5+1: per-instance pipeline-DAG dispatch toggle (tests / A-B;
+    /// production reads the PGRUST_RUNTIME_PIPELINE_DAG default once at
+    /// construction — default OFF this increment).
+    pub(crate) fn set_dag(&self, on: bool) {
+        self.dag.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn dag_enabled(&self) -> bool {
+        self.dag.load(Ordering::Relaxed)
+    }
+
+    /// M5-5: per-instance decay toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_DECAY default once at construction — default ON).
+    pub(crate) fn set_decay(&self, on: bool) {
+        self.decay.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn decay_enabled(&self) -> bool {
+        self.decay.load(Ordering::Relaxed)
+    }
+
+    /// M5-5 test hook: tighten the decay quantum so deterministic
+    /// virtual-clock tests cross decay boundaries. Production keeps the
+    /// ratified constant.
+    pub(crate) fn set_decay_quantum_ns(&self, ns: u64) {
+        self.decay_quantum_ns.store(ns.max(1), Ordering::SeqCst);
+    }
+
+    /// M5-5 test hook: probe alternative starvation floors (adversarial
+    /// skew tests). Production keeps the ratified default.
+    pub(crate) fn set_p_min(&self, p: u32) {
+        self.p_min.store(p.clamp(1, crate::rg::INITIAL_PRIORITY), Ordering::SeqCst);
+    }
+
+    pub(crate) fn p_min_value(&self) -> u32 {
+        self.p_min.load(Ordering::Relaxed)
     }
 
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
@@ -397,20 +637,31 @@ impl Scheduler {
 
     // ---- membership: submit / publish / admit -----------------------------
 
-    pub(crate) fn submit(&self, spec: QuerySpec, pinned: bool, class: RgClass) -> Arc<ResourceGroup> {
+    pub(crate) fn submit(
+        self: &Arc<Self>,
+        spec: QuerySpec,
+        pinned: bool,
+        class: RgClass,
+        session_token: u64,
+    ) -> Arc<ResourceGroup> {
         assert!(
             !(pinned && class == RgClass::Maintenance),
             "maintenance RGs are pool-executed, never pinned"
         );
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let rg = ResourceGroup::new(rg_id, spec, pinned, class);
+        let rg =
+            ResourceGroup::new(rg_id, spec, pinned, class, session_token, Arc::downgrade(self));
+        rg.submit_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         if self.trace {
             self.trace(&format!("rg {} submitted (query {})", rg.rg_id, rg.query_id));
         }
+        self.emit_dag(&rg);
         if rg.tasksets.is_empty() {
+            rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
             rg.completion.complete(RgOutcome::Completed);
             RuntimeStats::tick(&self.stats.rgs_completed);
+            self.emit_rgdone(&rg, false);
             return rg;
         }
         let mut m = lock(&self.membership);
@@ -440,14 +691,84 @@ impl Scheduler {
         rg
     }
 
-    /// Mark the RG's first task set started and publish it. Caller holds the
-    /// membership lock (lock order: membership, then progress).
+    /// Mark the RG's first ready task set(s) started and publish. Caller
+    /// holds the membership lock (lock order: membership, then progress).
+    ///
+    /// DAG dispatch (M5+1): admission publishes EVERY dependency-satisfied
+    /// task set the free slots allow — a UNION ALL's branches / a
+    /// multi-join's independent build sides start together. `slot` (the
+    /// caller's free pick) takes the deepest; extras fan out into remaining
+    /// free slots; capacity shortfalls defer (the deferred pipeline
+    /// re-publishes when one of the query's own pipelines finishes).
     fn start_rg_locked(&self, m: &mut Membership, rg: Arc<ResourceGroup>, slot: usize) {
-        let first = {
-            let mut p = lock(&rg.progress);
-            rg.next_ready(&mut p).expect("fresh RG must have a ready task set (index 0)")
+        // Stride join (M5-4, refined at M5-5): a newly-admitted RG starts at
+        // the stride VIRTUAL TIME — the minimum pass among currently-active
+        // slots — falling back to the M5-4 global-pass watermark when
+        // nothing is active (or when the M5-5 kill switch is off, which
+        // restores M5-4 exactly). M5-4's max-watermark join made
+        // submit→first-service grow O(K·t_max) under a K-query background:
+        // every active slot had to lap the watermark before the arrival's
+        // first pick (MULTI panel measured 25µs → 3.9ms → 11ms at
+        // K=1/2/6×4-workers). Joining at the min active pass restores the
+        // §3.4 law (short-query latency under batch load approaches
+        // isolated) with NO queue-wait credit and NO monopoly — the arrival
+        // merely ties the most-behind incumbent and advances at its own
+        // stride from there — and NO change to the starvation floor: a
+        // floor RG's pass sits at most one (decayed, 16x) jump above the
+        // min, so the 1/(1+K·p0/p_min) share bound is unchanged. Stored
+        // BEFORE the publish makes the slot pickable; persists across the
+        // RG's task-set republishes (publish never resets it).
+        let watermark = self.global_pass.load(Ordering::Relaxed);
+        let join = if self.decay.load(Ordering::Relaxed) && self.stride.load(Ordering::Relaxed)
+        {
+            let mut min_active: Option<u64> = None;
+            for (i, mask) in self.active.iter().enumerate() {
+                let mut w = mask.load(Ordering::Relaxed);
+                while w != 0 {
+                    let b = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    let s = i * 64 + b;
+                    if s >= self.slots.len() {
+                        break;
+                    }
+                    let p = self.slots[s].pass.load(Ordering::Relaxed);
+                    min_active = Some(min_active.map_or(p, |m| m.min(p)));
+                }
+            }
+            min_active.map_or(watermark, |m| m.min(watermark))
+        } else {
+            watermark
         };
-        self.publish_taskset_locked(m, rg, first, slot);
+        self.slots[slot].pass.store(join, Ordering::Relaxed);
+        if !self.dag.load(Ordering::Relaxed) {
+            let first = {
+                let mut p = lock(&rg.progress);
+                rg.next_ready(&mut p).expect("fresh RG must have a ready task set (index 0)")
+            };
+            self.publish_taskset_locked(m, rg, first, slot);
+            return;
+        }
+        // DAG join: the QUERY's shared stride account starts at the same
+        // join pass; every slot publish mirrors it into the slot's pass.
+        rg.pass_account.store(join, Ordering::Relaxed);
+        let free = m.owned.iter().filter(|e| e.is_none()).count();
+        debug_assert!(free >= 1, "caller must hand start_rg_locked a free slot");
+        let (ready, deferred) = {
+            let mut p = lock(&rg.progress);
+            rg.ready_all(&mut p, free)
+        };
+        assert!(!ready.is_empty(), "fresh RG must have a ready task set (index 0)");
+        RuntimeStats::add(&self.stats.dag_ready_deferred, deferred as u64);
+        self.publish_taskset_locked(m, Arc::clone(&rg), ready[0], slot);
+        for &r in &ready[1..] {
+            let s = m
+                .owned
+                .iter()
+                .position(Option::is_none)
+                .expect("ready_all is capped by the free-slot count");
+            RuntimeStats::tick(&self.stats.dag_fanout_publishes);
+            self.publish_taskset_locked(m, Arc::clone(&rg), r, s);
+        }
     }
 
     fn publish_taskset_locked(
@@ -457,6 +778,18 @@ impl Scheduler {
         index: usize,
         slot: usize,
     ) {
+        // Submission gating (M5+1 structural deadlock premise 1): a task set
+        // is only ever PUBLISHED with every dependency finalized — no
+        // running task can wait on an unfinished pipeline because nothing
+        // dependency-unsatisfied is visible to any worker.
+        #[cfg(debug_assertions)]
+        {
+            let p = lock(&rg.progress);
+            debug_assert!(
+                rg.tasksets[index].deps.iter().all(|&d| p.done[d]),
+                "published task set {index} with unsatisfied dependencies"
+            );
+        }
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let c0 = rg.tasksets[index].source.startup_c0();
         // Generation binding (H1): hand the work its generation BEFORE the
@@ -487,6 +820,25 @@ impl Scheduler {
         }
         let pinned = ts.rg.pinned;
         let class = ts.rg.class;
+        // Stride inputs (M5-4), refreshed at every publish: the slot's
+        // stride derives from the RG's CURRENT priority (constant p_0 at
+        // equal shares; M5-5's decay updates flow through here), and the
+        // session token feeds the equal-pass affinity tiebreak.
+        self.slots[slot]
+            .stride
+            .store(stride_for(ts.rg.priority.load(Ordering::Relaxed)), Ordering::Relaxed);
+        self.slots[slot].session.store(ts.rg.session_token, Ordering::Relaxed);
+        // M5+1 advisory words: same-query identification + dependency depth
+        // for the within-query pick refinement (read only under DAG mode).
+        self.slots[slot].rg.store(ts.rg.rg_id, Ordering::Relaxed);
+        self.slots[slot].depth.store(ts.rg.depth[index], Ordering::Relaxed);
+        if self.dag.load(Ordering::Relaxed) {
+            // The QUERY's shared stride account is the slot's pass (§3.6:
+            // one account summed over the query's pipelines). Mirrored at
+            // publish and at every advance; single-pipeline RGs see the
+            // exact per-slot sequence sequential mode would produce.
+            self.slots[slot].pass.store(ts.rg.pass_account.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // Pinned RGs are invisible to the pool's pick: only external
@@ -513,9 +865,12 @@ impl Scheduler {
         self.active[slot / 64].fetch_and(!(1u64 << (slot % 64)), Ordering::SeqCst);
     }
 
-    fn pick_slot(&self) -> Option<usize> {
+    fn pick_slot(&self, local: &WorkerLocal) -> Option<usize> {
         // M4 preference: any Maintenance-class slot first (§3.5 starvation
         // floor; mask is usually zero — two loads on the foreground path).
+        // Evaluated BEFORE the stride pick (m5-planner §3.2 reconciliation):
+        // maintenance cycles are few and single-morsel, and their passes
+        // charge normally below, so the preference cannot starve foreground.
         // A stale hit revalidates through the slot word into Retry.
         for (i, word) in self.maint.iter().enumerate() {
             let mask = word.load(Ordering::SeqCst);
@@ -526,19 +881,87 @@ impl Scheduler {
                 }
             }
         }
-        // M0 policy: FIFO / lowest-index active slot (single-RG benchmark
-        // case degenerates to "the only slot"). M5 replaces this scan with
-        // the thread-local lowest-pass stride pick.
-        for (i, word) in self.active.iter().enumerate() {
-            let mask = word.load(Ordering::SeqCst);
-            if mask != 0 {
-                let slot = i * 64 + mask.trailing_zeros() as usize;
-                if slot < self.slots.len() {
-                    return Some(slot);
+        let m0 = self.active[0].load(Ordering::SeqCst);
+        let m1 = self.active[1].load(Ordering::SeqCst);
+        if m0 | m1 == 0 {
+            return None;
+        }
+        // ONE active RG: the pick is forced — no pass reads, exactly the M0
+        // lowest-index pick (the single-query bit-identity anchor: stride
+        // and FIFO provably agree on this path).
+        if m0.count_ones() + m1.count_ones() == 1 {
+            let (i, mask) = if m0 != 0 { (0usize, m0) } else { (1, m1) };
+            let slot = i * 64 + mask.trailing_zeros() as usize;
+            return (slot < self.slots.len()).then_some(slot);
+        }
+        if !self.stride.load(Ordering::Relaxed) {
+            // Kill switch (PGRUST_RUNTIME_STRIDE=0): the M0 FIFO pick.
+            for (i, mask) in [m0, m1].into_iter().enumerate() {
+                if mask != 0 {
+                    let slot = i * 64 + mask.trailing_zeros() as usize;
+                    if slot < self.slots.len() {
+                        return Some(slot);
+                    }
+                }
+            }
+            return None;
+        }
+        // M5-4 stride pick (inter-query §5.3): lowest pass among active
+        // slots; equal-pass ties prefer the slot whose RG's leader session
+        // this worker is sticky-bound to (§5.2 affinity tiebreak — equal
+        // pass ONLY, no bounded pass penalty, per the design's §10 default),
+        // then lowest index (scan order). All reads Relaxed and advisory: a
+        // stale winner revalidates through the slot word into Retry.
+        let mut best: Option<(u64, usize)> = None;
+        for (i, mask) in [m0, m1].into_iter().enumerate() {
+            let mut w = mask;
+            while w != 0 {
+                let b = w.trailing_zeros() as usize;
+                w &= w - 1;
+                let slot = i * 64 + b;
+                if slot >= self.slots.len() {
+                    break;
+                }
+                let pass = self.slots[slot].pass.load(Ordering::Relaxed);
+                match best {
+                    None => best = Some((pass, slot)),
+                    Some((bp, bs)) => {
+                        if pass < bp {
+                            best = Some((pass, slot));
+                        } else if pass == bp
+                            && local.session_token != 0
+                            && self.slots[slot].session.load(Ordering::Relaxed)
+                                == local.session_token
+                            && self.slots[bs].session.load(Ordering::Relaxed)
+                                != local.session_token
+                        {
+                            RuntimeStats::tick(&self.stats.affinity_tiebreaks);
+                            best = Some((pass, slot));
+                        } else if pass == bp && self.dag.load(Ordering::Relaxed) {
+                            // M5+1 within-query refinement (§3.6): among a
+                            // query's runnable pipelines at equal pass (its
+                            // slots share one mirrored account, so they tie),
+                            // prefer the DEEPER one — the critical path
+                            // releases the most downstream work. Same-query
+                            // only (advisory rg words match, nonzero); ties
+                            // keep scan = submission order. Never crosses
+                            // the affinity tiebreak: same-query slots carry
+                            // the same session token.
+                            let brg = self.slots[bs].rg.load(Ordering::Relaxed);
+                            if brg != 0
+                                && brg == self.slots[slot].rg.load(Ordering::Relaxed)
+                                && self.slots[slot].depth.load(Ordering::Relaxed)
+                                    > self.slots[bs].depth.load(Ordering::Relaxed)
+                            {
+                                RuntimeStats::tick(&self.stats.dag_depth_picks);
+                                best = Some((pass, slot));
+                            }
+                        }
+                    }
                 }
             }
         }
-        None
+        best.map(|(_, slot)| slot)
     }
 
     // ---- the worker step ---------------------------------------------------
@@ -550,7 +973,7 @@ impl Scheduler {
         if self.stop.load(Ordering::SeqCst) {
             return Step::Stop;
         }
-        let Some(slot) = self.pick_slot() else {
+        let Some(slot) = self.pick_slot(local) else {
             // Idle transition: nothing is runnable — any WFIN accumulation
             // still held is this worker's final word on those sets.
             local.wfin_flush_all();
@@ -603,11 +1026,39 @@ impl Scheduler {
             _ => {
                 let found = {
                     let m = lock(&self.membership);
-                    m.owned.iter().enumerate().find_map(|(i, e)| {
-                        e.as_ref()
-                            .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
-                            .map(|e| (i, e.seq))
-                    })
+                    if self.dag.load(Ordering::Relaxed) {
+                        // M5+1: a pinned RG may occupy several slots. Among
+                        // its live pipelines prefer the DEEPEST (§3.6
+                        // critical-path priority), then the least-crowded
+                        // (spreads the gang across independent pipelines),
+                        // then lowest index. Advisory — a stale choice
+                        // revalidates through the slot word into Retry.
+                        let mut best: Option<(u64, u64, usize, u64)> = None;
+                        for (i, e) in m.owned.iter().enumerate() {
+                            let Some(e) = e.as_ref().filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                            else {
+                                continue;
+                            };
+                            let depth = e.ts.rg.depth[e.ts.index];
+                            let crowd = e.ts.active_workers.load(Ordering::SeqCst);
+                            let better = match &best {
+                                None => true,
+                                Some((bd, bc, _, _)) => {
+                                    depth > *bd || (depth == *bd && crowd < *bc)
+                                }
+                            };
+                            if better {
+                                best = Some((depth, crowd, i, e.seq));
+                            }
+                        }
+                        best.map(|(_, _, i, seq)| (i, seq))
+                    } else {
+                        m.owned.iter().enumerate().find_map(|(i, e)| {
+                            e.as_ref()
+                                .filter(|e| Arc::ptr_eq(&e.ts.rg, rg))
+                                .map(|e| (i, e.seq))
+                        })
+                    }
                 };
                 local.pinned_slot = found;
                 found.map(|(slot, _)| slot)
@@ -672,6 +1123,16 @@ impl Scheduler {
     fn run_task(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> bool {
         RuntimeStats::tick(&self.stats.tasks_claimed);
         RuntimeStats::tick(&ts.rg.stats.tasks_claimed);
+        // Submit→first-service instrument (§3.5): CAS-once at the RG's first
+        // task admission (one Relaxed load per task thereafter).
+        if ts.rg.first_service_ns.load(Ordering::Relaxed) == 0 {
+            let _ = ts.rg.first_service_ns.compare_exchange(
+                0,
+                self.clock.now_ns().max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
         let task_t0 = if local.wfin.is_empty() { 0 } else { self.clock.now_ns() };
         ts.active_workers.fetch_add(1, Ordering::SeqCst);
 
@@ -748,8 +1209,96 @@ impl Scheduler {
                     }
                 }
                 if t_morsels > 0 {
-                    // INERT stride accounting (M5 reads this).
-                    ts.rg.cpu_consumed_ns.fetch_add(t_cpu_ns, Ordering::Relaxed);
+                    // Stride accounting (LIVE as of M5-4): the RG's CPU
+                    // consumption (fairness-instrument readback) and the
+                    // slot's pass advance. The `.max(1)` floors zero-dt
+                    // virtual-clock charges so multi-RG progress still
+                    // rotates (task-count round-robin) in deterministic
+                    // tests and loom models.
+                    let cpu_total = ts
+                        .rg
+                        .cpu_consumed_ns
+                        .fetch_add(t_cpu_ns, Ordering::Relaxed)
+                        .saturating_add(t_cpu_ns);
+                    if self.stride.load(Ordering::Relaxed) {
+                        let stride = self.slots[ts.slot].stride.load(Ordering::Relaxed);
+                        let adv = (t_cpu_ns.saturating_mul(stride) >> PASS_SHIFT).max(1);
+                        let new_pass = if self.dag.load(Ordering::Relaxed) {
+                            // M5+1 (§3.6): the QUERY is the fair-share
+                            // principal — advance the RG's shared account
+                            // (the SUM of its pipelines' quanta) and mirror
+                            // it into this slot's pass word. Sibling slots
+                            // lag by at most their own last task (advisory;
+                            // they re-sync on their next advance). With one
+                            // pipeline this is value-identical to the slot
+                            // fetch_add below.
+                            let np =
+                                ts.rg.pass_account.fetch_add(adv, Ordering::Relaxed) + adv;
+                            self.slots[ts.slot].pass.store(np, Ordering::Relaxed);
+                            np
+                        } else {
+                            self.slots[ts.slot].pass.fetch_add(adv, Ordering::Relaxed) + adv
+                        };
+                        // Watermark: monotone max (new admissions join here).
+                        let mut cur = self.global_pass.load(Ordering::Relaxed);
+                        while new_pass > cur {
+                            match self.global_pass.compare_exchange_weak(
+                                cur,
+                                new_pass,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(c) => cur = c,
+                            }
+                        }
+                        // M5-5 decaying priorities (inter-query §5.4): when
+                        // the RG's consumed CPU crosses a decay-quantum
+                        // boundary, recompute p(q) = max(p_min, p0·λ^q) and
+                        // refresh THIS slot's stride in place so the new
+                        // share takes effect at the next advance (sibling
+                        // DAG slots refresh on republish — advisory, same
+                        // argument as the pass words). The completed task
+                        // was charged at the stride it RAN under (the load
+                        // above precedes this refresh). The decay_quanta
+                        // CAS makes each boundary apply exactly once across
+                        // racing workers; priority is monotone
+                        // non-increasing (min with current) so late racers
+                        // never raise it. Skipped entirely once the RG sits
+                        // at the floor.
+                        if self.decay.load(Ordering::Relaxed) {
+                            let qn = self.decay_quantum_ns.load(Ordering::Relaxed).max(1);
+                            let q = cpu_total / qn;
+                            let prev_q = ts.rg.decay_quanta.load(Ordering::Relaxed);
+                            let p_min = self.p_min.load(Ordering::Relaxed);
+                            if q > prev_q
+                                && ts.rg.priority.load(Ordering::Relaxed) > p_min
+                                && ts
+                                    .rg
+                                    .decay_quanta
+                                    .compare_exchange(
+                                        prev_q,
+                                        q,
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                let p0 = crate::rg::INITIAL_PRIORITY as f64;
+                                let decayed =
+                                    (p0 * self.decay_lambda.powi(q.min(64) as i32)) as u32;
+                                let cur_p = ts.rg.priority.load(Ordering::Relaxed);
+                                let p = decayed.max(p_min).min(cur_p);
+                                if p < cur_p {
+                                    ts.rg.priority.store(p, Ordering::Relaxed);
+                                    self.slots[ts.slot]
+                                        .stride
+                                        .store(stride_for(p), Ordering::Relaxed);
+                                    RuntimeStats::tick(&self.stats.priority_decays);
+                                }
+                            }
+                        }
+                    }
                     RuntimeStats::add(&self.stats.morsels_claimed, t_morsels);
                     RuntimeStats::add(&ts.rg.stats.morsels_claimed, t_morsels);
                     RuntimeStats::add(&self.stats.granules_executed, t_granules);
@@ -922,6 +1471,13 @@ impl Scheduler {
     /// Protocol step 5: at-most-once finalization by the provably-last
     /// worker out, then activate the RG's next task set in the same slot —
     /// or complete the RG and admit the next queued one.
+    ///
+    /// DAG dispatch (M5+1): the finalize is the DEPENDENCY-EDGE
+    /// SATISFACTION event — it publishes every newly-ready pipeline (the
+    /// deepest reuses this slot; the rest fan out into free slots, deferring
+    /// on capacity). A finishing pipeline with live siblings releases its
+    /// slot WITHOUT completing the RG; the RG completes only at live == 0
+    /// with nothing ready (all done, or aborted).
     fn last_out(&self, ts: &Arc<TaskSetRt>) {
         let was = ts.finalized.swap(true, Ordering::SeqCst);
         assert!(!was, "finalization must run at most once");
@@ -938,10 +1494,17 @@ impl Scheduler {
             ));
         }
 
+        if self.dag.load(Ordering::Relaxed) {
+            self.last_out_dag(ts, rg, aborted);
+            return;
+        }
+
+        // ---- sequential walk (DAG dispatch off): today's behavior --------
         // Progress under the RG lock only (never while holding membership).
         let next = {
             let mut p = lock(&rg.progress);
             p.done[ts.index] = true;
+            p.live -= 1;
             if aborted {
                 p.aborted = true;
                 None
@@ -969,59 +1532,242 @@ impl Scheduler {
                     );
                 }
                 self.release_slot_and_admit(ts.slot, ts.seq);
-                // The RG leaves the scheduler: drain (a no-op — every
-                // participant is provably gone, see retire_lifecycle) and
-                // retire its generation before the leader wakes.
-                rg.retire_lifecycle();
-                rg.completion.complete(if aborted {
-                    RgOutcome::Aborted
+                self.complete_rg(&rg, aborted);
+            }
+        }
+    }
+
+    /// The M5+1 edge-satisfaction/submission handshake (module doc; loom
+    /// model `dag_fanout_publish_exactly_once`). Membership is taken FIRST
+    /// (lock order: membership, then progress) so the ready computation,
+    /// its capacity cap, and the publishes are one atomic membership event —
+    /// two concurrently-finishing dependencies of one consumer serialize
+    /// here, and exactly one of them observes the consumer ready.
+    fn last_out_dag(&self, ts: &Arc<TaskSetRt>, rg: Arc<ResourceGroup>, aborted: bool) {
+        enum After {
+            Publish(Vec<usize>),
+            Release { complete: bool },
+        }
+        let mut m = lock(&self.membership);
+        debug_assert!(
+            matches!(&m.owned[ts.slot], Some(e) if e.seq == ts.seq),
+            "slot ownership changed before last-out"
+        );
+        let after = {
+            let mut p = lock(&rg.progress);
+            p.done[ts.index] = true;
+            p.live -= 1;
+            if aborted {
+                // No new submissions on a dead generation; live published
+                // siblings drain through their own generation-refusal
+                // last-outs — the LAST one completes the RG.
+                p.aborted = true;
+                After::Release { complete: p.live == 0 }
+            } else {
+                // This slot is still ours (freed below or reused), so the
+                // capacity for newly-ready pipelines is free slots + 1.
+                let free = m.owned.iter().filter(|e| e.is_none()).count();
+                let (ready, deferred) = rg.ready_all(&mut p, free + 1);
+                RuntimeStats::add(&self.stats.dag_ready_deferred, deferred as u64);
+                if ready.is_empty() {
+                    if p.live == 0 {
+                        debug_assert!(
+                            p.done.iter().all(|&d| d),
+                            "RG completed with unfinished task sets (dep DAG hole)"
+                        );
+                        After::Release { complete: true }
+                    } else {
+                        After::Release { complete: false }
+                    }
                 } else {
-                    RgOutcome::Completed
-                });
-                RuntimeStats::tick(&self.stats.rgs_completed);
-                if aborted {
-                    RuntimeStats::tick(&self.stats.rgs_aborted);
+                    After::Publish(ready)
                 }
-                // Parked pinned drivers observe completion by re-testing
-                // try_outcome after a wake; the completion word itself only
-                // unparks registered leader waiters.
-                self.park.wake_all();
-                if self.trace {
-                    self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+            }
+        };
+        match after {
+            After::Publish(ready) => {
+                // Deepest into this (retained) slot — the within-query
+                // critical-path preference — then fan out.
+                self.publish_taskset_locked(&mut m, Arc::clone(&rg), ready[0], ts.slot);
+                for &r in &ready[1..] {
+                    let s = m
+                        .owned
+                        .iter()
+                        .position(Option::is_none)
+                        .expect("ready_all is capped by the free-slot count");
+                    RuntimeStats::tick(&self.stats.dag_fanout_publishes);
+                    self.publish_taskset_locked(&mut m, Arc::clone(&rg), r, s);
+                }
+            }
+            After::Release { complete } => {
+                let complete_aborted = self.release_slot_locked(&mut m, ts.slot, ts.seq);
+                drop(m);
+                for q in complete_aborted {
+                    self.complete_queued_aborted(&q);
+                }
+                if complete {
+                    self.complete_rg(&rg, aborted);
                 }
             }
         }
     }
 
-    fn release_slot_and_admit(&self, slot: usize, seq: u64) {
-        // RGs popped while already aborted complete without ever running.
-        let mut complete_aborted: Vec<Arc<ResourceGroup>> = Vec::new();
-        {
-            let mut m = lock(&self.membership);
-            debug_assert!(
-                matches!(&m.owned[slot], Some(e) if e.seq == seq),
-                "releasing a slot we do not own"
-            );
-            m.owned[slot] = None;
-            while let Some(rg) = m.waitq.pop_front() {
-                if rg.is_aborted() {
-                    complete_aborted.push(rg);
-                    continue;
-                }
-                self.start_rg_locked(&mut m, rg, slot);
-                break;
-            }
-        }
-        for rg in complete_aborted {
-            {
-                let mut p = lock(&rg.progress);
-                p.aborted = true;
-            }
-            rg.retire_lifecycle();
-            rg.completion.complete(RgOutcome::Aborted);
-            RuntimeStats::tick(&self.stats.rgs_completed);
+    /// RG completion tail shared by both dispatch modes: retire the
+    /// generation, publish the outcome, wake waiters.
+    fn complete_rg(&self, rg: &Arc<ResourceGroup>, aborted: bool) {
+        // The RG leaves the scheduler: drain (a no-op — every participant
+        // is provably gone, see retire_lifecycle) and retire its generation
+        // before the leader wakes.
+        rg.retire_lifecycle();
+        rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
+        rg.completion.complete(if aborted { RgOutcome::Aborted } else { RgOutcome::Completed });
+        RuntimeStats::tick(&self.stats.rgs_completed);
+        if aborted {
             RuntimeStats::tick(&self.stats.rgs_aborted);
-            self.park.wake_all();
         }
+        self.emit_rgdone(rg, aborted);
+        // Parked pinned drivers observe completion by re-testing
+        // try_outcome after a wake; the completion word itself only
+        // unparks registered leader waiters.
+        self.park.wake_all();
+        if self.trace {
+            self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
+        }
+    }
+
+    fn release_slot_and_admit(&self, slot: usize, seq: u64) {
+        let complete_aborted = {
+            let mut m = lock(&self.membership);
+            self.release_slot_locked(&mut m, slot, seq)
+        };
+        for rg in complete_aborted {
+            self.complete_queued_aborted(&rg);
+        }
+    }
+
+    /// Free `slot` and admit the next queued RG into it. Returns RGs popped
+    /// while already aborted — they complete without ever running (the
+    /// caller finishes them OUTSIDE the membership lock).
+    fn release_slot_locked(
+        &self,
+        m: &mut Membership,
+        slot: usize,
+        seq: u64,
+    ) -> Vec<Arc<ResourceGroup>> {
+        let mut complete_aborted: Vec<Arc<ResourceGroup>> = Vec::new();
+        debug_assert!(
+            matches!(&m.owned[slot], Some(e) if e.seq == seq),
+            "releasing a slot we do not own"
+        );
+        m.owned[slot] = None;
+        while let Some(rg) = m.waitq.pop_front() {
+            if rg.is_aborted() {
+                complete_aborted.push(rg);
+                continue;
+            }
+            self.start_rg_locked(m, rg, slot);
+            break;
+        }
+        complete_aborted
+    }
+
+    /// Complete an aborted RG that never reached a slot (popped aborted at
+    /// admission, or reaped from the wait queue at abort time). The caller
+    /// must have REMOVED the RG from the wait queue under the membership
+    /// lock — removal is the exactly-once election for this completion.
+    fn complete_queued_aborted(&self, rg: &Arc<ResourceGroup>) {
+        {
+            let mut p = lock(&rg.progress);
+            p.aborted = true;
+        }
+        rg.retire_lifecycle();
+        rg.done_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
+        rg.completion.complete(RgOutcome::Aborted);
+        RuntimeStats::tick(&self.stats.rgs_completed);
+        RuntimeStats::tick(&self.stats.rgs_aborted);
+        self.emit_rgdone(rg, true);
+        self.park.wake_all();
+    }
+
+    /// M5-4 slot-reclamation fix (m5-planner §3.3 / §7 row M5-4): reap an
+    /// aborted RG from the WAIT QUEUE at abort time, completing it promptly
+    /// — a queued abort must not wait for an unrelated slot to free (the
+    /// m1-scan-pipelines boundary note). Exactly-once with the admission
+    /// pop: both paths remove under the membership lock, and only the
+    /// remover completes. Not found ⇒ the RG was already admitted (its
+    /// abort drains through the ordinary protocol) or already popped.
+    pub(crate) fn reap_queued_abort(&self, rg: &Arc<ResourceGroup>) {
+        let removed = {
+            let mut m = lock(&self.membership);
+            match m.waitq.iter().position(|q| Arc::ptr_eq(q, rg)) {
+                Some(i) => {
+                    m.waitq.remove(i);
+                    true
+                }
+                None => false,
+            }
+        };
+        if !removed {
+            return;
+        }
+        RuntimeStats::tick(&self.stats.queued_aborts_reaped);
+        if self.trace {
+            self.trace(&format!("rg {} reaped from wait queue (aborted while queued)", rg.rg_id));
+        }
+        self.complete_queued_aborted(rg);
+    }
+
+    /// `MORSEL|DAG|…` per-query pipeline-DAG trace (§3.6 instruments; same
+    /// PGRUST_MORSEL_MARKERS switch as WFIN/LFIN/RGDONE): one line at
+    /// submit with the decomposition — pipeline count, dependency edges
+    /// (`d->i`), per-pipeline depth, and the dispatch mode. Dispatch ORDER
+    /// is read off the publish/WFIN/RGDONE stream correlated by qid/pipe.
+    /// Off = one branch per submission.
+    fn emit_dag(&self, rg: &ResourceGroup) {
+        if !markers_enabled() {
+            return;
+        }
+        let mut edges = String::new();
+        for (i, ts) in rg.tasksets.iter().enumerate() {
+            for &d in &ts.deps {
+                if !edges.is_empty() {
+                    edges.push(',');
+                }
+                edges.push_str(&format!("{d}->{i}"));
+            }
+        }
+        let depths =
+            rg.depth.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        eprintln!(
+            "MORSEL|DAG|qid={}|rg={}|mode={}|pipes={}|edges={}|depths={}",
+            rg.query_id,
+            rg.rg_id,
+            if self.dag.load(Ordering::Relaxed) { "dag" } else { "seq" },
+            rg.tasksets.len(),
+            edges,
+            depths,
+        );
+    }
+
+    /// `MORSEL|RGDONE|…` completion trace (§3.5 submit→service channels;
+    /// same PGRUST_MORSEL_MARKERS switch and clock domain as WFIN/LFIN):
+    /// per-RG submit→first-service→done timestamps and the CPU readback the
+    /// MULTI-arm fairness verdicts consume. Off = one branch per completion.
+    fn emit_rgdone(&self, rg: &ResourceGroup, aborted: bool) {
+        if !markers_enabled() {
+            return;
+        }
+        eprintln!(
+            "MORSEL|RGDONE|qid={}|rg={}|class={:?}|outcome={}|submit_us={}|first_us={}|done_us={}|cpu_us={}|prio={}",
+            rg.query_id,
+            rg.rg_id,
+            rg.class,
+            if aborted { "aborted" } else { "completed" },
+            rg.submit_ns.load(Ordering::Relaxed) / 1000,
+            rg.first_service_ns.load(Ordering::Relaxed) / 1000,
+            rg.done_ns.load(Ordering::Relaxed) / 1000,
+            rg.cpu_consumed_ns.load(Ordering::Relaxed) / 1000,
+            rg.priority.load(Ordering::Relaxed),
+        );
     }
 }

@@ -70,6 +70,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea};
@@ -107,6 +108,17 @@ pub(super) struct RuntimeScanShared {
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
     started: AtomicUsize,
+    /// LAUNCHED helpers that have EXITED their drive frame (every exit path
+    /// — refused bind, errored, drove, panic-unwind — bumps exactly once,
+    /// by drop guard; the m35-spill inc-2c `ExitBump` pattern, ported here
+    /// per the inc-2c FLAG). Liveness reap input: a pinned RG is invisible
+    /// to pool workers, so once `exited >= launched` with the RG incomplete,
+    /// nobody will ever step it — the leader must reap or park forever.
+    /// LAUNCHED-path only by construction: standing-gang exits are counted
+    /// by the standing board's own claimed/detached accounting (standing
+    /// runs and fully closes BEFORE any launch, so the counter is exact
+    /// against `launched`).
+    exited: AtomicUsize,
     /// First worker-phase error (fold/executor/binder-cleanup errors; the
     /// entry-phase errors ride the ordinary parallel message channel).
     error: Mutex<Option<Box<PgError>>>,
@@ -498,6 +510,14 @@ fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     if !payload.drive_at_entry {
         return Ok(());
     }
+    // Every launched helper bumps `exited` exactly once, on EVERY exit path
+    // — including the exit-committed resume_unwind below (the leader's
+    // liveness reap counts these against `launched`; m35-spill inc-2c port).
+    // Launched-frame placement (here and in the POST_TASK_PARK hook, never
+    // inside the shared helper_drive): the standing driver must NOT bump —
+    // standing exits are accounted by the board's claimed/detached counters,
+    // and stale standing bumps would poison the launched loop's threshold.
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     parallel::gtrace("w.entry.drive.begin");
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive_entry(&payload)));
     let outcome = match r {
@@ -540,6 +560,10 @@ fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
 /// the same via the binder's finish(false); resource-release-at-commit
 /// would warn on leaked pins).
 fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("scan");
     let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else { return Ok(()) };
     // Process-wide lane lease: exhaustion = fail-closed non-participation
     // (the leader's all-refused fallback counts it exactly like a bind
@@ -606,6 +630,9 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
         // (or aborted) RG for nothing.
         return;
     }
+    // Launched-helper exit counter (see runtime_scan_worker_main): this hook
+    // is the drive frame when entry-drive is kill-switched off.
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, false)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime scan helper panicked").into());
@@ -618,6 +645,11 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
 
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeScanShared>, sticky: bool) {
     let _ = shared;
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving (hook + standing frames; the
+    // caller's catch layer records it, nobody drives, the leader-side
+    // liveness machinery must recover promptly).
+    super::test_helper_panic("scan");
     // F1 fail-closed accounting: a helper that cannot participate must NEVER
     // vanish silently — every early exit below counts itself as a refusal
     // (the leader's started==0 && refused>=launched probe is its fallback
@@ -918,14 +950,20 @@ fn emit_lfin(
     if !wfin_enabled() {
         return;
     }
+    // submit_us/first_us (M5-4, m5-planner §3.5 submit→service channels):
+    // time-to-service = first_us − submit_us; leader completion latency =
+    // t_us − submit_us. Same scheduler clock domain as every other field.
+    let (submit_ns, first_ns, _done_ns) = rg.service_times();
     eprintln!(
-        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|chan={}",
+        "MORSEL|LFIN|qid={}|t_us={}|granules={}|rgs={}|started={}|refused={}|submit_us={}|first_us={}|chan={}",
         rg.query_id(),
         rt.now_ns() / 1000,
         total_granules,
         nrgs,
         payload.started.load(Ordering::SeqCst),
         payload.refused.load(Ordering::SeqCst),
+        submit_ns / 1000,
+        first_ns / 1000,
         chan,
     );
 }
@@ -1631,11 +1669,20 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_scan_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Scan);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
+    // Armed offer reached the admission walk (heap shapes ride the scan
+    // arm's entry; they re-class at engagement). Done-repulls (the post-
+    // completion pull that exits via agg_is_done below) are not offers —
+    // without this gate `offered` double-counts every engagement.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::Scan, ArmCounter::Offered);
+    }
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED,
     // so under EXPLAIN ANALYZE every refusal records its reason for the
@@ -1847,7 +1894,13 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // --- Engage.
     let ea_scan_node = ea.then_some(scan_plan.scan.plan.plan_node_id);
     let ea_timer = ea && runtime_instr::ea_timer(estate);
-    engage(
+    // Router class resolution (M5-1): heap shapes re-class here — the entry
+    // and its refusals are the scan arm's, the engagement is per-source.
+    // Counter algebra at this single choke point: Engaged = ceremony
+    // entered; Completed = the runtime answered; Fallback = serial rerun.
+    let class = if is_cb { ArmClass::Scan } else { ArmClass::Heap };
+    router::tick(class, ArmCounter::Engaged);
+    let r = engage(
         agg,
         estate,
         rt,
@@ -1858,17 +1911,26 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         rg_starts,
         ea_scan_node,
         ea_timer,
-    )
+    )?;
+    router::tick(
+        class,
+        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
 }
 
 /// Record-and-refuse (transparency line, ea-morsels.md §6): armed +
 /// instrumented refusals only — every other path is byte-identical today.
+/// M5-1: every scan-arm refusal also feeds the router's consolidated
+/// taxonomy (entry-arm attribution — heap-shape refusals carry
+/// self-describing reasons).
 fn ea_refused<T>(
     estate: &mut EStateData<'_>,
     ea: bool,
     node_id: i32,
     reason: &'static str,
 ) -> PgResult<Option<T>> {
+    router::tick_refused(ArmClass::Scan, reason);
     if ea {
         estate.runtime_ea_record_refusal(node_id, "scan", reason);
     }
@@ -1912,6 +1974,7 @@ fn engage<'mcx>(
         pins_base: rt.nthreads(),
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
+        exited: AtomicUsize::new(0),
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
@@ -1997,10 +2060,10 @@ fn engage_ceremony<'mcx>(
         // Submit the pinned RG before launch: helpers find work immediately.
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
-        });
+        }, router::session_affinity_token());
         payload
             .rg
             .set(rg.downgrade())
@@ -2032,6 +2095,7 @@ fn engage_ceremony<'mcx>(
         // Submit-and-park: completion poll + parallel-message drain + CFI +
         // bounded latch quantum (the WaitForParallelWorkersToFinish shape —
         // CompletionWaiter alone would be deaf to worker errors/cancel).
+        let mut all_exited_seen = false;
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -2080,6 +2144,31 @@ fn engage_ceremony<'mcx>(
                     ERROR,
                     "runtime scan helpers exited before completing the scan",
                 )));
+            }
+            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
+            // arm; the agg leg-4d wedge class): a pinned RG is invisible to
+            // pool workers (rg.rs — publication never sets the global
+            // active bit), so once every launched helper has exited without
+            // the RG completing, NOBODY will ever step it and the leader
+            // parks forever (the all-stopped probe above cannot see helpers
+            // that exited their drive but parked back to the pool). Reap:
+            // abort + drain the closed generation ourselves; the next
+            // try_wait surfaces Aborted and the existing error/fallback
+            // handling (finish_outcome) decides. Two consecutive sightings
+            // before reaping let a mid-settlement completion land first —
+            // belt only: a helper's exit bump happens-after its drive's
+            // completion.complete(), and abort + drive_pinned on a
+            // completed RG are benign no-ops.
+            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+                if all_exited_seen && waiter.try_wait().is_none() {
+                    lane_trace(
+                        "runtime-scan: all helpers exited without completing the RG — reaping",
+                    );
+                    rg.abort();
+                    drain_rg(rt, payload, &rg);
+                    continue;
+                }
+                all_exited_seen = true;
             }
             // A raised cancel disposition (statement_timeout /
             // pg_cancel_backend) surfaces from the latch quantum (F1 defect
