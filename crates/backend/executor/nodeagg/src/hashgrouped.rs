@@ -416,11 +416,30 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// (1.0; `PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG` is the re-pricing
 /// channel) so the near-unique q14 class engages by default. The
 /// budget-fit term applies unchanged to both tiers.
+///
+/// `dop_budget` (q14-100m lane, the K2 100M admission): `Some((per_local
+/// envelope bytes, dop))` when the caller proved the FULL bounded-memory
+/// stack is armed — a live paremit recipe, a resolved K2 top-N selection
+/// (leader retention ≤ bound×parts candidates, never the merged group
+/// set), and the M3.5 spill arm (accept-side value pressure). Under that
+/// stack the single-halved-serial-budget fit term (`hashgroup_budget`)
+/// prices the WRONG machine: the runtime sink re-budgets every Local to
+/// the full R3 envelope, the combine's union bound (`worker_budget ×
+/// sealed.len()`) plus value-hash splits already bound each partition's
+/// merged table dynamically, and per-partition tables are est/256-sized.
+/// The fit term therefore becomes the same union bound the combine
+/// enforces: `est_groups × per_group × 2 ≤ envelope × dop` (CB q14@100M:
+/// 5.43M est × 640 = 3.48GB vs 512MB serial-halved → refused; vs 2GiB ×
+/// 16 = 32GiB → admits; the 10M engagement admits under BOTH terms —
+/// this face only ADDS engagements, never removes one). `None` = the
+/// serial-halved term exactly (every non-topn caller, and the
+/// `PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET=0` rollback channel).
 pub fn agg_hashgroup_economical_sink(
     node: &AggStateData<'_>,
     force: bool,
     input_rows: f64,
     paremit: bool,
+    dop_budget: Option<(usize, u32)>,
 ) -> bool {
     if force {
         return true;
@@ -452,7 +471,11 @@ pub fn agg_hashgroup_economical_sink(
     }
     let per_group =
         PER_GROUP_EST + PER_TEXT_KEY_EST * agg_hashgroup_text_key_count(node) as f64;
-    est_groups * per_group * 2.0 <= hashgroup_budget() as f64
+    let fit_budget = match dop_budget {
+        Some((envelope, dop)) => (envelope as f64) * f64::from(dop.max(1)),
+        None => hashgroup_budget() as f64,
+    };
+    est_groups * per_group * 2.0 <= fit_budget
 }
 
 /// Whether the arm is mid-emit (the drive routes straight to
