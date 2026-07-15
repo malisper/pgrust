@@ -1546,6 +1546,33 @@ impl LaneAggTable {
         });
     }
 
+    /// [`Self::probe_bytes_batch`] over CALLER-supplied hashes (the
+    /// canonical combine path carries the flush/SEAL-computed sink hash per
+    /// run row — one hash per (row, table), never recomputed). Same fused
+    /// run, same L2/lookahead gating, same row-for-row `probe_bytes`
+    /// semantics.
+    pub fn probe_bytes_batch_hashed(
+        &mut self,
+        keys: &[&[u8]],
+        hashes: &[u64],
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(self.repr, KeyRepr::Bytes);
+        out.reserve(keys.len());
+        let la = if self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES {
+            probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4)
+        } else {
+            0
+        };
+        self.probe_fold_bytes_hashed_run(keys, hashes, la, &mut |states, i, is_new| {
+            out.push(states);
+            if is_new {
+                new_out.push(i);
+            }
+        });
+    }
+
     /// The engaged fused driver behind [`Self::probe_bytes_batch`] —
     /// [`Self::probe_fold_hashed_run`]'s Bytes twin. Raw parts (entry
     /// pointers, row-store geometry, the arena base) are hoisted per run and

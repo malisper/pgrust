@@ -278,6 +278,44 @@ fn bytes_batch_matches_perrow() {
     }
 }
 
+/// The prehashed batch entry (combine path shape: caller-carried hashes)
+/// must match probe_bytes given the same hash values.
+#[test]
+fn bytes_batch_hashed_matches_perrow() {
+    let corpus: Vec<Vec<u8>> = (0..60_000)
+        .map(|i| format!("combine-key-{:06}-tail-past-eight", i % 20_000).into_bytes())
+        .collect();
+    let mut a = LaneAggTable::new(KeyRepr::Bytes, 8, 16);
+    let mut b = LaneAggTable::new(KeyRepr::Bytes, 8, 16);
+    let mut out: Vec<*mut u8> = Vec::new();
+    let mut new_out: Vec<u32> = Vec::new();
+    for chunk in corpus.chunks(512) {
+        let refs: Vec<&[u8]> = chunk.iter().map(|k| k.as_slice()).collect();
+        let hashes: Vec<u64> = refs.iter().map(|k| b.hash_key_bytes(k)).collect();
+        out.clear();
+        new_out.clear();
+        b.probe_bytes_batch_hashed(&refs, &hashes, &mut out, &mut new_out);
+        for (i, k) in chunk.iter().enumerate() {
+            let pr = a.probe_bytes(k, a.hash_key_bytes(k));
+            // SAFETY: zeroed 8-byte states both sides.
+            unsafe {
+                *states_i64(pr.states) += 1;
+                *states_i64(out[i]) += 1;
+            }
+        }
+    }
+    assert_eq!(a.len(), b.len());
+    let mut sa = [0u8; 8];
+    let mut sb = [0u8; 8];
+    for i in 0..a.nrows() {
+        assert_eq!(a.row_key_bytes(i, &mut sa), b.row_key_bytes(i, &mut sb), "row {i}");
+        // SAFETY: live rows both sides.
+        unsafe {
+            assert_eq!(*states_i64(a.row_states(i)), *states_i64(b.row_states(i)), "row {i}");
+        }
+    }
+}
+
 #[test]
 fn reset_reuses() {
     let mut t = LaneAggTable::new(KeyRepr::Int, 8, 4);
