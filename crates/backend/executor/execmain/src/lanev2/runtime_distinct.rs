@@ -622,6 +622,10 @@ impl RuntimeDistinctShared {
         router.flush()?;
         // In-memory tables merge EXACTLY ONCE, before any slice.
         let mut merger = PdBucketMerger::new(&self.spec);
+        // dedupsub reserve wave: spilled records can never reference a
+        // group the in-memory remainders lack (exactly-once law above), so
+        // the in-memory pre-count bounds the merged bucket's group count.
+        merger.seed_groups(groups);
         for s in sealed {
             merger.absorb(&s.table, b);
         }
@@ -1747,6 +1751,13 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // partial still shares the envelope.
     if let Some(s) = Arc::get_mut(&mut spec) {
         s.worker_budget = runtime_distinct_worker_budget();
+        // dedupsub I3: per-worker row-share expectation for the distinct-set
+        // projection reserve (plan's post-qual scan estimate / dop; 0 stays
+        // inert). An estimate error only moves probe-table GEOMETRY — the
+        // ratio clamp and expected-cap bound in flush_staged bound the
+        // overshoot, and the capacity-based budget metering stays honest.
+        s.expected_worker_rows =
+            (sort.plan.plan.plan_rows / f64::from(dop.max(1))).max(0.0) as u64;
     }
     if spec.max_att > desc.natts {
         refused(estate, ea, node_id, "att bound");
