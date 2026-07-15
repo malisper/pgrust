@@ -169,6 +169,23 @@ fn fill_split() -> bool {
     })
 }
 
+/// loadcommit C2a: PGRUST_PARALLEL_COPY_FILL_FADV=<MB> — per-run sliding
+/// POSIX_FADV_WILLNEED window on the merge fill's run files (kernel
+/// readahead overlapping the advance I/O with merge CPU). Pure hint,
+/// zero effect on bytes; default 0 = off; capped 64 MB/run. Page-cache
+/// pressure = runs x window (291 x 4 MB ≈ 1.2 GB at 100M defaults).
+fn fill_fadv_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_FADV")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(64)
+            * (1 << 20)
+    })
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -1195,6 +1212,13 @@ fn merge_sorted_runs(
             MergeKind::V2(m) => m.set_timed(true),
         }
     }
+    let fadv = fill_fadv_bytes();
+    if fadv > 0 {
+        match &mut merge {
+            MergeKind::V1(m) => m.set_fadvise(fadv),
+            MergeKind::V2(m) => m.set_fadvise(fadv),
+        }
+    }
     // Eager unlink: the open fds keep the data; a crash from here leaves
     // no orphan files.
     for p in &paths {
@@ -1202,12 +1226,13 @@ fn merge_sorted_runs(
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
-        "sort merge over {} runs encoders={nenc} fill={}",
+        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={}",
         paths.len(),
         match &merge {
             MergeKind::V1(_) => "v1",
             MergeKind::V2(_) => "v2",
-        }
+        },
+        fadv >> 20,
     ));
 
     const RG: usize = cbstore::format::RG_ROWS;
