@@ -5,7 +5,7 @@
 //! precedent).
 //!
 //! Phase-I MORSELIZATION (docs/design/vacuum-morsels.md, inc-2): behind
-//! `PGRUST_RUNTIME_VACUUM=1` (requires `PGRUST_RUNTIME=1`; default OFF) the
+//! the morsel arm (default ON since train-21; `PGRUST_RUNTIME_VACUUM=0` kills, requires the runtime master switch) the
 //! heap scan runs as SCAN task sets on the morsel runtime — see [`morsels`].
 //! The per-block bodies below are shared verbatim between the serial arm and
 //! the morsel workers: they take a read-only [`ScanEnv`] + the order-free

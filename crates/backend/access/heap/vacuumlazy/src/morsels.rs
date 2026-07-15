@@ -2,7 +2,7 @@
 //! (RATIFIED 2026-07-13, decisions of record 1-5 + the inc-1 claim-boundary
 //! quiesce amendment).
 //!
-//! Shape (doc §3): behind `PGRUST_RUNTIME_VACUUM=1` (requires
+//! Shape (doc §3): default ON, `PGRUST_RUNTIME_VACUUM=0` kills (requires
 //! `PGRUST_RUNTIME=1`; default OFF) the heap scan of one `heap_vacuum_rel`
 //! invocation runs as an RG-PER-ROUND leader loop: each round builds a
 //! [`VacuumBlockSource`] skip map (VM skip rules as granule admission, doc
@@ -88,8 +88,14 @@ use init_small::globals as g;
 // ---------------------------------------------------------------------------
 
 fn flag_enabled() -> bool {
+    // Train-21 default flip (W1 closed per protocol; battery-gated): the
+    // morsel arm is ON by default under the runtime master switch;
+    // PGRUST_RUNTIME_VACUUM=0 is the kill switch. Layering unchanged:
+    // PGRUST_RUNTIME=0 still disarms everything above this flag.
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_VACUUM").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_RUNTIME_VACUUM").is_ok_and(|v| v.trim() == "0")
+    })
 }
 
 /// Engagement trace (PGRUST_VACUUM_TRACE=1): the §9 battery's engagement /
