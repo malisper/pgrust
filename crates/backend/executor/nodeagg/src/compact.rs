@@ -866,6 +866,15 @@ pub fn agg_hash_compact_intern(node: &mut AggStateData<'_>, bytes: &[u8]) -> u32
     let t = ch.intern.as_mut().expect("intern requires an intern-armed shape");
     let hash = t.hash_key_bytes(bytes);
     let pr = t.probe_bytes(bytes, hash);
+    // spankey copy-tax counters (measurement only; cached-bool gated).
+    if crate::spankey::spankey_ctr_enabled() {
+        use crate::spankey::{spankey_add, SPANKEY_CTRS as S};
+        spankey_add(&S.intern_calls, 1);
+        if pr.is_new {
+            spankey_add(&S.intern_new, 1);
+            spankey_add(&S.intern_new_bytes, bytes.len() as u64);
+        }
+    }
     if pr.is_new {
         let id = (t.nrows() - 1) as u32;
         // SAFETY: fresh zeroed 8-byte state block; the id is its read-back.
@@ -1072,6 +1081,7 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     keys: &[i64],
     groups: &mut Vec<NonNull<AggPerGroup>>,
 ) -> PgResult<()> {
+    let spk_t0 = crate::spankey::spankey_t0();
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let AggStateData { perhash, trans_init, trans_typ, .. } = node;
@@ -1098,6 +1108,7 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     if ch.sink_mode {
         crate::sink::compact_extend_canon_hashes(ch);
     }
+    crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.probe_ns, spk_t0);
     Ok(())
 }
 
@@ -1108,6 +1119,7 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     keys: &[[u64; 2]],
     groups: &mut Vec<NonNull<AggPerGroup>>,
 ) -> PgResult<()> {
+    let spk_t0 = crate::spankey::spankey_t0();
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let AggStateData { perhash, trans_init, trans_typ, .. } = node;
@@ -1130,6 +1142,7 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     if ch.sink_mode {
         crate::sink::compact_extend_canon_hashes(ch);
     }
+    crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.probe_ns, spk_t0);
     Ok(())
 }
 
