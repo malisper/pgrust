@@ -948,6 +948,11 @@ impl<'mcx> BatchEmit<'mcx> for SeqScanBatchEmit<'_, 'mcx> {
     }
 
     #[inline]
+    fn refsort_batch_masks(&self, n: u32) -> Option<(&[u64], Option<&[u64]>)> {
+        ::nodeseqscan::seq_scan_refsort_batch_masks(self.node, n)
+    }
+
+    #[inline]
     fn rowref_base(&self) -> Option<u64> {
         ::nodeseqscan::seq_scan_batch_rowref_base(self.node)
     }
