@@ -1200,6 +1200,25 @@ pub fn seq_scan_batch_dict_codes(
     ::tableam::table_scan_batch_dict_codes(sd, c as u16)
 }
 
+/// `seq_scan_batch_dict_codes` with the v7 part-global stitch published
+/// when the scan carries one — the DictCode sort-key side channel
+/// (docs/design/dict-code-flow.md inc-1). Same audit guards as the
+/// per-epoch accessor (no still-up dict-lane answer, no length staging);
+/// consumers gate order use on `table.has_stitch()` and fail closed
+/// otherwise.
+#[inline]
+pub fn seq_scan_batch_dict_codes_global(
+    node: &SeqScanState<'_>,
+    c: usize,
+) -> Option<::exectuples::SoaDictLane> {
+    let sd = node.ss.ss_currentScanDesc.as_ref()?;
+    let b = node.batch_soa.as_deref()?;
+    if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
+        return None;
+    }
+    ::tableam::table_scan_batch_dict_codes_global(sd, c as u16)
+}
+
 /// Physical rowref base of the CURRENT staged batch (tie-ordering rule 2,
 /// the zone-adaptive rowref-selection sort feed): staged row `i`'s rowref is
 /// `base + i` — the SoA batch stages exactly the scan's current staged

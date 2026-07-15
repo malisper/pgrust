@@ -1511,6 +1511,22 @@ pub fn table_scan_batch_dict_codes<'mcx>(
     }
 }
 
+/// `table_scan_batch_dict_codes` with the v7 part-global stitch published
+/// when the scan carries one (the DictCode sort-key class,
+/// docs/design/dict-code-flow.md inc-1). Consumers gate order use on
+/// `table.has_stitch()` and fail closed otherwise. Heap scans have no
+/// dictionaries — always `None`.
+#[inline]
+pub fn table_scan_batch_dict_codes_global<'mcx>(
+    scan: &TableScanDesc<'mcx>,
+    c: u16,
+) -> Option<::exectuples::SoaDictLane> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(cb) => cb.staged_codes_lane_global(c as usize),
+    }
+}
+
 /// Physical rowref base of the CURRENT staged cbstore window (tie-ordering
 /// rule 2): staged row `i`'s rowref is `base + i`. Heap scans carry no
 /// rowrefs — always `None` (the rowref-armed consumer demotes).
