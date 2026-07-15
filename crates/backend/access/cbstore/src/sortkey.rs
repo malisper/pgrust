@@ -14,7 +14,7 @@
 //! (serial presort handles them through the tuplesort path).
 
 use ::datum::Datum;
-use ::tuplesort_seams::CbSortKeyKind;
+pub use ::tuplesort_seams::CbSortKeyKind;
 
 /// Encoded byte width of one key column; None for variable-width kinds.
 pub fn key_col_width(kind: CbSortKeyKind) -> Option<usize> {

@@ -1354,6 +1354,18 @@ pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWrit
     open_writer(rel)
 }
 
+/// load-r2 L3-1: the parallel load-sort opens the writer PLAIN — the sort
+/// happens upstream in the COPY workers (memcmp-key runs + k-way merge),
+/// and the merged rows drain through append_row/seal exactly like a plain
+/// load of pre-sorted input (byte-identity contract). The presort sorter
+/// the open installed is dropped here; opts.presort_key stays as the
+/// caller's key-spec record.
+pub fn begin_parallel_ingest_presorted(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
+    let mut w = open_writer(rel)?;
+    w.sorter = None;
+    Ok(w)
+}
+
 impl CbWriter {
     /// The encode plan for this writer's parallel workers; None when the
     /// writer sorts on ingest (cluster key) — that drain is serial by
