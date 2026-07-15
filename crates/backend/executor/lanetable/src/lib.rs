@@ -1555,6 +1555,17 @@ impl LaneAggTable {
         });
     }
 
+    /// Would the batched byte-key drivers take the engaged (two-phase)
+    /// path right now? Callers that must BUILD a batch (key-slice refs) to
+    /// use them should check this first: below the gate the primitives
+    /// route per-row anyway, and the caller-side batch construction is pure
+    /// tax (mt16 100M A/B jobs -65da/-6fdf: q40 hot +21% from exactly that
+    /// — canonical combine runs whose G/256 bucket tables sit under L2).
+    #[inline]
+    pub fn bytes_batch_engaged(&self) -> bool {
+        self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES
+    }
+
     /// [`Self::probe_bytes_batch`] over CALLER-supplied hashes (the
     /// canonical combine path carries the flush/SEAL-computed sink hash per
     /// run row — one hash per (row, table), never recomputed). Same fused
