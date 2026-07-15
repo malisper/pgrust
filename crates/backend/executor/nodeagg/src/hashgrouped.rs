@@ -102,6 +102,7 @@ use crate::{agg_sorted_emit, AggStateData};
 /// `nulls_first` are the plan Sort's flags for that prefix position.
 /// `collation` is the plan Sort's collation for that key — consulted only
 /// for text keys (`varstr_cmp`'s authority); 0 for integer keys.
+#[derive(Clone)]
 pub struct HashGroupOrderKey {
     pub key_idx: usize,
     pub desc: bool,
@@ -116,7 +117,7 @@ pub struct HashGroupOrderKey {
 /// `(arena offset << 32) | len`; byte equality is the grouping operator's
 /// equality (deterministic-collation `texteq` — module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HgKeyKind {
+pub(crate) enum HgKeyKind {
     Int16,
     Int32,
     Int64,
@@ -404,14 +405,22 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
 /// the leader-side adopt/emit tail (concat + rep synthesis + order +
 /// per-group emit over 835k groups) dominates, the q19@10M
-/// "emit/combine-bound near-unique" class. Default therefore stays at
-/// the serial-calibrated 8.0 — near-unique shapes keep their serial/def
-/// arms until a parallel-emit car exists; the env knob is the
-/// measurement channel (this run's evidence came through it).
+/// "emit/combine-bound near-unique" class. The serial-calibrated 8.0
+/// therefore prices the ADOPT tail.
+///
+/// `paremit` (parallel-emit car): the caller proved the shape rides the
+/// emission-in-combine fast path (`pd_paremit_cols` — ordered
+/// per-partition emit buckets built by workers; the leader tail collapses
+/// to the cross-bucket merge + datum memcpy), which removes exactly the
+/// serial floor the 8.0 tier priced. Those shapes read their own default
+/// (1.0; `PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG` is the re-pricing
+/// channel) so the near-unique q14 class engages by default. The
+/// budget-fit term applies unchanged to both tiers.
 pub fn agg_hashgroup_economical_sink(
     node: &AggStateData<'_>,
     force: bool,
     input_rows: f64,
+    paremit: bool,
 ) -> bool {
     if force {
         return true;
@@ -427,8 +436,18 @@ pub fn agg_hashgroup_economical_sink(
                 .unwrap_or(8.0)
         })
     }
+    fn paremit_min_rpg() -> f64 {
+        static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0)
+        })
+    }
+    let min_rpg = if paremit { paremit_min_rpg() } else { sink_min_rpg() };
     let est_groups = (node.plan.numGroups as f64).max(1.0);
-    if input_rows > 0.0 && input_rows < sink_min_rpg() * est_groups {
+    if input_rows > 0.0 && input_rows < min_rpg * est_groups {
         return false;
     }
     let per_group =
@@ -1102,16 +1121,32 @@ pub struct HgBatchShape {
 /// running the program (folds accumulate in the sidecar words;
 /// `hg_fold_combine` merges them into the real trans states at finish/
 /// degrade). `allow_fold=false` = the historical all-set-mode gate exactly.
+///
+/// `allow_text` (named-kernels-distinct, the filtered grouped-distinct
+/// batch feed): TEXT/VARCHAR grouping keys are admitted to the batched
+/// accepts — the span/row arms stage each staged cell's inline varlena
+/// content through the SAME `probe_buf`/`probe_spans` discipline as the
+/// per-row `stage_text_keys` (identical bytes: the staged cbstore cell is
+/// the decoded datum; non-inline images route to the per-row path, whose
+/// detoast yields the same content), probe read-only (`smap.find` on the
+/// stringhash single-key engagement / the generic content probe), and
+/// defer every probe MISS to the per-row path (`NeedSlot` — group creation
+/// order and rep bytes stay byte-identical). `allow_text=false` = the
+/// historical int-keys-only gate exactly.
 /// Callable only after `agg_hashgroup_begin`.
 pub fn agg_hashgroup_batch_shape(
     node: &AggStateData<'_>,
     allow_fold: bool,
+    allow_text: bool,
 ) -> Option<HgBatchShape> {
     let hg = node.hashgroup.as_deref()?;
-    if hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
+    if !allow_text && hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
         return None;
     }
-    debug_assert!(hg.smap.is_none(), "smap engages only on a single text key");
+    debug_assert!(
+        hg.smap.is_none() || (hg.nkeys == 1 && hg.key_kinds[0] == HgKeyKind::Text),
+        "smap engages only on a single text key"
+    );
     if hg.numtrans != node.pertrans_sort.len() && !allow_fold {
         return None;
     }
@@ -1235,6 +1270,98 @@ pub enum HgBatchRow {
     NeedSlot,
 }
 
+/// Content bytes of an INLINE (1B- or uncompressed-4B-header) varlena
+/// datum, no detoast, no copy. `None` = external/compressed image — the
+/// caller routes the row through the per-row path, whose
+/// `datum_varlena_packed` detoast produces the identical content bytes.
+///
+/// # Safety
+/// `d` is a non-null live varlena datum whose header (and, for inline
+/// images, full body) is readable — the staged-cell contract of the
+/// batched accepts (cbstore staged text cells are decoded in-window
+/// images).
+#[inline]
+unsafe fn inline_varlena_bytes<'a>(d: Datum) -> Option<&'a [u8]> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — header readable; sizes from the header
+    // bound the body reads.
+    unsafe {
+        if varatt::varatt_is_1b(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            ))
+        } else if varatt::varatt_is_4b_u(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ),
+                varatt::varsize_4b(p) - varatt::VARHDRSZ,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Key-extraction outcome of the batched accepts' shared per-row key pass:
+/// stage the row's key cells into `words` (+ text content into the probe
+/// staging), or defer the row (`None` = a non-inline text image).
+#[inline]
+fn hg_stage_batch_keys(
+    hg: &mut HashGroupedState<'_>,
+    read: impl Fn(usize) -> (Datum, bool),
+) -> Option<([i64; 32], u32)> {
+    let mut words = [0i64; 32];
+    let mut nulls = 0u32;
+    let mut text_cleared = false;
+    for i in 0..hg.nkeys {
+        let (d, isnull) = read(i);
+        if isnull {
+            nulls |= 1 << i;
+            words[i] = 0;
+            continue;
+        }
+        match hg.key_kinds[i] {
+            HgKeyKind::Int16 => words[i] = d.as_i16() as i64,
+            HgKeyKind::Int32 => words[i] = d.as_i32() as i64,
+            HgKeyKind::Int64 => words[i] = d.as_i64(),
+            HgKeyKind::Text => {
+                // SAFETY: staged-cell contract (fn doc above).
+                let b = unsafe { inline_varlena_bytes(d) }?;
+                if !text_cleared {
+                    hg.probe_buf.clear();
+                    text_cleared = true;
+                }
+                let off = hg.probe_buf.len();
+                hg.probe_buf.extend_from_slice(b);
+                hg.probe_spans[i] = (off as u32, b.len() as u32);
+                words[i] = 0;
+            }
+        }
+    }
+    Some((words, nulls))
+}
+
+/// Read-only group probe over the staged key pass ([`hg_stage_batch_keys`]
+/// already ran): the stringhash single-text-key map (`find` — never
+/// inserts) or the generic content probe. `None` = probe miss (creation
+/// defers to the per-row path).
+#[inline]
+fn hg_probe_staged(hg: &HashGroupedState<'_>, words: &[i64], nulls: u32) -> Option<u32> {
+    if let Some(smap) = hg.smap.as_ref() {
+        if nulls != 0 {
+            hg.null_group
+        } else {
+            let (poff, plen) = hg.probe_spans[0];
+            let bytes = &hg.probe_buf[poff as usize..(poff + plen) as usize];
+            smap.find(bytes, &hg.arena)
+        }
+    } else {
+        let h = hg.key_hash(words, nulls);
+        hg.probe(words, nulls, h).0
+    }
+}
+
 pub fn agg_hashgroup_accept_batch_row(
     node: &mut AggStateData<'_>,
     key_datums: &[Datum],
@@ -1246,29 +1373,17 @@ pub fn agg_hashgroup_accept_batch_row(
         node.hashgroup.as_deref(),
         Some(HashGroupedState { phase: HgPhase::Building, .. })
     ));
-    let mut words = [0i64; 32];
     let found = {
         let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
-        debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
         debug_assert_eq!(key_datums.len(), hg.nkeys);
-        let mut nulls = 0u32;
-        for (i, (&d, &isnull)) in key_datums.iter().zip(key_nulls.iter()).enumerate() {
-            if isnull {
-                nulls |= 1 << i;
-                words[i] = 0;
-                continue;
-            }
-            words[i] = match hg.key_kinds[i] {
-                HgKeyKind::Int16 => d.as_i16() as i64,
-                HgKeyKind::Int32 => d.as_i32() as i64,
-                HgKeyKind::Int64 => d.as_i64(),
-                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
-            };
-        }
+        let Some((words, nulls)) =
+            hg_stage_batch_keys(hg, |i| (key_datums[i], key_nulls[i]))
+        else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgBatchRow::NeedSlot;
+        };
         let nkeys = hg.nkeys;
-        let h = hg.key_hash(&words[..nkeys], nulls);
-        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
-        found
+        hg_probe_staged(hg, &words[..nkeys], nulls)
     };
     let Some(g) = found else {
         return HgBatchRow::NeedSlot;
@@ -1385,17 +1500,25 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
     switch_out(node);
     let AggStateData { hashgroup, pertrans_sort, .. } = node;
     let hg = hashgroup.as_deref_mut().expect("hashgroup state");
-    debug_assert!(hg.smap.is_none(), "batch shape excludes text keys");
     let nkeys = hg.nkeys;
     let nsort = hg.nsort;
     let nvocab = hg.vocab.len();
     debug_assert_eq!(views.len(), nkeys + nargs + hg_fold_cells(&hg.vocab));
-    let mut words = [0i64; 32];
     let mut absorbed = 0u32;
-    for i in pos..n {
+    let mut i = pos;
+    while i < n {
         let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
         if let Some(s) = sel {
+            // Word skip (the q22 survivor-walk precedent): an all-dead sel
+            // word advances 64 rows in one test. Forced-fallback rows carry
+            // a SET sel bit (the refsort contract), so no NeedSlot row is
+            // ever skipped with its word.
+            if i % 64 == 0 && i + 64 <= n && s[w] == 0 {
+                i += 64;
+                continue;
+            }
             if s[w] & bit == 0 {
+                i += 1;
                 continue; // qual-filtered (exact whole-qual verdict)
             }
         }
@@ -1403,26 +1526,15 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
             return HgSpanStop::NeedSlot { at: i, absorbed };
         }
         let ii = i as usize;
-        let mut nulls = 0u32;
-        for j in 0..nkeys {
+        let Some((words, nulls)) = hg_stage_batch_keys(hg, |j| {
             let (v, nl) = views[j];
             // SAFETY: caller contract — `views` spans `n` staged rows.
-            let (d, isnull) = unsafe { (*v.add(ii), *nl.add(ii)) };
-            if isnull {
-                nulls |= 1 << j;
-                words[j] = 0;
-                continue;
-            }
-            words[j] = match hg.key_kinds[j] {
-                HgKeyKind::Int16 => d.as_i16() as i64,
-                HgKeyKind::Int32 => d.as_i32() as i64,
-                HgKeyKind::Int64 => d.as_i64(),
-                HgKeyKind::Text => unreachable!("batch shape excludes text keys"),
-            };
-        }
-        let h = hg.key_hash(&words[..nkeys], nulls);
-        let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
-        let Some(g) = found else {
+            unsafe { (*v.add(ii), *nl.add(ii)) }
+        }) else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        };
+        let Some(g) = hg_probe_staged(hg, &words[..nkeys], nulls) else {
             return HgSpanStop::NeedSlot { at: i, absorbed };
         };
         let c = g as usize;
@@ -1483,6 +1595,7 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
         if hg.mem() > hg.budget {
             return HgSpanStop::Budget { at: i, absorbed };
         }
+        i += 1;
     }
     HgSpanStop::Done { absorbed }
 }
@@ -1673,10 +1786,82 @@ pub fn agg_hashgroup_finish_build<'mcx>(
     Ok(())
 }
 
+/// Compare two group rows — possibly from DIFFERENT key stores — under the
+/// plan Sort's prefix `spec` (total, C-identical order — module doc). Each
+/// side is `(keys, keynulls, arena, row)` in the packed-span convention.
+/// The ONE ordering authority shared by the build finish, the merged
+/// adoption ([`order_groups`]), and the runtime distinct sink's paremit
+/// bucket merge — byte-identity across those arms depends on this being
+/// the same comparator. Distinct groups never compare Equal on the full
+/// prefix (unique keys; deterministic collations tie-break by bytes).
+pub(crate) fn cmp_group_rows(
+    spec: &[HashGroupOrderKey],
+    nkeys: usize,
+    kinds: &[HgKeyKind],
+    a: (&[i64], &[u32], &[u8], usize),
+    b: (&[i64], &[u32], &[u8], usize),
+) -> PgResult<core::cmp::Ordering> {
+    let (akeys, anulls, aarena, ai) = a;
+    let (bkeys, bnulls, barena, bi) = b;
+    for k in spec.iter() {
+        let (na, nb) = (
+            anulls[ai] & (1 << k.key_idx) != 0,
+            bnulls[bi] & (1 << k.key_idx) != 0,
+        );
+        let ord = match (na, nb) {
+            (true, true) => core::cmp::Ordering::Equal,
+            (true, false) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Greater
+                }
+            }
+            (false, true) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Less
+                }
+            }
+            (false, false) => {
+                let (wa, wb) =
+                    (akeys[ai * nkeys + k.key_idx], bkeys[bi * nkeys + k.key_idx]);
+                let ord = if kinds[k.key_idx] == HgKeyKind::Text {
+                    // C's text btree order: varstr_cmp under the plan
+                    // Sort's collation (module doc — deterministic
+                    // collations tie-break by bytes, so byte-distinct
+                    // keys never compare equal).
+                    let (oa, la) = unpack_span(wa);
+                    let (ob, lb) = unpack_span(wb);
+                    ::varlena::varstr_cmp(
+                        &aarena[oa..oa + la],
+                        &barena[ob..ob + lb],
+                        k.collation,
+                    )?
+                    .cmp(&0)
+                } else {
+                    wa.cmp(&wb)
+                };
+                if k.desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        };
+        if ord != core::cmp::Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(core::cmp::Ordering::Equal)
+}
+
 /// Order group indices by the plan Sort's prefix (total, C-identical order —
-/// module doc). Shared by the build finish and the parallel-partials merged
-/// adoption.
-fn order_groups(
+/// module doc). Shared by the build finish, the parallel-partials merged
+/// adoption, and the runtime distinct sink's per-partition paremit bucket
+/// build (the same comparator then drives the leader's cross-bucket merge).
+pub(crate) fn order_groups(
     keys: &[i64],
     keynulls: &[u32],
     spec: &[HashGroupOrderKey],
@@ -1691,65 +1876,27 @@ fn order_groups(
     let mut cmp_err = None;
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
-        for k in spec.iter() {
-            let (na, nb) = (
-                keynulls[a] & (1 << k.key_idx) != 0,
-                keynulls[b] & (1 << k.key_idx) != 0,
-            );
-            let ord = match (na, nb) {
-                (true, true) => core::cmp::Ordering::Equal,
-                (true, false) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Less
-                    } else {
-                        core::cmp::Ordering::Greater
-                    }
+        match cmp_group_rows(
+            spec,
+            nkeys,
+            kinds,
+            (keys, keynulls, arena, a),
+            (keys, keynulls, arena, b),
+        ) {
+            Ok(ord) => {
+                debug_assert!(
+                    ord != core::cmp::Ordering::Equal || a == b,
+                    "distinct groups compare equal on the full prefix"
+                );
+                ord
+            }
+            Err(e) => {
+                if cmp_err.is_none() {
+                    cmp_err = Some(e);
                 }
-                (false, true) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Greater
-                    } else {
-                        core::cmp::Ordering::Less
-                    }
-                }
-                (false, false) => {
-                    let (wa, wb) = (keys[a * nkeys + k.key_idx], keys[b * nkeys + k.key_idx]);
-                    let ord = if kinds[k.key_idx] == HgKeyKind::Text {
-                        // C's text btree order: varstr_cmp under the plan
-                        // Sort's collation (module doc — deterministic
-                        // collations tie-break by bytes, so byte-distinct
-                        // keys never compare equal).
-                        let (oa, la) = unpack_span(wa);
-                        let (ob, lb) = unpack_span(wb);
-                        match ::varlena::varstr_cmp(
-                            &arena[oa..oa + la],
-                            &arena[ob..ob + lb],
-                            k.collation,
-                        ) {
-                            Ok(c) => c.cmp(&0),
-                            Err(e) => {
-                                if cmp_err.is_none() {
-                                    cmp_err = Some(e);
-                                }
-                                core::cmp::Ordering::Equal
-                            }
-                        }
-                    } else {
-                        wa.cmp(&wb)
-                    };
-                    if k.desc {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                }
-            };
-            if ord != core::cmp::Ordering::Equal {
-                return ord;
+                core::cmp::Ordering::Equal
             }
         }
-        debug_assert!(a == b || cmp_err.is_some(), "distinct groups compare equal on the full prefix");
-        core::cmp::Ordering::Equal
     });
     if let Some(e) = cmp_err {
         return Err(e);

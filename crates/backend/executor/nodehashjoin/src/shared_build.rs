@@ -60,10 +60,23 @@ pub const PARTITIONS: usize = 256;
 const MIN_NBUCKETS: u64 = 1024;
 const MAX_NBUCKETS: u64 = 1 << 31;
 
-/// Packed tuple reference: ordinal(8) | chunk(8) | word-offset(32) = 48
+/// Packed tuple reference: ordinal(15) | chunk(8) | word-offset(25) = 48
 /// bits. Stored shifted/+1 so 0 can mean "empty"/"end of chain".
-const REF_OFFSET_BITS: u32 = 32;
+///
+/// The 48-bit total is LOAD-BEARING: a bucket word is `(ref+1) << 16 |
+/// tag(16)` (§4), so the ref may never exceed 48 bits. The DOP-192
+/// readiness repack moved headroom from the offset (32 bits addressed
+/// 32GB chunks; `CHUNK_MAX_WORDS` is 2^21 words, and an over-`need`
+/// chunk holds exactly one tuple at offset 0, so 25 bits ≫ suffice)
+/// into the ordinal: 8 bits capped the sink worker index at 256, which
+/// an absolute runtime worker index crosses at nthreads ≥ 193 (index
+/// 192 + the 64-lane pin board). 15 bits ⇒ 32768 ordinals.
+const REF_OFFSET_BITS: u32 = 25;
 const REF_CHUNK_BITS: u32 = 8;
+const REF_ORDINAL_BITS: u32 = 48 - REF_CHUNK_BITS - REF_OFFSET_BITS; // 15
+
+/// Ordinal (sink worker index) space of the packed ref: 32768.
+pub const MAX_ORDINALS: usize = 1 << REF_ORDINAL_BITS;
 
 /// Tuple header: 3 words before the payload.
 ///   W0: next — packed (ref+1) of the next chain tuple; 0 = end.
@@ -94,9 +107,10 @@ fn bucket_of(hashvalue: u32, log2_nbuckets: u32) -> usize {
 }
 
 #[inline]
-fn pack_ref(ordinal: u8, chunk: usize, off_words: usize) -> u64 {
+fn pack_ref(ordinal: u16, chunk: usize, off_words: usize) -> u64 {
+    debug_assert!((ordinal as usize) < MAX_ORDINALS);
     debug_assert!(chunk < MAX_CHUNKS_PER_LOCAL);
-    debug_assert!(off_words <= u32::MAX as usize);
+    debug_assert!(off_words < (1 << REF_OFFSET_BITS));
     ((ordinal as u64) << (REF_CHUNK_BITS + REF_OFFSET_BITS))
         | ((chunk as u64) << REF_OFFSET_BITS)
         | off_words as u64
@@ -107,7 +121,7 @@ fn unpack_ref(r: u64) -> (usize, usize, usize) {
     (
         (r >> (REF_CHUNK_BITS + REF_OFFSET_BITS)) as usize,
         ((r >> REF_OFFSET_BITS) & ((1 << REF_CHUNK_BITS) - 1)) as usize,
-        (r & (u32::MAX as u64)) as usize,
+        (r & ((1 << REF_OFFSET_BITS) - 1)) as usize,
     )
 }
 
@@ -213,7 +227,7 @@ struct RunHeader {
 }
 
 pub struct JoinBuildLocal {
-    ordinal: u8,
+    ordinal: u16,
     /// Arc so the frozen table can adopt the storage by reference while the
     /// sink plumbing still owns (and later drops) the Locals themselves —
     /// the ParallelSink contract hands `finalize` only `&[Local]`.
@@ -233,8 +247,9 @@ pub struct JoinBuildLocal {
 
 impl JoinBuildLocal {
     /// `ordinal` = the sink worker index (worker-indexed Local slots,
-    /// R3 pinned regime); must be < 256 (asserted — the pin-board lane
-    /// space is 16+64, comfortably inside).
+    /// R3 pinned regime); must be < [`MAX_ORDINALS`] = 32768 (asserted —
+    /// the runtime passes its ABSOLUTE worker index, so this must hold
+    /// for nthreads + pin-board lanes, not just the tested DOP).
     pub fn new(ordinal: usize, budget: Arc<JoinBudget>) -> JoinBuildLocal {
         JoinBuildLocal::with_chunk_cap(ordinal, budget, CHUNK_MAX_WORDS)
     }
@@ -246,9 +261,9 @@ impl JoinBuildLocal {
         budget: Arc<JoinBudget>,
         cap_words: usize,
     ) -> JoinBuildLocal {
-        assert!(ordinal < 256, "join build Local ordinal {ordinal} out of ref range");
+        assert!(ordinal < MAX_ORDINALS, "join build Local ordinal {ordinal} out of ref range");
         JoinBuildLocal {
-            ordinal: ordinal as u8,
+            ordinal: ordinal as u16,
             chunks: Vec::new(),
             cur_used: 0,
             part_refs: (0..PARTITIONS).map(|_| Vec::new()).collect(),
@@ -413,7 +428,12 @@ impl CombinePlan {
     /// runs. Every later call must pass the SAME `locals` slice (the sink
     /// plumbing's sealed Arc guarantees it).
     pub fn plan(locals: &[JoinBuildLocal], budget: &JoinBudget) -> Result<CombinePlan, BudgetExceeded> {
-        let mut by_ordinal = vec![u16::MAX; 256].into_boxed_slice();
+        // Sized to the max PRESENT ordinal, not MAX_ORDINALS (32768):
+        // sparse high worker indices (192-core pin-board lanes) cost
+        // 2 bytes/index, dense probing stays an array load.
+        let slots = locals.iter().map(|l| l.ordinal as usize + 1).max().unwrap_or(0);
+        assert!(locals.len() < u16::MAX as usize, "Local count exceeds dense-index space");
+        let mut by_ordinal = vec![u16::MAX; slots].into_boxed_slice();
         let mut total = 0u64;
         let mut run_order = Vec::new();
         for (li, l) in locals.iter().enumerate() {
@@ -1160,6 +1180,57 @@ mod tests {
         l.push(0xAB, b"post-reset").unwrap();
         l.end_run();
         assert_eq!(l.tuples(), 1);
+    }
+
+    // ---- DOP-192 readiness: high worker ordinals (absolute runtime
+    // worker indices — the old 8-bit ref field asserted at 256, which an
+    // absolute index crosses at nthreads ≥ 193 + pin-board lanes) ----
+
+    #[test]
+    fn pack_ref_roundtrip_at_field_extremes() {
+        // Max realistic offset: a tuple can start no later than the last
+        // word of a CHUNK_MAX_WORDS chunk (over-`need` chunks hold one
+        // tuple at offset 0), so CHUNK_MAX_WORDS - 1 bounds it.
+        for &(ord, ci, off) in &[
+            (0u16, 0usize, 0usize),
+            (191, 3, 17),
+            (255, 255, CHUNK_MAX_WORDS - 1), // old layout's ordinal max
+            (256, 0, 0),                     // first index past the old assert
+            ((MAX_ORDINALS - 1) as u16, MAX_CHUNKS_PER_LOCAL - 1, CHUNK_MAX_WORDS - 1),
+        ] {
+            let r = pack_ref(ord, ci, off);
+            assert!(r < 1 << 48, "ref must stay in the bucket word's 48 bits");
+            assert_eq!(unpack_ref(r), (ord as usize, ci, off));
+        }
+    }
+
+    #[test]
+    fn high_worker_ordinals_build_identically() {
+        // Sparse ABSOLUTE worker indices as the 192-core runtime would
+        // hand fork(): dop-192 body, pin-board lane, old-assert boundary,
+        // ref-field max. Chains must still match the serial oracle.
+        let ds = ds_default();
+        let ordinals = [0usize, 191, 255, 256, 300, MAX_ORDINALS - 1];
+        let budget = JoinBudget::unlimited();
+        let ranges = ranges_of_sizes(ds.granules, std::iter::repeat(3));
+        let mut locals: Vec<JoinBuildLocal> = ordinals
+            .iter()
+            .map(|&o| JoinBuildLocal::new(o, Arc::clone(&budget)))
+            .collect();
+        for (i, range) in ranges.into_iter().enumerate() {
+            let l = &mut locals[i % ordinals.len()];
+            l.begin_run(range.start);
+            for g in range {
+                for (h, p) in ds.rows_of(g) {
+                    l.push(h, &p).unwrap();
+                }
+            }
+            l.end_run();
+        }
+        let t = plan_combine_freeze(locals, &budget, true);
+        let l2 = (t.nbuckets() as u64).trailing_zeros();
+        assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
+        assert_eq!(frozen_chains(&t), reference_chains(&ds.all_rows(), l2));
     }
 
     // ---- soak: larger randomized run vs the oracle ----

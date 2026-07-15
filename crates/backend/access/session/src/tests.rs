@@ -346,8 +346,24 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // 474 re-pin attributed the whole train-13 drift to morsels.rs
     // WORKER_CX alone — train-14's fuller +3/−2 decomposition above
     // subsumes it, same precedent as the m35 pin; one pin kept.)
-    // 475, re-pinned at m5-integration (M5-0/1 router merged) —
-    //   16. executor/execmain/src/lanev2/router.rs DUMP (the
+    // 475, re-pinned at band-2b (runtime plain-distinct sink):
+    //   16. executor/execmain/src/lanev2/runtime_plaindistinct.rs
+    //      WORKER_EXEC — the plain exact-DISTINCT sink helper's drive-scoped
+    //      worker executor slot (built inside the query-task binding, torn
+    //      down on every drive exit path) — same drive-scoped class and
+    //      argument as WORKER_EXEC slots 4-6.
+    // 476, re-pinned at train-18 (q28-sorted-arm ordered-grouped runtime sink):
+    //   17. executor/execmain/src/lanev2/runtime_agg_sorted.rs
+    //      WORKER_EXEC — the ordered-grouped (sorted-agg) sink's drive-scoped
+    //      worker executor slot (QueryDescHandle + fold keys/spec, built
+    //      inside the query-task binding, torn down on every drive exit
+    //      path incl. mark_self_errored) — same drive-scoped class and
+    //      argument as WORKER_EXEC slots 4-6 and the band-2b slot 16.
+    // 477, re-pinned at m5-boarding (M5-0/1 router merged onto train-19;
+    //   this slot was first pinned as 475/slot-16 at m5-integration on the
+    //   train-13/16 bases, renumbered here over train-18/19's two sink
+    //   slots above):
+    //   18. executor/execmain/src/lanev2/router.rs DUMP (the
     //      DumpOnThreadExit guard armed by arm_dump_on_thread_exit) — the
     //      M5-1 telemetry dump-on-exit hook: a drop guard whose only act
     //      is writing the process-global router counters to
@@ -356,7 +372,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      bookkeeping, no session identity, no state movement — the
     //      stats.rs dump-on-exit discipline; same argument as the worker
     //      pool-loop block (slot 7).
-    assert_eq!(count_tree(crates), 475, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    assert_eq!(count_tree(crates), 477, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

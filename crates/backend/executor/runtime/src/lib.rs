@@ -361,26 +361,31 @@ impl Runtime {
     /// a PROCESS resource: two concurrent participants on one lane would
     /// corrupt the finalization protocol's pins (publish-over-unsettled).
     pub fn acquire_external_lane(self: &Arc<Self>) -> Option<ExternalLane> {
-        let mask = &self.sched.external_lanes;
-        loop {
-            let cur = mask.load(std::sync::atomic::Ordering::SeqCst);
-            let free = !cur;
-            if free == 0 {
-                return None;
-            }
-            let bit = free.trailing_zeros() as usize;
-            if mask
-                .compare_exchange(
-                    cur,
-                    cur | (1u64 << bit),
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                return Some(ExternalLane { rt: Arc::clone(self), ordinal: bit });
+        // Low-word-first scan over the multi-word lease mask (DOP-192:
+        // MAX_EXTERNAL_LANES = 256 ⇒ 4 words). A word that fills under us
+        // is skipped; a CAS failure retries the same word.
+        for (wi, mask) in self.sched.external_lanes.iter().enumerate() {
+            loop {
+                let cur = mask.load(std::sync::atomic::Ordering::SeqCst);
+                let free = !cur;
+                if free == 0 {
+                    break; // word full — try the next word
+                }
+                let bit = free.trailing_zeros() as usize;
+                if mask
+                    .compare_exchange(
+                        cur,
+                        cur | (1u64 << bit),
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    return Some(ExternalLane { rt: Arc::clone(self), ordinal: wi * 64 + bit });
+                }
             }
         }
+        None
     }
 
     /// Drive one pinned RG as an external participant until it completes.
@@ -545,9 +550,7 @@ impl Drop for ExternalLane {
         // Release the lane bit. The pin was settled by the drive (every
         // worker_step_pinned settles before returning), so the next lessee
         // starts from a clean pin.
-        self.rt
-            .sched
-            .external_lanes
-            .fetch_and(!(1u64 << self.ordinal), std::sync::atomic::Ordering::SeqCst);
+        self.rt.sched.external_lanes[self.ordinal / 64]
+            .fetch_and(!(1u64 << (self.ordinal % 64)), std::sync::atomic::Ordering::SeqCst);
     }
 }

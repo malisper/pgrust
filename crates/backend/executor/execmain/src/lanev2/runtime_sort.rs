@@ -96,6 +96,15 @@ struct KeyCol {
     desc: bool,
     nulls_first: bool,
     width: KeyWidth,
+    /// DictCode class (docs/design/dict-code-flow.md inc-1): the key is a
+    /// dict-text column ordered by its v7 part-global byte-rank code (u32,
+    /// order-identical to `varstr_cmp` under the admitted memcmp-safe
+    /// collation). The observation is the stitch global code widened to
+    /// i64 (`width` is `KeyWidth::U32` for the encode contract); the
+    /// per-row emit fallback leg CANNOT serve this class (a text datum has
+    /// no order-preserving i64) — any fallback-forced row or unstitched /
+    /// non-dict window is a sink contract break (RG abort, serial rerun).
+    dictcode: bool,
 }
 
 struct TopnSpec {
@@ -116,10 +125,11 @@ fn sort_keys_and_map<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
 ) -> Option<(Vec<KeyCol>, Vec<u16>)> {
     // Single-column output sorts bare datums (nothing to late-materialize
-    // / no row image to carry).
-    if ::nodesort::sort_lane_is_datum(state) {
-        return None;
-    }
+    // / no row image to carry) — refused UNLESS a DictCode key admits (the
+    // deferred check below): for a dict-text key the datum IS a string
+    // gather per survivor, exactly what the winner-only late
+    // materialization elides (Q26's shape).
+    let is_datum = ::nodesort::sort_lane_is_datum(state);
     let plan = state.plan;
     let nkeys = plan.numCols as usize;
     if !(1..=::nodesort::sink::TOPN_MAX_KEYS).contains(&nkeys)
@@ -139,50 +149,104 @@ fn sort_keys_and_map<'mcx>(
         None => (0..natts as u16).collect(),
         // Projected scans admit only the pure Var-copy census (a computing
         // column deferred past the accept could elide C's error).
-        Some(p) => {
-            let cols = p.pi_state.scan_proj_cols()?;
-            if cols.any_arith() || cols.n as usize != natts {
-                return None;
+        Some(p) => match p.pi_state.scan_proj_cols() {
+            Some(cols) => {
+                if cols.any_arith() || cols.n as usize != natts {
+                    return None;
+                }
+                cols.cols[..natts]
+                    .iter()
+                    .map(|c| match *c {
+                        ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<u16>>>()?
             }
-            cols.cols[..natts]
-                .iter()
-                .map(|c| match *c {
-                    ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
-                    _ => None,
-                })
-                .collect::<Option<Vec<u16>>>()?
-        }
+            // A single-column pure-Var projection compiles to a
+            // JustAssignVar KERNEL (no step program => no scan_proj_cols
+            // census) — the datum-shaped DictCode admission (Q26's exact
+            // shape; the sortkey_direct census, same pattern).
+            None => match p.pi_state.kernel() {
+                ::execexpr::Kernel::JustAssignVar {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                }
+                | ::execexpr::Kernel::JustAssignVarVirt {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                } if natts == 1 => vec![attnum],
+                _ => return None,
+            },
+        },
     };
     // Every key: int-family operator (the POD-heap encoding vocabulary —
     // the adaptive walk's own list; timestamps/dates ride their I8/I4 cmp
-    // shapes) over a mapped scan column. Anything else refuses.
+    // shapes) over a mapped scan column, OR the DictCode text class
+    // (docs/design/dict-code-flow.md inc-1): `text_lt`/`text_gt` over a
+    // text/varchar column under a memcmp-safe deterministic collation —
+    // the observation is the v7 part-global byte-rank code, order-
+    // identical to `varstr_cmp` by the sorted-dict/stitch construction.
+    // Anything else refuses.
+    // pg_proc text_lt / text_gt — the btree text opclass's `<` / `>`.
+    const F_TEXT_LT: ::types_core::Oid = 740;
+    const F_TEXT_GT: ::types_core::Oid = 742;
     let mut keys = Vec::with_capacity(nkeys);
     for i in 0..nkeys {
-        let opfn = ::lsyscache::get_opcode(plan.sortOperators[i]).ok()?;
-        use ::execexpr::CmpOp::*;
-        let (width, desc) = match ::execexpr::CmpOp::for_fn_oid(opfn) {
-            Some(Int2Lt) => (KeyWidth::I2, false),
-            Some(Int2Gt) => (KeyWidth::I2, true),
-            Some(Int4Lt) => (KeyWidth::I4, false),
-            Some(Int4Gt) => (KeyWidth::I4, true),
-            Some(Int8Lt) => (KeyWidth::I8, false),
-            Some(Int8Gt) => (KeyWidth::I8, true),
-            Some(OidLt) => (KeyWidth::U32, false),
-            Some(OidGt) => (KeyWidth::U32, true),
-            _ => return None,
-        };
         let oc = plan.sortColIdx[i];
         if oc < 1 || oc as usize > natts {
             return None;
         }
         let resno_outer = (oc - 1) as usize;
+        let opfn = ::lsyscache::get_opcode(plan.sortOperators[i]).ok()?;
+        use ::execexpr::CmpOp::*;
+        let (width, desc, dictcode) = match ::execexpr::CmpOp::for_fn_oid(opfn) {
+            Some(Int2Lt) => (KeyWidth::I2, false, false),
+            Some(Int2Gt) => (KeyWidth::I2, true, false),
+            Some(Int4Lt) => (KeyWidth::I4, false, false),
+            Some(Int4Gt) => (KeyWidth::I4, true, false),
+            Some(Int8Lt) => (KeyWidth::I8, false, false),
+            Some(Int8Gt) => (KeyWidth::I8, true, false),
+            Some(OidLt) => (KeyWidth::U32, false, false),
+            Some(OidGt) => (KeyWidth::U32, true, false),
+            _ => {
+                if !(opfn == F_TEXT_LT || opfn == F_TEXT_GT)
+                    || !runtime_sort_dictcode_enabled()
+                {
+                    return None;
+                }
+                // Order via byte-rank codes is `varstr_cmp` order only
+                // under the memcmp tier (C-locale class); everything else
+                // refuses (Law D, dict-code-flow.md §2.2).
+                if plan.collations.len() < nkeys {
+                    return None;
+                }
+                let coll = plan.collations[i];
+                if coll == 0 || !::lanefold::str_collation_safe(coll) {
+                    return None;
+                }
+                // TEXT(25)/VARCHAR(1043) only (the codedgroup census;
+                // bpchar's space-pad compare is not memcmp).
+                let atttypid = outer_desc.attrs[resno_outer].atttypid;
+                if atttypid != 25 && atttypid != 1043 {
+                    return None;
+                }
+                (KeyWidth::U32, opfn == F_TEXT_GT, true)
+            }
+        };
         keys.push(KeyCol {
             attno_scan: tlist_map[resno_outer],
             resno_outer,
             desc,
             nulls_first: plan.nullsFirst[i],
             width,
+            dictcode,
         });
+    }
+    // The deferred datum-shape gate (see the census note above).
+    if is_datum && !keys.iter().any(|k| k.dictcode) {
+        return None;
     }
     Some((keys, tlist_map))
 }
@@ -220,6 +284,12 @@ fn full_spec<'mcx>(
         return None;
     }
     let (keys, _tlist_map) = sort_keys_and_map(state, ss, outer_desc)?;
+    // DictCode keys are top-N-only (inc-1): the full-sort accept reads
+    // every key from the projected slot (per-row emit leg), which cannot
+    // serve a code observation.
+    if keys.iter().any(|k| k.dictcode) {
+        return None;
+    }
     let natts = outer_desc.natts as usize;
     let mut cols = Vec::with_capacity(natts);
     for a in outer_desc.attrs.iter().take(natts) {
@@ -598,6 +668,12 @@ struct TopnAcceptSink<'a> {
     heap: &'a mut TopnLocal,
     keys: &'a [KeyCol],
     broke: bool,
+    /// Any key is the DictCode class: the fast leg must also answer a
+    /// stitched code lane per window, and NO row may take the per-row emit
+    /// leg (a text datum has no order-preserving i64) — a window that
+    /// cannot serve the fast leg, or any fallback-forced row, is a
+    /// contract break (RG abort, serial rerun; nothing was emitted).
+    dictcode: bool,
     /// Per-row multi-key scratch (avoids a per-row alloc).
     obs: [( i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
     flags: [(bool, bool); ::nodesort::sink::TOPN_MAX_KEYS],
@@ -613,6 +689,7 @@ impl<'a> TopnAcceptSink<'a> {
             heap,
             keys,
             broke: false,
+            dictcode: keys.iter().any(|k| k.dictcode),
             obs: [(0, false); ::nodesort::sink::TOPN_MAX_KEYS],
             flags,
         }
@@ -680,44 +757,106 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
         let fast = {
             let mut fb = [0u64; ::exectuples::SOA_BM_WORDS];
             let mut selw: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let mut dlanes: [Option<::exectuples::SoaDictLane>;
+                ::nodesort::sink::TOPN_MAX_KEYS] = [None; ::nodesort::sink::TOPN_MAX_KEYS];
             let mut ok = true;
             for (ki, key) in self.keys.iter().enumerate() {
-                match emit.refsort_key_batch(key.attno_scan, n) {
-                    Some((_, _, fallback, sel)) => {
+                if key.dictcode {
+                    // DictCode key: observations come from the stitched
+                    // code lane of the window — NEVER from SoA datum cells
+                    // (a text column may sit past the fixed-width deform's
+                    // coverage; the code lane reads the scan's own staged
+                    // window). Raw windows and unstitched parts cannot
+                    // serve order via codes (dict-code-flow.md §2.2 Law D).
+                    match emit.refsort_dictcode_batch(key.attno_scan) {
+                        Some(l) if l.table.has_stitch() => dlanes[ki] = Some(l),
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                // Int-family key: the SoA datum cells must be certified
+                // clean-readable (the incumbent law, per key).
+                if emit.refsort_key_batch(key.attno_scan, n).is_none() {
+                    ok = false;
+                    break;
+                }
+            }
+            // Batch masks (whole-qual sel verdict + forced-fallback), once
+            // per batch — column-independent (a dictcode-only spec never
+            // calls the key-batch accessor).
+            if ok {
+                match emit.refsort_batch_masks(n) {
+                    Some((fallback, sel)) => {
                         for (w, &word) in fallback.iter().enumerate() {
                             fb[w] |= word;
                         }
-                        if ki == 0 {
-                            selw = sel.map(|s| {
-                                let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                                w[..s.len()].copy_from_slice(s);
-                                w
-                            });
-                        }
+                        selw = sel.map(|s| {
+                            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                            w[..s.len()].copy_from_slice(s);
+                            w
+                        });
                     }
-                    None => {
-                        ok = false;
-                        break;
+                    None => ok = false,
+                }
+            }
+            ok.then_some((fb, selw, dlanes))
+        };
+        // DictCode specs have no per-row emit leg: a window that cannot
+        // serve the whole fast leg is a sink contract break — the RG
+        // aborts and the leader reruns the serial arm (R5; nothing was
+        // emitted).
+        if self.dictcode && fast.is_none() {
+            self.broke = true;
+            return Ok(());
+        }
+        let max_resno = self.keys.iter().map(|k| k.resno_outer).max().unwrap_or(0);
+        // Composed skip mask, word-skipped by `for_each_live`: the fast
+        // leg's exact qual-cleared rows and the feed's qual-survivor
+        // snapshot (`live_sel` — cleared bits answer `emit` with None, and
+        // cover the no-fast/requal legs) each produce nothing, so skipping
+        // them keeps the surviving observation stream identical.
+        let skip = {
+            let mut skip: Option<[u64; ::exectuples::SOA_BM_WORDS]> = None;
+            let selw = fast.as_ref().and_then(|(_, s, _)| *s);
+            for m in [emit.live_sel(), selw].into_iter().flatten() {
+                match &mut skip {
+                    None => skip = Some(m),
+                    Some(acc) => {
+                        for (a, b) in acc.iter_mut().zip(m.iter()) {
+                            *a &= *b;
+                        }
                     }
                 }
             }
-            ok.then_some((fb, selw))
+            skip
         };
-        let max_resno = self.keys.iter().map(|k| k.resno_outer).max().unwrap_or(0);
-        for i in pos..n {
-            if let Some((fb, selw)) = &fast {
+        ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
+            // Contract-break rows are dead (the RG aborts and the serial
+            // arm reruns): keep dict-code-flow's whole-batch early return
+            // under the closure walk — no emit runs after `broke`.
+            if self.broke {
+                return Ok(());
+            }
+            if let Some((fb, _, dlanes)) = &fast {
                 let w = (i / 64) as usize;
                 let bit = 1u64 << (i % 64);
-                if let Some(selw) = selw {
-                    if selw[w] & bit == 0 {
-                        continue; // qual-filtered (exact whole-qual verdict)
-                    }
-                }
                 if fb[w] & bit == 0 {
                     // Clean staged row: every key straight from its SoA
-                    // column (re-borrowed per key — batch-stable).
+                    // column (re-borrowed per key — batch-stable); DictCode
+                    // keys read the window's code and map it part-global
+                    // (dict windows carry no NULLs — cbstore stores none).
                     for ki in 0..nk {
                         let key = self.keys[ki];
+                        if key.dictcode {
+                            let lane = dlanes[ki]
+                                .expect("dictcode lane present under an engaged fast leg");
+                            let g = lane.table.global_code(lane.code(i as usize));
+                            self.obs[ki] = (g as i64, false);
+                            continue;
+                        }
                         let (kvals, knulls, _, _) = emit
                             .refsort_key_batch(key.attno_scan, n)
                             .expect("refsort key batch stable within a staged batch");
@@ -725,11 +864,16 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                         self.obs[ki] = (key_i64(d, key.width), isnull);
                     }
                     self.push_obs(rg, row0 + i);
-                    continue;
+                    return Ok(());
                 }
-                // Forced-fallback row: exact per-row emit below.
+                // Forced-fallback row: exact per-row emit below — which a
+                // DictCode spec cannot serve (contract break, R5 rerun).
+                if self.dictcode {
+                    self.broke = true;
+                    return Ok(());
+                }
             }
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             {
                 let slot = estate.slot_mut(id);
                 ::exectuples::slot_getsomeattrs(slot, max_resno as i32 + 1);
@@ -742,8 +886,8 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                 }
             }
             self.push_obs(rg, row0 + i);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -822,10 +966,14 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
         };
         ::postgres_seams::check_for_interrupts::call()?;
         let nk = self.keys.len();
-        for i in pos..n {
+        // Emit-dead word skip (`live_sel`): a cleared bit answers `emit`
+        // with None and no observable effect — same surviving rows, same
+        // run-buffer order.
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             // The per-row emit leg: qual verdict + projection + detoast —
             // C semantics, C's errors on C's row. None = qual-filtered.
-            let Some(id) = emit.emit(i, estate)? else { continue };
+            let Some(id) = emit.emit(i, estate)? else { return Ok(()) };
             let bufrow = self.local.buf.nrows as u32;
             {
                 let slot = estate.slot_mut(id);
@@ -857,7 +1005,8 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
                 ),
                 bufrow,
             });
-        }
+            Ok(())
+        })?;
         if self.local.bytes() > self.budget {
             self.budget_broke = true;
         }
@@ -1089,6 +1238,45 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                         let key_attnos: Vec<u16> =
                             payload.keys.iter().map(|k| k.attno_scan).collect();
                         ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &key_attnos);
+                        // DictCode specs (dict-code-flow inc-1): the accept
+                        // FAST LEG is mandatory — no per-row emit can observe
+                        // a code — so staged coverage must be forced BEFORE
+                        // the generic arm: (a) with a qual, the PREWHERE
+                        // prefix covers only the qual's columns (leg-7 v3:
+                        // q5/q6 int keys past it broke every window) — widen
+                        // it to the int-family key columns (dict keys read
+                        // the code side channel, never datum cells, and stay
+                        // OUT of the ask: a varlena in the fixed-width ask
+                        // forces the virtual-prefix detour for nothing);
+                        // (b) with NO qual, nothing arms at all and the
+                        // drain delivers row-granular arrivals (leg-7 v3:
+                        // q2/q4) — arm the offset-free columnar staging
+                        // (batched windows + window refs; the masks
+                        // accessor's no-qual arm serves all-survive).
+                        // Refusal on either path leaves the batch unarmed
+                        // and the sink contract-breaks to the serial arm,
+                        // exactly the fail-closed ladder.
+                        if payload.keys.iter().any(|k| k.dictcode) {
+                            let int_ask = payload
+                                .keys
+                                .iter()
+                                .filter(|k| !k.dictcode)
+                                .map(|k| k.attno_scan as i32 + 1)
+                                .max()
+                                .unwrap_or(0);
+                            if ss.ss.qual.is_some() {
+                                let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(
+                                    ss, estate, int_ask,
+                                )?;
+                            } else {
+                                let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(
+                                    ss,
+                                    estate,
+                                    int_ask.max(1),
+                                    None,
+                                );
+                            }
+                        }
                     }
                     super::arm_scan_staging(
                         ss,
@@ -1189,6 +1377,16 @@ fn runtime_sort_full_enabled() -> bool {
     })
 }
 
+/// DictCode sort-key class kill switch (docs/design/dict-code-flow.md
+/// inc-1): `0|off` refuses text keys only — the int-family vocabulary and
+/// every other admission are untouched.
+fn runtime_sort_dictcode_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_SORT_DICTCODE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// The runtime sort sink arms, probed from the sort feed's SeqScan branch
 /// BEFORE the serial arms arm anything: bounded sorts take the top-N sink
 /// (shape a); unbounded forward-only sorts take the full-sort sink (shape
@@ -1234,6 +1432,10 @@ pub(super) fn try_own_sort<'mcx>(
             refused("shape spec (bound/key vocabulary/tlist census)");
             return Ok(false);
         };
+        if spec.keys.iter().any(|k| k.dictcode) {
+            // Observability for the on/off gates (dict-code-flow.md inc-1).
+            lane_trace("runtime-sort: dictcode key class admitted");
+        }
         ArmSpec::Topn(spec)
     } else {
         let Some(spec) = full_spec(state, ss, outer_desc) else {

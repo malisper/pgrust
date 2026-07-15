@@ -52,16 +52,17 @@ const _: () = assert!(TOAST_TUPLE_THRESHOLD == 2032);
 const _: () = assert!(TOAST_TUPLE_TARGET_MAIN == 8160);
 const _: () = assert!(TOAST_MAX_CHUNK_SIZE == 1996);
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: {what}")
-}
-
-pub(crate) fn check_for_interrupts() {
+// CHECK_FOR_INTERRUPTS() (miscadmin.h): InterruptPending pre-check, then
+// ProcessInterrupts through the tcop seam (ported since this site's loud
+// stub was written; the stub turned any pending interrupt during a long
+// toast insert into a panic — it killed vacuum-morsels battery rounds 3-5,
+// notes/vacuum-morsels.md). The pre-check keeps seamless contexts (pure
+// unit tests) off the seam: it is only reached with an interrupt pending.
+pub(crate) fn check_for_interrupts() -> ::types_error::PgResult<()> {
     if init_small::globals::InterruptPending() {
-        unported("ProcessInterrupts (tcop/postgres.c)");
+        return postgres_seams::check_for_interrupts::call();
     }
+    Ok(())
 }
 
 // The dml paths never rewrite; only rewriteheap's direct call carries a

@@ -1363,6 +1363,44 @@ pub fn table_scan_granule_meta_consume(scan: &mut TableScanDesc<'_>) {
     }
 }
 
+pub use ::cbstore::CbAggMetaStep;
+
+/// Footer-stat aggregate metadata peek (cbstore only; see
+/// `CbScanDescData::agg_meta_peek`). Heap scans are never meta.
+#[allow(clippy::too_many_arguments)]
+pub fn table_scan_agg_meta_peek(
+    scan: &mut TableScanDesc<'_>,
+    mm_cols: &[u16],
+    sum_cols: &[u16],
+    len_cols: &[u16],
+    mm: &mut [(i64, i64)],
+    sums: &mut [i128],
+    lens: &mut [i64],
+) -> PgResult<CbAggMetaStep> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(CbAggMetaStep::NotMeta),
+        TableScanDesc::Cbstore(c) => {
+            c.agg_meta_peek(mm_cols, sum_cols, len_cols, mm, sums, lens)
+        }
+    }
+}
+
+/// Consume the row group the peek just answered (`MetaRg`; cbstore only).
+pub fn table_scan_agg_meta_consume_rg(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Cbstore(c) => c.agg_meta_consume_rg(),
+    }
+}
+
+/// Consume the granule the peek just answered (`MetaGranule`; cbstore only).
+pub fn table_scan_agg_meta_consume_granule(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => unreachable!("agg meta is cbstore-only"),
+        TableScanDesc::Cbstore(c) => c.agg_meta_consume_granule(),
+    }
+}
+
 /// Metadata COUNT(*) capability (cbstore: footer row counts per
 /// wholly-visible RG, fail-open per RG otherwise).
 pub fn table_scan_supports_meta_count(scan: &TableScanDesc<'_>) -> bool {
@@ -1508,6 +1546,22 @@ pub fn table_scan_batch_dict_codes<'mcx>(
     match scan {
         TableScanDesc::Heap(_) => None,
         TableScanDesc::Cbstore(cb) => cb.staged_codes_lane(c as usize),
+    }
+}
+
+/// `table_scan_batch_dict_codes` with the v7 part-global stitch published
+/// when the scan carries one (the DictCode sort-key class,
+/// docs/design/dict-code-flow.md inc-1). Consumers gate order use on
+/// `table.has_stitch()` and fail closed otherwise. Heap scans have no
+/// dictionaries — always `None`.
+#[inline]
+pub fn table_scan_batch_dict_codes_global<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    c: u16,
+) -> Option<::exectuples::SoaDictLane> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Cbstore(cb) => cb.staged_codes_lane_global(c as usize),
     }
 }
 
