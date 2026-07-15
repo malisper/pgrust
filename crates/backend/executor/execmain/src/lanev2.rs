@@ -5461,9 +5461,14 @@ fn sort_feed_if_needed<'mcx>(
             // ladder (a dense boundary tie would re-feed the whole scan: the
             // Q25@100M cliff class fix-100m-engagement retired). Refsort still
             // owns adaptive-off and tracked feeds (its ratified e2e arms).
-            // Follow-up (landing note): extend the narrow comparator with the
-            // ref column to reclaim refsort under the relaxed default.
-            let refsort = if narrow.is_none() && tie != TieMode::Rowref {
+            // LAZYTOPN (the chartered follow-up, delivered): under
+            // `topn_lazyfetch_enabled` the narrow comparator EXTENDS with the
+            // ref column (rule-2 (key, ref) total order — selection-exact,
+            // demote-free, byte-identical to the wide rowref arm by
+            // construction), reclaiming refsort under the relaxed default.
+            let refsort = if narrow.is_none()
+                && (tie != TieMode::Rowref || topn_lazyfetch_enabled())
+            {
                 refsort_arm(state, ss, &outer_desc)
             } else {
                 None
@@ -5471,7 +5476,7 @@ fn sort_feed_if_needed<'mcx>(
             let mut fed = false;
             if let Some(spec) = &refsort {
                 lane_trace("refsort armed (bounded sort late materialization)");
-                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
+                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tie, estate)? {
                     fed = true;
                 } else {
                     // Demoted before any output escaped: sticky-refuse the
@@ -7000,6 +7005,20 @@ fn refsort_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_TOPN_LAZYFETCH` kill switch (default ON; lazytopn lane).
+/// Governs the two lazytopn increments: (a) refsort arming under the
+/// relaxed rowref default (the rule-2 (key, ref) narrow comparator — the
+/// train-10 landing follow-up), and (b) the refsort accept-side needed-set
+/// narrowing (key ∪ qual during the narrow feed; the full set restores
+/// before the winner gather). `0|off` restores the pre-lane behavior
+/// exactly: refsort only on Off/Track tie modes, full-needed accept.
+fn topn_lazyfetch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_TOPN_LAZYFETCH").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Bound cap (matches the adaptive walk's): past this the top-N is
 /// scan-shaped anyway and the winner gather stops being "a handful of rows".
 const REFSORT_MAX_BOUND: i64 = 1 << 16;
@@ -7302,13 +7321,31 @@ fn sort_feed_refsort<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
     spec: &RefSortSpec,
     topk: Option<TopkCut>,
-    tie_track: bool,
+    tie: TieMode,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let key_desc = refsort_key_desc(sort, outer_desc, spec.key_resno_outer);
-    ::nodesort::sort_lane_begin_refsort(sort, key_desc)?;
-    if tie_track {
+    // Rowref (relaxed default, lazytopn): the ref column joins the
+    // comparator — rule-2 (key, ref) total order, selection-exact, no tie
+    // machinery. Track keeps the byte-exact demote ladder; Off keeps the
+    // plain leading-key comparator (physical-order feed, ties invisible to
+    // selection by arrival order).
+    ::nodesort::sort_lane_begin_refsort(sort, key_desc, tie == TieMode::Rowref)?;
+    if tie == TieMode::Track {
         ::nodesort::sort_lane_topk_tie_track_arm(sort);
+    } else if tie == TieMode::Rowref {
+        lane_trace("refsort rule-2 comparator armed (rowref tie-break)");
+    }
+    // Accept-side needed-set narrowing (lazytopn): the narrow feed reads
+    // only the key (fast leg) and the qual columns (staging + per-row
+    // requal); every other tlist column decodes ONLY at the winner gather.
+    // Restored unconditionally after the drain — the gather's needed-set
+    // guard demotes on any cell outside the CURRENT set, and the demote
+    // re-feed (legacy wide feed) reads every tlist column.
+    let narrowed = topn_lazyfetch_enabled()
+        && ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &[spec.key_attno_scan]);
+    if narrowed {
+        lane_trace("refsort accept narrowed (key+qual needed set)");
     }
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
@@ -7319,7 +7356,12 @@ fn sort_feed_refsort<'mcx>(
         topk: topk.map(TopkCutState::new),
         demoted: false,
     };
-    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    let drained =
+        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+    if narrowed {
+        ::nodeseqscan::seq_scan_cb_restore_needed(ss);
+    }
+    drained?;
     let demoted = sink.demoted;
     estate.es_direction = dir;
     if demoted {

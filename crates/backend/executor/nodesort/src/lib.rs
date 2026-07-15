@@ -537,24 +537,47 @@ pub fn sort_lane_refsort_key_desc(node: &SortState<'_>) -> Option<Rc<TupleDescDa
 /// leading key, over the same bound (ALLOWBOUNDED + set_bound, `exec_sort`'s
 /// construction). Marks the node `refsort` so the emit face serves the
 /// gathered-winner buffer.
+///
+/// `rule2` (lazytopn lane — the train-10 landing follow-up "extend the
+/// narrow comparator with the ref column"): sort on BOTH columns — the ref
+/// column (int8, ascending = physically-earliest-first) becomes the rule-2
+/// tie-breaker, making the bounded selection the (key, rowref) TOTAL ORDER
+/// of docs/conformance/tie-ordering.md. Selection and retained-tie emit
+/// order are then byte-identical to the wide feed's `arm_topk_rowref` arm
+/// by construction, with no tie machinery (a total order cannot tie).
 pub fn sort_lane_begin_refsort<'mcx>(
     node: &mut SortState<'mcx>,
     key_desc: Rc<TupleDescData<'static>>,
+    rule2: bool,
 ) -> PgResult<()> {
     debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
     debug_assert!(node.bounded && node.bound > 0 && !node.randomAccess);
     debug_assert!(!node.datumSort, "single-column output is already narrow");
     debug_assert!(key_desc.natts == 2);
+    /// pg_operator int8 `<` OID (the execindexing validate_scan precedent).
+    const INT8_LESS_OPERATOR: u32 = 412;
     let work_mem = init_small::globals::work_mem();
-    let mut ts = Tuplesort::begin_heap(
-        key_desc.clone(),
-        &[1],
-        &node.plan.sortOperators[..1],
-        &node.plan.collations[..1],
-        &node.plan.nullsFirst[..1],
-        work_mem,
-        TUPLESORT_ALLOWBOUNDED,
-    )?;
+    let mut ts = if rule2 {
+        Tuplesort::begin_heap(
+            key_desc.clone(),
+            &[1, 2],
+            &[node.plan.sortOperators[0], INT8_LESS_OPERATOR],
+            &[node.plan.collations[0], 0], // InvalidOid — int8 is non-collatable
+            &[node.plan.nullsFirst[0], false],
+            work_mem,
+            TUPLESORT_ALLOWBOUNDED,
+        )?
+    } else {
+        Tuplesort::begin_heap(
+            key_desc.clone(),
+            &[1],
+            &node.plan.sortOperators[..1],
+            &node.plan.collations[..1],
+            &node.plan.nullsFirst[..1],
+            work_mem,
+            TUPLESORT_ALLOWBOUNDED,
+        )?
+    };
     ts.set_bound(node.bound);
     node.tuplesortstate = Some(ts);
     node.refsort = true;
