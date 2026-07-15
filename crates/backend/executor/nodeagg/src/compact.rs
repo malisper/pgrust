@@ -1044,9 +1044,15 @@ pub fn agg_hash_compact_backstop<'mcx>(
             + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
             // Store-once canonical images (spankey): honest new-memory
             // terms — zero under the kill switch (store stays empty), so
-            // switch-off cadence is byte-for-byte the incumbent's.
-            + ch.canon_store.capacity()
-            + ch.canon_offs.capacity() * 4
+            // switch-off cadence is byte-for-byte the incumbent's. LIVE
+            // bytes (len), not retained capacity: a flush clears the store
+            // (its bytes became the run's), and counting the retained
+            // allocation made post-flush pressure UNDRAINABLE — the
+            // leg-12t refusal class (spill-armed engagements must see
+            // pressure fall after flush_now; sink_table_live_bytes is the
+            // same law for the table itself).
+            + ch.canon_store.len()
+            + ch.canon_offs.len() * 4
             + aggctx.context().subtree_used();
         if (ch.table.len() as u64) < ph.hash_ngroups_limit / 2 && mem < ph.hash_mem_limit / 2 {
             return Ok(true);
