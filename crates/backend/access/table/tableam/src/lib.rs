@@ -1030,7 +1030,7 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 let (dfb, dft, dfe, dfa) = ::cbstore::dict_frame_stats();
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}|dictlazy_builds={dfb}|dict_frames={dft}|dict_frames_ensured={dfe}|dict_ensure_alls={dfa}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}|rgs_claim_readahead={}|dictlazy_builds={dfb}|dict_frames={dft}|dict_frames_ensured={dfe}|dict_ensure_alls={dfa}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
@@ -1039,7 +1039,8 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
                     c.adaptive_probe_reverts,
                     c.granules_meta,
                     c.granules_bloom_pruned,
-                    c.rgs_readahead
+                    c.rgs_readahead,
+                    c.rgs_claim_readahead
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
