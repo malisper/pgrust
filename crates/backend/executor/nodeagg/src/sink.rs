@@ -2807,8 +2807,11 @@ impl SinkTableHandle {
         self.0.table.mem_used()
             + self.0.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
             + self.0.canon_hashes.capacity() * 8
-            + self.0.canon_store.capacity()
-            + self.0.canon_offs.capacity() * 4
+            // Live store bytes: at SEAL these are the remainder images the
+            // combine face retains and reads — a real charge; retained
+            // capacity from flushed epochs is not (the leg-12t law).
+            + self.0.canon_store.len()
+            + self.0.canon_offs.len() * 4
     }
 
     /// The combine-visible remainder face over this handle (+ the canonical
@@ -2973,9 +2976,14 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     };
     let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
-        // Store-once canonical images (spankey): zero under the kill switch.
-        + ch.canon_store.capacity()
-        + ch.canon_offs.capacity() * 4
+        // Store-once canonical images (spankey): LIVE bytes — the flush
+        // clears the store, so post-flush pressure drains exactly as the
+        // incumbent's (retained capacity deliberately uncounted, the
+        // sink_table_live_bytes law; capacity-counting made the leg-12t
+        // spill-armed engagement refuse instead of spill). Zero under the
+        // kill switch.
+        + ch.canon_store.len()
+        + ch.canon_offs.len() * 4
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):
     // at small work_mem the margin shrinks with the limit instead of
@@ -2997,8 +3005,9 @@ pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
         .map_or(0, |ch| {
             ch.table.mem_used()
                 + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
-                + ch.canon_store.capacity()
-                + ch.canon_offs.capacity() * 4
+                // Live store bytes (see agg_sink_budget_pressure).
+                + ch.canon_store.len()
+                + ch.canon_offs.len() * 4
         })
 }
 
