@@ -2934,6 +2934,28 @@ fn agg_dopcap_floor_bytes() -> u64 {
 /// above it the AGGREGATE working set is held at the anchor's.
 const DOPCAP_ANCHOR: u32 = 16;
 
+/// Budget-size ladder knob (`PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR`, default
+/// [`DOPCAP_ANCHOR`]): scales the AGGREGATE budget for the calibration
+/// ladder Michael chartered (8 = 0.5x, 32 = 2x the anchor working set) —
+/// the budget-response curve adjudicates whether the anchor sits at the
+/// knee per width, and a 2x-helps-at-96-but-hurts-at-191 shape is the
+/// per-socket-split signature. CALIBRATION/A-B channel on the stride/
+/// decay env precedent, not product surface — the ratified anchor stays
+/// the compiled constant. Clamped to [2, 191] so a typo cannot disable
+/// the budget outright (the kill switch is DOPCAP=0). The dop<=anchor
+/// early-out uses the SAME value, so a widened anchor also widens the
+/// unscaled band (exactly the 2x-aggregate semantics).
+fn agg_dopcap_anchor() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|a| a.clamp(2, 191))
+            .unwrap_or(DOPCAP_ANCHOR)
+    })
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -2951,9 +2973,10 @@ fn sink_cap_engaged(
     match sink_locality_cap_for(est_groups) {
         Some(l) => {
             let mut l = l;
-            if agg_dopcap_enabled() && dop as u32 > DOPCAP_ANCHOR {
+            let anchor = agg_dopcap_anchor();
+            if agg_dopcap_enabled() && dop as u32 > anchor {
                 let scaled =
-                    ((l as u64 * DOPCAP_ANCHOR as u64) / (dop as u64).max(1)) as u32;
+                    ((l as u64 * anchor as u64) / (dop as u64).max(1)) as u32;
                 // Byte-denominated floor at THIS shape's entry estimate
                 // (the same 16+8+state+16 arithmetic as sink_cap_for).
                 let entry = 16u64 + 8 + state_bytes as u64 + 16;
