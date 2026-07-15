@@ -2476,7 +2476,9 @@ fn sink_cap_engaged(
     word_keyed: bool,
 ) -> u32 {
     let base = sink_cap_for(state_bytes, budget, ngroups_limit);
-    if dop <= 1 || !word_keyed {
+    // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
+    // channel and stays authoritative — the locality bound never rewrites it.
+    if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
         return base;
     }
     match sink_locality_cap() {
