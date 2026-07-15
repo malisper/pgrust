@@ -10,11 +10,13 @@ pub mod bloom;
 pub mod condcache;
 pub mod format;
 pub mod hll;
+pub mod loadsort;
 pub mod lz4dec;
 pub mod part_cache;
 pub mod reader;
 pub mod scan;
 pub mod segfile;
+pub mod sortkey;
 pub mod writer;
 
 use ::datum::Datum;
