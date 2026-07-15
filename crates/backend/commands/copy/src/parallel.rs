@@ -1085,15 +1085,19 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Sort-mode phase 2: k-way merge every spilled run, encode in parallel,
-/// commit in order (load-r2 L3-1 step d).
+/// commit in order (load-r2 L3-1 step d + lever-i overlap).
 ///
-/// The merge thread streams rows in global memcmp-key order (== the serial
-/// presort order — no key ties on admitted int-class keys) into exactly
-/// RG_ROWS-row batches; a scoped encode pool (RgChunkEncoder — the landed
-/// worker-encode machinery, byte-proven vs serial by its seam oracle)
-/// seals them; this thread commits EncodedRgs in batch order through
-/// commit_encoded_rg. Backpressure: the bounded work channel caps
-/// in-flight batches at ~encoders+1. Returns the merged row count.
+/// Three concurrent roles under one scope (measured 100M split @ dfb8d6115:
+/// fill 43.1s / send-block 0.01s / done-wait 0.2s / commit 60.1s — the fill
+/// pump and the ordered commit were serialized on one thread; overlapped
+/// they cost ~max of the two):
+///   PUMP (spawned): streams rows in global memcmp-key order out of the
+///     RunMerge into exactly RG_ROWS-row batches -> bounded work channel.
+///   ENCODERS (spawned pool): RgChunkEncoder per batch (the landed
+///     worker-encode machinery, byte-proven by its seam oracle).
+///   LEADER (this thread): drains the done channel, commits EncodedRgs in
+///     batch order via commit_encoded_rg, CFIs per message.
+/// Returns the merged row count.
 fn merge_sorted_runs(
     writer: &mut cbstore::CbWriter,
     shared: &Arc<ParCopyShared>,
@@ -1120,17 +1124,15 @@ fn merge_sorted_runs(
     let work_rx = Mutex::new(work_rx);
     let (done_tx, done_rx) =
         std::sync::mpsc::channel::<(u64, PgResult<cbstore::EncodedRg>)>();
+    let abort = std::sync::atomic::AtomicBool::new(false);
 
-    let mut n_rows = 0u64;
+    let key_w = sort.key_w;
+    let t_merge = std::time::Instant::now();
     let mut first_err: Option<Box<PgError>> = None;
     let mut committed = 0u64;
-    let t_merge = std::time::Instant::now();
-    let mut t_fill = std::time::Duration::ZERO;
-    let mut t_send = std::time::Duration::ZERO;
-    let mut t_wait = std::time::Duration::ZERO;
     let mut t_commit = std::time::Duration::ZERO;
 
-    std::thread::scope(|scope| {
+    let (n_rows, batches) = std::thread::scope(|scope| {
         for _ in 0..nenc {
             let rx = &work_rx;
             let tx = done_tx.clone();
@@ -1180,42 +1182,46 @@ fn merge_sorted_runs(
                 }
             });
         }
-        drop(done_tx); // encoder clones remain; done_rx ends when they exit
+        drop(done_tx); // encoder clones remain; done_rx closes when they exit
 
-        let mut body = |first_err: &mut Option<Box<PgError>>| -> PgResult<()> {
-            let mut key: Vec<u8> = Vec::with_capacity(sort.key_w);
+        // PUMP: owns the RunMerge and the work sender; exits (dropping the
+        // sender) at end of input, on error, or on the leader's abort flag.
+        let abort_ref = &abort;
+        let pump = scope.spawn(move || -> (PgResult<()>, u64, u64) {
+            let mut key: Vec<u8> = Vec::with_capacity(key_w);
             let mut row: Vec<u8> = Vec::new();
             let mut cur = Batch { idx: 0, arena: Vec::new(), lens: Vec::new() };
-            let mut next_send = 0u64;
-            let mut pending: BTreeMap<u64, cbstore::EncodedRg> = BTreeMap::new();
-            let mut merge_done = false;
-            let mut since_cfi = 0u32;
-            loop {
-                // 1. fill + send one RG-sized batch (blocking send = the
-                //    backpressure bound; done_rx is unbounded so encoders
-                //    never deadlock against a full work channel).
-                if !merge_done && first_err.is_none() {
+            let mut sent = 0u64;
+            let mut n_rows = 0u64;
+            let mut t_fill = std::time::Duration::ZERO;
+            let mut t_send = std::time::Duration::ZERO;
+            let r = (|| -> PgResult<()> {
+                loop {
+                    if abort_ref.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
                     let t0 = std::time::Instant::now();
+                    let mut merge_done = false;
                     while cur.lens.len() < RG {
-                        if !merge.next_entry(&mut key, &mut row)? {
-                            merge_done = true;
-                            break;
-                        }
-                        cur.arena.extend_from_slice(&row);
-                        cur.lens.push(row.len() as u32);
-                        n_rows += 1;
-                        since_cfi += 1;
-                        if since_cfi >= 4096 {
-                            since_cfi = 0;
-                            postgres_seams::check_for_interrupts::call()?;
+                        match merge.next_entry(&mut key, &mut row) {
+                            Ok(true) => {
+                                cur.arena.extend_from_slice(&row);
+                                cur.lens.push(row.len() as u32);
+                                n_rows += 1;
+                            }
+                            Ok(false) => {
+                                merge_done = true;
+                                break;
+                            }
+                            Err(e) => return Err(e),
                         }
                     }
                     t_fill += t0.elapsed();
-                    if !cur.lens.is_empty() && (cur.lens.len() == RG || merge_done) {
+                    if !cur.lens.is_empty() {
                         let t1 = std::time::Instant::now();
                         let full = std::mem::replace(
                             &mut cur,
-                            Batch { idx: next_send + 1, arena: Vec::new(), lens: Vec::new() },
+                            Batch { idx: sent + 1, arena: Vec::new(), lens: Vec::new() },
                         );
                         if work_tx.send(full).is_err() {
                             return Err(Box::new(PgError::new(
@@ -1223,85 +1229,96 @@ fn merge_sorted_runs(
                                 "parallel load-sort encoder pool exited early",
                             )));
                         }
-                        next_send += 1;
+                        sent += 1;
                         t_send += t1.elapsed();
                     }
-                }
-                // 2. drain finished encodes; commit in batch order.
-                loop {
-                    match done_rx.try_recv() {
-                        Ok((idx, Ok(enc))) => {
-                            pending.insert(idx, enc);
-                        }
-                        Ok((_, Err(e))) => {
-                            if first_err.is_none() {
-                                *first_err = Some(e);
-                            }
-                        }
-                        Err(_) => break,
+                    if merge_done {
+                        return Ok(());
                     }
                 }
-                let t2 = std::time::Instant::now();
-                while pending.keys().next() == Some(&committed) {
-                    let enc = pending.remove(&committed).unwrap();
-                    writer.commit_encoded_rg(enc)?;
-                    committed += 1;
-                    if committed % 16 == 0 {
-                        pgstat_progress_update_param(
-                            PROGRESS_COPY_TUPLES_PROCESSED,
-                            (committed * RG as u64) as i64,
-                        );
+            })();
+            ptrace(&format!(
+                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent}",
+                t_fill.as_secs_f64(),
+                t_send.as_secs_f64(),
+            ));
+            (r, n_rows, sent)
+        });
+        // work_tx moved into the pump; when it finishes, the channel closes
+        // and the encoders drain out, closing done_rx.
+
+        // LEADER: ordered commits off the done channel.
+        let mut pending: BTreeMap<u64, cbstore::EncodedRg> = BTreeMap::new();
+        for (idx, r) in done_rx.iter() {
+            if let Err(e) = postgres_seams::check_for_interrupts::call() {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                abort.store(true, Ordering::SeqCst);
+            }
+            match r {
+                Ok(enc) => {
+                    pending.insert(idx, enc);
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
                     }
-                }
-                t_commit += t2.elapsed();
-                if first_err.is_some() {
-                    return Ok(());
-                }
-                if merge_done && committed == next_send {
-                    return Ok(());
-                }
-                // 3. everything sent, nothing committable: block on done.
-                if merge_done {
-                    let t3 = std::time::Instant::now();
-                    let r = done_rx.recv();
-                    t_wait += t3.elapsed();
-                    match r {
-                        Ok((idx, Ok(enc))) => {
-                            pending.insert(idx, enc);
-                        }
-                        Ok((_, Err(e))) => {
-                            if first_err.is_none() {
-                                *first_err = Some(e);
-                            }
-                        }
-                        Err(_) => {
-                            return Err(Box::new(PgError::new(
-                                ERROR,
-                                "parallel load-sort encoder pool exited with batches pending",
-                            )));
-                        }
-                    }
+                    abort.store(true, Ordering::SeqCst);
                 }
             }
-        };
-        let r = body(&mut first_err);
-        drop(work_tx); // encoders drain + exit; scope joins them
-        if let Err(e) = r {
+            if first_err.is_some() {
+                pending.clear();
+                continue; // keep draining so the pool can exit
+            }
+            let t2 = std::time::Instant::now();
+            while pending.keys().next() == Some(&committed) {
+                let enc = pending.remove(&committed).unwrap();
+                if let Err(e) = writer.commit_encoded_rg(enc) {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    abort.store(true, Ordering::SeqCst);
+                    pending.clear();
+                    break;
+                }
+                committed += 1;
+                if committed % 16 == 0 {
+                    pgstat_progress_update_param(
+                        PROGRESS_COPY_TUPLES_PROCESSED,
+                        (committed * RG as u64) as i64,
+                    );
+                }
+            }
+            t_commit += t2.elapsed();
+        }
+        let (pr, n_rows, sent) = pump.join().unwrap_or_else(|_| {
+            (
+                Err(Box::new(PgError::new(ERROR, "parallel load-sort pump panicked"))),
+                0,
+                0,
+            )
+        });
+        if let Err(e) = pr {
             if first_err.is_none() {
                 first_err = Some(e);
             }
         }
+        (n_rows, sent)
     });
 
     if let Some(e) = first_err {
         return Err(e);
     }
+    if committed != batches {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "parallel load-sort merge lost batches (committed != sent)",
+        )));
+    }
     ptrace(&format!(
-        "sort merge done: {:.2}s total (fill {:.2}s / send-block {:.2}s / done-wait {:.2}s / commit {:.2}s) rows={n_rows} rgs={committed}",
+        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed}",
         t_merge.elapsed().as_secs_f64(),
-        t_fill.as_secs_f64(),
-        t_send.as_secs_f64(),
-        t_wait.as_secs_f64(),
         t_commit.as_secs_f64(),
     ));
     pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n_rows as i64);
