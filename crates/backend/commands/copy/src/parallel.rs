@@ -1604,7 +1604,14 @@ pub(crate) fn copy_from_parallel<'mcx>(
         Ceremony::Refused => Ok(None),
         Ceremony::Done(processed) => {
             // Publish (footer + header, durable) — the serial finish.
+            let tf = std::time::Instant::now();
             writer.finish_parallel_ingest()?;
+            let (f_stitch, f_footer, f_sync, f_blob_bytes) = writer.finish_phase_split();
+            ptrace(&format!(
+                "finish split: wall {:.2}s stitch {f_stitch:.2}s footer {f_footer:.2}s \
+                 sync {f_sync:.2}s blob_bytes={f_blob_bytes}",
+                tf.elapsed().as_secs_f64(),
+            ));
             pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, processed as i64);
             ptrace(&format!("done rows={processed}"));
             Ok(Some(processed))
