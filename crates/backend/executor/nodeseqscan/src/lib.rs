@@ -107,6 +107,11 @@ struct CbScanInfo {
     /// Unlike `zone`, this is a SEMANTIC recognition — the metaagg arm
     /// answers the whole node from it, so it must equal the full qual.
     zero_qual: Option<::tableam::MetaZeroQual>,
+    /// EVERY conjunct of the scan qual lowered to a zone qual (`zone` IS
+    /// the full qual, not an advisory subset). Grants the footer-stat agg
+    /// meta arm its all-rows-pass proof: an AllPass zone verdict on every
+    /// entry proves the whole qual over the unit's rows.
+    zone_covers_qual: bool,
 }
 
 // Hashjoin Bloom pushdown state: key-column-only SoA deform per staged page,
@@ -1961,6 +1966,57 @@ pub fn seq_scan_granule_meta_consume(node: &mut SeqScanState<'_>) {
     ::tableam::table_scan_granule_meta_consume(sd);
 }
 
+/// Footer-stat agg meta arm's QUAL admission (the all-rows-pass proof's
+/// executor half): true iff this cbstore scan's zone quals are the ENTIRE
+/// scan qual — either there is no qual at all (vacuous), or every conjunct
+/// lowered to a zone qual AND the staged drive owns the whole qual as a
+/// bitmap (`qual_armed && !lane_requal`, the fold drive's own bitmap-mode
+/// signal: no hybrid-requal tail re-runs any clause per row). Under that
+/// grant, an AllPass zone verdict on every pushed entry proves every row of
+/// the unit passes — the fold over the unit is the fold over an all-ones
+/// selection. Call AFTER `arm_scan_staging` (the batch/lane arming decides
+/// `qual_armed`).
+pub fn seq_scan_agg_meta_qual_ok(node: &SeqScanState<'_>) -> bool {
+    let Some(cb) = node.cb_scan.as_deref() else { return false };
+    if node.ss.qual.is_none() {
+        return cb.zone.is_empty();
+    }
+    cb.zone_covers_qual
+        && node.batch_soa.as_deref().is_some_and(|b| b.qual_armed && !b.lane_requal)
+}
+
+/// Footer-stat aggregate metadata peek (cbstore; see
+/// `CbScanDescData::agg_meta_peek`). A missing desc reads as NotMeta.
+#[allow(clippy::too_many_arguments)]
+pub fn seq_scan_agg_meta_peek<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mm_cols: &[u16],
+    sum_cols: &[u16],
+    len_cols: &[u16],
+    mm: &mut [(i64, i64)],
+    sums: &mut [i128],
+    lens: &mut [i64],
+) -> PgResult<::tableam::CbAggMetaStep> {
+    node.ensure_scandesc(estate)?;
+    let Some(sd) = node.ss.ss_currentScanDesc.as_mut() else {
+        return Ok(::tableam::CbAggMetaStep::NotMeta);
+    };
+    ::tableam::table_scan_agg_meta_peek(sd, mm_cols, sum_cols, len_cols, mm, sums, lens)
+}
+
+/// Consume the row group the peek just answered (`MetaRg`; never decoded).
+pub fn seq_scan_agg_meta_consume_rg(node: &mut SeqScanState<'_>) {
+    let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
+    ::tableam::table_scan_agg_meta_consume_rg(sd);
+}
+
+/// Consume the granule the peek just answered (`MetaGranule`; never decoded).
+pub fn seq_scan_agg_meta_consume_granule(node: &mut SeqScanState<'_>) {
+    let sd = node.ss.ss_currentScanDesc.as_mut().expect("peek preceded consume");
+    ::tableam::table_scan_agg_meta_consume_granule(sd);
+}
+
 pub fn seq_scan_next_pagebatch<'mcx>(
     node: &mut SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3561,7 +3617,8 @@ fn cb_scan_info<'mcx>(
         },
         _ => None,
     };
-    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual })
+    let zone_covers_qual = nquals > 0 && zone.len() == nquals;
+    Ok(CbScanInfo { needed: cx.needed, qual_needed, zone, zero_qual, zone_covers_qual })
 }
 
 /// M3 runtime-sort key-only staged accept (docs/design/m3-sort.md inc-4

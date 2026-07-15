@@ -23,7 +23,8 @@ use ::types_error::{PgError, PgResult};
 pub use format::ColType;
 pub use reader::dict_frame_stats;
 pub use scan::{
-    CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, MetaZeroQual, ZoneCmp, ZoneQual,
+    CbAggMetaStep, CbDictLane, CbGranuleMetaStep, CbScanDescData, MetaAggScan, MetaZeroQual,
+    ZoneCmp, ZoneQual,
 };
 pub use writer::{coltypes_of, finish_bulk_insert, multi_insert, tuple_insert};
 
