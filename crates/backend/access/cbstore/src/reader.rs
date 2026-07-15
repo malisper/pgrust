@@ -471,7 +471,10 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
 }
 
 pub struct Part {
-    map: SegMap,
+    // Process-shared read-only mapping (coldio lane): pool workers'
+    // thread-local part caches share one mapping per live part state —
+    // see segfile.rs SHARED_MAPS for the measured fault-storm motivation.
+    map: std::sync::Arc<SegMap>,
     pub rgs: Vec<FooterRg>,
     pub ncols: usize,
     // Header footer_off this footer was parsed from (part-cache probe key).
@@ -552,7 +555,17 @@ impl Part {
         let (rgs, _footer_end, ndv, sorted, cluster_key, lenflags, stitch) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
-        let Some(map) = SegMap::open(path)? else { return Ok(None) };
+        // Shared mapping keyed by the part-cache identity vocabulary (seg0
+        // dev/ino + mapped length); the unstat-able fallback keeps the
+        // historical private mapping (same posture as the null identity).
+        let map = match ident_stat.as_ref() {
+            Some(md) => {
+                use std::os::unix::fs::MetadataExt;
+                SegMap::open_shared(path, md.dev(), md.ino())?
+            }
+            None => SegMap::open(path)?.map(std::sync::Arc::new),
+        };
+        let Some(map) = map else { return Ok(None) };
         // Structural skippability guard: a footer whose RG directory points
         // past the live mapping is torn state — readers must error cleanly
         // here rather than slice-panic on garbage row-group offsets.
@@ -2248,5 +2261,37 @@ mod tests {
         }
         let expected: Vec<usize> = offs.iter().map(|&off| blob_base + off as usize).collect();
         assert_eq!(got, expected);
+    }
+
+    // coldio lane: process-shared SegMap registry — one live mapping per
+    // (dev, ino, maplen) part state, across threads; distinct keys map
+    // privately; the Weak registry never keeps a dead mapping alive.
+    #[test]
+    fn shared_segmap_identity() {
+        use std::os::unix::fs::MetadataExt;
+        let path = test_part("cb_sharedmap_test.part", &[100, 100], 2);
+        let md = std::fs::metadata(&path).unwrap();
+        let a = SegMap::open_shared(&path, md.dev(), md.ino()).unwrap().unwrap();
+        let b = SegMap::open_shared(&path, md.dev(), md.ino()).unwrap().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same live part state must share one mapping"
+        );
+        // Cross-thread: a pool worker's open lands on the same mapping.
+        let (path2, dev, ino) = (path.clone(), md.dev(), md.ino());
+        let from_thread = std::thread::spawn(move || {
+            SegMap::open_shared(&path2, dev, ino).unwrap().unwrap()
+        })
+        .join()
+        .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &from_thread));
+        // A different identity (recreate stand-in) maps privately.
+        let c = SegMap::open_shared(&path, md.dev(), md.ino() ^ 1).unwrap().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+        // Weak registry: with every holder dropped the mapping dies and the
+        // next open takes the upgrade-miss path (fresh map, still readable).
+        drop((a, b, c, from_thread));
+        let d = SegMap::open_shared(&path, md.dev(), md.ino()).unwrap().unwrap();
+        assert!(!d.bytes().is_empty());
     }
 }
