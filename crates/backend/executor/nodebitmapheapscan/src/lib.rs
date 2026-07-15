@@ -11,7 +11,7 @@ use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::tableam::{table_beginscan_bm, table_endscan, table_rescan, table_slot_callbacks};
-use ::tidbitmap::{TbmIterator, TbmSharedIterator, TbmSharedIterState, TIDBitmap};
+use ::tidbitmap::{TbmIterator, TbmRangeIterator, TbmSharedIterator, TbmSharedIterState, TIDBitmap};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::BitmapHeapScan;
 use ::types_rel::Relation;
@@ -367,6 +367,60 @@ pub fn bitmap_table_scan_setup<'mcx>(
             Some(snapshot),
         )?);
     }
+    node.initialized = true;
+    Ok(())
+}
+
+/// bitmap-morsels (runtime bitmap arm): ensure the node's table scan
+/// descriptor exists — shared by the window install and the fallback attach.
+fn ensure_bm_scandesc<'mcx>(
+    node: &mut BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    if node.ss.ss_currentScanDesc.is_none() {
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("bitmap heap scan requires es_snapshot");
+        node.ss.ss_currentScanDesc = Some(table_beginscan_bm(
+            estate.es_query_cxt,
+            node.ss.ss_currentRelation.as_ref().expect("bitmap heap scan has a relation"),
+            Some(snapshot),
+        )?);
+    }
+    Ok(())
+}
+
+/// bitmap-morsels (runtime bitmap arm, worker/claim side): install a
+/// claimed-window range iterator over the frozen shared arrays. Replaces any
+/// previous window (a fully-drained one — the drain runs each claim to
+/// exhaustion; an aborted claim's remainder is discarded with the RG). The
+/// node never builds its own bitmap on this path: the leader built and froze
+/// it once (C's parallel-leader discipline).
+pub fn bitmap_scan_install_entry_window<'mcx>(
+    node: &mut BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    frozen: &Arc<TbmSharedIterState>,
+    start: u64,
+    end: u64,
+) -> PgResult<()> {
+    node.tbmiterator = TbmIterator::range(TbmRangeIterator::new(Arc::clone(frozen), start, end));
+    ensure_bm_scandesc(node, estate)?;
+    node.initialized = true;
+    Ok(())
+}
+
+/// bitmap-morsels (leader fallback): the engagement fell back with NOTHING
+/// consumed — attach the frozen state as an ordinary single-consumer shared
+/// iterator (cursor at 0), which yields exactly C's merged block order: the
+/// serial arm then drains the node byte-identically to the classic path.
+pub fn bitmap_scan_attach_shared_fallback<'mcx>(
+    node: &mut BitmapHeapScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    frozen: Arc<TbmSharedIterState>,
+) -> PgResult<()> {
+    node.tbmiterator = TbmIterator::shared(TbmSharedIterator::attach(frozen));
+    ensure_bm_scandesc(node, estate)?;
     node.initialized = true;
     Ok(())
 }
