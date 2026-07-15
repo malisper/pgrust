@@ -1169,6 +1169,45 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                         let key_attnos: Vec<u16> =
                             payload.keys.iter().map(|k| k.attno_scan).collect();
                         ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &key_attnos);
+                        // DictCode specs (dict-code-flow inc-1): the accept
+                        // FAST LEG is mandatory — no per-row emit can observe
+                        // a code — so staged coverage must be forced BEFORE
+                        // the generic arm: (a) with a qual, the PREWHERE
+                        // prefix covers only the qual's columns (leg-7 v3:
+                        // q5/q6 int keys past it broke every window) — widen
+                        // it to the int-family key columns (dict keys read
+                        // the code side channel, never datum cells, and stay
+                        // OUT of the ask: a varlena in the fixed-width ask
+                        // forces the virtual-prefix detour for nothing);
+                        // (b) with NO qual, nothing arms at all and the
+                        // drain delivers row-granular arrivals (leg-7 v3:
+                        // q2/q4) — arm the offset-free columnar staging
+                        // (batched windows + window refs; the masks
+                        // accessor's no-qual arm serves all-survive).
+                        // Refusal on either path leaves the batch unarmed
+                        // and the sink contract-breaks to the serial arm,
+                        // exactly the fail-closed ladder.
+                        if payload.keys.iter().any(|k| k.dictcode) {
+                            let int_ask = payload
+                                .keys
+                                .iter()
+                                .filter(|k| !k.dictcode)
+                                .map(|k| k.attno_scan as i32 + 1)
+                                .max()
+                                .unwrap_or(0);
+                            if ss.ss.qual.is_some() {
+                                let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(
+                                    ss, estate, int_ask,
+                                )?;
+                            } else {
+                                let _ = ::nodeseqscan::seq_scan_cb_columnar_arm(
+                                    ss,
+                                    estate,
+                                    int_ask.max(1),
+                                    None,
+                                );
+                            }
+                        }
                     }
                     super::arm_scan_staging(
                         ss,
