@@ -316,6 +316,13 @@ struct NumaCombine {
     partial_bytes_peak: AtomicUsize,
 }
 
+// SAFETY: the partial slots are single-writer / single-consumer by the
+// claims discipline (cursor-pop = exactly-once slot ownership; the 1→2
+// counter election = exactly-once consumption, Acquire-paired with the
+// writers' Release increments — see the AggSink Sync comment); every other
+// field is an atomic.
+unsafe impl Sync for NumaCombine {}
+
 impl NumaCombine {
     fn new() -> NumaCombine {
         NumaCombine {
