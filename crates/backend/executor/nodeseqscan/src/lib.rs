@@ -3784,8 +3784,17 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     // ignored by the parsers); default-off = zero cost.
     if sfin_enabled() {
         if let Some((rgsw, dictb, gscan, wins)) = seq_scan_cb_drive_counters(node) {
+            // dz_* = the DOMAIN-WORK tripwire totals (exectuples
+            // domain_work, proportionality-audit): bytes/entries of
+            // knowingly domain-sized work (full-domain clears, eager
+            // whole-dict fills, dense dict pointer-table builds) drained
+            // at scan shutdown so gates can watch the domain:touched
+            // ratio against cb_granules/cb_windows. Process-wide totals —
+            // serial legs read per-query-exact, parallel drives smear
+            // across emitters (tripwire semantics, not attribution).
+            let (dzb, dze) = ::exectuples::domain_work_take();
             eprintln!(
-                "MORSEL|SFIN|cb_rgswitch={rgsw}|cb_dictbuild={dictb}|cb_granules={gscan}|cb_windows={wins}"
+                "MORSEL|SFIN|cb_rgswitch={rgsw}|cb_dictbuild={dictb}|cb_granules={gscan}|cb_windows={wins}|dz_bytes={dzb}|dz_entries={dze}"
             );
         }
     }
