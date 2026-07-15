@@ -1702,12 +1702,18 @@ pub(super) fn min_granules() -> u64 {
 /// and still computed against the POOL dop (a refusal means "not worth any
 /// gang", independent of this sizing). gpw default 64 = the min_granules
 /// engagement floor: a worker bringing less than one floor's worth of
-/// granules cannot pay for its own arming. By construction this is
-/// IDENTITY on the 16-core fleet at both official scales (10M: 1221
-/// granules → 20 ≥ 16; 100M: 12207 → 191): only wider pools shrink.
+/// granules cannot pay for its own arming. Scope-gated to pools > 32:
+/// 16-core behavior (fleet, mt16 vectors, e2e dop censuses) is identity
+/// by construction; only wide pools shrink.
 /// Kill switch PGRUST_RUNTIME_ELASTIC_DOP=0; tune PGRUST_RUNTIME_ELASTIC_GPW.
 pub(super) fn elastic_dop(dop: i32, total_granules: u64) -> i32 {
-    if dop <= 1 {
+    // Wide-pool scope gate (mirrors sizing::DOPSCALE_W0): elastic sizing is
+    // the DOP-191 arming-tax fix; at pool <= 32 admission behavior is
+    // UNCHANGED -- the 16-core fleet, the mt16 vectors, and the e2e dop
+    // censuses (launched == asked, runtime-sort leg 2) are identity by
+    // construction. Caught by tranche-sort leg2-dop-census at 8b79874ce:
+    // a 74-granule fixture at dop=4 engaged 2/2.
+    if dop <= 32 {
         return dop;
     }
     static GPW: OnceLock<Option<u64>> = OnceLock::new();
