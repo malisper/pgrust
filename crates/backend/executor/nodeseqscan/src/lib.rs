@@ -1213,6 +1213,57 @@ pub fn seq_scan_batch_dict_codes(
     ::tableam::table_scan_batch_dict_codes(sd, c as u16)
 }
 
+/// Column-independent half of `seq_scan_refsort_key_batch`'s certification:
+/// `(fallback_words, sel_words)` for the CURRENT staged batch — the exact
+/// whole-qual selection verdict plus the forced-fallback mask, with NO
+/// claim about any column's datum cells (the DictCode sort-key class reads
+/// its observations from the dict-code side channel, never from SoA datum
+/// cells — docs/design/dict-code-flow.md inc-1). `sel` soundness is exactly
+/// the key-batch accessor's: `Some` iff the scan HAS a qual and the armed
+/// bitmap is the WHOLE qual's verdict (no hybrid requal tail); `None` with
+/// no qual = every staged row survives; a qual-bearing batch without an
+/// exact bitmap refuses wholesale. Forced-fallback rows carry SET sel bits
+/// and must take the per-row emit (or the caller's own fail-closed path).
+pub fn seq_scan_refsort_batch_masks<'a, 'mcx>(
+    node: &'a SeqScanState<'mcx>,
+    n: u32,
+) -> Option<(&'a [u64], Option<&'a [u64]>)> {
+    let b = node.batch_soa.as_deref()?;
+    let sel = if node.ss.qual.is_some() {
+        if !(b.qual_armed && !b.lane_requal && b.nwords > 0) {
+            return None;
+        }
+        Some(&b.sel[..])
+    } else {
+        None
+    };
+    if b.soa.nrows() < n {
+        return None;
+    }
+    Some((b.soa.fallback_words(), sel))
+}
+
+/// `seq_scan_batch_dict_codes` with the v7 part-global stitch published
+/// when the scan carries one — the DictCode sort-key side channel
+/// (docs/design/dict-code-flow.md inc-1). Same audit guards as the
+/// per-epoch accessor (no still-up dict-lane answer, no length staging);
+/// consumers gate order use on `table.has_stitch()` and fail closed
+/// otherwise.
+#[inline]
+pub fn seq_scan_batch_dict_codes_global(
+    node: &mut SeqScanState<'_>,
+    c: usize,
+) -> Option<::exectuples::SoaDictLane> {
+    {
+        let b = node.batch_soa.as_deref()?;
+        if b.soa.dict_lane(c).is_some() || b.soa.len_want(c) != 0 {
+            return None;
+        }
+    }
+    let sd = node.ss.ss_currentScanDesc.as_mut()?;
+    ::tableam::table_scan_batch_dict_codes_global(sd, c as u16)
+}
+
 /// Physical rowref base of the CURRENT staged batch (tie-ordering rule 2,
 /// the zone-adaptive rowref-selection sort feed): staged row `i`'s rowref is
 /// `base + i` — the SoA batch stages exactly the scan's current staged

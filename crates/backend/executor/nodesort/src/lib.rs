@@ -626,7 +626,13 @@ pub fn sort_lane_refsort_winners(node: &SortState<'_>) -> usize {
 pub fn sort_lane_runtime_topn_begin(node: &mut SortState<'_>) {
     debug_assert!(!node.sort_Done && node.tuplesortstate.is_none());
     debug_assert!(node.bounded && node.bound > 0 && !node.randomAccess);
-    debug_assert!(!node.datumSort, "runtime top-N refuses datum sorts (refsort census)");
+    // Datum-shaped nodes (natts == 1) are served identically by the refsort
+    // emit face: `refsort_pop` stores a 1-column minimal tuple into the
+    // result slot, and the tuplesort datum feed/drain legs are never
+    // reached (no tuplesort exists on this face). The runtime sink's own
+    // admission decides which single-column shapes engage (today: only
+    // specs with a DictCode key — the int-family single-column shapes keep
+    // their census refusal, docs/design/dict-code-flow.md inc-1).
     node.refsort = true;
     node.refsort_out.clear();
 }

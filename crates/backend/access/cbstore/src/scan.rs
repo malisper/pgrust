@@ -1984,6 +1984,52 @@ impl<'mcx> CbScanDescData<'mcx> {
         })
     }
 
+    /// `staged_codes_lane` with the v7 part-global STITCH PUBLISHED when
+    /// the scan carries one — the DictCode sort-key side channel
+    /// (docs/design/dict-code-flow.md inc-1). Same publication gating as
+    /// the deform's dict-lane answer (`batch_deform_col_sel`): stitch
+    /// identity armed (`scan_uid != 0`), per-(rg, col) stitch present and
+    /// length-consistent with the dict, `gndv` in the u32 envelope. A
+    /// SEPARATE accessor so the landed per-epoch consumers of
+    /// `staged_codes_lane` (str MIN/MAX code folds) keep their keying
+    /// unchanged. Consumers gate order use on `table.has_stitch()` and
+    /// fail closed otherwise.
+    #[inline]
+    pub fn staged_codes_lane_global(&mut self, c: usize) -> Option<::exectuples::SoaDictLane> {
+        // The key column may sit outside every other consumer's read set for
+        // this window (no qual on it, past the fixed-width deform's
+        // coverage, no per-row emit ran): complete its decode first —
+        // needed-set columns only (a key column is always in the needed
+        // set), idempotent per (rg, granule) via `decode_col`'s gkey check.
+        if c >= self.cols.len() || !self.needed[c] {
+            return None;
+        }
+        self.ensure_col(c);
+        let mut lane = self.staged_codes_lane(c)?;
+        if self.scan_uid != 0 {
+            let ndict = self.cols[c].dict.len();
+            let stitch = self
+                .part
+                .as_ref()
+                .and_then(|p| p.stitch(self.rg, c))
+                .filter(|s| s.len() == ndict);
+            let gndv = self
+                .part
+                .as_ref()
+                .map(|p| p.stitch_gndv(c))
+                .filter(|&g| stitch.is_some() && g <= u32::MAX as u64)
+                .unwrap_or(0);
+            if let Some(s) = stitch {
+                if gndv != 0 {
+                    lane.table.stitch = s.as_ptr();
+                    lane.table.gndv = gndv as u32;
+                    lane.table.gepoch = self.scan_uid;
+                }
+            }
+        }
+        Some(lane)
+    }
+
     /// Publish staged row `i` into the virtual slot (needed columns only;
     /// unneeded cells are nulled once per scan and never read).
     pub fn store_slot(&mut self, i: u32, slot: &mut SlotData<'_>) {
