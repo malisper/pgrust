@@ -148,6 +148,27 @@ fn stitch_pool_threads() -> usize {
     })
 }
 
+/// loadcommit C1: PGRUST_PARALLEL_COPY_FILL_V2=1 — loser-tree merge fill
+/// (zero per-row allocation, single-copy row emission). Default OFF; the
+/// emitted row sequence is byte-identical by construction (loadsort.rs
+/// `v2_less` + the v2_matches_heap_reference oracle).
+fn fill_v2() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_V2").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// loadcommit C0: PGRUST_PARALLEL_COPY_FILL_SPLIT=1 — per-row advance
+/// (run read+decode) timing inside the merge fill. Diagnostic arm only;
+/// default OFF = one untaken branch per row.
+fn fill_split() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_SPLIT").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -1157,14 +1178,37 @@ fn merge_sorted_runs(
     let sort = shared.sort.as_ref().expect("merge without sort mode");
     let paths =
         std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
-    let mut merge = cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?;
+    // loadcommit C1: the merge kernel — BinaryHeap (default, byte-proven)
+    // or the loser tree (opt-in, byte-identical order by construction).
+    enum MergeKind {
+        V1(cbstore::loadsort::RunMerge),
+        V2(cbstore::loadsort::RunMergeV2),
+    }
+    let mut merge = if fill_v2() {
+        MergeKind::V2(cbstore::loadsort::RunMergeV2::open(&paths, sort.key_w)?)
+    } else {
+        MergeKind::V1(cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?)
+    };
+    if fill_split() {
+        match &mut merge {
+            MergeKind::V1(m) => m.set_timed(true),
+            MergeKind::V2(m) => m.set_timed(true),
+        }
+    }
     // Eager unlink: the open fds keep the data; a crash from here leaves
     // no orphan files.
     for p in &paths {
         let _ = std::fs::remove_file(p);
     }
     let nenc = sort_encoders(shared.rt);
-    ptrace(&format!("sort merge over {} runs encoders={nenc}", paths.len()));
+    ptrace(&format!(
+        "sort merge over {} runs encoders={nenc} fill={}",
+        paths.len(),
+        match &merge {
+            MergeKind::V1(_) => "v1",
+            MergeKind::V2(_) => "v2",
+        }
+    ));
 
     const RG: usize = cbstore::format::RG_ROWS;
     struct Batch {
@@ -1254,18 +1298,39 @@ fn merge_sorted_runs(
                     }
                     let t0 = std::time::Instant::now();
                     let mut merge_done = false;
-                    while cur.lens.len() < RG {
-                        match merge.next_entry(&mut key, &mut row) {
-                            Ok(true) => {
-                                cur.arena.extend_from_slice(&row);
-                                cur.lens.push(row.len() as u32);
-                                n_rows += 1;
+                    match &mut merge {
+                        MergeKind::V1(m) => {
+                            while cur.lens.len() < RG {
+                                match m.next_entry(&mut key, &mut row) {
+                                    Ok(true) => {
+                                        cur.arena.extend_from_slice(&row);
+                                        cur.lens.push(row.len() as u32);
+                                        n_rows += 1;
+                                    }
+                                    Ok(false) => {
+                                        merge_done = true;
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
-                            Ok(false) => {
-                                merge_done = true;
-                                break;
+                        }
+                        MergeKind::V2(m) => {
+                            // loadcommit C1: rows land straight in the
+                            // batch arena — no pump-local key/row copies.
+                            while cur.lens.len() < RG {
+                                match m.next_row_into(&mut cur.arena) {
+                                    Ok(Some(l)) => {
+                                        cur.lens.push(l);
+                                        n_rows += 1;
+                                    }
+                                    Ok(None) => {
+                                        merge_done = true;
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
-                            Err(e) => return Err(e),
                         }
                     }
                     t_fill += t0.elapsed();
@@ -1289,8 +1354,16 @@ fn merge_sorted_runs(
                     }
                 }
             })();
+            // loadcommit C0: fill decomposition (advance = run read+decode
+            // inside the merge; 0.00 unless PGRUST_PARALLEL_COPY_FILL_SPLIT=1;
+            // heap/copy share = fill − advance).
+            let (adv_s, run_bytes) = match &merge {
+                MergeKind::V1(m) => m.fill_stats(),
+                MergeKind::V2(m) => m.fill_stats(),
+            };
             ptrace(&format!(
-                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent}",
+                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent} \
+                 fill split: advance {adv_s:.2}s runbytes={run_bytes}",
                 t_fill.as_secs_f64(),
                 t_send.as_secs_f64(),
             ));
