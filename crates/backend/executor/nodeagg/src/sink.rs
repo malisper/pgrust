@@ -4991,8 +4991,8 @@ mod tests {
         }
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
         ];
         let combines = test_combines();
         for b in 0..SINK_NBUCKETS {
