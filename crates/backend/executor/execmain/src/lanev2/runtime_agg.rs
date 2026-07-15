@@ -2908,17 +2908,24 @@ fn agg_dopcap_enabled() -> bool {
     })
 }
 
-/// Per-worker entry floor for the DOP-scaled locality bound (see
-/// [`agg_dopcap_enabled`]). 16384 entries ≈ 0.9MB at the 56B/entry
-/// estimate — inside a Neoverse-V2 core's private 2MB L2 with headroom.
-fn agg_dopcap_floor() -> u32 {
-    static N: OnceLock<u32> = OnceLock::new();
+/// Per-worker floor for the DOP-scaled locality bound (see
+/// [`agg_dopcap_enabled`]) — BYTE-denominated (cache-budget lit-review
+/// refinement 2, Schuhknecht VLDB15 class: the flush scatter's output
+/// shares the private cache with the table, so the floor must be a byte
+/// budget, not an entry count — an entry floor silently overflows L2 on
+/// state-heavy shapes). Default 1MB of table bytes at the sink's own
+/// entry estimate (16+8+state+16): ≈18K entries on the q19-class 56B
+/// entry, proportionally fewer on heavy states — table + flush output +
+/// scan batch fit a Neoverse-V2 core's private 2MB L2 with headroom.
+/// `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` overrides the BYTE budget (A/B knob).
+fn agg_dopcap_floor_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_FLOOR")
             .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .filter(|f| *f >= 1024)
-            .unwrap_or(1 << 14)
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|f| *f >= 64 * 1024)
+            .unwrap_or(1 << 20)
     })
 }
 
@@ -2947,7 +2954,12 @@ fn sink_cap_engaged(
             if agg_dopcap_enabled() && dop as u32 > DOPCAP_ANCHOR {
                 let scaled =
                     ((l as u64 * DOPCAP_ANCHOR as u64) / (dop as u64).max(1)) as u32;
-                l = scaled.max(agg_dopcap_floor()).min(l);
+                // Byte-denominated floor at THIS shape's entry estimate
+                // (the same 16+8+state+16 arithmetic as sink_cap_for).
+                let entry = 16u64 + 8 + state_bytes as u64 + 16;
+                let floor = (agg_dopcap_floor_bytes() / entry.max(1))
+                    .clamp(1 << 12, u32::MAX as u64) as u32;
+                l = scaled.max(floor).min(l);
             }
             base.min(l)
         }
