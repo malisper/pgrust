@@ -1959,6 +1959,14 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // entered; Completed = the runtime answered; Fallback = serial rerun.
     let class = if is_cb { ArmClass::Scan } else { ArmClass::Heap };
     router::tick(class, ArmCounter::Engaged);
+    // q2box diagnosis channel (trace-armed only, sibling of the refusal
+    // line above): one line per engagement ceremony with the resolved DOP
+    // and geometry — plain-exec engagement evidence without WFIN.
+    if super::lane_trace_enabled() {
+        lane_trace(&format!(
+            "runtime-scan: engage dop={dop} granules={total_granules} rgs={nrgs}"
+        ));
+    }
     let r = engage(
         agg,
         estate,
@@ -1991,6 +1999,13 @@ fn ea_refused<T>(
     reason: &'static str,
 ) -> PgResult<Option<T>> {
     router::tick_refused(ArmClass::Scan, reason);
+    // q2box diagnosis channel: name plain-exec refusals in the server log
+    // when the engagement trace is armed (PGRUST_LANE_V2_TRACE=1; default
+    // off — byte-identical otherwise). EA runs already surface the reason
+    // through the transparency line; this covers the timed/plain arms.
+    if super::lane_trace_enabled() {
+        lane_trace(&format!("runtime-scan: refused ({reason})"));
+    }
     if ea {
         estate.runtime_ea_record_refusal(node_id, "scan", reason);
     }
