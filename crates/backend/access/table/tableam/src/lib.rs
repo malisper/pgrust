@@ -1002,6 +1002,14 @@ pub fn cbstore_footer_col_bytes(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>
     ::cbstore::footer_col_bytes(rel)
 }
 
+// Every committed RG carries exact v7 zero/empty counts (q2box lane): the
+// plan-time answerability probe for the executor's meta zero-count qual
+// arm. None while the table has no committed footer; Some(false) on
+// v<=6-lineage parts (incl. preserved-RG mixtures).
+pub fn cbstore_footer_zerocnt_all(rel: &Relation<'_>) -> PgResult<Option<bool>> {
+    ::cbstore::footer_zerocnt_all(rel)
+}
+
 // cbstore's AM-specific sample acquisition (C table_relation_analyze lets the
 // AM supply the whole acquirefunc): row-group enumeration + random row fetch.
 pub fn cbstore_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {

@@ -55,7 +55,7 @@ use types_nodes::parsenodes::{Query, RTEKind};
 use types_nodes::primnodes::{Aggref, Var, AGGKIND_NORMAL};
 use types_nodes::{CmdType, LimitOption, Node};
 use crate::run::PlannerRun;
-use types_pathnodes::AMFLAG_CBSTORE;
+use types_pathnodes::{AMFLAG_CBSTORE, AMFLAG_CBSTORE_ZEROCNT};
 
 // ---------------------------------------------------------------------------
 // The bootstrap coverage classes (matrix rows the probe can key).
@@ -568,6 +568,26 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // Plain aggregation, one output row.
         if is_cb {
             if tlist_all_whitelisted_aggs(parse, rti, PLAIN_FOLD_AGGS) {
+                // Qualed COUNT-ONLY census (q2box lane, 2026-07-15): the
+                // transition program reads no scan column, so the runtime
+                // scan arm never takes it (no fold plan; the serial lane's
+                // per-row PREWHERE drive owns it) and the footer META
+                // answer serves only the zero-count qual shape on parts
+                // whose EVERY RG carries v7 zerocnts. Suppressing the
+                // Gather without that answerability is a measured 5x
+                // serial-instead-of-legacy false positive (q2 on the v6
+                // 100M bank: Gather-16 0.011s -> suppressed-serial 0.055s;
+                // notes/q2box-lane.md). Probe subset-of walk: keep the
+                // legacy Gather when the META answer provably cannot
+                // engage. Column-reading agg sets (count(v)/sum/min/max)
+                // keep the keying — the fold walk owns them, quals and
+                // all, through the kernel-qual PREWHERE feed.
+                if has_quals
+                    && tlist_all_count_star(parse)
+                    && run.root.rel(rel_id).amflags & AMFLAG_CBSTORE_ZEROCNT == 0
+                {
+                    return Ok(false);
+                }
                 return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages);
             }
             // Meta-over-Gather (M5-5, the band-2a q30 handoff): the residual
@@ -1122,6 +1142,22 @@ fn tlist_all_whitelisted_aggs(parse: &Query<'_>, rti: usize, whitelist: &[u32]) 
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return false };
         if !is_whitelisted_agg(tle.expr, rti, whitelist) {
+            return false;
+        }
+        n += 1;
+    }
+    n > 0
+}
+
+/// Every tlist entry is a zero-arg `count(*)` Aggref (n > 0) — the
+/// count-only census shape: no transition reads a scan column, so no fold
+/// plan exists for the runtime scan arm to own (q2box keying guard).
+fn tlist_all_count_star(parse: &Query<'_>) -> bool {
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return false };
+        let Some(agg) = tle.expr.as_aggref() else { return false };
+        if agg.aggfnoid != F_COUNT_STAR || !agg.args.is_nil() {
             return false;
         }
         n += 1;
