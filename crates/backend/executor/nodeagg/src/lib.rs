@@ -3745,9 +3745,13 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
                 estate.reset_expr_context(node.tmpcontext);
             }
         } else {
-            for i in 0..n {
+            // Fetch-dead word skip (`skip_words`): a cleared bit is a row
+            // `fetch_tuple` rejects with no observable effect — same
+            // surviving rows, same order, same transitions.
+            let skip = src.skip_words();
+            exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
                 if !src.fetch_tuple(i, estate)? {
-                    continue;
+                    return Ok(());
                 }
                 let outer_id = src.outer_slot();
                 estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
@@ -3756,7 +3760,8 @@ pub fn exec_agg_batched<'mcx, S: AggBatchSource<'mcx>>(
                     EvalSlots { scan: None, inner: None, outer: Some(outer_slot) };
                 exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
                 estate.reset_expr_context(node.tmpcontext);
-            }
+                Ok(())
+            })?;
         }
     }
     plain_finish(node, estate)
@@ -3772,9 +3777,12 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
         if n == 0 {
             break;
         }
-        for i in 0..n {
+        // Fetch-dead word skip (`skip_words`) — see `exec_agg_batched`'s
+        // per-row drain: same surviving rows, same order, same entries.
+        let skip = src.skip_words();
+        exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
             if !src.fetch_tuple(i, estate)? {
-                continue;
+                return Ok(());
             }
             let outer_id = src.outer_slot();
             estate.ecxt_mut(node.tmpcontext).ecxt_outertuple = Some(outer_id);
@@ -3785,7 +3793,8 @@ fn agg_fill_hash_table_batched<'mcx, S: AggBatchSource<'mcx>>(
                 exec_eval_expr(node.evaltrans.as_mut().unwrap(), &mut slots)?;
             }
             estate.reset_expr_context(node.tmpcontext);
-        }
+            Ok(())
+        })?;
     }
     hashagg_finish_initial_spills(node, estate)?;
     merge::maybe_install_handoff(node, estate)?;

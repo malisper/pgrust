@@ -14,6 +14,60 @@ use ::types_tuple::{CompactAttribute, HeapTupleData, SizeofHeapTupleHeader};
 pub const SOA_MAX_ROWS: usize = MaxHeapTuplesPerPage;
 pub const SOA_BM_WORDS: usize = SOA_MAX_ROWS.div_ceil(64);
 
+/// Visit the positions of `pos..n` whose bit is SET in `live`, ascending;
+/// `live = None` visits every position (the dense loop, unchanged codegen).
+/// WORD-GRANULAR SKIP (the q22 sort-feed lever, one shared implementation):
+/// an all-clear word advances 64 positions in one compare, and set bits
+/// within a sparse word iterate by trailing-zeros — so a batched loop whose
+/// per-position work is nothing on cleared bits (the caller's contract: a
+/// cleared bit is a definitive rejection with no observable effect) collapses
+/// its per-row ceremony to one word test per 64 rows on sparse selections,
+/// at ~one extra compare per word on dense ones.
+///
+/// The visited stream is EXACTLY the plain loop's surviving positions in the
+/// same order (differential-tested); an `Err` from `f` stops the walk at that
+/// position, exactly as the plain loop's `?` would. Bits at or past `n` are
+/// ignored (the last word is masked as a belt — producers stage zeros there
+/// by contract); when `Some`, `live` must cover bit `n - 1`.
+#[inline(always)]
+pub fn for_each_live<E>(
+    live: Option<&[u64]>,
+    pos: u32,
+    n: u32,
+    mut f: impl FnMut(u32) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(words) = live else {
+        for i in pos..n {
+            f(i)?;
+        }
+        return Ok(());
+    };
+    if pos >= n {
+        return Ok(());
+    }
+    let last = ((n - 1) / 64) as usize;
+    debug_assert!(words.len() > last, "live words must cover bit n-1");
+    let mut w = (pos / 64) as usize;
+    // Mask off bits below `pos` in the first word; bits at/past `n` are
+    // zero by the producer's contract (belt: mask the last word anyway).
+    let mut bits = words[w] & (!0u64 << (pos % 64));
+    loop {
+        if w == last && n % 64 != 0 {
+            bits &= (1u64 << (n % 64)) - 1;
+        }
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            f(i)?;
+        }
+        if w == last {
+            return Ok(());
+        }
+        w += 1;
+        bits = words[w];
+    }
+}
+
 /// Fixed-width prefix plan: every column below `ncols` has `attlen > 0`.
 pub struct SoaDeformPlan<'mcx> {
     ncols: u16,

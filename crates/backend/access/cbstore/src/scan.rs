@@ -1697,14 +1697,25 @@ impl<'mcx> CbScanDescData<'mcx> {
                     // PREWHERE completing deform: ensure SELECTED rows'
                     // codes only (unselected cells hold valid pointers to
                     // possibly-unmaterialized bytes — never read under the
-                    // armed batch's stale-cell contract).
+                    // armed batch's stale-cell contract). The ensure walk
+                    // word-skips cleared selection words (same ensured
+                    // codes — sparse survivor windows stop paying a per-row
+                    // bit test), and the pointer gather runs unconditionally
+                    // over the window exactly as before (a tight,
+                    // branch-free loop). Rows past the selection words are
+                    // unselected (the old `get`-based walk's contract).
                     Some(sel) => {
-                        for (i, (out, &code)) in
-                            soa.col_values_mut(c).iter_mut().zip(codes).enumerate()
-                        {
-                            if sel.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) {
-                                l.ensure_code(code);
-                            }
+                        let lim = (sel.len() * 64).min(codes.len()) as u32;
+                        let _ = ::exectuples::for_each_live::<core::convert::Infallible>(
+                            Some(sel),
+                            0,
+                            lim,
+                            |i| {
+                                l.ensure_code(codes[i as usize]);
+                                Ok(())
+                            },
+                        );
+                        for (out, &code) in soa.col_values_mut(c).iter_mut().zip(codes) {
                             *out = cd.dict[code as usize];
                         }
                     }

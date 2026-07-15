@@ -1411,15 +1411,13 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
     debug_assert_eq!(views.len(), nkeys + nargs + hg_fold_cells(&hg.vocab));
     let mut words = [0i64; 32];
     let mut absorbed = 0u32;
-    for i in pos..n {
+    // Word-skip the qual-filtered continues (exact whole-qual verdict —
+    // same surviving rows in the same order, so probe misses stop at their
+    // exact positions; an all-clear word advances 64 rows in one compare).
+    let stop = exectuples::for_each_live(sel, pos, n, |i| {
         let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
-        if let Some(s) = sel {
-            if s[w] & bit == 0 {
-                continue; // qual-filtered (exact whole-qual verdict)
-            }
-        }
         if fb[w] & bit != 0 {
-            return HgSpanStop::NeedSlot { at: i, absorbed };
+            return Err(HgSpanStop::NeedSlot { at: i, absorbed });
         }
         let ii = i as usize;
         let mut nulls = 0u32;
@@ -1442,7 +1440,7 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
         let h = hg.key_hash(&words[..nkeys], nulls);
         let (found, _slot_idx) = hg.probe(&words[..nkeys], nulls, h);
         let Some(g) = found else {
-            return HgSpanStop::NeedSlot { at: i, absorbed };
+            return Err(HgSpanStop::NeedSlot { at: i, absorbed });
         };
         let c = g as usize;
         // Set parks, straight into storage (cur == None invariant).
@@ -1500,10 +1498,14 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
         }
         absorbed += 1;
         if hg.mem() > hg.budget {
-            return HgSpanStop::Budget { at: i, absorbed };
+            return Err(HgSpanStop::Budget { at: i, absorbed });
         }
+        Ok(())
+    });
+    match stop {
+        Err(s) => s,
+        Ok(()) => HgSpanStop::Done { absorbed },
     }
-    HgSpanStop::Done { absorbed }
 }
 
 /// Number of staged fold cells a vocab consumes (arg-bearing entries only).
