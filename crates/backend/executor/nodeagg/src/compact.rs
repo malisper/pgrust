@@ -212,6 +212,22 @@ pub(crate) struct CompactHash {
     /// every table reset (flush) — rows restart per epoch. Empty for word
     /// shapes.
     pub(crate) canon_hashes: Vec<u64>,
+    /// STORE-ONCE canonical images (spankey step 2 — the lane owns the
+    /// canonical image lifecycle across accept/flush/combine): row i's
+    /// canonical byte image at `canon_store[canon_offs[i]..canon_offs[i+1]]`,
+    /// built exactly once at the accept-time hash extension and consumed
+    /// verbatim by the flush pass-1 and the combine remainder face (no
+    /// rebuild: word-unpack + intern-reverse-chase + tail assembly happen
+    /// once per group). Self-contained copies — valid across intern resets
+    /// and thread crossings (the canonical IMAGE law). Engaged iff
+    /// `spankey::spankey_store_enabled()` (kill switch reverts every
+    /// consumer to the incumbent rebuild); when engaged
+    /// `canon_offs.len() == canon_hashes.len() + 1` (leading 0); cleared
+    /// beside `canon_hashes` at every table reset. The canonical SPILL
+    /// serialization path deliberately does NOT read this store (condition
+    /// of record: spill bytes identical, replay unaware).
+    pub(crate) canon_store: Vec<u8>,
+    pub(crate) canon_offs: Vec<u32>,
     /// True once the RUNTIME sink drain owns this table (set per worker by
     /// `agg_sink_mark_sink_mode`). Gates the batch-tail canonical hashing:
     /// the serial lane shares this compact table and never flushes or
@@ -247,6 +263,8 @@ pub(crate) fn compact_hash_for_tests(
         key,
         intern,
         canon_hashes: Vec::new(),
+        canon_store: Vec::new(),
+        canon_offs: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
         keys: Vec::new(),
@@ -467,6 +485,8 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         key: CompactKeySpec::Single { width },
         intern: None,
         canon_hashes: Vec::new(),
+        canon_store: Vec::new(),
+        canon_offs: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
         keys: Vec::new(),
@@ -585,6 +605,8 @@ fn try_arm_mk_n(
             ::lanetable::LaneAggTable::new(::lanetable::KeyRepr::Bytes, 8, 1 << 10)
         }),
         canon_hashes: Vec::new(),
+        canon_store: Vec::new(),
+        canon_offs: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
         keys: Vec::new(),
@@ -836,6 +858,8 @@ pub fn agg_hash_compact_try_arm_reduced(
         key: CompactKeySpec::Reduced(shape),
         intern: None,
         canon_hashes: Vec::new(),
+        canon_store: Vec::new(),
+        canon_offs: Vec::new(),
         sink_mode: false,
         intern_gen: 0,
         keys: Vec::new(),
@@ -866,6 +890,15 @@ pub fn agg_hash_compact_intern(node: &mut AggStateData<'_>, bytes: &[u8]) -> u32
     let t = ch.intern.as_mut().expect("intern requires an intern-armed shape");
     let hash = t.hash_key_bytes(bytes);
     let pr = t.probe_bytes(bytes, hash);
+    // spankey copy-tax counters (measurement only; cached-bool gated).
+    if crate::spankey::spankey_ctr_enabled() {
+        use crate::spankey::{spankey_add, SPANKEY_CTRS as S};
+        spankey_add(&S.intern_calls, 1);
+        if pr.is_new {
+            spankey_add(&S.intern_new, 1);
+            spankey_add(&S.intern_new_bytes, bytes.len() as u64);
+        }
+    }
     if pr.is_new {
         let id = (t.nrows() - 1) as u32;
         // SAFETY: fresh zeroed 8-byte state block; the id is its read-back.
@@ -1009,6 +1042,17 @@ pub fn agg_hash_compact_backstop<'mcx>(
         };
         let mem = table_mem
             + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+            // Store-once canonical images (spankey): honest new-memory
+            // terms — zero under the kill switch (store stays empty), so
+            // switch-off cadence is byte-for-byte the incumbent's. LIVE
+            // bytes (len), not retained capacity: a flush clears the store
+            // (its bytes became the run's), and counting the retained
+            // allocation made post-flush pressure UNDRAINABLE — the
+            // leg-12t refusal class (spill-armed engagements must see
+            // pressure fall after flush_now; sink_table_live_bytes is the
+            // same law for the table itself).
+            + ch.canon_store.len()
+            + ch.canon_offs.len() * 4
             + aggctx.context().subtree_used();
         if (ch.table.len() as u64) < ph.hash_ngroups_limit / 2 && mem < ph.hash_mem_limit / 2 {
             return Ok(true);
@@ -1072,6 +1116,7 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     keys: &[i64],
     groups: &mut Vec<NonNull<AggPerGroup>>,
 ) -> PgResult<()> {
+    let spk_t0 = crate::spankey::spankey_t0();
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let AggStateData { perhash, trans_init, trans_typ, .. } = node;
@@ -1098,6 +1143,7 @@ pub fn agg_hash_compact_batch_mk1<'mcx>(
     if ch.sink_mode {
         crate::sink::compact_extend_canon_hashes(ch);
     }
+    crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.probe_ns, spk_t0);
     Ok(())
 }
 
@@ -1108,6 +1154,7 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     keys: &[[u64; 2]],
     groups: &mut Vec<NonNull<AggPerGroup>>,
 ) -> PgResult<()> {
+    let spk_t0 = crate::spankey::spankey_t0();
     // SAFETY: read of the once-allocated node; no &mut to it is live.
     let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
     let AggStateData { perhash, trans_init, trans_typ, .. } = node;
@@ -1130,6 +1177,7 @@ pub fn agg_hash_compact_batch_mk2<'mcx>(
     if ch.sink_mode {
         crate::sink::compact_extend_canon_hashes(ch);
     }
+    crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.probe_ns, spk_t0);
     Ok(())
 }
 

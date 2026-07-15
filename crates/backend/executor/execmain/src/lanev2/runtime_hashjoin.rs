@@ -2329,6 +2329,9 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         refuse("tiny-input-floor");
         return Ok(None);
     }
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
+    let dop = super::runtime_scan::elastic_dop(dop, outer_granules);
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
