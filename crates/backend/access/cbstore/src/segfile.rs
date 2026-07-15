@@ -100,6 +100,41 @@ impl SegFile {
         total
     }
 
+    /// Advisory readahead over the logical byte range [off, off+len):
+    /// POSIX_FADV_WILLNEED per underlying segment span, so a following
+    /// `read_exact_at` sequence overlaps its later ranges' disk fetches
+    /// with the earlier ranges' synchronous reads. Purely advisory —
+    /// kernel errors ignored, missing segments end the walk, no-op off
+    /// Linux (cold-readahead lane).
+    pub fn advise_willneed(&mut self, off: u64, len: u64) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let (mut off, mut len) = (off, len);
+            while len > 0 {
+                let segno = (off / SEG_BYTES) as usize;
+                let seg_off = off % SEG_BYTES;
+                let take = (SEG_BYTES - seg_off).min(len);
+                let Ok(f) = self.seg_for(segno, false) else { return };
+                // SAFETY: plain libc call on a live fd; advisory only.
+                unsafe {
+                    libc::posix_fadvise(
+                        f.as_raw_fd(),
+                        seg_off as libc::off_t,
+                        take as libc::off_t,
+                        libc::POSIX_FADV_WILLNEED,
+                    );
+                }
+                off += take;
+                len -= take;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (off, len);
+        }
+    }
+
     /// md contract: every non-last segment is exactly SEG_BYTES; pad every
     /// segment's tail to a BLCKSZ multiple so mdnblocks' division is exact.
     pub fn pad_and_sync(&mut self, logical_end: u64) -> PgResult<()> {
