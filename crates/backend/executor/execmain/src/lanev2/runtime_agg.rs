@@ -2886,6 +2886,47 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 /// estimate gate (fail-closed to serial), never an engagement the final
 /// gate would reject, and word-keyed spill-armed shapes vacate that gate
 /// entirely.
+/// agg192-contention (48xl window-B verdict 2): the locality cap was
+/// DOP-INDEPENDENT — ~64K entries ≈ 3.6-3.9MB per worker table, which is
+/// locality-correct for ONE worker but aggregates to ~690MB of live
+/// random-probed table bytes at 191 workers, spilling the shared SLC
+/// between 64 and 128 workers. The measured signature: instructions and
+/// LLC-miss COUNTS flat, stall_backend_mem x4-5, system-wide miss RATE
+/// saturating at ~1.7-1.9 G/s and then COLLAPSING at 191 (q19 1.24 G/s <
+/// its own 128-dop rate — queueing overload = the 191<128 regression).
+/// Fix: above the 16-worker anchor, scale the locality bound so the
+/// AGGREGATE stays at the anchor's working set (cap x 16 / dop), floored
+/// (default 16K entries ≈ 0.9MB — near-L2-resident per worker at any DOP)
+/// so flush cadence and the per-flush dict/intern-cache resets stay sane.
+/// dop <= 16 is UNCHANGED by construction (the mt16 official channel is
+/// byte-flat). `PGRUST_RUNTIME_AGG_DOPCAP=0` restores the DOP-independent
+/// bound; `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` is the ladder A/B knob.
+fn agg_dopcap_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Per-worker entry floor for the DOP-scaled locality bound (see
+/// [`agg_dopcap_enabled`]). 16384 entries ≈ 0.9MB at the 56B/entry
+/// estimate — inside a Neoverse-V2 core's private 2MB L2 with headroom.
+fn agg_dopcap_floor() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|f| *f >= 1024)
+            .unwrap_or(1 << 14)
+    })
+}
+
+/// The DOP anchor: at or below this width the locality bound is exactly
+/// the calibrated per-worker cap (the q36-ladder 64K / mid-NDV 1M bands);
+/// above it the AGGREGATE working set is held at the anchor's.
+const DOPCAP_ANCHOR: u32 = 16;
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -2901,7 +2942,15 @@ fn sink_cap_engaged(
         return base;
     }
     match sink_locality_cap_for(est_groups) {
-        Some(l) => base.min(l),
+        Some(l) => {
+            let mut l = l;
+            if agg_dopcap_enabled() && dop as u32 > DOPCAP_ANCHOR {
+                let scaled =
+                    ((l as u64 * DOPCAP_ANCHOR as u64) / (dop as u64).max(1)) as u32;
+                l = scaled.max(agg_dopcap_floor()).min(l);
+            }
+            base.min(l)
+        }
         None => base,
     }
 }
