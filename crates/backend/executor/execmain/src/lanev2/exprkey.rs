@@ -64,6 +64,27 @@ fn exprkey_enabled() -> bool {
     })
 }
 
+/// Opt-in switch for the coded-group arm (q29coded lane): the Dict key
+/// class groups by the INTERN ID of the memo's output value on the compact
+/// mk1 single-Intern table instead of probing the staged C tuplehash with
+/// the output TEXT. Default OFF — MEASURED REGRESSION at the q29@100M
+/// lpp15 face (5.11s vs 3.00s staged; byte gates green, par16/serial
+/// controls flat, zero budget teardowns): the partial's OUTPUT CONTRACT is
+/// still materialized text rows through the Gather tuple queues, so the
+/// coded table defers every group's key materialization from INSERT time
+/// (parallel, overlapped with the scan) to EMIT time (the pipeline-
+/// critical leader/queue face) and pays an intern re-image on top — +70%
+/// wall at +6.6% cycles (stall, not compute; notes/q29coded-lane.md). The
+/// arm becomes profitable only when the handoff itself is id-keyed (the
+/// merge-face increments); until then it is the opt-in substrate.
+/// `PGRUST_LANE_V2_CODEDKEY=1|on` engages.
+fn codedkey_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// Kill switch for the redundant-key (reduced grouping) tranche —
 /// independent of the single-computed-key arms above.
 fn redkey_enabled() -> bool {
@@ -1546,6 +1567,26 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         }
         _ => false,
     };
+    // Coded-group arm (q29coded lane): the Dict key class groups by the
+    // INTERN ID of the memo's output value on the compact mk1 single-Intern
+    // table (`agg_hash_compact_try_arm_mk1` — the M2 sink single-text arm's
+    // shape, armed here on the classic build) — the staged C-tuplehash text
+    // probe and its per-group minimal-tuple key materialization never run
+    // while armed. Fail-closed: any refusal (spill estimate, key kind,
+    // aggsplit divisor, kill switch) keeps the staged leg byte-identically.
+    // The dg/ch machinery composes unchanged — pergroup pointers simply
+    // point into compact rows, with the teardown ordering law on every
+    // migration path (see `coded_drop_caches`).
+    let mut coded = match &xk.kind {
+        ExprKeyKind::Dict { .. } if !has_resid && codedkey_enabled() => {
+            let armed = tick_arm(::nodeagg::agg_hash_compact_try_arm_mk1(agg, Some(xk.key_out)));
+            if armed {
+                trace_feed("expr-key coded-group feed engaged (intern key)");
+            }
+            armed
+        }
+        _ => false,
+    };
     // Multi-key arm: the packed compact table arms per build (mirrors the
     // scan feed's scan_mk_shape sequence, which also re-decides per build).
     // A non-armed build (spill risk under the current limits) runs whole
@@ -1663,6 +1704,7 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             xk,
             stage_slot,
             compact,
+            &mut coded,
             mk_shape.as_ref(),
             &mut idxs,
             &mut groups,
@@ -1863,6 +1905,7 @@ fn ch_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     xk: &mut ExprKeyState,
     lane: &::exectuples::SoaDictLane,
+    coded: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ChVerdict> {
     debug_assert_eq!(ch.epoch, Some(lane.table.epoch));
@@ -1918,10 +1961,21 @@ fn ch_batch<'mcx>(
         }
     }
     // Pass 2 (agg mutable): resolve unresolved groups in first-occurrence
-    // row order — the dg leg's exact probe sequence.
+    // row order — the dg leg's exact probe sequence (coded arm: the same
+    // intern+compact resolve, which never misses — no Disarm leg).
     for (k, &code) in ch.rowcodes.iter().enumerate() {
         let c = code as usize;
         if xk.dg_slots[c].is_none() {
+            if coded {
+                let key = xk.keys[k];
+                debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+                // SAFETY: memo outputs are live non-null text varlenas for
+                // the staged window (dicteval arena contract).
+                let v =
+                    unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+                xk.dg_slots[c] = Some(::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?);
+                continue;
+            }
             let (key, isnull) = (xk.keys[k], xk.knull[k]);
             ::nodeagg::agg_hash_hash_staged(agg, &[key], &[isnull], &mut xk.hash1)?;
             match ::nodeagg::agg_hash_probe_staged(agg, estate, key, isnull, xk.hash1[0])? {
@@ -1978,8 +2032,12 @@ pub(super) fn exprkey_sink_batch<'mcx>(
         scratch: ::lanefold::StrMmScratch::default(),
     };
     let mut ch: Option<CodeHistState> = None;
+    // The coded-group arm is never sink-admissible (Dict `sink_key_kind` =
+    // None) — the flag stays false on this route.
+    let mut coded = false;
     exprkey_batch(
-        agg, ss, xk, stage_slot, true, mk_shape, idxs, groups, &mut mm, &mut ch, n, estate,
+        agg, ss, xk, stage_slot, true, &mut coded, mk_shape, idxs, groups, &mut mm, &mut ch, n,
+        estate,
     )?;
     Ok(!xk.refused && ::nodeagg::agg_hash_compact_armed(agg))
 }
@@ -2061,12 +2119,55 @@ impl ExprKeyState {
     }
 }
 
+/// Drop the coded-group arm's compact-row pointer caches, STICKY (q29coded
+/// lane). Callers run this strictly BEFORE `agg_hash_compact_disarm` — the
+/// migration frees the compact rows the dg/ch caches point into — and
+/// strictly AFTER `ch_flush` (pending per-code counts fold into those same
+/// still-live rows). The build keeps the staged C-table leg from here: the
+/// migration re-homed every group there, so later batches re-resolve codes
+/// against the same groups, first-arrival order preserved.
+fn coded_drop_caches(xk: &mut ExprKeyState, coded: &mut bool) {
+    xk.dg_slots.clear();
+    xk.dg_epoch = None;
+    *coded = false;
+    trace_feed("expr-key coded-group teardown (staged leg resumes)");
+}
+
+/// The universal whole-batch per-row exit: flush pending per-code histogram
+/// counts, tear down the coded arm's caches when engaged (ORDER LAW: flush →
+/// drop caches → disarm; the disarm migration frees the compact rows), then
+/// migrate any armed compact table, drop the str MIN/MAX memo (per-row str
+/// advances bypass it), and route the whole batch through the per-row
+/// program — byte-identical (the permuted advance order is byte-invisible
+/// on transvalues).
+#[allow(clippy::too_many_arguments)]
+fn per_row_exit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    ch: &mut Option<CodeHistState>,
+    mm: &mut MmState,
+    coded: &mut bool,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ch_flush(agg, xk, ch, &mut mm.scratch)?;
+    if *coded {
+        coded_drop_caches(xk, coded);
+    }
+    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+    mm.scratch.invalidate();
+    per_row_batch(agg, ss, n, estate)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn exprkey_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: &mut ExprKeyState,
     stage_slot: &mut Option<ExecSlotId>,
     compact: bool,
+    coded: &mut bool,
     mk_shape: Option<&::nodeagg::MkShape>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
@@ -2112,15 +2213,7 @@ fn exprkey_batch<'mcx>(
         }
     };
     if !batched {
-        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-        return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+        return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
     }
     xk.rows.clear();
     for (w, &word) in sel[..nwords].iter().enumerate() {
@@ -2198,15 +2291,7 @@ fn exprkey_batch<'mcx>(
             if ::lanestitch::eval_project(prog, &batch, &sv, &mut outs).is_err() {
                 xk.refused = true;
                 trace_feed("expr-key arith trap: replaying batch per-row (sticky)");
-                ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
             }
         }
         ExprKeyKind::TsTrunc { input_col, unit } => {
@@ -2247,15 +2332,7 @@ fn exprkey_batch<'mcx>(
                     ::laneexec::DictEvalPrepared::Ready => {}
                     ::laneexec::DictEvalPrepared::Demote(reason) => {
                         ::laneexec::log_dicteval_demoted(reason);
-                        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                        return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                        return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                     }
                 }
                 let (vals, nulls) = prog.scratch();
@@ -2295,15 +2372,7 @@ fn exprkey_batch<'mcx>(
                 )
             } == ::lanefold::GuardCheck::Demote;
             if demote {
-                ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
             }
         }
     }
@@ -2313,6 +2382,21 @@ fn exprkey_batch<'mcx>(
     for &i in &xk.rows {
         xk.keys.push(xk.key_vals[i as usize]);
         xk.knull.push(xk.key_null[i as usize]);
+    }
+    // Coded-group arm (q29coded): pre-batch gates, BEFORE any probe.
+    // (a) Budget peek — the classic backstop migrates as a side effect,
+    // which would free the compact rows the dg/ch caches point into; the
+    // coded teardown runs the same migration in cache-safe order (flush →
+    // drop caches → disarm) and the batch continues on the staged leg
+    // below, which finds every group in the C table. (b) A NULL derived
+    // key cannot pack into the null-bitmap-free mk1 image — same teardown;
+    // the staged leg's probe handles NULL keys natively (byte-identical).
+    if *coded
+        && (::nodeagg::agg_hash_compact_over_limits(agg) || xk.knull.iter().any(|&nl| nl))
+    {
+        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+        coded_drop_caches(xk, coded);
+        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
     }
     // Probe. Compact first (int keys, no resid), then the dictgroup-style
     // per-epoch code map (dict windows), then the batched staged probe.
@@ -2370,32 +2454,22 @@ fn exprkey_batch<'mcx>(
         // back byte-identically (ChVerdict doc).
         if ch.as_ref().is_some_and(|c| !c.disarmed) {
             let chs = ch.as_mut().expect("just checked Some");
-            match ch_batch(chs, agg, xk, &lane, estate)? {
+            match ch_batch(chs, agg, xk, &lane, *coded, estate)? {
                 ChVerdict::Counted => return Ok(()),
                 ChVerdict::Demote => {
-                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                    return {
-                        // Whole-batch per-row route: flush + memo drop as at
-                        // every other per-row return.
-                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
-                        mm.scratch.invalidate();
-                        per_row_batch(agg, ss, n, estate)
-                    };
+                    // Whole-batch per-row route: flush + memo drop as at
+                    // every other per-row return (coded teardown inside).
+                    return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                 }
                 ChVerdict::Disarm => {
                     let chs = ch.as_mut().expect("just checked Some");
                     chs.disarmed = true;
                     trace_feed("expr-key code-histogram disarmed (spill mode)");
-                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                    return {
-                        // The batch's row-domain guard proof was skipped for
-                        // the ch path, so it must not reach the dg fold leg:
-                        // the universal per-row route runs it instead
-                        // (byte-identical; spill rows take C's row path).
-                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
-                        mm.scratch.invalidate();
-                        per_row_batch(agg, ss, n, estate)
-                    };
+                    // The batch's row-domain guard proof was skipped for
+                    // the ch path, so it must not reach the dg fold leg:
+                    // the universal per-row route runs it instead
+                    // (byte-identical; spill rows take C's row path).
+                    return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                 }
             }
         }
@@ -2405,6 +2479,24 @@ fn exprkey_batch<'mcx>(
             debug_assert!(code < ndict, "filler contract: code < ndict");
             let pg = match xk.dg_slots[code] {
                 Some(pg) => pg,
+                None if *coded => {
+                    // Coded-group resolve (q29coded): intern the memo's
+                    // OUTPUT VALUE once per (epoch, code) — cross-epoch
+                    // group identity is the intern table — and probe the
+                    // compact mk1 table by the u32 id; never a text probe
+                    // of the C tuplehash, never a spill leg (the budget
+                    // peek above bounds the table). First-arrival order is
+                    // the staged leg's exactly (same rows, same sequence).
+                    let key = xk.keys[k];
+                    debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+                    // SAFETY: memo outputs are live non-null text varlenas
+                    // for the staged window (dicteval arena contract).
+                    let v =
+                        unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+                    let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
+                    xk.dg_slots[code] = Some(pg);
+                    pg
+                }
                 None => {
                     let (key, isnull) = (xk.keys[k], xk.knull[k]);
                     ::nodeagg::agg_hash_hash_staged(agg, &[key], &[isnull], &mut xk.hash1)?;
@@ -2425,6 +2517,23 @@ fn exprkey_batch<'mcx>(
                     }
                 }
             };
+            idxs.push(i);
+            groups.push(pg);
+        }
+    } else if *coded {
+        // Raw window under the coded arm: per selected row through the same
+        // intern+probe (raw windows are the rare non-dict chunks; the memo
+        // scratch already carries per-row derived values). The epoch ended —
+        // flush pending histogram counts first, the staged leg's discipline.
+        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+        for k in 0..xk.rows.len() {
+            let i = xk.rows[k];
+            let key = xk.keys[k];
+            debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+            // SAFETY: per-row derived results are live non-null text
+            // varlenas (the memo's Raw-window scratch fill).
+            let v = unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+            let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
             idxs.push(i);
             groups.push(pg);
         }
