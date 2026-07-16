@@ -69,6 +69,7 @@ pub use lifecycle::{
     TaskHandle, TaskLifecycle, TaskParticipant,
 };
 pub use morsel::{MorselRange, MorselSource, StreamSource, SyntheticMorselSource};
+pub use morsel::{GranuleMap, GranuleMapSource, Segments};
 pub use rg::{
     CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork,
     WeakRgHandle,
