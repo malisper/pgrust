@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use ::types_core::{sig_atomic_t, ProcNumber};
 
@@ -62,6 +62,12 @@ pub struct Latch {
     pub maybe_sleeping: AtomicI32,
     pub is_shared: AtomicBool,
     pub owner_pid: AtomicI32,
+    /// Packed waiter::WakerHandle of the owner's structured-wait slot
+    /// (0 = none), re-published by the owner at every wait entry BEFORE it
+    /// arms maybe_sleeping. This is the wake ROUTE — set_latch unparks it
+    /// directly; no global pid-keyed wakeup registry exists. owner_pid stays
+    /// for ownership assertions and diagnostics only.
+    pub waker: AtomicU64,
 }
 
 impl Latch {
@@ -71,6 +77,7 @@ impl Latch {
             maybe_sleeping: AtomicI32::new(0),
             is_shared: AtomicBool::new(is_shared),
             owner_pid: AtomicI32::new(owner_pid),
+            waker: AtomicU64::new(0),
         }
     }
 

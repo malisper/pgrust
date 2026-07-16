@@ -1,8 +1,17 @@
 //! vacuumlazy.c phases I (scan/prune/freeze), II (index vacuum via
 //! ambulkdelete), III (mark LP_UNUSED), and end-of-vacuum rel truncation,
-//! single-table lane. Loud named panics: parallel vacuum,
-//! eager scanning. C divergences (recorded): the read stream is collapsed to
-//! sync per-block reads (bitmap precedent).
+//! single-table lane. Loud named panics: eager scanning. C divergences
+//! (recorded): the read stream is collapsed to sync per-block reads (bitmap
+//! precedent).
+//!
+//! Phase-I MORSELIZATION (docs/design/vacuum-morsels.md, inc-2): behind
+//! the morsel arm (default ON since train-21; `PGRUST_RUNTIME_VACUUM=0` kills, requires the runtime master switch) the
+//! heap scan runs as SCAN task sets on the morsel runtime — see [`morsels`].
+//! The per-block bodies below are shared verbatim between the serial arm and
+//! the morsel workers: they take a read-only [`ScanEnv`] + the order-free
+//! fold block [`ScanFolds`] + a dead-TID sink instead of the whole
+//! LVRelState, so the same code folds into the serial state or a worker's
+//! `VacScanLocal` (anti-goal zero: no behavior change to WHAT vacuum does).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -63,6 +72,34 @@ const REL_TRUNCATE_MINIMUM: BlockNumber = 1000;
 const REL_TRUNCATE_FRACTION: BlockNumber = 16;
 const BYPASS_THRESHOLD_PAGES: f64 = 0.02;
 
+/// Read-only inputs of the phase-I per-block bodies. One per scanning
+/// participant: the serial arm builds it from LVRelState, each morsel worker
+/// from its own opened relation + the generation's published cutoffs
+/// (workers derive their OWN vistest at bind — doc §5.1; every worker
+/// horizon >= the leader's, within C's envelope).
+pub(crate) struct ScanEnv<'a, 'mcx> {
+    pub(crate) rel: &'a RelationData<'mcx>,
+    pub(crate) cutoffs: &'a VacuumCutoffs,
+    pub(crate) vistest: GlobalVisStateHandle,
+    pub(crate) aggressive: bool,
+    pub(crate) nindexes: usize,
+}
+
+/// The phase-I fold block: the LVRelState counters the per-block bodies
+/// write, every one an order-insensitive-exact fold (sum / XID-min / max —
+/// doc §3.2), homed on the gated vacuum_morsels::ScanCounters unit so the
+/// serial arm and the morsel workers fold IDENTICAL state. `offnum` is C's
+/// error-context bookkeeping (vacrel->offnum), participant-local.
+pub(crate) struct ScanFolds {
+    pub(crate) counters: ::vacuum_morsels::ScanCounters,
+    pub(crate) offnum: OffsetNumber,
+}
+
+/// Dead-TID sink of the per-block bodies: the serial arm feeds the round
+/// TidStore (dead_items_add), morsel workers append VacScanLocal runs +
+/// shared byte accounting (doc §3.2).
+pub(crate) type DeadSink<'x> = &'x mut dyn FnMut(BlockNumber, &[OffsetNumber]) -> PgResult<()>;
+
 pub struct LVRelState<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     rel: &'a RelationData<'mcx>,
@@ -82,16 +119,19 @@ pub struct LVRelState<'a, 'mcx> {
 
     cutoffs: VacuumCutoffs,
     vistest: GlobalVisStateHandle,
-    NewRelfrozenXid: TransactionId,
-    NewRelminMxid: ::types_core::MultiXactId,
     skippedallvis: bool,
+    /// §5.2 fail-closed coverage guard (morsel arm only): a scan hole was
+    /// detected — suppress relfrozenxid/relminmxid advancement.
+    coverage_hole: bool,
 
     rel_pages: BlockNumber,
-    scanned_pages: BlockNumber,
+    // VACUUM VERBOSE / autovacuum-log truncation accounting (phase IV is
+    // serial; not part of the order-free folds).
     removed_pages: BlockNumber,
-    new_frozen_tuple_pages: BlockNumber,
-    lpdead_item_pages: BlockNumber,
-    nonempty_pages: BlockNumber,
+
+    /// The order-free phase-I folds (incl. NewRelfrozenXid/NewRelminMxid
+    /// trackers and vacrel->offnum) — see [`ScanFolds`].
+    folds: ScanFolds,
 
     // Option only so phase III can split the borrow (take/put-back); always
     // Some between dead_items_alloc and dead_items_cleanup.
@@ -100,23 +140,9 @@ pub struct LVRelState<'a, 'mcx> {
     pvs: Option<vacuumparallel::ParallelVacuumState>,
 
     num_index_scans: i64,
-    tuples_deleted: i64,
-    tuples_frozen: i64,
-    lpdead_items: i64,
-    live_tuples: i64,
-    recently_dead_tuples: i64,
-    missed_dead_tuples: i64,
-    missed_dead_pages: BlockNumber,
-
-    vm_new_visible_pages: BlockNumber,
-    vm_new_visible_frozen_pages: BlockNumber,
-    vm_new_frozen_pages: BlockNumber,
 
     new_rel_tuples: f64,
     new_live_tuples: f64,
-
-    // Error-context bookkeeping (C's vacrel->offnum).
-    offnum: OffsetNumber,
 
     current_block: BlockNumber,
     next_unskippable_block: BlockNumber,
@@ -196,34 +222,22 @@ pub fn heap_vacuum_rel<'mcx>(
         do_rel_truncate: params.truncate != VacOptValue::Disabled,
         cutoffs,
         vistest,
-        // Trackers start at the removal cutoffs; pruning ratchets them back to
-        // the oldest extant XID/MXID.
-        NewRelfrozenXid: cutoffs.OldestXmin,
-        NewRelminMxid: cutoffs.OldestMxact,
         skippedallvis: false,
+        coverage_hole: false,
         rel_pages,
-        scanned_pages: 0,
         removed_pages: 0,
-        new_frozen_tuple_pages: 0,
-        lpdead_item_pages: 0,
-        nonempty_pages: 0,
+        folds: ScanFolds {
+            // Trackers start at the removal cutoffs; pruning ratchets them
+            // back to the oldest extant XID/MXID.
+            counters: ::vacuum_morsels::ScanCounters::seed(cutoffs.OldestXmin, cutoffs.OldestMxact),
+            offnum: InvalidOffsetNumber,
+        },
         dead_items: None,
         dead_items_info: VacDeadItemsInfo { max_bytes: 0, num_items: 0 },
         pvs: None,
         num_index_scans: 0,
-        tuples_deleted: 0,
-        tuples_frozen: 0,
-        lpdead_items: 0,
-        live_tuples: 0,
-        recently_dead_tuples: 0,
-        missed_dead_tuples: 0,
-        missed_dead_pages: 0,
-        vm_new_visible_pages: 0,
-        vm_new_visible_frozen_pages: 0,
-        vm_new_frozen_pages: 0,
         new_rel_tuples: 0.0,
         new_live_tuples: 0.0,
-        offnum: InvalidOffsetNumber,
         current_block: InvalidBlockNumber,
         next_unskippable_block: InvalidBlockNumber,
         next_unskippable_allvis: false,
@@ -263,7 +277,7 @@ pub fn heap_vacuum_rel<'mcx>(
     lazy_check_wraparound_failsafe(&mut vacrel)?;
     dead_items_alloc(&mut vacrel, params.nworkers)?;
 
-    lazy_scan_heap(&mut vacrel, mcx)?;
+    lazy_scan_heap(&mut vacrel, mcx, params.nworkers)?;
 
     // dead_items_cleanup: ends parallel mode (copying worker stats out first),
     // then drops the tidstore.
@@ -288,24 +302,30 @@ pub fn heap_vacuum_rel<'mcx>(
 
     // Aggressive VACUUMs must reach FreezeLimit/MultiXactCutoff.
     debug_assert!(
-        vacrel.NewRelfrozenXid == vacrel.cutoffs.OldestXmin
+        vacrel.folds.counters.NewRelfrozenXid == vacrel.cutoffs.OldestXmin
             || ::types_core::xact::TransactionIdPrecedesOrEquals(
                 if vacrel.aggressive { vacrel.cutoffs.FreezeLimit } else { vacrel.cutoffs.relfrozenxid },
-                vacrel.NewRelfrozenXid
+                vacrel.folds.counters.NewRelfrozenXid
             )
     );
     debug_assert!(
-        vacrel.NewRelminMxid == vacrel.cutoffs.OldestMxact
+        vacrel.folds.counters.NewRelminMxid == vacrel.cutoffs.OldestMxact
             || ::types_core::xact::MultiXactIdPrecedesOrEquals(
                 if vacrel.aggressive { vacrel.cutoffs.MultiXactCutoff } else { vacrel.cutoffs.relminmxid },
-                vacrel.NewRelminMxid
+                vacrel.folds.counters.NewRelminMxid
             )
     );
     if vacrel.skippedallvis {
         // Skipped all-visible ranges may hold unfrozen XIDs the trackers missed.
         debug_assert!(!vacrel.aggressive);
-        vacrel.NewRelfrozenXid = InvalidTransactionId;
-        vacrel.NewRelminMxid = 0;
+    }
+    if vacrel.skippedallvis || vacrel.coverage_hole {
+        // coverage_hole: the §5.2 fail-closed guard — a morsel round's fold
+        // coverage could not be verified, so advancement is suppressed
+        // (always-safe, C's skippedallvis behavior; fires only under fault
+        // injection — the gate record tracks that).
+        vacrel.folds.counters.NewRelfrozenXid = InvalidTransactionId;
+        vacrel.folds.counters.NewRelminMxid = 0;
     }
 
     let new_rel_pages = vacrel.rel_pages;
@@ -323,8 +343,8 @@ pub fn heap_vacuum_rel<'mcx>(
         new_rel_allvisible,
         new_rel_allfrozen,
         vacrel.nindexes > 0,
-        vacrel.NewRelfrozenXid,
-        vacrel.NewRelminMxid,
+        vacrel.folds.counters.NewRelfrozenXid,
+        vacrel.folds.counters.NewRelminMxid,
         false,
     )?;
 
@@ -332,7 +352,8 @@ pub fn heap_vacuum_rel<'mcx>(
         rel.rd_id,
         rel.rd_rel.relisshared,
         vacrel.new_live_tuples.max(0.0) as i64,
-        vacrel.recently_dead_tuples + vacrel.missed_dead_tuples,
+        (vacrel.folds.counters.recently_dead_tuples + vacrel.folds.counters.missed_dead_tuples)
+            as i64,
         starttime,
     );
     pgstat_progress_end_command();
@@ -442,7 +463,7 @@ fn vacuum_instrument_report(
             msg, dbname, relnamespace, relname, vacrel.num_index_scans
         );
     }
-    let pct = |part: BlockNumber| {
+    let pct = |part: u64| {
         if orig_rel_pages == 0 { 100.0 } else { 100.0 * part as f64 / orig_rel_pages as f64 }
     };
     let _ = writeln!(
@@ -450,8 +471,8 @@ fn vacuum_instrument_report(
         "pages: {} removed, {} remain, {} scanned ({:.2}% of total), {} eagerly scanned",
         vacrel.removed_pages,
         new_rel_pages,
-        vacrel.scanned_pages,
-        pct(vacrel.scanned_pages),
+        vacrel.folds.counters.scanned_pages,
+        pct(vacrel.folds.counters.scanned_pages),
         0, // eager scanning elided in this port (heap_vacuum_eager_scan_setup)
     );
     let _ = writeln!(
@@ -474,26 +495,28 @@ fn vacuum_instrument_report(
         vacrel.cutoffs.OldestXmin, diff
     );
     if frozenxid_updated {
-        let diff = vacrel.NewRelfrozenXid.wrapping_sub(vacrel.cutoffs.relfrozenxid) as i32;
+        let diff =
+            vacrel.folds.counters.NewRelfrozenXid.wrapping_sub(vacrel.cutoffs.relfrozenxid) as i32;
         let _ = writeln!(
             buf,
             "new relfrozenxid: {}, which is {} XIDs ahead of previous value",
-            vacrel.NewRelfrozenXid, diff
+            vacrel.folds.counters.NewRelfrozenXid, diff
         );
     }
     if minmulti_updated {
-        let diff = vacrel.NewRelminMxid.wrapping_sub(vacrel.cutoffs.relminmxid) as i32;
+        let diff =
+            vacrel.folds.counters.NewRelminMxid.wrapping_sub(vacrel.cutoffs.relminmxid) as i32;
         let _ = writeln!(
             buf,
             "new relminmxid: {}, which is {} MXIDs ahead of previous value",
-            vacrel.NewRelminMxid, diff
+            vacrel.folds.counters.NewRelminMxid, diff
         );
     }
     let _ = writeln!(
         buf,
         "frozen: {} pages from table ({:.2}% of total) had {} tuples frozen",
-        vacrel.new_frozen_tuple_pages,
-        pct(vacrel.new_frozen_tuple_pages),
+        vacrel.folds.counters.new_frozen_tuple_pages,
+        pct(vacrel.folds.counters.new_frozen_tuple_pages),
         vacrel.tuples_frozen
     );
     let _ = writeln!(
@@ -512,8 +535,8 @@ fn vacuum_instrument_report(
         let _ = writeln!(
             buf,
             "{} pages from table ({:.2}% of total) had {} dead item identifiers removed",
-            vacrel.lpdead_item_pages,
-            pct(vacrel.lpdead_item_pages),
+            vacrel.folds.counters.lpdead_item_pages,
+            pct(vacrel.folds.counters.lpdead_item_pages),
             vacrel.lpdead_items
         );
     } else {
@@ -525,8 +548,8 @@ fn vacuum_instrument_report(
         let _ = writeln!(
             buf,
             "{} pages from table ({:.2}% of total) have {} dead item identifiers",
-            vacrel.lpdead_item_pages,
-            pct(vacrel.lpdead_item_pages),
+            vacrel.folds.counters.lpdead_item_pages,
+            pct(vacrel.folds.counters.lpdead_item_pages),
             vacrel.lpdead_items
         );
     }
@@ -635,19 +658,17 @@ fn dead_items_alloc(vacrel: &mut LVRelState<'_, '_>, nworkers: i32) -> PgResult<
 }
 
 fn dead_items_add(
-    vacrel: &mut LVRelState<'_, '_>,
+    dead_items: &mut TidStore,
+    dead_items_info: &mut VacDeadItemsInfo,
     blkno: BlockNumber,
     offsets: &[OffsetNumber],
 ) -> PgResult<()> {
-    vacrel.dead_items.as_mut().unwrap().set_block_offsets(blkno, offsets)?;
-    vacrel.dead_items_info.num_items += offsets.len() as i64;
+    dead_items.set_block_offsets(blkno, offsets)?;
+    dead_items_info.num_items += offsets.len() as i64;
 
     pgstat_progress_update_multi_param(
         &[PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS, PROGRESS_VACUUM_DEAD_TUPLE_BYTES],
-        &[
-            vacrel.dead_items_info.num_items,
-            vacrel.dead_items.as_ref().unwrap().memory_usage() as i64,
-        ],
+        &[dead_items_info.num_items, dead_items.memory_usage() as i64],
     );
     Ok(())
 }
@@ -682,9 +703,9 @@ fn collect_dead_tids<'mcx>(vacrel: &LVRelState<'_, 'mcx>) -> PgVec<'mcx, ItemPoi
     tids
 }
 
-fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()> {
+fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32) -> PgResult<()> {
+    let _ = mcx;
     let rel_pages = vacrel.rel_pages;
-    let mut blkno: BlockNumber = 0;
     let mut next_fsm_block_to_vacuum: BlockNumber = 0;
     let mut vmbuffer = VmBuffer::new();
 
@@ -701,14 +722,41 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
         ],
     );
 
-    vacrel.current_block = InvalidBlockNumber;
-    vacrel.next_unskippable_block = InvalidBlockNumber;
+    // Morsel arm (doc §3, inc-2): behind PGRUST_RUNTIME_VACUUM=1 the heap
+    // scan runs as RG-per-round SCAN task sets; INDEX/REAP stay the ported
+    // serial paths driven from lazy_vacuum between rounds. Every refusal —
+    // and every handoff (quiesce fallback, failsafe fire, small tail) — is
+    // today's serial scan, resumed at `resume_block` with C's own cursor
+    // machinery.
+    let mut resume_block: BlockNumber = 0;
+    if let Some(k) = morsels::admit(vacrel, nrequested) {
+        match morsels::scan_rounds(vacrel, k)? {
+            morsels::ScanHandoff::Refused => {}
+            morsels::ScanHandoff::Resume { block, next_fsm } => {
+                resume_block = block;
+                next_fsm_block_to_vacuum = next_fsm;
+            }
+        }
+    }
+    let mut blkno: BlockNumber = resume_block;
+
+    if resume_block == 0 {
+        vacrel.current_block = InvalidBlockNumber;
+        vacrel.next_unskippable_block = InvalidBlockNumber;
+    } else {
+        // Serial resume at `resume_block` (morsel handoff): the cursor
+        // machine's next step scans/decides from exactly that block.
+        vacrel.current_block = resume_block.wrapping_sub(1);
+        vacrel.next_unskippable_block = resume_block.wrapping_sub(1);
+    }
     vacrel.next_unskippable_allvis = false;
 
     loop {
         vacuum_delay_point(false)?;
 
-        if vacrel.scanned_pages > 0 && vacrel.scanned_pages % FAILSAFE_EVERY_PAGES == 0 {
+        if vacrel.folds.counters.scanned_pages > 0
+            && vacrel.folds.counters.scanned_pages % FAILSAFE_EVERY_PAGES as u64 == 0
+        {
             lazy_check_wraparound_failsafe(vacrel)?;
         }
 
@@ -738,7 +786,7 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             ReadBufferMode::Normal,
             vacrel.bstrategy.clone(),
         )?;
-        vacrel.scanned_pages += 1;
+        vacrel.folds.counters.scanned_pages += 1;
 
         pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_SCANNED, blkno as i64);
 
@@ -753,15 +801,40 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
         // SAFETY: buffer pinned + at least share-locked above.
         let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
 
-        if lazy_scan_new_or_empty(vacrel, buf, blkno, page, !got_cleanup_lock, &vmbuffer)? {
+        // Split borrows: the per-block bodies take the read-only env + the
+        // fold block + the dead-TID sink (the round TidStore on this arm).
+        let LVRelState {
+            rel,
+            cutoffs,
+            vistest,
+            aggressive,
+            nindexes,
+            do_index_vacuuming,
+            folds,
+            dead_items,
+            dead_items_info,
+            ..
+        } = &mut *vacrel;
+        let env = ScanEnv {
+            rel: *rel,
+            cutoffs: &*cutoffs,
+            vistest: *vistest,
+            aggressive: *aggressive,
+            nindexes: *nindexes,
+        };
+        let mut sink = |blkno: BlockNumber, offsets: &[OffsetNumber]| {
+            dead_items_add(dead_items.as_mut().unwrap(), dead_items_info, blkno, offsets)
+        };
+
+        if lazy_scan_new_or_empty(&env, folds, buf, blkno, page, !got_cleanup_lock, &vmbuffer)? {
             continue;
         }
 
         let mut has_lpdead_items = false;
         if !got_cleanup_lock
-            && !lazy_scan_noprune(vacrel, buf, blkno, page, &mut has_lpdead_items)?
+            && !lazy_scan_noprune(&env, folds, &mut sink, buf, blkno, page, &mut has_lpdead_items)?
         {
-            debug_assert!(vacrel.aggressive);
+            debug_assert!(env.aggressive);
             bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
             bufmgr_seams::lock_buffer_for_cleanup::call(buf)?;
             got_cleanup_lock = true;
@@ -770,7 +843,9 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
         let mut ndeleted = 0;
         if got_cleanup_lock {
             ndeleted = lazy_scan_prune(
-                vacrel,
+                &env,
+                folds,
+                &mut sink,
                 buf,
                 blkno,
                 page,
@@ -780,18 +855,18 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
             )?;
         }
 
-        if vacrel.nindexes == 0 || !vacrel.do_index_vacuuming || !has_lpdead_items {
+        if env.nindexes == 0 || !*do_index_vacuuming || !has_lpdead_items {
             let freespace = page.heap_free_space();
             bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
             bufmgr_seams::release_buffer::call(buf)?;
-            freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
+            freespace::RecordPageWithFreeSpace(env.rel, blkno, freespace)?;
 
             if got_cleanup_lock
-                && vacrel.nindexes == 0
+                && env.nindexes == 0
                 && ndeleted > 0
                 && blkno - next_fsm_block_to_vacuum >= VACUUM_FSM_EVERY_PAGES
             {
-                freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, blkno)?;
+                freespace::FreeSpaceMapVacuumRange(env.rel, next_fsm_block_to_vacuum, blkno)?;
                 next_fsm_block_to_vacuum = blkno;
             }
         } else {
@@ -809,12 +884,12 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>) -> PgResult<()>
     vacrel.new_live_tuples = vac_estimate_reltuples(
         vacrel.rel,
         rel_pages,
-        vacrel.scanned_pages,
-        vacrel.live_tuples as f64,
+        vacrel.folds.counters.scanned_pages as BlockNumber,
+        vacrel.folds.counters.live_tuples as f64,
     );
     vacrel.new_rel_tuples = vacrel.new_live_tuples.max(0.0)
-        + vacrel.recently_dead_tuples as f64
-        + vacrel.missed_dead_tuples as f64;
+        + vacrel.folds.counters.recently_dead_tuples as f64
+        + vacrel.folds.counters.missed_dead_tuples as f64;
 
     if vacrel.dead_items_info.num_items > 0 {
         lazy_vacuum(vacrel)?;
@@ -914,7 +989,8 @@ fn page_is_empty(page: PageRef<'_>) -> bool {
 }
 
 fn lazy_scan_new_or_empty(
-    vacrel: &mut LVRelState<'_, '_>,
+    env: &ScanEnv<'_, '_>,
+    folds: &mut ScanFolds,
     buf: Buffer,
     blkno: BlockNumber,
     page: PageRef<'_>,
@@ -924,9 +1000,9 @@ fn lazy_scan_new_or_empty(
     if page.is_new() {
         bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
         bufmgr_seams::release_buffer::call(buf)?;
-        if freespace::GetRecordedFreeSpace(vacrel.rel, blkno)? == 0 {
+        if freespace::GetRecordedFreeSpace(env.rel, blkno)? == 0 {
             let freespace: Size = BLCKSZ - SizeOfPageHeaderData;
-            freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
+            freespace::RecordPageWithFreeSpace(env.rel, blkno, freespace)?;
         }
         return Ok(true);
     }
@@ -945,7 +1021,7 @@ fn lazy_scan_new_or_empty(
         if !page.is_all_visible() {
             bufmgr_seams::mark_buffer_dirty::call(buf)?;
 
-            if relation_needs_wal(vacrel.rel)
+            if relation_needs_wal(env.rel)
                 && bufmgr_seams::buffer_page_get_lsn::call(buf) == 0
             {
                 xloginsert_seams::log_newpage_buffer::call(buf, true)?;
@@ -955,7 +1031,7 @@ fn lazy_scan_new_or_empty(
             let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
             pm.set_all_visible();
             visibilitymap_set(
-                vacrel.rel,
+                env.rel,
                 blkno,
                 buf,
                 0,
@@ -963,14 +1039,14 @@ fn lazy_scan_new_or_empty(
                 InvalidTransactionId,
                 VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
             )?;
-            vacrel.vm_new_visible_pages += 1;
-            vacrel.vm_new_visible_frozen_pages += 1;
+            folds.counters.vm_new_visible_pages += 1;
+            folds.counters.vm_new_visible_frozen_pages += 1;
         }
 
         let freespace = page.heap_free_space();
         bufmgr_seams::lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
         bufmgr_seams::release_buffer::call(buf)?;
-        freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
+        freespace::RecordPageWithFreeSpace(env.rel, blkno, freespace)?;
         return Ok(true);
     }
 
@@ -980,7 +1056,9 @@ fn lazy_scan_new_or_empty(
 /// Share-lock fallback for lazy_scan_prune: no pruning or freezing. False
 /// (page unprocessed) only when an aggressive VACUUM must freeze this page.
 fn lazy_scan_noprune(
-    vacrel: &mut LVRelState<'_, '_>,
+    env: &ScanEnv<'_, '_>,
+    folds: &mut ScanFolds,
+    dead_sink: DeadSink<'_>,
     buf: Buffer,
     blkno: BlockNumber,
     page: PageRef<'_>,
@@ -990,17 +1068,17 @@ fn lazy_scan_noprune(
 
     let mut hastup = false;
     let mut lpdead_items = 0usize;
-    let mut live_tuples: i64 = 0;
-    let mut recently_dead_tuples: i64 = 0;
-    let mut missed_dead_tuples: i64 = 0;
-    let mut NoFreezePageRelfrozenXid = vacrel.NewRelfrozenXid;
-    let mut NoFreezePageRelminMxid = vacrel.NewRelminMxid;
+    let mut live_tuples: u64 = 0;
+    let mut recently_dead_tuples: u64 = 0;
+    let mut missed_dead_tuples: u64 = 0;
+    let mut NoFreezePageRelfrozenXid = folds.counters.NewRelfrozenXid;
+    let mut NoFreezePageRelminMxid = folds.counters.NewRelminMxid;
     let mut deadoffsets = [InvalidOffsetNumber; MaxHeapTuplesPerPage];
 
     let maxoff = page.max_offset_number();
     let mut offnum = FirstOffsetNumber;
     while offnum <= maxoff {
-        vacrel.offnum = offnum;
+        folds.offnum = offnum;
         let itemid = page.item_id(offnum);
 
         if !itemid.is_used() {
@@ -1031,26 +1109,26 @@ fn lazy_scan_noprune(
                 ptr,
                 len,
                 ItemPointerData::new(blkno, offnum),
-                vacrel.rel.rd_id,
+                env.rel.rd_id,
             )
         };
 
         if heapam::freeze::heap_tuple_should_freeze(
             tuple.t_data(),
-            &vacrel.cutoffs,
+            env.cutoffs,
             &mut NoFreezePageRelfrozenXid,
             &mut NoFreezePageRelminMxid,
-        )? && vacrel.aggressive
+        )? && env.aggressive
         {
             // Aggressive VACUUM must advance relfrozenxid past FreezeLimit:
             // only lazy_scan_prune under a cleanup lock can freeze this page.
-            vacrel.offnum = InvalidOffsetNumber;
+            folds.offnum = InvalidOffsetNumber;
             return Ok(false);
         }
 
         match heapam_visibility_seams::heap_tuple_satisfies_vacuum::call(
             &mut tuple,
-            vacrel.cutoffs.OldestXmin,
+            env.cutoffs.OldestXmin,
             buf,
         )? {
             HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS | HTSV_Result::HEAPTUPLE_LIVE => {
@@ -1067,35 +1145,35 @@ fn lazy_scan_noprune(
         offnum += 1;
     }
 
-    vacrel.offnum = InvalidOffsetNumber;
+    folds.offnum = InvalidOffsetNumber;
 
     // Freezing/pruning is deferred to the next VACUUM; ratchet the trackers
     // last (lazy_scan_prune expects a clean slate).
-    vacrel.NewRelfrozenXid = NoFreezePageRelfrozenXid;
-    vacrel.NewRelminMxid = NoFreezePageRelminMxid;
+    folds.counters.NewRelfrozenXid = NoFreezePageRelfrozenXid;
+    folds.counters.NewRelminMxid = NoFreezePageRelminMxid;
 
-    if vacrel.nindexes == 0 {
+    if env.nindexes == 0 {
         if lpdead_items > 0 {
             // One-pass strategy without a cleanup lock: count LP_DEAD items
             // as missed instead of maintaining a dedicated reap lane, as C.
             hastup = true;
-            missed_dead_tuples += lpdead_items as i64;
+            missed_dead_tuples += lpdead_items as u64;
         }
     } else if lpdead_items > 0 {
-        vacrel.lpdead_item_pages += 1;
-        dead_items_add(vacrel, blkno, &deadoffsets[..lpdead_items])?;
-        vacrel.lpdead_items += lpdead_items as i64;
+        folds.counters.lpdead_item_pages += 1;
+        dead_sink(blkno, &deadoffsets[..lpdead_items])?;
+        folds.counters.lpdead_items += lpdead_items as u64;
     }
 
-    vacrel.live_tuples += live_tuples;
-    vacrel.recently_dead_tuples += recently_dead_tuples;
-    vacrel.missed_dead_tuples += missed_dead_tuples;
+    folds.counters.live_tuples += live_tuples;
+    folds.counters.recently_dead_tuples += recently_dead_tuples;
+    folds.counters.missed_dead_tuples += missed_dead_tuples;
     if missed_dead_tuples > 0 {
-        vacrel.missed_dead_pages += 1;
+        folds.counters.missed_dead_pages += 1;
     }
 
     if hastup {
-        vacrel.nonempty_pages = blkno + 1;
+        folds.counters.nonempty_pages = folds.counters.nonempty_pages.max(blkno + 1);
     }
 
     *has_lpdead_items = lpdead_items > 0;
@@ -1104,7 +1182,9 @@ fn lazy_scan_noprune(
 
 #[allow(clippy::too_many_arguments)]
 fn lazy_scan_prune(
-    vacrel: &mut LVRelState<'_, '_>,
+    env: &ScanEnv<'_, '_>,
+    folds: &mut ScanFolds,
+    dead_sink: DeadSink<'_>,
     buf: Buffer,
     blkno: BlockNumber,
     page: PageRef<'_>,
@@ -1113,34 +1193,34 @@ fn lazy_scan_prune(
     has_lpdead_items: &mut bool,
 ) -> PgResult<i32> {
     let mut prune_options = HEAP_PAGE_PRUNE_FREEZE;
-    if vacrel.nindexes == 0 {
+    if env.nindexes == 0 {
         prune_options |= HEAP_PAGE_PRUNE_MARK_UNUSED_NOW;
     }
 
     let mut presult = PruneFreezeResult::default();
-    let mut new_relfrozen_xid = vacrel.NewRelfrozenXid;
-    let mut new_relmin_mxid = vacrel.NewRelminMxid;
+    let mut new_relfrozen_xid = folds.counters.NewRelfrozenXid;
+    let mut new_relmin_mxid = folds.counters.NewRelminMxid;
     heap_page_prune_and_freeze(
-        vacrel.rel,
+        env.rel,
         buf,
-        vacrel.vistest,
+        env.vistest,
         prune_options,
-        Some(&vacrel.cutoffs),
+        Some(env.cutoffs),
         &mut presult,
         PruneReason::PruneVacuumScan,
-        &mut vacrel.offnum,
+        &mut folds.offnum,
         Some(&mut new_relfrozen_xid),
         Some(&mut new_relmin_mxid),
     )?;
-    vacrel.NewRelfrozenXid = new_relfrozen_xid;
-    vacrel.NewRelminMxid = new_relmin_mxid;
-    debug_assert!(vacrel.NewRelminMxid != 0);
-    debug_assert!(TransactionIdIsValid(vacrel.NewRelfrozenXid));
+    folds.counters.NewRelfrozenXid = new_relfrozen_xid;
+    folds.counters.NewRelminMxid = new_relmin_mxid;
+    debug_assert!(folds.counters.NewRelminMxid != 0);
+    debug_assert!(TransactionIdIsValid(folds.counters.NewRelfrozenXid));
 
     if presult.nfrozen > 0 {
         // Counts pages with newly frozen tuples, not pages newly all-frozen
         // in the VM.
-        vacrel.new_frozen_tuple_pages += 1;
+        folds.counters.new_frozen_tuple_pages += 1;
     }
 
     // Prune-time visibility must agree with heap_page_is_all_visible (C's
@@ -1148,27 +1228,28 @@ fn lazy_scan_prune(
     #[cfg(debug_assertions)]
     if presult.all_visible {
         debug_assert!(presult.lpdead_items == 0);
-        let (dbg_av, dbg_af, dbg_cutoff) = heap_page_is_all_visible(vacrel, buf)?;
+        let (dbg_av, dbg_af, dbg_cutoff) =
+            heap_page_is_all_visible(env.rel, env.cutoffs.OldestXmin, &mut folds.offnum, buf)?;
         debug_assert!(dbg_av);
         debug_assert!(presult.all_frozen == dbg_af);
         debug_assert!(!TransactionIdIsValid(dbg_cutoff) || dbg_cutoff == presult.vm_conflict_horizon);
     }
 
     if presult.lpdead_items > 0 {
-        vacrel.lpdead_item_pages += 1;
+        folds.counters.lpdead_item_pages += 1;
         let deadoffsets = &mut presult.deadoffsets[..presult.lpdead_items as usize];
         deadoffsets.sort_unstable();
-        dead_items_add(vacrel, blkno, deadoffsets)?;
+        dead_sink(blkno, deadoffsets)?;
     }
 
-    vacrel.tuples_deleted += presult.ndeleted as i64;
-    vacrel.tuples_frozen += presult.nfrozen as i64;
-    vacrel.lpdead_items += presult.lpdead_items as i64;
-    vacrel.live_tuples += presult.live_tuples as i64;
-    vacrel.recently_dead_tuples += presult.recently_dead_tuples as i64;
+    folds.counters.tuples_deleted += presult.ndeleted as u64;
+    folds.counters.tuples_frozen += presult.nfrozen as u64;
+    folds.counters.lpdead_items += presult.lpdead_items as u64;
+    folds.counters.live_tuples += presult.live_tuples as u64;
+    folds.counters.recently_dead_tuples += presult.recently_dead_tuples as u64;
 
     if presult.hastup {
-        vacrel.nonempty_pages = blkno + 1;
+        folds.counters.nonempty_pages = folds.counters.nonempty_pages.max(blkno + 1);
     }
 
     *has_lpdead_items = presult.lpdead_items > 0;
@@ -1193,33 +1274,33 @@ fn lazy_scan_prune(
         pm.set_all_visible();
         bufmgr_seams::mark_buffer_dirty::call(buf)?;
         let old_vmbits =
-            visibilitymap_set(vacrel.rel, blkno, buf, 0, vmbuffer, vm_conflict_horizon, flags)?;
+            visibilitymap_set(env.rel, blkno, buf, 0, vmbuffer, vm_conflict_horizon, flags)?;
 
         if old_vmbits & VISIBILITYMAP_ALL_VISIBLE == 0 {
-            vacrel.vm_new_visible_pages += 1;
+            folds.counters.vm_new_visible_pages += 1;
             if all_frozen {
-                vacrel.vm_new_visible_frozen_pages += 1;
+                folds.counters.vm_new_visible_frozen_pages += 1;
             }
         } else if old_vmbits & VISIBILITYMAP_ALL_FROZEN == 0 && all_frozen {
-            vacrel.vm_new_frozen_pages += 1;
+            folds.counters.vm_new_frozen_pages += 1;
         }
     } else if all_visible_according_to_vm
         && !page.is_all_visible()
-        && visibilitymap_get_status(vacrel.rel, blkno, vmbuffer)? != 0
+        && visibilitymap_get_status(env.rel, blkno, vmbuffer)? != 0
     {
         // VM bit set while the page-level bit is clear: repair, as C (WARNING
         // elided).
-        visibilitymap_clear(vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
+        visibilitymap_clear(env.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if presult.lpdead_items > 0 && page.is_all_visible() {
         // SAFETY: pinned + cleanup-locked by the scan loop.
         let mut pm = unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
         pm.clear_all_visible();
         bufmgr_seams::mark_buffer_dirty::call(buf)?;
-        visibilitymap_clear(vacrel.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
+        visibilitymap_clear(env.rel, blkno, vmbuffer, VISIBILITYMAP_VALID_BITS)?;
     } else if all_visible_according_to_vm
         && all_visible
         && all_frozen
-        && !vm_all_frozen(vacrel.rel, blkno, vmbuffer)?
+        && !vm_all_frozen(env.rel, blkno, vmbuffer)?
     {
         if !page.is_all_visible() {
             // SAFETY: pinned + cleanup-locked by the scan loop.
@@ -1229,7 +1310,7 @@ fn lazy_scan_prune(
         }
         debug_assert!(!TransactionIdIsValid(vm_conflict_horizon));
         let old_vmbits = visibilitymap_set(
-            vacrel.rel,
+            env.rel,
             blkno,
             buf,
             0,
@@ -1238,10 +1319,10 @@ fn lazy_scan_prune(
             VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
         )?;
         if old_vmbits & VISIBILITYMAP_ALL_VISIBLE == 0 {
-            vacrel.vm_new_visible_pages += 1;
-            vacrel.vm_new_visible_frozen_pages += 1;
+            folds.counters.vm_new_visible_pages += 1;
+            folds.counters.vm_new_visible_frozen_pages += 1;
         } else {
-            vacrel.vm_new_frozen_pages += 1;
+            folds.counters.vm_new_frozen_pages += 1;
         }
     }
 
@@ -1250,7 +1331,7 @@ fn lazy_scan_prune(
 
 fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     debug_assert!(vacrel.nindexes > 0);
-    debug_assert!(vacrel.lpdead_item_pages > 0);
+    debug_assert!(vacrel.folds.counters.lpdead_item_pages > 0);
 
     if !vacrel.do_index_vacuuming {
         debug_assert!(!vacrel.do_index_cleanup);
@@ -1261,9 +1342,9 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut bypass = false;
     if vacrel.consider_bypass_optimization && vacrel.rel_pages > 0 {
         debug_assert!(vacrel.num_index_scans == 0);
-        debug_assert!(vacrel.lpdead_items == vacrel.dead_items_info.num_items);
+        debug_assert!(vacrel.folds.counters.lpdead_items == vacrel.dead_items_info.num_items as u64);
         let threshold = vacrel.rel_pages as f64 * BYPASS_THRESHOLD_PAGES;
-        bypass = (vacrel.lpdead_item_pages as f64) < threshold
+        bypass = (vacrel.folds.counters.lpdead_item_pages as f64) < threshold
             && vacrel.dead_items.as_ref().unwrap().memory_usage() < 32 * 1024 * 1024;
     }
 
@@ -1300,6 +1381,31 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
 
     let dead_tids = collect_dead_tids(vacrel);
 
+    // W1 forensics (trace-gated): the snapshot the index-side reap-membership
+    // binary search (nbtree tid_is_member) consumes MUST be strictly
+    // ascending under ItemPointerCompare; report length + the first
+    // violation so a phantom-index-entry recurrence self-classifies
+    // (family A: store short of the lpdead fold = worker collection miss;
+    // family B: full-but-unsorted snapshot or a per-index removed shortfall
+    // = snapshot/search miss).
+    if morsels::vtrace_enabled() {
+        let mut first_bad: i64 = -1;
+        for i in 1..dead_tids.len() {
+            if ::types_tuple::itemptr::ItemPointerCompare(&dead_tids[i - 1], &dead_tids[i]) >= 0 {
+                first_bad = i as i64;
+                break;
+            }
+        }
+        morsels::vtrace(&format!(
+            "w1 index snapshot n={} store_items={} num_index_scans={} strict_sorted={} first_bad={}",
+            dead_tids.len(),
+            vacrel.dead_items_info.num_items,
+            vacrel.num_index_scans,
+            first_bad < 0,
+            first_bad,
+        ));
+    }
+
     if vacrel.pvs.is_none() {
         for idx in 0..vacrel.nindexes {
             let istat = vacrel.indstats[idx].take();
@@ -1314,6 +1420,15 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                 };
                 vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids)?
             };
+            if morsels::vtrace_enabled() {
+                morsels::vtrace(&format!(
+                    "w1 index bulkdel idx={} rel={} tuples_removed={} num_index_tuples={}",
+                    idx,
+                    vacrel.indrels[idx].name(),
+                    new_istat.tuples_removed,
+                    new_istat.num_index_tuples,
+                ));
+            }
             vacrel.indstats[idx] = Some(new_istat);
 
             pgstat_progress_update_param(PROGRESS_VACUUM_INDEXES_PROCESSED, (idx + 1) as i64);
@@ -1341,7 +1456,8 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
     }
 
     debug_assert!(
-        vacrel.num_index_scans > 0 || vacrel.dead_items_info.num_items == vacrel.lpdead_items
+        vacrel.num_index_scans > 0
+            || vacrel.dead_items_info.num_items as u64 == vacrel.folds.counters.lpdead_items
     );
     debug_assert!(allindexes || VacuumFailsafeActive());
 
@@ -1363,7 +1479,7 @@ fn lazy_cleanup_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     debug_assert!(vacrel.nindexes > 0);
 
     let reltuples = vacrel.new_rel_tuples;
-    let estimated_count = vacrel.scanned_pages < vacrel.rel_pages;
+    let estimated_count = vacrel.folds.counters.scanned_pages < vacrel.rel_pages as u64;
 
     pgstat_progress_update_multi_param(
         &[PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_INDEXES_TOTAL],
@@ -1438,6 +1554,7 @@ fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> 
 /// today); exercised directly by tests.
 pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
+    let mut vacuumed_items: u64 = 0; // W1 forensics (trace-gated report)
     let mut vmbuffer = VmBuffer::new();
 
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
@@ -1470,13 +1587,23 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         bufmgr_seams::release_buffer::call(buf)?;
         freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
         vacuumed_pages += 1;
+        vacuumed_items += num_offsets as u64;
     }
     drop(iter);
     vacrel.dead_items = Some(dead_items);
+    if morsels::vtrace_enabled() {
+        morsels::vtrace(&format!(
+            "w1 reap done rel={} pages={} items={} store_items={}",
+            vacrel.rel.name(),
+            vacuumed_pages,
+            vacuumed_items,
+            vacrel.dead_items_info.num_items,
+        ));
+    }
     debug_assert!(
         vacrel.num_index_scans > 1
-            || (vacrel.dead_items_info.num_items == vacrel.lpdead_items
-                && vacuumed_pages == vacrel.lpdead_item_pages)
+            || (vacrel.dead_items_info.num_items as u64 == vacrel.folds.counters.lpdead_items
+                && vacuumed_pages as u64 == vacrel.folds.counters.lpdead_item_pages)
     );
 
     vmbuffer.release();
@@ -1526,8 +1653,12 @@ fn lazy_vacuum_heap_page(
     }
 
     debug_assert!(!pm.as_ref().is_all_visible());
-    let (all_visible, all_frozen, visibility_cutoff_xid) =
-        heap_page_is_all_visible(vacrel, buffer)?;
+    let (all_visible, all_frozen, visibility_cutoff_xid) = heap_page_is_all_visible(
+        vacrel.rel,
+        vacrel.cutoffs.OldestXmin,
+        &mut vacrel.folds.offnum,
+        buffer,
+    )?;
     if all_visible {
         let mut flags = VISIBILITYMAP_ALL_VISIBLE;
         if all_frozen {
@@ -1544,17 +1675,20 @@ fn lazy_vacuum_heap_page(
             visibility_cutoff_xid,
             flags,
         )?;
-        vacrel.vm_new_visible_pages += 1;
+        vacrel.folds.counters.vm_new_visible_pages += 1;
         if all_frozen {
-            vacrel.vm_new_visible_frozen_pages += 1;
+            vacrel.folds.counters.vm_new_visible_frozen_pages += 1;
         }
     }
     Ok(())
 }
 
-/// Returns (all_visible, all_frozen, visibility_cutoff_xid).
+/// Returns (all_visible, all_frozen, visibility_cutoff_xid). `offnum` is the
+/// caller's error-context slot (C's vacrel->offnum) — participant-local.
 fn heap_page_is_all_visible(
-    vacrel: &mut LVRelState<'_, '_>,
+    rel: &RelationData<'_>,
+    oldest_xmin: TransactionId,
+    offnum_cx: &mut OffsetNumber,
     buf: Buffer,
 ) -> PgResult<(bool, bool, TransactionId)> {
     // SAFETY: caller holds pin + content lock; HTSV hint-bit stores land in
@@ -1568,7 +1702,7 @@ fn heap_page_is_all_visible(
     let maxoff = page.max_offset_number();
     let mut offnum = FirstOffsetNumber;
     while offnum <= maxoff && all_visible {
-        vacrel.offnum = offnum;
+        *offnum_cx = offnum;
         let itemid = page.item_id(offnum);
 
         if !itemid.is_used() || itemid.is_redirected() {
@@ -1591,13 +1725,13 @@ fn heap_page_is_all_visible(
                 ptr,
                 len,
                 ItemPointerData::new(blockno, offnum),
-                vacrel.rel.rd_id,
+                rel.rd_id,
             )
         };
 
         match heapam_visibility_seams::heap_tuple_satisfies_vacuum::call(
             &mut tuple,
-            vacrel.cutoffs.OldestXmin,
+            oldest_xmin,
             buf,
         )? {
             HTSV_Result::HEAPTUPLE_LIVE => {
@@ -1608,7 +1742,7 @@ fn heap_page_is_all_visible(
                     break;
                 }
                 let xmin = hdr.xmin();
-                if !TransactionIdPrecedes(xmin, vacrel.cutoffs.OldestXmin) {
+                if !TransactionIdPrecedes(xmin, oldest_xmin) {
                     all_visible = false;
                     all_frozen = false;
                     break;
@@ -1634,16 +1768,71 @@ fn heap_page_is_all_visible(
         offnum += 1;
     }
 
-    vacrel.offnum = InvalidOffsetNumber;
+    *offnum_cx = InvalidOffsetNumber;
     Ok((all_visible, all_frozen, visibility_cutoff_xid))
 }
 
+/// C lazy_check_wraparound_failsafe (REL_18_3 vacuumlazy.c:2949): one-shot
+/// latch; on fire, abandon the buffer strategy, disable index vacuuming /
+/// cleanup / truncation, reset the index progress counters, warn, and stop
+/// applying cost limits. (Previously loud here; ported by the vacuum-morsels
+/// lane — §5.5 — because the morsel arm's failsafe path completes serially
+/// through this body, and it is reachable today without morsels.)
 fn lazy_check_wraparound_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
+    // Don't warn more than once per VACUUM.
+    if VacuumFailsafeActive() {
+        return Ok(true);
+    }
     if !vacuum_xid_failsafe_check(&vacrel.cutoffs)? {
         return Ok(false);
     }
+    apply_failsafe(vacrel)?;
+    Ok(true)
+}
+
+/// The failsafe FIRE body (shared by the serial check above and the morsel
+/// arm's leader, which observes the fire from its park loop and applies the
+/// state change after the round quiesces — doc §5.5).
+fn apply_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     SetVacuumFailsafeActive(true);
-    unported("lazy_check_wraparound_failsafe: failsafe triggered (cost/parallel teardown)");
+
+    // Abandon use of a buffer access strategy to allow use of all of shared
+    // buffers (C assumes the allocating caller frees the object).
+    vacrel.bstrategy = types_storage::buf::buffer_access_strategy_none();
+
+    // Disable index vacuuming, index cleanup, and heap rel truncation.
+    vacrel.do_index_vacuuming = false;
+    vacrel.do_index_cleanup = false;
+    vacrel.do_rel_truncate = false;
+
+    // Reset the progress counters.
+    pgstat_progress_update_multi_param(
+        &[PROGRESS_VACUUM_INDEXES_TOTAL, PROGRESS_VACUUM_INDEXES_PROCESSED],
+        &[0, 0],
+    );
+
+    // C names the table db.schema.relname; the port has the relname (recorded
+    // divergence: message prefix elided with the rest of the logging lane).
+    elog::ereport(::types_error::WARNING)
+        .errmsg(format!(
+            "bypassing nonessential maintenance of table \"{}\" as a failsafe after {} index scans",
+            vacrel.rel.name(),
+            vacrel.num_index_scans
+        ))
+        .errdetail("The table's relfrozenxid or relminmxid is too far in the past.")
+        .errhint(
+            "Consider increasing configuration parameter \"maintenance_work_mem\" or \"autovacuum_work_mem\".\nYou might also need to consider other ways for VACUUM to keep up with the allocation of transaction IDs.",
+        )
+        .finish(::types_error::ErrorLocation::new(
+            "vacuumlazy.c",
+            2949,
+            "lazy_check_wraparound_failsafe",
+        ))?;
+
+    // Stop applying cost limits from this point on.
+    init_small::globals::SetVacuumCostActive(false);
+    init_small::globals::SetVacuumCostBalance(0);
+    Ok(())
 }
 
 const VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS: u64 = 50;
@@ -1729,7 +1918,7 @@ fn lazy_truncate_heap(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         )?;
         orig_rel_pages = new_rel_pages;
 
-        if !(new_rel_pages > vacrel.nonempty_pages && lock_waiter_detected) {
+        if !(new_rel_pages > vacrel.folds.counters.nonempty_pages && lock_waiter_detected) {
             return Ok(());
         }
     }
@@ -1743,7 +1932,7 @@ fn count_nondeletable_pages(
 ) -> PgResult<BlockNumber> {
     let mut starttime = std::time::Instant::now();
     let mut blkno = vacrel.rel_pages;
-    while blkno > vacrel.nonempty_pages {
+    while blkno > vacrel.folds.counters.nonempty_pages {
         // Waiters queue behind our AccessExclusiveLock; probe at most every
         // VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL, checked once per 32 blocks.
         if blkno % 32 == 0 {
@@ -1806,14 +1995,14 @@ fn count_nondeletable_pages(
             return Ok(blkno + 1);
         }
     }
-    Ok(vacrel.nonempty_pages)
+    Ok(vacrel.folds.counters.nonempty_pages)
 }
 
 fn should_attempt_truncation(vacrel: &LVRelState<'_, '_>) -> bool {
     if !vacrel.do_rel_truncate || VacuumFailsafeActive() {
         return false;
     }
-    let possibly_freeable = vacrel.rel_pages - vacrel.nonempty_pages;
+    let possibly_freeable = vacrel.rel_pages - vacrel.folds.counters.nonempty_pages;
     possibly_freeable > 0
         && (possibly_freeable >= REL_TRUNCATE_MINIMUM
             || possibly_freeable >= vacrel.rel_pages / REL_TRUNCATE_FRACTION)
@@ -1832,10 +2021,10 @@ pub fn init_seams() {
     // rd_tableam->relation_vacuum: installed here, not by tableam — heap is
     // the only AM and a tableam-side install cycles through heapam_handler.
     tableam_seams::table_relation_vacuum::set(|mcx, rel, params, bstrategy| {
-        // cbstore: immutable append-only row groups — VACUUM is a no-op
-        // (docs/design/cbstore-impl.md §7.2); autovacuum must never walk
-        // cbstore bytes as heap pages.
-        if tableam_vocab::is_cbstore_am_oid(rel.rd_rel.relam) {
+        // pgrcolumnar: immutable append-only row groups — VACUUM is a no-op
+        // (docs/design/pgrcolumnar-impl.md §7.2); autovacuum must never walk
+        // pgrcolumnar bytes as heap pages.
+        if tableam_vocab::is_pgrcolumnar_am_oid(rel.rd_rel.relam) {
             return Ok(());
         }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
@@ -1862,6 +2051,8 @@ fn vacuum_verbose_msg(
 fn unported(unit: &'static str) -> ! {
     panic!("unported callee reached from vacuumlazy.c: {unit}");
 }
+
+mod morsels;
 
 #[cfg(test)]
 mod tests;

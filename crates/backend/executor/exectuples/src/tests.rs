@@ -912,7 +912,7 @@ fn jit_deform_matches_aot_and_interpreter() {
     exec_clear_tuple(&mut slot, mcx);
 }
 
-// Dict-lane surface (cbstore dict currency): arm/answer negotiation, the
+// Dict-lane surface (pgrcolumnar dict currency): arm/answer negotiation, the
 // fill gates the AM keys its batch fill on, and window-boundary clearing.
 #[test]
 fn dict_lane_negotiation_round_trip() {
@@ -943,7 +943,7 @@ fn dict_lane_negotiation_round_trip() {
     // stale by contract, every other column is unaffected.
     let codes: [u32; 4] = [1, 0, 2, 1];
     let dict: [Datum; 3] = [Datum::from_i64(10), Datum::from_i64(20), Datum::from_i64(30)];
-    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 3, epoch: 7, sorted: true, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 3, epoch: 7, sorted: true, stitch: core::ptr::null(), gndv: 0, gepoch: 0, lazy: core::ptr::null(), lazy_ensure: None, lazy_ensure_all: None };
     soa.begin(codes.len() as u32);
     soa.set_dict_lane(1, SoaDictLane { codes: codes.as_ptr(), table });
     let lane = soa.dict_lane(1).expect("answered");
@@ -983,7 +983,7 @@ fn dict_gather_matches_full_decode_raw() {
         Datum::from_i64(42),
     ];
     let codes: [u32; 6] = [3, 3, 0, 2, 1, 0];
-    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 4, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
+    let table = SoaDictTable { dict: dict.as_ptr(), ndict: 4, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0, lazy: core::ptr::null(), lazy_ensure: None, lazy_ensure_all: None };
 
     soa.begin(codes.len() as u32);
     // Poison the target cells: garbage values, isnull = true. The gather
@@ -1012,11 +1012,125 @@ fn dict_gather_matches_full_decode_raw() {
 #[test]
 fn dict_table_epoch_identity() {
     let dict: [Datum; 2] = [Datum::from_i64(1), Datum::from_i64(2)];
-    let rg0 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
-    let rg0b = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
-    let rg1 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 1, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0 };
+    let rg0 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0, lazy: core::ptr::null(), lazy_ensure: None, lazy_ensure_all: None };
+    let rg0b = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 0, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0, lazy: core::ptr::null(), lazy_ensure: None, lazy_ensure_all: None };
+    let rg1 = SoaDictTable { dict: dict.as_ptr(), ndict: 2, epoch: 1, sorted: false, stitch: core::ptr::null(), gndv: 0, gepoch: 0, lazy: core::ptr::null(), lazy_ensure: None, lazy_ensure_all: None };
     assert!(rg0.same_identity(&rg0b));
     assert!(!rg0.same_identity(&rg1), "same arena address, new row group: memo must clear");
     assert_eq!(rg1.datum(0).as_i64(), 1);
     assert_eq!(rg1.datum(1).as_i64(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// for_each_live: the shared word-skip iterator (wordskip-general lane) must
+// visit EXACTLY the positions the plain pos..n loop keeps under a per-row
+// bit test — same positions, same order — for arbitrary masks, pos offsets,
+// ragged tails, and EXACT-LENGTH word slices (nwords = ceil(n/64), the
+// `seq_scan_batch_skip_sel` shape), and must stop at the first Err exactly
+// where the plain loop's `?` would.
+// ---------------------------------------------------------------------------
+#[test]
+fn for_each_live_matches_plain_loop_on_set_bits() {
+    let mut seed = 0x2545F4914F6CDD1Du64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..500u32 {
+        let n: u32 = match case % 6 {
+            0 => 1,
+            1 => 63,
+            2 => 64,
+            3 => 65,
+            4 => 128,
+            _ => (rng() % (64 * SOA_BM_WORDS as u64 - 1) + 1) as u32,
+        };
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let nwords = (n as usize).div_ceil(64);
+        let mut words: Vec<u64> = (0..nwords)
+            .map(|_| match case % 4 {
+                0 => 0,
+                1 => !0,
+                _ => rng(),
+            })
+            .collect();
+        // Producer contract: bits at/past n are zero.
+        if n % 64 != 0 {
+            words[nwords - 1] &= (1u64 << (n % 64)) - 1;
+        }
+        let expected: Vec<u32> = (pos..n)
+            .filter(|&i| words[(i / 64) as usize] & (1u64 << (i % 64)) != 0)
+            .collect();
+        let mut got = Vec::new();
+        for_each_live::<()>(Some(&words), pos, n, |i| {
+            got.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, expected, "case {case} n={n} pos={pos}");
+        // None mask = the plain dense loop.
+        let mut all = Vec::new();
+        for_each_live::<()>(None, pos, n, |i| {
+            all.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(all, (pos..n).collect::<Vec<_>>());
+        // Err stops the walk at that position (the plain loop's `?`).
+        if !expected.is_empty() {
+            let stop_at = expected[(rng() % expected.len() as u64) as usize];
+            let mut seen = Vec::new();
+            let r = for_each_live(Some(&words), pos, n, |i| {
+                if i == stop_at {
+                    return Err(i);
+                }
+                seen.push(i);
+                Ok(())
+            });
+            assert_eq!(r, Err(stop_at));
+            assert_eq!(
+                seen,
+                expected.iter().copied().take_while(|&i| i != stop_at).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+// for_each_live_onebody: identical visited stream to for_each_live for both
+// Some masks and the dense None case (the single-body word loop).
+#[test]
+fn for_each_live_onebody_matches_two_arm() {
+    let mut seed = 0xA0761D6478BD642Fu64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..300u32 {
+        let n: u32 = (rng() % (64 * SOA_BM_WORDS as u64 - 1) + 1) as u32;
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let nwords = (n as usize).div_ceil(64);
+        let mut words: Vec<u64> = (0..nwords).map(|_| rng()).collect();
+        if n % 64 != 0 {
+            words[nwords - 1] &= (1u64 << (n % 64)) - 1;
+        }
+        for live in [None, Some(&words[..])] {
+            let mut a = Vec::new();
+            for_each_live::<()>(live, pos, n, |i| {
+                a.push(i);
+                Ok(())
+            })
+            .unwrap();
+            let mut b = Vec::new();
+            for_each_live_onebody::<()>(live, pos, n, |i| {
+                b.push(i);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(a, b, "case {case} n={n} pos={pos} some={}", live.is_some());
+        }
+    }
 }

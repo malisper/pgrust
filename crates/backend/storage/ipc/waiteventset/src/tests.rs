@@ -145,8 +145,8 @@ fn cross_backend_set_latch_wakes_blocked_wait() {
 
     let latch = recv.recv().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
-    // Cross-backend SetLatch routes through wakeup_other_proc -> the waiter's
-    // wakeup pipe (C: kill(owner_pid, SIGURG)).
+    // Cross-backend SetLatch unparks the waker handle the blocked wait
+    // published; the fd-parked waiter is woken through its wake pipe.
     latch::SetLatch(latch);
 
     let (n, events) = waiter.join().unwrap();
@@ -222,34 +222,77 @@ fn freed_handle_is_invalid() {
     GetNumRegisteredWaitEvents(set);
 }
 
-// wretain warm-claim contract: each task runs under a fresh synthetic pid;
-// the wakeup registry entry must follow it or every cross-thread SetLatch to
-// this thread (shm_mq wakes, CV broadcasts, SendThreadSignal) is lost — the
-// repeated-parallel-query P1 wedge.
+// wretain warm-claim contract, waiter edition: the seam reissues the
+// thread's waiter token, so handles published for the PREVIOUS task go
+// stale (no stray wakes into the new task), while the new task's waits
+// re-publish a live route — cross-thread SetLatch keeps working with no
+// registry to re-key (the old pid-keyed table, whose missed re-key was the
+// P1 deaf-thread wedge, no longer exists).
 #[test]
-fn rekey_wakeup_registry_follows_task_pid() {
-    fn pipe_byte_pending() -> bool {
-        let mut buf = [0u8; 16];
-        // SAFETY: nonblocking read of this thread's own wakeup pipe.
-        let rc = unsafe { libc::read(wakeup_read_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-        rc > 0
-    }
+fn rekey_reissues_waiter_token_and_routes_survive() {
+    setup_backend();
+    let stale = waiter::current_handle();
 
-    let first_pid = setup_backend();
-
-    // Warm claim: fresh synthetic pid on the same thread, then the re-key.
+    // Warm claim: fresh synthetic pid on the same thread, then the reissue.
     let second_pid = NEXT_PID.fetch_add(1, SeqCst);
     g::SetMyProcPid(second_pid);
     RekeyWakeupRegistry();
 
-    // A wake resolved by the NEW pid must write this thread's pipe (this is
-    // SetLatch's cross-thread path for shm_mq/CV/SendThreadSignal wakes).
-    WakeupOtherProc(second_pid);
-    assert!(pipe_byte_pending(), "wake by the fresh task pid was dropped");
+    // Handles from before the claim are poison, not hijack routes.
+    assert_eq!(waiter::unpark(stale), waiter::Unparked::Stale);
 
-    // The old key is gone: a wake addressed to the dead pid is a no-op.
-    WakeupOtherProc(first_pid);
-    assert!(!pipe_byte_pending(), "wake by the dead pid hit this thread");
+    // And the new task's latch wait is woken by cross-thread SetLatch
+    // exactly as before the claim (the wait publishes a fresh handle).
+    let latch = owned_latch();
+    let set = CreateWaitEventSet(1).unwrap();
+    AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET, Some(latch), None).unwrap();
+    let setter = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        latch::SetLatch(latch);
+    });
+    let mut occurred = [WaitEvent::default(); 1];
+    let n = WaitEventSetWait(set, 10_000, &mut occurred, 0).unwrap();
+    setter.join().unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(occurred[0].events, WL_LATCH_SET);
+    FreeWaitEventSet(set);
+}
+
+// Chaos F2: C's "static, never freed" sets (LatchWaitSet, FeBeWaitSet) are
+// reclaimed by process death; a session THREAD's death reclaims nothing, so
+// the thread-top WaitEventSetReleaseGuard must close every set still
+// registered. The external-fd accounting is thread-local, so it observes the
+// backend free (close + ReleaseExternalFD) deterministically.
+#[test]
+fn release_guard_frees_this_threads_sets() {
+    std::thread::spawn(|| {
+        setup_backend();
+        let baseline = fd::vfd::num_external_fds();
+
+        let guard = WaitEventSetReleaseGuard::new();
+        let first = CreateWaitEventSet(2).unwrap();
+        let _second = CreateWaitEventSet(3).unwrap();
+        assert_eq!(fd::vfd::num_external_fds(), baseline + 2);
+
+        // A set explicitly freed before the guard must not be released twice
+        // by the sweep (Option::take empties the slot).
+        let third = CreateWaitEventSet(1).unwrap();
+        FreeWaitEventSet(third);
+        assert_eq!(fd::vfd::num_external_fds(), baseline + 2);
+
+        drop(guard);
+        assert_eq!(fd::vfd::num_external_fds(), baseline);
+
+        // The registry is emptied wholesale: a later create starts over at
+        // the first slot, and freeing a pre-sweep handle is a no-op.
+        FreeWaitEventSet(first);
+        assert_eq!(fd::vfd::num_external_fds(), baseline);
+        let reused = CreateWaitEventSet(1).unwrap();
+        assert_eq!(reused, first);
+        FreeWaitEventSet(reused);
+    })
+    .join()
+    .unwrap();
 }
 
 // The walreceiver's WaitLatchOrSocket shape: latch + inert PM-death + socket

@@ -132,6 +132,15 @@ pub fn in_error_recursion_trouble() -> bool {
     STACK.with(|s| s.borrow().recursion_depth > 2)
 }
 
+/// True when this thread carries no in-flight error state: no open error
+/// frames and no emit-context callbacks. The session-envelope boundary
+/// (harvested with SessionEnvelope Phase 0, elog side ported from
+/// 9a8eff9b1) refuses to bind or unbind across a dirty error boundary.
+pub fn error_stack_clean() -> bool {
+    STACK.with(|s| s.borrow().frames.is_empty())
+        && EMIT_CONTEXT_CALLBACKS.with(|s| s.borrow().is_empty())
+}
+
 #[cold]
 #[inline(never)]
 pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {

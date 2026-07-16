@@ -47,6 +47,13 @@ pub trait HashBuildBatchSource<'mcx> {
     fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
     fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool>;
     fn slot(&self) -> ExecSlotId;
+    /// Fetch-dead skip snapshot of the CURRENT staged batch (the
+    /// `executils::BatchSource::skip_words` contract): a CLEARED bit is a
+    /// position `fetch_tuple` rejects with no observable effect, so the
+    /// build drain may word-skip it. Default `None` = fetch every position.
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        None
+    }
 }
 
 /// Word-blocked k=2 Bloom over build hashvalues; false positives only.
@@ -977,12 +984,16 @@ pub fn multi_exec_hash_batched<'mcx, S: HashBuildBatchSource<'mcx>>(
         if n == 0 {
             break;
         }
-        for i in 0..n {
+        // Fetch-dead word skip (`skip_words`): a cleared bit is a row
+        // `fetch_tuple` rejects with no observable effect — the inserted
+        // build stream is identical.
+        let skip = src.skip_words();
+        exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| {
             if !src.fetch_tuple(i, estate)? {
-                continue;
+                return Ok(());
             }
-            hash_insert_slot(hs, estate, slot_id)?;
-        }
+            hash_insert_slot(hs, estate, slot_id)
+        })?;
     }
     hs.table.as_mut().expect("hash table created").finish_build(mcx)?;
     Ok(())
@@ -1060,6 +1071,24 @@ pub fn get_hash_memory_limit() -> usize {
         bytes as usize
     } else {
         usize::MAX
+    }
+}
+
+/// The inner-relation footprint `ExecChooseHashTableSize` prices batching
+/// against: `ntuples × (HJTUPLE_OVERHEAD + maxaligned minimal header +
+/// maxaligned data width)` — the same arithmetic as the estimator's
+/// `inner_rel_bytes`, exported for envelope-sizing callers (the M3.5 join
+/// spill admission sizes its level-0 batch count from this over the raw
+/// combined limit, not from exec_choose's rebalance-reduced nbatch).
+pub fn estimate_hash_inner_rel_bytes(ntuples: f64, tupwidth: i32) -> u64 {
+    let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
+    let tupsize =
+        HJTUPLE_OVERHEAD + maxalign(SizeofMinimalTupleHeader) + maxalign(tupwidth as usize);
+    let bytes = ntuples * tupsize as f64;
+    if bytes < u64::MAX as f64 {
+        bytes as u64
+    } else {
+        u64::MAX
     }
 }
 

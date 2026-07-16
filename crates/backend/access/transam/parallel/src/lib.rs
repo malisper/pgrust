@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::SeqCst};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -15,8 +15,22 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use types_storage::RelFileLocator;
+
+mod query_task_guard;
+pub mod standing;
+
+pub use query_task_guard::QueryTaskBindingGuard;
+// Ceremony-v2 (notes/runtime-ceremony2.md): deferred first-touch binding +
+// sticky session-affine retention for standing runtime executors.
+pub use query_task_guard::{
+    lazy_bind_enabled, sticky_bind_enabled, sticky_parked, DeferredQueryTaskBinding,
+};
+
+#[cfg(debug_assertions)]
+pub use query_task_guard::{
+    set_query_task_fault, QueryTaskFaultAction, QueryTaskFaultPoint,
+};
 
 #[cfg(test)]
 mod tests;
@@ -32,6 +46,63 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
 const PARALLEL_ERROR_QUEUE_MSGS: usize = 64;
 
 pub type ParallelWorkerEntry = fn(&ParallelShared) -> PgResult<()>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryTaskBindingPolicy {
+    pub has_params: bool,
+    pub temp_state: bool,
+    pub serializable: bool,
+    pub pending_invalidations: bool,
+}
+
+const QUERY_TASK_INSTALLED: u8 = 1 << 0;
+const QUERY_TASK_PARAMS: u8 = 1 << 1;
+const QUERY_TASK_TEMP: u8 = 1 << 2;
+const QUERY_TASK_SERIALIZABLE: u8 = 1 << 3;
+const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
+
+// Post-task park hooks (harvested with the query-task binder from
+// morsel/query-task-binder-20260710 @ 1b3cba43f; entrypoint-table precedent).
+// POST_TASK_PARK runs on a worker thread after its task fully ended and
+// Terminate was sent — the leader's finish wait is already satisfied, so
+// parking there cannot deadlock it. PRIVATE_SHUTDOWN runs in
+// DestroyParallelContext before it waits for worker exit: it must release
+// anything a worker could still be parked on. Inert unless registered; on
+// this tree only the binder substrate e2e registers them (the runtime
+// pool/scheduler lane owns the production park).
+// MULTI-REGISTRANT (M2 reconciliation of both lanes' independent fixes):
+// several runtime arms coexist (M1 runtime-scan, the M2 agg + distinct sink
+// arms), each with its own private-payload type — a single OnceLock slot
+// silently dropped the second arm's hook (its helpers would park as no-ops
+// and wedge the leader's wait). Every hook downcasts the context's private
+// payload and no-ops on foreign types, so calling every registrant in
+// registration order is correct by construction. Registration is append-only
+// and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
+// written once per arm per process, read per worker task.
+static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
+
+pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
+    let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
+    }
+}
+
+pub fn register_parallel_private_shutdown(f: fn(&(dyn Any + Send + Sync))) {
+    let mut v = PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.iter().any(|&h| core::ptr::fn_addr_eq(h, f)) {
+        v.push(f);
+    }
+}
+
+fn post_task_park_hooks() -> Vec<fn(&ParallelShared)> {
+    POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+fn private_shutdown_hooks() -> Vec<fn(&(dyn Any + Send + Sync))> {
+    PRIVATE_SHUTDOWN.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
 
 pub enum WorkerMessage {
     Error(Box<PgError>),
@@ -66,9 +137,13 @@ pub struct ParallelShared {
     // fresh-process InvalidateSystemCaches.
     leader_pending_invals: bool,
     guc_state: Vec<guc::store::NondefaultGuc>,
-    // §3.4 P-guc: typed leader capture; when session_guc_bind_enabled() this
-    // carries the GUC transfer and guc_state stays empty (and vice versa).
-    guc_bind: Vec<guc::store::CapturedGuc>,
+    // §3.4 P-guc via the layered-snapshot query pin (guc::layers): the
+    // leader's per-statement composed capture, shared by Arc — one capture
+    // per statement window regardless of worker count, and the worker adopts
+    // the leader's base (started-with parity). When session_guc_bind_enabled()
+    // this carries the GUC transfer and guc_state stays empty (and vice
+    // versa: PGRUST_NO_GUC_BIND reverts to the string restore path).
+    guc_pin: Option<Arc<guc::layers::GucQuerySnapshot>>,
     tstate: Vec<u8>,
     combocid: Arc<[(CommandId, CommandId)]>,
     pending_syncs: Vec<(RelFileLocator, bool)>,
@@ -87,6 +162,7 @@ pub struct ParallelShared {
     error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    query_task_binding: AtomicU8,
 }
 
 const _: fn() = || {
@@ -332,10 +408,10 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         } else {
             guc::store::capture_nondefault_variables()
         },
-        guc_bind: if guc::store::session_guc_bind_enabled() {
-            guc::store::capture_session_gucs()
+        guc_pin: if guc::store::session_guc_bind_enabled() {
+            Some(guc::layers::current_query_pin())
         } else {
-            Vec::new()
+            None
         },
         tstate,
         combocid: combocid::SerializeComboCIDState(),
@@ -356,6 +432,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         error_senders,
         worker_attached,
         private: Mutex::new(None),
+        query_task_binding: AtomicU8::new(0),
     });
 
     with_pcxt(id, |p| {
@@ -382,6 +459,86 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
 pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
     let shared = shared_for(id);
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+pub fn InstallQueryTaskBinding(
+    id: ParallelContextId,
+    policy: QueryTaskBindingPolicy,
+) -> PgResult<()> {
+    let shared = shared_for(id);
+    let encoded = QUERY_TASK_INSTALLED
+        | u8::from(policy.has_params) * QUERY_TASK_PARAMS
+        | u8::from(policy.temp_state) * QUERY_TASK_TEMP
+        | u8::from(policy.serializable) * QUERY_TASK_SERIALIZABLE
+        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS;
+    shared
+        .query_task_binding
+        .compare_exchange(0, encoded, SeqCst, SeqCst)
+        .map(|_| ())
+        .map_err(|_| {
+            Box::new(
+                PgError::new(ERROR, "parallel query-task binding was installed twice")
+                    .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            )
+        })
+}
+
+pub fn with_query_task_binding<T>(
+    shared: &Arc<ParallelShared>,
+    body: impl FnOnce() -> PgResult<T>,
+) -> PgResult<T> {
+    query_task_guard::with_query_task_binding(shared, body)
+}
+
+/// The binder's SESSION-state policy inputs, probed from the same sources
+/// `InitializeParallelDSM` serializes (temp namespace, serializable xact,
+/// pending invalidations) — the M1 runtime-scan leader's fail-closed
+/// admission reads this BEFORE creating a context: any set flag refuses
+/// engagement, because `validate()` (query_task_guard.rs) would refuse the
+/// bind on every helper anyway. `has_params` stays the caller's: params are
+/// executor state the leader already knows.
+pub fn query_task_policy_probe() -> QueryTaskBindingPolicy {
+    let (temp_ns, temp_toast_ns) = catalog_namespace::GetTempNamespaceState();
+    QueryTaskBindingPolicy {
+        has_params: false,
+        temp_state: temp_ns != InvalidOid || temp_toast_ns != InvalidOid,
+        serializable: xact::IsolationUsesXactSnapshot()
+            || predicate_seams::share_serializable_xact::call() != 0,
+        pending_invalidations: inval::TransactionHasPendingInvalidationMessages(),
+    }
+}
+
+/// One bounded leader latch wait + reset (the WaitForParallelWorkersToFinish
+/// wait quantum, recheck-cadence-bounded): the M1 runtime-scan leader's
+/// submit-and-park loop parks here between its completion/message/interrupt
+/// re-polls. An Err is a RAISED cancel disposition (statement_timeout /
+/// pg_cancel_backend delivered at the latch sleep, the thread model's signal
+/// delivery point) — the caller must abort + drain its RG and propagate
+/// (F1 chaos finding: swallowing it made every leader park loop
+/// uncancellable).
+pub fn wait_parallel_finish_quantum() -> PgResult<()> {
+    wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH)
+}
+
+/// True when every launched worker's underlying bgworker task has ENDED
+/// (thread exited, died, or parked back to the pool). The M1 runtime-scan
+/// leader's liveness probe: all stopped while the pinned RG is incomplete
+/// means nobody will ever finish the submitted work (helpers died pre-hook
+/// — e.g. an init-path panic-to-ERROR — leaves no channel message after
+/// Terminate and no refusal count). During normal hook driving the tasks
+/// are still BGWH_STARTED, so this cannot false-positive mid-drive.
+pub fn parallel_workers_all_stopped(id: ParallelContextId) -> bool {
+    let n = with_pcxt(id, |p| p.workers.len());
+    for i in 0..n {
+        let handle = with_pcxt(id, |p| p.workers.get(i).and_then(|w| w.bgwhandle));
+        let Some(handle) = handle else { continue };
+        match bgworker::GetBackgroundWorkerPid(&handle).0 {
+            bgworker::BgwHandleStatus::BGWH_STOPPED
+            | bgworker::BgwHandleStatus::BGWH_POSTMASTER_DIED => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 pub fn nworkers_launched(id: ParallelContextId) -> i32 {
@@ -560,7 +717,7 @@ pub fn WaitForParallelWorkersToAttach(id: ParallelContextId) -> PgResult<()> {
         if all_known {
             return Ok(());
         }
-        wait_on_my_latch(WAIT_EVENT_BGWORKER_STARTUP);
+        wait_on_my_latch(WAIT_EVENT_BGWORKER_STARTUP)?;
     }
 }
 
@@ -568,10 +725,28 @@ const PG_WAIT_IPC: u32 = 0x0800_0000;
 const WAIT_EVENT_BGWORKER_STARTUP: u32 = PG_WAIT_IPC + 6;
 const WAIT_EVENT_PARALLEL_FINISH: u32 = PG_WAIT_IPC + 32;
 
-fn wait_on_my_latch(wait_event: u32) {
+fn wait_on_my_latch(wait_event: u32) -> PgResult<()> {
     let latch = g::MyLatch().expect("parallel leader without MyLatch");
-    let _ = latch::WaitLatch(Some(latch), WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0, wait_event);
+    // Both callers are recheck loops (worker attach/finish state), and the
+    // wakes they rely on are the same cross-thread SetLatch delivery the
+    // shm_mq stall class loses intermittently — bound the sleep with the
+    // shared recheck cadence so a lost wake costs one period, not forever
+    // (shm_mq stall.rs rationale; a timeout return is a legal spurious wake
+    // because the caller re-polls before re-blocking).
+    //
+    // PROPAGATE the wait result (F1 chaos finding, defect layer 2b): in the
+    // thread model the latch sleep is the signal delivery point — WaitLatch
+    // runs drain_thread_signals(), so a raised statement-timeout/cancel
+    // disposition surfaces HERE as an Err. Discarding it (`let _ =`)
+    // CONSUMED the one-shot cancel and threw it away; the subsequent
+    // check_for_interrupts saw nothing and every arm's leader park loop
+    // became uncancellable. On Err the latch is deliberately NOT reset: the
+    // raise aborts the ceremony, and a leftover set latch only costs one
+    // spurious wake on the next wait.
+    let mut d = shm_mq::stall::StallDetector::new();
+    shm_mq::stall::wait_latch_reporting(latch, wait_event, &mut d, &mut |_| {})?;
     latch::ResetLatch(latch);
+    Ok(())
 }
 
 fn mark_known_attached(id: ParallelContextId, i: usize) {
@@ -636,7 +811,7 @@ pub fn WaitForParallelWorkersToFinish(id: ParallelContextId) -> PgResult<()> {
             }
         }
 
-        wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH);
+        wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH)?;
     }
 
     if let Some(shared) = with_pcxt(id, |p| p.shared.clone()) {
@@ -676,6 +851,14 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
         list.remove(idx)
     });
     PCXT_COUNT.with(|c| c.set(c.get() - 1));
+
+    // Release parked helpers BEFORE waiting for worker exit below. Every
+    // registered hook runs; each no-ops on foreign payload types.
+    if let Some(p) = pcxt.shared.as_ref().and_then(|s| s.private()) {
+        for f in private_shutdown_hooks() {
+            f(&*p);
+        }
+    }
 
     for w in pcxt.workers.iter_mut() {
         if w.error_receiver.is_some() {
@@ -987,10 +1170,58 @@ pub fn ParallelWorkerMain(main_arg: u64) -> PgResult<()> {
         shared.parallel_leader_proc_number,
     );
     MY_WORKER_SHARED.with(|s| *s.borrow_mut() = None);
+    // Successful tasks may park on the query's ready work instead of
+    // returning to the pool at once; the hook returns when the leader
+    // releases it (DestroyParallelContext at the latest). A hook panic must
+    // not corrupt the already-sent outcome.
+    if outcome.is_ok() {
+        for f in post_task_park_hooks() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&shared)));
+        }
+    }
     outcome
 }
 
+/// Test-only fault injection (default-off, dead unless the env var is set at
+/// server start): `PGRUST_TEST_WARM_WINDOW_FAIL=<n>` fails the first `n`
+/// WARM-claimed (wretain) pooled tasks at the top of the worker body — the
+/// exact geometry of the organic pre-connect failures (leader destroyed the
+/// parallel context before this worker attached: "could not map dynamic
+/// shared memory segment" / lock-group join refusal) that exposed the
+/// sinval-slot leak window between ReattachRetainedProc and the sinval
+/// reattach. scripts/sinval-slot-e2e.sh is the standing battery over this
+/// knob: pre-fix, each injected failure leaked its retained sinval slot
+/// (procno freed by ProcKill, slot procPid still set) and poisoned every
+/// later claimant of the procno.
+fn test_warm_window_fail() -> PgResult<()> {
+    use std::sync::atomic::AtomicUsize;
+    static BUDGET: std::sync::OnceLock<Option<AtomicUsize>> = std::sync::OnceLock::new();
+    let Some(budget) = BUDGET.get_or_init(|| {
+        std::env::var("PGRUST_TEST_WARM_WINDOW_FAIL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .map(AtomicUsize::new)
+    }) else {
+        return Ok(());
+    };
+    if !init_small::wretain::warm_claim() {
+        return Ok(());
+    }
+    if budget
+        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+    {
+        return ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg("pgrust: test warm-window fail injection")
+            .finish(loc(0, "test_warm_window_fail"));
+    }
+    Ok(())
+}
+
 fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> PgResult<()> {
+    test_warm_window_fail()?;
     // C 1400-1402: leader already gone — exit quietly (Terminate still sent).
     if !lmgr_proc::BecomeLockGroupMember(
         shared.parallel_leader_proc_number,
@@ -1071,8 +1302,11 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     if init_small::wretain::warm_claim() {
         guc::ResetAllOptions();
     }
-    let _guc_binding = if guc::store::session_guc_bind_enabled() {
-        Some(guc::store::bind_session_gucs(&shared.guc_bind)?)
+    let _guc_binding = if let Some(pin) = shared.guc_pin.as_ref() {
+        // Pin bind: leader-validated values + extras, assign hooks fire,
+        // check hooks don't; also adopts the leader's base (started-with
+        // parity across the whole parallel query).
+        Some(guc::layers::bind_query_pin(pin)?)
     } else {
         guc::store::restore_nondefault_variables(&shared.guc_state)?;
         None

@@ -18,7 +18,7 @@
 //!   on C's row — then refuses STICKY (all later batches per-row).
 //!
 //! * **Dict-expression keys** (Q29-class): the key is a strict fmgr chain
-//!   over ONE dict-coded cbstore text column (`ScanProjExprKey` census →
+//!   over ONE dict-coded pgrcolumnar text column (`ScanProjExprKey` census →
 //!   `laneexec::dicteval`, IMMUTABLE internal-language builtins only —
 //!   volatile/stable/SQL-language functions refuse there). The dict-memo
 //!   principle applied to the KEY: the chain runs through the REAL fmgr once
@@ -61,6 +61,27 @@ fn exprkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(std::env::var("PGRUST_LANE_V2_EXPRKEY").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Opt-in switch for the coded-group arm (q29coded lane): the Dict key
+/// class groups by the INTERN ID of the memo's output value on the compact
+/// mk1 single-Intern table instead of probing the staged C tuplehash with
+/// the output TEXT. Default OFF — MEASURED REGRESSION at the q29@100M
+/// lpp15 face (5.11s vs 3.00s staged; byte gates green, par16/serial
+/// controls flat, zero budget teardowns): the partial's OUTPUT CONTRACT is
+/// still materialized text rows through the Gather tuple queues, so the
+/// coded table defers every group's key materialization from INSERT time
+/// (parallel, overlapped with the scan) to EMIT time (the pipeline-
+/// critical leader/queue face) and pays an intern re-image on top — +70%
+/// wall at +6.6% cycles (stall, not compute; notes/q29coded-lane.md). The
+/// arm becomes profitable only when the handoff itself is id-keyed (the
+/// merge-face increments); until then it is the opt-in substrate.
+/// `PGRUST_LANE_V2_CODEDKEY=1|on` engages.
+fn codedkey_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
@@ -262,12 +283,21 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
 /// surviving row through the production fmgr and pack via the canonical
 /// numeric key form (`nodeagg::mk_numeric_datum_bits`); every other key is a
 /// bare-Var component packed from its base lane (Int/Numeric) or the
-/// dict/intern lane (TextRaw, cbstore). Unpackable numeric values (range /
+/// dict/intern lane (TextRaw, pgrcolumnar). Unpackable numeric values (range /
 /// non-minimal display scale) DEMOTE: the compact table migrates to the C
 /// tuplehash and the batch replays per-row — never a lossy pack.
 pub(super) struct MultiKeyChain {
-    /// The computed key's chain (production fmgr entry points).
-    pub(super) chain: ::laneexec::ValueChain,
+    /// The computed key's chain (production fmgr entry points). `None` ONLY
+    /// for the CaseDict class (`case_dict` is `Some` then): the computed
+    /// component is a conditional text select, not a numeric chain.
+    pub(super) chain: Option<::laneexec::ValueChain>,
+    /// CaseDict computed key (band-2a, q40 class): `CASE WHEN <AND of
+    /// int-eq-const preds> THEN <text Var> ELSE <text Const> END` as a
+    /// grouping key — evaluated per survivor as a bitmask of int compares
+    /// selecting between the THEN column's per-(epoch, code) intern id and
+    /// the ELSE const's memoized intern id. The packed component is Intern
+    /// (4-byte id) at the computed key's position.
+    pub(super) case_dict: Option<CaseDictSpec>,
     /// Recognized ts-extract fast kernel (see [`ts_extract_field`]): the
     /// derived key computes as int64 field arithmetic per survivor and packs
     /// via `mk_numeric_i64_bits` — no per-row fmgr, no NUMERIC datum. `None`
@@ -284,6 +314,32 @@ pub(super) struct MultiKeyChain {
     pub(super) dict_base: Option<u16>,
     /// Pack scratch (the scan feed's shape, reused per batch).
     pub(super) mks: super::MkScratch,
+}
+
+/// The recognized CaseDict computed key (see [`MultiKeyChain::case_dict`]).
+/// Recognition is v1-strict: exactly one WHEN arm, no CASE arg, the
+/// condition an AND of `<int Var> = <int Const>` builtin equalities (any
+/// int2/4/8 cross-width pair), THEN a bare text Var of the scan, ELSE a
+/// non-NULL text Const. Evaluation is effect-free and non-erroring (int
+/// compares + verbatim text select), so reading the THEN column on ELSE
+/// rows is sound (the pack pre-passes' "per-value, effect-free" rule).
+pub(super) struct CaseDictSpec {
+    /// AND predicates: (base scan colno, canonical i64 const, Var width).
+    pub(super) preds: Vec<(u16, i64, u8)>,
+    /// THEN: the text Var's base scan colno (dict-lane registered).
+    pub(super) then_base: u16,
+    /// ELSE: the const's raw text payload bytes.
+    pub(super) else_bytes: Vec<u8>,
+    /// Per-(epoch, code) intern-id cache for the THEN column (the mk
+    /// Intern arm's cache discipline, its own identity roll). Entry
+    /// encoding: 0 = unset, `id + 1` otherwise (`reset_code_id_cache` —
+    /// the zero-page allocation is the q40 vecstate fix).
+    pub(super) cd_epoch: Option<(bool, u64)>,
+    pub(super) cd_code_ids: Vec<u32>,
+    /// Memoized ELSE intern id (cleared with the intern cache).
+    pub(super) else_id: Option<u32>,
+    /// Per-batch condition scratch (indexed by staged row).
+    pub(super) cond: Vec<bool>,
 }
 
 /// How the key lane is computed per batch.
@@ -413,7 +469,13 @@ pub(super) fn decide_exprkey<'mcx>(
             return Some(xk);
         }
         if ::nodeagg::agg_hash_key_cols(agg).len() >= 2 {
-            return decide_exprkey_mk(agg, ss, estate);
+            if let Some(xk) = decide_exprkey_mk(agg, ss, estate) {
+                return Some(xk);
+            }
+            // CaseDict computed-text-key class (band-2a q40): the census
+            // above has no CASE vocabulary — a refusal falls through to the
+            // plan-tlist recognizer.
+            return decide_exprkey_mk_case(agg, ss, estate);
         }
         return refused();
     };
@@ -505,9 +567,9 @@ pub(super) fn decide_exprkey<'mcx>(
             }
             ExprKeyKind::TsTrunc { input_col: xk.input_col, unit }
         } else {
-            // Dict class: cbstore text column, IMMUTABLE internal builtins
+            // Dict class: pgrcolumnar text column, IMMUTABLE internal builtins
             // (dicteval's fail-closed compile owns the catalog gate).
-            if !::nodeseqscan::seq_scan_is_cbstore(ss)
+            if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
                 || !matches!(xk.input_type, TEXTOID | VARCHAROID)
             {
                 return refused();
@@ -598,9 +660,9 @@ pub(super) fn decide_exprkey<'mcx>(
         return refused();
     }
     // Staging arm (decide-phase probe, like `probe_arm_fold_prefix`): the
-    // PREWHERE lane first on qual'd cbstore scans, then the columnar /
+    // PREWHERE lane first on qual'd pgrcolumnar scans, then the columnar /
     // fixed-width-prefix deform. A refusing arm fails open to per-row.
-    let armed = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    let armed = if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             match ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix) {
                 Ok(true) => {}
@@ -674,10 +736,10 @@ fn decide_exprkey_mk<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
         None
     };
-    // v1: cbstore only — text key components need dict lanes and the
+    // v1: pgrcolumnar only — text key components need dict lanes and the
     // offset-free columnar arm stages every base component as decoded
     // datums (a heap fixed-width prefix cannot stage varlena keys).
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return refused();
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
@@ -840,7 +902,8 @@ fn decide_exprkey_mk<'mcx>(
         key_out,
         prefix,
         kind: ExprKeyKind::Multi(Box::new(MultiKeyChain {
-            chain,
+            chain: Some(chain),
+            case_dict: None,
             fast,
             input_base: xk.input_col,
             dict_input_att,
@@ -1087,7 +1150,7 @@ fn decide_reduced<'mcx>(
 }
 
 /// The shared staging arm (decide-phase probe + per-build re-arm): the
-/// PREWHERE lane first on qual'd cbstore scans, then the columnar /
+/// PREWHERE lane first on qual'd pgrcolumnar scans, then the columnar /
 /// fixed-width-prefix deform. A refusing arm fails open to per-row.
 fn arm_stage<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -1095,7 +1158,7 @@ fn arm_stage<'mcx>(
     prefix: i32,
     dict_key: Option<u16>,
 ) -> bool {
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix);
         }
@@ -1108,12 +1171,325 @@ fn arm_stage<'mcx>(
 
 /// Re-arm the staging for a build (idempotent — the decide-phase probe armed
 /// the identical shape; rescans re-enter here).
+/// Builtin int-equality pg_proc oids (all int2/4/8 same- and cross-width
+/// pairs): int2eq, int4eq, int8eq, int24eq, int42eq, int48eq, int84eq,
+/// int28eq, int82eq. Pure value equality — a canonical-i64 compare is
+/// exact for every pair.
+const INT_EQ_FNS: [u32; 9] = [63, 65, 467, 158, 159, 852, 474, 1850, 1856];
+
+const INT2OID: ::types_core::Oid = ::types_core::catalog::INT2OID;
+const INT4OID: ::types_core::Oid = ::types_core::catalog::INT4OID;
+const INT8OID: ::types_core::Oid = ::types_core::catalog::INT8OID;
+
+/// One recognized CaseDict predicate operand pair: (base colno, canonical
+/// const, Var width). `None` = not the `<int Var> = <int Const>` shape.
+fn case_dict_pred(op: &::types_nodes::primnodes::OpExpr<'_>) -> Option<(u16, i64, u8)> {
+    if !INT_EQ_FNS.contains(&op.opfuncid) || op.args.len() != 2 {
+        return None;
+    }
+    let mut it = op.args.iter();
+    let (a, b) = (it.next()?, it.next()?);
+    let (v, c) = match (a.as_var(), b.as_const()) {
+        (Some(v), Some(c)) => (v, c),
+        _ => match (b.as_var(), a.as_const()) {
+            (Some(v), Some(c)) => (v, c),
+            _ => return None,
+        },
+    };
+    if v.varlevelsup != 0 || v.varattno <= 0 || c.constisnull {
+        return None;
+    }
+    let width = match v.vartype {
+        INT2OID => 2u8,
+        INT4OID => 4,
+        INT8OID => 8,
+        _ => return None,
+    };
+    let cv = match c.consttype {
+        INT2OID => c.constvalue.as_i16() as i64,
+        INT4OID => c.constvalue.as_i32() as i64,
+        INT8OID => c.constvalue.as_i64(),
+        _ => return None,
+    };
+    Some(((v.varattno - 1) as u16, cv, width))
+}
+
+/// Recognize the CaseDict tlist entry (see [`CaseDictSpec`]): `CASE WHEN
+/// <AND of int-eq-const preds> THEN <text Var> ELSE <text Const> END`.
+/// Returns (preds, then_base, else_bytes).
+fn case_dict_recognize(
+    expr: ::types_nodes::Node<'_>,
+    mcx: ::mcx::Mcx<'_>,
+) -> Option<(Vec<(u16, i64, u8)>, u16, Vec<u8>)> {
+    let ce = expr.as_case_expr()?;
+    if ce.arg.is_some() || !matches!(ce.casetype, TEXTOID) || ce.args.len() != 1 {
+        return None;
+    }
+    let when = ce.args.iter().next()?.as_variant::<::types_nodes::primnodes::CaseWhen>()?;
+    // Condition: one int-eq OpExpr, or an AND of them.
+    let cond = when.expr?;
+    let mut preds: Vec<(u16, i64, u8)> = Vec::new();
+    if let Some(op) = cond.as_op_expr() {
+        preds.push(case_dict_pred(op)?);
+    } else {
+        let be = cond.as_bool_expr()?;
+        if be.boolop != ::types_nodes::primnodes::BoolExprType::AND_EXPR || be.args.len() == 0 {
+            return None;
+        }
+        for a in be.args.iter() {
+            preds.push(case_dict_pred(a.as_op_expr()?)?);
+        }
+    }
+    // THEN: a bare text Var of the scan.
+    let tv = when.result?.as_var()?;
+    if tv.varlevelsup != 0 || tv.varattno <= 0 || !matches!(tv.vartype, TEXTOID) {
+        return None;
+    }
+    // ELSE: a non-NULL text Const (a missing/NULL default derives NULL
+    // keys, which the packed image cannot carry — refuse).
+    let dc = ce.defresult?.as_const()?;
+    if dc.constisnull || !matches!(dc.consttype, TEXTOID) {
+        return None;
+    }
+    // SAFETY: non-null text Const datum in plan memory (parse authority);
+    // detoast/借 copies through mcx as every Const consumer does.
+    let bytes = unsafe { ::types_fmgr::datum_varlena_packed(dc.constvalue, mcx) }
+        .ok()?
+        .data()
+        .to_vec();
+    Some((preds, (tv.varattno - 1) as u16, bytes))
+}
+
+/// [`decide_exprkey_mk`]'s CaseDict twin (band-2a, ClickBench q40 class):
+/// the projected scan computes ONE grouping key as a CaseDict text select
+/// (recognized off the PLAN tlist — the compiled census has no CASE
+/// vocabulary); every other tlist column is a bare Var. The packed image
+/// carries the computed key as a second Intern component (the shared
+/// intern pool disambiguates by bytes), so the shape is SERIAL-ONLY: the
+/// M2 sink's canonical-bytes machinery caps Intern components at one and
+/// refuses upstream.
+fn decide_exprkey_mk_case<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> Option<Box<ExprKeyState>> {
+    if !super::multikey_enabled() || !case_dict_enabled() {
+        return None;
+    }
+    let refused = || {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        None
+    };
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+        return refused();
+    }
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
+        trace_feed("expr-key case-dict: refused (no fold plan)");
+        return None;
+    };
+    if plan.guarded || !plan.vguards.is_empty() || ::nodeagg::agg_lanefold_has_resid(agg) {
+        trace_feed("expr-key case-dict: refused (guarded/vguards/residual plan)");
+        return refused();
+    }
+    let Some(proj) = ss.ss.ps_ProjInfo.as_ref() else {
+        trace_feed("expr-key case-dict: refused (unprojected scan)");
+        return None;
+    };
+    let result_slot = proj.pi_result_slot;
+    let natts = estate
+        .slot(result_slot)
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()?
+        .attrs
+        .len();
+    // The scan PLAN tlist: bare Vars everywhere except ONE CaseDict entry.
+    let Some(scan_plan) = agg.plan.plan.lefttree.and_then(::types_nodes::Node::as_seq_scan)
+    else {
+        trace_feed("expr-key case-dict: refused (agg child is not a SeqScan node)");
+        return None;
+    };
+    let tlist = &scan_plan.scan.plan.targetlist;
+    if tlist.len() != natts {
+        trace_feed("expr-key case-dict: refused (tlist arity)");
+        return refused();
+    }
+    let mcx = estate.es_query_cxt;
+    let mut map: Vec<Option<u16>> = vec![None; natts];
+    let mut case_col: Option<(u16, Vec<(u16, i64, u8)>, u16, Vec<u8>)> = None;
+    for (j, n) in tlist.iter().enumerate() {
+        let te = n.as_target_entry()?;
+        let expr = te.expr;
+        if let Some(v) = expr.as_var() {
+            if v.varlevelsup != 0 || v.varattno <= 0 {
+                return refused();
+            }
+            map[j] = Some((v.varattno - 1) as u16);
+            continue;
+        }
+        if case_col.is_some() {
+            trace_feed("expr-key case-dict: refused (two computed entries)");
+            return refused();
+        }
+        let (preds, then_base, else_bytes) = match case_dict_recognize(expr, mcx) {
+            Some(r) => r,
+            None => {
+                trace_feed("expr-key case-dict: refused (CASE shape not recognized)");
+                return refused();
+            }
+        };
+        case_col = Some((j as u16, preds, then_base, else_bytes));
+    }
+    let Some((key_out, preds, then_base, else_bytes)) = case_col else {
+        trace_feed("expr-key case-dict: refused (no CASE entry in the scan tlist)");
+        return refused();
+    };
+    let refused_at = |why: &str| {
+        trace_feed(&format!("expr-key case-dict: refused ({why})"));
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
+        None
+    };
+    // Grouping-key classification (agg-input coordinates): the computed
+    // column must be a TextRaw grouping key; every other key a bare Var of
+    // a packable kind, at most one OTHER raw-bytes text key. Numeric keys
+    // refuse (v1 — keeps the CaseDict pack loop demote-free).
+    let key_cols = ::nodeagg::agg_hash_key_cols(agg);
+    let mut computed_is_key = false;
+    let mut dict_input_att: Option<u16> = None;
+    let mut fixed_total = 0usize;
+    for &(att, kind) in &key_cols {
+        if att == key_out {
+            if kind != ::nodeagg::GroupKeyKind::TextRaw {
+                return refused_at("computed key kind != TextRaw");
+            }
+            computed_is_key = true;
+            fixed_total += 4;
+            continue;
+        }
+        if map.get(att as usize).copied().flatten().is_none() {
+            return refused_at("key column is not a bare Var");
+        }
+        match kind {
+            ::nodeagg::GroupKeyKind::Int { width } => fixed_total += width as usize,
+            ::nodeagg::GroupKeyKind::TextRaw => {
+                if dict_input_att.is_some() {
+                    return refused_at("a third text key");
+                }
+                if plan.cols.iter().any(|&c| c == att) {
+                    return refused_at("fold reads the text key");
+                }
+                dict_input_att = Some(att);
+                fixed_total += 4;
+            }
+            _ => return refused_at("unpackable key kind"),
+        }
+    }
+    if !computed_is_key || fixed_total > 16 {
+        return refused_at("computed col not a key, or image > 16B");
+    }
+    // Dict-answered windows leave value lanes stale: the fold must not
+    // read the THEN column (its cells ride the extra dict registration).
+    if plan.cols.iter().any(|&c| map.get(c as usize).copied().flatten() == Some(then_base)) {
+        return refused_at("fold reads the THEN column");
+    }
+    // The fold/spill coordinate rules (decide_exprkey_mk's exact checks).
+    if plan.cols.iter().any(|&c| map.get(c as usize).is_none_or(|m| m.is_none())) {
+        return refused_at("fold column unmapped");
+    }
+    let (colnos_needed, _max) = ::nodeagg::agg_hash_needed_cols(agg);
+    if colnos_needed.len() != natts {
+        return refused_at("needed-cols arity");
+    }
+    let mut prefix = then_base as i32 + 1;
+    for &(base, _, _) in &preds {
+        prefix = prefix.max(base as i32 + 1);
+    }
+    for (c, &need) in colnos_needed.iter().enumerate() {
+        if !need || c == key_out as usize {
+            continue;
+        }
+        match map[c] {
+            Some(base) => prefix = prefix.max(base as i32 + 1),
+            None => return refused_at("needed col unmapped"),
+        }
+    }
+    if let Some(q) = ss.ss.qual.as_deref() {
+        match q.max_fetch(::execexpr::SlotSrc::Scan) {
+            Some(b) => prefix = prefix.max(b),
+            None => return refused_at("qual fetch bound"),
+        }
+    }
+    if prefix <= 0 {
+        return refused_at("empty prefix");
+    }
+    let dict_base =
+        dict_input_att.map(|att| map[att as usize].expect("TextRaw keys are bare Vars"));
+    // Staging: PREWHERE first on qual'd scans, then the columnar arm with
+    // the primary dict registration + the THEN column's extra registration.
+    if ss.ss.qual.is_some() {
+        match ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {}
+        }
+    }
+    if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, dict_base) {
+        return refused_at("columnar arm");
+    }
+    if !::nodeseqscan::seq_scan_cb_dict_want_extra(ss, then_base) {
+        return refused_at("extra dict registration");
+    }
+    trace_feed("agg-over-seqscan: expr-key feed armed (multi-key packed, case-dict key)");
+    Some(Box::new(ExprKeyState {
+        natts,
+        map,
+        key_out,
+        prefix,
+        kind: ExprKeyKind::Multi(Box::new(MultiKeyChain {
+            chain: None,
+            case_dict: Some(CaseDictSpec {
+                preds,
+                then_base,
+                else_bytes,
+                cd_epoch: None,
+                cd_code_ids: Vec::new(),
+                else_id: None,
+                cond: Vec::new(),
+            }),
+            fast: None,
+            input_base: then_base,
+            dict_input_att,
+            dict_base,
+            mks: super::MkScratch::default(),
+        })),
+        refused: false,
+        rows: Vec::new(),
+        keys: Vec::new(),
+        knull: Vec::new(),
+        hashes: Vec::new(),
+        hash1: Vec::new(),
+        key_vals: Vec::new(),
+        key_null: Vec::new(),
+        dg_epoch: None,
+        dg_slots: Vec::new(),
+    }))
+}
+
+/// `PGRUST_LANE_V2_CASEDICT` kill switch (default ON): the CaseDict
+/// computed-text-key class. Off, those shapes keep the per-row breaker
+/// feed exactly as before the car.
+fn case_dict_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CASEDICT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 pub(super) fn exprkey_rearm<'mcx>(
     xk: &ExprKeyState,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> bool {
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, xk.prefix);
         }
@@ -1124,7 +1500,19 @@ pub(super) fn exprkey_rearm<'mcx>(
             | ExprKeyKind::TsTrunc { .. }
             | ExprKeyKind::Reduced { .. } => None,
         };
-        ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, xk.prefix, dict_key)
+        if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, xk.prefix, dict_key) {
+            return false;
+        }
+        // CaseDict THEN column: its dict lanes ride an EXTRA registration
+        // on the armed batch (band-2a q40).
+        if let ExprKeyKind::Multi(m) = &xk.kind {
+            if let Some(cd) = &m.case_dict {
+                if !::nodeseqscan::seq_scan_cb_dict_want_extra(ss, cd.then_base) {
+                    return false;
+                }
+            }
+        }
+        true
     } else {
         ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, xk.prefix, false, true, true);
         ::nodeseqscan::seq_scan_batch_soa(ss).is_some()
@@ -1179,12 +1567,45 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         }
         _ => false,
     };
+    // Coded-group arm (q29coded lane): the Dict key class groups by the
+    // INTERN ID of the memo's output value on the compact mk1 single-Intern
+    // table (`agg_hash_compact_try_arm_mk1` — the M2 sink single-text arm's
+    // shape, armed here on the classic build) — the staged C-tuplehash text
+    // probe and its per-group minimal-tuple key materialization never run
+    // while armed. Fail-closed: any refusal (spill estimate, key kind,
+    // aggsplit divisor, kill switch) keeps the staged leg byte-identically.
+    // The dg/ch machinery composes unchanged — pergroup pointers simply
+    // point into compact rows, with the teardown ordering law on every
+    // migration path (see `coded_drop_caches`).
+    let mut coded = match &xk.kind {
+        ExprKeyKind::Dict { .. } if !has_resid && codedkey_enabled() => {
+            let armed = tick_arm(::nodeagg::agg_hash_compact_try_arm_mk1(agg, Some(xk.key_out)));
+            if armed {
+                trace_feed("expr-key coded-group feed engaged (intern key)");
+            }
+            armed
+        }
+        _ => false,
+    };
     // Multi-key arm: the packed compact table arms per build (mirrors the
     // scan feed's scan_mk_shape sequence, which also re-decides per build).
     // A non-armed build (spill risk under the current limits) runs whole
     // batches per-row — the arrival machinery, byte-identical.
     let mk_shape: Option<::nodeagg::MkShape> = if let ExprKeyKind::Multi(m) = &xk.kind {
-        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, false, m.dict_input_att) {
+        // CaseDict shapes carry TWO Intern components: the bare text Var
+        // (dict_input_att) and the computed CASE key itself (key_out) —
+        // both pack through the shared intern pool.
+        let mut atts_buf = [0u16; 2];
+        let mut n_atts = 0usize;
+        if let Some(a) = m.dict_input_att {
+            atts_buf[n_atts] = a;
+            n_atts += 1;
+        }
+        if m.case_dict.is_some() {
+            atts_buf[n_atts] = xk.key_out;
+            n_atts += 1;
+        }
+        match ::nodeagg::agg_hash_compact_try_arm_mk_multi(agg, false, &atts_buf[..n_atts]) {
             ::nodeagg::CompactArm::Armed => {
                 Some(::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table"))
             }
@@ -1283,6 +1704,7 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             xk,
             stage_slot,
             compact,
+            &mut coded,
             mk_shape.as_ref(),
             &mut idxs,
             &mut groups,
@@ -1350,6 +1772,46 @@ enum ChVerdict {
     Disarm,
 }
 
+/// Opt-in for the zero-page (fresh alloc_zeroed) code→intern-id cache
+/// allocation (`PGRUST_EXPRKEY_ZEROPAGE=1`). Default OFF — MEASURED
+/// (board-or-hold wave, notes/vecstate-lane.md): the fresh-mmap-per-
+/// execution strategy showed a consistent official-channel hot try-2
+/// spike (+6-14% on q40; allocator page-churn class) while the eager
+/// u32-memset refill below carries the SAME -27% diagnostic win (the win
+/// is the u32 id+1 representation — memset-optimizable at half the bytes
+/// vs the old `Vec<Option<u32>>` ptr::write fill — not the lazy paging).
+fn zeropage_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_EXPRKEY_ZEROPAGE").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
+
+/// Reset a code → intern-id cache for a new (epoch) identity. Entry
+/// encoding: 0 = unset, `id + 1` otherwise.
+///
+/// vecstate q40 fix (notes/vecstate-lane.md wave-3): under a v7 stitch
+/// `size` is the part-GLOBAL dict NDV (URL @100M ≈ 18.3M) and the
+/// historical `clear()+resize(size, None)` eagerly `ptr::write`-filled the
+/// whole gndv-sized array per worker per execution — 38% of q40's total
+/// cycles. The fresh `vec![0; size]` goes through `alloc_zeroed` (kernel
+/// zero pages for large sizes): untouched codes never cost a write and the
+/// resident set is O(touched pages), so the per-query working memory
+/// stays bounded by what the query actually references (no-large-caches
+/// law: the cache still dies with the scan — only the FILL became lazy).
+pub(super) fn reset_code_id_cache(cache: &mut Vec<u32>, size: usize) {
+    if zeropage_cache_enabled() {
+        *cache = vec![0u32; size];
+    } else {
+        // Kill-switch arm: the historical buffer-retaining eager refill.
+        cache.clear();
+        cache.resize(size, 0);
+    }
+}
+
 impl CodeHistState {
     fn new(ntrans: usize, has_str: bool) -> CodeHistState {
         CodeHistState {
@@ -1403,6 +1865,8 @@ fn ch_flush<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // avgpack: packed inline AvgAccum slots (sink worker builds only).
+    let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
     for &code in &ch.touched {
         let c = code as usize;
         let n = ch.hist[c] as i64;
@@ -1420,7 +1884,7 @@ fn ch_flush<'mcx>(
         // aggcx is the node's agg context; strd is a live inline varlena
         // image copy for str plans (begin_epoch/simg discipline); guards
         // proven per code at first touch.
-        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx)? };
+        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx, avgpack_mask)? };
     }
     ch.touched.clear();
     // The advances above bypassed the per-group str memo.
@@ -1441,6 +1905,7 @@ fn ch_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     xk: &mut ExprKeyState,
     lane: &::exectuples::SoaDictLane,
+    coded: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ChVerdict> {
     debug_assert_eq!(ch.epoch, Some(lane.table.epoch));
@@ -1496,10 +1961,21 @@ fn ch_batch<'mcx>(
         }
     }
     // Pass 2 (agg mutable): resolve unresolved groups in first-occurrence
-    // row order — the dg leg's exact probe sequence.
+    // row order — the dg leg's exact probe sequence (coded arm: the same
+    // intern+compact resolve, which never misses — no Disarm leg).
     for (k, &code) in ch.rowcodes.iter().enumerate() {
         let c = code as usize;
         if xk.dg_slots[c].is_none() {
+            if coded {
+                let key = xk.keys[k];
+                debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+                // SAFETY: memo outputs are live non-null text varlenas for
+                // the staged window (dicteval arena contract).
+                let v =
+                    unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+                xk.dg_slots[c] = Some(::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?);
+                continue;
+            }
             let (key, isnull) = (xk.keys[k], xk.knull[k]);
             ::nodeagg::agg_hash_hash_staged(agg, &[key], &[isnull], &mut xk.hash1)?;
             match ::nodeagg::agg_hash_probe_staged(agg, estate, key, isnull, xk.hash1[0])? {
@@ -1530,12 +2006,168 @@ struct MmState {
 
 /// One staged batch. See `exprkey_build_fold_feed` for the routing rules.
 #[allow(clippy::too_many_arguments)]
+/// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
+/// the expr-key feed under SINK constraints — compact table REQUIRED, no
+/// dict/code-histogram state, empty str-mm memo; `mk_shape` = the armed
+/// packed shape for the Multi kind (q19 class), `None` otherwise.
+/// `Ok(false)` = the batch routed anywhere the compact table cannot host
+/// (sticky range-guard refusal, a numeric pack demote's compact disarm):
+/// the sink cannot export the C tuplehash, so the caller REFUSES (RG abort
+/// → serial whole-attempt rerun — a data-borne error then surfaces from the
+/// serial replay with C's exact error identity).
+pub(super) fn exprkey_sink_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    mk_shape: Option<&::nodeagg::MkShape>,
+    stage_slot: &mut Option<ExecSlotId>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let mut mm = MmState {
+        cols: Vec::new(),
+        codes: Vec::new(),
+        scratch: ::lanefold::StrMmScratch::default(),
+    };
+    let mut ch: Option<CodeHistState> = None;
+    // The coded-group arm is never sink-admissible (Dict `sink_key_kind` =
+    // None) — the flag stays false on this route.
+    let mut coded = false;
+    exprkey_batch(
+        agg, ss, xk, stage_slot, true, &mut coded, mk_shape, idxs, groups, &mut mm, &mut ch, n,
+        estate,
+    )?;
+    Ok(!xk.refused && ::nodeagg::agg_hash_compact_armed(agg))
+}
+
+/// The sink-admissible key kind of an expr-key decide (runtime_agg's
+/// admission input).
+pub(super) enum SinkXkKind {
+    /// Arith/TsTrunc: single staged int key (compact Single).
+    Single,
+    /// Redundant-key elimination (compact Reduced).
+    Reduced(::nodeagg::RedShape),
+    /// Packed multi-key over the projected scan (q19 class) — the compact
+    /// Multi arm packs it; `dict_input_att` names the TextRaw component's
+    /// tlist attno when one exists (the intern/canonical-bytes lane).
+    Multi { dict_input_att: Option<u16> },
+}
+
+impl ExprKeyState {
+    /// The sink-admissible key kind of this decide: `Single` for Arith/
+    /// TsTrunc, `Reduced` for the redundant-key kind, `Multi` for the packed
+    /// multi-key kind (int/numeric/one-text components — the compact mk
+    /// admission owns the component gates); `None` for Dict (its per-epoch
+    /// code→pergroup map is inherently per-worker C-table state).
+    pub(super) fn sink_key_kind(&self) -> Option<SinkXkKind> {
+        match &self.kind {
+            ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(SinkXkKind::Single),
+            ExprKeyKind::Reduced { shape, .. } => Some(SinkXkKind::Reduced(shape.clone())),
+            ExprKeyKind::Multi(m) => {
+                // CaseDict shapes (TWO Intern components) are sink-admissible
+                // since canon-sink car 1: the canonical image length-prefixes
+                // multi-text tails, so the two tails decode unambiguously.
+                // The leader's `mk_shape_sink_ok` still owns the component
+                // gates (and the two-text kill switch).
+                Some(SinkXkKind::Multi { dict_input_att: m.dict_input_att })
+            }
+            ExprKeyKind::Dict { .. } => None,
+        }
+    }
+
+    /// The Multi kind's Intern (text) component input atts, in the packed
+    /// arm's order — the `agg_hash_compact_{mk_admit,try_arm_mk}_multi`
+    /// argument (mirrors `exprkey_build_fold_feed`'s own arm sequence:
+    /// the bare text Var first, then the CaseDict computed key). Empty for
+    /// intern-free Multi shapes; `None` for non-Multi kinds.
+    pub(super) fn sink_mk_intern_atts(&self) -> Option<([u16; 2], usize)> {
+        let ExprKeyKind::Multi(m) = &self.kind else { return None };
+        let mut atts = [0u16; 2];
+        let mut n = 0usize;
+        if let Some(a) = m.dict_input_att {
+            atts[n] = a;
+            n += 1;
+        }
+        if m.case_dict.is_some() {
+            atts[n] = self.key_out;
+            n += 1;
+        }
+        Some((atts, n))
+    }
+
+    /// Sticky per-build refusal flag (arith trap / range guard).
+    pub(super) fn sink_refused(&self) -> bool {
+        self.refused
+    }
+
+    /// Invalidate the Multi kind's per-epoch code→intern-id cache. The M2
+    /// sink drain calls this after a flush that RESET the worker's intern
+    /// table (wide-vocabulary bounding) — a cached id would materialize
+    /// the WRONG bytes. No-op for the other kinds.
+    pub(super) fn invalidate_mk_intern_cache(&mut self) {
+        if let ExprKeyKind::Multi(m) = &mut self.kind {
+            m.mks.epoch = None;
+            m.mks.code_ids.clear();
+            if let Some(cd) = m.case_dict.as_mut() {
+                cd.cd_epoch = None;
+                cd.cd_code_ids.clear();
+                cd.else_id = None;
+            }
+        }
+    }
+}
+
+/// Drop the coded-group arm's compact-row pointer caches, STICKY (q29coded
+/// lane). Callers run this strictly BEFORE `agg_hash_compact_disarm` — the
+/// migration frees the compact rows the dg/ch caches point into — and
+/// strictly AFTER `ch_flush` (pending per-code counts fold into those same
+/// still-live rows). The build keeps the staged C-table leg from here: the
+/// migration re-homed every group there, so later batches re-resolve codes
+/// against the same groups, first-arrival order preserved.
+fn coded_drop_caches(xk: &mut ExprKeyState, coded: &mut bool) {
+    xk.dg_slots.clear();
+    xk.dg_epoch = None;
+    *coded = false;
+    trace_feed("expr-key coded-group teardown (staged leg resumes)");
+}
+
+/// The universal whole-batch per-row exit: flush pending per-code histogram
+/// counts, tear down the coded arm's caches when engaged (ORDER LAW: flush →
+/// drop caches → disarm; the disarm migration frees the compact rows), then
+/// migrate any armed compact table, drop the str MIN/MAX memo (per-row str
+/// advances bypass it), and route the whole batch through the per-row
+/// program — byte-identical (the permuted advance order is byte-invisible
+/// on transvalues).
+#[allow(clippy::too_many_arguments)]
+fn per_row_exit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    xk: &mut ExprKeyState,
+    ch: &mut Option<CodeHistState>,
+    mm: &mut MmState,
+    coded: &mut bool,
+    n: u32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    ch_flush(agg, xk, ch, &mut mm.scratch)?;
+    if *coded {
+        coded_drop_caches(xk, coded);
+    }
+    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
+    mm.scratch.invalidate();
+    per_row_batch(agg, ss, n, estate)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn exprkey_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     xk: &mut ExprKeyState,
     stage_slot: &mut Option<ExecSlotId>,
     compact: bool,
+    coded: &mut bool,
     mk_shape: Option<&::nodeagg::MkShape>,
     idxs: &mut Vec<u32>,
     groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
@@ -1581,15 +2213,7 @@ fn exprkey_batch<'mcx>(
         }
     };
     if !batched {
-        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-        return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+        return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
     }
     xk.rows.clear();
     for (w, &word) in sel[..nwords].iter().enumerate() {
@@ -1599,6 +2223,21 @@ fn exprkey_batch<'mcx>(
             bits &= bits - 1;
             xk.rows.push(i);
         }
+    }
+    // ZERO-SURVIVOR staged window: skip BEFORE any lane demand (the q14
+    // codedgroup precedent — condcache-census lane). A condition-cache HIT
+    // whose cached verdicts are all-fail legitimately skips the survivor
+    // deform and dict-lane gather (nodeseqscan's cond_hit arm; multi-clause
+    // all-fail miss windows and zone AllFail folds behave the same), so the
+    // window carries NO live lanes. The Dict leg's dicteval prepare would
+    // see ColView::Missing and demote, DISARMING the compact table for the
+    // whole remaining build — a one-shot degrade triggered by a window that
+    // has nothing to probe, fold, or transition on ANY path (the batched
+    // route and the per-row replay are both no-ops over zero survivors).
+    // The bitmap here is the WHOLE qual's verdict (the `batched` admission
+    // above), so empty selection == truly zero survivors.
+    if xk.rows.is_empty() {
+        return Ok(());
     }
     // Multi-key packed batches own everything from here (derive → pack →
     // packed probe → fold); the single-key legs below never see them.
@@ -1628,11 +2267,12 @@ fn exprkey_batch<'mcx>(
                 });
             }
             let batch = ::lanestitch::Batch { nrows: n, lanes };
+            // Word-level SelVec build: `all(n)` masks bits at/past n, so
+            // ANDing the whole-qual words is exactly the per-row
+            // clear-on-cleared-bit walk (wordskip lane: no per-row test).
             let mut sv = ::lanestitch::SelVec::all(n);
-            for i in 0..n {
-                if sel[(i / 64) as usize] & (1u64 << (i % 64)) == 0 {
-                    sv.clear(i);
-                }
+            for (w, s) in sv.words[..nwords].iter_mut().zip(sel[..nwords].iter()) {
+                *w &= *s;
             }
             xk.key_vals.clear();
             xk.key_vals.resize(n as usize, ::datum::Datum::null());
@@ -1651,15 +2291,7 @@ fn exprkey_batch<'mcx>(
             if ::lanestitch::eval_project(prog, &batch, &sv, &mut outs).is_err() {
                 xk.refused = true;
                 trace_feed("expr-key arith trap: replaying batch per-row (sticky)");
-                ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
             }
         }
         ExprKeyKind::TsTrunc { input_col, unit } => {
@@ -1700,15 +2332,7 @@ fn exprkey_batch<'mcx>(
                     ::laneexec::DictEvalPrepared::Ready => {}
                     ::laneexec::DictEvalPrepared::Demote(reason) => {
                         ::laneexec::log_dicteval_demoted(reason);
-                        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                        return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                        return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                     }
                 }
                 let (vals, nulls) = prog.scratch();
@@ -1748,15 +2372,7 @@ fn exprkey_batch<'mcx>(
                 )
             } == ::lanefold::GuardCheck::Demote;
             if demote {
-                ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                return {
-            // Whole-batch per-row route: str advances bypass the memo, and
-            // pending histogram counts flush first (always sound; the
-            // permuted advance order is byte-invisible on transvalues).
-            ch_flush(agg, xk, ch, &mut mm.scratch)?;
-            mm.scratch.invalidate();
-            per_row_batch(agg, ss, n, estate)
-        };
+                return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
             }
         }
     }
@@ -1766,6 +2382,21 @@ fn exprkey_batch<'mcx>(
     for &i in &xk.rows {
         xk.keys.push(xk.key_vals[i as usize]);
         xk.knull.push(xk.key_null[i as usize]);
+    }
+    // Coded-group arm (q29coded): pre-batch gates, BEFORE any probe.
+    // (a) Budget peek — the classic backstop migrates as a side effect,
+    // which would free the compact rows the dg/ch caches point into; the
+    // coded teardown runs the same migration in cache-safe order (flush →
+    // drop caches → disarm) and the batch continues on the staged leg
+    // below, which finds every group in the C table. (b) A NULL derived
+    // key cannot pack into the null-bitmap-free mk1 image — same teardown;
+    // the staged leg's probe handles NULL keys natively (byte-identical).
+    if *coded
+        && (::nodeagg::agg_hash_compact_over_limits(agg) || xk.knull.iter().any(|&nl| nl))
+    {
+        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+        coded_drop_caches(xk, coded);
+        ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
     }
     // Probe. Compact first (int keys, no resid), then the dictgroup-style
     // per-epoch code map (dict windows), then the batched staged probe.
@@ -1823,32 +2454,22 @@ fn exprkey_batch<'mcx>(
         // back byte-identically (ChVerdict doc).
         if ch.as_ref().is_some_and(|c| !c.disarmed) {
             let chs = ch.as_mut().expect("just checked Some");
-            match ch_batch(chs, agg, xk, &lane, estate)? {
+            match ch_batch(chs, agg, xk, &lane, *coded, estate)? {
                 ChVerdict::Counted => return Ok(()),
                 ChVerdict::Demote => {
-                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                    return {
-                        // Whole-batch per-row route: flush + memo drop as at
-                        // every other per-row return.
-                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
-                        mm.scratch.invalidate();
-                        per_row_batch(agg, ss, n, estate)
-                    };
+                    // Whole-batch per-row route: flush + memo drop as at
+                    // every other per-row return (coded teardown inside).
+                    return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                 }
                 ChVerdict::Disarm => {
                     let chs = ch.as_mut().expect("just checked Some");
                     chs.disarmed = true;
                     trace_feed("expr-key code-histogram disarmed (spill mode)");
-                    ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
-                    return {
-                        // The batch's row-domain guard proof was skipped for
-                        // the ch path, so it must not reach the dg fold leg:
-                        // the universal per-row route runs it instead
-                        // (byte-identical; spill rows take C's row path).
-                        ch_flush(agg, xk, ch, &mut mm.scratch)?;
-                        mm.scratch.invalidate();
-                        per_row_batch(agg, ss, n, estate)
-                    };
+                    // The batch's row-domain guard proof was skipped for
+                    // the ch path, so it must not reach the dg fold leg:
+                    // the universal per-row route runs it instead
+                    // (byte-identical; spill rows take C's row path).
+                    return per_row_exit(agg, ss, xk, ch, mm, coded, n, estate);
                 }
             }
         }
@@ -1858,6 +2479,24 @@ fn exprkey_batch<'mcx>(
             debug_assert!(code < ndict, "filler contract: code < ndict");
             let pg = match xk.dg_slots[code] {
                 Some(pg) => pg,
+                None if *coded => {
+                    // Coded-group resolve (q29coded): intern the memo's
+                    // OUTPUT VALUE once per (epoch, code) — cross-epoch
+                    // group identity is the intern table — and probe the
+                    // compact mk1 table by the u32 id; never a text probe
+                    // of the C tuplehash, never a spill leg (the budget
+                    // peek above bounds the table). First-arrival order is
+                    // the staged leg's exactly (same rows, same sequence).
+                    let key = xk.keys[k];
+                    debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+                    // SAFETY: memo outputs are live non-null text varlenas
+                    // for the staged window (dicteval arena contract).
+                    let v =
+                        unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+                    let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
+                    xk.dg_slots[code] = Some(pg);
+                    pg
+                }
                 None => {
                     let (key, isnull) = (xk.keys[k], xk.knull[k]);
                     ::nodeagg::agg_hash_hash_staged(agg, &[key], &[isnull], &mut xk.hash1)?;
@@ -1878,6 +2517,23 @@ fn exprkey_batch<'mcx>(
                     }
                 }
             };
+            idxs.push(i);
+            groups.push(pg);
+        }
+    } else if *coded {
+        // Raw window under the coded arm: per selected row through the same
+        // intern+probe (raw windows are the rare non-dict chunks; the memo
+        // scratch already carries per-row derived values). The epoch ended —
+        // flush pending histogram counts first, the staged leg's discipline.
+        ch_flush(agg, xk, ch, &mut mm.scratch)?;
+        for k in 0..xk.rows.len() {
+            let i = xk.rows[k];
+            let key = xk.keys[k];
+            debug_assert!(!xk.knull[k], "coded batches were null-checked above");
+            // SAFETY: per-row derived results are live non-null text
+            // varlenas (the memo's Raw-window scratch fill).
+            let v = unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
+            let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
             idxs.push(i);
             groups.push(pg);
         }
@@ -1977,12 +2633,15 @@ fn exprkey_mk_batch<'mcx>(
     // Derive the computed key over the survivors. Errors: refuse-and-replay.
     let mut derive_err = false;
     let mut null_key = false;
-    {
+    // CaseDict shapes skip the derive entirely: their computed component
+    // evaluates inside the pack pre-pass (an intern id, not a datum lane).
+    if !matches!(&xk.kind, ExprKeyKind::Multi(m) if m.case_dict.is_some()) {
         let ExprKeyState { kind, rows, key_vals, key_null, .. } = &mut *xk;
         let ExprKeyKind::Multi(m) = kind else {
             unreachable!("mk batch requires the Multi kind")
         };
-        m.chain.reset();
+        let chain = m.chain.as_mut().expect("non-CaseDict Multi shapes carry the chain");
+        chain.reset();
         key_vals.clear();
         key_vals.resize(n as usize, ::datum::Datum::null());
         key_null.clear();
@@ -2012,7 +2671,7 @@ fn exprkey_mk_batch<'mcx>(
             for &i in rows.iter() {
                 let i = i as usize;
                 let input = ::datum::NullableDatum { value: values[i], isnull: isnull[i] };
-                match m.chain.eval(input) {
+                match chain.eval(input) {
                     Ok(nd) => {
                         key_vals[i] = nd.value;
                         key_null[i] = nd.isnull;
@@ -2031,7 +2690,7 @@ fn exprkey_mk_batch<'mcx>(
     }
     if derive_err || null_key {
         // NULL derived keys cannot pack without a null-bitmap byte
-        // (cbstore shapes carry none): same demote as an error, minus the
+        // (pgrcolumnar shapes carry none): same demote as an error, minus the
         // replayed raise.
         xk.refused = true;
         trace_feed("expr-key multi-key demote: replaying batch per-row (sticky)");
@@ -2047,7 +2706,9 @@ fn exprkey_mk_batch<'mcx>(
         let ExprKeyKind::Multi(m) = kind else {
             unreachable!("mk batch requires the Multi kind")
         };
-        let super::MkScratch { packbuf, keys1, keys2, epoch, code_ids, .. } = &mut m.mks;
+        let fast_kernel = m.fast.is_some();
+        let MultiKeyChain { case_dict, mks, .. } = &mut **m;
+        let super::MkScratch { packbuf, keys1, epoch, code_ids, .. } = mks;
         packbuf.clear();
         packbuf.resize(rows.len(), 0u128);
         'comps: for comp in shape.comps.iter() {
@@ -2060,7 +2721,7 @@ fn exprkey_mk_batch<'mcx>(
                     // ts-extract batches carry RAW i64 field values: the
                     // integer pack produces the datum path's exact bits
                     // (`mk_numeric_i64_bits` ≡ pack of `int64_to_numeric`).
-                    let fast = m.fast.is_some();
+                    let fast = fast_kernel;
                     for (k, &i) in rows.iter().enumerate() {
                         let bits = if fast {
                             ::nodeagg::mk_numeric_i64_bits(key_vals[i as usize].as_i64(), width)
@@ -2117,6 +2778,119 @@ fn exprkey_mk_batch<'mcx>(
                         packbuf[k] |= (((v as u64) & mask) as u128) << off_bits;
                     }
                 }
+                ::nodeagg::MkCompKind::Intern if att == *key_out && case_dict.is_some() => {
+                    // CaseDict computed key (band-2a q40): per-survivor int
+                    // predicate mask, then select between the THEN column's
+                    // per-(epoch, code) intern id and the memoized ELSE id.
+                    let cd = case_dict.as_mut().expect("checked Some");
+                    let mcx = estate.es_query_cxt;
+                    let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                        .expect("expr-key batched route requires the armed SoA");
+                    // Predicate pass (AND of int equalities; a NULL operand
+                    // makes the WHEN not-true -> ELSE, C's CASE semantics).
+                    cd.cond.clear();
+                    cd.cond.resize(n as usize, true);
+                    for &(base, cv, width) in &cd.preds {
+                        let (values, isnull) =
+                            (soa.col_values(base as usize), soa.col_isnull(base as usize));
+                        for &i in rows.iter() {
+                            let i = i as usize;
+                            if !cd.cond[i] {
+                                continue;
+                            }
+                            let v = match width {
+                                2 => values[i].as_i16() as i64,
+                                4 => values[i].as_i32() as i64,
+                                _ => values[i].as_i64(),
+                            };
+                            cd.cond[i] = !isnull[i] && v == cv;
+                        }
+                    }
+                    // ELSE id, memoized (cleared with the intern caches).
+                    let else_id = match cd.else_id {
+                        Some(id) => id,
+                        None => {
+                            let id =
+                                ::nodeagg::agg_hash_compact_intern(agg, &cd.else_bytes);
+                            cd.else_id = Some(id);
+                            id
+                        }
+                    };
+                    let lane = soa.dict_lane(cd.then_base as usize);
+                    match lane {
+                        Some(lane) => {
+                            let ndict = lane.table.ndict as usize;
+                            let global = lane.table.has_stitch();
+                            let (ident, size) = if global {
+                                ((true, lane.table.gepoch), lane.table.gndv as usize)
+                            } else {
+                                ((false, lane.table.epoch), ndict)
+                            };
+                            if cd.cd_epoch != Some(ident) {
+                                cd.cd_epoch = Some(ident);
+                                reset_code_id_cache(&mut cd.cd_code_ids, size);
+                            }
+                            for (k, &i) in rows.iter().enumerate() {
+                                let id = if cd.cond[i as usize] {
+                                    let local = lane.code(i as usize);
+                                    debug_assert!(
+                                        (local as usize) < ndict,
+                                        "filler contract: code < ndict"
+                                    );
+                                    let code = if global {
+                                        lane.table.global_code(local) as usize
+                                    } else {
+                                        local as usize
+                                    };
+                                    match cd.cd_code_ids[code] {
+                                        c if c != 0 => c - 1,
+                                        _ => {
+                                            let d = lane.table.datum(local);
+                                            // SAFETY: dict entries are live
+                                            // non-null text varlenas for the
+                                            // staged window (dict lane
+                                            // contract).
+                                            let v = unsafe {
+                                                ::types_fmgr::datum_varlena_packed(d, mcx)
+                                            }?;
+                                            let id = ::nodeagg::agg_hash_compact_intern(
+                                                agg,
+                                                v.data(),
+                                            );
+                                            debug_assert!(id != u32::MAX, "id+1 encoding");
+                                            cd.cd_code_ids[code] = id + 1;
+                                            id
+                                        }
+                                    }
+                                } else {
+                                    else_id
+                                };
+                                packbuf[k] |= (id as u128) << off_bits;
+                            }
+                        }
+                        None => {
+                            // Raw-answered window: per-row intern of the
+                            // THEN column on cond-true rows (correct,
+                            // colder — the Intern arm's fallback rule).
+                            let values = soa.col_values(cd.then_base as usize);
+                            for (k, &i) in rows.iter().enumerate() {
+                                let id = if cd.cond[i as usize] {
+                                    let d = values[i as usize];
+                                    // SAFETY: staged non-null live text
+                                    // varlena (columnar fill; admission
+                                    // proved the column type).
+                                    let v = unsafe {
+                                        ::types_fmgr::datum_varlena_packed(d, mcx)
+                                    }?;
+                                    ::nodeagg::agg_hash_compact_intern(agg, v.data())
+                                } else {
+                                    else_id
+                                };
+                                packbuf[k] |= (id as u128) << off_bits;
+                            }
+                        }
+                    }
+                }
                 ::nodeagg::MkCompKind::Intern => {
                     let base = map[att as usize].expect("Var keys map to base lanes") as usize;
                     let mcx = estate.es_query_cxt;
@@ -2137,8 +2911,7 @@ fn exprkey_mk_batch<'mcx>(
                             };
                             if *epoch != Some(ident) {
                                 *epoch = Some(ident);
-                                code_ids.clear();
-                                code_ids.resize(size, None);
+                                reset_code_id_cache(code_ids, size);
                             }
                             debug_assert!(code_ids.len() >= size);
                             for (k, &i) in rows.iter().enumerate() {
@@ -2154,8 +2927,8 @@ fn exprkey_mk_batch<'mcx>(
                                 };
                                 debug_assert!(code < size, "stitch contract: code < gndv");
                                 let id = match code_ids[code] {
-                                    Some(id) => id,
-                                    None => {
+                                    c if c != 0 => c - 1,
+                                    _ => {
                                         let d = lane.table.datum(local);
                                         // SAFETY: dict entries are live
                                         // non-null text varlenas for the
@@ -2169,7 +2942,8 @@ fn exprkey_mk_batch<'mcx>(
                                             agg,
                                             v.data(),
                                         );
-                                        code_ids[code] = Some(id);
+                                        debug_assert!(id != u32::MAX, "id+1 encoding");
+                                        code_ids[code] = id + 1;
                                         id
                                     }
                                 };
@@ -2201,14 +2975,12 @@ fn exprkey_mk_batch<'mcx>(
                 }
             }
         }
-        if !unpackable {
-            if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-            } else {
-                keys1.clear();
-                keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
-            }
+        if !unpackable && !shape.two_words {
+            // One-word shapes narrow u128 -> i64 (a real stride change).
+            // Two-word shapes probe the accumulator in place at the probe
+            // block below (mk_keys2_lane — mkaccept inc-1).
+            keys1.clear();
+            keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
         }
     }
     if unpackable {
@@ -2224,7 +2996,9 @@ fn exprkey_mk_batch<'mcx>(
             unreachable!("mk batch requires the Multi kind")
         };
         if shape.two_words {
-            ::nodeagg::agg_hash_compact_batch_mk2(agg, &m.mks.keys2, groups)?;
+            let super::MkScratch { packbuf, keys2, .. } = &mut m.mks;
+            let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+            ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
         } else {
             ::nodeagg::agg_hash_compact_batch_mk1(agg, &m.mks.keys1, groups)?;
         }
@@ -2355,12 +3129,22 @@ fn per_row_batch<'mcx>(
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    for i in 0..n {
+    // Emit-dead word skip over the staged qual bitmap: a cleared skip-sel
+    // bit is a row the emit rejects with no observable effect (definitive
+    // even under requal) — same accepted rows, same order, same errors.
+    let skip = {
+        let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+        ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+            w[..s.len()].copy_from_slice(s);
+            w
+        })
+    };
+    ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
         if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
             ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Rebuild the projected row in the memoized stage slot: needed columns from

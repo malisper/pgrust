@@ -107,6 +107,14 @@ pub struct DictEvalProg {
     ret_byval: bool,
     out: OutForm,
     memo_epoch: Option<u64>,
+    /// Codes whose Value-form memo slot was LAZILY filled this epoch — the
+    /// exact dirty set for the touched-walk epoch reset (proportionality-
+    /// audit B3: the per-epoch `resize(ndict, None)` memset was O(domain)
+    /// per row group while the lazy fill touches O(selected codes)).
+    /// Invariant (lazy progs): `memo[c].is_some()` ⟺ `c ∈ memo_touched`.
+    /// Eager progs fill the whole dict outside the lazy path and keep the
+    /// full-clear reset — see [`DictEvalProg::reset_epoch`].
+    memo_touched: Vec<u32>,
     /// By-ref results and chain intermediates; reset only at epoch change,
     /// strictly after every consumer of the previous window copied out (the
     /// proj.rs lifetime contract).
@@ -203,6 +211,7 @@ pub fn compile_value(spec: &DictExprSpec) -> Result<Box<DictEvalProg>, &'static 
         ret_byval,
         out: OutForm::Value { memo: Vec::new() },
         memo_epoch: None,
+        memo_touched: Vec::new(),
         arena,
         memo_bytes: 0,
         byte_cap: DICTEVAL_MEMO_CAP,
@@ -437,10 +446,65 @@ fn byref_size(d: Datum) -> usize {
     unsafe { types_tuple::varatt::varsize_any(p) }
 }
 
+/// `PGRUST_LANE_DICTEVAL_TOUCHED` kill switch (default ON; `0`/`off`
+/// restores the full-domain reset): LAZY Value-form epoch resets clear only
+/// the memo slots this epoch actually filled (`memo_touched` — the lazy fill
+/// records every first write) instead of `clear()+resize(ndict, None)`
+/// re-memsetting the whole per-RG dict domain on every roll. Visible state
+/// per epoch start is identical under both arms: all-None over
+/// `[0, ndict)`. Eager progs and the (test-only) Bitmap form keep the full
+/// clear — their fills bypass the lazy path, and eager work is O(ndict)
+/// regardless.
+fn dicteval_touched_clear_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_DICTEVAL_TOUCHED").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 impl DictEvalProg {
     fn reset_epoch(&mut self, epoch: Option<u64>, ndict: usize) {
         match &mut self.out {
+            OutForm::Value { memo }
+                if dicteval_touched_clear_enabled()
+                    && !self.eager
+                    // Dense epochs: one linear memset beats scattered
+                    // stores past ~1/8 occupancy — fall through to the
+                    // full clear (same visible state either way).
+                    && self.memo_touched.len() <= memo.len() / 8 =>
+            {
+                // Touched-walk reset: None exactly the lazily filled slots
+                // (the recorded dirty set) and grow the allocation
+                // monotonically — retained tail slots are None by the same
+                // invariant. The stale-Some hazard is real (memo datums
+                // point into the epoch arena, reset below), so the debug
+                // arm re-proves the all-None contract.
+                for &c in &self.memo_touched {
+                    memo[c as usize] = None;
+                }
+                if memo.len() < ndict {
+                    // Domain-work tripwire: growth is domain-sized.
+                    let grow = ndict - memo.len();
+                    exectuples::domain_work_tick(
+                        grow * core::mem::size_of::<Option<NullableDatum>>(),
+                        grow,
+                    );
+                    memo.resize(ndict, None);
+                }
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    memo.iter().all(Option::is_none),
+                    "touched-walk reset must leave no stale memo slot"
+                );
+            }
             OutForm::Value { memo } => {
+                // Domain-work tripwire: full-domain reset (eager progs and
+                // the kill-switch arm) — the exposure this lane closed for
+                // the lazy default.
+                exectuples::domain_work_tick(
+                    ndict * core::mem::size_of::<Option<NullableDatum>>(),
+                    ndict,
+                );
                 memo.clear();
                 memo.resize(ndict, None);
             }
@@ -452,6 +516,7 @@ impl DictEvalProg {
                 filled.resize(words, 0);
             }
         }
+        self.memo_touched.clear();
         if let Some(a) = &mut self.arena {
             a.reset();
         }
@@ -557,7 +622,8 @@ fn prepare_views(
                         // staged window's rows, dict covers ndict entries.
                         let code = unsafe { *lane.codes.add(i) } as usize;
                         let DictEvalProg {
-                            kernel, arena, out, memo_bytes, byte_cap, ret_byval, ..
+                            kernel, arena, out, memo_bytes, byte_cap, ret_byval,
+                            memo_touched, ..
                         } = &mut **p;
                         let OutForm::Value { memo } = out else {
                             return Ok(Prepared::Demote("bitmap prog on value surface"));
@@ -565,8 +631,10 @@ fn prepare_views(
                         match memo[code] {
                             Some(nd) => nd,
                             None => {
-                                // SAFETY: code < ndict by the lane contract.
-                                let entry = unsafe { *lane.table.dict.add(code) };
+                                // Seam-aware read: ensures a lazy sub-framed
+                                // dict entry's bytes (code < ndict by the
+                                // lane contract).
+                                let entry = lane.table.datum(code as u32);
                                 let Some(s) = crate::dict::inline_varlena_payload(entry)
                                 else {
                                     return Ok(Prepared::Demote("non-inline dict entry"));
@@ -579,6 +647,9 @@ fn prepare_views(
                                     return Ok(Prepared::Demote("memo byte cap"));
                                 }
                                 memo[code] = Some(nd);
+                                // Dirty-set record for the touched-walk
+                                // epoch reset (every first fill, exactly).
+                                memo_touched.push(code as u32);
                                 nd
                             }
                         }
@@ -612,6 +683,12 @@ fn prepare_views(
 // error surface of its own (eager kernels are non-erroring by proof; any
 // PgResult error here is a seam/representation surprise, not C's error).
 fn fill_eager(p: &mut DictEvalProg, lane: SoaDictLane) -> Result<(), ()> {
+    // Whole-dict sweep: materialize a lazy sub-framed dict up front.
+    // Domain-work tripwire: the eager fill IS domain-sized by design
+    // (proof-carrying arm) — metered so its query-class exposure stays
+    // visible next to the touched counters.
+    exectuples::domain_work_tick(0, lane.table.ndict as usize);
+    lane.table.ensure_all();
     for code in 0..lane.table.ndict as usize {
         // SAFETY: dict covers ndict entries (SoaDictLane contract).
         let entry = unsafe { *lane.table.dict.add(code) };
@@ -673,6 +750,9 @@ mod tests {
                     stitch: std::ptr::null(),
                     gndv: 0,
                     gepoch: 0,
+                    lazy: core::ptr::null(),
+                    lazy_ensure: None,
+                    lazy_ensure_all: None,
                 },
             }
         }
@@ -692,6 +772,7 @@ mod tests {
             ret_byval: true,
             out: OutForm::Value { memo: Vec::new() },
             memo_epoch: None,
+            memo_touched: Vec::new(),
             arena: None,
             memo_bytes: 0,
             byte_cap: cap,
@@ -742,6 +823,41 @@ mod tests {
         let views = [ColView::Dict(fx.lane(8))];
         prepare_views(&mut ps, &views, &sel, 5).unwrap();
         assert_eq!(n.get(), 6);
+    }
+
+    #[test]
+    fn lazy_touched_reset_survives_shrink_grow_and_partial_selection() {
+        // Proportionality-audit B3 pin for the touched-walk epoch reset
+        // (default arm): only code 4 of a 5-entry dict fills in epoch 1;
+        // epoch 2 SHRINKS the dict (retained memo tail must read as unfilled);
+        // epoch 3 GROWS it back with DIFFERENT content at code 4 — a stale
+        // Some from epoch 1 would resurface the old length (4), the fresh
+        // fill must see the new entry (8).
+        let e1 = DictFixture::new(&[b"a", b"bb", b"ccc", b"dd", b"eeee"], &[4, 4]);
+        let e2 = DictFixture::new(&[b"x", b"yy", b"zzz"], &[2]);
+        let e3 =
+            DictFixture::new(&[b"a", b"bb", b"ccc", b"dd", b"eeeeeeee"], &[4]);
+        let n = Rc::new(Cell::new(0));
+        let mut ps = vec![prog(false, true, usize::MAX, len_kernel(n.clone()))];
+        // Epoch 1: two rows, one distinct code — exactly one kernel call.
+        let views = [ColView::Dict(e1.lane(1))];
+        assert!(matches!(
+            prepare_views(&mut ps, &views, &rows(&[0, 1], 2), 2).unwrap(),
+            Prepared::Ready
+        ));
+        assert_eq!(n.get(), 1);
+        assert_eq!(ps[0].scratch().0[0].as_i32(), 4);
+        // Epoch 2 (smaller ndict): fresh fill for code 2.
+        let views = [ColView::Dict(e2.lane(2))];
+        prepare_views(&mut ps, &views, &rows(&[0], 1), 1).unwrap();
+        assert_eq!(n.get(), 2);
+        assert_eq!(ps[0].scratch().0[0].as_i32(), 3);
+        // Epoch 3 (grown back): code 4 must re-evaluate against the NEW
+        // entry — the stale-slot detector.
+        let views = [ColView::Dict(e3.lane(3))];
+        prepare_views(&mut ps, &views, &rows(&[0], 1), 1).unwrap();
+        assert_eq!(n.get(), 3, "code 4 must not be served from a stale slot");
+        assert_eq!(ps[0].scratch().0[0].as_i32(), 8);
     }
 
     #[test]

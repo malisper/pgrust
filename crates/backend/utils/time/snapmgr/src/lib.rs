@@ -650,6 +650,21 @@ pub fn ActiveSnapshotSet() -> bool {
     with_state(|s| !s.active.is_empty())
 }
 
+pub fn SnapshotStateClean() -> bool {
+    with_state(|s| {
+        s.current.is_none()
+            && s.secondary.is_none()
+            && !s.catalog_valid
+            && s.historic.is_none()
+            && s.historic_tuplecids.is_none()
+            && !s.first_snapshot_set
+            && s.first_xact_snapshot.is_none()
+            && s.active.is_empty()
+            && s.registered.is_empty()
+            && s.exported.is_empty()
+    })
+}
+
 pub fn RegisterSnapshot(snapshot: Option<&Snapshot>) -> PgResult<Option<Snapshot>> {
     let Some(snapshot) = snapshot else {
         return Ok(None);

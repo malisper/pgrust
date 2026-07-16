@@ -577,7 +577,7 @@ impl ScanContainsClause {
 ///
 /// The needle search is `memchr::memmem` with a per-call prebuilt finder —
 /// the measured-fastest kernel of the strsearch parity matrix (blob-wide
-/// application lands with the cbstore text arena; a pointer lane has no
+/// application lands with the pgrcolumnar text arena; a pointer lane has no
 /// contiguous blob).
 ///
 /// # Safety

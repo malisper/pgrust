@@ -782,34 +782,34 @@ pub fn heap_reloptions<'mcx>(
     }
 }
 
-// Is relam the cbstore table AM? The tableam_vocab registry only fills when
-// a cbstore relation is first built into the relcache, so fall back to the
+// Is relam the pgrcolumnar table AM? The tableam_vocab registry only fills when
+// a pgrcolumnar relation is first built into the relcache, so fall back to the
 // pg_am.amname probe (the same identity rule relcache build uses) — this
 // runs only for non-heap relam values with reloptions present, so the
 // syscache probe is off every hot path.
-pub fn relam_is_cbstore(relam: Oid) -> bool {
+pub fn relam_is_pgrcolumnar(relam: Oid) -> bool {
     const HEAP_TABLE_AM_OID: Oid = 2; // pg_am.dat (relcache build carries it too)
     relam != ::types_core::InvalidOid
         && relam != HEAP_TABLE_AM_OID
-        && (tableam_vocab::is_cbstore_am_oid(relam)
+        && (tableam_vocab::is_pgrcolumnar_am_oid(relam)
             || matches!(
                 syscache_seams::pg_am_amname::call(relam),
                 Ok(Some(ref n)) if n == "cbstore"
             ))
 }
 
-// cbstore AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
-// A closed hand-rolled parse table (no C counterpart — cbstore is native):
+// pgrcolumnar AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// A closed hand-rolled parse table (no C counterpart — pgrcolumnar is native):
 // cluster_key='col,...' (sort-on-ingest key), codec=auto|lz4|zstd|plain,
 // zstd_level=1..22, codec_cols='col=codec,...' (per-column overrides).
 // Column-name resolution happens at writer open, not here (parse-time has no
 // tupdesc); unknown/invalid values error under validate, are skipped else.
-pub fn cbstore_reloptions<'mcx>(
+pub fn pgrcolumnar_reloptions<'mcx>(
     mcx: Mcx<'mcx>,
     options: Option<&[u8]>,
     validate: bool,
-) -> PgResult<Option<::types_rel::CbstoreOptions>> {
-    use ::types_rel::{CbstoreCodec, CbstoreOptions};
+) -> PgResult<Option<::types_rel::PgrcolumnarOptions>> {
+    use ::types_rel::{PgrcolumnarCodec, PgrcolumnarOptions};
     let Some(options) = options else { return Ok(None) };
     let expanded = expand_short_image(mcx, Some(options))?;
     let options = match &expanded {
@@ -823,7 +823,7 @@ pub fn cbstore_reloptions<'mcx>(
             .into_error()
             .into()
     };
-    let mut out = CbstoreOptions::default();
+    let mut out = PgrcolumnarOptions::default();
     for text_str in option_text_strs(mcx, options)?.iter() {
         let (name, value) = match text_str.find('=') {
             Some(p) => (&text_str[..p], &text_str[p + 1..]),
@@ -841,10 +841,10 @@ pub fn cbstore_reloptions<'mcx>(
                 }
             }
             "codec" => match value {
-                v if v.eq_ignore_ascii_case("auto") => out.codec = CbstoreCodec::Auto,
-                v if v.eq_ignore_ascii_case("lz4") => out.codec = CbstoreCodec::Lz4,
-                v if v.eq_ignore_ascii_case("zstd") => out.codec = CbstoreCodec::Zstd,
-                v if v.eq_ignore_ascii_case("plain") => out.codec = CbstoreCodec::Plain,
+                v if v.eq_ignore_ascii_case("auto") => out.codec = PgrcolumnarCodec::Auto,
+                v if v.eq_ignore_ascii_case("lz4") => out.codec = PgrcolumnarCodec::Lz4,
+                v if v.eq_ignore_ascii_case("zstd") => out.codec = PgrcolumnarCodec::Zstd,
+                v if v.eq_ignore_ascii_case("plain") => out.codec = PgrcolumnarCodec::Plain,
                 other => {
                     if validate {
                         return Err(ereport(ERROR)
@@ -1228,8 +1228,8 @@ pub fn extractRelOptions<'mcx>(
     let image = text_array_image(mcx, d)?;
     let options = Some(image.as_slice());
     match relkind {
-        RELKIND_RELATION if relam_is_cbstore(relam) => {
-            Ok(cbstore_reloptions(mcx, options, false)?.map(RdOptions::Cbstore))
+        RELKIND_RELATION if relam_is_pgrcolumnar(relam) => {
+            Ok(pgrcolumnar_reloptions(mcx, options, false)?.map(RdOptions::Pgrcolumnar))
         }
         RELKIND_RELATION | RELKIND_TOASTVALUE | RELKIND_MATVIEW => {
             Ok(heap_reloptions(mcx, relkind, options, false)?.map(RdOptions::Std))

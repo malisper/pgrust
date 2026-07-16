@@ -9,6 +9,7 @@ name = "bgworker"
 path = "src/lib.rs"
 
 [dependencies]
+shm_mq = { path = "../../storage/ipc/shm_mq" }
 bgworker_seams = { path = "../bgworker_seams" }
 elog = { path = "../../utils/error/elog" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
@@ -26,6 +27,7 @@ postmaster_seams = { path = "../postmaster_seams" }
 postgres = { path = "../../tcop/postgres" }
 postinit = { path = "../../utils/init/postinit" }
 procsignal = { path = "../../storage/ipc/procsignal" }
+sinval = { path = "../../storage/ipc/sinval" }
 timeout_seams = { path = "../../utils/misc/timeout_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }

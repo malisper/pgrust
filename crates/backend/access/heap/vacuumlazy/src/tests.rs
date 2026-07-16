@@ -281,37 +281,57 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
             MultiXactCutoff: 1,
         },
         vistest: GlobalVisStateHandle::new(0),
-        NewRelfrozenXid: 1000,
-        NewRelminMxid: 1,
         skippedallvis: false,
+        coverage_hole: false,
         rel_pages: 1,
-        scanned_pages: 0,
         removed_pages: 0,
-        new_frozen_tuple_pages: 0,
-        lpdead_item_pages: 1,
-        nonempty_pages: 0,
+        folds: {
+            // Seed = (OldestXmin, OldestMxact), as heap_vacuum_rel.
+            let mut counters = ::vacuum_morsels::ScanCounters::seed(1000, 1);
+            counters.lpdead_item_pages = 1;
+            ScanFolds { counters, offnum: InvalidOffsetNumber }
+        },
         dead_items: Some(TidStore::create_local(mcx, 64 * 1024 * 1024, true).unwrap()),
         dead_items_info: VacDeadItemsInfo { max_bytes: 64 * 1024 * 1024, num_items: 0 },
         pvs: None,
         num_index_scans: 1,
-        tuples_deleted: 0,
-        tuples_frozen: 0,
-        lpdead_items: 0,
-        live_tuples: 0,
-        recently_dead_tuples: 0,
-        missed_dead_tuples: 0,
-        missed_dead_pages: 0,
-        vm_new_visible_pages: 0,
-        vm_new_visible_frozen_pages: 0,
-        vm_new_frozen_pages: 0,
         new_rel_tuples: 0.0,
         new_live_tuples: 0.0,
-        offnum: InvalidOffsetNumber,
         current_block: InvalidBlockNumber,
         next_unskippable_block: InvalidBlockNumber,
         next_unskippable_allvis: false,
         next_unskippable_vmbuffer: VmBuffer::new(),
     }
+}
+
+/// Split-borrow helper for the refactored per-block signatures: the env +
+/// (folds, dead-TID sink over the vacrel store) the serial loop builds.
+fn with_scan_parts<R>(
+    vr: &mut LVRelState<'_, '_>,
+    f: impl FnOnce(&ScanEnv<'_, '_>, &mut ScanFolds, DeadSink<'_>) -> R,
+) -> R {
+    let LVRelState {
+        rel,
+        cutoffs,
+        vistest,
+        aggressive,
+        nindexes,
+        folds,
+        dead_items,
+        dead_items_info,
+        ..
+    } = vr;
+    let env = ScanEnv {
+        rel: *rel,
+        cutoffs: &*cutoffs,
+        vistest: *vistest,
+        aggressive: *aggressive,
+        nindexes: *nindexes,
+    };
+    let mut sink = |blkno: BlockNumber, offsets: &[OffsetNumber]| {
+        dead_items_add(dead_items.as_mut().unwrap(), dead_items_info, blkno, offsets)
+    };
+    f(&env, folds, &mut sink)
 }
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -348,8 +368,11 @@ fn lazy_vacuum_heap_rel_reaps_dead_items() {
     bufmgr_seams::release_buffer::call(heap_buf).unwrap();
 
     let mut vr = vacrel(&rel, mcx);
-    dead_items_add(&mut vr, 0, &[1, 2, 3]).unwrap();
-    vr.lpdead_items = 3;
+    {
+        let LVRelState { dead_items, dead_items_info, .. } = &mut vr;
+        dead_items_add(dead_items.as_mut().unwrap(), dead_items_info, 0, &[1, 2, 3]).unwrap();
+    }
+    vr.folds.counters.lpdead_items = 3;
 
     lazy_vacuum_heap_rel(&mut vr).unwrap();
 
@@ -416,25 +439,28 @@ fn lazy_scan_noprune_counts_and_collects() {
     let buf = noprune_page(3);
 
     let mut vr = vacrel(&rel, mcx);
-    vr.lpdead_item_pages = 0;
+    vr.folds.counters.lpdead_item_pages = 0;
     let mut has_lpdead_items = false;
     let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
-    assert!(lazy_scan_noprune(&mut vr, buf, 3, page, &mut has_lpdead_items).unwrap());
+    assert!(with_scan_parts(&mut vr, |env, folds, sink| {
+        lazy_scan_noprune(env, folds, sink, buf, 3, page, &mut has_lpdead_items)
+    })
+    .unwrap());
 
     assert!(has_lpdead_items);
-    assert_eq!(vr.live_tuples, 1);
-    assert_eq!(vr.recently_dead_tuples, 1);
-    assert_eq!(vr.missed_dead_tuples, 1);
-    assert_eq!(vr.missed_dead_pages, 1);
-    assert_eq!(vr.lpdead_items, 1);
-    assert_eq!(vr.lpdead_item_pages, 1);
+    assert_eq!(vr.folds.counters.live_tuples, 1);
+    assert_eq!(vr.folds.counters.recently_dead_tuples, 1);
+    assert_eq!(vr.folds.counters.missed_dead_tuples, 1);
+    assert_eq!(vr.folds.counters.missed_dead_pages, 1);
+    assert_eq!(vr.folds.counters.lpdead_items, 1);
+    assert_eq!(vr.folds.counters.lpdead_item_pages, 1);
     let dead_tids = collect_dead_tids(&vr);
     assert_eq!(dead_tids.len(), 1);
     assert_eq!(::types_tuple::ItemPointerGetBlockNumberNoCheck(&dead_tids[0]), 3);
     assert_eq!(::types_tuple::ItemPointerGetOffsetNumberNoCheck(&dead_tids[0]), 2);
-    assert_eq!(vr.NewRelfrozenXid, 500, "ratcheted to oldest unfrozen xmin");
-    assert_eq!(vr.nonempty_pages, 4);
-    assert_eq!(vr.offnum, InvalidOffsetNumber);
+    assert_eq!(vr.folds.counters.NewRelfrozenXid, 500, "ratcheted to oldest unfrozen xmin");
+    assert_eq!(vr.folds.counters.nonempty_pages, 4);
+    assert_eq!(vr.folds.offnum, InvalidOffsetNumber);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }
@@ -454,15 +480,18 @@ fn lazy_scan_noprune_aggressive_requires_prune() {
     vr.aggressive = true;
     let mut has_lpdead_items = false;
     let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
-    assert!(!lazy_scan_noprune(&mut vr, buf, 5, page, &mut has_lpdead_items).unwrap());
+    assert!(!with_scan_parts(&mut vr, |env, folds, sink| {
+        lazy_scan_noprune(env, folds, sink, buf, 5, page, &mut has_lpdead_items)
+    })
+    .unwrap());
 
-    assert_eq!(vr.live_tuples, 0);
-    assert_eq!(vr.missed_dead_tuples, 0);
-    assert_eq!(vr.lpdead_items, 0);
+    assert_eq!(vr.folds.counters.live_tuples, 0);
+    assert_eq!(vr.folds.counters.missed_dead_tuples, 0);
+    assert_eq!(vr.folds.counters.lpdead_items, 0);
     assert_eq!(vr.dead_items_info.num_items, 0);
-    assert_eq!(vr.NewRelfrozenXid, 1000, "tracker untouched on bailout");
-    assert_eq!(vr.nonempty_pages, 0);
-    assert_eq!(vr.offnum, InvalidOffsetNumber);
+    assert_eq!(vr.folds.counters.NewRelfrozenXid, 1000, "tracker untouched on bailout");
+    assert_eq!(vr.folds.counters.nonempty_pages, 0);
+    assert_eq!(vr.folds.offnum, InvalidOffsetNumber);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();
 }
@@ -480,15 +509,18 @@ fn lazy_scan_noprune_one_pass_counts_lpdead_as_missed() {
 
     let mut vr = vacrel(&rel, mcx);
     vr.nindexes = 0;
-    vr.lpdead_item_pages = 0;
+    vr.folds.counters.lpdead_item_pages = 0;
     let mut has_lpdead_items = false;
     let page = unsafe { PageRef::from_raw(bufmgr_seams::buffer_get_page::call(buf)) };
-    assert!(lazy_scan_noprune(&mut vr, buf, 9, page, &mut has_lpdead_items).unwrap());
+    assert!(with_scan_parts(&mut vr, |env, folds, sink| {
+        lazy_scan_noprune(env, folds, sink, buf, 9, page, &mut has_lpdead_items)
+    })
+    .unwrap());
 
     assert!(has_lpdead_items);
-    assert_eq!(vr.missed_dead_tuples, 2, "HTSV-dead + folded LP_DEAD");
-    assert_eq!(vr.lpdead_items, 0);
-    assert_eq!(vr.lpdead_item_pages, 0);
+    assert_eq!(vr.folds.counters.missed_dead_tuples, 2, "HTSV-dead + folded LP_DEAD");
+    assert_eq!(vr.folds.counters.lpdead_items, 0);
+    assert_eq!(vr.folds.counters.lpdead_item_pages, 0);
     assert_eq!(vr.dead_items_info.num_items, 0);
 
     bufmgr_seams::release_buffer::call(buf).unwrap();

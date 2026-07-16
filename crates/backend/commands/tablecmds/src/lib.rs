@@ -313,7 +313,7 @@ pub fn DefineRelation<'mcx>(
         false,
     )?;
     // Reloptions validation moved below the access-method resolution: the
-    // cbstore AM owns its option namespace (cluster_key/codec/...), so the
+    // pgrcolumnar AM owns its option namespace (cluster_key/codec/...), so the
     // validator dispatches on the resolved relam, not just relkind.
     // PARTITION OF: the parent's partition descriptor changes — take an
     // exclusive lock (C parentLockmode).
@@ -359,8 +359,8 @@ pub fn DefineRelation<'mcx>(
         types_rel::RELKIND_PARTITIONED_TABLE => {
             reloptions::partitioned_table_reloptions(reloptions.as_deref(), true)?;
         }
-        types_rel::RELKIND_RELATION if reloptions::relam_is_cbstore(access_method_id) => {
-            reloptions::cbstore_reloptions(mcx, reloptions.as_deref(), true)?;
+        types_rel::RELKIND_RELATION if reloptions::relam_is_pgrcolumnar(access_method_id) => {
+            reloptions::pgrcolumnar_reloptions(mcx, reloptions.as_deref(), true)?;
         }
         _ => {
             reloptions::heap_reloptions(mcx, relkind, reloptions.as_deref(), true)?;
@@ -705,8 +705,8 @@ pub fn DefineRelation<'mcx>(
         },
     };
 
-    // cbstore accepts only ClickBench's type surface; refuse at CREATE TABLE
-    // (docs/design/cbstore-impl.md §3).
+    // pgrcolumnar accepts only ClickBench's type surface; refuse at CREATE TABLE
+    // (docs/design/pgrcolumnar-impl.md §3).
     if access_method_id != InvalidOid
         && access_method_id != 2
         && syscache_seams::pg_am_amname::call(access_method_id)?.as_deref() == Some("cbstore")
@@ -716,7 +716,7 @@ pub fn DefineRelation<'mcx>(
             if att.attisdropped {
                 continue;
             }
-            if cbstore::ColType::of_type_oid(att.atttypid).is_none() {
+            if pgrcolumnar::ColType::of_type_oid(att.atttypid).is_none() {
                 return Err(Box::new(
                     PgError::new(
                         ERROR,

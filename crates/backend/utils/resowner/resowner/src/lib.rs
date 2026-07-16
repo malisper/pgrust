@@ -1035,6 +1035,66 @@ pub fn AuxProcessResourceOwner() -> ResourceOwner {
     AUX_PROCESS_OWNER.with(|c| c.get())
 }
 
+/// M4 bgjobs (docs/design/m4-bgjobs.md §3.4): the aux resource owner is
+/// per-DAEMON state, but the cell is per-thread. The job envelope bind
+/// points a pool worker's cell at the job's owner for one cycle (buffer
+/// pins and the error path's ReleaseAuxProcessResources route through
+/// it), and the dispatcher's per-lifecycle reset clears its own stale
+/// cells before re-running CreateAuxProcessResourceOwner.
+pub fn SetAuxProcessResourceOwner(owner: ResourceOwner) {
+    AUX_PROCESS_OWNER.with(|c| c.set(owner));
+}
+
+pub fn ResourceOwnerStateClean() -> bool {
+    ResourceOwnerStateIssue().is_none()
+}
+
+pub fn ResourceOwnerStateIssue() -> Option<&'static str> {
+    ResourceOwnerStateIssueAllowing(ResourceOwner::NULL)
+}
+
+pub fn ResourceOwnerStateIssueAllowing(parked: ResourceOwner) -> Option<&'static str> {
+    if !CurrentResourceOwner().is_null() {
+        return Some("current resource owner is still live");
+    }
+    if !CurTransactionResourceOwner().is_null() {
+        return Some("current transaction resource owner is still live");
+    }
+    if !TopTransactionResourceOwner().is_null() {
+        return Some("top transaction resource owner is still live");
+    }
+    if !AuxProcessResourceOwner().is_null() {
+        return Some("auxiliary process resource owner is still live");
+    }
+    if with_arena(|a| {
+        a.slots.iter().enumerate().find_map(|(index, slot)| {
+            if !slot.live {
+                return None;
+            }
+            let owner = ResourceOwner::from_parts(index as u32, slot.generation);
+            if owner == parked
+                && slot.data.parent.is_null()
+                && slot.data.firstchild.is_null()
+                && slot.data.nextchild.is_null()
+                && slot.data.narr == 0
+                && slot.data.nhash == 0
+                && slot.data.capacity == 0
+                && slot.data.aio_handles.is_empty()
+                && slot.data.nlocks == 0
+                && !slot.data.releasing
+            {
+                return None;
+            }
+            Some(slot.data.name)
+        })
+    })
+    .is_some()
+    {
+        return Some("resource-owner state is not empty");
+    }
+    None
+}
+
 pub fn init_seams() {
     seams::install();
 }

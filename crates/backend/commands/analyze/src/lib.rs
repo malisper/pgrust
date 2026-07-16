@@ -501,6 +501,8 @@ fn do_analyze_rel<'mcx>(
             PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS
         },
     );
+    let anl_trace = analyze_trace();
+    let t_acquire = std::time::Instant::now();
     let numrows = if inh {
         acquire_inherited_sample_rows(
             anl_mcx,
@@ -528,6 +530,9 @@ fn do_analyze_rel<'mcx>(
         )?
     };
 
+    let acquire_wall = t_acquire.elapsed().as_secs_f64();
+    let t_compute = std::time::Instant::now();
+    let mut maxcol: (i32, f64) = (0, 0.0);
     if numrows > 0 {
         pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_COMPUTE_STATS);
 
@@ -538,13 +543,14 @@ fn do_analyze_rel<'mcx>(
         // Ingest-time footer NDV (whole-stream HLL): sampled Duj1 underestimates
         // heavy-tailed text NDV 100-1500x, so a present footer count wins.
         let footer_ndv = if !inh
-            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore)
+            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar)
         {
-            tableam::cbstore_footer_ndv(onerel)?
+            tableam::pgrcolumnar_footer_ndv(onerel)?
         } else {
             None
         };
         for s in vacattrstats.iter_mut() {
+            let t_col = anl_trace.then(std::time::Instant::now);
             match s.compute {
                 ComputeStats::Scalar => {
                     compute_scalar_stats(anl_mcx, col_cx.mcx(), s, &src, numrows, totalrows)?
@@ -594,6 +600,12 @@ fn do_analyze_rel<'mcx>(
                     s.stadistinct = n_distinct as f32;
                 }
             }
+            if let Some(t) = t_col {
+                let dt = t.elapsed().as_secs_f64();
+                if dt > maxcol.1 {
+                    maxcol = (s.tupattnum, dt);
+                }
+            }
             col_cx.reset();
         }
         if hasindex {
@@ -621,6 +633,19 @@ fn do_analyze_rel<'mcx>(
             &colstats,
             &mut ExtStatsExprCompute,
         )?;
+    }
+    if anl_trace {
+        // compute bucket includes index/ext stats + the pg_statistic write
+        // (both ~0 on the load shape); acquire has its own pgrcolumnar line.
+        eprintln!(
+            "ANALYZE|TRACE|rel={} rows={} acquire={:.3}s compute={:.3}s maxcol=(att {}, {:.3}s)",
+            onerel.rd_id,
+            numrows,
+            acquire_wall,
+            t_compute.elapsed().as_secs_f64(),
+            maxcol.0,
+            maxcol.1
+        );
     }
 
     pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE);
@@ -1262,8 +1287,8 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
-    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore) {
-        return cbstore_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
+        return pgrcolumnar_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
     }
     let base = rows.len();
     let mut numrows: i32 = 0;
@@ -1354,11 +1379,86 @@ fn acquire_sample_rows<'mcx>(
     Ok(numrows)
 }
 
-// cbstore's acquirefunc (C table_relation_analyze lets the AM supply it):
+// ---- loadfinal lane knobs (default OFF, fail-closed) -----------------------
+
+// PGRUST_ANALYZE_SAMPLE_POOL=<n>: decode the pgrcolumnar sample's granules on n
+// worker threads (0/unset = the serial per-ref gather path, untouched). The
+// sample positions and row values are identical either way — the reservoir
+// arithmetic is pure PRNG/row-count bookkeeping, run up front.
+fn analyze_sample_pool() -> usize {
+    std::env::var("PGRUST_ANALYZE_SAMPLE_POOL")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(64)
+}
+
+// PGRUST_ANALYZE_TRACE=1: decomposition trace lines (acquire / compute /
+// update walls) to stderr — the load-lane postmaster.log harvest channel.
+fn analyze_trace() -> bool {
+    matches!(
+        std::env::var("PGRUST_ANALYZE_TRACE").ok().as_deref().map(str::trim),
+        Some("1") | Some("on") | Some("true")
+    )
+}
+
+/// The pgrcolumnar reservoir's sample POSITIONS, computed without fetching:
+/// exactly `pgrcolumnar_acquire_sample_rows`'s serial loop with the two fetch
+/// sites recording (ord, rg, rg-global row) instead of materializing the
+/// row — the PRNG call sequence and f64 bookkeeping are verbatim, so the
+/// positions (and their post-sort order) are IDENTICAL to what the serial
+/// path samples from the same reservoir state. Returned sorted by ord
+/// (physical file order — the correlation stat's required rows order).
+fn pgrcolumnar_sample_positions(
+    rgs: &[(u32, u32)],
+    targrows: i32,
+    rstate: &mut sampling::ReservoirStateData,
+) -> Vec<(u64, u32, u32)> {
+    let mut sample: Vec<(u64, u32, u32)> = Vec::new();
+    let mut samplerows = 0.0f64;
+    let mut rowstoskip = -1.0f64;
+    let mut ord: u64 = 0;
+    for &(rg, nrows) in rgs {
+        let mut row: u32 = 0;
+        while row < nrows {
+            if (sample.len() as i32) < targrows {
+                sample.push((ord, rg, row));
+            } else {
+                if rowstoskip < 0.0 {
+                    rowstoskip =
+                        sampling::reservoir_get_next_s(rstate, samplerows, targrows as u32);
+                }
+                let skip = rowstoskip.ceil();
+                let span = (nrows - row) as f64;
+                if skip >= span {
+                    rowstoskip -= span;
+                    samplerows += span;
+                    ord += (nrows - row) as u64;
+                    break;
+                }
+                row += skip as u32;
+                ord += skip as u64;
+                samplerows += skip;
+                rowstoskip = -1.0;
+                let k = (targrows as f64 * sampling::sampler_random_fract(&mut rstate.randstate))
+                    as usize;
+                debug_assert!(k < targrows as usize);
+                sample[k] = (ord, rg, row);
+            }
+            row += 1;
+            ord += 1;
+            samplerows += 1.0;
+        }
+    }
+    sample.sort_unstable_by_key(|&(o, _, _)| o);
+    sample
+}
+
+// pgrcolumnar's acquirefunc (C table_relation_analyze lets the AM supply it):
 // uniform Vitter reservoir over the visible row stream; skipped spans are
 // never decoded (gather_row decodes granules on demand). totalrows is exact
-// from the part footer; cbstore parts carry no dead rows.
-fn cbstore_acquire_sample_rows<'mcx>(
+// from the part footer; pgrcolumnar parts carry no dead rows.
+fn pgrcolumnar_acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
     rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
@@ -1369,7 +1469,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
     let tupdesc = onerel.descr();
     let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
     let mut slot = tableam::table_slot_create(mcx, onerel)?;
-    let rgs = tableam::cbstore_analyze_visible_rgs(&scan)?;
+    let rgs = tableam::pgrcolumnar_analyze_visible_rgs(&scan)?;
     let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
     *totalrows = total as f64;
     *totaldeadrows = 0.0;
@@ -1381,7 +1481,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
                      rg: u32,
                      row: u32|
      -> PgResult<HeapTupleData<'mcx>> {
-        if !tableam::cbstore_analyze_fetch_row(scan, rg, row, slot) {
+        if !tableam::pgrcolumnar_analyze_fetch_row(scan, rg, row, slot) {
             panic!("cbstore analyze: sampled row ref out of range");
         }
         let b = slot.base();
@@ -1402,6 +1502,57 @@ fn cbstore_acquire_sample_rows<'mcx>(
         pg_prng::global_prng(|p| p.next_u64()),
         targrows as u32,
     );
+
+    // Parallel acquisition (PGRUST_ANALYZE_SAMPLE_POOL >= 1): sample
+    // positions first (pure arithmetic, identical PRNG stream), then decode
+    // the sampled granules on the pool. Rows, values, and final order match
+    // the serial arm below by construction; positions come back ord-sorted,
+    // so tuples append in physical order without the end sort.
+    let pool = analyze_sample_pool();
+    let trace = analyze_trace();
+    let t0 = std::time::Instant::now();
+    if pool >= 1 {
+        let positions = pgrcolumnar_sample_positions(&rgs, targrows, &mut rstate);
+        let refs: Vec<(u32, u32)> =
+            positions.iter().map(|&(_, rg, row)| (rg, row)).collect();
+        let mut formed: i32 = 0;
+        let tasks = {
+            let rows = &mut *rows;
+            let formed = &mut formed;
+            let mut per_row = |slot: &mut SlotData<'_>| -> PgResult<()> {
+                let b = slot.base();
+                let owned =
+                    heaptuple::heap_form_tuple(mcx, tupdesc, &b.tts_values, &b.tts_isnull)?;
+                let (ptr, len, tid, oid) = (
+                    owned.image().as_ptr(),
+                    owned.as_tuple().t_len,
+                    owned.as_tuple().t_self,
+                    owned.as_tuple().t_tableOid,
+                );
+                core::mem::forget(owned);
+                // SAFETY: as the serial arm's fetch — the image was just
+                // formed in `mcx` and, forgotten, lives until that context's
+                // teardown; nothing else writes it.
+                rows.push(unsafe { HeapTupleData::from_raw_parts(ptr, len, tid, oid) });
+                *formed += 1;
+                Ok(())
+            };
+            tableam::pgrcolumnar_analyze_gather_rows(&mut scan, &refs, pool, &mut slot, &mut per_row)?
+        };
+        drop(slot);
+        tableam::table_endscan(scan)?;
+        if trace {
+            eprintln!(
+                "ANALYZE|TRACE|cbstore acquire: pool={} refs={} granule_tasks={} wall={:.3}s",
+                pool,
+                refs.len(),
+                tasks,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        return Ok(formed);
+    }
+
     // (ordinal, tuple): replacements land at random slots; physical order is
     // restored by the final sort (the correlation stat reads rows order).
     let mut sample: Vec<(u64, HeapTupleData<'mcx>)> = Vec::new();
@@ -1454,6 +1605,13 @@ fn cbstore_acquire_sample_rows<'mcx>(
     let numrows = sample.len() as i32;
     for (_, t) in sample {
         rows.push(t);
+    }
+    if trace {
+        eprintln!(
+            "ANALYZE|TRACE|cbstore acquire: pool=0 refs={} wall={:.3}s",
+            numrows,
+            t0.elapsed().as_secs_f64()
+        );
     }
     Ok(numrows)
 }
@@ -2575,4 +2733,96 @@ pub fn init_seams() {
         set: set_default_statistics_target_guc,
     });
     commands_analyze_seams::analyze_rel::set(analyze_rel_seam);
+}
+
+#[cfg(test)]
+mod sample_positions_tests {
+    use super::{pgrcolumnar_sample_positions, sampling};
+
+    // Literal transcription of the SERIAL pgrcolumnar_acquire_sample_rows loop
+    // with the two fetch sites recording (ord, rg, row) instead of
+    // materializing tuples, ending with the same ord sort — the pre-refactor
+    // behavior the parallel path must reproduce position-for-position.
+    fn reference_positions(
+        rgs: &[(u32, u32)],
+        targrows: i32,
+        rstate: &mut sampling::ReservoirStateData,
+    ) -> Vec<(u64, u32, u32)> {
+        let mut sample: Vec<(u64, u32, u32)> = Vec::new();
+        let mut samplerows = 0.0f64;
+        let mut rowstoskip = -1.0f64;
+        let mut ord: u64 = 0;
+        for &(rg, nrows) in rgs {
+            let mut row: u32 = 0;
+            while row < nrows {
+                if (sample.len() as i32) < targrows {
+                    sample.push((ord, rg, row));
+                } else {
+                    if rowstoskip < 0.0 {
+                        rowstoskip = sampling::reservoir_get_next_s(
+                            rstate,
+                            samplerows,
+                            targrows as u32,
+                        );
+                    }
+                    let skip = rowstoskip.ceil();
+                    let span = (nrows - row) as f64;
+                    if skip >= span {
+                        rowstoskip -= span;
+                        samplerows += span;
+                        ord += (nrows - row) as u64;
+                        break;
+                    }
+                    row += skip as u32;
+                    ord += skip as u64;
+                    samplerows += skip;
+                    rowstoskip = -1.0;
+                    let k = (targrows as f64
+                        * sampling::sampler_random_fract(&mut rstate.randstate))
+                        as usize;
+                    sample[k] = (ord, rg, row);
+                }
+                row += 1;
+                ord += 1;
+                samplerows += 1.0;
+            }
+        }
+        sample.sort_unstable_by_key(|&(o, _, _)| o);
+        sample
+    }
+
+    fn check(rgs: &[(u32, u32)], targrows: i32, seed: u64) {
+        let mut rs_a = sampling::reservoir_init_selection_state(seed, targrows as u32);
+        let mut rs_b = sampling::reservoir_init_selection_state(seed, targrows as u32);
+        let want = reference_positions(rgs, targrows, &mut rs_a);
+        let got = pgrcolumnar_sample_positions(rgs, targrows, &mut rs_b);
+        assert_eq!(want, got, "rgs={rgs:?} targrows={targrows} seed={seed}");
+        let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
+        assert_eq!(got.len() as u64, total.min(targrows as u64));
+        // Ascending physical positions, no duplicates.
+        for w in got.windows(2) {
+            assert!(w[0].0 < w[1].0 && (w[0].1, w[0].2) < (w[1].1, w[1].2));
+        }
+        // Both PRNG streams consumed identically.
+        assert_eq!(rs_a.randstate.next_u64(), rs_b.randstate.next_u64());
+    }
+
+    #[test]
+    fn positions_match_serial_reference() {
+        // Table smaller than / equal to / crossing targrows; uneven RG
+        // geometry incl. 1-row RGs and empty-rg-list; many-RG spans where
+        // skips cross row groups.
+        check(&[], 100, 7);
+        check(&[(0, 50)], 100, 1);
+        check(&[(0, 100)], 100, 2);
+        check(&[(0, 101)], 100, 3);
+        check(&[(0, 1), (1, 1), (2, 1)], 2, 4);
+        check(&[(0, 65_536), (1, 65_536), (2, 40_000)], 300, 5);
+        check(&[(0, 9), (1, 65_536), (2, 1), (3, 12_345), (4, 65_536)], 150, 6);
+        for seed in [11u64, 22, 33, 44] {
+            check(&[(0, 65_536), (1, 65_536), (2, 65_536), (3, 21_111)], 1000, seed);
+        }
+        // Large-N shape: skips are long relative to RGs.
+        check(&[(0, 65_536); 32].iter().enumerate().map(|(i, &(_, n))| (i as u32, n)).collect::<Vec<_>>().as_slice(), 100, 12);
+    }
 }

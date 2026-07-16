@@ -2656,3 +2656,46 @@ fn sorted_group_by_compressed_text_key_detoasts_in_boundary_eq() {
     });
     assert_eq!(counts, vec![2, 1]);
 }
+
+// ---------------------------------------------------------------------------
+// q28-sorted-arm: SortedEmitAcc capture round trip (byval + varlena deep
+// copy, 8-aligned arena, end-resolved fixups).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sorted_emit_acc_round_trip() {
+    use crate::sortedsink::SortedEmitAcc;
+    // Columns: [int8 byval, varlena text, null varlena].
+    let spec: crate::sortedsink::SortedByrefSpec = vec![0, -1, -1];
+    let mut acc = SortedEmitAcc::new(3);
+    // A 4B-header varlena image: total size 9 (4 header + 5 payload).
+    let mut img = vec![0u8; 9];
+    let hdr = (9u32) << 2; // 4B uncompressed varsize encoding
+    img[..4].copy_from_slice(&hdr.to_le_bytes());
+    img[4..].copy_from_slice(b"hello");
+    let values = [
+        Datum::from_i64(42),
+        Datum::from_usize(img.as_ptr() as usize),
+        Datum::null(),
+    ];
+    let nulls = [false, false, true];
+    // SAFETY: img is a live 4B-U varlena image for the duration of the push.
+    unsafe { acc.push_row(&values, &nulls, &spec).unwrap() };
+    unsafe { acc.push_row(&values, &nulls, &spec).unwrap() };
+    assert!(!acc.is_empty());
+    let seg = acc.finish();
+    drop(img); // the seg must be self-contained
+    assert_eq!(seg.nrows, 2);
+    assert_eq!(seg.natts, 3);
+    for row in 0..2 {
+        let base = row * 3;
+        assert_eq!(seg.values[base].as_i64(), 42);
+        assert!(!seg.nulls[base]);
+        assert!(seg.nulls[base + 2]);
+        let p = seg.values[base + 1].as_usize() as *const u8;
+        assert_eq!(p as usize % 8, 0, "arena images are 8-aligned");
+        // SAFETY: points into seg.arena (self-contained copy).
+        let got = unsafe { core::slice::from_raw_parts(p, 9) };
+        assert_eq!(&got[4..], b"hello");
+    }
+}

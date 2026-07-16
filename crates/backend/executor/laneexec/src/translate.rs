@@ -2,7 +2,7 @@
 // the old lane executor; backend retargeted from the batchexec POC to this
 // crate's own interpreter — the JIT/stitched and deform-fusion direct tiers
 // did NOT come along: stitched bodies are rebuilt on lanestitch in a later
-// tranche, and the direct tier was a heap-deform lever with no cbstore
+// tranche, and the direct tier was a heap-deform lever with no pgrcolumnar
 // counterpart).
 use crate::interp::{
     compile_qual, eval_qual, BStep, Batch, CmpOp as LaneCmp, LaneRef, Program, QualPlan, SelVec,
@@ -33,7 +33,7 @@ struct StagedClause {
     sel: Option<f64>,
     orig: u16,
     // Single-column `Var CMP Const` int clause: the driver folds this against
-    // the staged cbstore granule's zone metadata (compressed-domain skip).
+    // the staged pgrcolumnar granule's zone metadata (compressed-domain skip).
     zone: Option<StagedZoneSrc>,
 }
 
@@ -65,7 +65,7 @@ pub struct LaneQualProg {
     /// truncation, and volatile-call counts are the per-row drive's by
     /// construction).
     pub requal: bool,
-    /// Dict-memoizable text clauses of the prefix (cbstore scans only):
+    /// Dict-memoizable text clauses of the prefix (pgrcolumnar scans only):
     /// evaluated by the dict tier after the int program — legal in any order
     /// because every prefix clause is non-erroring by admission.
     dict: Vec<crate::dict::DictClause>,
@@ -96,7 +96,7 @@ impl LaneQualProg {
 
     /// Every column the lane program reads from the SoA batch (int clause
     /// lanes + dict clause lanes incl. their Raw-window fallback) — the
-    /// lane-read mask for the cbstore fill skip.
+    /// lane-read mask for the pgrcolumnar fill skip.
     pub fn read_cols(&self) -> impl Iterator<Item = u16> + '_ {
         self.prog
             .steps
@@ -255,7 +255,7 @@ impl LaneQualProg {
 /// (profitability, not correctness — a weak 1-clause pre-filter under a
 /// volatile tail buys nothing): prefix >= 2 clauses, or prefix >= 1 with a
 /// provably non-volatile tail (unknown volatility counts as volatile).
-/// `dict_lanes` (cbstore scans): dict-memoizable text clauses — LIKE/NOT
+/// `dict_lanes` (pgrcolumnar scans): dict-memoizable text clauses — LIKE/NOT
 /// LIKE with a proven-non-erroring constant pattern, texteq/textne against a
 /// constant, deterministic collation — join the vectorizable prefix instead
 /// of ending it; they evaluate on the dict-memo tier (or per row over the
@@ -274,7 +274,7 @@ pub fn translate_scan_qual(
     let mut split = shape.clauses.len();
     for (k, cl) in shape.clauses.iter().enumerate() {
         // Union (dict x vocab): the vocab clause vocabulary decides
-        // admission; a refused Cmp clause gets one dict-tier chance (cbstore
+        // admission; a refused Cmp clause gets one dict-tier chance (pgrcolumnar
         // text lanes) before ending the prefix.
         let ok = match cl {
             LaneClause::Cmp(c) => {

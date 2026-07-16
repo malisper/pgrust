@@ -14,9 +14,12 @@ types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }
 miscinit = { path = "../../utils/init/miscinit" }
+runtime = { path = "../../executor/runtime" }
+bgjobs = { path = "../bgjobs" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 backend_startup = { path = "../../tcop/backend_startup" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+timeout_seams = { path = "../../utils/misc/timeout_seams" }
 autovacuum = { path = "../autovacuum" }
 bgworker = { path = "../bgworker" }
 bgwriter = { path = "../bgwriter" }
@@ -33,7 +36,12 @@ interrupt = { path = "../interrupt" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 ipc = { path = "../../storage/ipc/ipc" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+parallel = { path = "../../access/transam/parallel" }
+postinit = { path = "../../utils/init/postinit" }
+elog = { path = "../../utils/error/elog" }
+types_error = { path = "../../../_support/types/types_error" }
 sinval = { path = "../../storage/ipc/sinval" }
+waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 libc = "0.2"
 

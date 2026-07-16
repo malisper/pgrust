@@ -79,6 +79,17 @@ pub struct TbmSharedIterState {
     cursor: Mutex<TbmSharedCursor>,
 }
 
+impl TbmSharedIterState {
+    /// bitmap-morsels: the frozen entry counts (exact pages, lossy chunks).
+    /// The morsel granule space is SEGMENTED over the frozen arrays:
+    /// granules [0, npages) are exact-page entries in `ptpages` (block-number
+    /// order), granules [npages, npages+nchunks) are chunk entries in
+    /// `ptchunks` (block-number order). See [`TbmRangeIterator`].
+    pub fn entry_counts(&self) -> (u64, u64) {
+        (self.npages.max(0) as u64, self.nchunks.max(0) as u64)
+    }
+}
+
 struct TbmSharedCursor {
     spageptr: i32,
     schunkptr: i32,
@@ -475,6 +486,16 @@ impl<'mcx> TIDBitmap<'mcx> {
         Ok(())
     }
 
+    /// bitmap-morsels: entry counts (exact pages, lossy chunks) before any
+    /// freeze — the runtime bitmap arm's admission floor input.
+    pub fn entry_counts(&self) -> (u64, u64) {
+        match self.status {
+            TbmStatus::Empty => (0, 0),
+            TbmStatus::OnePage => (1, 0),
+            TbmStatus::Hash => (self.npages.max(0) as u64, self.nchunks.max(0) as u64),
+        }
+    }
+
     /// `tbm_begin_private_iterate`; the bitmap is read-only afterwards.
     pub fn begin_private_iterate(&mut self) -> PgResult<TbmPrivateIterator> {
         if self.status == TbmStatus::Hash && self.iterating == TbmIterating::Not {
@@ -721,39 +742,119 @@ impl TbmSharedIterator {
     }
 }
 
+/// bitmap-morsels RANGE iterator: iterates one CLAIMED WINDOW of the frozen
+/// shared arrays with NO shared cursor — each morsel worker owns a disjoint
+/// entry-index window, so no lock and no cross-worker handoff. The granule
+/// space is SEGMENTED (not C's block-order page/chunk merge): entries
+/// [0, npages) are the exact pages in `ptpages` order (ascending blockno),
+/// entries [npages, npages+nchunks) are the lossy chunks in `ptchunks` order.
+/// Each chunk entry expands to its set bits exactly like the shared/private
+/// iterators (advance_schunkbit), yielding lossy per-page results with
+/// recheck=true. Cross-window row ORDER therefore differs from the serial
+/// merged order — sound only for order-insensitive consumers (the runtime
+/// bitmap arm admits order-insensitive-exact agg partials only); per-page
+/// contents, recheck flags, and visibility semantics are identical.
+pub struct TbmRangeIterator {
+    state: Arc<TbmSharedIterState>,
+    /// Next entry index in the segmented space, in [pos, end).
+    pos: u64,
+    end: u64,
+    /// Bit cursor within the current chunk entry (pos >= npages only).
+    schunkbit: usize,
+}
+
+impl TbmRangeIterator {
+    /// Iterate segmented entries [start, end); the caller guarantees
+    /// end <= npages + nchunks (the morsel source's granule count).
+    pub fn new(state: Arc<TbmSharedIterState>, start: u64, end: u64) -> Self {
+        debug_assert!(
+            end <= (state.npages.max(0) as u64 + state.nchunks.max(0) as u64)
+                && start <= end
+        );
+        TbmRangeIterator { state, pos: start, end, schunkbit: 0 }
+    }
+
+    pub fn next(&mut self) -> Option<TbmIterateResult<'_>> {
+        let st = &*self.state;
+        let npages = st.npages.max(0) as u64;
+        loop {
+            if self.pos >= self.end {
+                return None;
+            }
+            if self.pos < npages {
+                let idx = st.ptpages[self.pos as usize] as usize;
+                self.pos += 1;
+                let page = &st.ptbase[idx];
+                return Some(TbmIterateResult {
+                    blockno: page.blockno,
+                    lossy: false,
+                    recheck: page.recheck,
+                    page: Some(page),
+                });
+            }
+            let ci = (self.pos - npages) as usize;
+            let chunk = &st.ptbase[st.ptchunks[ci] as usize];
+            let mut bit = self.schunkbit;
+            advance_schunkbit(chunk, &mut bit);
+            if bit >= PAGES_PER_CHUNK {
+                self.pos += 1;
+                self.schunkbit = 0;
+                continue;
+            }
+            self.schunkbit = bit + 1;
+            return Some(TbmIterateResult {
+                blockno: chunk.blockno + bit as BlockNumber,
+                lossy: true,
+                recheck: true,
+                page: None,
+            });
+        }
+    }
+}
+
 /// Unified iterator (`TBMIterator`).
 pub struct TbmIterator {
     private: Option<TbmPrivateIterator>,
     shared: Option<TbmSharedIterator>,
+    range: Option<TbmRangeIterator>,
 }
 
 impl TbmIterator {
     pub fn empty() -> Self {
-        TbmIterator { private: None, shared: None }
+        TbmIterator { private: None, shared: None, range: None }
     }
 
     pub fn private(iter: TbmPrivateIterator) -> Self {
-        TbmIterator { private: Some(iter), shared: None }
+        TbmIterator { private: Some(iter), shared: None, range: None }
     }
 
     pub fn shared(iter: TbmSharedIterator) -> Self {
-        TbmIterator { private: None, shared: Some(iter) }
+        TbmIterator { private: None, shared: Some(iter), range: None }
+    }
+
+    /// bitmap-morsels: a claimed-window iterator (self-contained, lock-free).
+    pub fn range(iter: TbmRangeIterator) -> Self {
+        TbmIterator { private: None, shared: None, range: Some(iter) }
     }
 
     pub fn exhausted(&self) -> bool {
-        self.private.is_none() && self.shared.is_none()
+        self.private.is_none() && self.shared.is_none() && self.range.is_none()
     }
 
     pub fn end_iterate(&mut self) {
         self.private = None;
         self.shared = None;
+        self.range = None;
     }
 
     /// `tbm_iterate`; the private lane needs the owning bitmap, the shared
-    /// lane is self-contained.
+    /// and range lanes are self-contained.
     pub fn next<'a>(&'a mut self, tbm: Option<&'a TIDBitmap<'_>>) -> Option<TbmIterateResult<'a>> {
         if let Some(p) = self.private.as_mut() {
             return p.next(tbm.expect("private tbm_iterate without the owning bitmap"));
+        }
+        if let Some(r) = self.range.as_mut() {
+            return r.next();
         }
         self.shared.as_mut().expect("tbm_iterate on an exhausted TBMIterator").next()
     }
@@ -764,6 +865,7 @@ mcx::forget_safe_nodrop!(TbmStatus, TbmIterating, PagetableEntry, TbmPrivateIter
 // Exempt (droppy Arc handles): released by TbmIterator::end_iterate /
 // ExecEndBitmapHeapScan before the owning arena resets.
 unsafe impl mcx::ForgetSafe for TbmSharedIterator {}
+unsafe impl mcx::ForgetSafe for TbmRangeIterator {}
 unsafe impl mcx::ForgetSafe for TbmIterator {}
 
 mcx::forget_safe_struct!(

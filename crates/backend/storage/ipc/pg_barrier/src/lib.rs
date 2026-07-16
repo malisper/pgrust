@@ -1,10 +1,13 @@
 // barrier.c (storage/ipc): dynamic-party phase barrier. Thread-native: the
-// spinlock+ConditionVariable pair is a std Mutex+Condvar; waits are timed and
-// re-check InterruptPending (C's ConditionVariableSleep checks interrupts per
-// wakeup), so a dead peer surfaces as an error instead of a hang.
+// spinlock+ConditionVariable pair is a std Mutex over the state plus Waiter
+// parks (M0 lane C — the raw 10ms Condvar poll moved onto the structured
+// wait primitive). Phase-advancers unpark every registered waiter promptly;
+// the 10ms timed park is retained as the InterruptPending poll (C's
+// ConditionVariableSleep checks interrupts per wakeup), so a dead peer
+// surfaces as an error instead of a hang, and cancels keep their latency.
 #![allow(non_snake_case)]
 
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 
 use ::types_error::PgResult;
 
@@ -16,11 +19,12 @@ struct BarrierInner {
     arrived: i32,
     elected: i32,
     static_party: bool,
+    /// Packed waiter handles of parked arrive_and_wait callers.
+    waiters: Vec<u64>,
 }
 
 pub struct Barrier {
     inner: Mutex<BarrierInner>,
-    cv: Condvar,
 }
 
 impl Barrier {
@@ -33,8 +37,8 @@ impl Barrier {
                 arrived: 0,
                 elected: 0,
                 static_party: participants > 0,
+                waiters: Vec::new(),
             }),
-            cv: Condvar::new(),
         }
     }
 
@@ -54,12 +58,14 @@ impl Barrier {
                 b.arrived = 0;
                 b.phase = next_phase;
                 b.elected = next_phase;
+                let woken = std::mem::take(&mut b.waiters);
                 drop(b);
-                self.cv.notify_all();
+                Self::unpark_all(woken);
                 return Ok(true);
             }
         }
         let mut elected = false;
+        let handle = waiter::current_handle().as_u64();
         let mut b = self.lock();
         loop {
             debug_assert!(b.phase == start_phase || b.phase == next_phase);
@@ -72,18 +78,28 @@ impl Barrier {
                 }
                 break;
             }
-            let (g, _) = self
-                .cv
-                .wait_timeout(b, core::time::Duration::from_millis(10))
-                .unwrap_or_else(|e| e.into_inner());
-            b = g;
-            if init_small::globals::InterruptPending() {
-                drop(b);
-                postgres_seams::check_for_interrupts::call()?;
-                b = self.lock();
+            if !b.waiters.contains(&handle) {
+                b.waiters.push(handle);
             }
+            drop(b);
+            // 10ms timed park = the InterruptPending poll cadence the old
+            // Condvar wait had; a phase advance unparks promptly.
+            let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+            if init_small::globals::InterruptPending() {
+                postgres_seams::check_for_interrupts::call()?;
+            }
+            b = self.lock();
+        }
+        if let Some(pos) = b.waiters.iter().position(|w| *w == handle) {
+            b.waiters.swap_remove(pos);
         }
         Ok(elected)
+    }
+
+    fn unpark_all(handles: Vec<u64>) {
+        for h in handles {
+            waiter::unpark_word(h);
+        }
     }
 
     /// `BarrierArriveAndDetach`: true if the caller was the last to detach.
@@ -135,11 +151,13 @@ impl Barrier {
     pub fn reset(&self) {
         let mut b = self.lock();
         debug_assert!(b.participants == 0 && b.arrived == 0);
+        debug_assert!(b.waiters.is_empty());
         b.phase = 0;
         b.participants = 0;
         b.arrived = 0;
         b.elected = 0;
         b.static_party = false;
+        b.waiters.clear();
     }
 
     fn detach_impl(&self, arrive: bool) -> bool {
@@ -148,15 +166,15 @@ impl Barrier {
         debug_assert!(b.participants > 0);
         b.participants -= 1;
         let release = (arrive || b.participants > 0) && b.arrived == b.participants;
+        let mut woken = Vec::new();
         if release {
             b.arrived = 0;
             b.phase += 1;
+            woken = std::mem::take(&mut b.waiters);
         }
         let last = b.participants == 0;
         drop(b);
-        if release {
-            self.cv.notify_all();
-        }
+        Self::unpark_all(woken);
         last
     }
 }

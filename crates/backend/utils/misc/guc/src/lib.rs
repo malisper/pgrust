@@ -7,6 +7,7 @@
 pub mod array;
 pub mod cnum;
 pub mod enum_lookup;
+pub mod layers;
 pub mod model;
 pub mod name;
 pub mod process_config;
@@ -110,7 +111,7 @@ pub fn GUC_check_errhint(hint: impl Into<String>) {
     GUC_CHECK_ERROR.with(|s| s.borrow_mut().hint = Some(hint.into()));
 }
 
-pub(crate) fn guc_nest_level() -> i32 {
+pub fn guc_nest_level() -> i32 {
     GUC_NEST_LEVEL.get()
 }
 

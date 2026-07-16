@@ -40,7 +40,7 @@ pub use stack::{
     errdetail_internal, errdetail_log, errdetail_log_plural, errdetail_plural, errfinish,
     errhidecontext, errhidestmt, errhint, errhint_internal, errhint_plural, errmsg,
     errmsg_internal, errmsg_plural, errposition, errsave_finish, errsave_start, errstart,
-    errstart_cold, geterrcode, geterrposition, getinternalerrposition,
+    errstart_cold, error_stack_clean, geterrcode, geterrposition, getinternalerrposition,
     in_error_recursion_trouble, internalerrposition, internalerrquery, pg_re_throw,
     pop_emit_context_callback, push_emit_context_callback, reset_statement_suppressed,
     clear_emit_context_callbacks, suppress_statement,

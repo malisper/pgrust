@@ -223,6 +223,12 @@ pub struct SortNode<'mcx> {
     /// table handed off (this node emits nothing), Some(false) = probed and
     /// refused or degraded (classic paths own the node).
     pub pd_state: Option<bool>,
+    /// M2 runtime DISTINCT-sink STATIC shape refusal memo (lanev2
+    /// `runtime_distinct`): once the plan-shape gates (order spec / spec
+    /// derivation / subtree shape / expr safety) refuse, later pulls skip
+    /// the whole probe. Dynamic gates (arming, EPQ, instrumentation,
+    /// economics, granule floor) stay per-call.
+    pub rd_shape_refused: bool,
 }
 
 // The IncrementalSort node's outer child lives here (nodesort precedent).
@@ -745,6 +751,7 @@ pub fn exec_init_node<'mcx>(
                 outer_desc: Some(outer_desc),
                 lane_fusible: None,
                 pd_state: None,
+                rd_shape_refused: false,
             })
         }
         NodeTag::T_IncrementalSort => {
@@ -1604,6 +1611,45 @@ fn agg_arm<'mcx>(
 ) -> ProcResult {
     let aps = &mut **aps;
     let AggPlanState { agg, outer, lane_choice, lane_stage_slot, lane_exprkey } = aps;
+    // EA-on-morsels dispatch (docs/design/ea-morsels.md §5): under EXPLAIN
+    // ANALYZE every child is an `Instrumented` wrapper, so the concrete-
+    // variant arms below cannot match — which is CORRECT for the serial
+    // fused drives (they rely on the mismatch to keep EA C-exact), but the
+    // runtime arms' EA admission (whose workers run uninstrumented) must
+    // still get its walk. Peel ONE wrapper layer for the LANE HOOK ONLY:
+    // the serial lane arms re-refuse instrumented shapes themselves
+    // (instr_idx gates inside seq_scan_fusible / decide paths), so only the
+    // runtime EA walks can own the node; a refusal falls through to the
+    // unchanged per-tuple instrumented exec below, byte-identically.
+    if estate.es_instrument != 0 && crate::lanev2::enabled() {
+        if let PlanStateNode::Instrumented(w) = &mut *outer {
+            match &mut w.inner {
+                PlanStateNode::SeqScan(ss) => {
+                    if let Some(r) = crate::lanev2::try_own_agg_over_seq_scan(
+                        agg,
+                        ss,
+                        lane_choice,
+                        lane_stage_slot,
+                        lane_exprkey,
+                        estate,
+                    )? {
+                        return Ok(r);
+                    }
+                }
+                PlanStateNode::Sort(s) => {
+                    // The DISTINCT sink's dedicated EA walk (its serial
+                    // dispatch sits behind the sort fusibility memo, which
+                    // rightly refuses instrumented trees).
+                    if let Some(r) =
+                        crate::lanev2::try_own_sorted_distinct_runtime_ea(agg, s, estate)?
+                    {
+                        return Ok(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     match outer {
         PlanStateNode::SeqScan(ss) => {
             // Lane-executor-v2 dispatch hook (Phase-2 hash-agg breaker):
@@ -1698,6 +1744,19 @@ fn agg_arm<'mcx>(
         }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
+            // bitmap-morsels: the runtime bitmap-heap arm (morselized claims
+            // over the frozen shared bitmap at DOP N). Falls through to the
+            // UNCHANGED fused/per-tuple paths on refuse; when the bitmap was
+            // built and the geometry floor refused, the classic setup
+            // already ran and the fused drive below skips its own. Lane
+            // logic + refuse-set live in `lanev2::runtime_bitmap`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_bitmap_heap_scan(agg, b, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && b.scan.ss.qual.is_none()
                 && b.scan.ss.ps_ProjInfo.is_none()
@@ -1910,6 +1969,14 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
     ) -> PgResult<Option<u32>> {
         ::nodeseqscan::seq_scan_batch_qual_count(self.ss, estate, n)
     }
+
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
+    }
 }
 
 impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mcx> {
@@ -1926,6 +1993,14 @@ impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanBatchSource<'_, 'mc
     #[inline]
     fn slot(&self) -> ExecSlotId {
         self.outer_slot
+    }
+
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
     }
 }
 
@@ -2014,6 +2089,17 @@ impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanProjBatchSource<'_,
     #[inline]
     fn slot(&self) -> ExecSlotId {
         self.result_slot
+    }
+
+    // Skipping a fetch-dead row elides only its ExprContext reset — the
+    // interleaved reset frees nothing (nothing allocated since the previous
+    // reset), so every surviving fetch sees identical context state.
+    #[inline]
+    fn skip_words(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        let sel = ::nodeseqscan::seq_scan_batch_skip_sel(self.ss)?;
+        let mut out = [0u64; ::exectuples::SOA_BM_WORDS];
+        out[..sel.len()].copy_from_slice(sel);
+        Some(out)
     }
 }
 
@@ -3726,7 +3812,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     WindowAggNode<'_> { state, outer },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer, lane_fusible, pd_state; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
