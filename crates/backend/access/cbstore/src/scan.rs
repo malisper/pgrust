@@ -2459,6 +2459,72 @@ impl<'mcx> CbScanDescData<'mcx> {
         true
     }
 
+    /// ANALYZE parallel sample fetch (loadfinal lane): materialize `refs`
+    /// ((rg, rg-global row), ascending file order — the reservoir sample's
+    /// physical positions) into `slot` one row at a time via `per_row`,
+    /// decoding (rg, granule) tasks on `pool` worker threads.
+    ///
+    /// Motivation: a 30k-row uniform sample over 100M rows lands ~2-3 rows
+    /// in nearly every granule, so acquisition decodes ~every granule of
+    /// every column — a serial full-part decode on the leader (~50 s of the
+    /// ~55 s VACUUM ANALYZE tail @100M). The sample positions are pure
+    /// PRNG/row-count arithmetic known up front, so the decode parallelizes
+    /// while the published rows, values, and order stay IDENTICAL to serial
+    /// `gather_row` fetches by construction (same decode routines, values
+    /// byte-copied out; the leader consumes task outputs in refs order).
+    pub fn analyze_gather_rows(
+        &mut self,
+        refs: &[(u32, u32)],
+        pool: usize,
+        slot: &mut SlotData<'_>,
+        per_row: &mut dyn FnMut(&mut SlotData<'_>) -> PgResult<()>,
+    ) -> PgResult<u64> {
+        let Some(part) = self.part.as_deref() else {
+            debug_assert!(refs.is_empty());
+            return Ok(0);
+        };
+        let ncols = self.coltypes.len();
+        let (needed_idx, coltypes) = (&self.needed_idx, &self.coltypes);
+        let mut ntasks = 0u64;
+        let mut res: PgResult<()> = Ok(());
+        {
+            let res = &mut res;
+            let slot = &mut *slot;
+            let mut on_task = |task: &AnalyzeTask, out: &AnalyzeTaskOut| -> bool {
+                ntasks += 1;
+                let nneed = needed_idx.len();
+                let bytes_base = out.bytes.as_ptr() as usize;
+                for i in 0..(task.hi - task.lo) {
+                    let base = slot.base_mut();
+                    base.tts_values.fill(Datum::null());
+                    base.tts_isnull.fill(true);
+                    for (j, &c) in needed_idx.iter().enumerate() {
+                        let w = out.words[i * nneed + j];
+                        base.tts_isnull[c as usize] = false;
+                        base.tts_values[c as usize] = if coltypes[c as usize].is_text() {
+                            // w = 4-aligned offset of the copied varlena
+                            // image; the image lives until on_task returns
+                            // (per_row's copy contract matches store_slot's
+                            // per-row publish).
+                            Datum::from_usize(bytes_base + w as usize)
+                        } else {
+                            Datum::from_usize(w as usize)
+                        };
+                    }
+                    base.tts_nvalid = ncols as ::types_core::AttrNumber;
+                    base.mark_not_empty();
+                    if let Err(e) = per_row(slot) {
+                        *res = Err(e);
+                        return false;
+                    }
+                }
+                true
+            };
+            analyze_gather_pipeline(part, refs, needed_idx, coltypes, pool, &mut on_task);
+        }
+        res.map(|()| ntasks)
+    }
+
     /// Per-row drive (`scan_getnextslot`): forward-only.
     pub fn getnextslot(&mut self, slot: &mut SlotData<'_>) -> PgResult<bool> {
         loop {
@@ -2474,6 +2540,192 @@ impl<'mcx> CbScanDescData<'mcx> {
             }
         }
     }
+}
+
+// ---- ANALYZE parallel sample fetch internals (loadfinal lane) --------------
+
+// One (rg, granule) decode task covering refs[lo..hi] (contiguous — refs
+// ascend in file order, so a granule's refs are one slice).
+struct AnalyzeTask {
+    rg: u32,
+    g: u32,
+    lo: usize,
+    hi: usize,
+}
+
+// Extracted sample values for one task, row-major in needed_idx order: for
+// text columns the u64 is a 4-aligned byte offset into `bytes` (a complete
+// inline varlena image, 1B-short or 4B-U, byte-copied out of the decode
+// buffers); for every other cbstore column type (all by-val) it is the
+// datum word verbatim.
+struct AnalyzeTaskOut {
+    words: Vec<u64>,
+    bytes: Vec<u8>,
+}
+
+// `&Part` across scoped decode threads.
+//
+// SAFETY: Part is read-only over an immutable mmap — sealed row groups
+// never mutate and the mapped extent is fixed at open (`data_end` and every
+// lazy section offset come from the footer parsed then). Its only interior
+// mutability is the `granule_starts` OnceLock, documented "builds it once
+// under any thread". All decode scratch with real interior mutability
+// (ColDecode incl. DictLazy's Cells) is constructed INSIDE each worker and
+// never crosses threads.
+struct PartSync<'a>(&'a Part);
+unsafe impl Sync for PartSync<'_> {}
+impl<'a> PartSync<'a> {
+    // Accessor (not a field projection): worker closures then capture the
+    // PartSync wrapper itself rather than disjoint-capturing a bare `&Part`
+    // field (edition-2021 capture would sidestep the Sync wrapper).
+    fn get(&self) -> &'a Part {
+        self.0
+    }
+}
+
+// Decode one task's needed columns with thread-local scratch and copy the
+// sampled rows' values out. Same decode routines as gather_row; the copy
+// direction (by-val word / full varlena image) is exactly what a serial
+// per_row consumer would read through ColDecode::datum.
+fn analyze_extract_task(
+    part: &Part,
+    task: &AnalyzeTask,
+    refs: &[(u32, u32)],
+    needed_idx: &[u16],
+    coltypes: &[ColType],
+    cds: &mut [ColDecode],
+) -> AnalyzeTaskOut {
+    let (rg, g) = (task.rg as usize, task.g as usize);
+    for &c in needed_idx {
+        decode_col(part, rg, g, c as usize, &mut cds[c as usize]);
+    }
+    let nneed = needed_idx.len();
+    let nrows = task.hi - task.lo;
+    let mut out =
+        AnalyzeTaskOut { words: Vec::with_capacity(nrows * nneed), bytes: Vec::new() };
+    for i in task.lo..task.hi {
+        debug_assert_eq!(refs[i].0, task.rg);
+        let r = refs[i].1 as usize - g * GRANULE_ROWS;
+        for &c in needed_idx {
+            let d = cds[c as usize].datum(r);
+            if coltypes[c as usize].is_text() {
+                while out.bytes.len() % 4 != 0 {
+                    out.bytes.push(0);
+                }
+                let off = out.bytes.len() as u64;
+                let p = d.as_usize() as *const u8;
+                // SAFETY: cbstore decode contract — `d` is a live inline
+                // varlena image in this thread's decode buffers.
+                let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
+                // SAFETY: same contract; the image is `len` readable bytes.
+                out.bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
+                out.words.push(off);
+            } else {
+                out.words.push(d.as_usize() as u64);
+            }
+        }
+    }
+    out
+}
+
+// The bounded producer/consumer pipeline: workers claim tasks in file order
+// off an atomic cursor and park while more than `pool * 8` outputs are
+// undelivered (consume-on-arrival keeps memory flat); the caller's
+// `on_task` sees every task IN ORDER (return false = stop early, e.g. a
+// consumer error). Worker panics (decode corruption) release the leader's
+// wait and re-raise on scope exit — the backend's ordinary panic unwind.
+fn analyze_gather_pipeline(
+    part: &Part,
+    refs: &[(u32, u32)],
+    needed_idx: &[u16],
+    coltypes: &[ColType],
+    pool: usize,
+    on_task: &mut dyn FnMut(&AnalyzeTask, &AnalyzeTaskOut) -> bool,
+) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    debug_assert!(pool >= 1);
+    let mut tasks: Vec<AnalyzeTask> = Vec::new();
+    for (i, &(rg, row)) in refs.iter().enumerate() {
+        debug_assert!(i == 0 || refs[i - 1] < refs[i], "refs must ascend");
+        let g = (row as usize / GRANULE_ROWS) as u32;
+        match tasks.last_mut() {
+            Some(t) if t.rg == rg && t.g == g => t.hi = i + 1,
+            _ => tasks.push(AnalyzeTask { rg, g, lo: i, hi: i + 1 }),
+        }
+    }
+    let ntasks = tasks.len();
+    if ntasks == 0 {
+        return;
+    }
+    let results: Vec<std::sync::Mutex<Option<AnalyzeTaskOut>>> =
+        (0..ntasks).map(|_| std::sync::Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    let consumed = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let wpanic = AtomicBool::new(false);
+    let window = pool * 8;
+    let pshare = PartSync(part);
+    let ncols = coltypes.len();
+
+    // Sets stop/wpanic when its worker unwinds, so the leader never waits
+    // on a task that will not arrive.
+    struct PanicGuard<'a>(&'a AtomicBool, &'a AtomicBool);
+    impl Drop for PanicGuard<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.1.store(true, Ordering::Relaxed);
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    std::thread::scope(|s| {
+        for _ in 0..pool {
+            s.spawn(|| {
+                let _guard = PanicGuard(&stop, &wpanic);
+                let part = pshare.get();
+                let mut cds: Vec<ColDecode> = (0..ncols).map(|_| new_col_decode()).collect();
+                loop {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let t = next.fetch_add(1, Ordering::Relaxed);
+                    if t >= ntasks {
+                        return;
+                    }
+                    while t >= consumed.load(Ordering::Acquire) + window {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    }
+                    let out = analyze_extract_task(
+                        part, &tasks[t], refs, needed_idx, coltypes, &mut cds,
+                    );
+                    *results[t].lock().unwrap() = Some(out);
+                }
+            });
+        }
+        'consume: for t in 0..ntasks {
+            let out = loop {
+                if let Some(o) = results[t].lock().unwrap().take() {
+                    break o;
+                }
+                if wpanic.load(Ordering::Relaxed) {
+                    // The producing worker died; scope exit re-raises its
+                    // panic below.
+                    break 'consume;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            };
+            let go = on_task(&tasks[t], &out);
+            consumed.store(t + 1, Ordering::Release);
+            if !go {
+                break 'consume;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+    });
 }
 
 fn zone_can_match(q: &ZoneQual, min: i64, max: i64) -> bool {
@@ -2583,5 +2835,198 @@ mod verdict_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod analyze_gather_tests {
+    use super::*;
+    use crate::format::RG_ROWS;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-anlz-gather-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    // Low-cardinality (dict-able) and high-cardinality (blob/lz4) text
+    // shapes, empties included.
+    fn dict_text(i: usize) -> Vec<u8> {
+        match i % 5 {
+            0 => Vec::new(),
+            k => format!("dict-val-{}", (i % 89) * k).into_bytes(),
+        }
+    }
+    fn uniq_text(i: usize) -> Vec<u8> {
+        format!("unique-payload-{i}-{}", "x".repeat(i % 37)).into_bytes()
+    }
+
+    // 2 full RGs + a partial granule; 4 columns exercising by-val + both
+    // text shapes.
+    fn build_part(path: &str) -> Part {
+        let coltypes =
+            vec![ColType::I64, ColType::Text, ColType::I32, ColType::Text];
+        let mut w = crate::writer::open_writer_at(path, coltypes).unwrap();
+        let n = 2 * RG_ROWS + GRANULE_ROWS + GRANULE_ROWS / 3;
+        let mut keep = Vec::new();
+        for i in 0..n {
+            let (d, u) = (dict_text(i), uniq_text(i));
+            let vals = [
+                Datum::from_i64(i as i64 * 7 - 3),
+                text_datum(&d, &mut keep),
+                Datum::from_i64((i % 100_003) as i64),
+                text_datum(&u, &mut keep),
+            ];
+            w.append_row(&vals, &[false; 4]).unwrap();
+            keep.clear();
+        }
+        w.finish().unwrap();
+        Part::open(path, 4).unwrap().unwrap()
+    }
+
+    // Serial reference: decode through the same ColDecode vocabulary,
+    // one fresh scratch, refs in order — what gather_row publishes.
+    fn reference_rows(
+        part: &Part,
+        refs: &[(u32, u32)],
+        needed_idx: &[u16],
+        coltypes: &[ColType],
+    ) -> Vec<Vec<Vec<u8>>> {
+        let mut cds: Vec<ColDecode> =
+            (0..coltypes.len()).map(|_| new_col_decode()).collect();
+        let mut out = Vec::new();
+        for &(rg, row) in refs {
+            let g = row as usize / GRANULE_ROWS;
+            let r = row as usize % GRANULE_ROWS;
+            let mut vals = Vec::new();
+            for &c in needed_idx {
+                decode_col(part, rg as usize, g, c as usize, &mut cds[c as usize]);
+                let d = cds[c as usize].datum(r);
+                if coltypes[c as usize].is_text() {
+                    let p = d.as_usize() as *const u8;
+                    let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
+                    vals.push(unsafe { core::slice::from_raw_parts(p, len) }.to_vec());
+                } else {
+                    vals.push(d.as_usize().to_le_bytes().to_vec());
+                }
+            }
+            out.push(vals);
+        }
+        out
+    }
+
+    fn pipeline_rows(
+        part: &Part,
+        refs: &[(u32, u32)],
+        needed_idx: &[u16],
+        coltypes: &[ColType],
+        pool: usize,
+    ) -> Vec<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        let mut on_task = |task: &AnalyzeTask, to: &AnalyzeTaskOut| -> bool {
+            let nneed = needed_idx.len();
+            for i in 0..(task.hi - task.lo) {
+                let mut vals = Vec::new();
+                for (j, &c) in needed_idx.iter().enumerate() {
+                    let w = to.words[i * nneed + j];
+                    if coltypes[c as usize].is_text() {
+                        let p = unsafe { to.bytes.as_ptr().add(w as usize) };
+                        assert_eq!(w % 4, 0, "text image offset must be 4-aligned");
+                        let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
+                        vals.push(unsafe { core::slice::from_raw_parts(p, len) }.to_vec());
+                    } else {
+                        vals.push((w as usize).to_le_bytes().to_vec());
+                    }
+                }
+                out.push(vals);
+            }
+            true
+        };
+        analyze_gather_pipeline(part, refs, needed_idx, coltypes, pool, &mut on_task);
+        out
+    }
+
+    fn sample_refs(part: &Part, stride: usize) -> Vec<(u32, u32)> {
+        let mut refs = Vec::new();
+        for rg in 0..part.rgs.len() {
+            let n = part.rgs[rg].nrows as usize;
+            // Boundary rows + a stride walk (granule first/last rows, RG
+            // first/last rows, granule-crossing spacing).
+            let mut rows: Vec<usize> = vec![0, 1, GRANULE_ROWS - 1, GRANULE_ROWS, n - 1];
+            let mut r = stride % 977;
+            while r < n {
+                rows.push(r);
+                r += stride;
+            }
+            rows.sort_unstable();
+            rows.dedup();
+            refs.extend(rows.into_iter().filter(|&r| r < n).map(|r| (rg as u32, r as u32)));
+        }
+        refs
+    }
+
+    #[test]
+    fn pipeline_matches_serial_reference_across_pools() {
+        let path = tmp("pools");
+        let part = build_part(&path);
+        let coltypes =
+            vec![ColType::I64, ColType::Text, ColType::I32, ColType::Text];
+        let needed_idx: Vec<u16> = vec![0, 1, 2, 3];
+        for stride in [3_333usize, 8_192, 12_345] {
+            let refs = sample_refs(&part, stride);
+            let want = reference_rows(&part, &refs, &needed_idx, &coltypes);
+            for pool in [1usize, 3, 7] {
+                let got = pipeline_rows(&part, &refs, &needed_idx, &coltypes, pool);
+                assert_eq!(want.len(), got.len(), "stride {stride} pool {pool}");
+                assert_eq!(want, got, "stride {stride} pool {pool}");
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn pipeline_subset_needed_and_empty_refs() {
+        let path = tmp("subset");
+        let part = build_part(&path);
+        let coltypes =
+            vec![ColType::I64, ColType::Text, ColType::I32, ColType::Text];
+        // Text-only needed subset (the copy-out path alone).
+        let needed_idx: Vec<u16> = vec![1, 3];
+        let refs = sample_refs(&part, 5_000);
+        let want = reference_rows(&part, &refs, &needed_idx, &coltypes);
+        let got = pipeline_rows(&part, &refs, &needed_idx, &coltypes, 2);
+        assert_eq!(want, got);
+        // Empty refs: no tasks, no hang.
+        let got = pipeline_rows(&part, &[], &needed_idx, &coltypes, 2);
+        assert!(got.is_empty());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn pipeline_early_stop_terminates() {
+        let path = tmp("stop");
+        let part = build_part(&path);
+        let coltypes =
+            vec![ColType::I64, ColType::Text, ColType::I32, ColType::Text];
+        let needed_idx: Vec<u16> = vec![0, 1, 2, 3];
+        let refs = sample_refs(&part, 2_000);
+        let mut seen = 0usize;
+        let mut on_task = |_t: &AnalyzeTask, _o: &AnalyzeTaskOut| -> bool {
+            seen += 1;
+            seen < 3
+        };
+        analyze_gather_pipeline(&part, &refs, &needed_idx, &coltypes, 4, &mut on_task);
+        assert_eq!(seen, 3);
+        std::fs::remove_file(&path).unwrap();
     }
 }
