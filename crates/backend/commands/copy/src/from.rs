@@ -441,7 +441,7 @@ pub fn CopyFrom<'mcx>(
                 .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
-    // Morsel-parallel COPY (parallel.rs; PGRUST_PARALLEL_COPY=1, cbstore
+    // Morsel-parallel COPY (parallel.rs; PGRUST_PARALLEL_COPY=1, pgrcolumnar
     // text loads): admission refusals (triggers included — fail-closed,
     // traced) fall through to the serial body, byte-identically. Errors
     // return UNWRAPPED — the workers attached the exact line contexts

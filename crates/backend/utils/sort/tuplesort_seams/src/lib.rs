@@ -16,10 +16,10 @@ seam_core::seam!(
     ) -> PgResult<PgVec<'mcx, NullableDatum>>
 );
 
-// ---- cbstore ingest sort (writer sort-on-ingest, cbstore-impl cluster key) --
+// ---- pgrcolumnar ingest sort (writer sort-on-ingest, pgrcolumnar-impl cluster key) --
 //
-// cbstore cannot depend on tuplesort (tuplesort -> nbtree -> tableam ->
-// cbstore); this seam hands it a spill-capable row sorter keyed on the
+// pgrcolumnar cannot depend on tuplesort (tuplesort -> nbtree -> tableam ->
+// pgrcolumnar); this seam hands it a spill-capable row sorter keyed on the
 // writer's column classes. Comparators are fixed per kind — signed ints for
 // the int classes, C-collation byte order for text — matching the v5/v6
 // sorted-flag order definition (and the frozen-bank LC_ALL=C protocol), so
@@ -48,7 +48,7 @@ pub trait CbIngestSort {
 }
 
 seam_core::seam!(
-    pub fn cbstore_ingest_sort(
+    pub fn pgrcolumnar_ingest_sort(
         tup_desc: std::rc::Rc<TupleDescData<'static>>,
         keys: &[(i16, CbSortKeyKind)],
         work_mem: i32,

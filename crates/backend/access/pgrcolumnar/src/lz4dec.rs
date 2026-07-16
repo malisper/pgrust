@@ -1,5 +1,5 @@
-//! Purpose-built LZ4 block decoder for cbstore's frames (the Stage 2.4
-//! "unchecked LZ4 inner loop" lever, docs/design/cbstore-v2-beat-clickhouse-plan.md).
+//! Purpose-built LZ4 block decoder for pgrcolumnar's frames (the Stage 2.4
+//! "unchecked LZ4 inner loop" lever, docs/design/pgrcolumnar-v2-beat-clickhouse-plan.md).
 //!
 //! Provenance: implements the LZ4 block format per the reference spec
 //! (lz4/doc/lz4_Block_format.md, github.com/lz4/lz4 @ v1.10), with the
@@ -470,7 +470,7 @@ mod tests {
     }
 
     // ---- mutational fuzz: seeded, deterministic; cross-checked vs lz4_flex.
-    // Default budget keeps CI fast; CBSTORE_LZ4_FUZZ_ITERS raises it for the
+    // Default budget keeps CI fast; PGRCOLUMNAR_LZ4_FUZZ_ITERS raises it for the
     // meaningful run (see notes in the branch report).
     #[test]
     fn fuzz_mutated_frames() {

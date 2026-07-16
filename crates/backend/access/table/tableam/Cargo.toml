@@ -27,7 +27,7 @@ guc_seams = { path = "../../../utils/misc/guc_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
 exectuples = { path = "../../../executor/exectuples" }
 tableam_vocab = { path = "../tableam_vocab" }
-cbstore = { path = "../../cbstore" }
+pgrcolumnar = { path = "../../pgrcolumnar" }
 heapam = { path = "../../heap/heapam" }
 format_type = { path = "../../../utils/adt/format_type" }
 heapam_handler = { path = "../../heap/heapam_handler" }

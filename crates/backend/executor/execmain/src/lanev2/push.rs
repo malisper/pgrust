@@ -238,7 +238,7 @@ pub(super) trait BatchEmit<'mcx> {
 
     /// Physical rowref base of the CURRENT staged batch (tie-ordering rule
     /// 2, the zone-adaptive rowref-selection sort feed): staged row `i`'s
-    /// rowref is `base + i`. Default: never serves (only the cbstore-backed
+    /// rowref is `base + i`. Default: never serves (only the pgrcolumnar-backed
     /// seqscan emit face carries physical rowrefs).
     fn rowref_base(&self) -> Option<u64> {
         None
@@ -250,7 +250,7 @@ pub(super) trait BatchEmit<'mcx> {
     /// published when the scan carries one. `Some` certifies only the
     /// window's codes/dict identity; a consumer using codes for ORDER
     /// semantics must additionally gate on `table.has_stitch()` and fail
-    /// closed otherwise. Default: never serves (only the cbstore-backed
+    /// closed otherwise. Default: never serves (only the pgrcolumnar-backed
     /// seqscan emit face can).
     fn refsort_dictcode_batch(&mut self, _col: u16) -> Option<::exectuples::SoaDictLane> {
         None

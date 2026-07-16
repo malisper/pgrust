@@ -43,7 +43,7 @@ impl EaRowTally {
     }
 }
 
-/// Fold of the worker's cbstore scan-descriptor counters (the CBSCAN debug
+/// Fold of the worker's pgrcolumnar scan-descriptor counters (the CBSCAN debug
 /// line's fields — scan.rs:366-382 at the base): snapshotted whole at claim
 /// end (the descriptor is per-worker and cumulative, so the LAST snapshot
 /// is the worker's total — the same overwrite discipline as the partial).

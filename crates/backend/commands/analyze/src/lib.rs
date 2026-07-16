@@ -543,9 +543,9 @@ fn do_analyze_rel<'mcx>(
         // Ingest-time footer NDV (whole-stream HLL): sampled Duj1 underestimates
         // heavy-tailed text NDV 100-1500x, so a present footer count wins.
         let footer_ndv = if !inh
-            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore)
+            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar)
         {
-            tableam::cbstore_footer_ndv(onerel)?
+            tableam::pgrcolumnar_footer_ndv(onerel)?
         } else {
             None
         };
@@ -636,7 +636,7 @@ fn do_analyze_rel<'mcx>(
     }
     if anl_trace {
         // compute bucket includes index/ext stats + the pg_statistic write
-        // (both ~0 on the load shape); acquire has its own cbstore line.
+        // (both ~0 on the load shape); acquire has its own pgrcolumnar line.
         eprintln!(
             "ANALYZE|TRACE|rel={} rows={} acquire={:.3}s compute={:.3}s maxcol=(att {}, {:.3}s)",
             onerel.rd_id,
@@ -1287,8 +1287,8 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
-    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore) {
-        return cbstore_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
+        return pgrcolumnar_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
     }
     let base = rows.len();
     let mut numrows: i32 = 0;
@@ -1381,7 +1381,7 @@ fn acquire_sample_rows<'mcx>(
 
 // ---- loadfinal lane knobs (default OFF, fail-closed) -----------------------
 
-// PGRUST_ANALYZE_SAMPLE_POOL=<n>: decode the cbstore sample's granules on n
+// PGRUST_ANALYZE_SAMPLE_POOL=<n>: decode the pgrcolumnar sample's granules on n
 // worker threads (0/unset = the serial per-ref gather path, untouched). The
 // sample positions and row values are identical either way — the reservoir
 // arithmetic is pure PRNG/row-count bookkeeping, run up front.
@@ -1402,14 +1402,14 @@ fn analyze_trace() -> bool {
     )
 }
 
-/// The cbstore reservoir's sample POSITIONS, computed without fetching:
-/// exactly `cbstore_acquire_sample_rows`'s serial loop with the two fetch
+/// The pgrcolumnar reservoir's sample POSITIONS, computed without fetching:
+/// exactly `pgrcolumnar_acquire_sample_rows`'s serial loop with the two fetch
 /// sites recording (ord, rg, rg-global row) instead of materializing the
 /// row — the PRNG call sequence and f64 bookkeeping are verbatim, so the
 /// positions (and their post-sort order) are IDENTICAL to what the serial
 /// path samples from the same reservoir state. Returned sorted by ord
 /// (physical file order — the correlation stat's required rows order).
-fn cbstore_sample_positions(
+fn pgrcolumnar_sample_positions(
     rgs: &[(u32, u32)],
     targrows: i32,
     rstate: &mut sampling::ReservoirStateData,
@@ -1454,11 +1454,11 @@ fn cbstore_sample_positions(
     sample
 }
 
-// cbstore's acquirefunc (C table_relation_analyze lets the AM supply it):
+// pgrcolumnar's acquirefunc (C table_relation_analyze lets the AM supply it):
 // uniform Vitter reservoir over the visible row stream; skipped spans are
 // never decoded (gather_row decodes granules on demand). totalrows is exact
-// from the part footer; cbstore parts carry no dead rows.
-fn cbstore_acquire_sample_rows<'mcx>(
+// from the part footer; pgrcolumnar parts carry no dead rows.
+fn pgrcolumnar_acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
     rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
@@ -1469,7 +1469,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
     let tupdesc = onerel.descr();
     let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
     let mut slot = tableam::table_slot_create(mcx, onerel)?;
-    let rgs = tableam::cbstore_analyze_visible_rgs(&scan)?;
+    let rgs = tableam::pgrcolumnar_analyze_visible_rgs(&scan)?;
     let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
     *totalrows = total as f64;
     *totaldeadrows = 0.0;
@@ -1481,7 +1481,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
                      rg: u32,
                      row: u32|
      -> PgResult<HeapTupleData<'mcx>> {
-        if !tableam::cbstore_analyze_fetch_row(scan, rg, row, slot) {
+        if !tableam::pgrcolumnar_analyze_fetch_row(scan, rg, row, slot) {
             panic!("cbstore analyze: sampled row ref out of range");
         }
         let b = slot.base();
@@ -1512,7 +1512,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
     let trace = analyze_trace();
     let t0 = std::time::Instant::now();
     if pool >= 1 {
-        let positions = cbstore_sample_positions(&rgs, targrows, &mut rstate);
+        let positions = pgrcolumnar_sample_positions(&rgs, targrows, &mut rstate);
         let refs: Vec<(u32, u32)> =
             positions.iter().map(|&(_, rg, row)| (rg, row)).collect();
         let mut formed: i32 = 0;
@@ -1537,7 +1537,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
                 *formed += 1;
                 Ok(())
             };
-            tableam::cbstore_analyze_gather_rows(&mut scan, &refs, pool, &mut slot, &mut per_row)?
+            tableam::pgrcolumnar_analyze_gather_rows(&mut scan, &refs, pool, &mut slot, &mut per_row)?
         };
         drop(slot);
         tableam::table_endscan(scan)?;
@@ -2737,9 +2737,9 @@ pub fn init_seams() {
 
 #[cfg(test)]
 mod sample_positions_tests {
-    use super::{cbstore_sample_positions, sampling};
+    use super::{pgrcolumnar_sample_positions, sampling};
 
-    // Literal transcription of the SERIAL cbstore_acquire_sample_rows loop
+    // Literal transcription of the SERIAL pgrcolumnar_acquire_sample_rows loop
     // with the two fetch sites recording (ord, rg, row) instead of
     // materializing tuples, ending with the same ord sort — the pre-refactor
     // behavior the parallel path must reproduce position-for-position.
@@ -2795,7 +2795,7 @@ mod sample_positions_tests {
         let mut rs_a = sampling::reservoir_init_selection_state(seed, targrows as u32);
         let mut rs_b = sampling::reservoir_init_selection_state(seed, targrows as u32);
         let want = reference_positions(rgs, targrows, &mut rs_a);
-        let got = cbstore_sample_positions(rgs, targrows, &mut rs_b);
+        let got = pgrcolumnar_sample_positions(rgs, targrows, &mut rs_b);
         assert_eq!(want, got, "rgs={rgs:?} targrows={targrows} seed={seed}");
         let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
         assert_eq!(got.len() as u64, total.min(targrows as u64));

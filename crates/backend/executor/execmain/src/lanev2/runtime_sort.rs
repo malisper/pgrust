@@ -3,7 +3,7 @@
 //! parallelism-redesign-2026-07.md §2.2/§5-M3).
 //!
 //! Shape: the SERIAL-plan bounded sort breaker `Sort(bounded) ←
-//! SeqScan(cbstore)` (the ClickBench Q24/Q25 class), executed as one
+//! SeqScan(pgrcolumnar)` (the ClickBench Q24/Q25 class), executed as one
 //! SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
 //! PREWHERE → narrow (key, rowref) pushes into a per-worker bounded
 //! `TopnHeap` on the tie-ordering rule-2 TOTAL order) → SEAL (parallel
@@ -117,7 +117,7 @@ struct TopnSpec {
 }
 
 /// Shared shape derivation (both sort-sink arms): datum-sort refusal,
-/// cbstore window-ref availability, the Var-only tlist census, and the
+/// pgrcolumnar window-ref availability, the Var-only tlist census, and the
 /// int-family key vocabulary. `None` = the serial feed runs unchanged.
 fn sort_keys_and_map<'mcx>(
     state: &::nodesort::SortState<'mcx>,
@@ -139,8 +139,8 @@ fn sort_keys_and_map<'mcx>(
     {
         return None;
     }
-    // Window refs only exist for cbstore staged batches.
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    // Window refs only exist for pgrcolumnar staged batches.
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return None;
     }
     let natts = outer_desc.natts as usize;
@@ -847,7 +847,7 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                     // Clean staged row: every key straight from its SoA
                     // column (re-borrowed per key — batch-stable); DictCode
                     // keys read the window's code and map it part-global
-                    // (dict windows carry no NULLs — cbstore stores none).
+                    // (dict windows carry no NULLs — pgrcolumnar stores none).
                     for ki in 0..nk {
                         let key = self.keys[ki];
                         if key.dictcode {
@@ -1030,7 +1030,7 @@ impl RuntimeSortShared {
                     let estate = &mut d.estate;
                     let ss = sort_worker_scan(d.planstate.as_mut())?;
                     // train-12 composition: AM-dispatched positioner (heap
-                    // lane rename); this arm admits only cbstore scans by
+                    // lane rename); this arm admits only pgrcolumnar scans by
                     // construction.
                     ::nodeseqscan::seq_scan_set_morsel_range(
                         ss,
@@ -1651,7 +1651,7 @@ fn engage_ceremony<'mcx>(
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
         // Submit the pinned RG (accept → seal → combine) before launch.
-        let source = Arc::new(super::runtime_scan::CbstoreGranuleSource {
+        let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
             starts: Arc::new(starts),
             // This arm feeds claims straight into set_granule_range
             // (single-epoch contract); it does not subdivide multi-epoch
@@ -1907,7 +1907,7 @@ fn adopt_winners<'mcx>(
                 values[j] = base.tts_values[c as usize];
                 isnull[j] = base.tts_isnull[c as usize];
                 // Needed-set guard (the refsort law): gather_row nulls only
-                // unneeded cells (cbstore stores no NULLs), so a null
+                // unneeded cells (pgrcolumnar stores no NULLs), so a null
                 // projected cell means the column was outside the scan's
                 // needed set — fall back before any output escapes.
                 if isnull[j] {

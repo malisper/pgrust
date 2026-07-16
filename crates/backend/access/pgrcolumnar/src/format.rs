@@ -1,4 +1,4 @@
-//! On-disk framing for cbstore parts (docs/design/cbstore-impl.md §1-2).
+//! On-disk framing for pgrcolumnar parts (docs/design/pgrcolumnar-impl.md §1-2).
 
 use ::types_core::Oid;
 

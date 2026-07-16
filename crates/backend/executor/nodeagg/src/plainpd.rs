@@ -271,7 +271,7 @@ impl PlainPdLocal {
         Ok(())
     }
 
-    /// One dict-coded text window (the cbstore zero-decode lane): the
+    /// One dict-coded text window (the pgrcolumnar zero-decode lane): the
     /// caller's identity-scoped `memo` filters repeat codes exactly as the
     /// serial `agg_plain_distinct_insert_dict_batch` does; novel codes
     /// detoast + route by content hash.

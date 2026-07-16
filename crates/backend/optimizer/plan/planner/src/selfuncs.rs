@@ -2664,15 +2664,15 @@ fn add_unique_group_var<'mcx>(
     vardata: &VariableStatData<'mcx>,
 ) -> PgResult<()> {
     let (mut ndistinct, isdefault) = get_variable_numdistinct(run, vardata);
-    // cbstore no-stats group-key ndistinct (pgrust-only divergence, scoped to
-    // grouping/DISTINCT estimation -- consts::DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO
-    // provenance): cbstore cannot ANALYZE, so a defaulted 200 here starves
+    // pgrcolumnar no-stats group-key ndistinct (pgrust-only divergence, scoped to
+    // grouping/DISTINCT estimation -- consts::DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO
+    // provenance): pgrcolumnar cannot ANALYZE, so a defaulted 200 here starves
     // hash-finalize parallel agg at 100M scale. isdefault is preserved so
     // SELFLAG_USED_DEFAULT consumers still see the truth.
     if isdefault {
         if let Some(rel) = vardata.rel {
             let r = run.root.rel(rel);
-            if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 && r.tuples > 0.0 {
+            if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0 && r.tuples > 0.0 {
                 // Prefer the footer's ingest-time per-column NDV (whole-stream
                 // HLL — the same count a footer-backed ANALYZE harvests into
                 // stadistinct; plancat stashes it on the rel). Only a plain
@@ -2681,7 +2681,7 @@ fn add_unique_group_var<'mcx>(
                 // fallback below.
                 let footer_ndv = node.as_var().and_then(|v| {
                     (v.varno == r.relid as i32 && v.varlevelsup == 0 && v.varattno >= 1)
-                        .then(|| r.cbstore_col_ndv.get(v.varattno as usize - 1))
+                        .then(|| r.pgrcolumnar_col_ndv.get(v.varattno as usize - 1))
                         .flatten()
                         .copied()
                         .filter(|&d| d > 0)
@@ -2689,7 +2689,7 @@ fn add_unique_group_var<'mcx>(
                 if let Some(d) = footer_ndv {
                     ndistinct = crate::costsize::clamp_row_est((d as f64).min(r.tuples));
                 } else {
-                    let ratio = crate::costsize::gucs::cbstore_group_ndistinct_ratio();
+                    let ratio = crate::costsize::gucs::pgrcolumnar_group_ndistinct_ratio();
                     if ratio > 0.0 {
                         ndistinct = crate::costsize::clamp_row_est(r.tuples * ratio);
                     }

@@ -1,6 +1,6 @@
 //! md.c-compatible segment fan-out for the part's byte stream: logical byte
 //! offsets over 1 GiB segment files (`path`, `path.1`, ...) so smgr's
-//! mdnblocks/mdunlink stay valid on cbstore relations.
+//! mdnblocks/mdunlink stay valid on pgrcolumnar relations.
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;

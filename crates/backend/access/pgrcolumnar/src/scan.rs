@@ -1,5 +1,5 @@
 //! Sequential scan: RG visibility, zone-map pruning, granule decode, window
-//! staging for the page-batch executor drive (docs/design/cbstore-impl.md §7.3).
+//! staging for the page-batch executor drive (docs/design/pgrcolumnar-impl.md §7.3).
 
 use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
@@ -86,7 +86,7 @@ fn staged_text_span(ds: &[Datum]) -> Option<::exectuples::SoaTextSpan> {
         }
         prev = p;
     }
-    // SAFETY: cbstore text datums point at live complete varlena images
+    // SAFETY: pgrcolumnar text datums point at live complete varlena images
     // (decode contract); `prev` is the window's last (highest) image.
     let end = prev + unsafe { ::types_tuple::varatt::varsize_any(prev as *const u8) };
     Some(::exectuples::SoaTextSpan { base: first as *const u8, len: end - first })
@@ -143,7 +143,7 @@ fn new_col_decode() -> ColDecode {
 // or not (no countability proof needed).
 //
 // # Safety
-// `d` is a live inline varlena image (cbstore decode contract: 1B short or
+// `d` is a live inline varlena image (pgrcolumnar decode contract: 1B short or
 // plain 4B-U).
 #[inline]
 unsafe fn text_datum_len(d: Datum, chars: bool) -> i64 {
@@ -289,7 +289,7 @@ pub struct MetaZeroQual {
     pub keep_nonzero: bool,
 }
 
-// Zone-ordered adaptive traversal (docs/design/cbstore-zone-adaptive.md):
+// Zone-ordered adaptive traversal (docs/design/pgrcolumnar-zone-adaptive.md):
 // granules visited best-first by the sort-key column's zone bound, with a
 // consumer-fed stop bound (top-k heap floor / running MIN-MAX best). Armed
 // only on serial scans over exact-zone int-family columns; the physical
@@ -434,7 +434,7 @@ pub struct CbScanDescData<'mcx> {
     // Staging window width (rows per staged batch): WINDOW_ROWS unless
     // overridden by PGRUST_CB_WINDOW_ROWS (see env_window_rows).
     window_rows: usize,
-    // Post-qual materialization (cbstore_prewhere): granule decode is
+    // Post-qual materialization (pgrcolumnar_prewhere): granule decode is
     // per-column on demand — the SoA deform pulls only the columns it fills
     // and store_slot completes the needed set for surviving rows only.
     lazy: bool,
@@ -1583,7 +1583,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                 else {
                     return Ok(CbGranuleMetaStep::NotMeta);
                 };
-                // cbstore stores no NULLs; a mismatch means foreign/corrupt
+                // pgrcolumnar stores no NULLs; a mismatch means foreign/corrupt
                 // stats — refuse rather than answer.
                 if st.1 != grows as u32 {
                     return Ok(CbGranuleMetaStep::NotMeta);
@@ -1758,7 +1758,7 @@ impl<'mcx> CbScanDescData<'mcx> {
                 let Some(st) = part.granule_len_stats(self.rg, g, c as usize) else {
                     return Ok(CbAggMetaStep::NotMeta);
                 };
-                // cbstore stores no NULLs; a mismatch means foreign/corrupt
+                // pgrcolumnar stores no NULLs; a mismatch means foreign/corrupt
                 // stats — refuse rather than answer.
                 if st.1 != grows as u32 {
                     return Ok(CbAggMetaStep::NotMeta);
@@ -1922,7 +1922,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// Footer value min/max of the staged window's granule for column `c`;
     /// int-encoded chunks only (text granule entries carry byte lengths).
     /// The bounds cover the whole granule — a superset of any staged window
-    /// inside it (cbstore stores no NULLs, so they bound every row).
+    /// inside it (pgrcolumnar stores no NULLs, so they bound every row).
     pub fn staged_window_value_minmax(&self, c: usize) -> Option<(i64, i64)> {
         if !self.decoded {
             return None;
@@ -2556,7 +2556,7 @@ struct AnalyzeTask {
 // Extracted sample values for one task, row-major in needed_idx order: for
 // text columns the u64 is a 4-aligned byte offset into `bytes` (a complete
 // inline varlena image, 1B-short or 4B-U, byte-copied out of the decode
-// buffers); for every other cbstore column type (all by-val) it is the
+// buffers); for every other pgrcolumnar column type (all by-val) it is the
 // datum word verbatim.
 struct AnalyzeTaskOut {
     words: Vec<u64>,
@@ -2614,7 +2614,7 @@ fn analyze_extract_task(
                 }
                 let off = out.bytes.len() as u64;
                 let p = d.as_usize() as *const u8;
-                // SAFETY: cbstore decode contract — `d` is a live inline
+                // SAFETY: pgrcolumnar decode contract — `d` is a live inline
                 // varlena image in this thread's decode buffers.
                 let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
                 // SAFETY: same contract; the image is `len` readable bytes.

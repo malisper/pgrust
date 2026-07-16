@@ -2,7 +2,7 @@
 //! (docs/design/m2-sinks.md §2 donor A, notes/m2-agg-sink.md).
 //!
 //! Shape (phase 1): a SERIAL-plan hashed Agg (AGGSPLIT_SIMPLE) over an
-//! unprojected cbstore SeqScan, K2 single-int-key compact class, byval
+//! unprojected pgrcolumnar SeqScan, K2 single-int-key compact class, byval
 //! whitelist transitions with catalog combine functions, identity emit —
 //! executed as one runtime ParallelSink (ACCEPT + COMBINE task sets) at
 //! DOP N on the M1 pinned-RG machinery. The plan surface stays the serial
@@ -289,7 +289,7 @@ struct AggSink {
     topn_mode: AtomicU8,
     /// WinnersOnly selection declined (NULL/pending order transvalue): the
     /// whole attempt is REFUSED → R5 serial rerun (demote=refusal doctrine;
-    /// design §3.2 step 3). Fail-closed and count-gated ≈0: the cbstore
+    /// design §3.2 step 3). Fail-closed and count-gated ≈0: the pgrcolumnar
     /// envelope (sort-b decision 6) makes the trigger structurally
     /// unreachable on every admitted feed.
     topn_refused: AtomicBool,
@@ -712,7 +712,7 @@ fn agg_markers_on() -> bool {
 
 /// Leg-R fault injection (`PGRUST_RUNTIME_AGG_TOPN_FAULT=decline`): simulate
 /// the NULL-order-transvalue selection decline, which is structurally
-/// unreachable on real cbstore feeds (sort-b decision 6) — the e2e refusal
+/// unreachable on real pgrcolumnar feeds (sort-b decision 6) — the e2e refusal
 /// gate needs a trigger the corpus cannot produce. Read once; consulted only
 /// on topn-armed combine claims (off-path-free).
 fn topn_fault_decline() -> bool {
@@ -1052,7 +1052,7 @@ impl runtime::ParallelSink for AggSink {
             }
             Ok(Ok(CombineOutcome::TopnDeclined)) => {
                 // Winners-only refusal (§3.2 step 3): fail-closed, count-
-                // gated ≈0 (structurally unreachable on cbstore feeds —
+                // gated ≈0 (structurally unreachable on pgrcolumnar feeds —
                 // sort-b decision 6). The e2e leg-R gate greps this line.
                 lane_trace(
                     "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
@@ -1896,9 +1896,9 @@ fn accept_morsel_body(
                 };
                 // train-12 composition: the heap lane generalized the
                 // positioner to AM-dispatched seq_scan_set_morsel_range
-                // (PgResult<()>); this arm admits only cbstore scans (its
+                // (PgResult<()>); this arm admits only pgrcolumnar scans (its
                 // admission requires cb granule geometry), so the former
-                // not-cbstore false branch is unreachable by construction.
+                // not-pgrcolumnar false branch is unreachable by construction.
                 ::nodeseqscan::seq_scan_set_morsel_range(
                     ss,
                     estate,
@@ -2200,7 +2200,7 @@ enum SplitOutcome {
     /// Depth-cap overflow — the caller refuses (OverBudget → R5 rerun).
     DepthCap,
     /// A split leaf's winners-only selection declined (fault injection; the
-    /// NULL-order decline is structurally unreachable on cbstore feeds) —
+    /// NULL-order decline is structurally unreachable on pgrcolumnar feeds) —
     /// the caller refuses through the topn channel (R5 rerun).
     Declined,
 }
@@ -2436,12 +2436,12 @@ fn split_subparts_and_emit(
 
 /// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
 /// what the K2 sink does when the scan staging is dict-group armed (the
-/// single-int-key GROUP BY over a dict-encoded cbstore column whose
+/// single-int-key GROUP BY over a dict-encoded pgrcolumnar column whose
 /// fixed-width prefix deform is unarmable — UserID past varlena columns).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DictFeed {
     /// Keep the dict-group registration and admit. MEASURED FINDING
-    /// (q16-columnar-feed lane): cbstore NEVER dict-encodes INT chunks
+    /// (q16-columnar-feed lane): pgrcolumnar NEVER dict-encodes INT chunks
     /// (`encode_int_chunk`: Const/For/Raw/DeltaFor only — Encoding::Dict is
     /// the varlena encoder's arm), and the K2 sink admits int keys only
     /// (`agg_sink_key_width`), so dict windows cannot reach this drain
@@ -2549,7 +2549,7 @@ fn sink_dict_batch<'mcx>(
             dgs.slots[code] = Some(pending);
             dgs.miss_codes.push(code as u32);
             // NULL discipline: dict codes have no NULL representation and
-            // cbstore stores no NULLs (per-chunk proof) — as the serial arm.
+            // pgrcolumnar stores no NULLs (per-chunk proof) — as the serial arm.
             keys.push(lane.table.datum(local));
             knull.push(false);
         }
@@ -2581,7 +2581,7 @@ fn sink_dict_batch<'mcx>(
     let soa =
         ::nodeseqscan::seq_scan_batch_soa(ss).expect("sink dict feed requires the armed SoA");
     // SAFETY: as the raw K2 sink fold — every probed row is non-fallback
-    // (cbstore stages none; the caller admits all-lane batches only) with
+    // (pgrcolumnar stages none; the caller admits all-lane batches only) with
     // valid lane values for every plan column (the key column is NOT in
     // `plan.cols`: the dict-group arm refuses that shape, and only that arm
     // registers the dict lane); the plan is unguarded (sink admission);
@@ -4080,7 +4080,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         seq_scan_fusible(ss, estate)?
     };
-    if !fusible || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !fusible || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         refuse(estate, ea, node_id, "scan not fusible cbstore");
         return Ok(false);
     }
@@ -4697,12 +4697,12 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        // The sink's task sets over the cbstore granule geometry. Default
+        // The sink's task sets over the pgrcolumnar granule geometry. Default
         // (combine-parallel lane): the 3-set sealed plumbing — ACCEPT →
         // FREEZE (per-Local SEAL partition, parallel across slots) →
         // COMBINE. PGRUST_RUNTIME_AGG_PARSEAL=0 restores the 2-set shape
         // (single-threaded SEAL in the accept set's finalize) exactly.
-        let source = Arc::new(CbstoreGranuleSource { starts });
+        let source = Arc::new(PgrcolumnarGranuleSource { starts });
         let tasksets = if parseal_enabled() {
             let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
                 runtime::sealed_sink_tasksets(
@@ -5067,14 +5067,14 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
     drained
 }
 
-/// Granule-addressed morsel source over one cbstore part's geometry
+/// Granule-addressed morsel source over one pgrcolumnar part's geometry
 /// (runtime_scan's source, module-local copy — claims never cross a
 /// row-group/dict-epoch edge).
-struct CbstoreGranuleSource {
+struct PgrcolumnarGranuleSource {
     starts: Vec<u64>,
 }
 
-impl runtime::MorselSource for CbstoreGranuleSource {
+impl runtime::MorselSource for PgrcolumnarGranuleSource {
     fn total_granules(&self) -> u64 {
         self.starts.last().copied().unwrap_or(0)
     }

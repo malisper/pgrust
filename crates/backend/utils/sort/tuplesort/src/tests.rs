@@ -2007,11 +2007,11 @@ mod gist_point_zorder {
     }
 }
 
-pub(super) mod cbstore_ingest {
+pub(super) mod pgrcolumnar_ingest {
     use super::*;
     use ::types_tuple::TYPALIGN_INT;
 
-    // int8 + text descriptor (the cbstore ingest shape: by-val ints, inline
+    // int8 + text descriptor (the pgrcolumnar ingest shape: by-val ints, inline
     // 4B-U varlenas).
     pub(super) fn i64_text_desc(mcx: Mcx<'static>) -> Rc<TupleDescData<'static>> {
         let mut attrs = PgVec::new_in(mcx);
@@ -2052,7 +2052,7 @@ pub(super) mod cbstore_ingest {
         Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
     }
 
-    // putvalues/getvalues (the cbstore_ingest_sort seam machinery): rows come
+    // putvalues/getvalues (the pgrcolumnar_ingest_sort seam machinery): rows come
     // back key-sorted (text C-order primary, i64 tiebreak) and deform exactly.
     #[test]
     fn putvalues_getvalues_sorts_rows() {
@@ -2104,9 +2104,9 @@ pub(super) mod cbstore_ingest {
     }
 }
 
-mod cbstore_ingest_large {
+mod pgrcolumnar_ingest_large {
     use super::*;
-    use super::cbstore_ingest::*;
+    use super::pgrcolumnar_ingest::*;
 
     #[test]
     fn putvalues_getvalues_sorts_67k_rows() {

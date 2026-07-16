@@ -46,7 +46,7 @@ fn aot_qual_cmp_golden_set() {
         // ne-admission census close: date (int32 days), timestamp and
         // timestamptz (int64 usecs) are plain int compares incl. their
         // infinity sentinels (date.c / timestamp.c) — the same fact
-        // laneexec's translate whitelist and the cbstore zone-qual
+        // laneexec's translate whitelist and the pgrcolumnar zone-qual
         // extraction already carried; registered so the central census
         // matches its consumers.
         (1086, I4, Eq), (1091, I4, Ne), (1087, I4, Lt), (1088, I4, Le), (1089, I4, Gt), (1090, I4, Ge),

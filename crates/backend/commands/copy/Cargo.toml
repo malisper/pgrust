@@ -71,12 +71,12 @@ types_trigger = { path = "../../../_support/types/types_trigger" }
 trigger = { path = "../trigger" }
 libc = "0.2"
 # Morsel-parallel COPY (parallel.rs): runtime stream source + pinned RG,
-# full-identity helpers, cbstore chunk encoders, leader-latch wakes.
+# full-identity helpers, pgrcolumnar chunk encoders, leader-latch wakes.
 runtime = { path = "../../executor/runtime" }
 parallel = { path = "../../access/transam/parallel" }
 latch = { path = "../../storage/ipc/latch" }
 types_storage = { path = "../../../_support/types/types_storage" }
-cbstore = { path = "../../access/cbstore" }
+pgrcolumnar = { path = "../../access/pgrcolumnar" }
 memchr = "2"
 
 [dev-dependencies]

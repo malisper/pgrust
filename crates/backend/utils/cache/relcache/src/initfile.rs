@@ -501,15 +501,15 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_i32(buf, o.pages_per_range);
             put_bool(buf, o.autosummarize);
         }
-        Some(RdOptions::Cbstore(o)) => {
+        Some(RdOptions::Pgrcolumnar(o)) => {
             put_u8(buf, 9);
             put_i32(
                 buf,
                 match o.codec {
-                    ::types_rel::CbstoreCodec::Auto => 0,
-                    ::types_rel::CbstoreCodec::Lz4 => 1,
-                    ::types_rel::CbstoreCodec::Zstd => 2,
-                    ::types_rel::CbstoreCodec::Plain => 3,
+                    ::types_rel::PgrcolumnarCodec::Auto => 0,
+                    ::types_rel::PgrcolumnarCodec::Lz4 => 1,
+                    ::types_rel::PgrcolumnarCodec::Zstd => 2,
+                    ::types_rel::PgrcolumnarCodec::Plain => 3,
                 },
             );
             put_i32(buf, o.zstd_level);
@@ -600,12 +600,12 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
             autosummarize: rd.boolean()?,
         }))),
         9 => {
-            let mut o = ::types_rel::CbstoreOptions::default();
+            let mut o = ::types_rel::PgrcolumnarOptions::default();
             o.codec = match rd.i32()? {
-                0 => ::types_rel::CbstoreCodec::Auto,
-                1 => ::types_rel::CbstoreCodec::Lz4,
-                2 => ::types_rel::CbstoreCodec::Zstd,
-                3 => ::types_rel::CbstoreCodec::Plain,
+                0 => ::types_rel::PgrcolumnarCodec::Auto,
+                1 => ::types_rel::PgrcolumnarCodec::Lz4,
+                2 => ::types_rel::PgrcolumnarCodec::Zstd,
+                3 => ::types_rel::PgrcolumnarCodec::Plain,
                 _ => return None,
             };
             o.zstd_level = rd.i32()?;
@@ -619,7 +619,7 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
             if !o.set_codec_cols(cc) {
                 return None;
             }
-            Some(Some(RdOptions::Cbstore(o)))
+            Some(Some(RdOptions::Pgrcolumnar(o)))
         }
         10 => Some(Some(RdOptions::Hnsw(types_rel::reloptions::HnswOptions {
             m: rd.i32()?,

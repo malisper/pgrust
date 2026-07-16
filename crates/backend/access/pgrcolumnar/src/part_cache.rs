@@ -1,6 +1,6 @@
 //! Session-local Part cache: relation OID -> parsed Part (footer, granule
 //! directory, block zone maps, blooms — the whole mmap'd part), reused
-//! across statements (docs/design/cbstore-part-cache.md).
+//! across statements (docs/design/pgrcolumnar-part-cache.md).
 //!
 //! STALENESS RULE (the design note's §3, kept in sync verbatim): a cached
 //! parsed footer for relation R may be reused by a statement iff
@@ -131,9 +131,9 @@ fn shared_publish(key: (u64, u64, u64), part: &Arc<Part>) {
     map.insert(key, Arc::downgrade(part));
 }
 
-// Was the hidden GUC `cbstore_part_cache` on the old branch; re-homed to an
+// Was the hidden GUC `pgrcolumnar_part_cache` on the old branch; re-homed to an
 // env off-switch (default ON) — the lane-v2 line adds no SQL GUCs (see
-// costsize::gucs' cbstore knob note). `PGRUST_CBSTORE_PART_CACHE=0`/`off`
+// costsize::gucs' pgrcolumnar knob note). `PGRUST_CBSTORE_PART_CACHE=0`/`off`
 // disables (byte-identical A/B gate).
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();

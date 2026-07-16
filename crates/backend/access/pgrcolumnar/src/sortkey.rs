@@ -33,7 +33,7 @@ pub fn fixed_key_width(keys: &[(u16, CbSortKeyKind)]) -> Option<usize> {
 
 /// Append the row's memcmp sort key to `out`.
 ///
-/// Caller guarantees non-null key datums (cbstore refuses NULLs before any
+/// Caller guarantees non-null key datums (pgrcolumnar refuses NULLs before any
 /// row reaches a sorter) and int-class kinds (`fixed_key_width` is Some).
 #[inline]
 pub fn encode_sort_key(keys: &[(u16, CbSortKeyKind)], values: &[Datum], out: &mut Vec<u8>) {

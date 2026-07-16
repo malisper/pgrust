@@ -158,7 +158,7 @@ pub struct AggStateData<'mcx> {
     qual: Option<PgBox<'mcx, ExprState<'mcx>>>,
     // Lane-v2 hash-agg breaker fold state (None = lane off / nothing admits).
     lanefold: Option<LaneFold<'mcx>>,
-    // Lane-v2 metadata-answer plan (cbstore footer answers): Some iff EVERY
+    // Lane-v2 metadata-answer plan (pgrcolumnar footer answers): Some iff EVERY
     // transition is footer-answerable (lanefold::classify_meta) on an
     // AGG_PLAIN node the lane fold gate admitted. Consumed by the execmain
     // metaagg arm via agg_meta_plan/exec_agg_meta.
@@ -245,7 +245,7 @@ struct PerTransSortData<'mcx> {
     agg_collation: Oid,
     scratch: NonNull<NullableDatum>,
     flag: NonNull<bool>,
-    // Lane-v2 exact-DISTINCT set hosting (distinctset.rs, cbstore-v2 plan
+    // Lane-v2 exact-DISTINCT set hosting (distinctset.rs, pgrcolumnar-v2 plan
     // §2.3). `Some` = this entry is SET-MODE: admitted at ExecInitAgg
     // (`distinct_set_kind`, only under PGRUST_LANE_V2 and never with grouping
     // sets / combine / presorted / agg-level ORDER BY), the per-group
@@ -435,7 +435,7 @@ fn init_pertrans_sort<'mcx>(
         let a = sortdesc.attr(0);
         (a.attbyval, a.attlen)
     };
-    // Lane-v2 exact-DISTINCT set admission (distinctset.rs; cbstore-v2 plan
+    // Lane-v2 exact-DISTINCT set admission (distinctset.rs; pgrcolumnar-v2 plan
     // §2.3). Structural half here: single-column DISTINCT (which by
     // transformDistinctClause construction also means no agg-level ORDER BY
     // beyond that column — refuse any explicit aggorder), single input,
@@ -514,7 +514,7 @@ fn init_pertrans_sort<'mcx>(
 }
 
 /// The lane-v2 exact-DISTINCT set's type/equality/transition admission
-/// matrix (cbstore-v2 plan §2.3). `Some(kind)` requires ALL of:
+/// matrix (pgrcolumnar-v2 plan §2.3). `Some(kind)` requires ALL of:
 ///
 ///   * the transition is one of count(any) / sum(int2|int4) /
 ///     avg(int2|int4) / sum-or-avg(int8) — the order-insensitive allowlist
@@ -1472,7 +1472,7 @@ pub fn exec_init_agg<'mcx>(
         None
     };
 
-    // Metadata-answer plan (lane-v2 metaagg arm, cbstore footer answers):
+    // Metadata-answer plan (lane-v2 metaagg arm, pgrcolumnar footer answers):
     // classified only under the SAME node-shape gate the lanefold plan
     // passed (lane on, single set, no sorted transitions, subplan- and
     // param-free program — `lanefold.is_some()` implies all of it), plus
@@ -1492,7 +1492,7 @@ pub fn exec_init_agg<'mcx>(
     // Narrow-sort + sorted-fold admission leg (field doc): probed wherever a
     // sorted-agg lane arm can engage (lane on, AGG_SORTED, real grouping
     // keys) — the narrow-sort arm needs it for internal-sort entries, the
-    // sorted-fold arm (lanev2 sorted-agg over cbstore SeqScan) for its
+    // sorted-fold arm (lanev2 sorted-agg over pgrcolumnar SeqScan) for its
     // raw-datum group-boundary compare.
     let group_eq_representational = if lane_v2_enabled()
         && node.aggstrategy == AGG_SORTED
@@ -4427,7 +4427,7 @@ pub fn agg_plain_fold_admissible(node: &AggStateData<'_>) -> bool {
 }
 
 /// Agg-side admission for the lane-v2 plain-agg PER-ROW drain feed (the
-/// cbstore no-qual-feed tranche): `agg_plain_fold_admissible` minus the
+/// pgrcolumnar no-qual-feed tranche): `agg_plain_fold_admissible` minus the
 /// classified-fold-plan requirement — the per-row feed runs the FULL per-row
 /// transition program (`agg_plain_build_accept`) over batch-decoded staged
 /// windows, so arbitrary transition expressions are hosted. Same
@@ -4569,7 +4569,7 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
 /// Equivalent to `agg_plain_distinct_insert_batch` over the same rows —
 /// NULLs elided value-for-value and folded into the set's one `seen_null` —
 /// with the null scan hoisted to once per window (the all-non-null arm is
-/// one straight datum→i64 pass; cbstore lanes are null-free by the format).
+/// one straight datum→i64 pass; pgrcolumnar lanes are null-free by the format).
 /// Same batch-granular budget-check/overflow contract; a degraded group
 /// keeps feeding its tuplesort (non-null values in row order + one NULL —
 /// one stands for the window's many, which dedup to one either way).
@@ -4644,7 +4644,7 @@ pub fn agg_plain_distinct_insert_lane_batch<'mcx>(
 /// One staged batch of the direct-feed drive, TEXT keys (the varlena key
 /// staging): `keys` are the batch's NON-NULL key datums in row order — live
 /// text/varchar varlena pointers (in-page on heap, decoded images on
-/// cbstore). Each detoasts exactly as the per-row collect does
+/// pgrcolumnar). Each detoasts exactly as the per-row collect does
 /// (`datum_varlena_packed` into per-tuple memory — reset once per batch here
 /// instead of per row: a lifetime-only difference, the set retains its own
 /// canonical image) and inserts its content bytes. Same batch-granular
@@ -4692,7 +4692,7 @@ pub fn agg_plain_distinct_insert_bytes_batch<'mcx>(
 }
 
 /// One staged batch of the direct-feed drive, DICT-CODED text keys (the
-/// cbstore zero-decode dict lane): `codes` are the batch's per-row u32 codes
+/// pgrcolumnar zero-decode dict lane): `codes` are the batch's per-row u32 codes
 /// into `dict` (the row group's decoded-Datum dictionary; NULL-free by the
 /// dict-lane contract), and `memo` is the caller's IDENTITY-SCOPED per-code
 /// dedup bitmap (cleared by the caller whenever the memo identity changes).

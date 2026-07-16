@@ -501,7 +501,7 @@ pub fn sort_lane_begin_narrowed<'mcx>(
 // then serves `refsort_out` and never reads the narrow tuplesort as output.
 // ---------------------------------------------------------------------------
 
-/// Pack a cbstore row ref: (row group, rg-global row index) -> i64.
+/// Pack a pgrcolumnar row ref: (row group, rg-global row index) -> i64.
 #[inline(always)]
 pub fn refsort_encode(rg: u32, row: u32) -> i64 {
     (((rg as u64) << 32) | row as u64) as i64

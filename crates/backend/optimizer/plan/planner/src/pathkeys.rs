@@ -329,8 +329,8 @@ fn make_pathkey_from_sortinfo<'mcx>(
     )))
 }
 
-// cbstore sorted-scan pathkeys (allpaths::create_cbstore_sorted_paths):
-// default ascending nulls-last pathkey for an admitted cbstore column Var;
+// pgrcolumnar sorted-scan pathkeys (allpaths::create_pgrcolumnar_sorted_paths):
+// default ascending nulls-last pathkey for an admitted pgrcolumnar column Var;
 // EC lookup only (create_it=false — an EC nobody asked for is a pathkey
 // nobody can use, the index-path discipline).
 pub fn make_pathkey_from_sortinfo_existing<'mcx>(

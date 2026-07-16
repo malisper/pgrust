@@ -1,11 +1,11 @@
 //! Morsel source vocabulary: granule-addressed pipeline input.
 //!
 //! Sizing is in GRANULES (the source's smallest indivisible claim unit —
-//! for cbstore in M1 a granule is the 8,192-row unit of format.rs; heap
+//! for pgrcolumnar in M1 a granule is the 8,192-row unit of format.rs; heap
 //! sources will present block-range units). Two hard rules the runtime
 //! enforces on every claim (lit-review §5.2):
 //!   1. never split a granule — claims are whole-granule ranges;
-//!   2. never cross a hard boundary (cbstore row-group or dictionary-epoch
+//!   2. never cross a hard boundary (pgrcolumnar row-group or dictionary-epoch
 //!      edge) within one claim, so per-epoch memos (dict-eval, codehist,
 //!      gmemo) stay worker-coherent and every kernel invocation sees a
 //!      single dictionary snapshot.
@@ -29,7 +29,7 @@ pub trait MorselSource: Send + Sync {
     }
 
     /// Startup-ramp seed C0 in granules (Umbra: 16). Sources whose granules
-    /// are large (cbstore: 8,192 rows each) may override downward in M1.
+    /// are large (pgrcolumnar: 8,192 rows each) may override downward in M1.
     fn startup_c0(&self) -> u64 {
         16
     }
@@ -37,7 +37,7 @@ pub trait MorselSource: Send + Sync {
     /// Whole-boundary claims: every claim runs from its start to the NEXT
     /// hard boundary — the duration-adaptive sizer never stops a claim
     /// short of an epoch edge. Sources whose per-EPOCH state dominates the
-    /// per-granule work opt in (cbstore: the runtime-drive-scaling lane's
+    /// per-granule work opt in (pgrcolumnar: the runtime-drive-scaling lane's
     /// WFIN decomposition measured q21@10M DOP15 busy inflation of +78%,
     /// tracking dict_builds 153→243 almost exactly — every row group SPLIT
     /// across workers duplicates its dictionary decompress + dict-eval

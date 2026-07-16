@@ -208,7 +208,7 @@ fn arm_seq_scan_qual_bitmap<'mcx>(
 /// lane pipeline drives it. `arm_scan_staging` is the ONE seam owning the
 /// arming decision + staging setup across every feed site (agg fold /
 /// per-row build feeds, sort feed, join build and probe feeds), so a second
-/// staging backend (cbstore column windows) plugs in by matching the scan's
+/// staging backend (pgrcolumnar column windows) plugs in by matching the scan's
 /// source kind inside that helper — not by growing per-site variants.
 enum ScanFeedShape<'a, 'mcx> {
     /// Row-emit feed with no SoA lane reader above the scan: arm the
@@ -234,15 +234,15 @@ enum ScanFeedShape<'a, 'mcx> {
 
 /// Arm the scan staging a lane feed consumes, per feed shape. Idempotent at
 /// every site (re-preparing the same shape is a no-op; the bitmap arm
-/// early-returns once armed). This is the single seam the cbstore staging
-/// variant (CbstoreSource tranche) plugs into: every arm below stages
+/// early-returns once armed). This is the single seam the pgrcolumnar staging
+/// variant (PgrcolumnarSource tranche) plugs into: every arm below stages
 /// through `nodeseqscan`'s SoA seam, whose batch primitives dispatch on the
 /// scan's AM inside `tableam` — heap scans stage page batches
-/// (`heap_getnextpagebatch` + `heap_batch_deform_soa`), cbstore scans stage
+/// (`heap_getnextpagebatch` + `heap_batch_deform_soa`), pgrcolumnar scans stage
 /// column windows (`next_window` + `batch_deform`, <= WINDOW_ROWS <=
 /// SOA_MAX_ROWS, RG/granule/block pruning inside the staging call) — so the
 /// feed sites stay untouched and one arm serves both source kinds. The
-/// cbstore-only differences live below the seam: the fill honors
+/// pgrcolumnar-only differences live below the seam: the fill honors
 /// `lane_fill_wanted`/`dict_want` (dict-lane publication), the store slot is
 /// the scan's virtual slot (`store_slot`, needed columns only), and the
 /// prefix publish is a virtual-slot no-op.
@@ -251,19 +251,19 @@ fn arm_scan_staging<'mcx>(
     estate: &mut EStateData<'mcx>,
     shape: ScanFeedShape<'_, 'mcx>,
 ) -> PgResult<()> {
-    // PREWHERE v1 (cbstore scans with a qual, phase4 design §3): try the
+    // PREWHERE v1 (pgrcolumnar scans with a qual, phase4 design §3): try the
     // lane-qual arm FIRST — it subsumes the kernel-bitmap arms (staged
     // clauses cheapest-first with zone folds + per-clause late
     // materialization, the dict text tier, hybrid requal tails) over the
     // same forced full-prefix deform, widened to the feed's own SoA ask.
     // Varlane fold feeds COEXIST (q22coexist): the fold's one varlena column
-    // joins the lane's prefix ask — the cbstore (virtual-)prefix deform
+    // joins the lane's prefix ask — the pgrcolumnar (virtual-)prefix deform
     // hosts any column type, and the lane's completing deform fills it for
     // survivor windows, exactly the rows the fold touches (the fold drain
     // walks the selection bitmap and the guard proof restricts to it).
     // Refusal falls through to the heap-shaped arms below (the varkey
     // staging for varlane folds), byte-safely.
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         let min_prefix = match &shape {
             ScanFeedShape::RowFeed { .. } => 0,
             ScanFeedShape::HashAggFold { agg } | ScanFeedShape::HashAggPerRow { agg } => {
@@ -277,7 +277,7 @@ fn arm_scan_staging<'mcx>(
         };
         // Every varlena fold column joins the lane's prefix ask — the single
         // varkey-shaped column AND the multi-varlena set (lane-v2-
-        // dictminmax): the cbstore (virtual-)prefix deform hosts any column
+        // dictminmax): the pgrcolumnar (virtual-)prefix deform hosts any column
         // type, and vguard columns must be staged for the fold + guard proof.
         let vcol = match &shape {
             ScanFeedShape::HashAggFold { agg } => ::nodeagg::agg_lanefold_plan(agg)
@@ -360,7 +360,7 @@ fn arm_scan_staging<'mcx>(
             } else if ::nodeagg::agg_lanefold_plan(agg)
                 .is_some_and(|p| !p.vguards.is_empty())
             {
-                // Multi-varlena fold (Q23-class): re-arm the cbstore
+                // Multi-varlena fold (Q23-class): re-arm the pgrcolumnar
                 // virtual-prefix staging the decide-phase probe proved
                 // (idempotent). A lost arm leaves the SoA unarmed and the
                 // feed's (None, _) route asserts no lane reader — so a
@@ -382,7 +382,7 @@ fn arm_scan_staging<'mcx>(
                 ::nodeseqscan::seq_scan_batch_soa_prepare(ss, estate, soa_prefix, false, force, true);
                 if ::nodeseqscan::seq_scan_batch_soa(ss).is_none() {
                     // Full-prefix deform unarmable (non-fixed-width column in
-                    // the prefix) or declined (break-even). Try the cbstore
+                    // the prefix) or declined (break-even). Try the pgrcolumnar
                     // dict-group columnar arm (§2.1) first — count(*)-only
                     // plans reach here without decide's probe-arm (their fold
                     // reads no lane columns, but K2 wants the key staged).
@@ -445,7 +445,7 @@ fn arm_scan_staging<'mcx>(
 /// `MIN(URL), MIN(Title)` shape): a plan whose lane set carries 2+ varlena
 /// columns (or one varlena among fixed-width lanes) is unhostable by the
 /// heap paths — the fixed-width prefix deform cannot stage `attlen == -1`
-/// and the varkey pass stages exactly one column — but the cbstore
+/// and the varkey pass stages exactly one column — but the pgrcolumnar
 /// virtual-prefix staging hosts ANY column type. Arm it: PREWHERE for
 /// qualled scans (it owns the staging + selection bitmap; ask widened to
 /// every fold/vguard column), the offset-free columnar arm for bare scans.
@@ -456,7 +456,7 @@ fn try_arm_cb_multivar<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return Ok(false);
     }
     let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
@@ -515,9 +515,9 @@ fn probe_arm_fold_prefix<'mcx>(
 // pipelines stay fully exercised via the agg/sort/join breaker feeds.
 const STANDALONE_SCAN_NO_UPSIDE: bool = true;
 
-/// Tiny-input row floor for standalone cbstore scan admission (the
+/// Tiny-input row floor for standalone pgrcolumnar scan admission (the
 /// `TinyInputFloor` refuse): relations below this never pay the qual-
-/// translate/arm admission cascade. Default = one cbstore granule (8,192
+/// translate/arm admission cascade. Default = one pgrcolumnar granule (8,192
 /// rows — the store's decode/zone unit; a sub-granule scan is a handful of
 /// staged windows either way, bench 2026-07-12: lane-ON == lane-OFF to noise
 /// at this size, so the cascade is pure tax). `PGRUST_LANE_V2_TINY_FLOOR`
@@ -552,20 +552,20 @@ pub fn try_own_seq_scan<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Standalone scan ownership: refused for heap (STANDALONE_SCAN_NO_UPSIDE
     // — the incumbent row drive carries the identical kernels), but ADMITTED
-    // for cbstore scans WITH AN ARMED QUAL KERNEL: the documented exception
+    // for pgrcolumnar scans WITH AN ARMED QUAL KERNEL: the documented exception
     // (phase4 design §7 / design-doc §4 "shrinks when standalone scans gain
-    // a kernel the row drive lacks"). The incumbent cbstore per-row drive
+    // a kernel the row drive lacks"). The incumbent pgrcolumnar per-row drive
     // (`getnextslot`) has NO SoA staging, NO kernel-qual bitmap and NO
     // dict/PREWHERE tier, so lane ownership of a QUAL'D scan is staged-
-    // kernel upside. A kernel-less cbstore scan (no qual, or an unarmable
+    // kernel upside. A kernel-less pgrcolumnar scan (no qual, or an unarmable
     // one) is the heap case exactly — per-pull capacity-one adapter overhead
     // with nothing to vectorize — and REFUSES: bench-gated 2026-07-12 on the
-    // 2M-row cbstore microbench, where unconditional admission ran
+    // 2M-row pgrcolumnar microbench, where unconditional admission ran
     // count-star 1.33x, group-int (sorted-agg pull feed) 1.21x and
     // merge-join-agg 1.10x lane-ON vs lane-OFF while the qual'd shapes won
     // 0.45-0.84x; the qual-armed gate keeps the wins and returns the rest
     // to the per-row drive. Per-PULL tick cadence (once per call).
-    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
     if STANDALONE_SCAN_NO_UPSIDE && !is_cb {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
         return Ok(None);
@@ -612,7 +612,7 @@ pub fn try_own_seq_scan<'mcx>(
                 // even its own admission cascade (qual walk + translate +
                 // arm). Checked BEFORE the cascade — the refuse costs one
                 // footer metadata read, memoized. Floor = one granule
-                // (8,192 rows, cbstore's zone/decode unit); PGRUST_LANE_V2_
+                // (8,192 rows, pgrcolumnar's zone/decode unit); PGRUST_LANE_V2_
                 // TINY_FLOOR overrides for floor-calibration benches.
                 if let Some(rows) = ::nodeseqscan::seq_scan_cb_total_rows(ss, estate)? {
                     if rows < cb_tiny_floor() {
@@ -673,9 +673,9 @@ fn seq_scan_fusible<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    // Engagement class: cbstore scans are counted apart (their admission
+    // Engagement class: pgrcolumnar scans are counted apart (their admission
     // economics and corpus differ — see ShapeClass::CbScan).
-    let class = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    let class = if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         ShapeClass::CbScan
     } else {
         ShapeClass::SeqScan
@@ -1605,7 +1605,7 @@ pub enum AggLaneChoice {
     /// lanefold whole-batch transition kernels (residual transitions
     /// per-row).
     Fold,
-    /// Lane answers the whole AGG_PLAIN node from cbstore part metadata
+    /// Lane answers the whole AGG_PLAIN node from pgrcolumnar part metadata
     /// (footer row counts + zone maps + footer sums) — zero rows staged, end
     /// states finalized by the real finalfns (the metaagg arm; phase4 §7
     /// re-entry, armed 2026-07-14). Structural admission only: the per-call
@@ -1639,19 +1639,19 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     // single group has no per-group read-back — feed + finalize is the whole
     // node inside one call), but the same staged-batch fold applies, with
     // `lanefold::fold_batch` (the ungrouped kernel, CSE included) in place of
-    // the grouped probe+fold. cbstore scans additionally route WITHOUT a
+    // the grouped probe+fold. pgrcolumnar scans additionally route WITHOUT a
     // classified fold plan (lane-v2-noqualfeed): the plain decider can pick
     // the per-row drain feed there — batch window decode + the full per-row
-    // transition program — because the cbstore incumbent is the per-pull
+    // transition program — because the pgrcolumnar incumbent is the per-pull
     // Volcano drive, not the fused batched arm the heap refusal defends.
     if ::nodeagg::agg_plain_fold_admissible(agg)
         || (::nodeagg::agg_plain_perrow_admissible(agg)
-            && ::nodeseqscan::seq_scan_is_cbstore(ss))
+            && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss))
     {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
     // AGG_SORTED (the sort-free GroupAggregate shape — clustered/footer-
-    // sorted cbstore banks plan `Agg(AGG_SORTED) → SeqScan` with no Sort
+    // sorted pgrcolumnar banks plan `Agg(AGG_SORTED) → SeqScan` with no Sort
     // node): the sorted-agg drive over the scan's staged batches, with
     // fold-admissible transitions run as vectorized per-group-run folds.
     // Section doc at `try_own_sorted_agg_over_seq_scan`. Non-admissible
@@ -1665,7 +1665,7 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     // neither the fold drive above nor the legacy fused arm can host it —
     // the incumbent is the per-tuple pull with a per-group TUPLESORT. The
     // set drive replaces that sort with the exact-distinct hash set
-    // (uniqExact analog, cbstore-v2 plan §2.3).
+    // (uniqExact analog, pgrcolumnar-v2 plan §2.3).
     if ::nodeagg::agg_plain_distinct_set_admissible(agg) {
         return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
@@ -1793,7 +1793,7 @@ fn decide_agg_lane<'mcx>(
                         }
                         armed
                     }
-                    // Multi-varlena (Q23-class): cbstore's virtual-prefix
+                    // Multi-varlena (Q23-class): pgrcolumnar's virtual-prefix
                     // staging hosts it (lane-v2-dictminmax); heap refuses.
                     None => {
                         let armed = try_arm_cb_multivar(agg, ss, estate)?;
@@ -1808,7 +1808,7 @@ fn decide_agg_lane<'mcx>(
             } else {
                 // Probe-arm the deform now so an unarmable prefix (non-fixed-
                 // width column) is known BEFORE committing to ownership. A
-                // cbstore scan whose prefix refuses only on varlena columns
+                // pgrcolumnar scan whose prefix refuses only on varlena columns
                 // gets the dict-group columnar arm (§2.1) — the text grouping
                 // key stages as dict codes, everything else as decoded Datums.
                 let armed = probe_arm_fold_prefix(agg, ss, estate)?
@@ -2037,7 +2037,7 @@ fn agg_hash_build_fold_feed<'mcx>(
     let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
     // Varlena-lane plans read their one column through the varkey staging at
     // SoA column 0 (see lanefold_varlane_col / VarLaneCols). Multi-varlena
-    // plans (lane-v2-dictminmax, Q23-class) admitted only over the cbstore
+    // plans (lane-v2-dictminmax, Q23-class) admitted only over the pgrcolumnar
     // virtual-prefix staging, which stages every column at its NATURAL index
     // — no remap (vcol None).
     let vcol = {
@@ -2065,7 +2065,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
         mm_str_cols(plan, Some)
     };
-    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_scratch = ::lanefold::StrMmScratch::default();
@@ -2369,7 +2369,7 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
             c
         }
     };
-    // Metadata-answer arm: the whole node from cbstore footers, zero rows
+    // Metadata-answer arm: the whole node from pgrcolumnar footers, zero rows
     // staged. Runtime gates (MVCC snapshot / AM answerability / guard
     // re-proof) are re-checked per call; a runtime refusal falls back to the
     // per-row Volcano drive byte-identically (it may raise C's overflow
@@ -2384,9 +2384,9 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     // M1 runtime scan arm (the Meta arm preempts above — footer answers
     // beat any parallel scan): FORCED engagement under PGRUST_RUNTIME=1 +
     // pgrust.runtime_scan_pool, serial plan surface unchanged; the morsel
-    // source dispatches on the table AM (cbstore granules / heap block
+    // source dispatches on the table AM (pgrcolumnar granules / heap block
     // ranges). Owns the Fold shapes AND the qualed count-only census shape
-    // (serial-refused on cbstore because the footer is the serial lever,
+    // (serial-refused on pgrcolumnar because the footer is the serial lever,
     // and on heap for admission economics — but a parallel qual-bitmap
     // scan is exactly M1's LIKE-count target). Heap Refuse shapes that are
     // neither fold-prefix-armable nor census fall through inside the arm.
@@ -2419,7 +2419,7 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
     Ok(Some(::nodeagg::agg_plain_finish(agg, estate)?))
 }
 
-/// Build feed for the plain PER-ROW drive (`AggLaneChoice::PerRow` — cbstore
+/// Build feed for the plain PER-ROW drive (`AggLaneChoice::PerRow` — pgrcolumnar
 /// scans only, lane-v2-noqualfeed): drain the Phase-1 scan pipeline (batch
 /// window decode; the PREWHERE/kernel-bitmap arms engage when the qual has a
 /// kernel shape) into the FULL per-row transition program. This replaces the
@@ -2439,7 +2439,7 @@ fn agg_plain_perrow_feed<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    debug_assert!(::nodeseqscan::seq_scan_is_cbstore(ss));
+    debug_assert!(::nodeseqscan::seq_scan_is_pgrcolumnar(ss));
     // Row-emit staging (drain pipeline): PREWHERE v1 / kernel bitmap when a
     // qual kernel exists; a no-qual scan stages bare batch-decoded windows.
     arm_scan_staging(
@@ -2490,14 +2490,14 @@ impl<'mcx> BatchSink<'mcx> for PlainAggBuildSink<'_, 'mcx> {}
 /// batched with per-row transitions, so a per-row lane feed has nothing to
 /// win (admission economics, design §4).
 ///
-/// cbstore scans (lane-v2-noqualfeed, phase4 §7 re-entry): the incumbent
+/// pgrcolumnar scans (lane-v2-noqualfeed, phase4 §7 re-entry): the incumbent
 /// fused drive is gated OFF (`table_scan_supports_pagebatch` false — lane-OFF
 /// stays the per-row Volcano oracle), so the heap Refuse arms take the
 /// PER-ROW drain feed instead: batch window decode + the full per-row
 /// transition program beats the per-pull Volcano chain regardless of quals
 /// (the shape the old kernel-armed gate mis-scoped — its 1.21-1.33x evidence
 /// measured the standalone capacity-one RowFeed adapter, not a drained
-/// breaker feed). The one cbstore Refuse left is the count(*)-only census
+/// breaker feed). The one pgrcolumnar Refuse left is the count(*)-only census
 /// shape: transitions reading NO input columns decode nothing on the per-row
 /// drive (empty needed set) and are the MetaAggScan footer path's target —
 /// a batch-decoded feed has nothing to win there (distinct reason so the
@@ -2507,7 +2507,7 @@ fn decide_plain_agg_lane<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggLaneChoice> {
-    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
     // Heap Refuse = admission economics (§4): the legacy fused
     // `exec_agg_batched` drive (or the per-tuple path) already owns the shape
     // at least as well as a lane feed could. One tick per memoized per-node
@@ -2517,7 +2517,7 @@ fn decide_plain_agg_lane<'mcx>(
         Ok(AggLaneChoice::Refuse)
     };
     // Metadata-answer arm first (phase4 §7 re-entry, armed 2026-07-14): a
-    // bare cbstore scan under an all-footer-answerable transition set
+    // bare pgrcolumnar scan under an all-footer-answerable transition set
     // answers from part metadata — strictly cheaper than any fold feed, so
     // it preempts the fold decision below wherever it admits.
     if meta_agg_admissible(agg, ss, estate)? {
@@ -2526,8 +2526,8 @@ fn decide_plain_agg_lane<'mcx>(
     // count(*)-only census shapes (the transition program reads no input
     // columns): heap's incumbent fused drive advances those per batch with
     // zero per-row work (the storeless advance / `qualifying_count` bitmap
-    // census); cbstore's per-row drive decodes nothing (empty needed set)
-    // and the footer answer (MetaAggScan) is the real lever — a bare-cbstore
+    // census); pgrcolumnar's per-row drive decodes nothing (empty needed set)
+    // and the footer answer (MetaAggScan) is the real lever — a bare-pgrcolumnar
     // count(*) is answered by the Meta arm above; one reaching here has a
     // qual/projection/uncovered transition. Deliberate refuse-set entries,
     // one tick per memoized choice.
@@ -2611,20 +2611,20 @@ fn meta_trans_zero_ok(
 }
 
 /// Structural admission for the metadata-answer arm, evaluated once per
-/// memoized per-node choice: a BARE cbstore scan (variant Plain — no qual,
+/// memoized per-node choice: a BARE pgrcolumnar scan (variant Plain — no qual,
 /// no projection — and no zone quals; v1 requires literally no qual) under
 /// an AGG_PLAIN node whose EVERY transition is footer-answerable
 /// (`classify_meta`: count(*)/count(col)/min/max over bare int-family Vars,
 /// sum/avg over affine divk==1 int transforms; FILTER/DISTINCT/ORDER BY and
 /// the float/bool/bitwise/text tiers refuse). Ticks the metaagg class only
-/// for cbstore-backed scans — heap plain aggs are out of the arm's scope
+/// for pgrcolumnar-backed scans — heap plain aggs are out of the arm's scope
 /// (heap has no part metadata) and fall through silently.
 fn meta_agg_admissible<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return Ok(false);
     }
     if !metaagg_enabled() {
@@ -2759,7 +2759,7 @@ fn plain_fold_meta_arm<'mcx>(
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<FoldMetaArm> {
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) || !foldmeta_enabled() {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) || !foldmeta_enabled() {
         return None;
     }
     // RG xmin visibility folds against the scan snapshot: MVCC only (the
@@ -2957,7 +2957,7 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
         mm_str_cols(plan, Some)
     };
-    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
@@ -3162,7 +3162,7 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
 }
 
 // ===========================================================================
-// Plain-agg exact-DISTINCT drive (the uniqExact analog — cbstore-v2 plan
+// Plain-agg exact-DISTINCT drive (the uniqExact analog — pgrcolumnar-v2 plan
 // §2.3; nodeagg's distinctset module). Hosts AGG_PLAIN nodes whose every
 // DISTINCT aggregate is a set-mode entry (count/sum/avg(DISTINCT x) over
 // int2/4/8 or deterministic-collation text — `distinct_set_kind`'s matrix):
@@ -3274,7 +3274,7 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                 Ok(())
             });
         }
-        // Dict-coded text window (the cbstore zero-decode lane): consume
+        // Dict-coded text window (the pgrcolumnar zero-decode lane): consume
         // codes+dict for the whole window — the key's datum cells are stale
         // while a lane is up, so `emit_key` must not run. The memo dedups
         // per epoch (row group); a repeat code's value was already fed and
@@ -3338,7 +3338,7 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
         // let nodeagg run one null scan per window before the batched set
         // insert. Same rows, same order, same cells `emit_key` reads (the
         // loop below stays the authority for windows with fallback rows;
-        // cbstore stages none).
+        // pgrcolumnar stages none).
         if !self.key_bytes {
             if let Some((vals, isnull, fb)) = emit.topk_key_lane(n) {
                 if fb.iter().all(|&w| w == 0) {
@@ -3428,7 +3428,7 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
     // v2 batched-insert arm: single set-mode DISTINCT over exactly outer
     // column 0 with the scan's direct key staging (no qual, covered column —
     // the sort breaker's own matcher; integer keys stage fixed-width, text
-    // keys stage varlena pointers, dict-encoded cbstore text windows answer
+    // keys stage varlena pointers, dict-encoded pgrcolumnar text windows answer
     // codes+dict). Probed BEFORE the first produce, exactly as `sort_feed`
     // probes: arming decides staging.
     let key_direct = ::nodeagg::agg_plain_distinct_direct_shape(agg)
@@ -3643,9 +3643,9 @@ fn scan_k2_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
 }
 
 // ===========================================================================
-// Stage-2.1 dict-code grouping (cbstore-v2 plan §2.1 — the LowCardinality /
+// Stage-2.1 dict-code grouping (pgrcolumnar-v2 plan §2.1 — the LowCardinality /
 // DuckDB dict-grouping analog): when the K2 scan feed's single grouping key
-// is a dict-encoded cbstore column, the feed opts the key into the dict lane
+// is a dict-encoded pgrcolumnar column, the feed opts the key into the dict lane
 // (`dict_want`) and groups each dict-answered window ON THE u32 CODES — a
 // per-epoch (row-group) DIRECT-INDEXED array maps code → the group's live
 // pergroup state in the GLOBAL C-ported tuplehash, resolved LAZILY on the
@@ -3664,7 +3664,7 @@ fn scan_k2_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
 // first-arrival order; direct global pointers keep the C transition code
 // running exactly once per row into the one true state.
 //
-// NULLs: dict lanes are NULL-free by the cbstore per-chunk proof (the store
+// NULLs: dict lanes are NULL-free by the pgrcolumnar per-chunk proof (the store
 // writes no NULLs today) — asserted per batch, never assumed structurally.
 // Raw windows (non-dict-encoded key chunks) fall back to the Raw K2 keys
 // path within the same build, byte-identically.
@@ -3681,7 +3681,7 @@ fn dictgroup_enabled() -> bool {
 /// Dict-group admission + columnar staging arm, tried when the standard
 /// fixed-width-prefix arm refused (a varlena column — typically the text
 /// grouping key itself — sits inside the fold prefix). Admission (§2.1):
-///   * cbstore scan, unprojected (callers gate), lane fold plan classified;
+///   * pgrcolumnar scan, unprojected (callers gate), lane fold plan classified;
 ///   * the K2 deferred probe wants the shape (`scan_k2_wanted`: unguarded,
 ///     no residual transitions, single kernel-hostable grouping key);
 ///   * no varlena-guard transitions (str MIN/MAX keeps the varkey staging /
@@ -3696,7 +3696,7 @@ fn try_arm_cb_dictgroup<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> bool {
     if !dictgroup_enabled()
-        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
         || !scan_k2_wanted(agg)
     {
         return false;
@@ -4009,7 +4009,7 @@ fn scan_k2_batch<'mcx>(
 /// stale under a dict lane) and are deliberately NOT cached: every later row
 /// of that code must also spill, exactly as the per-row path would.
 ///
-/// NULL discipline: dict codes have no NULL representation and cbstore
+/// NULL discipline: dict codes have no NULL representation and pgrcolumnar
 /// stores no NULLs (per-chunk proof, phase4 §8.3) — every dict-window row
 /// probes with `isnull = false`, which is what the Raw fill would have
 /// published (`isnull.fill(false)`).
@@ -4083,7 +4083,7 @@ fn scan_dictgroup_batch<'mcx>(
     }
     let soa =
         ::nodeseqscan::seq_scan_batch_soa(ss).expect("dict-group feed requires the armed SoA");
-    // SAFETY: as the Raw K2 fold — every probed row is non-fallback (cbstore
+    // SAFETY: as the Raw K2 fold — every probed row is non-fallback (pgrcolumnar
     // stages none) with valid lane values for every plan column (the
     // columnar fill stages decoded Datums; the key column is NOT in
     // `plan.cols` — grouping keys are not transition args in this shape, and
@@ -4154,7 +4154,7 @@ fn scan_dictgroup_spill<'mcx>(
 // (dictgroup's lazy resolve retargeted from pergroup pointers to stable u32
 // ids, spike §2.3); the intern table's reverse map materializes the text at
 // read-back/migrate. NULL components (heap) fold into a null-bitmap byte in
-// the key image (CH `nullable_keys128`); cbstore rides the no-NULLs proof.
+// the key image (CH `nullable_keys128`); pgrcolumnar rides the no-NULLs proof.
 //
 // Fallback discipline: multi-key has NO C staged-probe leg (the tuplehash
 // kernel is Expr) — the compact table is the ONLY packed host. The runtime
@@ -4209,7 +4209,7 @@ fn scan_mk_dict_att<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<u16> {
 
 /// Multi-key dict-component columnar arm, tried when the fixed-width-prefix
 /// arm refused (the text key component sits inside the prefix) — the
-/// multi-key twin of `try_arm_cb_dictgroup`: arm the cbstore SoA staging
+/// multi-key twin of `try_arm_cb_dictgroup`: arm the pgrcolumnar SoA staging
 /// with the text component opted into dict lanes; the packing pre-pass
 /// consumes the codes through the per-epoch intern resolve. False =
 /// fail-open (per-row paths, byte-identical).
@@ -4219,7 +4219,7 @@ fn try_arm_cb_multikey_dict<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> bool {
     if !multikey_enabled()
-        || !::nodeseqscan::seq_scan_is_cbstore(ss)
+        || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
         || !scan_mk_plan_wanted(agg)
     {
         return false;
@@ -4235,7 +4235,7 @@ fn try_arm_cb_multikey_dict<'mcx>(
     // Pure-int multi-key shapes need no dict lane — but a varlena column
     // INSIDE the fixed-width prefix (the reason the standard arm refused)
     // still blocks the staging. The offset-free columnar arm hosts those
-    // (Q32-class `GROUP BY WatchID, ClientIP` on cbstore): every staged
+    // (Q32-class `GROUP BY WatchID, ClientIP` on pgrcolumnar): every staged
     // column fills as decoded Datums, no dict registration.
     let Some(key) = scan_mk_dict_att(agg) else {
         // All-Int keys → plain columnar staging; any Other component means
@@ -4397,7 +4397,7 @@ fn scan_mk1_text_admit<'mcx>(
     estate: &EStateData<'mcx>,
     arm: bool,
 ) -> Option<ScanMk> {
-    if !multikey_enabled() || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !multikey_enabled() || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return None;
     }
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
@@ -4534,8 +4534,8 @@ fn scan_mk_admit<'mcx>(
             return refused(RefuseReason::MultiKeyShape);
         }
     }
-    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
-    // A text component needs its dict-lane registration (cbstore only) and
+    let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
+    // A text component needs its dict-lane registration (pgrcolumnar only) and
     // must stay out of the fold's lane reads (stale SoA cells).
     let dict_att = scan_mk_dict_att(agg);
     let has_text = ::nodeagg::agg_hash_key_cols(agg)
@@ -4572,7 +4572,7 @@ fn scan_mk_admit<'mcx>(
             }
         }
     }
-    // Packing admission + table arm (nullable = heap; cbstore rides the
+    // Packing admission + table arm (nullable = heap; pgrcolumnar rides the
     // no-NULLs per-chunk proof and packs no null byte).
     let dict = dict_att.filter(|_| is_cb);
     let verdict = if arm {
@@ -4658,7 +4658,7 @@ fn scan_mk_batch<'mcx>(
             (0..n as usize).all(|i| {
                 if isnull[i] {
                     // Heap NULLs pack via the null-bitmap byte; a NULL under
-                    // the cbstore no-NULLs proof is a staging surprise —
+                    // the pgrcolumnar no-NULLs proof is a staging surprise —
                     // demote instead of asserting in release.
                     return mk.shape.nullable;
                 }
@@ -5445,7 +5445,7 @@ fn sort_feed_if_needed<'mcx>(
             if runtime_sort::try_own_sort(state, ss, &outer_desc, estate)? {
                 return Ok(true);
             }
-            // Zone-adaptive top-N granule order (cbstore bounded sorts; None
+            // Zone-adaptive top-N granule order (pgrcolumnar bounded sorts; None
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
             let adaptive = adaptive_topk_arm(state, &outer_desc, ss)?;
@@ -5802,7 +5802,7 @@ enum TieMode {
 }
 
 // ===========================================================================
-// Streaming top-k cutoff on the sort-breaker feed (cbstore-v2 plan §2.8;
+// Streaming top-k cutoff on the sort-breaker feed (pgrcolumnar-v2 plan §2.8;
 // ClickHouse PartialSortingTransform's threshold filter, our shape). For a
 // bounded (top-N) sort, once the tuplesort's bounded heap is FULL every
 // further put is compare-against-the-k-th-boundary-and-usually-discard. The
@@ -5970,9 +5970,9 @@ fn topk_cut_arm<'mcx>(
 }
 
 // ===========================================================================
-// Zone-ordered adaptive top-N traversal (cbstore; cbstore-v2 plan, design in
-// docs/design/cbstore-zone-adaptive.md). For `ORDER BY x LIMIT k` over a
-// cbstore scan, the granule directory's footer min/max gives a partial order
+// Zone-ordered adaptive top-N traversal (pgrcolumnar; pgrcolumnar-v2 plan, design in
+// docs/design/pgrcolumnar-zone-adaptive.md). For `ORDER BY x LIMIT k` over a
+// pgrcolumnar scan, the granule directory's footer min/max gives a partial order
 // on x: visiting granules best-first (zone min ascending for ASC / max
 // descending for DESC) and feeding the bounded sort's k-th boundary back to
 // the scan lets the scan STOP at the first granule whose bound the boundary
@@ -6063,7 +6063,7 @@ const ADAPTIVE_TOPK_MAX_BOUND: i64 = 1 << 16;
 /// observation-free projection (the shared topk-cut resolution); leading
 /// order operator in the int-family kernel vocabulary (maps ASC/DESC; float
 /// and cross-width never appear as sort operators on admitted columns);
-/// scan-side qual observation-freedom plus the AM's own gates (cbstore,
+/// scan-side qual observation-freedom plus the AM's own gates (pgrcolumnar,
 /// serial, exact int-family zone entries) inside
 /// `seq_scan_adaptive_topk_arm`.
 fn adaptive_topk_arm<'mcx>(
@@ -6964,7 +6964,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
         // k-th boundary leading-key datum to the scan before it stages the
         // next window. No-op unless the scan armed the adaptive order (the
         // emit face's default and the AM's unarmed path both drop it); a
-        // NULL boundary never feeds (cbstore stores no NULLs — conservative
+        // NULL boundary never feeds (pgrcolumnar stores no NULLs — conservative
         // guard only).
         if let Some((bkey, false)) = ::nodesort::sort_lane_topk_boundary(self.sort) {
             emit.push_topk_bound(bkey);
@@ -6974,13 +6974,13 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
 }
 
 // ===========================================================================
-// Refsort — late-materialization top-N on the cbstore-fed bounded sort
+// Refsort — late-materialization top-N on the pgrcolumnar-fed bounded sort
 // breaker (notes/latemat-lane.md, Phase B conversion 1). For `... WHERE
-// <qual> ORDER BY key LIMIT n` over a lane-armed cbstore scan with a
+// <qual> ORDER BY key LIMIT n` over a lane-armed pgrcolumnar scan with a
 // Var-only child tlist, the legacy feed projects EVERY survivor to a full
 // slot and puts a full minimal tuple into the bounded tuplesort — of which
 // only <= n winners ever emerge. The refsort feed instead puts NARROW
-// (key, ref) rows (ref = the survivor's cbstore (rg, row) address) into a
+// (key, ref) rows (ref = the survivor's pgrcolumnar (rg, row) address) into a
 // synthetic 2-col tuplesort built with the plan's leading-key comparator,
 // then AFTER performsort gathers only the <= bound winners' full rows via
 // `gather_row` and buffers the projected outer tuples on the node
@@ -7058,7 +7058,7 @@ struct RefSortSpec {
 
 /// Admission for the refsort feed (never a lane refusal — `None` runs the
 /// legacy feed). Bounded sort with a sane bound; heap (multi-column) sort
-/// with exactly ONE plan sort key (v1); cbstore child scan (window refs
+/// with exactly ONE plan sort key (v1); pgrcolumnar child scan (window refs
 /// exist for staged batches); EVERY outer tlist entry a plain Var of the
 /// scan relation (no projection = the physical tlist, or the all-Var
 /// scan-projection census); sticky-refused nodes never re-arm.
@@ -7101,9 +7101,9 @@ fn refsort_arm<'mcx>(
     if plan.numCols != 1 || plan.sortColIdx.is_empty() {
         return None;
     }
-    // Window refs only exist for cbstore staged batches (the heap AM answers
+    // Window refs only exist for pgrcolumnar staged batches (the heap AM answers
     // `window_ref` with None — every batch would demote).
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return None;
     }
     let natts = outer_desc.natts as usize;
@@ -7423,7 +7423,7 @@ fn sort_feed_refsort<'mcx>(
                 values[j] = base.tts_values[c as usize];
                 isnull[j] = base.tts_isnull[c as usize];
                 // Needed-set guard: gather_row nulls only unneeded cells
-                // (cbstore stores no NULLs), so a null projected cell means
+                // (pgrcolumnar stores no NULLs), so a null projected cell means
                 // the column was not in the scan's needed set — demote
                 // before any output escapes (spurious-demote-safe: the
                 // legacy re-feed is byte-identical regardless).
@@ -8196,7 +8196,7 @@ fn try_hashgroup_build<'mcx>(
     // materialize those columns (`lane_fill_wanted` masks non-lane-read
     // columns once a lane program arms). Resolve the batch column map
     // BEFORE the staging arm, pre-arm PREWHERE with the covering ask on
-    // qual-bearing cbstore scans, and register the feed's columns as lane
+    // qual-bearing pgrcolumnar scans, and register the feed's columns as lane
     // reads. Every refusal leaves the per-row path byte-identically (the
     // views refuse per batch).
     let batch_cols = if distincthash_batch_enabled() {
@@ -8245,7 +8245,7 @@ fn try_hashgroup_build<'mcx>(
         None
     };
     // Pre-arm PREWHERE with the feed's covering column ask (qual-bearing
-    // cbstore scans; a no-qual/refused arm returns false and the ordinary
+    // pgrcolumnar scans; a no-qual/refused arm returns false and the ordinary
     // staging below proceeds). Idempotent with `arm_scan_staging`'s own
     // PREWHERE arm — an armed lane is kept there, and the ask=0 re-arm
     // early-returns.
@@ -8258,7 +8258,7 @@ fn try_hashgroup_build<'mcx>(
             .map(|&c| c as i32 + 1)
             .max()
             .unwrap_or(0);
-        if ::nodeseqscan::seq_scan_is_cbstore(ss)
+        if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
             && ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, ask)?
         {
             trace_feed("hash-grouped distinct batch feed: prewhere pre-armed");
@@ -8376,7 +8376,7 @@ fn pdemit_emit<'mcx>(
 // increment-2 consumer.
 //
 // Admission tier: engages ONLY where the hash arm's density tier refuses
-// (the two arms partition the density axis at MIN_ROWS_PER_GROUP), cbstore
+// (the two arms partition the density axis at MIN_ROWS_PER_GROUP), pgrcolumnar
 // scans only, dict-answered sorted windows only, bare-Var projections, the
 // Q14 transition shape (one set-mode COUNT(DISTINCT <bare int Var>)).
 // Everything else falls through to the hash arm / narrow sort exactly as
@@ -8466,8 +8466,8 @@ fn try_codedgroup_build<'mcx>(
     let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
         return Ok(HgBuild::Refused);
     };
-    // Dict lanes exist only on cbstore scans; heap keeps the incumbents.
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    // Dict lanes exist only on pgrcolumnar scans; heap keeps the incumbents.
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return Ok(HgBuild::Refused);
     }
     if !::nodeagg::agg_codedgroup_admissible(agg)
@@ -9090,7 +9090,7 @@ pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
 
 // ===========================================================================
 // Sorted-agg over SeqScan (lane-v2-sortedfold): the sort-free GroupAggregate
-// shape — clustered/footer-sorted cbstore banks plan `Agg(AGG_SORTED) →
+// shape — clustered/footer-sorted pgrcolumnar banks plan `Agg(AGG_SORTED) →
 // SeqScan` with NO Sort node (the pathkeys come from the store order), so
 // neither the hashed fold breaker (AGG_HASHED only) nor the sorted-agg-over-
 // Sort arm can host it. Two drives, chosen once per node:
@@ -9108,11 +9108,11 @@ pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
 //     operator uses.
 //   * PerRow (`sorted_perrow_step`): the SortedAggOp chain over the scan's
 //     staged batches (SeqScanSource → SeqScanFilterProject → SortedAggOp).
-//     The cbstore incumbent is the per-pull Volcano drive, so the staged
+//     The pgrcolumnar incumbent is the per-pull Volcano drive, so the staged
 //     window decode alone wins (the noqualfeed economics); hosts every
 //     `agg_sorted_lane_admissible` shape incl. exact-DISTINCT set entries.
 //
-// cbstore scans only: the planner produces this shape from cbstore footer
+// pgrcolumnar scans only: the planner produces this shape from pgrcolumnar footer
 // pathkeys; heap SeqScans are never ordered, and heap's incumbent drives own
 // heap agg shapes anyway (admission economics §4).
 //
@@ -9194,7 +9194,7 @@ fn sorted_key_datum_eq(a: ::datum::Datum, b: ::datum::Datum, attlen: i16) -> boo
 /// xor VarLenChars; CountAny rides along — it reads only isnull) and which
 /// is not a grouping column, ask the staging to answer the column as i64
 /// lengths (`seq_scan_batch_len_want` audits the datum-reading
-/// co-consumers). On dict-encoded cbstore chunks the fill then reads ONE
+/// co-consumers). On dict-encoded pgrcolumnar chunks the fill then reads ONE
 /// per-code length table entry per row (string bytes touched once per
 /// distinct value per row group) — the fold never materializes or
 /// dereferences a per-row varlena datum; Raw chunks read the varlena header
@@ -9239,7 +9239,7 @@ fn arm_fold_len_lanes<'mcx>(
 /// once per node: Fold when the node passes the sorted-fold admission AND
 /// the group keys are lane-comparable AND the staging (PREWHERE for qualled
 /// scans, the offset-free columnar arm otherwise) covers every fold + key
-/// column; PerRow otherwise (always available — the cbstore incumbent is the
+/// column; PerRow otherwise (always available — the pgrcolumnar incumbent is the
 /// per-pull Volcano drive).
 fn decide_sorted_agg_lane<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
@@ -9296,9 +9296,9 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
     choice: &mut Option<AggLaneChoice>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // cbstore scans only (section doc): heap falls through silently — the
+    // pgrcolumnar scans only (section doc): heap falls through silently — the
     // shape does not arise there and the fused drives own heap aggs.
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return Ok(None);
     }
     // Scan-side refuse-set: dynamic EPQ/direction gates re-checked per call;
@@ -9372,7 +9372,7 @@ fn sorted_perrow_step<'mcx>(
 /// is answerable from (passing rows, Σ octet_length) and the qual is absent
 /// or exactly `col <> ''` on the length column itself (the arithmetic:
 /// empty strings are precisely the rejected rows AND contribute zero to the
-/// byte-length sum, and cbstore stores no NULLs, so filtered count =
+/// byte-length sum, and pgrcolumnar stores no NULLs, so filtered count =
 /// rows − empties and the filtered sum IS the footer sum).
 struct SortedMetaFold {
     // Columns whose footer stats the peek fetches: the plan's VarLenBytes
@@ -9392,7 +9392,7 @@ fn sorted_fold_meta_ctx<'mcx>(
         return None;
     }
     // The key compare below widens by attlen: only 2/4/8-byte keys arise on
-    // cbstore (i16/i32/date/i64/timestamp), but stay fail-closed.
+    // pgrcolumnar (i16/i32/date/i64/timestamp), but stay fail-closed.
     for &(_, attlen) in &keys.cols[..keys.n] {
         if !matches!(attlen, 2 | 4 | 8) {
             return None;
@@ -9436,7 +9436,7 @@ fn sorted_fold_meta_ctx<'mcx>(
 }
 
 /// Widen a by-value key datum to the decode-value domain granule zone
-/// entries live in (sign-extension per attlen — exactly how the cbstore
+/// entries live in (sign-extension per attlen — exactly how the pgrcolumnar
 /// decode widens i16/i32/date columns).
 #[inline]
 fn sorted_key_widen(d: ::datum::Datum, attlen: i16) -> i64 {
@@ -9469,7 +9469,7 @@ fn sorted_fold_meta_granules<'mcx>(
     let mut key_cols = [0u16; SORTED_FOLD_MAX_KEYS];
     let mut want_key = [0i64; SORTED_FOLD_MAX_KEYS];
     for k in 0..nkeys {
-        // NULL keys never arise from a cbstore scan (no NULLs stored), but a
+        // NULL keys never arise from a pgrcolumnar scan (no NULLs stored), but a
         // null open-group key would not be zone-comparable — refuse.
         if cur_key[k].1 {
             return Ok(());
