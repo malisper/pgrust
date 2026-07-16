@@ -105,6 +105,67 @@ pub fn sink_hash_bytes(b: &[u8]) -> u64 {
     h
 }
 
+/// `PGRUST_RUNTIME_AGG_AVGPACK` kill switch (default ON): the avgpack lane —
+/// AvgInt8 (avg(int2/int4)) states packed INLINE in the sink table's state
+/// words (`[count: i64, sum: i64]` in the transno's 16-byte `AggPerGroup`
+/// slot) instead of a per-group 40-byte transarray in the worker
+/// aggcontext. Kills the unspillable byref-floor refusal class (the
+/// proportionality-audit q33@dop2 172s verdict): flush/spill/combine copy
+/// state words verbatim, so with nothing pointer-shaped left the spill law
+/// drains ALL pressure. Off restores the aggcontext representation
+/// everywhere, bit-exactly.
+pub fn sink_avgpack_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_AVGPACK").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The node's avgpack shape mask: bit per transno of the AvgInt8 class
+/// (`_int8` transarray transtype — on an admitted sink engagement that is
+/// exactly the `int4_avg_combine` family). 0 when the kill switch is off or
+/// any such transno is >= 64 (mask capacity — packing is then refused
+/// WHOLESALE so the leader's combine/emit resolution and the worker's table
+/// arm can never disagree per-transno). Computed once at node build
+/// (`AggStateData::avgpack_shape_mask`); worker sink builds adopt it as the
+/// compact table's packed-representation mask at TABLE CREATION.
+pub(crate) fn sink_avgpack_shape_mask(peragg: &[crate::PerAggData<'_>]) -> u64 {
+    if !sink_avgpack_enabled() {
+        return 0;
+    }
+    let mut mask = 0u64;
+    for pa in peragg {
+        if pa.aggref.aggtranstype == INT8ARRAYOID {
+            if pa.transno >= 64 {
+                return 0;
+            }
+            mask |= 1u64 << pa.transno;
+        }
+    }
+    mask
+}
+
+/// Whether `transno` is packed under an avgpack mask.
+#[inline(always)]
+pub(crate) fn avgpack_of(mask: u64, transno: u32) -> bool {
+    transno < 64 && (mask >> transno) & 1 == 1
+}
+
+/// avgpack: read a packed slot's `[count, sum]` words.
+///
+/// # Safety
+/// `states` is a live state block of numtrans 16-byte slots and `transno`
+/// is packed under the engagement's mask (so the slot holds the inline
+/// image, not an `AggPerGroup`).
+#[inline(always)]
+unsafe fn avgpack_read_slot(states: *const AggPerGroup, transno: usize) -> (i64, i64) {
+    // SAFETY: caller contract — 16-byte 8-aligned slot holding two i64s.
+    unsafe {
+        let w = states.add(transno).cast::<i64>();
+        (*w, *w.add(1))
+    }
+}
+
 /// `PGRUST_RUNTIME_AGG_SPILL_CANON` kill switch (default ON): the canonical
 /// bytes spill record (canon-sink-increments car 3). Off, canonical
 /// (text-bearing) engagements restore the train-13 composition gate exactly
@@ -137,6 +198,24 @@ pub fn sink_gid_merge_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_RUNTIME_AGG_GIDMERGE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// combine16 kill switch (default ON): build each combine claim's merged
+/// bucket table FLAT — one single-level entry set presized from the claim's
+/// arrival count, two-level conversion suppressed, long-key arena reserved
+/// from the directory's byte counts. Root cause: the sink bucket and the
+/// table's two-level bucket both key on `hash >> 56`, and bytes-mode combine
+/// probes reuse the carried SINK hash — constant top byte within a claim —
+/// so a `total > TWO_LEVEL_THRESHOLD` two-level table funnels every member
+/// into ONE sub-EntrySet (re-grown through full rehashes) while the other
+/// 255 presized sets are allocated + zeroed unused. Byte-invisible: entry
+/// layout/growth never changes dedup results or row insertion order, and
+/// every consumer reads rows in insertion order.
+pub fn sink_combine16_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_COMBINE16").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -319,6 +398,114 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
     }
 }
 
+/// Freeze a COMBINE-MERGED bucket table into a self-contained single-bucket
+/// run (numa-combine two-level pass A). Every non-NULL row of `t` belongs to
+/// bucket `b` by construction — the caller merged only bucket-`b` arrivals —
+/// and the run preserves the table's INSERTION ORDER verbatim: the first-seen
+/// discipline composes across the second-level merge exactly because a
+/// partial run replays its half's arrivals in the flat pass's own order.
+/// Handles all three key reprs; the NULL group (word modes,
+/// `b == SINK_NULL_BUCKET` only — the two-level arm routes the NULL bucket
+/// flat, but the conversion stays total) rides out-of-band as every run's
+/// NULL face does. State blocks are copied VERBATIM — callers hold the
+/// all-byval gate (a byref block would dangle past the pass-A claim).
+/// Bytes-mode rows re-derive [`sink_hash_bytes`] from their canonical image
+/// (bit-identical to the flush-side hash — same function, same bytes); GID
+/// words are dropped (`keys` empty ⇒ the final merge always bytes-probes,
+/// byte-invisible by the GID map's own contract).
+pub fn sink_run_from_bucket_table(b: usize, t: &LaneAggTable) -> SinkRun {
+    debug_assert!(b < SINK_NBUCKETS);
+    let state_words = t.state_bytes() / 8;
+    let n = t.nrows();
+    let bytes_mode = t.repr() == KeyRepr::Bytes;
+    let key_words = if bytes_mode { 0 } else { table_key_words(t) };
+    let mut keys: Vec<u64> = Vec::new();
+    let mut key_offs: Vec<u32> = Vec::new();
+    let mut key_bytes: Vec<u8> = Vec::new();
+    let mut hashes: Vec<u64> = Vec::new();
+    let mut states: Vec<u64> = Vec::with_capacity(n * state_words);
+    let mut null_states: Option<Vec<u64>> = None;
+    if bytes_mode {
+        key_offs.reserve(n + 1);
+        key_offs.push(0);
+        hashes.reserve(n);
+    } else {
+        keys.reserve(n * key_words);
+    }
+    // SAFETY (both closures below): row `i < nrows`; the row's state block is
+    // `state_words` u64s, 8-aligned by the LaneAggTable state layout.
+    let push_states = |states: &mut Vec<u64>, i: usize| unsafe {
+        states.extend_from_slice(core::slice::from_raw_parts(
+            t.row_states(i).cast::<u64>().cast_const(),
+            state_words,
+        ));
+    };
+    let mut scratch = [0u8; 8];
+    for i in 0..n {
+        if bytes_mode {
+            let k = t
+                .row_key_bytes(i, &mut scratch)
+                .expect("canonical shapes are non-nullable");
+            let h = sink_hash_bytes(k);
+            debug_assert_eq!(bucket_of(h), b, "merged bucket table carries a foreign row");
+            key_bytes.extend_from_slice(k);
+            key_offs.push(key_bytes.len() as u32);
+            hashes.push(h);
+            push_states(&mut states, i);
+        } else {
+            match row_key_words(t, i) {
+                Some([w0, w1]) => {
+                    debug_assert_eq!(
+                        bucket_of(sink_hash(w0, w1)),
+                        b,
+                        "merged bucket table carries a foreign row"
+                    );
+                    keys.push(w0);
+                    if key_words == 2 {
+                        keys.push(w1);
+                    }
+                    push_states(&mut states, i);
+                }
+                None => {
+                    debug_assert_eq!(b, SINK_NULL_BUCKET);
+                    let mut block = vec![0u64; state_words];
+                    // SAFETY: as push_states.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            t.row_states(i).cast::<u64>().cast_const(),
+                            block.as_mut_ptr(),
+                            state_words,
+                        );
+                    }
+                    null_states = Some(block);
+                }
+            }
+        }
+    }
+    let nonnull = if bytes_mode {
+        key_offs.len() - 1
+    } else {
+        keys.len() / key_words
+    } as u32;
+    // Single-bucket geometry: all rows in `b`.
+    let mut starts = vec![0u32; SINK_NBUCKETS + 1];
+    for s in starts[b + 1..].iter_mut() {
+        *s = nonnull;
+    }
+    SinkRun {
+        key_words,
+        state_words,
+        starts,
+        keys,
+        states,
+        null_states,
+        key_offs,
+        key_bytes,
+        hashes,
+        gid_gen: 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical key bytes (text-bearing Multi shapes — the C2 car).
 // ---------------------------------------------------------------------------
@@ -341,7 +528,9 @@ fn compact_canon_shape(ch: &crate::compact::CompactHash) -> Option<&MkShape> {
 /// everything; covers the per-row test/fallback insert paths). Word shapes
 /// return immediately.
 pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) {
-    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactHash {
+        table, key, intern, canon_hashes, canon_store, canon_offs, ..
+    } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else { return };
     if shape.intern_comp().is_none() {
         return;
@@ -352,12 +541,46 @@ pub(crate) fn compact_extend_canon_hashes(ch: &mut crate::compact::CompactHash) 
         debug_assert_eq!(canon_hashes.len(), n, "canon hashes never outrun the table");
         return;
     }
-    let mut scratch: Vec<u8> = Vec::with_capacity(64);
-    canon_hashes.reserve(n - canon_hashes.len());
-    for row in canon_hashes.len()..n {
-        scratch.clear();
-        canon_row_bytes_append(table, shape, intern, row, &mut scratch);
-        canon_hashes.push(sink_hash_bytes(&scratch));
+    let spk_t0 = crate::spankey::spankey_t0();
+    let start = canon_hashes.len();
+    let mut spk_bytes = 0u64;
+    canon_hashes.reserve(n - start);
+    if crate::spankey::spankey_store_enabled() {
+        // STORE-ONCE (spankey step 2): the image this hash pass had to
+        // build anyway is KEPT — flush pass-1 and the combine remainder
+        // face read it verbatim instead of re-running word-unpack +
+        // intern-reverse-chase + tail assembly per consumer. Alignment:
+        // the switch is process-constant, so the store covers rows 0..n.
+        if canon_offs.is_empty() {
+            canon_offs.push(0);
+        }
+        debug_assert_eq!(canon_offs.len(), start + 1, "store aligned with hashes");
+        canon_offs.reserve(n - start);
+        for row in start..n {
+            let base = canon_store.len();
+            canon_row_bytes_append(table, shape, intern, row, canon_store);
+            canon_offs.push(canon_store.len() as u32);
+            if spk_t0.is_some() {
+                spk_bytes += (canon_store.len() - base) as u64;
+            }
+            canon_hashes.push(sink_hash_bytes(&canon_store[base..]));
+        }
+    } else {
+        let mut scratch: Vec<u8> = Vec::with_capacity(64);
+        for row in start..n {
+            scratch.clear();
+            canon_row_bytes_append(table, shape, intern, row, &mut scratch);
+            if spk_t0.is_some() {
+                spk_bytes += scratch.len() as u64;
+            }
+            canon_hashes.push(sink_hash_bytes(&scratch));
+        }
+    }
+    if spk_t0.is_some() {
+        use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+        spankey_add(&S.canon_accept_rows, (n - start) as u64);
+        spankey_add(&S.canon_accept_bytes, spk_bytes);
+        spankey_lap(&S.canon_accept_ns, spk_t0);
     }
 }
 
@@ -454,6 +677,7 @@ fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
 /// [`sink_flush_table_canon`] with the GID-word fill decision injected (the
 /// unit tests exercise the GID lane regardless of the process env).
 fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) -> SinkRun {
+    let spk_t0 = crate::spankey::spankey_t0();
     // The batch tails already hashed every row's canonical image
     // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
     // here is the defensive no-op sweep for the non-batched insert paths.
@@ -466,7 +690,9 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // q13/q19 profiles put at ~14% of the engaged 16-thread query.
     compact_extend_canon_hashes(ch);
     let gid_gen = ch.intern_gen;
-    let crate::compact::CompactHash { table, key, intern, canon_hashes, .. } = ch;
+    let crate::compact::CompactHash {
+        table, key, intern, canon_hashes, canon_store, canon_offs, ..
+    } = ch;
     let crate::compact::CompactKeySpec::Multi(shape) = key else {
         unreachable!("canonical flush requires a Multi shape")
     };
@@ -477,19 +703,36 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     let hashes = &*canon_hashes;
     let mut counts = [0u32; SINK_NBUCKETS];
     let mut byte_counts = [0usize; SINK_NBUCKETS];
-    let mut scratch: Vec<u8> = Vec::new();
-    let mut scratch_offs: Vec<u32> = Vec::with_capacity(n + 1);
-    scratch_offs.push(0);
-    for i in 0..n {
-        let base = scratch.len();
-        canon_row_bytes_append(table, shape, intern, i, &mut scratch);
-        let img = &scratch[base..];
-        debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
-        let h = hashes[i];
-        counts[bucket_of(h)] += 1;
-        byte_counts[bucket_of(h)] += img.len();
-        scratch_offs.push(scratch.len() as u32);
-    }
+    // STORE-ONCE (spankey step 2): the accept-time extension already
+    // materialized every row's image — pass 1 collapses to per-bucket
+    // counting off the stored offsets (no rebuild). Kill switch off (or
+    // non-sink test paths without a store): build the local scratch as
+    // before, IDENTICAL bytes by the stored-hash law either way.
+    let mut lscratch: Vec<u8> = Vec::new();
+    let mut loffs: Vec<u32> = Vec::with_capacity(n + 1);
+    let (scratch, scratch_offs): (&[u8], &[u32]) = if canon_offs.len() == n + 1 {
+        for i in 0..n {
+            let img = &canon_store[canon_offs[i] as usize..canon_offs[i + 1] as usize];
+            debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+            let h = hashes[i];
+            counts[bucket_of(h)] += 1;
+            byte_counts[bucket_of(h)] += img.len();
+        }
+        (&canon_store[..], &canon_offs[..])
+    } else {
+        loffs.push(0);
+        for i in 0..n {
+            let base = lscratch.len();
+            canon_row_bytes_append(table, shape, intern, i, &mut lscratch);
+            let img = &lscratch[base..];
+            debug_assert_eq!(hashes[i], sink_hash_bytes(img), "stored canon hash law");
+            let h = hashes[i];
+            counts[bucket_of(h)] += 1;
+            byte_counts[bucket_of(h)] += img.len();
+            loffs.push(lscratch.len() as u32);
+        }
+        (&lscratch[..], &loffs[..])
+    };
     let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
     let mut acc = 0u32;
     starts.push(0);
@@ -549,8 +792,17 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // out contiguously — slot s's key ends exactly where slot s+1 begins.
     debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
     table.reset();
-    // The epoch's rows are gone — the stored hashes restart with them.
+    // The epoch's rows are gone — the stored hashes AND the store-once
+    // canonical images restart with them.
     canon_hashes.clear();
+    canon_store.clear();
+    canon_offs.clear();
+    if spk_t0.is_some() {
+        use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+        spankey_add(&S.flush_canon_rows, n as u64);
+        spankey_add(&S.flush_canon_bytes, total_bytes as u64);
+        spankey_lap(&S.flush_canon_ns, spk_t0);
+    }
     SinkRun {
         key_words: 0,
         state_words,
@@ -1287,6 +1539,13 @@ pub enum SinkCombineKind {
     /// 3324 — the avg(int2/int4) family): thread-native element adds through
     /// the live aggcontext image, same lifetime argument as PolyInt128.
     AvgInt8,
+    /// [`AvgInt8`](Self::AvgInt8) under the avgpack lane: the state is the
+    /// PACKED inline `[count, sum]` image in the transno's own 16-byte
+    /// state slot — SELF-CONTAINED (no aggcontext pointer, no null flags;
+    /// AvgInt8 states are never SQL-null and `count == 0` encodes the
+    /// all-NULL-input group). Combine = unconditional element adds; the
+    /// new-group verbatim block copy IS the correct seed.
+    AvgInt8Packed,
 }
 
 /// One transno's resolved combine: the kind + (byval only) a bare whitelist
@@ -1349,7 +1608,15 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
             if shape.aggcombinefn != COMBINE_INT4_AVG {
                 return Ok(None);
             }
-            SinkCombineKind::AvgInt8
+            // avgpack: the node-build mask decides packedness — the SAME
+            // deterministic value a worker sink build adopts as its table
+            // representation (F1 leader/worker-verdict law; both sides
+            // compute it from the plan + the process-constant kill switch).
+            if avgpack_of(node.avgpack_shape_mask, pa.transno) {
+                SinkCombineKind::AvgInt8Packed
+            } else {
+                SinkCombineKind::AvgInt8
+            }
         } else if node.trans_typ[transno].byval
             && crate::merge::COMBINE_WHITELIST.contains(&shape.aggcombinefn)
         {
@@ -1384,7 +1651,14 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
 /// drain adds the aggcontext subtree to its budget accounting exactly when
 /// this holds (byref states live there, not in the table rows).
 pub fn sink_combines_byref(combines: &[SinkCombineFn]) -> bool {
-    combines.iter().any(|c| c.kind != SinkCombineKind::Byval)
+    combines.iter().any(|c| {
+        // avgpack: packed states live INSIDE the table rows (self-contained
+        // words) — nothing of theirs is in the aggcontext, so they do not
+        // put the drain on byref accounting. This is the byref-floor kill:
+        // pure-packed shapes stop counting the aggcontext subtree against
+        // the budget, and flush/spill drain all live pressure.
+        !matches!(c.kind, SinkCombineKind::Byval | SinkCombineKind::AvgInt8Packed)
+    })
 }
 
 /// C advance_combine over two state blocks (`combine_one_par`'s thread-
@@ -1407,6 +1681,22 @@ pub unsafe fn sink_combine_states(
     src: *const AggPerGroup,
 ) -> PgResult<()> {
     for (transno, c) in combines.iter().enumerate() {
+        // avgpack: packed slots carry the inline [count, sum] image, no
+        // null flags — combine is int4_avg_combine's element adds,
+        // unconditional (an all-NULL-input group holds {0,0}; adding zeros
+        // is C's own arithmetic on its {0,0} transarray). Runs BEFORE the
+        // flag-reading strict/adopt block below.
+        if c.kind == SinkCombineKind::AvgInt8Packed {
+            // SAFETY: caller contract — both blocks hold numtrans 16-byte
+            // slots; this transno's slots are packed images (one plan).
+            unsafe {
+                let dw = dst.add(transno).cast::<i64>();
+                let sw = src.add(transno).cast::<i64>();
+                *dw = (*dw).wrapping_add(*sw);
+                *dw.add(1) = (*dw.add(1)).wrapping_add(*sw.add(1));
+            }
+            continue;
+        }
         // SAFETY: caller contract.
         let (d, s) = unsafe { (&mut *dst.add(transno), &*src.add(transno)) };
         if c.strict || c.kind != SinkCombineKind::Byval {
@@ -1451,6 +1741,8 @@ pub unsafe fn sink_combine_states(
                     }
                 }
             },
+            // Handled (with continue) before the flag-reading block above.
+            SinkCombineKind::AvgInt8Packed => unreachable!(),
             // int4_avg_combine's core (numeric.c:6832): element adds over
             // the int8[2] {count,sum} transarray.
             SinkCombineKind::AvgInt8 => unsafe {
@@ -1502,6 +1794,14 @@ pub struct SinkRemainder<'a> {
     pub table: &'a LaneAggTable,
     pub part: &'a SinkPart,
     pub canon: Option<(&'a MkShape, &'a LaneAggTable)>,
+    /// STORE-ONCE canonical images (spankey step 2): row i's image at
+    /// `store[offs[i]..offs[i+1]]`, built once at the accept-time hash
+    /// extension. `Some` iff the Local's store covers every table row
+    /// (kill switch off ⇒ `None` ⇒ the incumbent per-arrival
+    /// `canon_row_bytes` rebuild — identical bytes by the stored-hash
+    /// law). Self-contained copies, safe to read cross-thread with the
+    /// table (the canonical IMAGE law).
+    pub canon_store: Option<(&'a [u8], &'a [u32])>,
     /// GID-merge car (canonical shapes): the Local's CURRENT intern-table
     /// generation — remainder rows sit in the live table, so their packed
     /// words are generation-current by construction. 0 for word shapes.
@@ -1656,11 +1956,20 @@ pub fn sink_combine_bucket(
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
 ) -> PgResult<LaneAggTable> {
-    sink_combine_bucket_impl(b, key_words, state_bytes, locals, combines, sink_gid_merge_enabled())
+    sink_combine_bucket_impl(
+        b,
+        key_words,
+        state_bytes,
+        locals,
+        combines,
+        sink_gid_merge_enabled(),
+        sink_combine16_enabled(),
+    )
 }
 
-/// [`sink_combine_bucket`] with the GID-map decision injected (unit tests
-/// exercise the GID lane regardless of the process env).
+/// [`sink_combine_bucket`] with the GID-map and combine16 flat-table
+/// decisions injected (unit tests exercise both lanes regardless of the
+/// process env).
 fn sink_combine_bucket_impl(
     b: usize,
     key_words: usize,
@@ -1668,12 +1977,26 @@ fn sink_combine_bucket_impl(
     locals: &[SinkLocalView<'_>],
     combines: &[SinkCombineFn],
     gid_enabled: bool,
+    flat: bool,
 ) -> PgResult<LaneAggTable> {
     debug_assert!(b < SINK_NBUCKETS);
     let mut total = 0usize;
+    // Bytes mode (combine16): the runs' key-byte volume for this bucket, an
+    // O(faces) directory read. Run ranges are exact image bytes (a slight
+    // over-count vs the arena — packed ≤8 B keys never land there — the
+    // safe direction). Remainder-face images are NOT counted (they
+    // materialize from shape + intern at absorb time; no cheap directory
+    // length exists) — a hint is not a cap, the arena extends past it
+    // freely, and the flush-heavy shapes where arena volume is material
+    // are run-dominated. Feeds `reserve_arena` on the flat path only.
+    let mut key_bytes = 0usize;
     for l in locals {
         for r in l.all_runs() {
             total += (r.starts[b + 1] - r.starts[b]) as usize;
+            if key_words == 0 {
+                key_bytes += (r.key_offs[r.starts[b + 1] as usize]
+                    - r.key_offs[r.starts[b] as usize]) as usize;
+            }
         }
         if let Some(rem) = &l.remainder {
             total += (rem.part.starts[b + 1] - rem.part.starts[b]) as usize;
@@ -1686,13 +2009,27 @@ fn sink_combine_bucket_impl(
         // Inline16: bucket tables are G/256-sized — well inside the band.
         _ => (KeyRepr::Int, EntryLayout::Inline16),
     };
-    let mut t = LaneAggTable::with_config(
-        repr,
-        state_bytes,
-        total.max(4),
-        HashKind::best(),
-        layout,
-    );
+    let mut t = if flat {
+        let mut t = LaneAggTable::with_flat_capacity(
+            repr,
+            state_bytes,
+            total.max(4),
+            HashKind::best(),
+            layout,
+        );
+        if key_words == 0 {
+            t.reserve_arena(key_bytes);
+        }
+        t
+    } else {
+        LaneAggTable::with_config(
+            repr,
+            state_bytes,
+            total.max(4),
+            HashKind::best(),
+            layout,
+        )
+    };
     let state_words = state_bytes / 8;
 
     // Shared merge tail: seed a new group's block or combine into the
@@ -1760,8 +2097,10 @@ fn sink_combine_bucket_impl(
 
     // Canonical remainder scratch (bytes mode only).
     let mut canon: Vec<u8> = Vec::new();
+    let spk = crate::spankey::spankey_ctr_enabled();
     for l in locals {
         gmap.clear();
+        let spk_t0 = spk.then(std::time::Instant::now);
         for r in l.all_runs() {
             debug_assert_eq!(r.key_words, key_words);
             debug_assert_eq!(r.state_words, state_words);
@@ -1815,6 +2154,10 @@ fn sink_combine_bucket_impl(
                 }
             }
         }
+        crate::spankey::spankey_lap(&crate::spankey::SPANKEY_CTRS.combine_runs_ns, spk_t0);
+        let spk_t0 = spk.then(std::time::Instant::now);
+        let mut spk_rows = 0u64;
+        let mut spk_bytes = 0u64;
         if let Some(rem) = &l.remainder {
             let (rt, part) = (rem.table, rem.part);
             debug_assert_eq!(rt.state_bytes(), t.state_bytes());
@@ -1824,6 +2167,12 @@ fn sink_combine_bucket_impl(
                 let (shape, intern) = rem
                     .canon
                     .ok_or_else(|| sink_shape_error("bytes-mode remainder without a canon face"))?;
+                // STORE-ONCE (spankey step 2): read the accept-time image
+                // verbatim instead of the per-arrival rebuild (word-unpack
+                // + intern-reverse-chase + tail assembly). Identical bytes
+                // by the stored-hash law; kill switch off ⇒ `None` ⇒ the
+                // incumbent rebuild.
+                let stored = rem.canon_store;
                 if use_gid {
                     gmap.roll(rem.gid_gen);
                 }
@@ -1844,14 +2193,37 @@ fn sink_combine_bucket_impl(
                             }
                             continue;
                         }
-                        canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
-                        let dst =
-                            absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
+                        let img: &[u8] = match stored {
+                            Some((sb, so)) => {
+                                &sb[so[row as usize] as usize..so[row as usize + 1] as usize]
+                            }
+                            None => {
+                                canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                                &canon
+                            }
+                        };
+                        if spk {
+                            spk_rows += 1;
+                            spk_bytes += img.len() as u64;
+                        }
+                        let dst = absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
-                    canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
-                    absorb_bytes(&mut t, &canon, part.hashes[lo + slot], src)?;
+                    let img: &[u8] = match stored {
+                        Some((sb, so)) => {
+                            &sb[so[row as usize] as usize..so[row as usize + 1] as usize]
+                        }
+                        None => {
+                            canon_row_bytes(rt, shape, intern, row as usize, &mut canon);
+                            &canon
+                        }
+                    };
+                    if spk {
+                        spk_rows += 1;
+                        spk_bytes += img.len() as u64;
+                    }
+                    absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
                 }
                 debug_assert!(!part.has_null, "canonical shapes are non-nullable");
             } else {
@@ -1872,6 +2244,12 @@ fn sink_combine_bucket_impl(
                     }
                 }
             }
+        }
+        if spk {
+            use crate::spankey::{spankey_add, spankey_lap, SPANKEY_CTRS as S};
+            spankey_add(&S.combine_rem_rows, spk_rows);
+            spankey_add(&S.combine_rem_bytes, spk_bytes);
+            spankey_lap(&S.combine_rem_ns, spk_t0);
         }
     }
     Ok(t)
@@ -1943,8 +2321,11 @@ pub enum SinkEmitCol {
     Agg { transno: u32 },
     /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
     /// transarray → `ops::int64_avg_div` NUMERIC image into the buf arena
-    /// (`BatchEmitCol::AvgInt8`'s exact core).
-    AvgInt8 { transno: u32 },
+    /// (`BatchEmitCol::AvgInt8`'s exact core). `packed` = the avgpack
+    /// inline representation (the transno's state slot IS the {count,sum}
+    /// image; never SQL-null, `count == 0` finalizes to NULL exactly as
+    /// C's `int8_avg` does on its {0,0} state).
+    AvgInt8 { transno: u32, packed: bool },
     /// `avg(int8)` (finalfn `numeric_poly_avg` 3389): Int128AggState →
     /// `aggregates::numeric_poly_avg` image into the buf arena.
     AvgInt128 { transno: u32 },
@@ -2065,7 +2446,12 @@ pub fn sink_build_emit_plan(
             let col = match pa.finalfn.as_ref() {
                 None => SinkEmitCol::Agg { transno: pa.transno },
                 Some(f) => match f.fn_oid {
-                    FINALFN_INT8_AVG => SinkEmitCol::AvgInt8 { transno: pa.transno },
+                    FINALFN_INT8_AVG => SinkEmitCol::AvgInt8 {
+                        transno: pa.transno,
+                        // avgpack: the same node-build mask the combine
+                        // resolution and the worker table arm read.
+                        packed: avgpack_of(node.avgpack_shape_mask, pa.transno),
+                    },
                     FINALFN_POLY_AVG => SinkEmitCol::AvgInt128 { transno: pa.transno },
                     FINALFN_POLY_SUM => SinkEmitCol::SumInt128 { transno: pa.transno },
                     _ => return None,
@@ -2386,20 +2772,34 @@ fn emit_row(
             // count == 0 → NULL, else the int64_avg_div image.
             // SAFETY: non-null _int8 transvalue is a live merged image
             // (combine contract).
-            SinkEmitCol::AvgInt8 { transno } => unsafe {
-                let pg = &*states.add(transno as usize);
-                if pg.trans_value_is_null {
-                    values.push(Datum::null());
-                    nulls.push(true);
-                } else {
-                    let (count, sum) =
-                        crate::compact::int8_avg_trans_read(pg.trans_value)?;
+            SinkEmitCol::AvgInt8 { transno, packed } => unsafe {
+                // avgpack: the slot IS the {count,sum} image — same
+                // finalize core over the same integers, only the storage
+                // moved (byte-identical NUMERIC image).
+                if packed {
+                    let (count, sum) = avgpack_read_slot(states, transno as usize);
                     if count == 0 {
                         values.push(Datum::null());
                         nulls.push(true);
                     } else {
                         let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
                         push_image(values, nulls, arena, fixups, img.as_bytes());
+                    }
+                } else {
+                    let pg = &*states.add(transno as usize);
+                    if pg.trans_value_is_null {
+                        values.push(Datum::null());
+                        nulls.push(true);
+                    } else {
+                        let (count, sum) =
+                            crate::compact::int8_avg_trans_read(pg.trans_value)?;
+                        if count == 0 {
+                            values.push(Datum::null());
+                            nulls.push(true);
+                        } else {
+                            let img = ::adt_numeric::ops::int64_avg_div(sum, count)?;
+                            push_image(values, nulls, arena, fixups, img.as_bytes());
+                        }
                     }
                 }
             },
@@ -2693,6 +3093,11 @@ impl SinkTableHandle {
         self.0.table.mem_used()
             + self.0.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
             + self.0.canon_hashes.capacity() * 8
+            // Live store bytes: at SEAL these are the remainder images the
+            // combine face retains and reads — a real charge; retained
+            // capacity from flushed epochs is not (the leg-12t law).
+            + self.0.canon_store.len()
+            + self.0.canon_offs.len() * 4
     }
 
     /// The combine-visible remainder face over this handle (+ the canonical
@@ -2706,7 +3111,18 @@ impl SinkTableHandle {
                 .expect("canonical shapes carry the intern table");
             (shape, intern)
         });
-        SinkRemainder { table: &self.0.table, part, canon, gid_gen: self.0.intern_gen }
+        // STORE-ONCE face (spankey step 2): published only when the store
+        // covers every row (accept-time extension ran with the switch on).
+        let canon_store = (canon.is_some()
+            && self.0.canon_offs.len() == self.0.table.nrows() + 1)
+            .then(|| (&self.0.canon_store[..], &self.0.canon_offs[..]));
+        SinkRemainder {
+            table: &self.0.table,
+            part,
+            canon,
+            canon_store,
+            gid_gen: self.0.intern_gen,
+        }
     }
 }
 
@@ -2716,6 +3132,17 @@ impl SinkTableHandle {
 /// no-op when no compact table is armed). Gates the batch-tail canonical
 /// hashing — the serial lane shares the compact table and must not pay for
 /// hashes it never consumes.
+/// The armed compact table's avgpack mask (0 = not armed / nothing packed).
+/// The lane's fold feeds pass it to lanefold's grouped kernels so packed
+/// AvgAccum transnos advance the inline `[count, sum]` representation; it is
+/// nonzero ONLY on sink worker builds (set at table creation, compact.rs).
+pub fn agg_sink_avgpack_mask(node: &AggStateData<'_>) -> u64 {
+    node.perhash
+        .as_ref()
+        .and_then(|ph| ph.compact.as_ref())
+        .map_or(0, |ch| ch.avgpack_mask)
+}
+
 pub fn agg_sink_mark_sink_mode(node: &mut AggStateData<'_>) {
     if let Some(ph) = node.perhash.as_mut() {
         if let Some(ch) = ph.compact.as_mut() {
@@ -2846,6 +3273,14 @@ pub fn agg_sink_budget_pressure(node: &AggStateData<'_>) -> bool {
     };
     let mem = table_mem
         + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+        // Store-once canonical images (spankey): LIVE bytes — the flush
+        // clears the store, so post-flush pressure drains exactly as the
+        // incumbent's (retained capacity deliberately uncounted, the
+        // sink_table_live_bytes law; capacity-counting made the leg-12t
+        // spill-armed engagement refuse instead of spill). Zero under the
+        // kill switch.
+        + ch.canon_store.len()
+        + ch.canon_offs.len() * 4
         + aggctx;
     // Proportional headroom (an eighth of the half-limit, capped at 32MB):
     // at small work_mem the margin shrinks with the limit instead of
@@ -2867,6 +3302,9 @@ pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
         .map_or(0, |ch| {
             ch.table.mem_used()
                 + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+                // Live store bytes (see agg_sink_budget_pressure).
+                + ch.canon_store.len()
+                + ch.canon_offs.len() * 4
         })
 }
 
@@ -3426,12 +3864,497 @@ pub fn agg_sink_emit_drained(node: &mut AggStateData<'_>) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-socket SHARED aggregate table — the mid-NDV architecture EXPERIMENT
+// (cachebudget lane D2; docs/design/shared-agg-table-experiment.md). Hard
+// default-OFF (PGRUST_RUNTIME_AGG_SHARED_TABLE=1 in the executor arms it).
+//
+// Design (a) of the design note: a Folklore*-class single-word-CAS
+// open-addressing table (Xue & Marcus PVLDB'25's winning variant — written
+// from scratch, the reference impl was consulted as literature only),
+// PER SOCKET, sized at engagement to fit a socket-SLC share. PROTOTYPE
+// SCOPE (recorded in the design note §4): single-int-word keys, COUNT-only
+// states (count(*) / count(col) — i64 add is the one atomic fold the
+// architecture question needs; the footprint-vs-coherence verdict is
+// state-class-independent to first order). Workers keep their bounded
+// Locals as the heavy-hitter pre-pass (Polychroniou composition): the
+// shared face absorbs at FLUSH cadence — a flushed run's rows CAS/add into
+// the socket table and the run is dropped instead of retained, so combine
+// volume collapses to the (≤2) socket tables plus whatever overflowed.
+//
+// SPILL FALLBACK (the literature has no spill story; we do): occupancy is
+// reserved run-by-run BEFORE merging; a reservation that would cross the
+// sized capacity closes the face — that run and every later flush ride the
+// EXISTING partitioned runs/spill path, and the combine key-merges both
+// sources correctly by construction (runs from different sources are
+// exactly what it merges). Fail-closed, no mid-run split.
+//
+// Result-identity class: insertion race order makes slot layout
+// nondeterministic; the seal drain SORTS by key so a given dataset drains
+// deterministically, but the merged first-seen order still differs from
+// the incumbent's — LIMIT-boundary tie shapes are therefore outside the
+// byte-identity law (the experiment's e2e corpus carries total ORDER BY;
+// adoption as a default requires the canonical re-sort law — design note
+// §4). The experiment gate refuses topn/freeze shapes.
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicBool as ShAtomicBool, AtomicU64 as ShAtomicU64, AtomicUsize as ShAtomicUsize, Ordering as ShOrdering};
+
+pub struct SharedCountTable {
+    /// Slot key words; 0 = EMPTY sentinel (the literal key 0 rides the
+    /// dedicated side slot below — Datum 0 is a common int key).
+    keys: Box<[ShAtomicU64]>,
+    /// Per-slot i64 count accumulators (parallel to `keys`).
+    counts: Box<[ShAtomicU64]>,
+    mask: usize,
+    /// Conservative member reservations (run rows reserved up front; hits
+    /// on existing keys over-reserve, which only closes the face early —
+    /// the safe direction).
+    members: ShAtomicUsize,
+    cap_members: usize,
+    /// Closed = a reservation crossed capacity; every later merge refuses
+    /// (callers route runs to the incumbent path).
+    closed: ShAtomicBool,
+    /// The literal key-word 0 group (presence + count).
+    zero_present: ShAtomicBool,
+    zero_count: ShAtomicU64,
+    /// The out-of-band NULL group (SinkRun::null_states).
+    null_present: ShAtomicBool,
+    null_count: ShAtomicU64,
+}
+
+impl SharedCountTable {
+    /// `cap_members` live groups, slots ≥ 2× that (power of two) — probe
+    /// termination is structural: reservations bound distinct keys to
+    /// cap_members ≤ slots/2, so an empty slot always exists.
+    pub fn new(cap_members: usize) -> SharedCountTable {
+        let cap_members = cap_members.max(64);
+        let slots = (cap_members * 2).next_power_of_two();
+        SharedCountTable {
+            keys: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
+            counts: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
+            mask: slots - 1,
+            members: ShAtomicUsize::new(0),
+            cap_members,
+            closed: ShAtomicBool::new(false),
+            zero_present: ShAtomicBool::new(false),
+            zero_count: ShAtomicU64::new(0),
+            null_present: ShAtomicBool::new(false),
+            null_count: ShAtomicU64::new(0),
+        }
+    }
+
+    /// Merge a flushed single-word count run into the shared face.
+    /// `true` = absorbed (caller DROPS the run); `false` = the face is/
+    /// became closed — caller keeps the run on the incumbent path. Any
+    /// number of worker threads may call concurrently.
+    pub fn merge_run(&self, run: &SinkRun) -> bool {
+        debug_assert_eq!(run.key_words, 1, "shared count face is single-word-keyed");
+        // State block = one AggPerGroup (16B = 2 words): word 0 the count
+        // Datum, word 1 the trans_value_is_null/no_trans_value flag bytes —
+        // structurally 0 for count (seeded non-null, never nulled).
+        debug_assert_eq!(run.state_words, 2, "shared count face is count-state only");
+        if self.closed.load(ShOrdering::Acquire) {
+            return false;
+        }
+        let n = run.nrows();
+        // FAIL-CLOSED flags pre-pass BEFORE any reservation or slot write:
+        // a set trans_value_is_null / no_trans_value byte is not the count
+        // shape this face folds — refuse the whole run (it rides the
+        // incumbent path; never a partial merge). ONLY the two bool bytes
+        // are meaningful: AggPerGroup is repr(C) {Datum, bool, bool} and
+        // the trailing 6 PADDING bytes are UNDEFINED in fold-written
+        // states (the wave-5 finding: requiring a fully-zero word refused
+        // every real run — merged_runs=0 with the face live).
+        const FLAG_BYTES: u64 = 0xFFFF;
+        for i in 0..n {
+            if run.states[i * 2 + 1] & FLAG_BYTES != 0 {
+                return false;
+            }
+        }
+        if run.null_states.as_ref().is_some_and(|b| b[1] & FLAG_BYTES != 0) {
+            return false;
+        }
+        // Reserve BEFORE touching slots: crossing capacity closes the face
+        // with the reservation backed out — no partial run is ever merged.
+        if self.members.fetch_add(n, ShOrdering::AcqRel) + n > self.cap_members {
+            self.members.fetch_sub(n, ShOrdering::AcqRel);
+            self.closed.store(true, ShOrdering::Release);
+            return false;
+        }
+        // RESERVATION RELEASE LAW: rows resolving to an EXISTING key (or
+        // the key-0 side slot) release their reservation below, so steady-
+        // state `members` counts CLAIMED SLOTS, not cumulative flushed
+        // rows. Duplicate keys across runs are the COMMON case (every key
+        // recurs in ~W×flushes runs); without the release the face closes
+        // after ~cap total flushed rows regardless of NDV (the concurrent-
+        // oracle unit test caught exactly this). Claimed slots therefore
+        // never exceed cap_members ≤ slots/2 — probe termination stays
+        // structural. Transient in-flight reservations (Σ concurrent runs'
+        // rows) can spuriously close a face genuinely NEAR capacity —
+        // fail-safe direction (the run rides the incumbent path).
+        let mut release = 0usize;
+        for i in 0..n {
+            let key = run.keys[i];
+            let cnt = run.states[i * 2];
+            if key == 0 {
+                self.zero_present.store(true, ShOrdering::Release);
+                self.zero_count.fetch_add(cnt, ShOrdering::Relaxed);
+                release += 1;
+                continue;
+            }
+            let mut pos = (sink_hash(key, 0) as usize) & self.mask;
+            loop {
+                let cur = self.keys[pos].load(ShOrdering::Acquire);
+                if cur == key {
+                    self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                    release += 1;
+                    break;
+                }
+                if cur == 0 {
+                    match self.keys[pos].compare_exchange(
+                        0,
+                        key,
+                        ShOrdering::AcqRel,
+                        ShOrdering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            // Fresh slot claim: consumes its reservation.
+                            self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                            break;
+                        }
+                        Err(now) if now == key => {
+                            self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                            release += 1;
+                            break;
+                        }
+                        Err(_) => { /* raced claim by another key: keep probing */ }
+                    }
+                } else {
+                    pos = (pos + 1) & self.mask;
+                    continue;
+                }
+                // CAS lost to a DIFFERENT key landing in this slot: advance.
+                pos = (pos + 1) & self.mask;
+            }
+        }
+        if release > 0 {
+            self.members.fetch_sub(release, ShOrdering::AcqRel);
+        }
+        if let Some(block) = run.null_states.as_ref() {
+            self.null_present.store(true, ShOrdering::Release);
+            self.null_count.fetch_add(block[0], ShOrdering::Relaxed);
+        }
+        true
+    }
+
+    /// Claimed slots + in-flight reservations (observability; equals the
+    /// live distinct group count at quiescence).
+    pub fn reserved(&self) -> usize {
+        self.members.load(ShOrdering::Relaxed)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(ShOrdering::Relaxed)
+    }
+
+    /// Seal-time drain into a bucket-major [`SinkRun`] (the exact
+    /// sink_flush_table framing, so the combine consumes it like any
+    /// flushed run). SINGLE-THREADED BY CONTRACT: called at SEAL, after
+    /// every accept worker has settled (the runtime's seal ordering is the
+    /// happens-before). Rows are sorted by key first — a given dataset
+    /// drains deterministically regardless of insertion races. `None` =
+    /// nothing was absorbed.
+    pub fn drain_to_run(&self) -> Option<SinkRun> {
+        let mut pairs: Vec<(u64, u64)> = Vec::with_capacity(self.reserved().min(self.mask + 1));
+        for pos in 0..=self.mask {
+            let key = self.keys[pos].load(ShOrdering::Acquire);
+            if key != 0 {
+                pairs.push((key, self.counts[pos].load(ShOrdering::Acquire)));
+            }
+        }
+        if self.zero_present.load(ShOrdering::Acquire) {
+            pairs.push((0, self.zero_count.load(ShOrdering::Acquire)));
+        }
+        let null = self
+            .null_present
+            .load(ShOrdering::Acquire)
+            .then(|| vec![self.null_count.load(ShOrdering::Acquire), 0]);
+        if pairs.is_empty() && null.is_none() {
+            return None;
+        }
+        pairs.sort_unstable_by_key(|&(k, _)| k);
+        // Bucket-major framing, verbatim from sink_flush_table.
+        let mut counts = [0u32; SINK_NBUCKETS];
+        for &(k, _) in &pairs {
+            counts[bucket_of(sink_hash(k, 0))] += 1;
+        }
+        let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+        let mut acc = 0u32;
+        starts.push(0);
+        for c in counts {
+            acc += c;
+            starts.push(acc);
+        }
+        let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+        let n = pairs.len();
+        let mut keys: Vec<u64> = vec![0; n];
+        // Emitted states are valid AggPerGroup blocks: [count, flags=0].
+        let mut states: Vec<u64> = vec![0; n * 2];
+        for &(k, c) in &pairs {
+            let b = bucket_of(sink_hash(k, 0));
+            let slot = cursor[b] as usize;
+            cursor[b] += 1;
+            keys[slot] = k;
+            states[slot * 2] = c;
+        }
+        Some(SinkRun {
+            key_words: 1,
+            state_words: 2,
+            starts,
+            keys,
+            states,
+            null_states: null,
+            key_offs: Vec::new(),
+            key_bytes: Vec::new(),
+            hashes: Vec::new(),
+            gid_gen: 0,
+        })
+    }
+}
+
+/// Experiment gate helper: every aggregate is a COUNT (count(*) 2803 /
+/// count(col) 2147), unfiltered, un-DISTINCTed — the i64-add state class
+/// the shared count face folds atomically.
+pub fn agg_sink_all_count(node: &AggStateData<'_>) -> bool {
+    const COUNT_STAR: Oid = 2803;
+    const COUNT_ANY: Oid = 2147;
+    !node.peragg.is_empty()
+        && node.peragg.iter().all(|pa| {
+            let ar = pa.aggref;
+            (ar.aggfnoid == COUNT_STAR || ar.aggfnoid == COUNT_ANY)
+                && ar.aggfilter.is_none()
+                && ar.aggdistinct.is_nil()
+                && ar.aggorder.is_nil()
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests: pure kernels, no executor.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SharedCountTable (cachebudget D2 experiment) ----------------
+
+    /// Build a single-word count run from (key, count) pairs (+ optional
+    /// NULL-group count), framed exactly like sink_flush_table.
+    fn count_run(pairs: &[(u64, u64)], null: Option<u64>) -> SinkRun {
+        let mut counts = [0u32; SINK_NBUCKETS];
+        for &(k, _) in pairs {
+            counts[bucket_of(sink_hash(k, 0))] += 1;
+        }
+        let mut starts = vec![0u32];
+        let mut acc = 0u32;
+        for c in counts {
+            acc += c;
+            starts.push(acc);
+        }
+        let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+        let mut keys = vec![0u64; pairs.len()];
+        let mut states = vec![0u64; pairs.len() * 2];
+        for &(k, c) in pairs {
+            let b = bucket_of(sink_hash(k, 0));
+            let s = cursor[b] as usize;
+            cursor[b] += 1;
+            keys[s] = k;
+            states[s * 2] = c;
+        }
+        SinkRun {
+            key_words: 1,
+            state_words: 2,
+            starts,
+            keys,
+            states,
+            null_states: null.map(|c| vec![c, 0]),
+            key_offs: Vec::new(),
+            key_bytes: Vec::new(),
+            hashes: Vec::new(),
+            gid_gen: 0,
+        }
+    }
+
+    fn drained_map(t: &SharedCountTable) -> (std::collections::HashMap<u64, u64>, Option<u64>) {
+        let run = t.drain_to_run().expect("non-empty drain");
+        // Bucket framing must be internally consistent.
+        assert_eq!(run.starts.len(), SINK_NBUCKETS + 1);
+        assert_eq!(*run.starts.last().unwrap() as usize, run.nrows());
+        for b in 0..SINK_NBUCKETS {
+            for i in run.starts[b] as usize..run.starts[b + 1] as usize {
+                assert_eq!(bucket_of(sink_hash(run.keys[i], 0)), b, "bucket-major framing");
+            }
+        }
+        let map = run
+            .keys
+            .iter()
+            .copied()
+            .zip(run.states.chunks(2).map(|st| {
+                assert_eq!(st[1] & 0xFFFF, 0, "drained states are valid non-null AggPerGroup blocks");
+                st[0]
+            }))
+            .collect();
+        (map, run.null_states.as_ref().map(|b| b[0]))
+    }
+
+    /// Concurrent merges against a HashMap oracle: 8 threads × interleaved
+    /// runs over an adversarial key set (dense small ints incl. the literal
+    /// 0 side-slot key, plus hash-colliding sparse keys), with a NULL
+    /// group. The drain must equal the oracle exactly.
+    #[test]
+    fn shared_count_concurrent_oracle() {
+        // Capacity must clear the worst-case TRANSIENT reservation window
+        // (Σ concurrent runs' rows ≈ 8×900 in-flight + ≤900 claimed), not
+        // just the distinct-key count — the release law keeps steady-state
+        // at claimed slots, but pre-checks see in-flight reservations.
+        let t = SharedCountTable::new(16384);
+        let mut oracle: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        let mut per_thread: Vec<Vec<(Vec<(u64, u64)>, Option<u64>)>> = vec![Vec::new(); 8];
+        let mut null_total = 0u64;
+        for th in 0..8u64 {
+            for r in 0..6u64 {
+                let mut pairs = Vec::new();
+                for i in 0..500u64 {
+                    // Overlapping keys across threads/runs; key 0 included.
+                    let k = (i * (th % 3 + 1) + r) % 900;
+                    let c = th + r + i % 7 + 1;
+                    pairs.push((k, c));
+                    *oracle.entry(k).or_insert(0) += c;
+                }
+                let null = (r % 2 == 0).then_some(th + r + 1);
+                if let Some(n) = null {
+                    null_total += n;
+                }
+                // count_run wants unique keys per run (a real flush is a
+                // dedup'd table) — fold duplicates first.
+                let mut folded: std::collections::HashMap<u64, u64> =
+                    std::collections::HashMap::new();
+                for (k, c) in pairs {
+                    *folded.entry(k).or_insert(0) += c;
+                }
+                let folded: Vec<(u64, u64)> = folded.into_iter().collect();
+                // Rebuild the oracle-side dedup accounting: already added above.
+                per_thread[th as usize].push((folded, null));
+            }
+        }
+        let tr = &t;
+        std::thread::scope(|s| {
+            for runs in per_thread.iter() {
+                s.spawn(move || {
+                    for (pairs, null) in runs {
+                        assert!(tr.merge_run(&count_run(pairs, *null)), "capacity was sized");
+                    }
+                });
+            }
+        });
+        assert!(!t.is_closed());
+        let (map, null) = drained_map(&t);
+        assert_eq!(map, oracle);
+        assert_eq!(null, Some(null_total));
+    }
+
+    /// The reservation RELEASE law: repeated runs over the SAME key set —
+    /// the production steady state (every key recurs in ~W×flushes runs) —
+    /// must never burn capacity. Under the pre-release design this closed
+    /// the face after ~cap total flushed ROWS regardless of NDV (the wave-3
+    /// fleet failure).
+    #[test]
+    fn shared_count_repeat_keys_do_not_burn_capacity() {
+        let t = SharedCountTable::new(512);
+        let pairs: Vec<(u64, u64)> = (1..=100u64).map(|k| (k, 1)).collect();
+        for _ in 0..1000 {
+            assert!(t.merge_run(&count_run(&pairs, None)), "repeat keys must release");
+        }
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 100, "steady state counts claimed slots only");
+        let (map, _) = drained_map(&t);
+        assert_eq!(map.len(), 100);
+        assert!(map.values().all(|&c| c == 1000));
+    }
+
+    /// The spill fallback: a reservation crossing capacity CLOSES the face
+    /// with the run unmerged, and everything absorbed before the close
+    /// drains intact (the refused run rides the incumbent path).
+    #[test]
+    fn shared_count_overflow_closes() {
+        let t = SharedCountTable::new(64);
+        let small: Vec<(u64, u64)> = (1..=40u64).map(|k| (k, 1)).collect();
+        assert!(t.merge_run(&count_run(&small, None)));
+        let big: Vec<(u64, u64)> = (100..=200u64).map(|k| (k, 2)).collect();
+        assert!(!t.merge_run(&count_run(&big, None)), "over-capacity run refused");
+        assert!(t.is_closed());
+        // Closed face refuses everything, even a tiny run.
+        assert!(!t.merge_run(&count_run(&[(7, 1)], None)));
+        let (map, null) = drained_map(&t);
+        assert_eq!(map.len(), 40);
+        assert_eq!(map[&7], 1);
+        assert_eq!(null, None);
+    }
+
+    /// Drain determinism: same content, different insertion order →
+    /// byte-identical runs (the sort-by-key law).
+    #[test]
+    fn shared_count_drain_deterministic() {
+        let a = SharedCountTable::new(256);
+        let b = SharedCountTable::new(256);
+        let pairs: Vec<(u64, u64)> = (0..100u64).map(|k| (k * 37 % 251, k + 1)).collect();
+        let mut folded: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for &(k, c) in &pairs {
+            *folded.entry(k).or_insert(0) += c;
+        }
+        let folded: Vec<(u64, u64)> = folded.into_iter().collect();
+        let mut rev = folded.clone();
+        rev.reverse();
+        assert!(a.merge_run(&count_run(&folded, Some(3))));
+        assert!(b.merge_run(&count_run(&rev, Some(3))));
+        let ra = a.drain_to_run().unwrap();
+        let rb = b.drain_to_run().unwrap();
+        assert_eq!(ra.keys, rb.keys);
+        assert_eq!(ra.states, rb.states);
+        assert_eq!(ra.starts, rb.starts);
+        assert_eq!(ra.null_states, rb.null_states);
+    }
+
+    /// Empty face drains to None (no ghost runs at seal).
+    #[test]
+    fn shared_count_empty_drain() {
+        assert!(SharedCountTable::new(64).drain_to_run().is_none());
+    }
+
+    /// FAIL-CLOSED flags pre-pass: a null-marked (or padding-dirty) state
+    /// block refuses the WHOLE run before any reservation or slot write —
+    /// refusal, not closure (later clean runs still merge).
+    #[test]
+    fn shared_count_nonzero_flags_refused() {
+        let t = SharedCountTable::new(64);
+        let mut bad = count_run(&[(5, 1)], None);
+        bad.states[1] = 1; // trans_value_is_null byte
+        assert!(!t.merge_run(&bad));
+        let mut bad2 = count_run(&[(6, 1)], None);
+        bad2.states[1] = 1 << 8; // no_trans_value byte
+        assert!(!t.merge_run(&bad2));
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 0, "refused before reserving");
+        assert!(t.drain_to_run().is_none());
+        // UNDEFINED PADDING (bytes 2..8 of the flags word) must be
+        // ACCEPTED — fold-written AggPerGroup padding is garbage in
+        // practice (the wave-5 all-runs-refused failure).
+        let mut padded = count_run(&[(5, 2)], None);
+        padded.states[1] = 0xDEAD_BEEF_0000_0000 | (0xCAFE << 16);
+        assert!(t.merge_run(&padded));
+        let (map, _) = drained_map(&t);
+        assert_eq!(map[&5], 2);
+    }
 
     const STATE_BYTES: usize = core::mem::size_of::<AggPerGroup>() * 2;
 
@@ -3554,8 +4477,8 @@ mod tests {
         assert!(!part2.has_null);
 
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
         ];
         let combines = test_combines();
         let mut merged: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
@@ -3631,8 +4554,8 @@ mod tests {
         bump(&mut t2, Some(same[0]), 1, 0);
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
         ];
         let combines = test_combines();
         let t = sink_combine_bucket(want_bucket, 1, STATE_BYTES, &locals, &combines).unwrap();
@@ -3642,6 +4565,193 @@ mod tests {
         assert_eq!(t.row_key_int(2), Some(same[2]));
         // same[0] merged across both locals.
         assert_eq!(read_group(&t, Some(same[0])), Some((2, 0)));
+    }
+
+    /// Row (count, max) via the toy AggPerGroup pair.
+    fn row_counts(t: &LaneAggTable, row: usize) -> (i64, i64) {
+        let pg = t.row_states(row).cast_const().cast::<AggPerGroup>();
+        unsafe { ((*pg).trans_value.as_i64(), (*pg.add(1)).trans_value.as_i64()) }
+    }
+
+    /// numa-combine item 1, the superset-lemma-style order law: merging
+    /// CONTIGUOUS halves of the locals slice into partial single-bucket runs
+    /// ([`sink_run_from_bucket_table`]) and re-merging the two partials is
+    /// ROW-FOR-ROW identical (keys, insertion order, states) to the flat
+    /// pass — first-seen order composes across contiguous halves. Word keys.
+    #[test]
+    fn two_level_partial_runs_match_flat_combine() {
+        // Four locals with overlapping keys, mixed faces: l0 run+remainder,
+        // l1 remainder, l2 run, l3 remainder. No NULL group — the two-level
+        // arm routes SINK_NULL_BUCKET flat (SinkRun carries NULLs
+        // out-of-band, which would move the NULL group's first-seen slot).
+        let mut t0 = mk_table(32);
+        for k in 0..600 {
+            bump(&mut t0, Some(k), 1, k);
+        }
+        let run0 = sink_flush_table(&mut t0);
+        for k in 300..900 {
+            bump(&mut t0, Some(k), 2, 2 * k);
+        }
+        let part0 = sink_partition_remainder(&t0);
+        let mut t1 = mk_table(32);
+        for k in (0..1200).step_by(3) {
+            bump(&mut t1, Some(k), 1, 5);
+        }
+        let part1 = sink_partition_remainder(&t1);
+        let mut t2 = mk_table(32);
+        for k in 450..1050 {
+            bump(&mut t2, Some(k), 4, 3 * k);
+        }
+        let run2 = sink_flush_table(&mut t2);
+        let part2 = sink_partition_remainder(&t2);
+        let mut t3 = mk_table(32);
+        for k in (1..1500).step_by(7) {
+            bump(&mut t3, Some(k), 1, k + 1);
+        }
+        let part3 = sink_partition_remainder(&t3);
+
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run0),
+                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, canon_store: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run2),
+                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }),
+            },
+            SinkLocalView {
+                spilled: &[],
+                runs: &[],
+                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, canon_store: None, gid_gen: 0 }),
+            },
+        ];
+        let combines = test_combines();
+        for b in 0..SINK_NBUCKETS {
+            let flat = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            // Pass A: contiguous halves → partial single-bucket runs.
+            let m0 = sink_combine_bucket(b, 1, STATE_BYTES, &locals[..2], &combines).unwrap();
+            let m1 = sink_combine_bucket(b, 1, STATE_BYTES, &locals[2..], &combines).unwrap();
+            let r0 = sink_run_from_bucket_table(b, &m0);
+            let r1 = sink_run_from_bucket_table(b, &m1);
+            assert_eq!(r0.nrows(), m0.nrows());
+            assert_eq!(r1.nrows(), m1.nrows());
+            // Final: 2-way merge of the partials, socket order.
+            let partial_views = [
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r0), remainder: None },
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r1), remainder: None },
+            ];
+            let two =
+                sink_combine_bucket(b, 1, STATE_BYTES, &partial_views, &combines).unwrap();
+            assert_eq!(two.nrows(), flat.nrows(), "bucket {b} row count");
+            for row in 0..flat.nrows() {
+                assert_eq!(
+                    two.row_key_int(row),
+                    flat.row_key_int(row),
+                    "bucket {b} row {row} key/order"
+                );
+                assert_eq!(
+                    row_counts(&two, row),
+                    row_counts(&flat, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
+    }
+
+    /// The two-level order law over CANONICAL BYTES keys (text-bearing
+    /// shapes): partial runs re-derive the flush-side hash from the
+    /// canonical image, and per-worker intern-id skew across the halves
+    /// still merges on bytes — row-for-row identical to the flat pass.
+    #[test]
+    fn two_level_partial_runs_match_flat_combine_canon() {
+        // Worker intern orders deliberately DIFFER (the canonical-bytes
+        // hazard); texts span the packed8 (len <= 8) and arena arms.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w1, Some(1), b"apple", 1);
+        bump_canon(&mut w1, Some(1), b"banana", 2);
+        bump_canon(&mut w1, Some(2), b"apple", 3);
+        let run1 = sink_flush_table_canon(&mut w1);
+        bump_canon(&mut w1, Some(1), b"apple", 10);
+        bump_canon(&mut w1, Some(3), b"a-rather-long-canonical-key", 5);
+        let mut h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w2, Some(9), b"zzz", 7);
+        bump_canon(&mut w2, Some(1), b"banana", 20);
+        bump_canon(&mut w2, Some(1), b"apple", 30);
+        let mut h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+
+        let mut w3 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w3, Some(3), b"a-rather-long-canonical-key", 100);
+        bump_canon(&mut w3, Some(1), b"banana", 1);
+        bump_canon(&mut w3, Some(4), b"", 6);
+        let mut h3 = SinkTableHandle(w3);
+        let part3 = h3.partition_remainder();
+
+        let mut w4 = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w4, Some(2), b"apple", 2);
+        bump_canon(&mut w4, Some(9), b"zzz", 3);
+        let run4 = sink_flush_table_canon(&mut w4);
+        bump_canon(&mut w4, Some(4), b"", 4);
+        let mut h4 = SinkTableHandle(w4);
+        let part4 = h4.partition_remainder();
+
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run1),
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h2.remainder_view(&part2)) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h3.remainder_view(&part3)) },
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run4),
+                remainder: Some(h4.remainder_view(&part4)),
+            },
+        ];
+        let combines = test_combines();
+        let mut groups = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let flat = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            let m0 = sink_combine_bucket(b, 0, STATE_BYTES, &locals[..2], &combines).unwrap();
+            let m1 = sink_combine_bucket(b, 0, STATE_BYTES, &locals[2..], &combines).unwrap();
+            let r0 = sink_run_from_bucket_table(b, &m0);
+            let r1 = sink_run_from_bucket_table(b, &m1);
+            assert_eq!(r0.key_words, 0);
+            assert_eq!(r0.hashes.len(), r0.nrows(), "carried-hash law on the partial run");
+            let partial_views = [
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r0), remainder: None },
+                SinkLocalView { spilled: &[], runs: core::slice::from_ref(&r1), remainder: None },
+            ];
+            let two =
+                sink_combine_bucket(b, 0, STATE_BYTES, &partial_views, &combines).unwrap();
+            assert_eq!(two.nrows(), flat.nrows(), "bucket {b} row count");
+            groups += flat.nrows();
+            let (mut sa, mut sb) = ([0u8; 8], [0u8; 8]);
+            for row in 0..flat.nrows() {
+                assert_eq!(
+                    two.row_key_bytes(row, &mut sa).map(<[u8]>::to_vec),
+                    flat.row_key_bytes(row, &mut sb).map(<[u8]>::to_vec),
+                    "bucket {b} row {row} canonical key/order"
+                );
+                assert_eq!(
+                    row_counts(&two, row),
+                    row_counts(&flat, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
+        assert_eq!(groups, 6, "distinct (int8, text) groups across the corpus");
     }
 
     #[test]
@@ -3785,7 +4895,7 @@ mod tests {
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::AvgInt128 { transno: 0 },
-                SinkEmitCol::AvgInt8 { transno: 1 },
+                SinkEmitCol::AvgInt8 { transno: 1, packed: false },
             ],
         };
         let buf = sink_emit_bucket(&plan, &t).unwrap();
@@ -3805,6 +4915,193 @@ mod tests {
             assert_eq!(got, expect);
         }
         assert!(!buf.nulls[1] && !buf.nulls[2]);
+    }
+
+    // avgpack: seed a packed [count, sum] image into a pergroup slot.
+    fn mk_packed(count: i64, sum: i64) -> AggPerGroup {
+        let mut pg = AggPerGroup {
+            trans_value: Datum::null(),
+            trans_value_is_null: false,
+            no_trans_value: false,
+        };
+        // SAFETY: the slot is 16 repr(C) bytes, 8-aligned.
+        unsafe { (&mut pg as *mut AggPerGroup).cast::<[i64; 2]>().write([count, sum]) };
+        pg
+    }
+
+    fn read_packed(pg: &AggPerGroup) -> [i64; 2] {
+        // SAFETY: as mk_packed.
+        unsafe { (pg as *const AggPerGroup).cast::<[i64; 2]>().read() }
+    }
+
+    #[test]
+    fn avgpack_combine_is_self_contained_element_adds() {
+        // Transno 0: byval count; transno 1: PACKED AvgInt8 (avgpack).
+        let combines = vec![
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: false,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::Byval,
+            },
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: true,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::AvgInt8Packed,
+            },
+        ];
+        // The byref-floor kill: packed shapes take NO byref accounting.
+        assert!(!sink_combines_byref(&combines));
+
+        let mut dst = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(4),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            mk_packed(4, 100),
+        ];
+        let src = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(6),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            mk_packed(6, 44),
+        ];
+        unsafe { sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap() };
+        assert_eq!(dst[0].trans_value.as_i64(), 10);
+        assert_eq!(read_packed(&dst[1]), [10, 144]);
+
+        // The all-NULL-input group ({0,0}) combines as C's own zero adds.
+        let mut dz = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(0),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            mk_packed(0, 0),
+        ];
+        let sz = [
+            AggPerGroup {
+                trans_value: Datum::from_i64(0),
+                trans_value_is_null: false,
+                no_trans_value: false,
+            },
+            mk_packed(0, 0),
+        ];
+        unsafe { sink_combine_states(&combines, dz.as_mut_ptr(), sz.as_ptr()).unwrap() };
+        assert_eq!(read_packed(&dz[1]), [0, 0]);
+    }
+
+    #[test]
+    fn avgpack_flush_spill_replay_combine_emit_matches_unpacked() {
+        // Full packed pipeline: worker table -> flush -> spill record ->
+        // replay -> combine -> finalize-at-emit; the emitted NUMERIC image
+        // must byte-equal the UNPACKED (transarray) arm's over the same
+        // integers, and a count == 0 group must finalize to NULL.
+        let combines = vec![
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: false,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::Byval,
+            },
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: true,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::AvgInt8Packed,
+            },
+        ];
+        // Two worker tables, overlapping keys; key 9 sees only NULL inputs
+        // everywhere (packed {0,0} on both sides).
+        let seed = |rows: &[(i64, i64, i64)]| -> LaneAggTable {
+            let mut t = mk_table(4);
+            for &(k, c, s) in rows {
+                let pr = t.probe_int(k, t.hash_key_int(k as u64));
+                let states = [
+                    AggPerGroup {
+                        trans_value: Datum::from_i64(c),
+                        trans_value_is_null: false,
+                        no_trans_value: false,
+                    },
+                    mk_packed(c, s),
+                ];
+                // SAFETY: fresh row's state block holds 2 slots.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        states.as_ptr(),
+                        pr.states.cast::<AggPerGroup>(),
+                        2,
+                    );
+                }
+            }
+            t
+        };
+        let mut ta = seed(&[(7, 4, 100), (9, 0, 0)]);
+        let mut tb = seed(&[(7, 6, 44), (9, 0, 0)]);
+        let state_words = STATE_BYTES / 8;
+        // Worker A's epoch goes through the SPILL RECORD (verbatim words);
+        // worker B stays an in-memory flushed run.
+        let run_a = sink_flush_table(&mut ta);
+        let run_b = sink_flush_table(&mut tb);
+        let mut spilled: Vec<SinkRun> = Vec::new();
+        for b in 0..SINK_NBUCKETS {
+            let mut bytes = Vec::new();
+            sink_run_spill_bucket(&run_a, b, &mut bytes);
+            if !bytes.is_empty() {
+                spilled.push(sink_run_from_spill(b, 1, state_words, &bytes).unwrap());
+            }
+        }
+        let locals = [
+            SinkLocalView { spilled: &spilled, runs: &[], remainder: None },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run_b), remainder: None },
+        ];
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            ntails: 0,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::AvgInt8 { transno: 1, packed: true },
+            ],
+        };
+        let mut rows: Vec<(i64, i64, Option<Vec<u8>>)> = Vec::new();
+        for b in 0..SINK_NBUCKETS {
+            let t = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
+            let buf = sink_emit_bucket(&plan, &t).unwrap();
+            for r in 0..buf.nrows {
+                let key = buf.values[r * 3].as_i64();
+                let count = buf.values[r * 3 + 1].as_i64();
+                let avg = if buf.nulls[r * 3 + 2] {
+                    None
+                } else {
+                    let p = buf.values[r * 3 + 2].as_usize();
+                    let lo = buf.arena.as_ptr() as usize;
+                    // Compare through the expected image's length below;
+                    // capture generously (the arena is self-contained).
+                    let len = buf.arena.len() - (p - lo);
+                    Some(
+                        unsafe { core::slice::from_raw_parts(p as *const u8, len) }.to_vec(),
+                    )
+                };
+                rows.push((key, count, avg));
+            }
+        }
+        rows.sort_by_key(|r| r.0);
+        assert_eq!(rows.len(), 2);
+        // Key 7: count 10, avg = int64_avg_div(144, 10) — the UNPACKED
+        // finalfn core's exact image over the same integers.
+        assert_eq!((rows[0].0, rows[0].1), (7, 10));
+        let expect = ::adt_numeric::ops::int64_avg_div(144, 10).unwrap();
+        let got = rows[0].2.as_ref().expect("non-NULL avg");
+        assert_eq!(&got[..expect.as_bytes().len()], expect.as_bytes());
+        // Key 9 (all-NULL inputs, count 0): NULL — C int8_avg's exact gate.
+        assert_eq!((rows[1].0, rows[1].1), (9, 0));
+        assert!(rows[1].2.is_none());
     }
 
     #[test]
@@ -3895,7 +5192,7 @@ mod tests {
             ],
         };
         let locals =
-            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, gid_gen: 0 }) }];
+            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, canon_store: None, gid_gen: 0 }) }];
         let combines = test_combines();
         let mut total_rows = 0usize;
         for b in 0..SINK_NBUCKETS {
@@ -4120,6 +5417,179 @@ mod tests {
         assert_eq!(seen[&(2, b"apple".to_vec())], 3);
         assert_eq!(seen[&(3, b"cherry".to_vec())], 5);
         assert_eq!(seen[&(9, b"zzz".to_vec())], 7);
+    }
+
+    // -- combine16: flat presized merged tables ------------------------------
+
+    /// Row-for-row identity (key, order, states) between two merged tables —
+    /// the combine16 byte gate: entry-set layout/growth must never move a
+    /// row or a state byte.
+    fn assert_merged_identical(a: &LaneAggTable, b: &LaneAggTable, key_words: usize) {
+        assert_eq!(a.nrows(), b.nrows());
+        let state_words = a.state_bytes() / 8;
+        assert_eq!(b.state_bytes() / 8, state_words);
+        for row in 0..a.nrows() {
+            match key_words {
+                0 => {
+                    let (mut sa, mut sb) = ([0u8; 8], [0u8; 8]);
+                    assert_eq!(
+                        a.row_key_bytes(row, &mut sa),
+                        b.row_key_bytes(row, &mut sb),
+                        "row {row} key"
+                    );
+                }
+                2 => assert_eq!(a.row_key_i128(row), b.row_key_i128(row), "row {row} key"),
+                _ => assert_eq!(a.row_key_int(row), b.row_key_int(row), "row {row} key"),
+            }
+            let (pa, pb) = (a.row_states(row).cast_const(), b.row_states(row).cast_const());
+            // SAFETY: live rows; state blocks are state_words u64s.
+            let (va, vb) = unsafe {
+                (
+                    core::slice::from_raw_parts(pa.cast::<u64>(), state_words),
+                    core::slice::from_raw_parts(pb.cast::<u64>(), state_words),
+                )
+            };
+            // AggPerGroup datums for the toy byval corpus are value words —
+            // bit-comparable (byref corpora would need field-wise reads).
+            assert_eq!(va, vb, "row {row} states");
+        }
+    }
+
+    #[test]
+    fn flat_combine_matches_incumbent() {
+        // The roundtrip corpus (runs + remainders + NULL) through both
+        // construction arms, all 256 buckets.
+        let mut t1 = mk_table(64);
+        for k in 0..1000 {
+            bump(&mut t1, Some(k), 1, k);
+        }
+        bump(&mut t1, None, 1, 7);
+        let run1 = sink_flush_table(&mut t1);
+        for k in 500..1200 {
+            bump(&mut t1, Some(k), 1, 2 * k);
+        }
+        bump(&mut t1, None, 2, 3);
+        let part1 = sink_partition_remainder(&t1);
+        let mut t2 = mk_table(64);
+        for k in 300..1500 {
+            bump(&mut t2, Some(k), 1, 3 * k);
+        }
+        let part2 = sink_partition_remainder(&t2);
+        let locals = [
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
+        ];
+        let combines = test_combines();
+        for b in 0..SINK_NBUCKETS {
+            let incumbent =
+                sink_combine_bucket_impl(b, 1, STATE_BYTES, &locals, &combines, false, false)
+                    .unwrap();
+            let flat =
+                sink_combine_bucket_impl(b, 1, STATE_BYTES, &locals, &combines, false, true)
+                    .unwrap();
+            assert_eq!(flat.grow_count(), 0, "bucket {b}: presized flat table grew");
+            assert_eq!(flat.convert_count(), 0, "bucket {b}: flat table converted");
+            assert_merged_identical(&incumbent, &flat, 1);
+        }
+    }
+
+    #[test]
+    fn flat_combine_matches_incumbent_canon() {
+        // The canonical corpus (skewed per-worker intern ids, run +
+        // remainder faces) through both arms — bytes-mode probes carry the
+        // SINK hash, the degeneracy class this lane exists for.
+        let mut w1 = canon_worker(canon_shape_int8_text());
+        for i in 0..40i64 {
+            bump_canon(&mut w1, Some(i % 7), format!("text-{i}").as_bytes(), 1);
+        }
+        let run1 = sink_flush_table_canon(&mut w1);
+        for i in 20..60i64 {
+            bump_canon(&mut w1, Some(i % 5), format!("text-{i}").as_bytes(), 2);
+        }
+        let mut h1 = SinkTableHandle(w1);
+        let part1 = h1.partition_remainder();
+        let mut w2 = canon_worker(canon_shape_int8_text());
+        for i in (0..50i64).rev() {
+            bump_canon(&mut w2, Some(i % 7), format!("text-{i}").as_bytes(), 3);
+        }
+        let mut h2 = SinkTableHandle(w2);
+        let part2 = h2.partition_remainder();
+        let locals = [
+            SinkLocalView {
+                spilled: &[],
+                runs: core::slice::from_ref(&run1),
+                remainder: Some(h1.remainder_view(&part1)),
+            },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(h2.remainder_view(&part2)) },
+        ];
+        let combines = test_combines();
+        for gid in [false, true] {
+            for b in 0..SINK_NBUCKETS {
+                let incumbent =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &locals, &combines, gid, false)
+                        .unwrap();
+                let flat =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &locals, &combines, gid, true)
+                        .unwrap();
+                assert_eq!(flat.grow_count(), 0, "bucket {b}: presized flat table grew");
+                assert_eq!(flat.convert_count(), 0, "bucket {b}: flat table converted");
+                assert_merged_identical(&incumbent, &flat, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn flat_suppresses_constant_top_byte_degeneracy() {
+        // The root-cause proof in miniature: keys whose carried hashes share
+        // one top byte (a combine claim's invariant — sink bucket = hash
+        // top byte). Past TWO_LEVEL_THRESHOLD the incumbent converts
+        // two-level and funnels every member into ONE sub-EntrySet (which
+        // then re-grows); the flat table does neither. Same inserts, same
+        // insertion order, identical read-back.
+        const N: usize = ::lanetable::TWO_LEVEL_THRESHOLD + 20_000;
+        let mk_key = |i: usize| (i as u64).to_le_bytes();
+        // Carried-hash discipline: constant top byte, varying low bits —
+        // the shape probe_bytes sees from a combine claim's run hashes.
+        let mk_hash =
+            |i: usize| (0xABu64 << 56) | (sink_hash(i as u64, 17) & ((1u64 << 56) - 1));
+        let mut incumbent = LaneAggTable::with_config(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            N,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        let mut flat = LaneAggTable::with_flat_capacity(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            N,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        for i in 0..N {
+            let (k, h) = (mk_key(i), mk_hash(i));
+            let pi = incumbent.probe_bytes(&k, h);
+            let pf = flat.probe_bytes(&k, h);
+            assert_eq!(pi.is_new, pf.is_new, "insert {i}");
+            assert!(pi.is_new, "distinct keys");
+        }
+        // Re-probe: every key hits in both.
+        for i in 0..N {
+            let (k, h) = (mk_key(i), mk_hash(i));
+            assert!(!incumbent.probe_bytes(&k, h).is_new, "re-probe {i} (incumbent)");
+            assert!(!flat.probe_bytes(&k, h).is_new, "re-probe {i} (flat)");
+        }
+        assert_eq!(flat.grow_count(), 0, "flat presized table must never grow");
+        assert_eq!(flat.convert_count(), 0);
+        // The incumbent, presized IDENTICALLY, still degrades: the constant
+        // top byte defeats its 256-way presize (two-level at birth for this
+        // hint), so the one live sub-EntrySet re-grows.
+        assert!(incumbent.is_two_level(), "hint above threshold builds two-level");
+        assert!(
+            incumbent.grow_count() > 0,
+            "constant-top-byte inserts must grow the incumbent's single live sub-set"
+        );
+        assert_merged_identical(&incumbent, &flat, 0);
     }
 
     #[test]
@@ -4390,7 +5860,7 @@ mod tests {
             let locals = [SinkLocalView {
                 spilled: core::slice::from_ref(&run1),
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
             }];
             let direct = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
 
@@ -5514,8 +6984,9 @@ mod tests {
             for b in 0..SINK_NBUCKETS {
                 // GID lane forced ON (the default is the measured-off
                 // evidence channel; the law under test is byte-invisibility).
-                let t = sink_combine_bucket_impl(b, 0, STATE_BYTES, locals, &combines, true)
-                    .unwrap();
+                let t =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, locals, &combines, true, true)
+                        .unwrap();
                 let buf = sink_emit_bucket(&plan, &t).unwrap();
                 for row in 0..buf.nrows {
                     let k = buf.values[row * 3].as_i64();

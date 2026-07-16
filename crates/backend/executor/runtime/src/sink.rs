@@ -407,6 +407,15 @@ pub trait SealedParallelSink: Send + Sync {
     /// contract (operator-side errors are recorded out of band and abort
     /// the RG — the M1 run_morsel discipline).
     fn seal(&self, worker: usize, local: Self::Local) -> Self::Sealed;
+    /// Single-threaded post-freeze hook under last-worker-out of the FREEZE
+    /// set: every `seal` call has returned, and this runs on the collected
+    /// sealed values (worker-slot order) strictly before any combine claim
+    /// can observe them (combine deps on the freeze set). The place for
+    /// exactly-once whole-census decisions that the per-slot parallel
+    /// `seal` cannot make (the agg sink's TRUE-TABLE-ADOPT census and
+    /// top-N SEAL-mode resolution). Default: nothing (the distinct sink
+    /// needs no census).
+    fn sealed_ready(&self, _sealed: &mut Vec<Self::Sealed>) {}
     fn partitions(&self) -> u64;
     fn combine(&self, part: u64, sealed: &[Self::Sealed]);
     fn finalize(&self, sealed: &[Self::Sealed]);
@@ -500,6 +509,9 @@ impl<S: SealedParallelSink> TaskSetWork for SealedFreeze<S> {
                 None => {}
             }
         }
+        // Exactly-once whole-census hook, strictly before any combine claim
+        // (single-threaded here by last-worker-out; combine deps=[freeze]).
+        self.0.sink.sealed_ready(&mut sealed);
         *lock(&self.0.sealed) = Some((generation, Arc::new(sealed)));
     }
 }

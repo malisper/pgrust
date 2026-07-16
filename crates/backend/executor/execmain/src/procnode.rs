@@ -1744,6 +1744,19 @@ fn agg_arm<'mcx>(
         }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
+            // bitmap-morsels: the runtime bitmap-heap arm (morselized claims
+            // over the frozen shared bitmap at DOP N). Falls through to the
+            // UNCHANGED fused/per-tuple paths on refuse; when the bitmap was
+            // built and the geometry floor refused, the classic setup
+            // already ran and the fused drive below skips its own. Lane
+            // logic + refuse-set live in `lanev2::runtime_bitmap`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_bitmap_heap_scan(agg, b, estate)?
+                {
+                    return Ok(r);
+                }
+            }
             if agg_fusible_common(agg, estate)
                 && b.scan.ss.qual.is_none()
                 && b.scan.ss.ps_ProjInfo.is_none()

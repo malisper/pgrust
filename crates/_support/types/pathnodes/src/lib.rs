@@ -1323,9 +1323,16 @@ impl<'mcx> Subroot<'mcx> {
 }
 
 // RelOptInfo.amflags bits (C: uint32 amflags in RelOptInfo; bit 0 matches
-// C's AMFLAG_HAS_TID_RANGE, bit 1 is pgrust-only).
+// C's AMFLAG_HAS_TID_RANGE, bits 1-2 are pgrust-only).
 pub const AMFLAG_HAS_TID_RANGE: u32 = 1 << 0;
 pub const AMFLAG_CBSTORE: u32 = 1 << 1;
+/// pgrust-only (q2box lane): every committed row group of the cbstore
+/// part carries exact v7 zero/empty counts (RG_FLAG_ZEROCNT on all RGs) —
+/// the executor's footer META answer can serve zero-count-qual COUNT
+/// shapes (`col <> 0` / `col = 0`) without a scan. Plan-time consumers
+/// (m5_suppress CbPlainAggFold keying) must treat a CLEAR bit as NOT
+/// answerable (v<=6 parts, preserved-RG mixtures, footer-less rels).
+pub const AMFLAG_CBSTORE_ZEROCNT: u32 = 1 << 2;
 
 #[derive(Clone, Debug)]
 pub struct RelOptInfo<'mcx> {

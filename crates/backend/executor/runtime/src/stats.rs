@@ -59,6 +59,27 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     generation_refusals,
     /// Idle worker parks.
     worker_parks,
+    /// Aborted still-QUEUED RGs reaped from the wait queue at abort time
+    /// (M5-4 slot-reclamation fix) instead of waiting for a slot to free.
+    queued_aborts_reaped,
+    /// Stride picks resolved by the session-affinity equal-pass tiebreak
+    /// (M5-4: the pick preferred a slot whose leader session the worker is
+    /// sticky-bound to over an equal-pass lower-index slot).
+    affinity_tiebreaks,
+    /// M5-5 decaying priorities: priority updates applied (one per RG per
+    /// crossed decay quantum until the RG reaches the p_min floor).
+    priority_decays,
+    /// M5+1 pipeline-DAG dispatch: dependency-satisfied pipelines published
+    /// into ADDITIONAL slots (beyond the RG's first/reused slot) — the
+    /// independent-subtree overlap the increment buys.
+    dag_fanout_publishes,
+    /// M5+1: ready pipelines left unpublished for lack of a free slot (they
+    /// re-publish when one of the query's own pipelines finishes — the RG
+    /// always retains a slot while work remains, so nothing strands).
+    dag_ready_deferred,
+    /// M5+1: stride picks resolved by the within-query dependency-depth
+    /// refinement (equal pass, same query — deeper pipeline preferred).
+    dag_depth_picks,
 );
 
 counters!(RgStats, RgStatsSnapshot;

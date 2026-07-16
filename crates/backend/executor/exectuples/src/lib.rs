@@ -9,7 +9,10 @@ extern crate alloc;
 
 mod batch;
 mod deform;
+mod domain_work;
 mod slots;
+
+pub use domain_work::{domain_work_take, domain_work_tick};
 
 pub use batch::{
     for_each_live, for_each_live_onebody, soa_classify_row, soa_deform_columns, soa_stage_varkey,

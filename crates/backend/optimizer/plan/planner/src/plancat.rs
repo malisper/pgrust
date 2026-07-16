@@ -366,6 +366,16 @@ pub fn get_relation_info<'mcx>(
         } else {
             PgVec::new_in(run.mcx)
         };
+        // Meta zero-count answerability (q2box lane): every committed RG
+        // carries v7 zero/empty counts. Consumed by m5_suppress's
+        // CbPlainAggFold keying — a qualed count-only shape may only be
+        // suppressed to serial when the footer META answer can actually
+        // serve it (v<=6-lineage banks measured 5x serial-instead-of-
+        // Gather otherwise). Served from the session part cache (one flag
+        // walk per cached Part lookup; the footer serves above already
+        // pay the cache probe).
+        let zerocnt_all = is_cbstore
+            && ::tableam::cbstore_footer_zerocnt_all(&relation)?.unwrap_or(false);
         let r = run.root.rel_mut(rel);
         r.serverid = 0;
         r.fdwroutine = None;
@@ -373,6 +383,9 @@ pub fn get_relation_info<'mcx>(
             // cbstore refuses TID/TID-range and bitmap scans; the flag also
             // routes Gather costing to cbstore_parallel_setup_cost.
             r.amflags |= types_pathnodes::AMFLAG_CBSTORE;
+            if zerocnt_all {
+                r.amflags |= types_pathnodes::AMFLAG_CBSTORE_ZEROCNT;
+            }
             r.cbstore_sorted_attnos = sorted_attnos;
             r.cbstore_col_bytes = col_bytes;
             r.cbstore_col_ndv = col_ndv;

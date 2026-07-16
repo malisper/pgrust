@@ -66,6 +66,7 @@ use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea, trace_feed};
@@ -152,6 +153,19 @@ pub(super) struct RuntimeDistinctShared {
     /// M3.5 spill arm: the engagement's spill set (None = spill disabled →
     /// budget crossings refuse exactly as before).
     spill_set: Option<Arc<::spillset::SpillSet>>,
+    /// LOCALITY CAP (distinct-sidecar-cap lane — the q36-radix medicine on
+    /// the DISTINCT-sidecar working set): Some(bytes) = a worker whose
+    /// per-group distinct sets hold >= cap bytes drains them through the
+    /// EXISTING spill-epoch machinery (256-partition contiguous value
+    /// records) and resets the sets, keeping every accept-side set probe
+    /// cache-resident; the combine's per-partition replay re-dedups
+    /// cross-epoch duplicates into cache-resident bucket tables. Resolved
+    /// once at engage: DOP>1 AND the spill arm is live (the epoch drain is
+    /// the pressure law's own machinery — a locality flush is just an early
+    /// epoch). None = today's behavior exactly (budget-crossing epochs
+    /// only). The pressure law itself is untouched: a real budget crossing
+    /// still spills (or refuses) through the same path.
+    locality_cap: Option<usize>,
     /// Spill observability (gate-record counters, the R4 line).
     spill_epochs: AtomicU64,
     spilled_bytes: AtomicU64,
@@ -280,10 +294,13 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
     type Sealed = DistinctSealed;
 
     fn fork(&self, _worker: usize) -> DistinctSinkLocal {
-        DistinctSinkLocal {
-            pd: PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget),
-            spill: None,
+        let pd = PdSinkLocal::new(Arc::clone(&self.spec), self.spec.worker_budget);
+        if _worker == 0 && pd.batch_insert_armed() {
+            // batch-insert lane engagement trace (e2e leg pin; once per
+            // engagement — worker 0's fork).
+            trace_feed("runtime-distinct: batched set-insert armed");
         }
+        DistinctSinkLocal { pd, spill: None }
     }
 
     fn accept_local(
@@ -605,6 +622,10 @@ impl RuntimeDistinctShared {
         router.flush()?;
         // In-memory tables merge EXACTLY ONCE, before any slice.
         let mut merger = PdBucketMerger::new(&self.spec);
+        // dedupsub reserve wave: spilled records can never reference a
+        // group the in-memory remainders lack (exactly-once law above), so
+        // the in-memory pre-count bounds the merged bucket's group count.
+        merger.seed_groups(groups);
         for s in sealed {
             merger.absorb(&s.table, b);
         }
@@ -898,6 +919,11 @@ struct PdAcceptSink<'a> {
     tmp: EcxtId,
     reset_tmp: bool,
     crossed: bool,
+    /// Locality-cap memo: the cap is armed on the engagement but THIS
+    /// Local's shape refused the epoch drain (not spill-eligible / arm
+    /// off) — stop re-probing per row; behavior degrades to today's
+    /// budget-only cadence exactly.
+    locality_denied: bool,
     /// EA-on-morsels row funnel (Some only under EXPLAIN ANALYZE): scanned
     /// tallied window-grain in accept_batch, survivors per emitted row.
     tally: Option<&'a mut EaRowTally>,
@@ -911,7 +937,14 @@ impl PdAcceptSink<'_> {
     /// values so accept continues bounded. `Ok(false)` = refused (arm off,
     /// or a shape/economics face we cannot spill exactly): the caller falls
     /// through to the phase-1 Crossed abort, fail-closed.
-    fn try_spill_epoch(&mut self) -> PgResult<bool> {
+    ///
+    /// `locality` = the flush was cap-triggered, not budget-triggered
+    /// (distinct-sidecar-cap lane): the group-table-dominated
+    /// worthwhileness gate is vacated — the cap on `spill_freeable_bytes`
+    /// IS the worthwhileness predicate (the flush releases exactly the
+    /// capped set memory by construction) — and a refusal is benign (the
+    /// caller keeps accepting under the budget law; never a crossing).
+    fn try_spill_epoch(&mut self, locality: bool) -> PgResult<bool> {
         // Every refusal below names its branch on the trace channel (the agg
         // arm's refuse(why) pattern — inc-3a followup: the battery -82184
         // fail-closed was invisible without a reason line).
@@ -934,7 +967,7 @@ impl PdAcceptSink<'_> {
         // deterministically refused legitimate value-dominated shapes (the
         // q9-class lockstep corpus; see the PdBuilder doc).
         let budget = self.shared.spec.worker_budget;
-        if pd.pd_spill_freeable_bytes() < budget / 4 {
+        if !locality && pd.pd_spill_freeable_bytes() < budget / 4 {
             trace_feed("runtime-distinct: spill refused (group-table-dominated crossing)");
             return Ok(false);
         }
@@ -958,6 +991,12 @@ impl PdAcceptSink<'_> {
         self.shared
             .spilled_bytes
             .fetch_add(file.spilled_bytes() - before, Ordering::Relaxed);
+        if locality {
+            trace_feed(&format!(
+                "runtime-distinct: locality cap engaged (cap={})",
+                self.shared.locality_cap.unwrap_or(0)
+            ));
+        }
         Ok(true)
     }
 }
@@ -975,8 +1014,23 @@ impl<'mcx> Sink<'mcx> for PdAcceptSink<'_> {
         if self.reset_tmp {
             estate.reset_expr_context(self.tmp);
         }
-        if crossed && !self.try_spill_epoch()? {
-            self.crossed = true;
+        if crossed {
+            if !self.try_spill_epoch(false)? {
+                self.crossed = true;
+            }
+        } else if let Some(cap) = self.shared.locality_cap {
+            // Locality flush (distinct-sidecar-cap): bound the per-worker
+            // set working footprint at `cap` bytes through an EARLY spill
+            // epoch. A refusal (shape not spill-eligible) is memoized and
+            // benign — accept continues under the budget law exactly as
+            // today. One field load + compare per row when disarmed-by-shape
+            // or under the cap.
+            if !self.locality_denied
+                && self.local.pd.pd_spill_freeable_bytes() >= cap
+                && !self.try_spill_epoch(true)?
+            {
+                self.locality_denied = true;
+            }
         }
         Ok(SinkFeed::NeedMore)
     }
@@ -1073,6 +1127,7 @@ impl RuntimeDistinctShared {
                         tmp,
                         reset_tmp,
                         crossed: false,
+                        locality_denied: false,
                         tally: ea.then_some(&mut ipb.rows),
                     };
                     let fed = drain_pipeline(
@@ -1160,6 +1215,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeDistinct
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     let _exit = super::runtime_agg::ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("distinct");
     // F1 fail-closed accounting: a helper that cannot participate must NEVER
     // vanish silently — every early exit below counts itself as a refusal
     // (the leader's started==0 && refused>=launched probe is its fallback
@@ -1351,6 +1410,38 @@ fn distinct_spill_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
+/// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): unset/0 = OFF (the
+/// budget-epoch cadence exactly — the DEFAULT), N = working-set bound
+/// (floored at 64KB). Engagement is further gated at engage(): DOP>1 AND
+/// the spill arm live (the epoch drain is the spill machinery; a dead arm
+/// means no flush target, and a single Local has no duplicate-group tax to
+/// convert — the q36-radix DOP1 law).
+///
+/// MEASURED REFUSAL as a default (2026-07-14 q9/q10/q14 @100M mt16 cap
+/// ladder, notes/distinct-sidecar-cap.md): every cap point 2MB-32MB is
+/// +17..21% WORSE than off on q9/q10 (hot 0.79/0.93 -> 0.94-0.99/
+/// 1.09-1.13) and cap-FLAT — no knee. The distinct-sidecar working set is
+/// not a latency lever there: at matched memory the baseline never spills
+/// and its sets merge ONCE through the freeze partition law, while the
+/// locality regime adds epoch write + full replay re-probe for near-unique
+/// (group,value) pairs whose accept probes were not DRAM-bound enough to
+/// repay (the bandwidth study's instruction-parity reading). Outputs
+/// byte-MATCHED on all four cap arms at 100M — the mechanism is correct,
+/// just unprofitable; the env channel stays for shapes that may differ
+/// (C3/q36-radix measured-refusal precedent).
+fn distinct_locality_cap() -> Option<usize> {
+    static N: OnceLock<Option<usize>> = OnceLock::new();
+    *N.get_or_init(|| {
+        match std::env::var("PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
+            None | Some(0) => None,
+            Some(c) => Some(c.max(64 << 10)),
+        }
+    })
+}
+
 /// Runtime-sink per-Local budget (bytes) — the FULL chartered R3 envelope:
 /// `work_mem × hash_mem_multiplier` per participant (C's
 /// `get_hash_memory_limit`, m2-sinks.md §5 R3 — "each Local gets the full
@@ -1396,6 +1487,20 @@ fn distinct_topn_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET` kill switch (default ON): 0/off
+/// restores the serial-halved budget-fit admission exactly (the K2 100M
+/// budget refusal — q14@100M falls back to the vector's non-runtime arm;
+/// the rollback/A-B attribution channel for the dop-budget face).
+fn distinct_topn_dopbudget_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET").as_deref(),
             Ok("0") | Ok("off")
         )
     })
@@ -1501,6 +1606,9 @@ fn refused(
     node_id: i32,
     reason: &'static str,
 ) {
+    // M5-1: every distinct-arm refusal feeds the router's consolidated
+    // taxonomy alongside the trace / EA transparency line.
+    router::tick_refused(ArmClass::Distinct, reason);
     lane_trace(&format!("runtime-distinct: refused ({reason})"));
     if ea {
         estate.runtime_ea_record_refusal(node_id, "distinct", reason);
@@ -1522,7 +1630,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_distinct_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Distinct);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
@@ -1532,6 +1642,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     if *rd_shape_refused {
         return Ok(None);
     }
+    router::tick(ArmClass::Distinct, ArmCounter::Offered);
     lane_trace("runtime-distinct: probed");
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
@@ -1559,6 +1670,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         return Ok(None);
     }
     if estate.es_epq_active {
+        router::tick_refused(ArmClass::Distinct, "epq");
         return Ok(None);
     }
     // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
@@ -1586,13 +1698,27 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // near-unique class's conversion; hashgrouped.rs economics doc).
     let paremit_cols =
         if distinct_paremit_enabled() { ::nodeagg::pd_paremit_cols(agg) } else { None };
-    if !::nodeagg::agg_hashgroup_admissible(agg)
-        || !::nodeagg::agg_hashgroup_economical_sink(
-            agg,
-            super::pardistinct_force(),
-            sort.plan.plan.plan_rows,
-            paremit_cols.is_some(),
-        )
+    if !::nodeagg::agg_hashgroup_admissible(agg) {
+        refused(estate, ea, node_id, "hashgroup admission/economics");
+        return Ok(None);
+    }
+    // Economics, serial-halved fit term first (the pre-lane sizing): a PASS
+    // here is final. A FAIL is only provisional when the K2 dop-budget face
+    // (economical_sink doc) can still apply — the paremit/topn probes below
+    // are plan reads only, so deferring the refusal costs nothing and keeps
+    // every non-K2 shape refusing exactly as before, same reason string.
+    let econ_serial = ::nodeagg::agg_hashgroup_economical_sink(
+        agg,
+        super::pardistinct_force(),
+        sort.plan.plan.plan_rows,
+        paremit_cols.is_some(),
+        None,
+    );
+    if !econ_serial
+        && !(distinct_topn_dopbudget_enabled()
+            && distinct_topn_enabled()
+            && distinct_spill_enabled()
+            && paremit_cols.is_some())
     {
         refused(estate, ea, node_id, "hashgroup admission/economics");
         return Ok(None);
@@ -1625,6 +1751,13 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // partial still shares the envelope.
     if let Some(s) = Arc::get_mut(&mut spec) {
         s.worker_budget = runtime_distinct_worker_budget();
+        // dedupsub I3: per-worker row-share expectation for the distinct-set
+        // projection reserve (plan's post-qual scan estimate / dop; 0 stays
+        // inert). An estimate error only moves probe-table GEOMETRY — the
+        // ratio clamp and expected-cap bound in flush_staged bound the
+        // overshoot, and the capacity-based budget metering stays honest.
+        s.expected_worker_rows =
+            (sort.plan.plan.plan_rows / f64::from(dop.max(1))).max(0.0) as u64;
     }
     if spec.max_att > desc.natts {
         refused(estate, ea, node_id, "att bound");
@@ -1650,6 +1783,28 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         (Some(_), Some(cols)) => distinct_topn_arm(agg, estate, &spec, cols),
         _ => None,
     };
+    // Deferred economics (the K2 dop-budget face — economical_sink doc): a
+    // serial-halved-term FAIL above survives only if the full bounded-memory
+    // stack actually resolved (live paremit recipe + armed K2 selection) AND
+    // the estimate fits the sink's real union bound (per-Local R3 envelope ×
+    // dop — the same bound the combine enforces dynamically; splits + value
+    // spill bound each partition, the selection bounds the leader).
+    if !econ_serial {
+        let admit = paremit.is_some()
+            && topn.is_some()
+            && ::nodeagg::agg_hashgroup_economical_sink(
+                agg,
+                super::pardistinct_force(),
+                sort.plan.plan.plan_rows,
+                true,
+                Some((runtime_distinct_worker_budget(), dop as u32)),
+            );
+        if !admit {
+            refused(estate, ea, node_id, "hashgroup admission/economics");
+            return Ok(None);
+        }
+        lane_trace(&format!("runtime-distinct: topn dop-budget admission (dop={dop})"));
+    }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
@@ -1715,6 +1870,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "granule floor");
         return Ok(None);
     }
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
@@ -1763,6 +1921,13 @@ fn engage<'mcx>(
     } else {
         None
     };
+    // Locality cap (distinct-sidecar-cap lane): resolved once per
+    // engagement — DOP>1 with a live spill arm only (fn doc).
+    let locality_cap = if dop > 1 && spill_set.is_some() {
+        distinct_locality_cap()
+    } else {
+        None
+    };
 
     let payload = Arc::new(RuntimeDistinctShared {
         rt,
@@ -1789,6 +1954,7 @@ fn engage<'mcx>(
         crossed: AtomicBool::new(false),
         merged_bytes: AtomicUsize::new(0),
         spill_set,
+        locality_cap,
         spill_epochs: AtomicU64::new(0),
         spilled_bytes: AtomicU64::new(0),
         combine_splits: AtomicU64::new(0),
@@ -1811,9 +1977,18 @@ fn engage<'mcx>(
     });
 
     xact::EnterParallelMode();
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::Distinct, ArmCounter::Engaged);
     let engaged =
         engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, spec, order);
     xact::ExitParallelMode();
+    if let Ok(r) = &engaged {
+        router::tick(
+            ArmClass::Distinct,
+            if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+        );
+    }
     engaged
 }
 
@@ -1836,6 +2011,10 @@ fn engage_ceremony<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_distinct_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
+    // SinkProbe surface (M5-1, the §3.5 lane_trace remainder): captured out
+    // of the ceremony body and reported at RG completion.
+    let mut sink_probe: Option<Arc<runtime::SinkProbe>> = None;
+    let probe_out = &mut sink_probe;
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
@@ -1858,18 +2037,19 @@ fn engage_ceremony<'mcx>(
             starts: Arc::new(starts),
             coalesce: false,
         });
-        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
+        let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
             runtime::sealed_sink_tasksets(
                 Arc::clone(payload),
                 source,
                 rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
                 0,
             );
+        *probe_out = Some(probe);
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets: vec![accept, freeze, combine],
-        });
+        }, router::session_affinity_token());
         payload
             .rg
             .set(rg.downgrade())
@@ -2020,6 +2200,12 @@ fn engage_ceremony<'mcx>(
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
+
+    // SinkProbe report (M5-1): stale_locals_dropped / combine_refusals now
+    // have a surface — router counters + a lane_trace line per engagement.
+    if let Some(probe) = &sink_probe {
+        router::sink_probe_complete(ArmClass::Distinct, probe);
+    }
 
     match outcome {
         EngageOutcome::Fallback => {

@@ -5,7 +5,7 @@
 //! precedent).
 //!
 //! Phase-I MORSELIZATION (docs/design/vacuum-morsels.md, inc-2): behind
-//! `PGRUST_RUNTIME_VACUUM=1` (requires `PGRUST_RUNTIME=1`; default OFF) the
+//! the morsel arm (default ON since train-21; `PGRUST_RUNTIME_VACUUM=0` kills, requires the runtime master switch) the
 //! heap scan runs as SCAN task sets on the morsel runtime — see [`morsels`].
 //! The per-block bodies below are shared verbatim between the serial arm and
 //! the morsel workers: they take a read-only [`ScanEnv`] + the order-free
@@ -1097,6 +1097,31 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
 
     let dead_tids = collect_dead_tids(vacrel);
 
+    // W1 forensics (trace-gated): the snapshot the index-side reap-membership
+    // binary search (nbtree tid_is_member) consumes MUST be strictly
+    // ascending under ItemPointerCompare; report length + the first
+    // violation so a phantom-index-entry recurrence self-classifies
+    // (family A: store short of the lpdead fold = worker collection miss;
+    // family B: full-but-unsorted snapshot or a per-index removed shortfall
+    // = snapshot/search miss).
+    if morsels::vtrace_enabled() {
+        let mut first_bad: i64 = -1;
+        for i in 1..dead_tids.len() {
+            if ::types_tuple::itemptr::ItemPointerCompare(&dead_tids[i - 1], &dead_tids[i]) >= 0 {
+                first_bad = i as i64;
+                break;
+            }
+        }
+        morsels::vtrace(&format!(
+            "w1 index snapshot n={} store_items={} num_index_scans={} strict_sorted={} first_bad={}",
+            dead_tids.len(),
+            vacrel.dead_items_info.num_items,
+            vacrel.num_index_scans,
+            first_bad < 0,
+            first_bad,
+        ));
+    }
+
     if vacrel.pvs.is_none() {
         for idx in 0..vacrel.nindexes {
             let istat = vacrel.indstats[idx].take();
@@ -1111,6 +1136,15 @@ fn lazy_vacuum_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<bool> {
                 };
                 vac_bulkdel_one_index(vacrel.mcx, &ivinfo, istat, &dead_tids)?
             };
+            if morsels::vtrace_enabled() {
+                morsels::vtrace(&format!(
+                    "w1 index bulkdel idx={} rel={} tuples_removed={} num_index_tuples={}",
+                    idx,
+                    vacrel.indrels[idx].name(),
+                    new_istat.tuples_removed,
+                    new_istat.num_index_tuples,
+                ));
+            }
             vacrel.indstats[idx] = Some(new_istat);
 
             pgstat_progress_update_param(PROGRESS_VACUUM_INDEXES_PROCESSED, (idx + 1) as i64);
@@ -1236,6 +1270,7 @@ fn update_relstats_all_indexes(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> 
 /// today); exercised directly by tests.
 pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
     let mut vacuumed_pages: BlockNumber = 0;
+    let mut vacuumed_items: u64 = 0; // W1 forensics (trace-gated report)
     let mut vmbuffer = VmBuffer::new();
 
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_VACUUM_HEAP);
@@ -1268,9 +1303,19 @@ pub fn lazy_vacuum_heap_rel(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
         bufmgr_seams::release_buffer::call(buf)?;
         freespace::RecordPageWithFreeSpace(vacrel.rel, blkno, freespace)?;
         vacuumed_pages += 1;
+        vacuumed_items += num_offsets as u64;
     }
     drop(iter);
     vacrel.dead_items = Some(dead_items);
+    if morsels::vtrace_enabled() {
+        morsels::vtrace(&format!(
+            "w1 reap done rel={} pages={} items={} store_items={}",
+            vacrel.rel.name(),
+            vacuumed_pages,
+            vacuumed_items,
+            vacrel.dead_items_info.num_items,
+        ));
+    }
     debug_assert!(
         vacrel.num_index_scans > 1
             || (vacrel.dead_items_info.num_items as u64 == vacrel.folds.counters.lpdead_items

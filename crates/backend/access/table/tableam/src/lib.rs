@@ -1002,6 +1002,14 @@ pub fn cbstore_footer_col_bytes(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>
     ::cbstore::footer_col_bytes(rel)
 }
 
+// Every committed RG carries exact v7 zero/empty counts (q2box lane): the
+// plan-time answerability probe for the executor's meta zero-count qual
+// arm. None while the table has no committed footer; Some(false) on
+// v<=6-lineage parts (incl. preserved-RG mixtures).
+pub fn cbstore_footer_zerocnt_all(rel: &Relation<'_>) -> PgResult<Option<bool>> {
+    ::cbstore::footer_zerocnt_all(rel)
+}
+
 // cbstore's AM-specific sample acquisition (C table_relation_analyze lets the
 // AM supply the whole acquirefunc): row-group enumeration + random row fetch.
 pub fn cbstore_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {
@@ -1030,7 +1038,7 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
             if std::env::var_os("PGRUST_AGG_BATCH_DEBUG").is_some() {
                 let (dfb, dft, dfe, dfa) = ::cbstore::dict_frame_stats();
                 eprintln!(
-                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}|dictlazy_builds={dfb}|dict_frames={dft}|dict_frames_ensured={dfe}|dict_ensure_alls={dfa}",
+                    "CBSCAN|windows={}|granules_scanned={}|granules_pruned={}|blocks_pruned={}|granules_bound_skipped={}|adaptive_probe_reverts={}|granules_meta={}|granules_bloom_pruned={}|rgs_readahead={}|rgs_claim_readahead={}|dictlazy_builds={dfb}|dict_frames={dft}|dict_frames_ensured={dfe}|dict_ensure_alls={dfa}",
                     c.windows_staged,
                     c.granules_scanned,
                     c.granules_pruned,
@@ -1039,7 +1047,8 @@ pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
                     c.adaptive_probe_reverts,
                     c.granules_meta,
                     c.granules_bloom_pruned,
-                    c.rgs_readahead
+                    c.rgs_readahead,
+                    c.rgs_claim_readahead
                 );
             }
             if (c.rs_base.rs_flags & SO_TEMP_SNAPSHOT) != 0 {
@@ -1475,6 +1484,15 @@ pub fn table_scan_condcache_store(scan: &mut TableScanDesc<'_>, sel: &[u64]) {
     match scan {
         TableScanDesc::Heap(_) => {}
         TableScanDesc::Cbstore(c) => c.condcache_store(sel),
+    }
+}
+
+/// Fold the scan's per-scan condition-cache stat cells into the process
+/// counters (before a `condcache_stats` read; scan teardown folds anyway).
+pub fn table_scan_condcache_fold_stats(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(_) => {}
+        TableScanDesc::Cbstore(c) => c.condcache_fold_stats(),
     }
 }
 
