@@ -159,7 +159,11 @@ fn name_datum_str<'a>(d: Datum) -> &'a str {
 // the superuser fast path; relkind is re-checked on the opened rel.
 pub fn renametrig<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()> {
     if !superuser::superuser_arg(miscinit::GetUserId())? {
-        panic!("unported: ALTER TRIGGER owner check for non-superusers");
+        // unported: ALTER TRIGGER owner check for non-superusers
+        return Err(err(
+            "ALTER TRIGGER ... RENAME as a non-superuser is not supported yet".to_string(),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
     let rvn = stmt.relation.expect("RenameStmt.relation");
     let rv = rel_vocab::RangeVar {
