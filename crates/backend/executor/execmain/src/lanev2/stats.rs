@@ -43,8 +43,16 @@
 //!     node per (re)init, like the seqscan class); structural child refusals
 //!     once per memoized verdict, dynamic EPQ/backward/parallel gates per
 //!     offered call.
-//!   * `ProjectSet` — never owned (a documented wholesale refuse, design §4);
-//!     one REFUSED tick per offered call.
+//!   * `ProjectSet` — at default config never owned (the documented
+//!     wholesale refuse, design §4): one REFUSED tick per offered call,
+//!     unchanged. With the default-OFF `PGRUST_LANE_V2_ROWMODE` knob ON
+//!     (Phase-0 row-mode facility, rowmode.rs), the admitted
+//!     `ProjectSet ← childless Result` shape ticks OWNED once per offered
+//!     pull the row-mode drive owns (the per-pull decision cadence of the
+//!     index classes); refusals stay per offered call. NOTE for a future
+//!     default flip: ProjectSet compositions then bypass `result_arm`, so
+//!     the `result` class's owned floor must be reseeded alongside the
+//!     `projectset` one (see notes/ws-e-rowmode-ledger.md).
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but

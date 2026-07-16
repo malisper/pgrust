@@ -1484,12 +1484,15 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2: ProjectSet is REFUSED wholesale — a documented
-    // refuse-set entry (the SRF multi-call protocol is per-tuple stateful and
-    // has no lane-owned child shape to chain onto; see the ProjectSet section
-    // of `lanev2.rs`). Accounting tick only; always the unchanged body.
+    // Lane-executor-v2 dispatch hook (row-mode facility, Phase 0): the
+    // default-OFF `PGRUST_LANE_V2_ROWMODE` shape (`ProjectSet ← childless
+    // Result`, the no-FROM SRF tlist) — knob OFF this ticks the documented
+    // wholesale refuse exactly as before and falls through to the UNCHANGED
+    // exec_project_set. Lane logic + refuse-set in `lanev2` (rowmode.rs).
     if crate::lanev2::enabled() {
-        crate::lanev2::refuse_project_set();
+        if let Some(r) = crate::lanev2::try_own_project_set(ps, estate)? {
+            return Ok(r);
+        }
     }
     exec_project_set(ps, estate)
 }
