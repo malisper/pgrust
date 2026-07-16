@@ -4,7 +4,7 @@
 //! WHAT THE ROUTER IS (Option A, §2.1): one executor-startup decision layer
 //! over the SERIAL plan that owns (1) the engine selection — legacy Gather
 //! machinery vs runtime engagement vs serial, (2) the ARMING source for the
-//! six runtime arm engagements (cbstore scan, heap source, agg sink,
+//! six runtime arm engagements (pgrcolumnar scan, heap source, agg sink,
 //! distinct sink, hash join, sort), and (3) the consolidated
 //! engagement/refusal/win-loss telemetry those arms feed. The six per-arm
 //! fail-closed admission walks REMAIN the router's per-class predicates —
@@ -78,7 +78,7 @@ use std::sync::{Mutex, OnceLock};
 /// The six runtime arm classes the router dispatches to (§1.1 rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ArmClass {
-    /// cbstore scan→fold/census TaskSets (M1-a + rowdrive).
+    /// pgrcolumnar scan→fold/census TaskSets (M1-a + rowdrive).
     Scan = 0,
     /// heap block-range source (M1-b; engages through the scan arm's entry,
     /// classed apart because admission economics and EA policy differ).

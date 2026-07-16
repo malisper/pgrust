@@ -5488,7 +5488,7 @@ fn select_scan_proj_expr_key(state: &ExprState<'_>) -> Option<crate::steps::Scan
 }
 
 // ===========================================================================
-// Lane qual shape extraction (the CbstoreSource wiring tranche; harvested
+// Lane qual shape extraction (the PgrcolumnarSource wiring tranche; harvested
 // from the old lane-executor line). `lane_scan_qual` decodes a scan qual's
 // compiled step stream into the structural clause vocabulary laneexec's
 // fail-closed translate consumes (laneexec re-exports these types as its

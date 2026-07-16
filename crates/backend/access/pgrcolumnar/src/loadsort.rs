@@ -12,7 +12,7 @@
 //! Run file bytes: repeated entries `[key: KW][rowlen: u32 le][rowbytes]`.
 //! Row bytes (`RowCodec`, by ColType): I16 2B le | I32/Date 4B le |
 //! I64/Timestamp 8B le | Text u32 le payload len + payload. NULLs never
-//! reach a run (cbstore refuses NULLs at ingest).
+//! reach a run (pgrcolumnar refuses NULLs at ingest).
 
 use crate::format::ColType;
 use crate::varlena_bytes;

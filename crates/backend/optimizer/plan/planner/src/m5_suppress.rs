@@ -28,7 +28,7 @@
 //! test below; the separate bootstrap TSV is deleted). ROW-FLIP TRANCHE 1
 //! (m5-integration-r2): the original seven bootstrap classes plus TWO
 //! flipped rows — CbTopnBoundedIntKeys (bounded top-N, sort arm) and
-//! CbHashJoinPlainAgg (plain agg over one two-cbstore-rel join, hashjoin
+//! CbHashJoinPlainAgg (plain agg over one two-pgrcolumnar-rel join, hashjoin
 //! arm) — route runtime; living-matrix rows the probe cannot key at plan
 //! time carry probe_key "-" and keep Gather regardless of their route_to
 //! flag (the bootstrap-narrowing law — safe false negatives, upgraded per
@@ -55,7 +55,7 @@ use types_nodes::parsenodes::{Query, RTEKind};
 use types_nodes::primnodes::{Aggref, Var, AGGKIND_NORMAL};
 use types_nodes::{CmdType, LimitOption, Node};
 use crate::run::PlannerRun;
-use types_pathnodes::{AMFLAG_CBSTORE, AMFLAG_CBSTORE_ZEROCNT};
+use types_pathnodes::{AMFLAG_PGRCOLUMNAR, AMFLAG_PGRCOLUMNAR_ZEROCNT};
 
 // ---------------------------------------------------------------------------
 // The bootstrap coverage classes (matrix rows the probe can key).
@@ -68,23 +68,23 @@ use types_pathnodes::{AMFLAG_CBSTORE, AMFLAG_CBSTORE_ZEROCNT};
 /// walk owns their enforcement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoverClass {
-    /// cbstore seq-scan folds / plain agg (scan arm + plain-agg sink):
+    /// pgrcolumnar seq-scan folds / plain agg (scan arm + plain-agg sink):
     /// whitelisted order-insensitive-exact aggregates, no GROUP BY.
     CbPlainAggFold,
-    /// hashed GROUP BY over cbstore, int-family NOT-NULL-agnostic Var keys
+    /// hashed GROUP BY over pgrcolumnar, int-family NOT-NULL-agnostic Var keys
     /// (walk enforces nullable-image refusal); spill-ELIGIBLE row.
     /// groupby_high stays legacy via the group-estimate floor (§10).
     CbGroupedAggIntKeys,
-    /// hashed GROUP BY over cbstore with exactly one text/varchar key
+    /// hashed GROUP BY over pgrcolumnar with exactly one text/varchar key
     /// (default collation) among the Var keys; spill-DISABLED row
     /// (§2.4 law 2c: canonical-bytes engagements refuse under memory
     /// pressure — expected, serial-correct).
     CbGroupedAggTextKey,
-    /// GROUP BY + ORDER BY <whitelisted agg> LIMIT n over cbstore (the
+    /// GROUP BY + ORDER BY <whitelisted agg> LIMIT n over pgrcolumnar (the
     /// m3-sort-b combine-phase top-N composition, q17/q18/q31–33 family);
     /// §2.4 law 2b degrade rules are arm-internal.
     CbGroupedAggTopN,
-    /// Grouped COUNT(DISTINCT <int Var>) over cbstore, int-family GROUP
+    /// Grouped COUNT(DISTINCT <int Var>) over pgrcolumnar, int-family GROUP
     /// keys (the runtime distinct sink's sorted-distinct feed — CB q9/q10
     /// class); plain whitelisted aggs may ride alongside; single-agg-key
     /// ORDER BY + LIMIT composition is walk-admitted. RE-KEYED at
@@ -100,13 +100,13 @@ pub enum CoverClass {
     /// plain heap rel, no quals, int-family args (text-first prefix and
     /// min(text) are walk refusals, so the probe never keys them).
     HeapCmpFoldPrefix,
-    /// M5-3 row flip 1 (m5-integration-r2): bounded top-N over cbstore
+    /// M5-3 row flip 1 (m5-integration-r2): bounded top-N over pgrcolumnar
     /// (sort arm shape a) — ORDER BY int-family Var keys + LIMIT without
     /// OFFSET/WITH TIES, all-Var tlist. Full sort (no LIMIT) stays the
     /// uncovered fullsort-shape-b row.
     CbTopnBoundedIntKeys,
     /// M5-3 row flip 2 (m5-integration-r2): plain (ungrouped) whitelisted
-    /// aggregation over ONE explicit two-cbstore-relation join (the
+    /// aggregation over ONE explicit two-pgrcolumnar-relation join (the
     /// hashjoin arm's agg-over-HashJoin shape): single JoinExpr of a
     /// phase-1/right family, >=1 hashjoinable int-family equi clause,
     /// NEITHER rel indexed (index paths could cost a serial merge/NL plan
@@ -117,7 +117,7 @@ pub enum CoverClass {
     /// classify uncovered — the m5p1-flagged SQL admission gap.
     CbHashJoinPlainAgg,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
-    /// FOOTER-ANSWERABLE aggregation over one plain cbstore rel with NO
+    /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
     /// quals — count(*)/count(col), min/max over bare int-family Vars,
     /// and sum/avg over int2/int4 AFFINE transforms (`v±k`, `v*k`; the
     /// lanefold classify_arg admission, divk==1 only — classify_meta
@@ -517,7 +517,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
         return Ok(false);
     };
-    let is_cb = run.root.rel(rel_id).amflags & AMFLAG_CBSTORE != 0;
+    let is_cb = run.root.rel(rel_id).amflags & AMFLAG_PGRCOLUMNAR != 0;
     let rel_rows = run.root.rel(rel_id).rows.max(0.0);
     let rel_pages = f64::from(run.root.rel(rel_id).pages);
     let has_quals = top.quals.is_some();
@@ -533,12 +533,12 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
 
     // --- Aggregate shapes ----------------------------------------------------
     if !parse.hasAggs {
-        // Bounded top-N over cbstore (row flip 1, CbTopnBoundedIntKeys):
+        // Bounded top-N over pgrcolumnar (row flip 1, CbTopnBoundedIntKeys):
         // ORDER BY int-family Var keys + LIMIT, no OFFSET (WITH TIES is
         // prefiltered above), every tlist entry a plain Var on the rel
         // (the sort arm's emit face; junk sort-key entries are Vars too).
         // Full sort (no LIMIT) stays the uncovered fullsort-shape-b row;
-        // heap rels stay uncovered (the arm is cbstore-fusible only).
+        // heap rels stay uncovered (the arm is pgrcolumnar-fusible only).
         if is_cb
             && !parse.sortClause.is_nil()
             && parse.limitCount.is_some()
@@ -584,7 +584,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 // all, through the kernel-qual PREWHERE feed.
                 if has_quals
                     && tlist_all_count_star(parse)
-                    && run.root.rel(rel_id).amflags & AMFLAG_CBSTORE_ZEROCNT == 0
+                    && run.root.rel(rel_id).amflags & AMFLAG_PGRCOLUMNAR_ZEROCNT == 0
                 {
                     return Ok(false);
                 }
@@ -617,7 +617,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
-    // --- Grouped aggregation over cbstore ------------------------------------
+    // --- Grouped aggregation over pgrcolumnar ------------------------------------
     if !is_cb {
         return Ok(false);
     }
@@ -731,7 +731,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
 }
 
 /// Row flip 2 (CbHashJoinPlainAgg): plain whitelisted aggregation over one
-/// explicit two-cbstore-relation join. Strictly narrower than the
+/// explicit two-pgrcolumnar-relation join. Strictly narrower than the
 /// runtime_hashjoin walk (probe ⊂ walk, risk P1) PLUS two planner-choice
 /// guards the walk cannot express — the probe must also be confident the
 /// SERIAL plan will BE an agg-over-HashJoin-over-two-SeqScans:
@@ -817,7 +817,7 @@ fn classify_join_sides(
             return refuse_join("side has no RelOptInfo yet");
         };
         let rel = run.root.rel(rel_id);
-        if rel.amflags & AMFLAG_CBSTORE == 0 {
+        if rel.amflags & AMFLAG_PGRCOLUMNAR == 0 {
             return refuse_join("side not cbstore");
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
@@ -1206,7 +1206,7 @@ mod tests {
     /// artifact (crates/backend/executor/execmain/src/lanev2/m5-coverage.tsv, the M5-1 router file) must
     /// not drift apart. The TSV is the reviewable/reportable surface; this
     /// table is the executable one; this test is the tie. A probe key may
-    /// span several matrix rows (CbPlainAggFold keys both cbstore fold
+    /// span several matrix rows (CbPlainAggFold keys both pgrcolumnar fold
     /// rows); all rows sharing a key must agree on route_to.
     #[test]
     fn bootstrap_matrix_matches_tsv() {

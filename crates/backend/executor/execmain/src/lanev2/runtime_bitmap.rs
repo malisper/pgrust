@@ -119,7 +119,7 @@ pub(super) struct BitmapMorselCtx {
 /// chunk), no interior hard boundaries — the duration-adaptive sizer builds
 /// multi-page runs and the photo-finish handles the tail. Lossy chunks are
 /// heavier granules (up to PAGES_PER_CHUNK heap pages); the sizer absorbs
-/// that the same way it absorbs fat cbstore granules.
+/// that the same way it absorbs fat pgrcolumnar granules.
 struct BitmapEntrySource {
     nentries: u64,
 }

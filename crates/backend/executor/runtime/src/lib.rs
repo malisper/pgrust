@@ -19,7 +19,7 @@
 //! - no leader execution path (§2.5 DECIDED: a participating leader only
 //!   displaces a worker under the cores-permit cap; the deferred mechanism
 //!   is documented in the design doc — do not build it here);
-//! - no real pipelines (M1 wires cbstore scans through [`MorselSource`] /
+//! - no real pipelines (M1 wires pgrcolumnar scans through [`MorselSource`] /
 //!   [`TaskSetWork`]); M0 exercises everything with synthetic sources;
 //! - no stride/priority policy (fields present, single-RG FIFO behavior)
 //!   — SUPERSEDED (M5-4): stride/fair-share at equal shares is live (see

@@ -1,7 +1,7 @@
-// Lane executor text/qual tiers over columnar (cbstore) scans, harvested
-// from the old lane-executor line onto lane-v2 (cbstore-v2 plan Stage 1.4,
-// docs/design/cbstore-v2-beat-clickhouse-plan.md; spike
-// notes/phase4-cbstore-source-design-2026-07-12.md §5):
+// Lane executor text/qual tiers over columnar (pgrcolumnar) scans, harvested
+// from the old lane-executor line onto lane-v2 (pgrcolumnar-v2 plan Stage 1.4,
+// docs/design/pgrcolumnar-v2-beat-clickhouse-plan.md; spike
+// notes/phase4-pgrcolumnar-source-design-2026-07-12.md §5):
 //
 // - shape:     the structural clause vocabulary (LaneQualShape). The
 //              ExprState walker producing it lands with the executor-wiring

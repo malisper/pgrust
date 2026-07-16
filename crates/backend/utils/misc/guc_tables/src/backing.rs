@@ -37,7 +37,7 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // (2026-07-14); PGRUST_LANE_V2=0|off at boot flips the startup default
     // (PGC_S_ENV_VAR, initialize_guc_options_from_environment).
     (pgrust_lane_executor_cell, bool, pgrust_lane_executor, set_pgrust_lane_executor, true),
-    // pgrust.condition_cache (pgrust-only): the cbstore per-granule
+    // pgrust.condition_cache (pgrust-only): the pgrcolumnar per-granule
     // qual-verdict cache (ClickHouse QueryConditionCache counterpart).
     // Default OFF — the benchmark arms enable it explicitly and record it in
     // manifests. The PREWHERE arm reads the cell at qual-arm time.

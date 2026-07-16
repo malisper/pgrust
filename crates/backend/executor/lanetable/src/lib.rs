@@ -1,4 +1,4 @@
-//! lanetable — the lane-native compact-row aggregation table (cbstore-v2
+//! lanetable — the lane-native compact-row aggregation table (pgrcolumnar-v2
 //! plan Stage 2.2, closing the measured 2.4–3.3×/6.6× aggregation-table gap
 //! vs ClickHouse's HashMap/StringHashMap on the Stage-0 shim parity rig).
 //!

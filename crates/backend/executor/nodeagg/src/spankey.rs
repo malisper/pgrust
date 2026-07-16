@@ -6,7 +6,7 @@
 //!   (b) canonical-bytes / intern build,
 //!   (c) hash/compare over the materialized bytes,
 //! before building any span-feed mechanism. Staging is zero-copy by
-//! construction (cbstore decode publishes pointers into the mmap blob /
+//! construction (pgrcolumnar decode publishes pointers into the mmap blob /
 //! per-granule decompress arena — reader.rs decode_granule RawText/Lz4Text),
 //! so (a) is expected ~0 and the interesting shares are the intern resolves
 //! (pack-loop Intern component), the accept-time canonical image + hash

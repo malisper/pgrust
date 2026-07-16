@@ -15,9 +15,9 @@
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use cbstore::scan::CbScanDescData;
-use cbstore::writer::open_writer_at;
-use cbstore::ColType;
+use pgrcolumnar::scan::CbScanDescData;
+use pgrcolumnar::writer::open_writer_at;
+use pgrcolumnar::ColType;
 use datum::Datum;
 use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::{Oid, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
@@ -153,7 +153,7 @@ fn scan_base<'mcx>(
         rs_maxtid: Default::default(),
         rs_flags: 0,
         rs_parallel: parallel,
-        rs_am: ::tableam_vocab::TableAm::Cbstore,
+        rs_am: ::tableam_vocab::TableAm::Pgrcolumnar,
     }
 }
 
@@ -184,8 +184,8 @@ fn write_part(tag: &str) -> (String, usize) {
     (path, n_rows)
 }
 
-fn open_part(path: &str) -> std::sync::Arc<cbstore::reader::Part> {
-    std::sync::Arc::new(cbstore::reader::Part::open(path, 2).unwrap().expect("part exists"))
+fn open_part(path: &str) -> std::sync::Arc<pgrcolumnar::reader::Part> {
+    std::sync::Arc::new(pgrcolumnar::reader::Part::open(path, 2).unwrap().expect("part exists"))
 }
 
 // Drive next_window to exhaustion; returns total staged rows.

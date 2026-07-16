@@ -84,19 +84,19 @@ pub(super) enum ShapeClass {
     SubqueryScan = 10,
     Append = 11,
     ProjectSet = 12,
-    /// cbstore-backed SeqScan (the CbstoreSource tranche): counted apart
+    /// pgrcolumnar-backed SeqScan (the PgrcolumnarSource tranche): counted apart
     /// from heap seqscans because the admission economics differ (standalone
-    /// cbstore scans ARE lane-owned — the per-row drive lacks the batch
-    /// kernels) and the regress corpus has no cbstore tables (its floor
-    /// seeds from the dedicated cbstore e2e corpus).
+    /// pgrcolumnar scans ARE lane-owned — the per-row drive lacks the batch
+    /// kernels) and the regress corpus has no pgrcolumnar tables (its floor
+    /// seeds from the dedicated pgrcolumnar e2e corpus).
     CbScan = 13,
-    /// Metadata-answered plain agg over a bare cbstore scan (the metaagg
+    /// Metadata-answered plain agg over a bare pgrcolumnar scan (the metaagg
     /// footer-answer arm). OWNED ticks once per metadata-answered execution
-    /// event; refusals tick ONLY for cbstore-backed plain-agg offers (heap
+    /// event; refusals tick ONLY for pgrcolumnar-backed plain-agg offers (heap
     /// scans are out of the arm's scope and tick nothing here) — structural
     /// reasons once per memoized per-node choice, runtime reasons per
-    /// offered call. The regress corpus has no cbstore tables; the floor
-    /// seeds from the cbstore e2e corpus.
+    /// offered call. The regress corpus has no pgrcolumnar tables; the floor
+    /// seeds from the pgrcolumnar e2e corpus.
     MetaAgg = 14,
     /// Streaming top-k cutoff pre-filter on the sort breaker feed: OWNED =
     /// one tick per sort feed the pre-filter ARMED on (engagement evidence
@@ -110,8 +110,8 @@ pub(super) enum ShapeClass {
     /// refusals tick the dynamic per-call gates (EPQ/backward) here and the
     /// agg-side shape refusal under aggbuild.
     Gather = 16,
-    /// Zone-ordered adaptive top-N traversal on a cbstore-fed bounded sort
-    /// (docs/design/cbstore-zone-adaptive.md): OWNED = one tick per sort
+    /// Zone-ordered adaptive top-N traversal on a pgrcolumnar-fed bounded sort
+    /// (docs/design/pgrcolumnar-zone-adaptive.md): OWNED = one tick per sort
     /// feed the adaptive granule order ARMED on (never a refusal class —
     /// non-admission keeps the physical-order feed). Demotions (ambiguous
     /// boundary tie observed → exact physical re-feed) are the
@@ -185,7 +185,7 @@ pub(super) enum RefuseReason {
     /// An in-lane kill switch is off. The master `PGRUST_LANE_V2` switch is
     /// checked by the dispatch hooks *before* any lane code runs and never
     /// ticks this; the metaagg arm's `PGRUST_LANE_V2_METAAGG=0` disarm ticks
-    /// it (once per memoized per-node choice on a cbstore-backed plain agg).
+    /// it (once per memoized per-node choice on a pgrcolumnar-backed plain agg).
     EnvOff = 0,
     /// EvalPlanQual re-check active (model-incompatible, §4).
     Epq = 1,
@@ -241,7 +241,7 @@ pub(super) enum RefuseReason {
     AdmissionEconomicsNoConsumer = 19,
     /// Dynamic tiny-input row-floor (§4 endgame refuse-set): the relation is
     /// too small for lane ownership to recover its own admission-probe cost
-    /// (armed 2026-07-12 at the cbstore standalone hook — the memoized tiny
+    /// (armed 2026-07-12 at the pgrcolumnar standalone hook — the memoized tiny
     /// verdict is taken BEFORE the qual-translate/arm cascade runs).
     TinyInputFloor = 20,
     /// Join-side shape refuse (hash-join breaker and NestLoop TupleOp) —
@@ -276,14 +276,14 @@ pub(super) enum RefuseReason {
     /// REFUSES the compact table (the C table spills; distinct-spill is v2,
     /// per the plan's 2.2 item). Ticked per build decision.
     CompactSpillRisk = 26,
-    /// Stage-2.1 dict-code grouping (cbstore dict-group feed): the offered
-    /// cbstore K2 fold shape cannot host dict-code grouping — varlena-guard
+    /// Stage-2.1 dict-code grouping (pgrcolumnar dict-group feed): the offered
+    /// pgrcolumnar K2 fold shape cannot host dict-code grouping — varlena-guard
     /// (str MIN/MAX) fold plans, an unarmable columnar prefix, or a staging
     /// consumer conflict. Mode-choice observability inside a still-lane-owned
     /// build (like the compact rows); ticked once per build decision.
     DictGroupShape = 27,
     /// Metaagg arm structural shape refuse (once per memoized per-node
-    /// choice on a cbstore-backed plain agg): a transition set that is not
+    /// choice on a pgrcolumnar-backed plain agg): a transition set that is not
     /// all-footer-answerable (classify_meta None — floats/bools/bitwise/
     /// text, FILTER, DISTINCT/ORDER BY, non-affine transforms), or a scan
     /// that is not bare (qual/projection/zone quals).
@@ -293,7 +293,7 @@ pub(super) enum RefuseReason {
     /// interval is unproven against the visible rows' footer min/max — the
     /// per-row drive owns the call and raises C's overflow error at C's row.
     MetaRuntime = 29,
-    /// cbstore standalone scan: the scan HAS a qual, but no staged kernel
+    /// pgrcolumnar standalone scan: the scan HAS a qual, but no staged kernel
     /// armed for it — the PREWHERE walker/translate refused the shape
     /// (anchored/underscore/escape LIKE classes, non-whitelisted comparators,
     /// hybrid prefixes below the engagement gate). Split out of
@@ -303,10 +303,10 @@ pub(super) enum RefuseReason {
     /// verdict, like the cbscan admission row.
     QualNotVectorizable = 30,
     /// Plain-agg (ungrouped) plans whose transitions read NO input columns —
-    /// pure count(*)-style census shapes. Deliberately refused by the cbstore
+    /// pure count(*)-style census shapes. Deliberately refused by the pgrcolumnar
     /// per-row breaker-feed admission (lane-v2-noqualfeed): the census answer
     /// needs no data decode at all (heap: the incumbent fused drive's
-    /// storeless advance; cbstore: the MetaAggScan footer path / the empty
+    /// storeless advance; pgrcolumnar: the MetaAggScan footer path / the empty
     /// needed-set per-row walk), so a batch-decoded feed has nothing to win.
     CountOnlyCensus = 31,
     /// Multi-key packed grouping (multikey spike §2.4): the 2..N-key shape

@@ -1,11 +1,11 @@
 //! M1 RUNTIME SCAN PIPELINES — the first real pipeline on the morsel
 //! runtime (docs/design/parallelism-redesign-2026-07.md §2.1/§2.2/§5-M1).
 //!
-//! Shape: a SERIAL-plan plain Agg over a cbstore OR heap SeqScan
+//! Shape: a SERIAL-plan plain Agg over a pgrcolumnar OR heap SeqScan
 //! (COUNT/plain-agg fold shapes with optional PREWHERE/kernel quals — the
 //! lane's simplest fold pipelines), executed as ONE runtime TaskSet at DOP
-//! N. The morsel source dispatches on the table AM: cbstore granules with
-//! row-group hard boundaries ([`CbstoreGranuleSource`]) or heap block
+//! N. The morsel source dispatches on the table AM: pgrcolumnar granules with
+//! row-group hard boundaries ([`PgrcolumnarGranuleSource`]) or heap block
 //! ranges with none ([`HeapBlockSource`] — C's
 //! table_block_parallelscan_nextpage chunked claim, runtime-adaptive).
 //! Heap visibility is per tuple inside the page batch, under the leader
@@ -20,7 +20,7 @@
 //! Execution model (submit-and-park, §2.5):
 //!  * The LEADER creates a parallel context (vacuumparallel precedent — no
 //!    Gather node), installs the query-task binding policy, submits a
-//!    PINNED resource group (one task set: CbstoreGranuleSource + the fold
+//!    PINNED resource group (one task set: PgrcolumnarGranuleSource + the fold
 //!    work), launches N helpers through the ordinary wpool machinery, and
 //!    PARKS — a WaitForParallelWorkersToFinish-shaped loop (completion poll
 //!    + ProcessParallelMessages + CHECK_FOR_INTERRUPTS + latch quantum).
@@ -48,7 +48,7 @@
 //! whitelisted kinds only; no params (extern or exec); binder policy
 //! sources empty (no temp namespace, not serializable, no pending invals);
 //! parallel-safe scan expressions; MVCC snapshot; not already in parallel
-//! mode / a parallel worker; a cbstore or plain heap scan admitted by the
+//! mode / a parallel worker; a pgrcolumnar or plain heap scan admitted by the
 //! lane gate; fold-mode shapes prove the fold prefix arms on the leader;
 //! first-class dynamic gates (EPQ / instrumented / backward) via
 //! `seq_scan_fusible`. If every launched helper refuses the bind before
@@ -127,7 +127,7 @@ pub(super) struct RuntimeScanShared {
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
     /// Row-group start prefix sums (the morsel source's hard boundaries),
-    /// shared with [`CbstoreGranuleSource`]: a COALESCED claim (sched.rs
+    /// shared with [`PgrcolumnarGranuleSource`]: a COALESCED claim (sched.rs
     /// dop1-tax fix 1 — several epochs per claim at low live width) is
     /// segmented at these edges inside `morsel_body`, so `set_granule_range`
     /// still sees single-RG ranges and every kernel invocation sees one
@@ -403,9 +403,9 @@ impl RuntimeScanShared {
                         )));
                     };
                     // A COALESCED claim spans several row groups (sched.rs
-                    // dop1-tax fix 1): cbstore claims are segmented at the
+                    // dop1-tax fix 1): pgrcolumnar claims are segmented at the
                     // RG edges (`rg_starts`) so every positioned range sees
-                    // a single dictionary epoch (set_morsel_range's cbstore
+                    // a single dictionary epoch (set_morsel_range's pgrcolumnar
                     // single-RG contract) and every kernel batch one
                     // dictionary snapshot. Heap sources have no interior
                     // boundaries and never coalesce (no rg_starts): the
@@ -921,7 +921,7 @@ fn wfin_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
 }
 
-/// This worker's cbstore drive counters (rg_switches, dict_builds,
+/// This worker's pgrcolumnar drive counters (rg_switches, dict_builds,
 /// granules_scanned, windows_staged) — read BEFORE teardown releases the qd.
 fn worker_cb_counters() -> Option<(u64, u64, u64, u64)> {
     WORKER_EXEC.with(|cell| {
@@ -1110,7 +1110,7 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                                 // The fold drain reads staged lane columns;
                                 // the leader proved this exact arm on ITS
                                 // scan (the decide probe / the engagement
-                                // probe), so an unarmed cbstore prefix is a
+                                // probe), so an unarmed pgrcolumnar prefix is a
                                 // divergence, not a shape refusal.
                                 return Err(Box::new(PgError::new(
                                     ERROR,
@@ -1149,12 +1149,12 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                             // delta pure per-window gather+deform work the
                             // serial Volcano census never does (dist-prof:
                             // gather_dict_lane 2.48% + decompress +4ms,
-                            // runtime1 only). cbstore only (the measured
+                            // runtime1 only). pgrcolumnar only (the measured
                             // shape; heap census keeps its kernel-bitmap
                             // staging verbatim). Requal quals refuse inside.
                             // PGRUST_RUNTIME_CENSUS_BITSONLY=0 restores the
                             // materializing arm (A/B).
-                            if ::nodeseqscan::seq_scan_is_cbstore(ss)
+                            if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
                                 && census_bits_only_enabled()
                                 && ::nodeseqscan::seq_scan_batch_bits_only(ss)
                             {
@@ -1510,15 +1510,15 @@ fn perrow_fold_drain<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
-// The morsel source: cbstore granule geometry.
+// The morsel source: pgrcolumnar granule geometry.
 // ---------------------------------------------------------------------------
 
-/// Granule-addressed morsel source over one cbstore part's geometry: claims
+/// Granule-addressed morsel source over one pgrcolumnar part's geometry: claims
 /// are whole-granule ranges that never cross a row-group edge — which is
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
-pub(super) struct CbstoreGranuleSource {
+pub(super) struct PgrcolumnarGranuleSource {
     /// Row-group start prefix sums (len nrgs+1; last = total). Shared with
     /// the engagement payload (`rg_starts`): morsel_body segments coalesced
     /// claims at the same edges the source publishes.
@@ -1528,7 +1528,7 @@ pub(super) struct CbstoreGranuleSource {
     pub(super) coalesce: bool,
 }
 
-impl runtime::MorselSource for CbstoreGranuleSource {
+impl runtime::MorselSource for PgrcolumnarGranuleSource {
     fn total_granules(&self) -> u64 {
         self.starts.last().copied().unwrap_or(0)
     }
@@ -1600,9 +1600,9 @@ impl runtime::MorselSource for HeapBlockSource {
         self.nblocks
     }
 
-    /// A heap block stages ~50-250 tuples (vs 8,192/granule on cbstore).
+    /// A heap block stages ~50-250 tuples (vs 8,192/granule on pgrcolumnar).
     /// Seed the ramp at 16 blocks (128KB, a few thousand rows — tens of µs
-    /// on fold shapes): same probe-morsel sizing intent as cbstore's C0=2.
+    /// on fold shapes): same probe-morsel sizing intent as pgrcolumnar's C0=2.
     fn startup_c0(&self) -> u64 {
         16
     }
@@ -1800,12 +1800,12 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     } else {
         seq_scan_fusible(ss, estate)?
     };
-    let is_cb = ::nodeseqscan::seq_scan_is_cbstore(ss);
+    let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
     if !fusible || !(is_cb || ::nodeseqscan::seq_scan_is_heap(ss)) {
         return ea_refused(estate, ea, node_id, "scan-not-fusible");
     }
-    // EA instrumentation is cbstore-only (the ratified lane's tally spans
-    // the cbstore fold/census drives; the rowdrive heap arms carry no
+    // EA instrumentation is pgrcolumnar-only (the ratified lane's tally spans
+    // the pgrcolumnar fold/census drives; the rowdrive heap arms carry no
     // tally): heap shapes under EA keep the pre-EA refusal — fail-closed
     // observability, never un-tallied numbers.
     if ea && !is_cb {
@@ -1816,7 +1816,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return ea_refused(estate, ea, node_id, "partials-not-order-insensitive-exact");
     }
     // Census shapes (fold plan reads no columns) engage only with a qual:
-    // cbstore's bare count(*) is the Meta/footer arm's, heap's is the fused
+    // pgrcolumnar's bare count(*) is the Meta/footer arm's, heap's is the fused
     // storeless batch advance's (O(pages) serially — a per-row parallel
     // drive would lose), and a qual-less census scan would stage nothing
     // for the per-row drive either way. CARVE-OUT (rowdrive car 1, the
@@ -1839,18 +1839,18 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         // granule = one heap block).
     }
     // Fold-mode shapes must have an armable fold prefix on this scan:
-    // cbstore proved it at decide time (only the Fold choice reaches here
+    // pgrcolumnar proved it at decide time (only the Fold choice reaches here
     // with a column-reading plan); heap arrives through the Refuse choice,
     // which conflates the census shape with fold-not-ready (projected scan
     // or unarmable prefix). The probe is decide's identical idempotent arm
-    // — free for an already-armed cbstore scan, decisive for heap. The
+    // — free for an already-armed pgrcolumnar scan, decisive for heap. The
     // worker-side arm re-verifies (divergence is an error, not a wrong
     // answer). CARVE-OUT (rowdrive car 2, the per-row direct drive): a
     // heap fold shape whose prefix is UNARMABLE (qual/transition column
     // the fixed-width prefix deform cannot host — the m1 LIKE-fold
     // boundary) takes DriveMode::PerRowFold: the serial row path
     // (emit + accept) N-wide per claim. Projected scans stay refused
-    // (fail-closed); cbstore keeps its decide-time verdicts.
+    // (fail-closed); pgrcolumnar keeps its decide-time verdicts.
     let mut perrow = false;
     if drive_mode(agg, ss) == DriveMode::Fold {
         if ss.ss.ps_ProjInfo.is_some() {
@@ -1929,15 +1929,15 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
 
     // --- Geometry: enough granules to be worth a gang. The source is the
-    // AM's morsel geometry: cbstore absolute granules with row-group hard
+    // AM's morsel geometry: pgrcolumnar absolute granules with row-group hard
     // boundaries, heap block ranges with none. (The floor is granule-
     // denominated, so its meaning is per-AM: ~8,192 rows/granule on
-    // cbstore, one ~8KB block on heap — both env-tunable through the same
+    // pgrcolumnar, one ~8KB block on heap — both env-tunable through the same
     // knob because the e2e floors force it anyway.)
-    // nrgs rides along for the WFIN/LFIN diagnostic channel only: cbstore
+    // nrgs rides along for the WFIN/LFIN diagnostic channel only: pgrcolumnar
     // row-group (= dictionary epoch) count; heap has no interior hard
     // boundaries, so it honestly reports 0.
-    // rg_starts additionally rides to the engagement payload (cbstore only):
+    // rg_starts additionally rides to the engagement payload (pgrcolumnar only):
     // morsel_body segments COALESCED claims at the same RG edges the source
     // publishes (dop1-tax fix 1). Heap has no interior boundaries and no
     // dictionary epochs — nothing to segment, nothing to coalesce.
@@ -1953,7 +1953,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         let nrgs = starts.len().saturating_sub(1);
         let starts = Arc::new(starts);
         (
-            Arc::new(CbstoreGranuleSource {
+            Arc::new(PgrcolumnarGranuleSource {
                 starts: Arc::clone(&starts),
                 coalesce: true,
             }),
@@ -2108,7 +2108,7 @@ pub(super) fn engage<'mcx>(
         bitmap: bitmap_ctx,
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
-    // morsel_body expects the edges whenever the source coalesces (cbstore).
+    // morsel_body expects the edges whenever the source coalesces (pgrcolumnar).
     if let Some(starts) = rg_starts {
         payload
             .rg_starts

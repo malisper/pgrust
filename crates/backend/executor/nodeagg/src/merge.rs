@@ -818,7 +818,7 @@ pub(crate) fn init_finalize_merge<'mcx>(
     // blocks and the merge is flat (the tuple-format exchange measured
     // ~200ns/entry, DRAM-bound pointer chasing) — and the NDV floor over the
     // finalize's plan-time group estimate (footer-HLL-honest on never-
-    // ANALYZEd cbstore since the cbparallelstats lane). Low-NDV shapes keep
+    // ANALYZEd pgrcolumnar since the cbparallelstats lane). Low-NDV shapes keep
     // classic behavior byte-for-byte (their tables never reach the cap even
     // when admitted, but the floor keeps the planner and executor aligned).
     let raw_shape = par.as_ref().is_some_and(|spec| {

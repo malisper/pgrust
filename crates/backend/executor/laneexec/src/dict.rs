@@ -1,5 +1,5 @@
 // Dict-memo tier (lane-executor increment 9 / the POC's S3 storage stage):
-// text predicates over cbstore DictCoded lanes evaluate ONCE per distinct
+// text predicates over pgrcolumnar DictCoded lanes evaluate ONCE per distinct
 // dictionary code per epoch (row group) via the PRODUCTION adt helpers, then
 // per row as one memo index. Admission is fail-closed: only predicates
 // proven non-erroring for every input at translate time may run eagerly
@@ -435,14 +435,14 @@ fn like_pattern_safe(pat: &[u8]) -> bool {
 
 /// Payload bytes of an inline varlena datum (1B-short or 4B-uncompressed);
 /// None for external/compressed images (fail closed — a toasted pattern
-/// const refuses translation, and cbstore lanes never publish one).
+/// const refuses translation, and pgrcolumnar lanes never publish one).
 pub fn inline_varlena_payload<'a>(d: Datum) -> Option<&'a [u8]> {
     let p = d.as_usize() as *const u8;
     if p.is_null() {
         return None;
     }
     // SAFETY: a non-null text datum points at a live varlena image readable
-    // through its header (const arg slot / cbstore-published lane datum).
+    // through its header (const arg slot / pgrcolumnar-published lane datum).
     unsafe {
         if varatt::varatt_is_1b_e(p) {
             return None;
@@ -623,7 +623,7 @@ fn eval_dict_lane(
         return Ok(());
     }
     for i in snapshot.iter() {
-        // Dict lanes are NULL-free by contract (cbstore S2); strict-NULL
+        // Dict lanes are NULL-free by contract (pgrcolumnar S2); strict-NULL
         // handling returns with nullable dict lanes.
         if !cl.memo[codes[i as usize] as usize] {
             sv.clear(i);
@@ -847,7 +847,7 @@ fn eval_raw_rows(
 /// One blob-wide memmem pass over a contiguous text-span window, mapping
 /// hits back to rows through the ascending pointer lane. True = the clause
 /// is fully answered into `sv`; false = bail (a non-inline image — never
-/// published by cbstore — was met before proving a row), and the per-row
+/// published by pgrcolumnar — was met before proving a row), and the per-row
 /// loop must run instead (raising its own error at the identical first row).
 ///
 /// Identity argument (byte-exact vs the per-row kernel): memmem yields the
@@ -926,7 +926,7 @@ mod tests {
         like_kernel_for(pat).map(|k| k.shape())
     }
 
-    // Build a cbstore-shaped text blob: complete 4B-U varlena images,
+    // Build a pgrcolumnar-shaped text blob: complete 4B-U varlena images,
     // back-to-back, 4-byte aligned (the writer's push_varlena_image layout),
     // plus the ascending pointer lane into it.
     fn blob_of(rows: &[&[u8]]) -> (Vec<u8>, Vec<usize>) {

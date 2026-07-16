@@ -184,7 +184,7 @@ pub const HEAP_TABLE_AM_OID: Oid = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TableAm {
     Heap,
-    Cbstore,
+    Pgrcolumnar,
 }
 
 impl TableAm {
@@ -198,8 +198,8 @@ impl TableAm {
             relam => {
                 if relam != 0 && is_registered_heap_am(relam) {
                     Some(TableAm::Heap)
-                } else if relam != 0 && is_registered_cbstore_am(relam) {
-                    Some(TableAm::Cbstore)
+                } else if relam != 0 && is_registered_pgrcolumnar_am(relam) {
+                    Some(TableAm::Pgrcolumnar)
                 } else {
                     None
                 }
@@ -208,8 +208,8 @@ impl TableAm {
     }
 }
 
-// Zone-map qual pushdown vocabulary (cbstore; advisory-only pruning —
-// docs/design/cbstore-impl.md §7.3). Values are the widened i64 image of the
+// Zone-map qual pushdown vocabulary (pgrcolumnar; advisory-only pruning —
+// docs/design/pgrcolumnar-impl.md §7.3). Values are the widened i64 image of the
 // int/date/timestamp constant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ZoneCmp {
@@ -262,26 +262,27 @@ pub fn register_heap_table_am(relam: Oid) {
 }
 
 thread_local! {
-    // pg_am oids whose amname is "cbstore" (closed-AM engine: handlers are
-    // never invoked, so cbstore is identified by name at relcache build —
-    // docs/design/cbstore-impl.md §7.1).
-    static CBSTORE_AMS: std::cell::RefCell<Vec<Oid>> =
+    // pg_am oids whose amname is "cbstore" (the frozen SQL-surface AM name for
+    // the pgrcolumnar engine; closed-AM engine: handlers are
+    // never invoked, so pgrcolumnar is identified by name at relcache build —
+    // docs/design/pgrcolumnar-impl.md §7.1).
+    static PGRCOLUMNAR_AMS: std::cell::RefCell<Vec<Oid>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cold]
-fn is_registered_cbstore_am(relam: Oid) -> bool {
-    CBSTORE_AMS.with(|v| v.borrow().contains(&relam))
+fn is_registered_pgrcolumnar_am(relam: Oid) -> bool {
+    PGRCOLUMNAR_AMS.with(|v| v.borrow().contains(&relam))
 }
 
 /// Registry probe by relam oid (vacuum/planner gates that hold a
 /// RelationData, not a Relation).
-pub fn is_cbstore_am_oid(relam: Oid) -> bool {
-    relam != 0 && is_registered_cbstore_am(relam)
+pub fn is_pgrcolumnar_am_oid(relam: Oid) -> bool {
+    relam != 0 && is_registered_pgrcolumnar_am(relam)
 }
 
-pub fn register_cbstore_table_am(relam: Oid) {
-    CBSTORE_AMS.with(|v| {
+pub fn register_pgrcolumnar_table_am(relam: Oid) {
+    PGRCOLUMNAR_AMS.with(|v| {
         let mut v = v.borrow_mut();
         if !v.contains(&relam) {
             v.push(relam);

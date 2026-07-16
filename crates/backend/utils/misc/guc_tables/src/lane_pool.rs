@@ -1,28 +1,28 @@
-//! Stage-4 v1 work-stealing pool arming for lane-owned cbstore pipelines
-//! (docs/design/cbstore-v2-beat-clickhouse-plan.md §4.1-4.3).
+//! Stage-4 v1 work-stealing pool arming for lane-owned pgrcolumnar pipelines
+//! (docs/design/pgrcolumnar-v2-beat-clickhouse-plan.md §4.1-4.3).
 //!
 //! The pool rides pgrust's thread-backend parallel query: Gather workers are
-//! threads of one process, the cbstore scan's row-group claim cursor is
+//! threads of one process, the pgrcolumnar scan's row-group claim cursor is
 //! already a shared atomic (`phs_nallocated.fetch_add` — the global claim
 //! over granule ranges the Stage-0.4 prototype validated), per-worker
 //! partial hash-agg tables cross to the leader by pointer (nodeagg::merge
 //! handoff), and the finalize merge is partition-parallel (256-bucket atomic
-//! bucket claim). What was missing is an ARMING path: cbstore Gather costing
+//! bucket claim). What was missing is an ARMING path: pgrcolumnar Gather costing
 //! carries a deliberate 32k setup surcharge (provisional, pre-pool), so
-//! cbstore plans essentially never go parallel unforced.
+//! pgrcolumnar plans essentially never go parallel unforced.
 //!
 //! v1 arming, per the plan's forced-plans posture (no planner shape rules):
 //!  - `SET pgrust.lane_parallel_pool = <dop>` (a placeholder customized
 //!    option — deliberately NOT a registered GUC: a new `pg_settings` row
 //!    would break the byte-identical `SHOW ALL`/`pg_settings` regression
-//!    outputs, the same reason lane-v2 knobs are env vars) forces cbstore
-//!    base relations to plan `<dop>` parallel workers and drops the cbstore
+//!    outputs, the same reason lane-v2 knobs are env vars) forces pgrcolumnar
+//!    base relations to plan `<dop>` parallel workers and drops the pgrcolumnar
 //!    Gather setup surcharge back to `parallel_setup_cost`.
 //!  - `PGRUST_LANE_V2_POOL=0`/`off` is the kill switch: arming is refused
 //!    regardless of the GUC. Default (unset) allows arming — the pool is
 //!    still OFF by default because the GUC defaults to unset.
 //!  - Arming also requires the lane master switch (`PGRUST_LANE_V2=1`):
-//!    the pool's scope is lane-owned cbstore pipelines only; heap plans and
+//!    the pool's scope is lane-owned pgrcolumnar pipelines only; heap plans and
 //!    lane-off servers keep PG's Gather behavior untouched.
 //!  - The DOP is clamped to actually-available cores minus one (the leader
 //!    participates; the Stage-0.4 prototype measured 10-60% losses on short
@@ -62,7 +62,7 @@ fn max_forced_workers() -> i32 {
 /// Read at plan time (leader) and at handoff-install time (workers — the
 /// customized option restores into worker sessions with the rest of the GUC
 /// state). Callers must additionally gate on the relation/plan being
-/// cbstore-fed; heap plans never consult this.
+/// pgrcolumnar-fed; heap plans never consult this.
 pub fn lane_parallel_pool_dop() -> i32 {
     if !lane_pool_env_ok() {
         return 0;

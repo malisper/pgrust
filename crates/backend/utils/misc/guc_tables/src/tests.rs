@@ -14,7 +14,7 @@ fn table_counts_match_compiled_backend_shape() {
     // (pgrust-only, the lane-v2 master gate),
     // pgrust.regex_pattern_program (pgrust-only, the anchored
     // pattern-program regex fast tier, hidden), and
-    // pgrust.condition_cache (pgrust-only, the cbstore condition cache
+    // pgrust.condition_cache (pgrust-only, the pgrcolumnar condition cache
     // gate; +1 Int for its size), +3 pg_stat_statements.*
     // (statically defined custom GUCs; no DefineCustomXxxVariable here).
     // Int/Enum: +1 each for pg_stat_statements.max / .track;
