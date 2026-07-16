@@ -38,7 +38,10 @@ pub(crate) enum CopySrc<'mcx, 's> {
     // COPY_CALLBACK (copyfrom_internal.h): tablesync pulls bytes from the
     // publisher's COPY OUT stream. cb(buf, minread) fills up to buf.len()
     // bytes, at least minread unless the stream ends; 0 = EOF.
-    Callback { cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 's> },
+    // Lifetime-erased to 'static (SAFETY at construction): CopyFromState is
+    // bounded by 's regardless, and a non-'static dyn's conservative dropck
+    // ("Drop may observe borrows") breaks parallel.rs's worker teardown.
+    Callback { cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 'static> },
     /// Parallel COPY worker: one segmentator-cut input chunk (whole rows,
     /// in-memory). EOF at the chunk's end.
     Chunk(crate::parallel::ChunkCursor),
@@ -280,6 +283,12 @@ fn begin_copy_from_guts<'mcx, 's>(
     let mut progress_bytes_total: i64 = 0;
     let src = if let Some(cb) = data_source_cb.take() {
         progress_type = PROGRESS_COPY_TYPE_CALLBACK;
+        // SAFETY (dropck erasure only): CopyFromState<'mcx, 's> still carries
+        // 's, so the state (and this box) cannot outlive the closure's
+        // captures; erasing 's from the trait object relaxes nothing but
+        // dropck's conservative dyn-Drop borrow extension.
+        let cb: Box<dyn FnMut(&mut [u8], usize) -> PgResult<usize> + 'static> =
+            unsafe { core::mem::transmute(cb) };
         CopySrc::Callback { cb }
     } else {
         match filename {
