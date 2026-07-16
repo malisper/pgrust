@@ -119,6 +119,34 @@ pub fn exec_result<'mcx>(
 // any call boundary sees exactly C's state (rs_checkqual / rs_done).
 // ===========================================================================
 
+/// `exec_result`'s childless (no-FROM) body, one pull's worth: entry CFI →
+/// one-time gate → per-call ctx reset → drained guard → mark done + project
+/// — the statement stream `try_own_result`'s inline childless arm ran before
+/// the row-mode facility factored it here (a code MOVE; `try_own_result`
+/// keeps its stats ticks around the call), shared with the row-mode
+/// `ResultRowSource` face (`lanev2::rowmode`). `exec_result` itself keeps its
+/// two-arm body above — same seams (`lane_result_gate`/`lane_result_project`),
+/// same state (`rs_checkqual`/`rs_done`), so a Volcano fallback at any call
+/// boundary is byte-safe.
+#[inline]
+pub(crate) fn lane_result_childless_next<'mcx>(
+    node: &mut ResultState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert!(node.outer.is_none());
+    crate::cfi()?;
+    if node.rs_checkqual && !lane_result_gate(node, estate)? {
+        return Ok(None);
+    }
+    let ecxt = node.ps.ps_ExprContext.expect("ResultState without ExprContext");
+    estate.reset_expr_context(ecxt);
+    if node.rs_done {
+        return Ok(None);
+    }
+    node.rs_done = true;
+    Ok(Some(lane_result_project(&mut node.ps, estate)?))
+}
+
 /// `exec_result`'s One-Time Filter arm (`rs_checkqual`): evaluate
 /// `resconstantqual` once — pending-initplan $n params hoisted first, the
 /// subplan-aware qual driver where needed — consuming `rs_checkqual`. False →
