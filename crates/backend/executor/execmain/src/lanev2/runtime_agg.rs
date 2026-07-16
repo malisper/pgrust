@@ -101,6 +101,117 @@ pub(super) struct AggSinkLocal {
     /// work) from shared-line contention (stall-only inflation).
     probe_flushes: u64,
     probe_flush_bytes: u64,
+    /// α-gate controller state (cachebudget lane; see the module section by
+    /// [`alpha_gate_floor`]). Thread-owned like everything else here; rides
+    /// the Local through SEAL for the AGGSEAL observability sums only —
+    /// behavior after seal never reads it.
+    alpha: AlphaGate,
+}
+
+/// Per-Local α-gate state (Müller ADAPTIVE): a pure function of this
+/// worker's OWN fold/flush stream — no shared reads, no shared writes.
+#[derive(Default)]
+struct AlphaGate {
+    /// Rows folded into the table since the last flush (any kind).
+    window_rows: u64,
+    /// Demoted: this Local's flush threshold is the sink's `alpha_floor`.
+    demoted: bool,
+    /// Rows folded since the demote (the re-probe budget's clock).
+    rows_since_demote: u64,
+    /// Observability (AGGSEAL marker sums): demote / collapse-restore /
+    /// hysteresis re-probe transition counts.
+    demotes: u64,
+    restores: u64,
+    reprobes: u64,
+}
+
+/// Summed α-gate transition counts for an AGGSEAL marker line.
+fn alpha_sums(locals: &[AggSinkLocal]) -> (u64, u64, u64) {
+    locals.iter().fold((0, 0, 0), |(d, r, p), l| {
+        (d + l.alpha.demotes, r + l.alpha.restores, p + l.alpha.reprobes)
+    })
+}
+
+impl AlphaGate {
+    /// The effective flush threshold for this Local right now. Undemoted
+    /// (or controller unarmed): exactly `sink.cap` — the incumbent cadence.
+    #[inline]
+    fn cap(&self, sink: &AggSink) -> u32 {
+        match sink.alpha_floor {
+            Some(f) if self.demoted => f,
+            _ => sink.cap,
+        }
+    }
+
+    /// Fold accounting, once per staged batch (survivor count — rows that
+    /// actually probed the table; qual-dropped rows never touch it).
+    #[inline]
+    fn absorbed(&mut self, rows: usize) {
+        self.window_rows += rows as u64;
+        if self.demoted {
+            self.rows_since_demote += rows as u64;
+        }
+    }
+
+    /// A CAP flush fired with `entries` distinct groups in the run:
+    /// adjudicate α = window_rows / entries against α₀ and transition.
+    #[inline]
+    fn on_cap_flush(&mut self, entries: usize, sink: &AggSink) {
+        self.adjudicate(
+            entries,
+            sink.alpha_floor,
+            sink.cap,
+            agg_alpha0_x100(),
+            agg_alpha_reprobe_mult(),
+        );
+    }
+
+    /// The controller core (env-free for the unit tests; the knobs arrive
+    /// as arguments).
+    fn adjudicate(
+        &mut self,
+        entries: usize,
+        alpha_floor: Option<u32>,
+        full_cap: u32,
+        alpha0_x100: u64,
+        reprobe_mult: u64,
+    ) {
+        let rows = self.window_rows;
+        self.window_rows = 0;
+        if alpha_floor.is_none() || entries == 0 {
+            return;
+        }
+        // α ≥ α₀ ⟺ rows × 100 ≥ entries × α₀×100 (integer, no fp).
+        let collapse_ok = rows.saturating_mul(100) >= (entries as u64) * alpha0_x100;
+        if self.demoted {
+            if collapse_ok {
+                // The floor window itself collapsed — the phase changed;
+                // give the table its budget share back immediately.
+                self.demoted = false;
+                self.restores += 1;
+            } else if reprobe_mult > 0
+                && self.rows_since_demote >= reprobe_mult.saturating_mul(full_cap as u64)
+            {
+                // Müller hysteresis: one full-cap probe window — the NEXT
+                // fill re-adjudicates (and re-demotes if α is still low,
+                // restarting this clock).
+                self.demoted = false;
+                self.reprobes += 1;
+            }
+        } else if !collapse_ok {
+            self.demoted = true;
+            self.rows_since_demote = 0;
+            self.demotes += 1;
+        }
+    }
+
+    /// A non-cap (budget-pressure) flush emptied the table: the fill window
+    /// restarts; no adjudication (the window didn't reach the threshold —
+    /// its α is not the fill-window statistic the controller is defined on).
+    #[inline]
+    fn on_pressure_flush(&mut self) {
+        self.window_rows = 0;
+    }
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -137,6 +248,13 @@ struct AggSink {
     /// must match — the emit plan's MultiComp columns came from it).
     mk: Option<::nodeagg::MkShape>,
     cap: u32,
+    /// α-gate demoted flush threshold (cachebudget lane; [`alpha_gate_floor`]
+    /// — Some arms the per-Local controller, None = structurally off for
+    /// this engagement). Fixed at construction like `cap`.
+    alpha_floor: Option<u32>,
+    /// Per-socket shared-table EXPERIMENT face (cachebudget D2, hard
+    /// default-OFF; see [`SharedAggFace`]). None on every default boot.
+    shared: Option<SharedAggFace>,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
     key_words: usize,
@@ -846,6 +964,11 @@ impl runtime::ParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // Shared-table experiment drain (single-threaded here; before the
+        // adopt census — injected runs correctly decline the adopt).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(locals);
+        }
         let t0 = agg_markers_on().then(std::time::Instant::now);
         // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
         // (the sealed-Local census is final: last-worker-out; a widened
@@ -880,8 +1003,9 @@ impl runtime::ParallelSink for AggSink {
             // parallelizes; its A/B evidence line.
             let flushes: u64 = locals.iter().map(|l| l.probe_flushes).sum();
             let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(locals);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}",
                 locals.len(),
                 t0.elapsed().as_micros()
             );
@@ -1597,6 +1721,11 @@ impl runtime::SealedParallelSink for AggSink {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // Shared-table experiment drain (single-threaded here by
+        // last-worker-out; before the adopt census).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(sealed);
+        }
         if agg_markers_on() {
             // The 3-set arm's AGGSEAL sibling line (single-threaded here by
             // last-worker-out of the freeze set): the flush-amplification
@@ -1605,8 +1734,9 @@ impl runtime::SealedParallelSink for AggSink {
                 sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
             let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(sealed);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|dur_us=0",
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0",
                 sealed.len(),
             );
         }
@@ -2492,14 +2622,23 @@ fn sink_drain_range<'mcx>(
     };
     loop {
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
-        // held across this point), budget-check table + runs.
+        // held across this point), budget-check table + runs. The threshold
+        // is the α-gate's per-Local effective cap (== sink.cap until a fill
+        // window adjudicates a demote — flush WHEN only, never results).
         if let Some((run, intern_reset)) =
-            ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
+            ::nodeagg::sink::agg_sink_flush_if_due(agg, local.alpha.cap(sink))
         {
+            local.alpha.on_cap_flush(run.nrows(), sink);
             local.probe_flushes += 1;
             local.probe_flush_bytes += run.bytes() as u64;
-            local.run_bytes += run.bytes();
-            local.runs.push(run);
+            // Shared-table EXPERIMENT (D2, default OFF): an absorbed run's
+            // rows live in the socket table — the run is DROPPED, holding
+            // no Local memory; a refusal (closed face) is the spill
+            // fallback: the run rides the incumbent path below.
+            if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                local.run_bytes += run.bytes();
+                local.runs.push(run);
+            }
             // The flush RESET the compact table: every cached code -> state
             // pointer is a dangling table row — drop the dict-code cache.
             dgs.invalidate();
@@ -2569,10 +2708,15 @@ fn sink_drain_range<'mcx>(
                     if let Some((run, intern_reset)) =
                         ::nodeagg::sink::agg_sink_flush_now(agg)
                     {
+                        local.alpha.on_pressure_flush();
                         local.probe_flushes += 1;
                         local.probe_flush_bytes += run.bytes() as u64;
-                        local.run_bytes += run.bytes();
-                        local.runs.push(run);
+                        // Shared-table experiment: as at the cap flush —
+                        // absorption drains the pressure outright.
+                        if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                            local.run_bytes += run.bytes();
+                            local.runs.push(run);
+                        }
                         if intern_reset {
                             mks.epoch = None;
                             mks.code_ids.clear();
@@ -2657,6 +2801,9 @@ fn sink_drain_range<'mcx>(
             )? {
                 return Err(AcceptFail::Budget);
             }
+            // α numerator (batched route contract as the EA count below:
+            // idxs holds this batch's survivors — the rows that probed).
+            local.alpha.absorbed(idxs.len());
             if ea {
                 // The sink-legal expr-key route is the batched one (per-row
                 // routing errors above): idxs holds this batch's survivors.
@@ -2688,6 +2835,10 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
+            // α numerator staging: scan_mk_batch's survivor-less PREWHERE
+            // window returns BEFORE survivor collection — pre-clear so the
+            // count below can never re-read a previous batch's survivors.
+            mks.rows.clear();
             if !super::scan_mk_batch(
                 agg,
                 ss,
@@ -2711,10 +2862,17 @@ fn sink_drain_range<'mcx>(
                     "worker mk feed demoted mid-build",
                 )));
             }
+            // α numerator: the mk feed's own survivor collection (freeze-
+            // filtered rows never probed — they were dropped before the
+            // pack; survivor-less windows counted 0 via the pre-clear).
+            local.alpha.absorbed(mks.rows.len());
             continue;
         }
         let ScanK2Scratch { rows, keys, knull, .. } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
+        // α numerator: both K2 legs (dict window and plain keys) fold
+        // exactly these survivors.
+        local.alpha.absorbed(rows.len());
         if ea {
             local.instr.rows.survived += rows.len() as u64;
         }
@@ -3449,6 +3607,230 @@ fn agg_dopcap_anchor() -> u32 {
     })
 }
 
+// ---------------------------------------------------------------------------
+// α-gate controller (cachebudget lane — Müller et al., SIGMOD 2015 "Cache-
+// Efficient Aggregation: Hashing Is Sorting", the ADAPTIVE controller,
+// adapted to the sink's bounded-Local flush discipline).
+//
+// The DOP-aware budget (agg192-contention) sizes every worker's locality
+// table as a share of the shared cache — but a share is only WORTH holding
+// when the table actually collapses rows (repeat keys fold in place). When
+// a worker's key stream is near-unique, the table is a WRITE BUFFER: every
+// row inserts, nothing folds, and its cache residency buys nothing while
+// still charging the aggregate SLC budget the other workers' tables need
+// (the window-B root cause, at any width). Müller's runtime signal
+// adjudicates this per worker with zero synchronization: at table FILL
+// compute the collapse ratio α = rows-absorbed / distinct-entries-flushed.
+// α below α₀ ⇒ demote that worker's flush threshold to the byte-denominated
+// L2 floor (agg192's — the flush scatter shares the private cache, so the
+// floor is bytes at the shape's entry estimate) and flush through; α at or
+// above α₀ ⇒ keep the budget share. Re-probe after ~10× the full table's
+// row volume (Müller's hysteresis: one full-cap fill window re-adjudicates
+// a phase change; a wrong re-probe costs footprint only — the retained
+// capacity means no realloc).
+//
+// Byte-identity law: the effective cap changes only WHEN flushes happen —
+// flush cadence is semantics-free (the dopcap precedent: runs merge
+// first-seen, W≡F≡D and selection totality are cadence-independent) — and
+// the controller is per-Local thread-owned state with ZERO new shared
+// writes (the condcache lesson). Demotion requires a first full-cap FILL,
+// so engagements that never fill (low NDV, adopt/pass-through shapes) are
+// byte-and-time identical by construction. Freeze-armed (LIMIT-k) shapes
+// are structurally excluded at engagement (bounded output, nothing to buy).
+// Kill switch: PGRUST_RUNTIME_AGG_ALPHAGATE=0.
+// ---------------------------------------------------------------------------
+
+fn agg_alphagate_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// α₀ ×100 (`PGRUST_RUNTIME_AGG_ALPHA0`, default 2.0): the collapse ratio
+/// below which a filled table is adjudicated a write buffer. 2.0 = each
+/// entry absorbed under two rows across the fill window — the table at most
+/// halved its flush volume, too little to earn a shared-cache share (the
+/// demote trades ≤2× sequential flush bytes for the aggregate footprint).
+/// The 48xl calibration ladder sweeps this knob (composes with agg192's
+/// DOPCAP_ANCHOR ladder).
+fn agg_alpha0_x100() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA0")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|a| a.is_finite() && *a >= 1.0 && *a <= 100.0)
+            .map(|a| (a * 100.0) as u64)
+            .unwrap_or(200)
+    })
+}
+
+/// Re-probe row multiple (`PGRUST_RUNTIME_AGG_ALPHA_REPROBE`, default 10 —
+/// Müller's "periodically re-probe after processing ~10× the cache volume
+/// of input"): a demoted Local restores the full threshold for one probe
+/// window after `mult × full-cap` rows. 0 = never re-probe (a demote is
+/// then sticky until a floor window shows collapse).
+fn agg_alpha_reprobe_mult() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA_REPROBE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+    })
+}
+
+/// The α-gate's demoted flush threshold for this engagement, resolved ONCE
+/// at construction: `Some(floor_entries)` arms the controller. Reuses
+/// agg192's byte-denominated L2 floor (`PGRUST_RUNTIME_AGG_DOPCAP_FLOOR`,
+/// default 1MB at the shape's own 16+8+state+16 entry estimate) — the same
+/// "table + flush scatter fit the private L2" constant, deliberately shared
+/// so the calibration ladder moves both together. None (controller off):
+/// kill switch; dop at or under the DOPCAP anchor (see below);
+/// fixed-cap A/B override (PGRUST_RUNTIME_AGG_CAP stays authoritative, the
+/// locality-bound law); freeze-armed shapes (caller gates); or a floor at/
+/// above the engaged cap (nothing to demote to).
+///
+/// ANCHOR GATE (this lane's mt16 100M ON/OFF pair verdict): at or under
+/// the anchor width the aggregate working set already sits at the ratified
+/// SLC constant — demoting write-buffer tables there paid flush-EVENT
+/// overhead (dict-code cache invalidation + run setup at ~3.5× the
+/// cadence: q32 hot +9%, q19 +2.5%, suite otherwise flat 1.0026) and
+/// bought no residency anyone needed at 16 workers. Above the anchor is
+/// the window-B regime the controller is FOR (per-worker shares shrink
+/// below adjudication value; dopcap scales caps toward the floor and the
+/// α-gate decides which workers deserve their share). Sharing
+/// [`agg_dopcap_anchor`] means a window-D re-anchoring moves the α-gate's
+/// engagement band with it — one calibration channel, one knob. The
+/// official mt16 channel is therefore byte-AND-time identical by
+/// construction (the dopcap boarding precedent).
+fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
+    if !agg_alphagate_enabled()
+        || dop <= agg_dopcap_anchor() as i32
+        || sink_cap_override().is_some()
+    {
+        return None;
+    }
+    let entry = 16u64 + 8 + state_bytes as u64 + 16;
+    let floor =
+        (agg_dopcap_floor_bytes() / entry.max(1)).clamp(1 << 12, u32::MAX as u64) as u32;
+    (floor < cap).then_some(floor)
+}
+
+// ---------------------------------------------------------------------------
+// Per-socket SHARED aggregate table EXPERIMENT (cachebudget D2, hard
+// default-OFF — docs/design/shared-agg-table-experiment.md §4 and the
+// nodeagg::sink::SharedCountTable section doc). The mid-NDV architecture
+// decider for the next 48xl window; NOT a product default candidate until
+// the measurement spec's verdicts land (and the emit-order law is settled).
+// ---------------------------------------------------------------------------
+
+/// `PGRUST_RUNTIME_AGG_SHARED_TABLE=1` arms the experiment (default OFF).
+fn agg_shared_table_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(), Ok("1"))
+    })
+}
+
+/// Engagement band upper bound in estimated groups
+/// (`PGRUST_RUNTIME_AGG_SHARED_MAX`, default 1M ≈ a socket-SLC share at the
+/// 16B count-entry: 36MB × 0.5 / 16B — the design note's band arithmetic).
+/// The band's LOWER bound is the engaged sink cap itself (below it the
+/// per-worker Locals never fill and today's path is already optimal).
+fn agg_shared_table_max_groups() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1 << 20)
+    })
+}
+
+/// Band lower-bound OVERRIDE (`PGRUST_RUNTIME_AGG_SHARED_MIN`, experiment/
+/// e2e forcing channel): None = the engaged sink cap (the default band
+/// floor — below the cap Locals never fill and there is nothing to
+/// absorb). The e2e forced legs set 1 so engagement does not hinge on the
+/// corpus's planner group estimates.
+fn agg_shared_table_min_groups() -> Option<u64> {
+    static N: OnceLock<Option<u64>> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    })
+}
+
+/// The experiment face: one shared count table per socket half (the
+/// numa-combine socket map; non-Linux / single-node folds to table 0).
+/// Prototype scope (recorded in the design note): single-int-word K2 keys,
+/// COUNT-only states.
+struct SharedAggFace {
+    tables: [::nodeagg::sink::SharedCountTable; 2],
+    /// Observability: runs absorbed / runs kept on the incumbent path
+    /// after a close (the SHAREDAGG marker line).
+    merged_runs: AtomicU64,
+    kept_runs: AtomicU64,
+}
+
+impl SharedAggFace {
+    fn new(est_groups: u64) -> SharedAggFace {
+        // Each socket table can in the worst case hold EVERY group (groups
+        // are not socket-partitioned — both halves may touch a key), so
+        // both size at the estimate; 25% headroom absorbs estimate error
+        // before the close-fallback fires.
+        let cap = (est_groups + est_groups / 4).max(64) as usize;
+        SharedAggFace {
+            tables: [
+                ::nodeagg::sink::SharedCountTable::new(cap),
+                ::nodeagg::sink::SharedCountTable::new(cap),
+            ],
+            merged_runs: AtomicU64::new(0),
+            kept_runs: AtomicU64::new(0),
+        }
+    }
+
+    /// Try to absorb a flushed run into the calling worker's socket table.
+    /// `true` = absorbed (drop the run); `false` = keep it on the incumbent
+    /// runs path (closed face / overflow — the spill fallback).
+    fn absorb(&self, run: &::nodeagg::sink::SinkRun) -> bool {
+        let half = numa_current_half().unwrap_or(0).min(1);
+        if self.tables[half].merge_run(run) {
+            self.merged_runs.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            self.kept_runs.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// SEAL-time drain (single-threaded by the seal contract): inject the
+    /// socket tables' contents as runs on the first sealed Local — the
+    /// combine consumes them exactly like flushed runs.
+    fn drain_into(&self, locals: &mut [AggSinkLocal]) {
+        let Some(l0) = locals.first_mut() else { return };
+        for t in &self.tables {
+            if let Some(run) = t.drain_to_run() {
+                l0.run_bytes += run.bytes();
+                l0.runs.push(run);
+            }
+        }
+        if agg_markers_on() {
+            eprintln!(
+                "MORSEL|SHAREDAGG|members={},{}|closed={},{}|merged_runs={}|kept_runs={}",
+                self.tables[0].reserved(),
+                self.tables[1].reserved(),
+                u8::from(self.tables[0].is_closed()),
+                u8::from(self.tables[1].is_closed()),
+                self.merged_runs.load(Ordering::Relaxed),
+                self.kept_runs.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -4117,11 +4499,47 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         }
         None => None,
     };
+    // Shared-table EXPERIMENT engagement (D2, default OFF): K2 single-int-
+    // word, COUNT-only states, no topn/freeze composition, est groups in
+    // (engaged cap, band max] — below the band Locals never fill; above it
+    // the table cannot be SLC-resident and the incumbent partitioned path
+    // is the right answer (and remains the runtime fallback either way).
+    let shared = if agg_shared_table_enabled()
+        && drain == SinkDrain::K2
+        && key_words == 1
+        // ONE count transition: the state block is a single AggPerGroup
+        // (16B — Datum + flag bytes), the layout the shared face folds
+        // (wave-4 finding: the raw-transvalue 8B guess never engaged).
+        && state_bytes == core::mem::size_of::<::execexpr::AggPerGroup>()
+        && dop > 1
+        && topn.is_none()
+        && freeze.is_none()
+        && ::nodeagg::sink::agg_sink_all_count(agg)
+        && est_groups > agg_shared_table_min_groups().unwrap_or(sink_cap as u64)
+        && est_groups <= agg_shared_table_max_groups()
+    {
+        lane_trace(&format!(
+            "runtime-agg: SHARED-TABLE experiment engaged (est_groups={est_groups})"
+        ));
+        Some(SharedAggFace::new(est_groups))
+    } else {
+        None
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
         mk,
         cap: sink_cap,
+        // Freeze-armed (LIMIT-k admission) shapes stay on the incumbent
+        // cadence: their live group set is k-bounded post-freeze, so the
+        // α-gate has no footprint to reclaim and the freeze-window byte
+        // surface stays untouched.
+        alpha_floor: if freeze.is_some() {
+            None
+        } else {
+            alpha_gate_floor(state_bytes, sink_cap, dop)
+        },
+        shared,
         budget,
         key_words,
         state_bytes,
@@ -4715,6 +5133,111 @@ mod topn_mode_tests {
         }
         // Unknown encodings decode fail-closed to FullDrain.
         assert_eq!(TopnMode::decode(97), TopnMode::FullDrain);
+    }
+}
+
+#[cfg(test)]
+mod alpha_gate_tests {
+    use super::AlphaGate;
+
+    const FLOOR: Option<u32> = Some(16_384);
+    const CAP: u32 = 65_536;
+    const A0: u64 = 200; // α₀ = 2.0
+    const RP: u64 = 10;
+
+    fn fill_and_flush(g: &mut AlphaGate, rows: u64, entries: usize) {
+        g.absorbed(rows as usize);
+        g.adjudicate(entries, FLOOR, CAP, A0, RP);
+    }
+
+    /// Write-buffer window (α ≈ 1) demotes; a collapsing floor window
+    /// (α ≥ α₀) restores immediately — the phase-change fast path.
+    #[test]
+    fn demote_then_collapse_restore() {
+        let mut g = AlphaGate::default();
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // α = 1.0
+        assert!(g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 0));
+        // Floor window with strong collapse: 3 rows/entry.
+        fill_and_flush(&mut g, 3 * 16_384, 16_384);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 1, 0));
+    }
+
+    /// The α₀ boundary is INCLUSIVE-keep: exactly α₀ keeps the share
+    /// (rows×100 ≥ entries×α₀×100), just under demotes.
+    #[test]
+    fn alpha0_boundary() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, 2 * CAP as u64, CAP as usize); // α = 2.0
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, 2 * CAP as u64 - 1, CAP as usize); // just under
+        assert!(g.demoted);
+    }
+
+    /// Müller hysteresis: a demoted Local with persistently low α re-probes
+    /// (full threshold restored) only after reprobe_mult × full-cap rows,
+    /// then re-demotes on the next low-α full window, restarting the clock.
+    #[test]
+    fn reprobe_after_ten_cache_volumes() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // demote
+        assert!(g.demoted);
+        // Floor windows at α=1: 10×CAP rows = 40 floor fills before the
+        // re-probe budget is met.
+        let mut reprobed_at = None;
+        for i in 0..50 {
+            fill_and_flush(&mut g, 16_384, 16_384);
+            if !g.demoted {
+                reprobed_at = Some(i);
+                break;
+            }
+        }
+        // 10 × 65_536 rows / 16_384 rows-per-window = 40 windows.
+        assert_eq!(reprobed_at, Some(39));
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 1));
+        // The probe window fails again → re-demote, clock restarted.
+        fill_and_flush(&mut g, CAP as u64, CAP as usize);
+        assert!(g.demoted);
+        assert_eq!(g.demotes, 2);
+        assert_eq!(g.rows_since_demote, 0);
+    }
+
+    /// reprobe_mult = 0 pins a low-α demote (sticky mode).
+    #[test]
+    fn reprobe_zero_is_sticky() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, FLOOR, CAP, A0, 0);
+        assert!(g.demoted);
+        for _ in 0..1000 {
+            g.absorbed(16_384);
+            g.adjudicate(16_384, FLOOR, CAP, A0, 0);
+        }
+        assert!(g.demoted);
+        assert_eq!(g.reprobes, 0);
+    }
+
+    /// Unarmed controller (alpha_floor = None) never transitions and the
+    /// effective threshold never leaves sink.cap — the kill-switch/serial/
+    /// freeze identity. Pressure flushes reset the window without
+    /// adjudication.
+    #[test]
+    fn unarmed_and_pressure_identity() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, None, CAP, A0, RP);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (0, 0, 0));
+        // Pressure flush: window resets, no verdict.
+        g.absorbed(100);
+        g.on_pressure_flush();
+        assert_eq!(g.window_rows, 0);
+        assert!(!g.demoted);
+        // Empty run (entries = 0) never adjudicates.
+        g.adjudicate(0, FLOOR, CAP, A0, RP);
+        assert!(!g.demoted);
     }
 }
 
