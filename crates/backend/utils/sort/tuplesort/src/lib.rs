@@ -76,7 +76,7 @@ pub fn init_seams() {
             Ok(out)
         },
     );
-    tuplesort_seams::cbstore_ingest_sort::set(|tup_desc, keys, work_mem| {
+    tuplesort_seams::pgrcolumnar_ingest_sort::set(|tup_desc, keys, work_mem| {
         use tuplesort_seams::CbSortKeyKind;
         assert!(!keys.is_empty());
         let ssup: Vec<SortSupport> = keys
@@ -99,7 +99,7 @@ pub fn init_seams() {
     });
 }
 
-// cbstore ingest-sort seam impl: a heap tuplesort driven value-wise.
+// pgrcolumnar ingest-sort seam impl: a heap tuplesort driven value-wise.
 struct CbIngestSortImpl {
     ts: Tuplesort,
 }
@@ -263,7 +263,7 @@ pub struct TuplesortData<'m> {
     // Freed-space size mode, resolved once (bounded-path discards are per-put).
     free_typlen: i16,
     // Top-k boundary-tie tracking (armed only by the lane's zone-adaptive
-    // sort feed, docs/design/cbstore-zone-adaptive.md): `tie_dirty` records
+    // sort feed, docs/design/pgrcolumnar-zone-adaptive.md): `tie_dirty` records
     // whether the CURRENT k-th boundary key group extends beyond the heap —
     // i.e. an incoming full-key tie against the boundary was discarded, or a
     // boundary-tie heap member was evicted while an equal-key member remains.
@@ -1399,7 +1399,7 @@ impl Tuplesort {
         })
     }
 
-    /// Heap-variant put straight from deformed values (the cbstore ingest-sort
+    /// Heap-variant put straight from deformed values (the pgrcolumnar ingest-sort
     /// seam; no slot exists on that path).
     pub fn putvalues(&mut self, values: &[Datum], isnull: &[bool]) -> PgResult<()> {
         self.0.with_mut(|st| {

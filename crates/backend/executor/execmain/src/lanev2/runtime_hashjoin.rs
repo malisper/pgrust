@@ -5,7 +5,7 @@
 //! per-leaf build/probe task sets, recursive splits with a depth cap).
 //!
 //! Shape (phase 1): a SERIAL-plan plain Agg over a HashJoin over two
-//! lane-fusible cbstore SeqScans. UNBATCHED (budget fits — the dormant
+//! lane-fusible pgrcolumnar SeqScans. UNBATCHED (budget fits — the dormant
 //! default) it is THREE runtime task sets:
 //!
 //!   [0] BUILD-ACCEPT   inner-scan granules → filter/project → per-worker
@@ -101,7 +101,7 @@ use ::types_tuple::MinimalTupleData;
 
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_agg::ExitBump;
-use super::runtime_scan::{exprs_parallel_safe, CbstoreGranuleSource};
+use super::runtime_scan::{exprs_parallel_safe, PgrcolumnarGranuleSource};
 use super::stats::{self, RefuseReason, ShapeClass};
 use super::{lane_trace, seq_scan_fusible};
 
@@ -892,7 +892,7 @@ fn build_morsel_body(
     with_worker_exec("runtime hash-join build morsel without a bound executor", |es, ps| {
         with_join_tree(es, ps, |estate, _agg, _hj, _outer_ss, hstate, inner_ss| {
             // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); this arm admits only cbstore scans by construction.
+            // rename); this arm admits only pgrcolumnar scans by construction.
             ::nodeseqscan::seq_scan_set_morsel_range(
                 inner_ss,
                 estate,
@@ -1057,7 +1057,7 @@ fn probe_morsel_body(
     with_worker_exec("runtime hash-join probe morsel without a bound executor", |es, ps| {
         with_join_tree(es, ps, |estate, agg, hj, outer_ss, hstate, _inner_ss| {
             // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); this arm admits only cbstore scans by construction.
+            // rename); this arm admits only pgrcolumnar scans by construction.
             ::nodeseqscan::seq_scan_set_morsel_range(
                 outer_ss,
                 estate,
@@ -2142,7 +2142,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         router::tick_refused(ArmClass::HashJoin, reason);
     }
 
-    // --- Node shape: HashJoin over two lane-fusible cbstore SeqScans; a
+    // --- Node shape: HashJoin over two lane-fusible pgrcolumnar SeqScans; a
     // fresh (untouched) join; phase-1 join types; subplan/param-free exprs.
     let crate::procnode::PlanStateNode::SeqScan(outer_ss) = &mut *hj.outer else {
         refuse("outer-not-seqscan");
@@ -2167,11 +2167,11 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         refuse("partials-not-order-insensitive-exact");
         return Ok(None);
     }
-    if !seq_scan_fusible(outer_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(outer_ss) {
+    if !seq_scan_fusible(outer_ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(outer_ss) {
         refuse("outer-scan-not-fusible");
         return Ok(None);
     }
-    if !seq_scan_fusible(inner_ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(inner_ss) {
+    if !seq_scan_fusible(inner_ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(inner_ss) {
         refuse("inner-scan-not-fusible");
         return Ok(None);
     }
@@ -2499,7 +2499,7 @@ fn engage_ceremony<'mcx>(
         let runtime::SinkTaskSets { accept, combine, probe: _sink_probe } =
             runtime::sink_tasksets(
                 sink,
-                Arc::new(CbstoreGranuleSource {
+                Arc::new(PgrcolumnarGranuleSource {
                     starts: Arc::new(inner_starts),
                     // This arm feeds claims straight into set_granule_range
                     // (single-epoch contract); it does not subdivide
@@ -2533,7 +2533,7 @@ fn engage_ceremony<'mcx>(
         }
         let probe0_idx = tasksets.len();
         tasksets.push(runtime::TaskSetSpec {
-            source: Arc::new(CbstoreGranuleSource {
+            source: Arc::new(PgrcolumnarGranuleSource {
                 starts: Arc::new(outer_starts),
                 // As above: straight set_granule_range feed, never coalesce.
                 coalesce: false,

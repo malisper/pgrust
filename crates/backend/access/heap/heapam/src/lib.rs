@@ -372,7 +372,7 @@ pub fn heap_setscanlimits(
 }
 
 /// Position the scan on the block-range morsel claim `[b0, b1)` (M1 heap
-/// morsel source): the heap analog of cbstore's `set_granule_range`, and a
+/// morsel source): the heap analog of pgrcolumnar's `set_granule_range`, and a
 /// repositionable `heap_setscanlimits` — callable between claims (the
 /// previous claim drained to `end_of_scan`, or never started). The claim
 /// unit is one block, so the range maps directly onto the

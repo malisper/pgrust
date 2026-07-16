@@ -912,7 +912,7 @@ fn jit_deform_matches_aot_and_interpreter() {
     exec_clear_tuple(&mut slot, mcx);
 }
 
-// Dict-lane surface (cbstore dict currency): arm/answer negotiation, the
+// Dict-lane surface (pgrcolumnar dict currency): arm/answer negotiation, the
 // fill gates the AM keys its batch fill on, and window-boundary clearing.
 #[test]
 fn dict_lane_negotiation_round_trip() {

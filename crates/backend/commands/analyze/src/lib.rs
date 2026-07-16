@@ -538,9 +538,9 @@ fn do_analyze_rel<'mcx>(
         // Ingest-time footer NDV (whole-stream HLL): sampled Duj1 underestimates
         // heavy-tailed text NDV 100-1500x, so a present footer count wins.
         let footer_ndv = if !inh
-            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore)
+            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar)
         {
-            tableam::cbstore_footer_ndv(onerel)?
+            tableam::pgrcolumnar_footer_ndv(onerel)?
         } else {
             None
         };
@@ -1262,8 +1262,8 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
 ) -> PgResult<i32> {
     debug_assert!(targrows > 0);
-    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Cbstore) {
-        return cbstore_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
+    if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
+        return pgrcolumnar_acquire_sample_rows(mcx, onerel, rows, targrows, totalrows, totaldeadrows);
     }
     let base = rows.len();
     let mut numrows: i32 = 0;
@@ -1354,11 +1354,11 @@ fn acquire_sample_rows<'mcx>(
     Ok(numrows)
 }
 
-// cbstore's acquirefunc (C table_relation_analyze lets the AM supply it):
+// pgrcolumnar's acquirefunc (C table_relation_analyze lets the AM supply it):
 // uniform Vitter reservoir over the visible row stream; skipped spans are
 // never decoded (gather_row decodes granules on demand). totalrows is exact
-// from the part footer; cbstore parts carry no dead rows.
-fn cbstore_acquire_sample_rows<'mcx>(
+// from the part footer; pgrcolumnar parts carry no dead rows.
+fn pgrcolumnar_acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
     rows: &mut PgVec<'mcx, HeapTupleData<'mcx>>,
@@ -1369,7 +1369,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
     let tupdesc = onerel.descr();
     let mut scan = tableam::table_beginscan_analyze(mcx, onerel)?;
     let mut slot = tableam::table_slot_create(mcx, onerel)?;
-    let rgs = tableam::cbstore_analyze_visible_rgs(&scan)?;
+    let rgs = tableam::pgrcolumnar_analyze_visible_rgs(&scan)?;
     let total: u64 = rgs.iter().map(|&(_, n)| n as u64).sum();
     *totalrows = total as f64;
     *totaldeadrows = 0.0;
@@ -1381,7 +1381,7 @@ fn cbstore_acquire_sample_rows<'mcx>(
                      rg: u32,
                      row: u32|
      -> PgResult<HeapTupleData<'mcx>> {
-        if !tableam::cbstore_analyze_fetch_row(scan, rg, row, slot) {
+        if !tableam::pgrcolumnar_analyze_fetch_row(scan, rg, row, slot) {
             panic!("cbstore analyze: sampled row ref out of range");
         }
         let b = slot.base();

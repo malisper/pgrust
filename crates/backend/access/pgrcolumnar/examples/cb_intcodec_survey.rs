@@ -1,6 +1,6 @@
 //! Integer/timestamp codec survey (intcodec lane, phase 1 — evidence only).
 //!
-//! For each fixed-width (int/date/timestamp) column of a cbstore part:
+//! For each fixed-width (int/date/timestamp) column of a pgrcolumnar part:
 //! current on-disk footprint (chunk payload + metadata), encoding/codec
 //! histogram, measured decode cost of the CURRENT path (decode_granule:
 //! frame decompress + widen), and OFFLINE simulated sizes for candidate
@@ -19,8 +19,8 @@
 //! Usage: cb_intcodec_survey <part-file> <ncols> [names-file] [col ...]
 //!   names-file: one column name per line, in attribute order.
 
-use cbstore::format::{Codec, Encoding};
-use cbstore::reader::Part;
+use pgrcolumnar::format::{Codec, Encoding};
+use pgrcolumnar::reader::Part;
 use std::time::Instant;
 
 fn bytes_width(range: u128) -> usize {

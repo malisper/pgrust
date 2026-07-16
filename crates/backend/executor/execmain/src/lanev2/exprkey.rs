@@ -18,7 +18,7 @@
 //!   on C's row — then refuses STICKY (all later batches per-row).
 //!
 //! * **Dict-expression keys** (Q29-class): the key is a strict fmgr chain
-//!   over ONE dict-coded cbstore text column (`ScanProjExprKey` census →
+//!   over ONE dict-coded pgrcolumnar text column (`ScanProjExprKey` census →
 //!   `laneexec::dicteval`, IMMUTABLE internal-language builtins only —
 //!   volatile/stable/SQL-language functions refuse there). The dict-memo
 //!   principle applied to the KEY: the chain runs through the REAL fmgr once
@@ -262,7 +262,7 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
 /// surviving row through the production fmgr and pack via the canonical
 /// numeric key form (`nodeagg::mk_numeric_datum_bits`); every other key is a
 /// bare-Var component packed from its base lane (Int/Numeric) or the
-/// dict/intern lane (TextRaw, cbstore). Unpackable numeric values (range /
+/// dict/intern lane (TextRaw, pgrcolumnar). Unpackable numeric values (range /
 /// non-minimal display scale) DEMOTE: the compact table migrates to the C
 /// tuplehash and the batch replays per-row — never a lossy pack.
 pub(super) struct MultiKeyChain {
@@ -546,9 +546,9 @@ pub(super) fn decide_exprkey<'mcx>(
             }
             ExprKeyKind::TsTrunc { input_col: xk.input_col, unit }
         } else {
-            // Dict class: cbstore text column, IMMUTABLE internal builtins
+            // Dict class: pgrcolumnar text column, IMMUTABLE internal builtins
             // (dicteval's fail-closed compile owns the catalog gate).
-            if !::nodeseqscan::seq_scan_is_cbstore(ss)
+            if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
                 || !matches!(xk.input_type, TEXTOID | VARCHAROID)
             {
                 return refused();
@@ -639,9 +639,9 @@ pub(super) fn decide_exprkey<'mcx>(
         return refused();
     }
     // Staging arm (decide-phase probe, like `probe_arm_fold_prefix`): the
-    // PREWHERE lane first on qual'd cbstore scans, then the columnar /
+    // PREWHERE lane first on qual'd pgrcolumnar scans, then the columnar /
     // fixed-width-prefix deform. A refusing arm fails open to per-row.
-    let armed = if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    let armed = if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             match ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix) {
                 Ok(true) => {}
@@ -715,10 +715,10 @@ fn decide_exprkey_mk<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
         None
     };
-    // v1: cbstore only — text key components need dict lanes and the
+    // v1: pgrcolumnar only — text key components need dict lanes and the
     // offset-free columnar arm stages every base component as decoded
     // datums (a heap fixed-width prefix cannot stage varlena keys).
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return refused();
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
@@ -1129,7 +1129,7 @@ fn decide_reduced<'mcx>(
 }
 
 /// The shared staging arm (decide-phase probe + per-build re-arm): the
-/// PREWHERE lane first on qual'd cbstore scans, then the columnar /
+/// PREWHERE lane first on qual'd pgrcolumnar scans, then the columnar /
 /// fixed-width-prefix deform. A refusing arm fails open to per-row.
 fn arm_stage<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -1137,7 +1137,7 @@ fn arm_stage<'mcx>(
     prefix: i32,
     dict_key: Option<u16>,
 ) -> bool {
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, prefix);
         }
@@ -1259,7 +1259,7 @@ fn decide_exprkey_mk_case<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::MultiKeyShape);
         None
     };
-    if !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return refused();
     }
     let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else {
@@ -1468,7 +1468,7 @@ pub(super) fn exprkey_rearm<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> bool {
-    if ::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         if ss.ss.qual.is_some() {
             let _ = ::nodeseqscan::seq_scan_cb_prewhere_arm(ss, estate, xk.prefix);
         }
@@ -2581,7 +2581,7 @@ fn exprkey_mk_batch<'mcx>(
     }
     if derive_err || null_key {
         // NULL derived keys cannot pack without a null-bitmap byte
-        // (cbstore shapes carry none): same demote as an error, minus the
+        // (pgrcolumnar shapes carry none): same demote as an error, minus the
         // replayed raise.
         xk.refused = true;
         trace_feed("expr-key multi-key demote: replaying batch per-row (sticky)");

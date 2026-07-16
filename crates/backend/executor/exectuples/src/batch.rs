@@ -166,11 +166,11 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 
     /// Columnar-AM plan: `ncols` only, NO offset chain — usable exclusively
-    /// with batch fills that ignore tuple offsets (cbstore's `batch_deform`
+    /// with batch fills that ignore tuple offsets (pgrcolumnar's `batch_deform`
     /// stages decoded Datums per column, so varlena columns are stageable
     /// and the fixed-width-prefix restriction does not apply). The heap
     /// deform paths must never see this plan (they index `offs`); callers
-    /// install it only on cbstore scan states, whose `TableScanDesc`
+    /// install it only on pgrcolumnar scan states, whose `TableScanDesc`
     /// dispatch never reaches the heap deform (`is_virtual` guards it).
     pub fn columnar(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
         if ncols == 0 || ncols > u16::MAX as usize {
@@ -193,7 +193,7 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 }
 
-/// Identity + content handle of one per-row-group dictionary (cbstore dict
+/// Identity + content handle of one per-row-group dictionary (pgrcolumnar dict
 /// encoding): decoded text Datums, code = index. The pointer is the storage
 /// adapter's and stays valid while the window is staged (until the next
 /// batch fill / endscan) — the same lifetime contract as the text Datums the
@@ -213,10 +213,10 @@ impl<'mcx> SoaDeformPlan<'mcx> {
 /// is `same_identity` (epoch match); nothing here prevents carrying it —
 /// implementing that plumbing is explicitly out of scope for now.
 ///
-/// CONTRACT: dict-coded columns are NULL-free today (cbstore stores no
+/// CONTRACT: dict-coded columns are NULL-free today (pgrcolumnar stores no
 /// NULLs). That is a per-chunk proof the filler asserts by writing
 /// `isnull = false` on gather — NOT a type invariant of this struct; the
-/// per-lane isnull currency stays so a NULL-capable cbstore v2 only changes
+/// per-lane isnull currency stays so a NULL-capable pgrcolumnar v2 only changes
 /// the fillers (phase4 design §8.3).
 #[derive(Clone, Copy)]
 pub struct SoaDictTable {
@@ -241,7 +241,7 @@ pub struct SoaDictTable {
     /// Scan-unique stitch identity: stable across every RG (and rescan) of
     /// one pinned scan, distinct across scans. 0 iff `stitch` is null.
     pub gepoch: u64,
-    /// LAZY SUB-FRAMED DICTIONARY SEAM (cbstore CHUNK_FLAG_DICT_FRAMED):
+    /// LAZY SUB-FRAMED DICTIONARY SEAM (pgrcolumnar CHUNK_FLAG_DICT_FRAMED):
     /// null = every entry's bytes are materialized (the historical
     /// contract). Non-null = `dict[code]` POINTERS are always valid but a
     /// code's entry BYTES exist only after an ensure covering it: `datum()`
@@ -403,14 +403,14 @@ pub struct SoaBatch<'mcx> {
     // (or left None = per-row) by the fill every window.
     text_spans: PgVec<'mcx, Option<SoaTextSpan>>,
     text_any: bool,
-    // Length-lane arming (fold length admissions over cbstore text columns):
+    // Length-lane arming (fold length admissions over pgrcolumnar text columns):
     // 0 = none, LEN_WANT_BYTES = octet length, LEN_WANT_CHARS = UTF-8
-    // character length. Armed once at feed arm (cbstore scans only); the
+    // character length. Armed once at feed arm (pgrcolumnar scans only); the
     // AM's batch fill answers the column's values cells with
     // `Datum::from_i64(length)` for every staged SELECTED row instead of
     // varlena datum pointers (post-qual for dict-answered qual columns — the
     // gather/convert step). Heap fills never see an armed column (the
-    // arming seam refuses non-cbstore scans).
+    // arming seam refuses non-pgrcolumnar scans).
     len_want: PgVec<'mcx, u8>,
     len_any: bool,
 }
@@ -655,7 +655,7 @@ impl<'mcx> SoaBatch<'mcx> {
         &self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
     }
 
-    // Columnar-AM staging (cbstore): the AM writes decoded vectors directly
+    // Columnar-AM staging (pgrcolumnar): the AM writes decoded vectors directly
     // (subject to `lane_fill_wanted`; dict-answered columns skip the fill).
     #[inline]
     pub fn col_values_mut(&mut self, c: usize) -> &mut [Datum] {
@@ -951,7 +951,7 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
     let h = match slot {
         SlotData::BufferHeap(b) => &mut b.base,
         SlotData::Heap(h) => h,
-        // Columnar-AM (cbstore) scans use virtual slots the AM's
+        // Columnar-AM (pgrcolumnar) scans use virtual slots the AM's
         // batch_store_slot fully populates; the prefix publish is a no-op
         // (and MUST be: dict-answered / fill-skipped SoA cells are stale).
         SlotData::Virtual(_) => return true,

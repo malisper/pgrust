@@ -87,7 +87,7 @@ pub(crate) unsafe fn minimal_getattr(
     unsafe { fetchatt(target, tp.add(off)) }
 }
 
-/// Linear all-attribute deform of a MinimalTuple body (the cbstore ingest-sort
+/// Linear all-attribute deform of a MinimalTuple body (the pgrcolumnar ingest-sort
 /// drain; per-attribute `minimal_getattr` would be quadratic on wide rows).
 ///
 /// # Safety

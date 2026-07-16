@@ -3,7 +3,7 @@
 //! docs/design/parallelism-redesign-2026-07.md §2.2/§5-M2).
 //!
 //! Shape: the SERIAL-plan grouped distinct pipeline `Agg(AGG_SORTED) ← Sort
-//! ← SeqScan(cbstore)` (the ClickBench Q9/Q10 class — and, with the
+//! ← SeqScan(pgrcolumnar)` (the ClickBench Q9/Q10 class — and, with the
 //! distinct-bytes car, the text-group-key q14 donor-B class), executed as
 //! one SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
 //! PREWHERE → per-worker `PdBuilder` partial: compact int group keys +
@@ -1107,8 +1107,8 @@ impl RuntimeDistinctShared {
                     let ss = distinct_worker_scan(d.planstate.as_mut())?;
                     // train-12 composition: the heap lane generalized the
                     // positioner to AM-dispatched seq_scan_set_morsel_range
-                    // (PgResult<()>); this arm admits only cbstore scans, so
-                    // the former not-cbstore branch is unreachable by
+                    // (PgResult<()>); this arm admits only pgrcolumnar scans, so
+                    // the former not-pgrcolumnar branch is unreachable by
                     // construction.
                     ::nodeseqscan::seq_scan_set_morsel_range(
                         ss,
@@ -1665,7 +1665,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     } else {
         seq_scan_fusible(ss, estate)?
     };
-    if !fusible || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !fusible || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         refused(estate, ea, node_id, "scan not fusible/cbstore");
         return Ok(None);
     }
@@ -2033,7 +2033,7 @@ fn engage_ceremony<'mcx>(
         // coalesce: false — this arm's morsel_body feeds the claim straight
         // into set_granule_range (single-epoch contract); it does not
         // subdivide multi-epoch claims.
-        let source = Arc::new(super::runtime_scan::CbstoreGranuleSource {
+        let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
             starts: Arc::new(starts),
             coalesce: false,
         });

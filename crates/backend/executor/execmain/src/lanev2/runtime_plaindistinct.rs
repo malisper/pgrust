@@ -1,5 +1,5 @@
 //! Runtime PLAIN exact-DISTINCT sink (band-2b) — DOP-parallel
-//! `Aggregate(AGG_PLAIN, all-DISTINCT) → [Sort →] SeqScan(cbstore)`, the CB
+//! `Aggregate(AGG_PLAIN, all-DISTINCT) → [Sort →] SeqScan(pgrcolumnar)`, the CB
 //! q5/q6 class (`COUNT(DISTINCT UserID)` / `COUNT(DISTINCT SearchPhrase)`).
 //!
 //! Why this arm exists: the planner-parallel plan for this shape is
@@ -259,7 +259,7 @@ fn mark_self_errored() {
 /// The per-morsel accept feed: staged key windows into the worker's
 /// partitioned sets. The serial `PlainDistinctAggBuildSink`'s staged reads,
 /// retargeted at `PlainPdLocal`; any row the staging cannot serve crosses
-/// the engagement to the serial fallback (v1 fail-closed — cbstore stages
+/// the engagement to the serial fallback (v1 fail-closed — pgrcolumnar stages
 /// every row of a covered key column).
 struct PlainAcceptSink<'a> {
     local: &'a mut PlainPdLocal,
@@ -368,7 +368,7 @@ impl<'mcx> BatchSink<'mcx> for PlainAcceptSink<'_> {
                 Some((_, true)) => saw_null = true,
                 None => {
                     // A row the key staging cannot serve: cross to serial
-                    // (v1 fail-closed; cbstore covered-key scans stage all).
+                    // (v1 fail-closed; pgrcolumnar covered-key scans stage all).
                     self.crossed = true;
                     return Ok(());
                 }
@@ -703,7 +703,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
         refused(estate, true, node_id, "ea not threaded (plain-distinct v1)");
         return Ok(None);
     }
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         refused(estate, ea, node_id, "scan not fusible/cbstore");
         return Ok(None);
     }
@@ -859,7 +859,7 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        let source = Arc::new(super::runtime_scan::CbstoreGranuleSource {
+        let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
             starts: Arc::new(starts),
             coalesce: false,
         });
