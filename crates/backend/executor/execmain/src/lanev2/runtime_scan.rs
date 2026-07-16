@@ -4,10 +4,11 @@
 //! Shape: a SERIAL-plan plain Agg over a pgrcolumnar OR heap SeqScan
 //! (COUNT/plain-agg fold shapes with optional PREWHERE/kernel quals — the
 //! lane's simplest fold pipelines), executed as ONE runtime TaskSet at DOP
-//! N. The morsel source dispatches on the table AM: pgrcolumnar granules with
-//! row-group hard boundaries ([`PgrcolumnarGranuleSource`]) or heap block
-//! ranges with none ([`HeapBlockSource`] — C's
-//! table_block_parallelscan_nextpage chunked claim, runtime-adaptive).
+//! N. The morsel source is [`runtime::GranuleMapSource`] over the geometry
+//! the storage seam publishes ([`super::batch_source::SeqScanSource`]):
+//! pgrcolumnar granules with row-group hard boundaries, or heap block
+//! ranges with none (C's table_block_parallelscan_nextpage chunked claim,
+//! runtime-adaptive).
 //! Heap visibility is per tuple inside the page batch, under the leader
 //! snapshot the task binding restores — exactly a C parallel seq scan
 //! worker's check. The plan surface
@@ -20,7 +21,7 @@
 //! Execution model (submit-and-park, §2.5):
 //!  * The LEADER creates a parallel context (vacuumparallel precedent — no
 //!    Gather node), installs the query-task binding policy, submits a
-//!    PINNED resource group (one task set: PgrcolumnarGranuleSource + the fold
+//!    PINNED resource group (one task set: the GranuleMapSource + the fold
 //!    work), launches N helpers through the ordinary wpool machinery, and
 //!    PARKS — a WaitForParallelWorkersToFinish-shaped loop (completion poll
 //!    + ProcessParallelMessages + CHECK_FOR_INTERRUPTS + latch quantum).
@@ -70,6 +71,7 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::batch_source::{BatchGranuleSource, SeqScanSource};
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
@@ -126,13 +128,16 @@ pub(super) struct RuntimeScanShared {
     failed: AtomicBool,
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
-    /// Row-group start prefix sums (the morsel source's hard boundaries),
-    /// shared with [`PgrcolumnarGranuleSource`]: a COALESCED claim (sched.rs
-    /// dop1-tax fix 1 — several epochs per claim at low live width) is
-    /// segmented at these edges inside `morsel_body`, so `set_granule_range`
-    /// still sees single-RG ranges and every kernel invocation sees one
-    /// dictionary snapshot. Set once at engage, before any claim.
-    rg_starts: OnceLock<Arc<Vec<u64>>>,
+    /// The scan's granule geometry (row-group start prefix sums = the
+    /// morsel source's hard boundaries), shared with the scheduler's
+    /// [`runtime::GranuleMapSource`]: a COALESCED claim (sched.rs dop1-tax
+    /// fix 1 — several epochs per claim at low live width) is segmented at
+    /// these edges inside `morsel_body` ([`runtime::GranuleMap::segments`]),
+    /// so `set_granule_range` still sees single-RG ranges and every kernel
+    /// invocation sees one dictionary snapshot. Set once at engage, before
+    /// any claim; UNSET on the heap and bitmap paths (no interior
+    /// boundaries — nothing to segment) exactly as `rg_starts` was.
+    map: OnceLock<Arc<runtime::GranuleMap>>,
     /// inc-2 bind-once: helpers drive from the ENTRY TASK (already fully
     /// bound by parallel_worker_body — a strict superset of the query-task
     /// binder's bind) instead of re-binding at POST_TASK_PARK. The hook
@@ -403,62 +408,62 @@ impl RuntimeScanShared {
                         )));
                     };
                     // A COALESCED claim spans several row groups (sched.rs
-                    // dop1-tax fix 1): pgrcolumnar claims are segmented at the
-                    // RG edges (`rg_starts`) so every positioned range sees
-                    // a single dictionary epoch (set_morsel_range's pgrcolumnar
+                    // dop1-tax fix 1): pgrcolumnar claims are segmented at
+                    // the RG edges (`GranuleMap::segments` over the shared
+                    // engagement geometry) so every positioned range sees
+                    // a single dictionary epoch (position's pgrcolumnar
                     // single-RG contract) and every kernel batch one
                     // dictionary snapshot. Heap sources have no interior
-                    // boundaries and never coalesce (no rg_starts): the
-                    // loop degenerates to one positioned range. Cancel
-                    // observability stays at epoch grain: an abort/failure
-                    // observed between segments stops the claim (aborted
+                    // boundaries and never coalesce (no map on the
+                    // payload): the loop degenerates to one positioned
+                    // range (`Segments::whole`). Cancel observability
+                    // stays at epoch grain: an abort/failure observed
+                    // between segments stops the claim (aborted
                     // generations need not execute every granule — the RG
                     // outcome is discarded).
                     let ea = self.instr.is_some();
                     let mut tally = EaRowTally::default();
-                    let starts = self.rg_starts.get();
-                    let mut seg = range.start;
-                    while seg < range.end {
-                        let seg_end = match starts {
-                            Some(starts) => {
-                                let bound = match starts.binary_search(&seg) {
-                                    Ok(i) => starts[i + 1],
-                                    Err(i) => starts[i],
-                                };
-                                bound.min(range.end)
-                            }
-                            None => range.end,
-                        };
-                        ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, seg, seg_end)?;
+                    let mut src = SeqScanSource::new(&mut *ss);
+                    let mut segs = match self.map.get() {
+                        Some(map) => map.segments(range.start..range.end),
+                        None => runtime::Segments::whole(range.start..range.end),
+                    };
+                    while let Some(seg) = segs.next() {
+                        src.position(estate, seg)?;
                         match mode {
                             DriveMode::Fold => {
                                 if ea {
                                     super::agg_plain_fold_drain_ea(
                                         &mut aps.agg,
-                                        ss,
+                                        src.scan_mut(),
                                         estate,
                                         &mut tally,
                                     )?
                                 } else {
-                                    super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
+                                    super::agg_plain_fold_drain(
+                                        &mut aps.agg,
+                                        src.scan_mut(),
+                                        estate,
+                                    )?
                                 }
                             }
                             DriveMode::Census => census_drain(
                                 &mut aps.agg,
-                                ss,
+                                src.scan_mut(),
                                 estate,
                                 ea.then_some(&mut tally),
                             )?,
                             // rowdrive direct-drive modes (car 1/car 2):
-                            // heap-only admission (no rg_starts; EA refuses
-                            // heap at admission), so the segmentation loop
-                            // degenerates to one positioned range for these
-                            // arms and no tally is ever needed.
+                            // heap-only admission (no payload map; EA
+                            // refuses heap at admission), so the
+                            // segmentation loop degenerates to one
+                            // positioned range for these arms and no tally
+                            // is ever needed.
                             DriveMode::StorelessCount => {
-                                storeless_count_drain(&mut aps.agg, ss, estate)?
+                                storeless_count_drain(&mut aps.agg, src.scan_mut(), estate)?
                             }
                             DriveMode::PerRowFold => {
-                                perrow_fold_drain(&mut aps.agg, ss, estate)?
+                                perrow_fold_drain(&mut aps.agg, src.scan_mut(), estate)?
                             }
                             // Dispatched to runtime_bitmap::drain_claim
                             // before this match (BitmapHeapScan outer).
@@ -466,8 +471,7 @@ impl RuntimeScanShared {
                                 unreachable!("bitmap arm returns above")
                             }
                         }
-                        seg = seg_end;
-                        if seg < range.end
+                        if segs.more()
                             && (self.failed.load(Ordering::SeqCst)
                                 || self
                                     .rg
@@ -1518,13 +1522,19 @@ fn perrow_fold_drain<'mcx>(
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
+///
+/// LEGACY of the m2 SINK arms only (distinct/plain-distinct/sort/hashjoin
+/// construction sites; runtime_agg keeps its own private copy): the SCAN
+/// arm now rides [`runtime::GranuleMapSource`] over the storage seam's
+/// [`runtime::GranuleMap`]. Consolidating the sink sites onto
+/// GranuleMapSource is WS-A inc-3 (post-integrate) and MUST carry each
+/// arm's posture bit-for-bit — see notes/se-ws-a-batchsource.md.
 pub(super) struct PgrcolumnarGranuleSource {
-    /// Row-group start prefix sums (len nrgs+1; last = total). Shared with
-    /// the engagement payload (`rg_starts`): morsel_body segments coalesced
-    /// claims at the same edges the source publishes.
+    /// Row-group start prefix sums (len nrgs+1; last = total).
     pub(super) starts: Arc<Vec<u64>>,
     /// True only when the consuming work body subdivides multi-epoch claims
-    /// (the scan arm's morsel_body). See `coalesce_claims`.
+    /// (none of the remaining users: the sink drains feed claims straight
+    /// into `set_granule_range`). See `coalesce_claims`.
     pub(super) coalesce: bool,
 }
 
@@ -1559,10 +1569,7 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
     /// cancel/photo-finish granularity the armed arm already ships.
     /// PGRUST_RUNTIME_SPLIT_CLAIMS=1 restores sizer-truncated claims (A/B).
     fn whole_boundary_claims(&self) -> bool {
-        static SPLIT: OnceLock<bool> = OnceLock::new();
-        !*SPLIT.get_or_init(|| {
-            std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
-        })
+        whole_claims()
     }
 
     /// dop1-tax fix 1: the SCAN arm's morsel_body subdivides a coalesced
@@ -1578,35 +1585,27 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
     }
 }
 
-/// Block-range morsel source over a heap relation (M1 heap source, the
-/// parallelism redesign's "heap morsels are block ranges"): granule = ONE
-/// block, C's `table_block_parallelscan_nextpage` claim unit at its finest —
-/// the runtime's duration-adaptive sizing builds the multi-block runs C
-/// precomputes as chunks, and the last-worker photo-finish replaces C's
-/// end-of-scan chunk ramp-down. Heap has no dictionary epochs, so there are
-/// no interior hard boundaries (`next_boundary_after` = the trait default:
-/// total). Visibility is per tuple inside the page batch
-/// (`page_collect_tuples` under the task-bound leader snapshot — exactly a
-/// C parallel seq scan worker's check), not a source property.
-struct HeapBlockSource {
-    /// rs_nblocks at the leader's scan start (the C parallel-scan contract:
-    /// blocks appended after scan start are not visited; their tuples are
-    /// invisible to the scan snapshot anyway).
-    nblocks: u64,
+/// Whole-boundary claim posture of the pgrcolumnar arms — the
+/// PGRUST_RUNTIME_SPLIT_CLAIMS kill switch (1 restores sizer-truncated
+/// claims for A/B), read once per process: the OnceLock freezes the first
+/// read, so construction-time (`GranuleMapSource`) and claim-time
+/// (`PgrcolumnarGranuleSource`) reads are observationally identical.
+pub(super) fn whole_claims() -> bool {
+    static SPLIT: OnceLock<bool> = OnceLock::new();
+    !*SPLIT.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
+    })
 }
 
-impl runtime::MorselSource for HeapBlockSource {
-    fn total_granules(&self) -> u64 {
-        self.nblocks
-    }
-
-    /// A heap block stages ~50-250 tuples (vs 8,192/granule on pgrcolumnar).
-    /// Seed the ramp at 16 blocks (128KB, a few thousand rows — tens of µs
-    /// on fold shapes): same probe-morsel sizing intent as pgrcolumnar's C0=2.
-    fn startup_c0(&self) -> u64 {
-        16
-    }
-}
+// The scan arm's heap block-range source (granule = ONE block, C's
+// `table_block_parallelscan_nextpage` claim unit at its finest; no interior
+// hard boundaries — heap has no dictionary epochs) is now the boundary-free
+// `runtime::GranuleMap::unbounded` published by the storage seam
+// (`batch_source::SeqScanSource::granule_map`) under a
+// `runtime::GranuleMapSource` with sizer-truncated, non-coalescing posture
+// — exactly the deleted HeapBlockSource's behavior. Visibility stays per
+// tuple inside the page batch (`page_collect_tuples` under the task-bound
+// leader snapshot), a drive property, not a source property.
 
 // ---------------------------------------------------------------------------
 // Leader-side parallel-safety walk (executor-side, fail-closed): the scan's
@@ -1928,44 +1927,39 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return ea_refused(estate, ea, node_id, "binder-policy");
     }
 
-    // --- Geometry: enough granules to be worth a gang. The source is the
-    // AM's morsel geometry: pgrcolumnar absolute granules with row-group hard
-    // boundaries, heap block ranges with none. (The floor is granule-
-    // denominated, so its meaning is per-AM: ~8,192 rows/granule on
-    // pgrcolumnar, one ~8KB block on heap — both env-tunable through the same
-    // knob because the e2e floors force it anyway.)
-    // nrgs rides along for the WFIN/LFIN diagnostic channel only: pgrcolumnar
-    // row-group (= dictionary epoch) count; heap has no interior hard
-    // boundaries, so it honestly reports 0.
-    // rg_starts additionally rides to the engagement payload (pgrcolumnar only):
-    // morsel_body segments COALESCED claims at the same RG edges the source
-    // publishes (dop1-tax fix 1). Heap has no interior boundaries and no
-    // dictionary epochs — nothing to segment, nothing to coalesce.
-    let (source, nrgs, rg_starts): (
-        Arc<dyn runtime::MorselSource>,
-        usize,
-        Option<Arc<Vec<u64>>>,
-    ) = if is_cb {
-        let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
-        else {
-            return Ok(None);
-        };
-        let nrgs = starts.len().saturating_sub(1);
-        let starts = Arc::new(starts);
-        (
-            Arc::new(PgrcolumnarGranuleSource {
-                starts: Arc::clone(&starts),
-                coalesce: true,
-            }),
-            nrgs,
-            Some(starts),
-        )
-    } else {
-        let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(ss, estate)? else {
-            return Ok(None);
-        };
-        (Arc::new(HeapBlockSource { nblocks }), 0, None)
+    // --- Geometry: enough granules to be worth a gang. The storage seam
+    // (`SeqScanSource::granule_map`) publishes the AM's morsel geometry as
+    // ONE GranuleMap: pgrcolumnar absolute granules with row-group hard
+    // boundaries, heap block ranges with none — per-AM startup seed baked
+    // in. (The floor is granule-denominated, so its meaning is per-AM:
+    // ~8,192 rows/granule on pgrcolumnar, one ~8KB block on heap — both
+    // env-tunable through the same knob because the e2e floors force it
+    // anyway.)
+    // nbounds() rides along for the WFIN/LFIN diagnostic channel only:
+    // pgrcolumnar row-group (= dictionary epoch) count; heap has no interior
+    // hard boundaries, so it honestly reports 0.
+    // The map additionally rides to the engagement payload (pgrcolumnar
+    // only): morsel_body segments COALESCED claims at the same RG edges the
+    // source publishes (dop1-tax fix 1). Heap has no interior boundaries
+    // and no dictionary epochs — nothing to segment, nothing to coalesce.
+    let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
+        return Ok(None);
     };
+    let map = Arc::new(map);
+    let nrgs = map.nbounds();
+    // Claim posture is EXPLICIT per arm (the GranuleMapSource contract,
+    // never AM-inferred): the scan arm's pgrcolumnar posture is
+    // whole-boundary (per the PGRUST_RUNTIME_SPLIT_CLAIMS kill switch) +
+    // coalesce (morsel_body subdivides multi-epoch claims); heap claims
+    // stay sizer-truncated with no coalescing — a boundary-free source
+    // opting into whole-boundary claims would take the pipeline in one
+    // claim.
+    let source: Arc<dyn runtime::MorselSource> = Arc::new(runtime::GranuleMapSource::new(
+        Arc::clone(&map),
+        is_cb && whole_claims(),
+        is_cb,
+    ));
+    let payload_map = is_cb.then(|| Arc::clone(&map));
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
         return ea_refused(estate, ea, node_id, "tiny-input-floor");
@@ -2018,7 +2012,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         total_granules,
         nrgs,
         source,
-        rg_starts,
+        payload_map,
         ea_scan_node,
         ea_timer,
         None,
@@ -2064,7 +2058,7 @@ pub(super) fn engage<'mcx>(
     total_granules: u64,
     nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
-    rg_starts: Option<Arc<Vec<u64>>>,
+    map: Option<Arc<runtime::GranuleMap>>,
     ea_scan_node: Option<i32>,
     ea_timer: bool,
     bitmap_ctx: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
@@ -2097,7 +2091,7 @@ pub(super) fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
-        rg_starts: OnceLock::new(),
+        map: OnceLock::new(),
         drive_at_entry: entry_drive_enabled(),
         standing: Mutex::new(None),
         instr: ea_scan_node.map(|_| {
@@ -2109,11 +2103,11 @@ pub(super) fn engage<'mcx>(
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (pgrcolumnar).
-    if let Some(starts) = rg_starts {
+    if let Some(map) = map {
         payload
-            .rg_starts
-            .set(starts)
-            .unwrap_or_else(|_| unreachable!("rg_starts set once"));
+            .map
+            .set(map)
+            .unwrap_or_else(|_| unreachable!("map set once"));
     }
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context
