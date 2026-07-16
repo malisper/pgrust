@@ -298,7 +298,7 @@ pub static parallel_tuple_cost: GucRealVar = GucSlot::new("parallel_tuple_cost")
 pub static pg_gss_accept_delegation: GucBoolVar = GucSlot::new("pg_gss_accept_delegation");
 // pgrust-only: pgrust.lane_executor (no C symbol; the lane-v2 master gate).
 pub static pgrust_lane_executor: GucBoolVar = GucSlot::new("pgrust_lane_executor");
-// pgrust-only: pgrust.condition_cache (+_size) — the cbstore per-granule
+// pgrust-only: pgrust.condition_cache (+_size) — the pgrcolumnar per-granule
 // qual-verdict cache (ClickHouse QueryConditionCache counterpart), default
 // OFF, LRU-bounded by the size GUC (KB).
 pub static pgrust_condition_cache: GucBoolVar = GucSlot::new("pgrust_condition_cache");

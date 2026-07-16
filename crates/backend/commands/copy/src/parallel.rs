@@ -12,9 +12,9 @@
 //!     ceremony): claim chunks off the pinned RG, parse+convert through the
 //!     UNCHANGED per-chunk COPY machinery (CopySrc::Chunk), run the serial
 //!     path's exec_constraints, and encode whole RGs via
-//!     [`cbstore::RgChunkEncoder`].
+//!     [`pgrcolumnar::RgChunkEncoder`].
 //!  3. ORDERED COMMITTER (leader): commit encoded RGs in INPUT ORDER into
-//!     the one [`cbstore::CbWriter`] — the part is BYTE-IDENTICAL to a
+//!     the one [`pgrcolumnar::CbWriter`] — the part is BYTE-IDENTICAL to a
 //!     serial COPY of the same stream (the acceptance oracle).
 //!
 //! Error semantics: workers record chunk-indexed errors (context lines
@@ -23,7 +23,7 @@
 //! completion — first-error-in-input-order, exactly like serial.
 //!
 //! Admission is FAIL-CLOSED (every refusal is today's serial COPY,
-//! byte-identically): PGRUST_PARALLEL_COPY=1 + a live runtime; cbstore AM
+//! byte-identically): PGRUST_PARALLEL_COPY=1 + a live runtime; pgrcolumnar AM
 //! only; text (non-CSV, non-binary) format; no triggers, no WHERE clause,
 //! no defaults, no ON_ERROR ignore, no header, no transcoding, no
 //! cluster_key, no indexes, no generated columns.
@@ -630,12 +630,12 @@ pub(crate) struct ParCopyShared {
     eol: Mutex<EolPre>,
     attnumlist: Vec<i16>,
     // Encode plan.
-    plan: Arc<cbstore::ParallelIngestPlan>,
+    plan: Arc<pgrcolumnar::ParallelIngestPlan>,
     // Chunk registry: leader inserts BEFORE publishing the watermark past
     // the index; the claiming worker removes.
     chunks: Mutex<HashMap<u64, ChunkDesc>>,
     // Completed encodes, keyed by chunk index; the leader commits in order.
-    done: Mutex<BTreeMap<u64, Option<cbstore::EncodedRg>>>,
+    done: Mutex<BTreeMap<u64, Option<pgrcolumnar::EncodedRg>>>,
     // First-error-in-input-order protocol: chunk-indexed error records;
     // claims for chunks ABOVE the floor drain (chunks below still parse, so
     // an earlier error can still surface and win).
@@ -659,7 +659,7 @@ pub(crate) struct ParCopyShared {
 
 /// Sort-mode plan: the presort key spec in memcmp-key terms.
 struct ParCopySort {
-    keys: Vec<(u16, cbstore::sortkey::CbSortKeyKind)>,
+    keys: Vec<(u16, pgrcolumnar::sortkey::CbSortKeyKind)>,
     key_w: usize,
     budget: usize,
     /// Statement-unique run-file name component.
@@ -748,8 +748,8 @@ struct ParCopyWorkerCx<'a, 'mcx> {
 }
 
 struct WorkerSortState {
-    batch: cbstore::loadsort::SortBatch,
-    codec: cbstore::loadsort::RowCodec,
+    batch: pgrcolumnar::loadsort::SortBatch,
+    codec: pgrcolumnar::loadsort::RowCodec,
     keybuf: Vec<u8>,
     rowbuf: Vec<u8>,
     /// Phase-wall accumulators (load-r3 M0; ptrace-gated — stay zero and
@@ -822,7 +822,7 @@ impl ParCopyShared {
         wcx: &mut ParCopyWorkerCx<'_, '_>,
         chunk: ChunkDesc,
         eol: EolType,
-    ) -> PgResult<Option<cbstore::EncodedRg>> {
+    ) -> PgResult<Option<pgrcolumnar::EncodedRg>> {
         {
             let st = &mut wcx.st;
             st.src = CopySrc::Chunk(ChunkCursor::new(chunk.segs));
@@ -842,7 +842,7 @@ impl ParCopyShared {
         }
 
         let mut enc = if self.sort.is_none() {
-            Some(cbstore::RgChunkEncoder::new(Arc::clone(&self.plan)))
+            Some(pgrcolumnar::RgChunkEncoder::new(Arc::clone(&self.plan)))
         } else {
             None
         };
@@ -910,7 +910,7 @@ impl ParCopyShared {
                     now
                 });
                 st.keybuf.clear();
-                cbstore::sortkey::encode_sort_key(&sort.keys, &base.tts_values, &mut st.keybuf);
+                pgrcolumnar::sortkey::encode_sort_key(&sort.keys, &base.tts_values, &mut st.keybuf);
                 st.rowbuf.clear();
                 st.codec.serialize_row(&base.tts_values, &mut st.rowbuf)?;
                 st.batch.push(&st.keybuf, &st.rowbuf);
@@ -1115,8 +1115,8 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
         };
         let slot = tableam::table_slot_create(mcx, &rel)?;
         let sort_state = shared.sort.as_ref().map(|sp| WorkerSortState {
-            batch: cbstore::loadsort::SortBatch::new(sp.key_w),
-            codec: cbstore::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
+            batch: pgrcolumnar::loadsort::SortBatch::new(sp.key_w),
+            codec: pgrcolumnar::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
             keybuf: Vec::with_capacity(sp.key_w),
             rowbuf: Vec::new(),
             t_parse: std::time::Duration::ZERO,
@@ -1223,7 +1223,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
 ///     batch order via commit_encoded_rg, CFIs per message.
 /// Returns the merged row count.
 fn merge_sorted_runs(
-    writer: &mut cbstore::CbWriter,
+    writer: &mut pgrcolumnar::CbWriter,
     shared: &Arc<ParCopyShared>,
 ) -> PgResult<u64> {
     let sort = shared.sort.as_ref().expect("merge without sort mode");
@@ -1232,8 +1232,8 @@ fn merge_sorted_runs(
     // loadcommit C1: the merge kernel — BinaryHeap (default, byte-proven)
     // or the loser tree (opt-in, byte-identical order by construction).
     enum MergeKind {
-        V1(cbstore::loadsort::RunMerge),
-        V2(cbstore::loadsort::RunMergeV2),
+        V1(pgrcolumnar::loadsort::RunMerge),
+        V2(pgrcolumnar::loadsort::RunMergeV2),
     }
     let prefetch = if fill_v2() { fill_prefetch() } else { 0 };
     let lz4 = run_lz4_effective();
@@ -1241,16 +1241,16 @@ fn merge_sorted_runs(
         ptrace("runlz4 refused: requires PGRUST_PARALLEL_COPY_FILL_V2=1 (raw runs used)");
     }
     let mut merge = if prefetch > 0 {
-        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_prefetch(
+        MergeKind::V2(pgrcolumnar::loadsort::RunMergeV2::open_prefetch(
             &paths,
             sort.key_w,
             prefetch,
             lz4,
         )?)
     } else if fill_v2() {
-        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_opts(&paths, sort.key_w, lz4)?)
+        MergeKind::V2(pgrcolumnar::loadsort::RunMergeV2::open_opts(&paths, sort.key_w, lz4)?)
     } else {
-        MergeKind::V1(cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?)
+        MergeKind::V1(pgrcolumnar::loadsort::RunMerge::open(&paths, sort.key_w)?)
     };
     if fill_split() {
         match &mut merge {
@@ -1282,7 +1282,7 @@ fn merge_sorted_runs(
         lz4 as u8,
     ));
 
-    const RG: usize = cbstore::format::RG_ROWS;
+    const RG: usize = pgrcolumnar::format::RG_ROWS;
     struct Batch {
         idx: u64,
         arena: Vec<u8>,
@@ -1291,7 +1291,7 @@ fn merge_sorted_runs(
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<Batch>(nenc + 1);
     let work_rx = Mutex::new(work_rx);
     let (done_tx, done_rx) =
-        std::sync::mpsc::channel::<(u64, PgResult<cbstore::EncodedRg>)>();
+        std::sync::mpsc::channel::<(u64, PgResult<pgrcolumnar::EncodedRg>)>();
     let abort = std::sync::atomic::AtomicBool::new(false);
 
     let key_w = sort.key_w;
@@ -1306,7 +1306,7 @@ fn merge_sorted_runs(
             let tx = done_tx.clone();
             let plan = Arc::clone(&shared.plan);
             scope.spawn(move || {
-                let codec = cbstore::loadsort::RowCodec::new(plan.coltypes.clone());
+                let codec = pgrcolumnar::loadsort::RowCodec::new(plan.coltypes.clone());
                 let ncols = plan.coltypes.len();
                 let mut arena: Vec<u8> = Vec::new();
                 let mut values = vec![::datum::Datum::null(); ncols];
@@ -1318,9 +1318,9 @@ fn merge_sorted_runs(
                     };
                     let Ok(b) = b else { break };
                     let r = catch_unwind(AssertUnwindSafe(
-                        || -> PgResult<cbstore::EncodedRg> {
+                        || -> PgResult<pgrcolumnar::EncodedRg> {
                             let mut enc =
-                                cbstore::RgChunkEncoder::new(Arc::clone(&plan));
+                                pgrcolumnar::RgChunkEncoder::new(Arc::clone(&plan));
                             let mut off = 0usize;
                             for &l in &b.lens {
                                 let l = l as usize;
@@ -1445,7 +1445,7 @@ fn merge_sorted_runs(
         // and the encoders drain out, closing done_rx.
 
         // LEADER: ordered commits off the done channel.
-        let mut pending: BTreeMap<u64, cbstore::EncodedRg> = BTreeMap::new();
+        let mut pending: BTreeMap<u64, pgrcolumnar::EncodedRg> = BTreeMap::new();
         for (idx, r) in done_rx.iter() {
             if let Err(e) = postgres_seams::check_for_interrupts::call() {
                 if first_err.is_none() {
@@ -1579,7 +1579,7 @@ fn admit<'mcx>(
     if parallel::IsParallelWorker() || !init_small::globals::IsUnderPostmaster() {
         refuse!("not a postmaster session leader");
     }
-    if tableam_vocab::TableAm::of(rel) != Some(tableam_vocab::TableAm::Cbstore) {
+    if tableam_vocab::TableAm::of(rel) != Some(tableam_vocab::TableAm::Pgrcolumnar) {
         refuse!("not a cbstore relation");
     }
     if has_triggers {
@@ -1625,18 +1625,18 @@ fn admit<'mcx>(
         refuse!("soft-error context");
     }
     // Every physical column must be COPY-listed (no defaults admitted, and
-    // cbstore refuses NULLs anyway — but refuse here for the exact serial
+    // pgrcolumnar refuses NULLs anyway — but refuse here for the exact serial
     // error path).
     if cstate.attnumlist.len() != rel.rd_att.natts as usize {
         refuse!("partial column list");
     }
-    // cbstore geometry: supported coltypes, no cluster key (sort-on-ingest
+    // pgrcolumnar geometry: supported coltypes, no cluster key (sort-on-ingest
     // drains serially by construction).
-    let coltypes = match cbstore::coltypes_of(rel) {
+    let coltypes = match pgrcolumnar::coltypes_of(rel) {
         Ok(t) => t,
         Err(_) => refuse!("unsupported cbstore column type (serial raises the error)"),
     };
-    let sort = match cbstore::writer::writer_opts_of(rel, &coltypes) {
+    let sort = match pgrcolumnar::writer::writer_opts_of(rel, &coltypes) {
         Ok(opts) if opts.cluster_key.is_empty() && opts.presort_key.is_empty() => None,
         Ok(opts) if !opts.cluster_key.is_empty() => {
             refuse!("cluster_key (sort-on-ingest is serial)")
@@ -1648,7 +1648,7 @@ fn admit<'mcx>(
             if !sort_flag_enabled() {
                 refuse!("PGRUST_COPY_PRESORT (sort-on-ingest is serial; PGRUST_PARALLEL_COPY_SORT=1 engages the parallel sort)");
             }
-            let Some(key_w) = cbstore::sortkey::fixed_key_width(&opts.presort_key) else {
+            let Some(key_w) = pgrcolumnar::sortkey::fixed_key_width(&opts.presort_key) else {
                 refuse!("PGRUST_COPY_PRESORT text key (parallel load-sort is int-class only)");
             };
             static SORT_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -1702,9 +1702,9 @@ pub(crate) fn copy_from_parallel<'mcx>(
     // Sort mode opens PLAIN (the sort happens upstream in the workers; the
     // merged drain through append_row is the L3-0 byte-proven path).
     let mut writer = if sort.is_some() {
-        cbstore::writer::begin_parallel_ingest_presorted(rel)?
+        pgrcolumnar::writer::begin_parallel_ingest_presorted(rel)?
     } else {
-        cbstore::begin_parallel_ingest(rel)?
+        pgrcolumnar::begin_parallel_ingest(rel)?
     };
     let Some(plan) = writer.parallel_ingest_plan() else {
         // Belt+braces: admission already refused cluster keys.
@@ -1788,7 +1788,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn ceremony(
     cstate: &mut CopyFromState<'_, '_>,
-    writer: &mut cbstore::CbWriter,
+    writer: &mut pgrcolumnar::CbWriter,
     shared: &Arc<ParCopyShared>,
     rt: &'static Arc<runtime::Runtime>,
     k: i32,
@@ -1824,7 +1824,7 @@ fn ceremony(
         ptrace(&format!("engaged dop={launched} window={}", window(k)));
 
         // ---- the leader loop: segment/publish + ordered commit ----
-        let mut seg = Segmentator::new(cbstore::format::RG_ROWS as u32);
+        let mut seg = Segmentator::new(pgrcolumnar::format::RG_ROWS as u32);
         let mut published = 0u64;
         let mut next_commit = 0u64;
         let mut processed = 0u64;

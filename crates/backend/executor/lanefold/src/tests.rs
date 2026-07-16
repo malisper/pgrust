@@ -1,4 +1,4 @@
-// Ported from the cbstore branch's nodeagg lanefold_tests, restricted to the
+// Ported from the pgrcolumnar branch's nodeagg lanefold_tests, restricted to the
 // harvested surface: the tests there that drove the whole executor
 // (exec_agg_batched, dict windows, textlen, DISTINCT, metadata) stay behind;
 // what ports is the kernel-level byte-parity contract — classifier admission
@@ -2825,7 +2825,7 @@ fn len_staged_lane_folds_i64_and_skips_guards() {
 // ===========================================================================
 
 // One epoch's dictionary + a coded lane over it. The dict is byte-sorted +
-// deduplicated exactly like the cbstore writer (payload slice cmp — memcmp
+// deduplicated exactly like the pgrcolumnar writer (payload slice cmp — memcmp
 // then length, i.e. varstrfastcmp_c's order); values cells are dict[code]
 // (the Raw gather's pointer identity).
 struct DictEpoch {
@@ -3324,7 +3324,7 @@ fn granule_meta_fold_matches_fold_batch() {
     ];
     let plan = classify(mcx, &specs).expect("admits");
     assert_eq!(granule_meta_len_cols(&plan), Some(vec![0u16]));
-    // A no-NULLs "granule" (cbstore stores no NULLs) with empties mixed in.
+    // A no-NULLs "granule" (pgrcolumnar stores no NULLs) with empties mixed in.
     let data: Vec<Option<Datum>> = (0..37)
         .map(|i| {
             Some(match i % 5 {
@@ -3451,7 +3451,7 @@ fn fold_agg_meta_parity_with_fold_batch() {
     let plan = classify(mcx, &specs).expect("plan admits");
     let cols = agg_meta_cols(&plan).expect("footer-answerable plan");
 
-    // A cbstore-shaped unit: NO NULLs, mixed signs, i64-extreme-free int8.
+    // A pgrcolumnar-shaped unit: NO NULLs, mixed signs, i64-extreme-free int8.
     let ints: Vec<(i64, i64, i64, i64)> = (0..300)
         .map(|i| {
             let i = i as i64;

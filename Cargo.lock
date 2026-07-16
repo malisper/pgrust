@@ -2949,37 +2949,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cbstore"
-version = "0.0.0"
-dependencies = [
- "datum",
- "exectuples",
- "init_small",
- "inval",
- "laneexec",
- "libc",
- "lz4_flex",
- "mbutils_seams",
- "mcx",
- "relpath",
- "snapmgr",
- "tableam_vocab",
- "transam_seams",
- "tuplesort",
- "tuplesort_seams",
- "types_core",
- "types_error",
- "types_rel",
- "types_scan",
- "types_slot",
- "types_snapshot",
- "types_storage",
- "types_tuple",
- "xact_seams",
- "zstd",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4284,7 +4253,6 @@ dependencies = [
  "aclchk_seams",
  "aio_seams",
  "backend_progress",
- "cbstore",
  "clauses",
  "copy_seams",
  "datum",
@@ -4315,6 +4283,7 @@ dependencies = [
  "parse_collate",
  "parse_relation",
  "parser_small1",
+ "pgrcolumnar",
  "planner",
  "portalmem",
  "postgres",
@@ -11639,6 +11608,37 @@ name = "pglz"
 version = "0.1.0"
 
 [[package]]
+name = "pgrcolumnar"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "exectuples",
+ "init_small",
+ "inval",
+ "laneexec",
+ "libc",
+ "lz4_flex",
+ "mbutils_seams",
+ "mcx",
+ "relpath",
+ "snapmgr",
+ "tableam_vocab",
+ "transam_seams",
+ "tuplesort",
+ "tuplesort_seams",
+ "types_core",
+ "types_error",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "xact_seams",
+ "zstd",
+]
+
+[[package]]
 name = "pgstat"
 version = "0.0.0"
 dependencies = [
@@ -16196,7 +16196,6 @@ version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
  "catalog_storage",
- "cbstore",
  "datum",
  "elog_seams",
  "exectuples",
@@ -16209,6 +16208,7 @@ dependencies = [
  "init_small",
  "mcx",
  "multixact",
+ "pgrcolumnar",
  "procarray",
  "smgr",
  "snapmgr",
@@ -16278,7 +16278,6 @@ dependencies = [
  "catalog_namespace",
  "catalog_storage",
  "catalog_toasting",
- "cbstore",
  "clauses",
  "coerce",
  "commands_amcmds",
@@ -16329,6 +16328,7 @@ dependencies = [
  "pg_publication",
  "pg_shdepend",
  "pg_type",
+ "pgrcolumnar",
  "pgstat",
  "planner",
  "predicate_seams",

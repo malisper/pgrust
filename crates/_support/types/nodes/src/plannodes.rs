@@ -156,7 +156,7 @@ pub struct SeqScan<'mcx> {
     /// pathtarget's Vars plus the scan clauses' Vars, captured at
     /// create_seqscan_plan time. `use_physical_tlist` inflates the plan
     /// tlist to every column (free for heap's lazy deform); a columnar AM
-    /// (cbstore) must not decode by that inflated tlist, and the executor
+    /// (pgrcolumnar) must not decode by that inflated tlist, and the executor
     /// cannot reconstruct the real consumed set after the swap.
     /// `None` = unknown (wholerow/system-column reference): consumers fall
     /// back to walking the plan tlist. `Some(empty)` is meaningful — the

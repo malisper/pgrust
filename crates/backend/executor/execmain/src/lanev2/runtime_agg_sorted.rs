@@ -1,5 +1,5 @@
 //! q28-sorted-arm — the ORDERED-GROUPED runtime aggregation arm: a
-//! SERIAL-plan sort-free GroupAggregate (`Agg(AGG_SORTED) → cbstore
+//! SERIAL-plan sort-free GroupAggregate (`Agg(AGG_SORTED) → pgrcolumnar
 //! SeqScan`, the clustered/footer-sorted bank shape) executed as one runtime
 //! ParallelSink at DOP N on the M1 pinned-RG machinery.
 //!
@@ -34,7 +34,7 @@
 //!    `PGRUST_RUNTIME_AGG_SORTED` kill;
 //!  * sorted-FOLD admissible (AGG_SORTED, no gsets/merge/internal sorts,
 //!    classified fold plan, representational grouping equality), lane-
-//!    comparable by-value keys, unprojected fusible cbstore SeqScan whose
+//!    comparable by-value keys, unprojected fusible pgrcolumnar SeqScan whose
 //!    staging arms (PREWHERE for qualled scans);
 //!  * no vguards, no residual transitions; every transition kind
 //!    runtime-partial combinable (AvgAccum/Int128/Count/Sum/byval folds —
@@ -1027,9 +1027,9 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
     if estate.es_epq_active {
         return Ok(false);
     }
-    // --- Plan/shape gates (fail-closed). The caller proved cbstore +
+    // --- Plan/shape gates (fail-closed). The caller proved pgrcolumnar +
     // seq_scan_fusible before the choice memo; re-checked cheaply here.
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_cbstore(ss) {
+    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         refuse("scan not fusible cbstore");
         return Ok(false);
     }
@@ -1576,7 +1576,7 @@ fn stitch_and_finalize<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
-// Morsel source: whole-boundary claims over the cbstore granule geometry.
+// Morsel source: whole-boundary claims over the pgrcolumnar granule geometry.
 // ---------------------------------------------------------------------------
 
 /// Granule-addressed morsel source (runtime_agg's copy) that opts into

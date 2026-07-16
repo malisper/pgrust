@@ -1,16 +1,16 @@
-// Dict-tier round trip over a REAL cbstore part (cbstore-v2 Stage 1.4
+// Dict-tier round trip over a REAL pgrcolumnar part (pgrcolumnar-v2 Stage 1.4
 // acceptance): write rows through the production writer (dict-encoded text
 // column), stage windows through the harvested scan drive (next_window /
 // batch_deform / staged_dict_lane -> SoaDictLane publish), translate an
 // int + dict-LIKE qual, evaluate through the dict-memo tier into the
 // selection bitmap, and compare every staged row against a per-row oracle
 // computed from the written source arrays. No executor wiring: this is the
-// test-only driver the wiring tranche will replace with CbstoreSource.
+// test-only driver the wiring tranche will replace with PgrcolumnarSource.
 use std::rc::Rc;
 
-use cbstore::scan::CbScanDescData;
-use cbstore::writer::open_writer_at;
-use cbstore::ColType;
+use pgrcolumnar::scan::CbScanDescData;
+use pgrcolumnar::writer::open_writer_at;
+use pgrcolumnar::ColType;
 use datum::Datum;
 use exectuples::{SoaBatch, SOA_BM_WORDS};
 use laneexec::shape::{LaneClause, LaneCmpClause, LaneCmpRhs, LaneQualShape, LaneSuffix};
@@ -145,7 +145,7 @@ fn scan_base<'mcx>(mcx: Mcx<'mcx>) -> ::tableam_vocab::TableScanDescData<'mcx> {
         rs_maxtid: Default::default(),
         rs_flags: 0,
         rs_parallel: None,
-        rs_am: ::tableam_vocab::TableAm::Cbstore,
+        rs_am: ::tableam_vocab::TableAm::Pgrcolumnar,
     }
 }
 
@@ -228,7 +228,7 @@ fn dict_tier_roundtrip_over_real_part() {
     }
     w.finish().unwrap();
 
-    let part = std::sync::Arc::new(cbstore::reader::Part::open(&path, 2).unwrap().expect("part exists"));
+    let part = std::sync::Arc::new(pgrcolumnar::reader::Part::open(&path, 2).unwrap().expect("part exists"));
     assert_eq!(part.total_rows(), n_rows as u64);
 
     let ctx = MemoryContext::new("cbdicttier");
@@ -294,7 +294,7 @@ fn dict_tier_roundtrip_over_real_part() {
     let mut lq2 = translate_scan_qual(&qual, true).unwrap();
     let mut scan2 = CbScanDescData::new_with_part(
         scan_base(mcx),
-        Some(std::sync::Arc::new(cbstore::reader::Part::open(&path, 2).unwrap().unwrap())),
+        Some(std::sync::Arc::new(pgrcolumnar::reader::Part::open(&path, 2).unwrap().unwrap())),
         vec![ColType::I64, ColType::Text],
     );
     let mut soa2 = SoaBatch::new_in(mcx, 2);

@@ -1,4 +1,4 @@
-//! Lane-v2 exact-DISTINCT set state — the uniqExact analog (cbstore-v2 plan
+//! Lane-v2 exact-DISTINCT set state — the uniqExact analog (pgrcolumnar-v2 plan
 //! §2.3; both executor catalogs' set-state designs).
 //!
 //! One `DistinctSet` replaces the per-group TUPLESORT a non-presorted

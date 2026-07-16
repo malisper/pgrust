@@ -1,4 +1,4 @@
-//! Lane-v2 compact-row aggregation table hosting (cbstore-v2 plan Stage 2.2).
+//! Lane-v2 compact-row aggregation table hosting (pgrcolumnar-v2 plan Stage 2.2).
 //!
 //! The `lanetable::LaneAggTable` replaces the C-ported tuplehash as the
 //! GROUP BY table for a narrow, explicitly-admitted shape; everything else
@@ -784,7 +784,7 @@ fn mk_admit_n(
             // Raw-bytes text packs ONLY through the dict/intern lane the
             // feed armed for exactly this column. NULL text is never
             // interned: non-nullable shapes carry the feed's no-NULLs proof
-            // (cbstore) or its runtime NULL-demote pre-check (slot streams);
+            // (pgrcolumnar) or its runtime NULL-demote pre-check (slot streams);
             // nullable shapes route NULL through the null-bitmap byte (bit
             // set, value bits zero) without touching the intern table.
             ::execgrouping::GroupKeyKind::TextRaw if intern_atts.contains(&input_att) => {

@@ -5,7 +5,7 @@
 //! (`crates/backend/executor/execmain/src/scan_task.rs`, "fix(execmain):
 //! linearize scan-task shutdown", qualified 2026-07-10; journal
 //! docs/optimizations/2026-07-10-morsel-real-scan-prerequisite.md). The
-//! donor's execparallel/Gather wiring (ParallelShared target, cbstore scan
+//! donor's execparallel/Gather wiring (ParallelShared target, pgrcolumnar scan
 //! descriptor claims, plan-shape eligibility walk) is deliberately REMOVED —
 //! the new runtime's pool/scheduler own that wiring. What is kept, with the
 //! donor's semantics intact:
@@ -527,7 +527,7 @@ impl TaskParticipant {
 
     /// Run one unit of work under the operation count. The claim source
     /// itself (scan cursor, morsel queue, ...) is the caller's; the donor's
-    /// cbstore row-group cursor claim lived exactly here.
+    /// pgrcolumnar row-group cursor claim lived exactly here.
     pub fn run<T>(&self, f: impl FnOnce() -> PgResult<T>) -> PgResult<T> {
         let _operation = self.enter_operation()?;
         f()

@@ -1,5 +1,5 @@
 //! mmap read path: part open, footer parse, granule decode kernels
-//! (docs/design/cbstore-impl.md §6).
+//! (docs/design/pgrcolumnar-impl.md §6).
 
 use ::datum::Datum;
 use ::types_error::{PgError, PgResult};
@@ -487,7 +487,7 @@ pub struct Part {
     // planner's footer-NDV consumer never re-reads the footer per plan
     // (fixed-overhead audit 2026-07-14: the standalone part_footer_ndv
     // path re-read + re-parsed the whole ~2MB 100M footer on EVERY
-    // planning of a cbstore rel — ~1.3ms of a ~1.9ms plan constant).
+    // planning of a pgrcolumnar rel — ~1.3ms of a ~1.9ms plan constant).
     pub ndv: Vec<u64>,
     // v6 declared cluster key (zero-based column indexes, key order); empty
     // on pre-v6 parts or when none was declared. Per-RG sortedness under it
@@ -527,7 +527,7 @@ pub struct Part {
     // part-cache-shared Part builds it once under any thread.
     granule_starts: std::sync::OnceLock<Vec<u64>>,
     // Lazy per-column on-disk chunk byte totals (see col_bytes). The
-    // planner asks on EVERY plan of a cbstore rel (plancat column-fraction
+    // planner asks on EVERY plan of a pgrcolumnar rel (plancat column-fraction
     // seqscan disk costing) and the walk is O(rgs x ncols) over the footer
     // chunk directory — at 100M (~1.5K RGs x 105 cols) it measured 85% of
     // the replan loop / 76% of the whole serial per-query fixed path

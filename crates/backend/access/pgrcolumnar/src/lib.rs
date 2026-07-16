@@ -1,5 +1,5 @@
-//! cbstore: scan-only columnar table AM for the ClickBench charter
-//! (docs/design/clickbench-format.md, docs/design/cbstore-impl.md).
+//! pgrcolumnar: scan-only columnar table AM for the ClickBench charter
+//! (docs/design/clickbench-format.md, docs/design/pgrcolumnar-impl.md).
 //! Buffer-cache-bypass by design (approved): reads are mmap of the part
 //! file, writes are direct pwrites + fsync; the main fork file's existence
 //! stays owned by the ordinary smgr create/unlink machinery.
@@ -67,7 +67,7 @@ pub fn varlena_bytes<'a>(d: Datum) -> PgResult<&'a [u8]> {
     }
 }
 
-// Footer row count for planner sizing (cbstore-impl.md §7.2); None while
+// Footer row count for planner sizing (pgrcolumnar-impl.md §7.2); None while
 // the table has no committed footer. Served from the session part cache.
 pub fn footer_rows(rel: &::types_rel::Relation<'_>) -> PgResult<Option<u64>> {
     Ok(part_cache::cached_part(rel)?.map(|p| p.total_rows()))
@@ -76,7 +76,7 @@ pub fn footer_rows(rel: &::types_rel::Relation<'_>) -> PgResult<Option<u64>> {
 // Ingest-time per-column NDV from the part footer (v2 parts only); per-entry
 // 0 = unknown. ANALYZE prefers these over the sampled Duj1 estimate.
 // Served from the session part cache like footer_rows/footer_sorted: the
-// planner asks on EVERY plan of a cbstore rel (plancat footer-NDV group-key
+// planner asks on EVERY plan of a pgrcolumnar rel (plancat footer-NDV group-key
 // estimation), and the standalone part_footer_ndv path re-read + re-parsed
 // the entire footer from disk per call (~2MB / ~1.3ms on the 100M bank —
 // the dominant term of the ~1.9ms per-query plan constant; fixed-overhead
@@ -97,7 +97,7 @@ pub fn footer_sorted(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<boo
 // groups (planner column-fraction seqscan disk costing); None while the
 // table has no committed footer. Served from the once-per-cached-Part
 // computation (reader.rs Part::col_bytes, the walk moved there verbatim):
-// the planner asks on EVERY plan of a cbstore rel, and the O(rgs x ncols)
+// the planner asks on EVERY plan of a pgrcolumnar rel, and the O(rgs x ncols)
 // chunk-directory walk measured 85% of the replan loop / 76% of the whole
 // serial per-query fixed path at 100M (fixedpath2 round 2) — ~0.2ms of the
 // ~0.25ms post-footer_ndv plan constant. Identical values => identical

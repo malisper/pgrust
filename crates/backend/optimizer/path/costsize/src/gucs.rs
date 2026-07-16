@@ -38,54 +38,54 @@ session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
     (parallel_leader_participation_backing_cell, bool, parallel_leader_participation_backing, set_parallel_leader_participation_backing, true),
 );
 
-// --- cbstore planner knobs (pgrust-only) ---------------------------------
+// --- pgrcolumnar planner knobs (pgrust-only) ---------------------------------
 //
-// Re-homed from the old cbstore branch's hidden (GUC_NO_SHOW_ALL) SQL GUCs:
+// Re-homed from the old pgrcolumnar branch's hidden (GUC_NO_SHOW_ALL) SQL GUCs:
 // the lane-v2 line deliberately adds NO new GUCs (a new row would break the
 // byte-identical `pg_settings` / `SHOW ALL` regression outputs — see
 // execmain::lanev2's gating note), so these are compile-time constants with
 // an env off-switch where the old surface was a bool. Every consumer is
-// gated on the relation/plan actually being cbstore-fed, so heap plans are
+// gated on the relation/plan actually being pgrcolumnar-fed, so heap plans are
 // untouched at any value. Provenance / calibration notes for the constants
 // live with their original definitions on the old branch
 // (guc_tables::consts @ inter-query-scheduling).
 
-// cbstore-path Gather setup: measured one-time thread-native startup
+// pgrcolumnar-path Gather setup: measured one-time thread-native startup
 // (~11ms flat) vs C's fork-based ~1-2ms that DEFAULT_PARALLEL_SETUP_COST
-// prices. PROVISIONAL — re-measure when lane-v2 parallel over cbstore lands.
-pub const DEFAULT_CBSTORE_PARALLEL_SETUP_COST: f64 = 32000.0;
-// cbstore-path Gather per-tuple transfer (chunked transport ~27ns/tuple).
-pub const DEFAULT_CBSTORE_PARALLEL_TUPLE_COST: f64 = 0.005;
-// cbstore no-stats group-key ndistinct ratio (0 disables = C behavior);
+// prices. PROVISIONAL — re-measure when lane-v2 parallel over pgrcolumnar lands.
+pub const DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST: f64 = 32000.0;
+// pgrcolumnar-path Gather per-tuple transfer (chunked transport ~27ns/tuple).
+pub const DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST: f64 = 0.005;
+// pgrcolumnar no-stats group-key ndistinct ratio (0 disables = C behavior);
 // superseded per column once a footer-NDV-backed ANALYZE has run.
-pub const DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO: f64 = 0.05;
-// Per-tuple surcharge for a Sort directly over a Gather on cbstore-fed
+pub const DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO: f64 = 0.05;
+// Per-tuple surcharge for a Sort directly over a Gather on pgrcolumnar-fed
 // plans (denies workers the fused bounded-sort feed).
-pub const DEFAULT_CBSTORE_GATHER_SORT_TUPLE_COST: f64 = 30.0;
+pub const DEFAULT_PGRCOLUMNAR_GATHER_SORT_TUPLE_COST: f64 = 30.0;
 
-pub fn cbstore_parallel_setup_cost() -> f64 {
-    DEFAULT_CBSTORE_PARALLEL_SETUP_COST
+pub fn pgrcolumnar_parallel_setup_cost() -> f64 {
+    DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST
 }
 
-pub fn cbstore_parallel_tuple_cost() -> f64 {
-    DEFAULT_CBSTORE_PARALLEL_TUPLE_COST
+pub fn pgrcolumnar_parallel_tuple_cost() -> f64 {
+    DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST
 }
 
-pub fn cbstore_group_ndistinct_ratio() -> f64 {
-    DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO
+pub fn pgrcolumnar_group_ndistinct_ratio() -> f64 {
+    DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO
 }
 
-pub fn cbstore_gather_sort_tuple_cost() -> f64 {
-    DEFAULT_CBSTORE_GATHER_SORT_TUPLE_COST
+pub fn pgrcolumnar_gather_sort_tuple_cost() -> f64 {
+    DEFAULT_PGRCOLUMNAR_GATHER_SORT_TUPLE_COST
 }
 
-/// Column-fraction seqscan disk costing on cbstore (pgrust-only, the Q38
-/// sort-vs-hash costing fix): the disk term of a cbstore seqscan is scaled
+/// Column-fraction seqscan disk costing on pgrcolumnar (pgrust-only, the Q38
+/// sort-vs-hash costing fix): the disk term of a pgrcolumnar seqscan is scaled
 /// by the referenced columns' share of the part's on-disk bytes — C's
 /// pages*seq_page_cost structure kept, with an honest page count for a
 /// columnar AM whose scan open takes a plan-derived column need-set.
 /// `PGRUST_CBSTORE_COLFRAC_COST=0`/`off` disables for A/B.
-pub fn cbstore_colfrac_cost() -> bool {
+pub fn pgrcolumnar_colfrac_cost() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(
@@ -95,15 +95,15 @@ pub fn cbstore_colfrac_cost() -> bool {
     })
 }
 
-/// Footer-NDV group-key estimation on cbstore (pgrust-only): a never-
-/// ANALYZEd cbstore rel estimates group-key ndistinct from the part
+/// Footer-NDV group-key estimation on pgrcolumnar (pgrust-only): a never-
+/// ANALYZEd pgrcolumnar rel estimates group-key ndistinct from the part
 /// footer's ingest-time per-column NDV (the exact numbers a footer-backed
 /// ANALYZE would put in pg_statistic) instead of the flat
-/// DEFAULT_CBSTORE_GROUP_NDISTINCT_RATIO guess. The ratio starves nothing
+/// DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO guess. The ratio starves nothing
 /// serially, but at high DOP it prices partial aggregation as useless
 /// (per-worker groups ~= 5% of the table) and flips grouped parallel plans
 /// serial. `PGRUST_CBSTORE_FOOTER_NDV_EST=0`/`off` disables for A/B.
-pub fn cbstore_footer_ndv_est() -> bool {
+pub fn pgrcolumnar_footer_ndv_est() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(
@@ -113,9 +113,9 @@ pub fn cbstore_footer_ndv_est() -> bool {
     })
 }
 
-/// Footer sorted-column scan pathkeys (was GUC `cbstore_scan_pathkeys`,
+/// Footer sorted-column scan pathkeys (was GUC `pgrcolumnar_scan_pathkeys`,
 /// default on). `PGRUST_CBSTORE_SCAN_PATHKEYS=0`/`off` disables for A/B.
-pub fn cbstore_scan_pathkeys() -> bool {
+pub fn pgrcolumnar_scan_pathkeys() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(

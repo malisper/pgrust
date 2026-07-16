@@ -9,7 +9,7 @@
 //! memcmp 21% of the warm profile), and the hash-grouped text arm pays
 //! detoast+hash+memcmp per row into ~as many group states as rows (measured
 //! LOSS — its density tier now refuses upfront). This arm exploits the
-//! cbstore dict facts instead (the dictminmax foundation, verified in
+//! pgrcolumnar dict facts instead (the dictminmax foundation, verified in
 //! writer.rs): every CB-bank text chunk is dict-encoded, per-epoch (row
 //! group) dictionaries are DEDUPLICATED and BYTE-SORTED, and a dict-lane
 //! window's codes satisfy `values[i] == table.datum(code(i))`.
@@ -23,7 +23,7 @@
 //! detoast, no string compare, no transition program on the build path. The
 //! state's key materializes ONCE per distinct (epoch, code): the dict
 //! entry's varlena IMAGE is copied into the arm's arena (C-identical datum
-//! bytes — the cbstore fill's Raw gather for a dict chunk publishes exactly
+//! bytes — the pgrcolumnar fill's Raw gather for a dict chunk publishes exactly
 //! `dict[code]`, so this is the datum every row of the state carried).
 //!
 //! Emit (streamed, one group per pull): per-epoch states listed in CODE
@@ -50,7 +50,7 @@
 //!     text order (admission refuses DESC and non-memcmp collations). Two
 //!     distinct groups never compare equal, so the order is total. NULL
 //!     group keys cannot exist here (dict codes have no NULL representation
-//!     and cbstore stores no NULLs; any non-dict window degrades BEFORE
+//!     and pgrcolumnar stores no NULLs; any non-dict window degrades BEFORE
 //!     being absorbed);
 //!   * same values: the same distinct multiset per group replays through
 //!     the SAME set machinery (`process_ordered_aggregates`); the admission
@@ -75,7 +75,7 @@
 //! Admission (v1, deliberately tight — the Q14 shape): the narrow-sort
 //! admission, exactly ONE text/varchar grouping column, exactly ONE
 //! transition which is a set-mode COUNT(DISTINCT <bare int Var>) pertrans
-//! (`set_count_transfn` + `direct_att`), cbstore scan + dict staging armed
+//! (`set_count_transfn` + `direct_att`), pgrcolumnar scan + dict staging armed
 //! by the drive, single ASC memcmp-tier text sort prefix. Everything else
 //! refuses to the incumbent arms, byte-identically.
 
@@ -621,7 +621,7 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
     debug_assert!(cg.code_map.len() >= map_size, "map size is fixed per identity");
     for (idx, &i) in rows.iter().enumerate() {
         // NULL DISTINCT arg: C feeds it through seen_null; this arm keeps
-        // v1 simple and degrades (unreachable on cbstore — no NULLs).
+        // v1 simple and degrades (unreachable on pgrcolumnar — no NULLs).
         if argn[i as usize] {
             return CgAccept { consumed: idx, keep: false };
         }
@@ -643,7 +643,7 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
                     (varatt::varatt_is_1b_e(p), varatt::varsize_any(p))
                 };
                 if external {
-                    // Non-inline image (never produced by the cbstore
+                    // Non-inline image (never produced by the pgrcolumnar
                     // decode); refuse the row — the caller degrades.
                     return CgAccept { consumed: idx, keep: false };
                 }

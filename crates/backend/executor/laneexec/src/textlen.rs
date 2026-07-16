@@ -4,7 +4,7 @@
 // dict code on dict windows, per selected row off the inline varlena header
 // on raw windows — through the SAME production counting helpers the per-row
 // drive calls, so parity is by construction. Non-inline images (never
-// published by cbstore lanes) demote the batch to the per-row program.
+// published by pgrcolumnar lanes) demote the batch to the per-row program.
 use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;

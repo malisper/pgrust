@@ -1149,7 +1149,7 @@ pub struct HgBatchShape {
 /// batch feed): TEXT/VARCHAR grouping keys are admitted to the batched
 /// accepts — the span/row arms stage each staged cell's inline varlena
 /// content through the SAME `probe_buf`/`probe_spans` discipline as the
-/// per-row `stage_text_keys` (identical bytes: the staged cbstore cell is
+/// per-row `stage_text_keys` (identical bytes: the staged pgrcolumnar cell is
 /// the decoded datum; non-inline images route to the per-row path, whose
 /// detoast yields the same content), probe read-only (`smap.find` on the
 /// stringhash single-key engagement / the generic content probe), and
@@ -1301,7 +1301,7 @@ pub enum HgBatchRow {
 /// # Safety
 /// `d` is a non-null live varlena datum whose header (and, for inline
 /// images, full body) is readable — the staged-cell contract of the
-/// batched accepts (cbstore staged text cells are decoded in-window
+/// batched accepts (pgrcolumnar staged text cells are decoded in-window
 /// images).
 #[inline]
 unsafe fn inline_varlena_bytes<'a>(d: Datum) -> Option<&'a [u8]> {

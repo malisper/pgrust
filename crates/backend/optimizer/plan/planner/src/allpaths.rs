@@ -1488,7 +1488,7 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
     let seqscan = crate::pathnode::create_seqscan_path(run, rel, &required_outer, 0)?;
     add_path(run, rel, seqscan);
 
-    create_cbstore_sorted_paths(run, rel, &required_outer)?;
+    create_pgrcolumnar_sorted_paths(run, rel, &required_outer)?;
 
     // C: partial paths only when required_outer == NULL.
     if run.root.rel(rel).consider_parallel
@@ -1501,7 +1501,7 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
     Ok(())
 }
 
-// cbstore v5 sorted-column pathkeys (sorted-groupexec inc2): one extra
+// pgrcolumnar v5 sorted-column pathkeys (sorted-groupexec inc2): one extra
 // serial seqscan path per useful ordering of the footer-proven sorted
 // columns. Each claimed column is independently non-decreasing over the
 // whole part, so ANY permutation of the claimed columns is a valid
@@ -1511,19 +1511,19 @@ fn set_plain_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> 
 // pathkey), ECs are looked up create_it=false (the index-path discipline),
 // and useless tails are truncated — no useful prefix means no extra path.
 // Partial paths claim nothing (per-worker RG dispatch order is not proven).
-fn create_cbstore_sorted_paths<'mcx>(
+fn create_pgrcolumnar_sorted_paths<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &types_pathnodes::Relids<'mcx>,
 ) -> PgResult<()> {
-    let nsorted = run.root.rel(rel).cbstore_sorted_attnos.len();
+    let nsorted = run.root.rel(rel).pgrcolumnar_sorted_attnos.len();
     if nsorted == 0 {
         return Ok(());
     }
     let relid_index = run.root.rel(rel).relid;
     let mut vars: Vec<(i16, types_nodes::node_tree::Node<'mcx>)> = Vec::with_capacity(nsorted);
     for i in 0..nsorted {
-        let attno = run.root.rel(rel).cbstore_sorted_attnos[i];
+        let attno = run.root.rel(rel).pgrcolumnar_sorted_attnos[i];
         let found = run.root.rel_reltarget(rel).exprs.iter().find_map(|&id| {
             let n = *run.root.expr_node(id);
             let v = n.as_var()?;
@@ -1568,17 +1568,17 @@ fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<
     let parallel_workers = {
         let r = run.root.rel(rel);
         let max = crate::gucs::max_parallel_workers_per_gather();
-        // Stage-4 pool arming (guc_tables::lane_pool): a cbstore baserel in
+        // Stage-4 pool arming (guc_tables::lane_pool): a pgrcolumnar baserel in
         // an armed session plans exactly the requested DOP (clamped to the
         // gather GUC; the helper already clamped to available cores) — the
-        // plan's forced-plans posture, no shape rules. Unarmed cbstore rels
+        // plan's forced-plans posture, no shape rules. Unarmed pgrcolumnar rels
         // size from their own scan geometry (row-group count; see
-        // compute_cbstore_parallel_worker), honoring the parallel_workers
+        // compute_pgrcolumnar_parallel_worker), honoring the parallel_workers
         // reloption first. Heap rels keep C's page-ladder sizing untouched.
-        if r.amflags & types_pathnodes::AMFLAG_CBSTORE != 0 {
+        if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0 {
             match ::guc_tables::lane_pool::lane_parallel_pool_dop() {
                 dop if dop > 0 => dop.min(max),
-                _ => ::allpaths::compute_cbstore_parallel_worker(r, r.tuples, max),
+                _ => ::allpaths::compute_pgrcolumnar_parallel_worker(r, r.tuples, max),
             }
         } else {
             ::allpaths::compute_parallel_worker(r, r.pages as f64, -1.0, max)

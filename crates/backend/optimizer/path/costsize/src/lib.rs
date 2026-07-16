@@ -480,14 +480,14 @@ pub fn compute_gather_rows(rows: f64, parallel_workers: i32) -> f64 {
 }
 
 
-// Gather setup price: cbstore-fed parallel plans pay the measured
-// thread-native startup (consts::DEFAULT_CBSTORE_PARALLEL_SETUP_COST
+// Gather setup price: pgrcolumnar-fed parallel plans pay the measured
+// thread-native startup (consts::DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST
 // provenance), heap plans keep C's parallel_setup_cost. The Gather may sit
 // on an upper rel (grouped rel over a partial agg), whose amflags are
-// empty — scan the simple-rel array instead: any cbstore baserel in the
+// empty — scan the simple-rel array instead: any pgrcolumnar baserel in the
 // (sub)query prices the whole plan's Gathers.
 fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
-    if cbstore_feeds_plan(run) {
+    if pgrcolumnar_feeds_plan(run) {
         // Stage-4 pool arming (guc_tables::lane_pool): a session that set
         // `pgrust.lane_parallel_pool` is asking for the parallel shape —
         // drop the provisional pre-pool surcharge back to the regular knob
@@ -495,39 +495,39 @@ fn gather_setup_cost(run: &PlannerRun<'_>) -> f64 {
         if guc_tables::lane_pool::lane_parallel_pool_armed() {
             gucs::parallel_setup_cost()
         } else {
-            gucs::cbstore_parallel_setup_cost()
+            gucs::pgrcolumnar_parallel_setup_cost()
         }
     } else {
         gucs::parallel_setup_cost()
     }
 }
 
-// Per-tuple Gather transfer price: cbstore-fed plans pay the measured P0b
-// chunked-transport rate (consts::DEFAULT_CBSTORE_PARALLEL_TUPLE_COST
+// Per-tuple Gather transfer price: pgrcolumnar-fed plans pay the measured P0b
+// chunked-transport rate (consts::DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST
 // provenance), heap plans keep C's parallel_tuple_cost. Same selector as
 // gather_setup_cost.
 fn gather_tuple_cost(run: &PlannerRun<'_>) -> f64 {
-    if cbstore_feeds_plan(run) {
+    if pgrcolumnar_feeds_plan(run) {
         // Armed pool sessions price Gather transfer at the regular rate too:
-        // the measured cbstore chunked-transport rate (0.005/tuple) is cheap
+        // the measured pgrcolumnar chunked-transport rate (0.005/tuple) is cheap
         // enough that at high forced DOP the planner starts preferring
         // ship-every-row-to-the-leader plans (HashAggregate ABOVE Gather)
         // over the partial-agg shape the pool exists for. Heap semantics for
-        // armed cbstore plans; the measured rate stays for unarmed costing.
+        // armed pgrcolumnar plans; the measured rate stays for unarmed costing.
         if guc_tables::lane_pool::lane_parallel_pool_armed() {
             gucs::parallel_tuple_cost()
         } else {
-            gucs::cbstore_parallel_tuple_cost()
+            gucs::pgrcolumnar_parallel_tuple_cost()
         }
     } else {
         gucs::parallel_tuple_cost()
     }
 }
 
-pub fn cbstore_feeds_plan(run: &PlannerRun<'_>) -> bool {
+pub fn pgrcolumnar_feeds_plan(run: &PlannerRun<'_>) -> bool {
     run.root.simple_rel_array.iter().any(|slot| {
         slot.is_some_and(|rid| {
-            run.root.rel(rid).amflags & types_pathnodes::AMFLAG_CBSTORE != 0
+            run.root.rel(rid).amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR != 0
         })
     })
 }
@@ -548,13 +548,13 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
     // Stage-4 §4.4 exchange transfer pricing: an admitted partial hashed Agg
     // under this Gather hands its tables to the finalize by pointer (the
     // radix-partitioned handoff), never through tuple-queue serialization —
-    // price its "transfer" at the measured cbstore chunked-transport rate
+    // price its "transfer" at the measured pgrcolumnar chunked-transport rate
     // (the install relocation memcpy class) instead of parallel_tuple_cost.
     // Ship-all-raw-rows Gathers (subpath ≠ partial Agg) keep the armed
     // pool's heap-rate pricing, so the degenerate leader-hash plan cannot
     // win on a free transfer.
     let tuple_cost = if lane_exchange_partial_agg(run, sub_id) {
-        gucs::cbstore_parallel_tuple_cost()
+        gucs::pgrcolumnar_parallel_tuple_cost()
     } else {
         gather_tuple_cost(run)
     };
@@ -611,15 +611,15 @@ pub fn cost_gather_merge(
     p.total_cost = startup_cost + run_cost + input_total_cost;
 }
 
-// cbstore column-fraction disk costing (pgrust-only, AMFLAG_CBSTORE-gated;
-// the Q38 sort-vs-hash fix): a cbstore seqscan opens with a plan-derived
+// pgrcolumnar column-fraction disk costing (pgrust-only, AMFLAG_PGRCOLUMNAR-gated;
+// the Q38 sort-vs-hash fix): a pgrcolumnar seqscan opens with a plan-derived
 // column need-set and never touches the other columns' chunks, so the honest
 // disk term is the referenced columns' share of the part's on-disk bytes.
 // C's costing structure (pages you read x spc_seq_page_cost) is kept — only
 // the page count is corrected for a columnar AM, exactly as heap's page
 // count is honest for a row store. Referenced = the rel's reltarget +
 // baserestrictinfo (+ any pushed-down ppi clauses) Vars; a whole-row Var
-// reads everything. Heap rels (and footer-less cbstore) return 1.0.
+// reads everything. Heap rels (and footer-less pgrcolumnar) return 1.0.
 //
 // Why this matters beyond realism: the uncorrected all-columns disk term is
 // a large shared constant in every candidate plan's total, which at scale
@@ -627,7 +627,7 @@ pub fn cost_gather_merge(
 // add_path's 1% STD_FUZZ_FACTOR, where the sorted path wins the pathkey
 // tiebreak (CB Q38 @100M planned Sort+GroupAggregate ~17x slower than the
 // hash plan it fuzzily displaced).
-fn cbstore_scan_col_fraction(
+fn pgrcolumnar_scan_col_fraction(
     run: &mut PlannerRun<'_>,
     rel: RelId,
     path_id: types_pathnodes::PathId,
@@ -635,7 +635,7 @@ fn cbstore_scan_col_fraction(
     use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
     {
         let r = run.root.rel(rel);
-        if r.amflags & types_pathnodes::AMFLAG_CBSTORE == 0 || r.cbstore_col_bytes.is_empty() {
+        if r.amflags & types_pathnodes::AMFLAG_PGRCOLUMNAR == 0 || r.pgrcolumnar_col_bytes.is_empty() {
             return 1.0;
         }
     }
@@ -665,7 +665,7 @@ fn cbstore_scan_col_fraction(
     if attrs.is_member(0 - FirstLowInvalidHeapAttributeNumber) {
         return 1.0;
     }
-    let col_bytes = &run.root.rel(rel).cbstore_col_bytes;
+    let col_bytes = &run.root.rel(rel).pgrcolumnar_col_bytes;
     let mut needed: u64 = 0;
     let mut total: u64 = 0;
     for (i, &b) in col_bytes.iter().enumerate() {
@@ -710,7 +710,7 @@ pub fn cost_seqscan(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, 
     let mut startup_cost = 0.0;
     let (_, spc_seq_page_cost) = get_tablespace_page_costs(reltablespace);
     let disk_run_cost =
-        spc_seq_page_cost * pages as f64 * cbstore_scan_col_fraction(run, rel, path_id);
+        spc_seq_page_cost * pages as f64 * pgrcolumnar_scan_col_fraction(run, rel, path_id);
 
     let qpqual_cost =
         get_restriction_qual_cost(run, rel, path_id).expect("cost_qual_eval over ppi_clauses");
@@ -1908,7 +1908,7 @@ pub fn cost_agg_shape(
 // The adjustments below apply ONLY when the executor's own admission
 // (guc_tables::lane_pool::agg_exchange_admits over the same plan-time group
 // estimate) says the exchange will engage — armed pool + NDV floor —
-// and the plan is cbstore-fed; everything else keeps C costing untouched.
+// and the plan is pgrcolumnar-fed; everything else keeps C costing untouched.
 // ---------------------------------------------------------------------------
 
 // The AGG_HASHED disk-spill surcharge exactly as cost_agg_shape adds it
@@ -1959,7 +1959,7 @@ fn peel_projection(run: &PlannerRun<'_>, id: types_pathnodes::PathId) -> types_p
 /// admission floor. Shared by cost_gather (transfer pricing) and the
 /// finalize-side shape check.
 pub fn lane_exchange_partial_agg(run: &PlannerRun<'_>, subpath_id: types_pathnodes::PathId) -> bool {
-    if !cbstore_feeds_plan(run) {
+    if !pgrcolumnar_feeds_plan(run) {
         return false;
     }
     match run.root.path(peel_projection(run, subpath_id)) {
@@ -1989,7 +1989,7 @@ pub fn cost_agg_lane_exchange_adjust(
 ) {
     if aggstrategy != types_pathnodes::AGG_HASHED
         || !guc_tables::lane_pool::agg_exchange_admits(num_groups)
-        || !cbstore_feeds_plan(run)
+        || !pgrcolumnar_feeds_plan(run)
     {
         return;
     }

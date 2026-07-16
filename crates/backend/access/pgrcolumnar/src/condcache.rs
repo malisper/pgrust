@@ -1,6 +1,6 @@
 //! Condition cache (pgrust.condition_cache): a bounded in-memory cache of
-//! per-window staged-qual survivor bitmaps over IMMUTABLE cbstore part
-//! state — the ClickHouse QueryConditionCache mechanism rebuilt on cbstore
+//! per-window staged-qual survivor bitmaps over IMMUTABLE pgrcolumnar part
+//! state — the ClickHouse QueryConditionCache mechanism rebuilt on pgrcolumnar
 //! vocabulary. Hot re-executions of the same PREWHERE prefix over the same
 //! sealed part serve the selection bitmap from memory and skip the qual's
 //! decode + evaluation legs entirely; surviving windows still complete their
@@ -11,7 +11,7 @@
 //!
 //! KEY: (PartIdent, qual fingerprint, row group, window width).
 //!   - PartIdent = (st_dev, st_ino, st_size, footer_off) captured at Part
-//!     open — the part-cache staleness probe's exact vocabulary. cbstore
+//!     open — the part-cache staleness probe's exact vocabulary. pgrcolumnar
 //!     parts are immutable once sealed: every COPY publish grows
 //!     len/footer_off, every DROP/TRUNCATE/reingest recreates the inode, so
 //!     a stale bitmap is unreachable through a live Part (its identity names

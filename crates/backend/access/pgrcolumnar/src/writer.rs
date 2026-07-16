@@ -1,5 +1,5 @@
 //! COPY/INSERT append path: RG builders, analyze-then-pick encoders, footer
-//! publish (docs/design/cbstore-impl.md §2, §5).
+//! publish (docs/design/pgrcolumnar-impl.md §2, §5).
 
 use std::collections::HashMap;
 
@@ -95,7 +95,7 @@ impl CbWriterOpts {
         CbWriterOpts {
             cluster_key: Vec::new(),
             presort_key: Vec::new(),
-            // Train #8 ingest default: LZ4 (matches CbstoreOptions::default).
+            // Train #8 ingest default: LZ4 (matches PgrcolumnarOptions::default).
             codec: vec![CodecChoice::Lz4; ncols],
             zstd_level: ZSTD_LEVEL_DEFAULT,
             delta: vec![intcodec_env_default(); ncols],
@@ -126,23 +126,23 @@ fn col_index_of(rel: &::types_rel::Relation<'_>, name: &str) -> PgResult<u16> {
     ))
 }
 
-/// Resolve the relation's cbstore reloptions into writer terms.
+/// Resolve the relation's pgrcolumnar reloptions into writer terms.
 pub fn writer_opts_of(
     rel: &::types_rel::Relation<'_>,
     coltypes: &[ColType],
 ) -> PgResult<CbWriterOpts> {
     let mut out = CbWriterOpts::plain(coltypes.len());
-    let Some(o) = rel.rd_options.as_ref().and_then(|o| o.cbstore()) else {
+    let Some(o) = rel.rd_options.as_ref().and_then(|o| o.pgrcolumnar()) else {
         apply_intcodec_cols_env(rel, &mut out.delta)?;
         apply_presort_env(rel, coltypes, &mut out)?;
         return Ok(out);
     };
     out.zstd_level = o.zstd_level;
     let table_choice = match o.codec {
-        ::types_rel::CbstoreCodec::Auto => CodecChoice::Auto,
-        ::types_rel::CbstoreCodec::Lz4 => CodecChoice::Lz4,
-        ::types_rel::CbstoreCodec::Zstd => CodecChoice::Zstd,
-        ::types_rel::CbstoreCodec::Plain => CodecChoice::Plain,
+        ::types_rel::PgrcolumnarCodec::Auto => CodecChoice::Auto,
+        ::types_rel::PgrcolumnarCodec::Lz4 => CodecChoice::Lz4,
+        ::types_rel::PgrcolumnarCodec::Zstd => CodecChoice::Zstd,
+        ::types_rel::PgrcolumnarCodec::Plain => CodecChoice::Plain,
     };
     out.codec = vec![table_choice; coltypes.len()];
     for part in o.cluster_key().split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -699,7 +699,7 @@ fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
         // multi_insert drops writers abandoned by error unwinds.
         let tup_desc: std::rc::Rc<::types_tuple::TupleDescData<'static>> =
             unsafe { std::mem::transmute(rel.rd_att.clone()) };
-        w.sorter = Some(::tuplesort_seams::cbstore_ingest_sort::call(
+        w.sorter = Some(::tuplesort_seams::pgrcolumnar_ingest_sort::call(
             tup_desc,
             &keys,
             init_small::globals::maintenance_work_mem(),
@@ -1287,7 +1287,7 @@ fn seal_rg_body(
     }
     // v7 per-granule length stats, straight off the buffered per-row
     // (off, len) ranges (exact octet_length: the stored payload byte
-    // count). Granule slots past the last row stay zero. cbstore stores
+    // count). Granule slots past the last row stay zero. pgrcolumnar stores
     // no NULLs (append_row errors), so nonnull = granule rows.
     let nlencols = coltypes.iter().filter(|t| t.is_text()).count();
     let mut lenstats: Vec<(u64, u32, u32)> = Vec::new();
@@ -1501,7 +1501,7 @@ impl RgChunkEncoder {
 /// Parallel COPY (leader): a writer for ordered RG commits. The ordinary
 /// open path — header init / append-to-committed-part invalidation / freeze
 /// decision all identical to serial COPY. The caller owns admission (checked
-/// BEFORE opening: cbstore AM, no cluster key — `writer_opts_of`).
+/// BEFORE opening: pgrcolumnar AM, no cluster key — `writer_opts_of`).
 pub fn begin_parallel_ingest(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     open_writer(rel)
 }
@@ -2395,7 +2395,7 @@ pub fn tuple_insert<'mcx>(
     slot: &mut ::types_slot::SlotData<'mcx>,
 ) -> PgResult<()> {
     // Single-row inserts buffer like COPY: the row joins the per-(xid, cid)
-    // ingest writer and the statement-end flush (ExecModifyTable's cbstore
+    // ingest writer and the statement-end flush (ExecModifyTable's pgrcolumnar
     // finish, or COPY's finish_bulk_insert) publishes RG-sized seals. The
     // old finish-per-row form sealed ONE ROW GROUP PER ROW on INSERT..SELECT
     // (24 GB for 2M rows), each with a full footer rewrite.
@@ -3229,7 +3229,7 @@ mod cluster_key_tests {
         let keys: Vec<(i16, CbSortKeyKind)> =
             w.opts.cluster_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
         w.sorter =
-            Some(::tuplesort_seams::cbstore_ingest_sort::call(tup_desc(), &keys, 65536).unwrap());
+            Some(::tuplesort_seams::pgrcolumnar_ingest_sort::call(tup_desc(), &keys, 65536).unwrap());
 
         // > 1 RG of rows, adversarial order (descending + interleaved).
         let n = RG_ROWS + 1234;
@@ -3339,7 +3339,7 @@ mod cluster_key_tests {
             let keys: Vec<(i16, CbSortKeyKind)> =
                 w.opts.presort_key.iter().map(|&(c, k)| (c as i16 + 1, k)).collect();
             w.sorter = Some(
-                ::tuplesort_seams::cbstore_ingest_sort::call(tup_desc(), &keys, 65536).unwrap(),
+                ::tuplesort_seams::pgrcolumnar_ingest_sort::call(tup_desc(), &keys, 65536).unwrap(),
             );
             let mut keep = Vec::new();
             for (v, t) in &rows {

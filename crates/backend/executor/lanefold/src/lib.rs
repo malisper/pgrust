@@ -1,5 +1,5 @@
 // Lane-native aggregate transition fold — the whole-batch int-family
-// transition kernels harvested from the cbstore branch's
+// transition kernels harvested from the pgrcolumnar branch's
 // `nodeagg/src/lanefold.rs` (inter-query-scheduling worktree), delivered as a
 // standalone crate for the lane-executor-v2 hash-agg breaker.
 //
@@ -44,7 +44,7 @@
 // - The int8[2] {count,sum} AVG transarray discipline (`avg_apply`,
 //   `new_int8_transarray`) matching C numeric.c's Int8TransTypeData carrier.
 //
-// STRIPPED (cbstore/lane-v1 wiring that does not exist on lane-executor-v2):
+// STRIPPED (pgrcolumnar/lane-v1 wiring that does not exist on lane-executor-v2):
 // - Dict-coded windows: DictEval derived lanes, the dict-group memo, textlen
 //   lanes, and the per-(code, group) text MIN/MAX memo (`TextMmLane`).
 //   (The metadata-answered transitions — `classify_meta`/`MetaTrans` — were
@@ -207,7 +207,7 @@ pub trait LaneCols {
     ///    the datum a kernel advances/copies IS the code's decoded value;
     /// 2. when `lane.table.sorted`, the dictionary entries are DEDUPLICATED
     ///    and strictly ascending in `varstrfastcmp_c` order (byte-lexicographic
-    ///    memcmp + length tiebreak — cbstore's writer sorts payload byte
+    ///    memcmp + length tiebreak — pgrcolumnar's writer sorts payload byte
     ///    slices with exactly that order), so within this epoch
     ///    `sign(varstrfastcmp_c(dict[a], dict[b])) == sign(cmp(a, b))` and
     ///    equal codes are the SAME datum pointer.
@@ -499,7 +499,7 @@ struct LaneArg {
 
 const PLAIN: (i64, i64, i64) = (0, 1, 1);
 
-// True floor/ceil division for either divisor sign. (Port fix: the cbstore
+// True floor/ceil division for either divisor sign. (Port fix: the pgrcolumnar
 // original used div_euclid-based forms that are only floor/ceil for b > 0;
 // for a negative non-unit mulk with inexact division they widened the safe
 // interval by one on each side, admitting the two boundary values whose
@@ -856,7 +856,7 @@ pub fn classify_trans(
 // Metadata-answerable transitions (re-harvested from the lane-v1 metacount /
 // footer-sums work; value-correctness proven end-to-end in
 // notes/q4-avg-quarantine-resolution.md): COUNT(*) / COUNT(bare Var) — equal
-// on cbstore, which stores no NULLs (writer::append_row errors on NULL) —
+// on pgrcolumnar, which stores no NULLs (writer::append_row errors on NULL) —
 // MIN/MAX over a bare int-family Var, answered from footer row counts and
 // zone maps, and SUM/AVG over an int-family Var with an affine divk==1
 // transform, answered from footer i128 sums as mulk*S + addend*N (the
@@ -1353,10 +1353,10 @@ fn cse_delta(t: &LaneTrans, c: i64, s: i64) -> i64 {
     s.wrapping_add(c.wrapping_mul(t.addend as i64))
 }
 
-/// Granule-metadata fold admissibility (v7 cbstore footer length stats):
+/// Granule-metadata fold admissibility (v7 pgrcolumnar footer length stats):
 /// `Some(cols)` iff EVERY admitted transition is answerable from the pair
 /// (passing row count, per-column Σ octet_length over passing rows) —
-/// CountStar/CountAny (equal on cbstore, which stores no NULLs) and PLAIN
+/// CountStar/CountAny (equal on pgrcolumnar, which stores no NULLs) and PLAIN
 /// Sum/AvgAccum over VarLenBytes lanes (byte lengths are what the footer
 /// sums carry; VarLenChars refuses). `cols` = the deduped length columns
 /// whose footer sums the fold consumes. Integer-guarded plans refuse
@@ -1386,7 +1386,7 @@ pub fn granule_meta_len_cols(plan: &LanePlan<'_>) -> Option<Vec<u16>> {
 }
 
 /// Apply the plan's transitions for a metadata-answered granule: `passing`
-/// selected rows (none NULL — cbstore), `sum_of(col)` = Σ octet_length over
+/// selected rows (none NULL — pgrcolumnar), `sum_of(col)` = Σ octet_length over
 /// exactly those rows (footer arithmetic). Bit-equal to `fold_batch` over
 /// the same selection: count_apply/sum_apply/avg_apply are the identical
 /// state mutations, integer sums are order-free (mod-2^64 ring), and the
@@ -1437,7 +1437,7 @@ pub struct AggMetaCols {
 /// are no residual transitions and EVERY admitted transition is answerable
 /// from (row count, exact footer (min, max), exact footer sums,
 /// Σ octet_length):
-///   * CountStar/CountAny — the unit's row count (cbstore stores no NULLs,
+///   * CountStar/CountAny — the unit's row count (pgrcolumnar stores no NULLs,
 ///     so the non-null count IS the row count, any column type);
 ///   * Min/Max over PLAIN int lanes — the footer extremes are attained
 ///     values of the unit's rows (identity transform only: min(v*3) is not

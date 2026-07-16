@@ -633,7 +633,7 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // harness / kill-switch path. The session backing cell IS the gate the
     // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
     GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust.condition_cache: the cbstore per-granule qual-verdict cache
+    // pgrust.condition_cache: the pgrcolumnar per-granule qual-verdict cache
     // (ClickHouse QueryConditionCache counterpart; approved 2026-07-10 as
     // the one sanctioned cross-query in-memory cache, GUC-gated). Default
     // OFF; benchmark arms enable it explicitly and record it in manifests.
