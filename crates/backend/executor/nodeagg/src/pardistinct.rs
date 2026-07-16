@@ -1520,6 +1520,9 @@ fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMe
             .map(|p| (p.starts[b + 1] - p.starts[b]) as usize)
             .sum(),
     );
+    // q9internals inc-3: all donors are known here — arm the anticipatory
+    // per-set reserve (the split paths keep the exact per-donor bound).
+    m.set_donor_hint(tables.len());
     for &t in tables {
         m.absorb(t, b);
     }
@@ -1554,6 +1557,13 @@ pub struct PdBucketMerger<'s> {
     /// Bucket-local open-addressed probe over the output groups.
     table: Vec<u32>,
     hashes: Vec<u64>,
+    /// q9internals inc-3: total donors this merge will absorb (0 = unknown
+    /// — per-donor exact reserves, the pre-inc-3 behavior) + how many have
+    /// been absorbed. Known donor counts let the per-set reserve target
+    /// anticipate the donors still to come instead of re-growing (and
+    /// re-rehashing the whole set) once per donor.
+    donor_hint: usize,
+    absorbed: usize,
 }
 
 impl<'s> PdBucketMerger<'s> {
@@ -1570,7 +1580,22 @@ impl<'s> PdBucketMerger<'s> {
             },
             table: vec![0; 64],
             hashes: Vec::new(),
+            donor_hint: 0,
+            absorbed: 0,
         }
+    }
+
+    /// q9internals inc-3: declare the total donor count (the non-split
+    /// combine knows all its tables up front). ONLY a reserve-geometry
+    /// input: with n roughly-equal donors the per-donor exact bound
+    /// re-grows the same dst set ~log2(n) times, each grow a full-set
+    /// rehash (~2x final len of reinsert volume at q9's disjoint
+    /// per-worker sets); scaling the target by the donors still to come
+    /// makes the first reserve final. The split paths keep hint 0: their
+    /// per-absorb budget checks (mem_bytes-driven split decisions) must
+    /// not see anticipatory capacity.
+    pub fn set_donor_hint(&mut self, n: usize) {
+        self.donor_hint = n;
     }
 
     /// dedupsub reserve wave (vecaudit boardable item): pre-size the
@@ -1609,6 +1634,10 @@ impl<'s> PdBucketMerger<'s> {
         let nsets = self.spec.sets.len();
         let has_bytes = self.spec.has_bytes_keys();
         let key_kinds = &self.spec.key_kinds;
+        self.absorbed += 1;
+        // q9internals inc-3: donors still to come INCLUDING this one (>= 1;
+        // 1 when the hint is unset/exhausted = the per-donor exact bound).
+        let donors_left = (self.donor_hint + 1).saturating_sub(self.absorbed).max(1);
         let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
@@ -1708,9 +1737,15 @@ impl<'s> PdBucketMerger<'s> {
                 // needed), one jump instead of the per-absorb doubling
                 // ladder. Int values only (bytes sets pass an empty
                 // `vals`; the emptiness guards in reserve_projected keep
-                // bytes/replay arms untouched).
+                // bytes/replay arms untouched). q9internals inc-3: with a
+                // donor hint, anticipate the donors still to come (equal-
+                // share extrapolation of THIS donor's contribution) so the
+                // first reserve is the last — the per-donor exact bound
+                // re-grew the same big set once per donor, a full-set
+                // rehash each time. Geometry only; grow_to_cap census
+                // measured 5.05%/4.19% of q9/q10 rt16 cycles at t23.
                 if !vals.is_empty() && pd_grow_project_enabled() {
-                    let target = dset.len() + vals.len();
+                    let target = dset.len() + vals.len() * donors_left;
                     if target >= PD_PROJECT_MIN {
                         dset.reserve_projected(target);
                     }
@@ -3678,6 +3713,67 @@ mod tests {
             );
             assert_eq!(oracle.set_int_offs, t.set_int_offs, "memo={memo} staged={staged}");
             assert_eq!(oracle.set_null, t.set_null, "memo={memo} staged={staged}");
+        }
+    }
+
+    /// q9internals inc-3: the donor-hint anticipatory combine reserve is
+    /// pure geometry — merged output byte-identical with the hint armed vs
+    /// not, on overlapping AND disjoint donor value sets, and the armed
+    /// merge's big dst set reaches final capacity by the end of donor 1
+    /// (no per-donor re-grow).
+    #[test]
+    fn donor_hint_merge_identity() {
+        let spec = Arc::new(PdSpec {
+            key_atts: vec![0],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+            vocab: vec![],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+            max_att: 2,
+            worker_budget: usize::MAX,
+            expected_worker_rows: 0,
+        });
+        // 4 donors, one dominant group: donor d holds values in a mostly
+        // disjoint range (the q9 UserID-clustered shape) plus a shared
+        // overlap slice (dedup face).
+        let tables: Vec<PdHandedTable> = (0..4i64)
+            .map(|d| {
+                let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
+                for i in 0..(3 * PD_PROJECT_MIN as i64) {
+                    let k = [i % 5]; // 5 groups
+                    let h = key_hash(&k, 0);
+                    let (found, slot) = b.probe(&k, 0, h, &KeySrc::None);
+                    let g = match found {
+                        Some(g) => g,
+                        None => b.create_group(&k, 0, h, slot, &KeySrc::None),
+                    } as usize;
+                    let v = if i % 97 == 0 { i } else { d * 1_000_000_000 + i };
+                    b.dsets[g].insert_i64(v);
+                }
+                b.freeze().unwrap()
+            })
+            .collect();
+        let refs: Vec<&PdHandedTable> = tables.iter().collect();
+        let nbuckets = PD_GROUP_PARTS;
+        for b in 0..nbuckets {
+            let hinted = merge_bucket_refs(&spec, &refs, b);
+            // Hint-less control: drive the merger without set_donor_hint.
+            let mut m = PdBucketMerger::new(&spec);
+            for &t in &refs {
+                m.absorb(t, b);
+            }
+            let plain = m.finish();
+            assert_eq!(hinted.ngroups, plain.ngroups, "bucket {b}");
+            assert_eq!(hinted.keys, plain.keys, "bucket {b}");
+            for (i, (h, p)) in hinted.dsets.iter().zip(plain.dsets.iter()).enumerate() {
+                match (h, p) {
+                    (Some(h), Some(p)) => {
+                        assert_eq!(h.ints(), p.ints(), "bucket {b} set {i} values+order");
+                        assert_eq!(h.seen_null, p.seen_null, "bucket {b} set {i}");
+                    }
+                    (None, None) => {}
+                    _ => panic!("bucket {b} set {i}: arm mismatch"),
+                }
+            }
         }
     }
 
