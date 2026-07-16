@@ -994,6 +994,81 @@ pub fn agg_hash_compact_intern(node: &mut AggStateData<'_>, bytes: &[u8]) -> u32
     }
 }
 
+/// Batched twin of [`agg_hash_compact_intern`] (stringhash2 re-charter
+/// inc-2, accept face): resolve a staged window of text components through
+/// `probe_bytes_batch` (one hash pass + entry-line look-ahead prefetch —
+/// the -1385 DRAM-chain overlap win; t22 census: the per-row intern resolve
+/// under `scan_mk_batch` is 15.1% of q34's cycles). Row-for-row identical
+/// to the per-row loop: insertion order = slice order, so new rows get the
+/// same dense ordinal ids and the table is byte-identical. Callers gate on
+/// [`agg_hash_compact_intern_batch_engaged`] — below the primitive's L2
+/// gate (or with the kill switch thrown) the per-row shape is right and the
+/// caller-side staging is pure tax (the -65da/-6fdf law).
+pub fn agg_hash_compact_intern_batch(
+    node: &mut AggStateData<'_>,
+    texts: &[&[u8]],
+    ids_out: &mut Vec<u32>,
+) {
+    let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+    let ch = ph.compact.as_mut().expect("intern requires an armed table");
+    let CompactHash { intern, hashes, states, new_rows, .. } = ch;
+    let t = intern.as_mut().expect("intern requires an intern-armed shape");
+    hashes.clear();
+    states.clear();
+    new_rows.clear();
+    let base = t.nrows() as u32;
+    t.probe_bytes_batch(texts, hashes, states, new_rows);
+    // Dense id assignment in insertion order — identical to the per-row
+    // path (a new row's id is its row index; the batch preserves row
+    // order, so ordinal position IS the row index delta).
+    for (ord, &i) in new_rows.iter().enumerate() {
+        // SAFETY: fresh zeroed 8-byte state block (intern contract).
+        unsafe { states[i as usize].cast::<u32>().write(base + ord as u32) };
+    }
+    ids_out.clear();
+    ids_out.reserve(texts.len());
+    for &p in states.iter() {
+        // SAFETY: live state block written at insert (above, or by an
+        // earlier resolve).
+        ids_out.push(unsafe { p.cast::<u32>().read() });
+    }
+    // spankey copy-tax counters (measurement only; cached-bool gated) —
+    // mirrors the per-row entry so the counters stay comparable.
+    if crate::spankey::spankey_ctr_enabled() {
+        use crate::spankey::{spankey_add, SPANKEY_CTRS as S};
+        spankey_add(&S.intern_calls, texts.len() as u64);
+        spankey_add(&S.intern_new, new_rows.len() as u64);
+        let nb: u64 = new_rows.iter().map(|&i| texts[i as usize].len() as u64).sum();
+        spankey_add(&S.intern_new_bytes, nb);
+    }
+}
+
+/// Should the feed stage a window for [`agg_hash_compact_intern_batch`]?
+/// True only when an intern table is armed AND it is above the batch
+/// primitive's L2 engagement gate (below it the primitive routes per-row
+/// and the caller-side staging is pure tax) AND the
+/// `PGRUST_LANE_V2_INTERN_BATCH` kill switch (default ON, `=0` kills — the
+/// same-pod A/B channel) is not thrown.
+pub fn agg_hash_compact_intern_batch_engaged(node: &AggStateData<'_>) -> bool {
+    #[inline]
+    fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var("PGRUST_LANE_V2_INTERN_BATCH")
+                .map(|v| v != "0")
+                .unwrap_or(true)
+        })
+    }
+    if !enabled() {
+        return false;
+    }
+    node.perhash
+        .as_ref()
+        .and_then(|ph| ph.compact.as_ref())
+        .and_then(|ch| ch.intern.as_ref())
+        .is_some_and(|t| t.bytes_batch_engaged())
+}
+
 /// Whether this build currently runs on the compact table.
 pub fn agg_hash_compact_armed(node: &AggStateData<'_>) -> bool {
     node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some())

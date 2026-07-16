@@ -1618,6 +1618,233 @@ impl LaneAggTable {
             .max(len + add);
         self.arena.reserve(target - len);
     }
+
+    /// Batched byte-key probe — [`Self::probe_int_batch`]'s Bytes twin
+    /// (stringhash2 lane, mechanism #2): hashes computed in one pass over the
+    /// staged key slices, then a fused hoisted-locals probe run issuing the
+    /// entry-line prefetch [`PREFETCH_LOOKAHEAD`] rows ahead (Salt8 distance —
+    /// Bytes entries are always Salt8). The per-row `probe_bytes` shape
+    /// reloads the table's mask/base pointers from memory every row and
+    /// serializes each row's dependent-miss chain (entry line → row line →
+    /// arena line for >8 B keys); the look-ahead overlaps the ENTRY line
+    /// misses across rows. Semantics are `probe_bytes` row-for-row: same
+    /// probe order, same insert positions, same group ids.
+    ///
+    /// The two-phase shape engages only above [`PREFETCH_MIN_TABLE_BYTES`]:
+    /// below it the entry array is cache-resident and the batch machinery is
+    /// pure overhead (pod micro-probe, job -1385: disengaged fused run +9.5%
+    /// at card 1e4 vs per-row; engaged batch −34..−61% at DRAM-bound cards)
+    /// — small tables take a plain per-row probe loop, identical semantics.
+    /// `PGRUST_LANE_V2_PROBE_LOOKAHEAD` remains the hint kill channel
+    /// (0 = engaged run with no hints).
+    pub fn probe_bytes_batch(
+        &mut self,
+        keys: &[&[u8]],
+        hashes: &mut Vec<u64>,
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(self.repr, KeyRepr::Bytes);
+        out.reserve(keys.len());
+        if self.entry_bytes() <= PREFETCH_MIN_TABLE_BYTES {
+            for (i, &k) in keys.iter().enumerate() {
+                let pr = self.probe_bytes(k, self.hash_key_bytes(k));
+                out.push(pr.states);
+                if pr.is_new {
+                    new_out.push(i as u32);
+                }
+            }
+            return;
+        }
+        hashes.clear();
+        hashes.reserve(keys.len());
+        // Hash-kind branch hoisted out of the loop (see probe_int_batch).
+        match self.hash {
+            HashKind::Fmix => {
+                for &k in keys {
+                    hashes.push(hash_bytes(k));
+                }
+            }
+            HashKind::Crc => {
+                for &k in keys {
+                    hashes.push(hash_bytes_crc(k));
+                }
+            }
+        }
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
+        let hs: &[u64] = hashes;
+        self.probe_fold_bytes_hashed_run(keys, hs, la, &mut |states, i, is_new| {
+            out.push(states);
+            if is_new {
+                new_out.push(i);
+            }
+        });
+    }
+
+    /// Would the batched byte-key drivers take the engaged (two-phase)
+    /// path right now? Callers that must BUILD a batch (key-slice refs) to
+    /// use them should check this first: below the gate the primitives
+    /// route per-row anyway, and the caller-side batch construction is pure
+    /// tax (mt16 100M A/B jobs -65da/-6fdf: q40 hot +21% from exactly that
+    /// — canonical combine runs whose G/256 bucket tables sit under L2).
+    #[inline]
+    pub fn bytes_batch_engaged(&self) -> bool {
+        self.entry_bytes() > PREFETCH_MIN_TABLE_BYTES
+    }
+
+    /// [`Self::probe_bytes_batch`] over CALLER-supplied hashes (the
+    /// canonical combine path carries the flush/SEAL-computed sink hash per
+    /// run row — one hash per (row, table), never recomputed). Same fused
+    /// run, same L2/lookahead gating, same row-for-row `probe_bytes`
+    /// semantics.
+    pub fn probe_bytes_batch_hashed(
+        &mut self,
+        keys: &[&[u8]],
+        hashes: &[u64],
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(self.repr, KeyRepr::Bytes);
+        debug_assert_eq!(keys.len(), hashes.len());
+        out.reserve(keys.len());
+        // Same size gate as probe_bytes_batch (job -1385 control verdict).
+        if self.entry_bytes() <= PREFETCH_MIN_TABLE_BYTES {
+            for (i, (&k, &h)) in keys.iter().zip(hashes.iter()).enumerate() {
+                let pr = self.probe_bytes(k, h);
+                out.push(pr.states);
+                if pr.is_new {
+                    new_out.push(i as u32);
+                }
+            }
+            return;
+        }
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
+        self.probe_fold_bytes_hashed_run(keys, hashes, la, &mut |states, i, is_new| {
+            out.push(states);
+            if is_new {
+                new_out.push(i);
+            }
+        });
+    }
+
+    /// The engaged fused driver behind [`Self::probe_bytes_batch`] —
+    /// [`Self::probe_fold_hashed_run`]'s Bytes twin. Raw parts (entry
+    /// pointers, row-store geometry, the arena base) are hoisted per run and
+    /// re-derived after every insert (inserts can grow entries, rows, and
+    /// the arena).
+    fn probe_fold_bytes_hashed_run(
+        &mut self,
+        keys: &[&[u8]],
+        hashes: &[u64],
+        la: usize,
+        fold: &mut impl FnMut(*mut u8, u32, bool),
+    ) {
+        debug_assert_eq!(keys.len(), hashes.len());
+        let kw = self.key_words;
+        let mut i = 0usize;
+        'rehoist: while i < keys.len() {
+            let bp: *mut EntrySet = match &mut self.buckets {
+                Some(bs) => bs.as_mut_ptr(),
+                None => core::ptr::null_mut(),
+            };
+            let (sp_entries, sp_mask) = {
+                let s = &mut self.single;
+                (s.entries.as_mut_ptr(), s.mask)
+            };
+            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_shift = self.rows.chunk_shift;
+            let rows_cmask = self.rows.chunk_mask;
+            let rows_stride = self.rows.stride_words;
+            let salt_on = self.total_members > SALT_DISABLE_MAX_ENTRIES;
+            let arena_ptr = self.arena.as_ptr();
+            while i < keys.len() {
+                let j = i + la;
+                if la != 0 && j < keys.len() {
+                    // SAFETY: j < keys.len() == hashes.len().
+                    let h = unsafe { *hashes.get_unchecked(j) };
+                    let (e_ptr_j, mask_j) = if bp.is_null() {
+                        (sp_entries, sp_mask)
+                    } else {
+                        // SAFETY: two-level tables have exactly 256 buckets.
+                        let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                        (set.entries.as_mut_ptr(), set.mask)
+                    };
+                    // SAFETY: masked slot index (hint only; Salt8 = 1 word).
+                    prefetch(unsafe { e_ptr_j.add((h as usize) & mask_j) });
+                }
+                // SAFETY: i < keys.len() == hashes.len().
+                let key = unsafe { *keys.get_unchecked(i) };
+                let hash = unsafe { *hashes.get_unchecked(i) };
+                let klen = key.len() as u64;
+                let packed = if key.len() <= 8 { pack8(key) } else { 0 };
+                let (e_ptr, mask) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                let salted = if salt_on { salt_of(hash) } else { 0 };
+                let mut pos = (hash as usize) & mask;
+                let hit: Option<*mut u64> = loop {
+                    // SAFETY: masked entry index.
+                    let e = unsafe { *e_ptr.add(pos) };
+                    if e == 0 {
+                        break None;
+                    }
+                    if salted == 0 || (e & !REF_MASK) == salted {
+                        let row = ((e & REF_MASK) - 1) as usize;
+                        // SAFETY: live row (parts stable since last insert).
+                        let p = unsafe {
+                            row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                        };
+                        // SAFETY: live Bytes row: [word0, len, hash][states].
+                        let (w0, rlen, rhash) = unsafe { (*p, *p.add(1), *p.add(2)) };
+                        let matched = if rlen == klen {
+                            if klen <= 8 {
+                                w0 == packed
+                            } else {
+                                rhash == hash && {
+                                    // SAFETY: live long-key row: w0/rlen are
+                                    // the arena offset/length recorded at
+                                    // insert; the arena base is re-hoisted
+                                    // after every insert (the only growth).
+                                    unsafe {
+                                        core::slice::from_raw_parts(
+                                            arena_ptr.add(w0 as usize),
+                                            key.len(),
+                                        ) == key
+                                    }
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                        if matched {
+                            break Some(p);
+                        }
+                    }
+                    pos = (pos + 1) & mask;
+                };
+                match hit {
+                    Some(p) => {
+                        // SAFETY: states follow the key words.
+                        fold(unsafe { p.add(kw).cast() }, i as u32, false);
+                        i += 1;
+                    }
+                    None => {
+                        // Insert leg (cold; may grow entries/rows/arena) —
+                        // fold, then re-hoist every raw part.
+                        let pr = self.insert_bytes(key, hash, pos, packed);
+                        fold(pr.states, i as u32, true);
+                        i += 1;
+                        continue 'rehoist;
+                    }
+                }
+            }
+        }
+    }
+
     // -- NULL group ---------------------------------------------------------
 
     /// The NULL key's group (out-of-band; SQL GROUP BY treats NULLs as one
