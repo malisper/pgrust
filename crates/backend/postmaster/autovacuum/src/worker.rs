@@ -55,7 +55,11 @@ thread_local! {
 }
 
 // proc_exit / PANIC payloads must keep unwinding (main_loop.rs precedent).
-fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
+// Shared with the launcher (launcher.rs sigsetjmp-equivalent boundary).
+pub(crate) fn pg_error_from_panic(
+    payload: Box<dyn std::any::Any + Send>,
+    fallback_msg: &str,
+) -> PgError {
     if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
         std::panic::resume_unwind(payload);
     }
@@ -66,7 +70,7 @@ fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
                 .downcast_ref::<String>()
                 .cloned()
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_else(|| "autovacuum worker panicked".to_string());
+                .unwrap_or_else(|| fallback_msg.to_string());
             PgError::new(ERROR, msg)
         }
     }
@@ -108,7 +112,7 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
     // escaped panic reaches launch_backend's SIGABRT mapping and cycles the
     // whole cluster (postgres.c run_one_iteration precedent).
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker_body))
-        .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))))
+        .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked"))))
     {
         Ok(()) => {}
         Err(e) => {
@@ -619,7 +623,7 @@ pub fn do_autovacuum() -> PgResult<()> {
                 }
                 autovacuum_do_vac_analyze(tmcx, &tab, bstrategy.clone())
             }))
-            .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))));
+            .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked"))));
             match vac_result {
                 Ok(()) => {
                     g::SetQueryCancelPending(false);
