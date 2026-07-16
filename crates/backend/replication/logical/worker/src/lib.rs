@@ -128,6 +128,23 @@ pub(crate) fn maybe_reread_subscription(mcx: Mcx<'_>) -> PgResult<()> {
     }
     SUBSCRIPTION_CHANGED.set(false);
 
+    // C: "This function might be called inside or outside of transaction."
+    // The apply loop's idle arm calls it with no transaction (and hence no
+    // resource owner) — catalog reads need one (worker.c:3902).
+    let started_tx = if !xact::IsTransactionState() {
+        xact::StartTransactionCommand()?;
+        true
+    } else {
+        false
+    };
+    let result = maybe_reread_subscription_guts(mcx);
+    if started_tx {
+        xact::CommitTransactionCommand()?;
+    }
+    result
+}
+
+fn maybe_reread_subscription_guts(mcx: Mcx<'_>) -> PgResult<()> {
     let subid = my_sub(|s| s.oid);
     let newsub = load_subscription(mcx, subid)?;
 
