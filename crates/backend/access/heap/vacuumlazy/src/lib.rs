@@ -478,13 +478,13 @@ fn vacuum_instrument_report(
     let _ = writeln!(
         buf,
         "tuples: {} removed, {} remain, {} are dead but not yet removable",
-        vacrel.tuples_deleted, vacrel.new_rel_tuples as i64, vacrel.recently_dead_tuples
+        vacrel.folds.counters.tuples_deleted, vacrel.new_rel_tuples as i64, vacrel.folds.counters.recently_dead_tuples
     );
-    if vacrel.missed_dead_tuples > 0 {
+    if vacrel.folds.counters.missed_dead_tuples > 0 {
         let _ = writeln!(
             buf,
             "tuples missed: {} dead from {} pages not removed due to cleanup lock contention",
-            vacrel.missed_dead_tuples, vacrel.missed_dead_pages
+            vacrel.folds.counters.missed_dead_tuples, vacrel.folds.counters.missed_dead_pages
         );
     }
     let next_xid = varsup::ReadNextTransactionId()?;
@@ -517,14 +517,14 @@ fn vacuum_instrument_report(
         "frozen: {} pages from table ({:.2}% of total) had {} tuples frozen",
         vacrel.folds.counters.new_frozen_tuple_pages,
         pct(vacrel.folds.counters.new_frozen_tuple_pages),
-        vacrel.tuples_frozen
+        vacrel.folds.counters.tuples_frozen
     );
     let _ = writeln!(
         buf,
         "visibility map: {} pages set all-visible, {} pages set all-frozen ({} were all-visible)",
-        vacrel.vm_new_visible_pages,
-        vacrel.vm_new_visible_frozen_pages + vacrel.vm_new_frozen_pages,
-        vacrel.vm_new_frozen_pages
+        vacrel.folds.counters.vm_new_visible_pages,
+        vacrel.folds.counters.vm_new_visible_frozen_pages + vacrel.folds.counters.vm_new_frozen_pages,
+        vacrel.folds.counters.vm_new_frozen_pages
     );
     if vacrel.do_index_vacuuming {
         if vacrel.nindexes == 0 || vacrel.num_index_scans == 0 {
@@ -537,7 +537,7 @@ fn vacuum_instrument_report(
             "{} pages from table ({:.2}% of total) had {} dead item identifiers removed",
             vacrel.folds.counters.lpdead_item_pages,
             pct(vacrel.folds.counters.lpdead_item_pages),
-            vacrel.lpdead_items
+            vacrel.folds.counters.lpdead_items
         );
     } else {
         if !VacuumFailsafeActive() {
@@ -550,7 +550,7 @@ fn vacuum_instrument_report(
             "{} pages from table ({:.2}% of total) have {} dead item identifiers",
             vacrel.folds.counters.lpdead_item_pages,
             pct(vacrel.folds.counters.lpdead_item_pages),
-            vacrel.lpdead_items
+            vacrel.folds.counters.lpdead_items
         );
     }
     for (i, istat) in vacrel.indstats.iter().enumerate() {
