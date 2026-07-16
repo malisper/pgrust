@@ -68,7 +68,7 @@ use ::types_nodes::NodeTag;
 
 use super::router::{self, ArmClass, ArmCounter};
 use super::stats::{self, RefuseReason, ShapeClass};
-use super::{lane_trace, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
+use super::{lane_trace, lane_trace_enabled, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
 
 // ---------------------------------------------------------------------------
 // The sink: ParallelSink impl + engagement-shared control state.
@@ -366,6 +366,12 @@ struct AggSink {
     combine_splits: AtomicU64,
     split_depth_max: AtomicU64,
     split_uniq: AtomicU64,
+    /// combine16 observability: in-memory merge claims and the merged
+    /// tables' entry-set grow / two-level-convert counts (flat presized
+    /// tables must show 0/0 — the engagement gate's evidence line).
+    combine16_claims: AtomicU64,
+    combine16_grows: AtomicU64,
+    combine16_converts: AtomicU64,
     /// EA-on-morsels (ea-morsels.md §2): Some(scan plan_node_id) ONLY when
     /// engaged under EXPLAIN ANALYZE — the single EA flag for this sink;
     /// None on every other path (dead-when-off).
@@ -871,6 +877,17 @@ impl AggSink {
                 self.refuse_budget();
             }
         }
+    }
+
+    /// combine16 evidence: fold one merged bucket table's construction
+    /// counters into the sink totals (three relaxed adds per claim — 256
+    /// claims per engagement, noise). Flat presized tables must report
+    /// grows == converts == 0; the incumbent path on a large canonical
+    /// shape reports the degenerate-top-byte growth this lane removes.
+    fn note_combine16(&self, t: &LaneAggTable) {
+        self.combine16_claims.fetch_add(1, Ordering::Relaxed);
+        self.combine16_grows.fetch_add(t.grow_count() as u64, Ordering::Relaxed);
+        self.combine16_converts.fetch_add(t.convert_count() as u64, Ordering::Relaxed);
     }
 
     /// §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2),
@@ -1457,6 +1474,7 @@ impl AggSink {
             &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
             spk_t0,
         );
+        self.note_combine16(&merged);
         if let Some(t0) = t0 {
             self.topn_ctr
                 .build_ns
@@ -2328,6 +2346,7 @@ fn split_views_and_emit(
         let t0 = ctr.then(std::time::Instant::now);
         let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        sink.note_combine16(&t);
         if let Some(t0) = t0 {
             sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -2404,6 +2423,7 @@ fn split_subparts_and_emit(
         let ctr = sink.topn.is_some();
         let t0 = ctr.then(std::time::Instant::now);
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        sink.note_combine16(&t);
         if let Some(t0) = t0 {
             sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -2720,10 +2740,36 @@ fn sink_drain_range<'mcx>(
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                        // RESIDUAL pressure after flush+spill = the
+                        // unspillable floor (q33's byref aggcontext class,
+                        // proportionality-audit). One counted line makes
+                        // every future envelope cliff self-diagnosing —
+                        // without it the refusal is silent and only shows
+                        // as a 10-15x serial-rerun wall.
+                        if lane_trace_enabled() {
+                            lane_trace(&format!(
+                                "runtime-agg: budget-refused (residual) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                                local.run_bytes,
+                                ::nodeagg::sink::agg_sink_table_mem(agg),
+                                ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                                sink.budget,
+                            ));
+                        }
                         return Err(AcceptFail::Budget);
                     }
                 }
-                None => return Err(AcceptFail::Budget),
+                None => {
+                    if lane_trace_enabled() {
+                        lane_trace(&format!(
+                            "runtime-agg: budget-refused (spill disarmed) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                            local.run_bytes,
+                            ::nodeagg::sink::agg_sink_table_mem(agg),
+                            ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                            sink.budget,
+                        ));
+                    }
+                    return Err(AcceptFail::Budget);
+                }
             }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -4525,6 +4571,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         adopted: Mutex::new(None),
         adopted_flag: AtomicBool::new(false),
         forks: AtomicUsize::new(0),
+        combine16_claims: AtomicU64::new(0),
+        combine16_grows: AtomicU64::new(0),
+        combine16_converts: AtomicU64::new(0),
         rg: OnceLock::new(),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
@@ -4865,6 +4914,18 @@ fn engage_ceremony<'mcx>(
                 lane_trace(&format!(
                     "runtime-agg: COMBINE-SPLIT splits={splits} max_depth={}",
                     sink.split_depth_max.load(Ordering::Relaxed)
+                ));
+            }
+            // combine16 evidence line (e2e-grepped): flat presized merged
+            // tables must never grow or convert; the incumbent arm on a
+            // large canonical shape shows the degenerate-top-byte growth.
+            let c16_claims = sink.combine16_claims.load(Ordering::Relaxed);
+            if c16_claims > 0 {
+                lane_trace(&format!(
+                    "runtime-agg: COMBINE16 flat={} claims={c16_claims} grows={} converts={}",
+                    ::nodeagg::sink::sink_combine16_enabled() as u32,
+                    sink.combine16_grows.load(Ordering::Relaxed),
+                    sink.combine16_converts.load(Ordering::Relaxed)
                 ));
             }
             // EA-on-morsels merge (clean Completed only): write the bypassed
