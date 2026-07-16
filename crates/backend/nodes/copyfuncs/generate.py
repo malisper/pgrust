@@ -245,7 +245,9 @@ fn copy_node_opt<'d>(mcx: Mcx<'d>, node: Option<Node<'_>>) -> PgResult<Option<No
 }
 
 fn copy_node_list<'d>(mcx: Mcx<'d>, list: &NodeList<'_>) -> PgResult<NodeList<'d>> {
-    let mut out = NodeList::nil();
+    // Exact-length preallocation (C list_copy's new_list sizing): the copy
+    // knows its final length, so it never rides the lappend growth curve.
+    let mut out = NodeList::with_capacity(mcx, list.len())?;
     for cell in list.iter() {
         out.lappend(mcx, copy_node(mcx, cell)?)?;
     }
@@ -253,7 +255,7 @@ fn copy_node_list<'d>(mcx: Mcx<'d>, list: &NodeList<'_>) -> PgResult<NodeList<'d
 }
 
 fn copy_opt_node_list<'d>(mcx: Mcx<'d>, list: &OptNodeList<'_>) -> PgResult<OptNodeList<'d>> {
-    let mut out = OptNodeList::nil();
+    let mut out = OptNodeList::with_capacity(mcx, list.len())?;
     for cell in list.iter() {
         out.lappend(mcx, copy_node_opt(mcx, cell)?)?;
     }
