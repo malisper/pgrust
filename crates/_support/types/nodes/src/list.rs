@@ -279,6 +279,17 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
         Ok(list)
     }
 
+    /// Empty list with room for `n` cells (C new_list sizing): a builder that
+    /// knows its final length (copyfuncs list copies) allocates once instead
+    /// of riding the lappend growth curve.
+    pub fn with_capacity(mcx: Mcx<'mcx>, n: usize) -> PgResult<Self> {
+        let mut list = Self::nil();
+        if n > 0 {
+            list.enlarge(mcx, n as i32)?;
+        }
+        Ok(list)
+    }
+
     #[inline]
     pub fn make1(mcx: Mcx<'mcx>, c1: F::Cell<'mcx>) -> PgResult<Self> {
         Self::from_slice(mcx, &[c1])
