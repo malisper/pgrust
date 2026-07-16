@@ -8,7 +8,8 @@ use datum::Datum;
 use elog::{elog, ereport};
 use types_core::{InvalidOid, InvalidXLogRecPtr, Oid, OidIsValid, TEXTOID};
 use types_error::{
-    ErrorLocation, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERROR,
 };
 use types_fmgr::{
     datum_varlena_packed, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
@@ -213,15 +214,23 @@ pub fn fc_binary_upgrade_set_record_init_privs(
     Ok(Datum::from_usize(0))
 }
 
+#[cold]
+#[inline(never)]
+fn upgrade_unported(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("function {name} is not yet implemented"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 pub fn fc_binary_upgrade_set_missing_value(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_set_missing_value")?;
     let _ = fcinfo;
-    panic!(
-        "binary_upgrade_set_missing_value: SetAttrMissing (commands/tablecmds.c) unported"
-    );
+    // unported: SetAttrMissing (commands/tablecmds.c).
+    Err(upgrade_unported("binary_upgrade_set_missing_value"))
 }
 
 pub fn fc_binary_upgrade_logical_slot_has_caught_up(
@@ -230,10 +239,8 @@ pub fn fc_binary_upgrade_logical_slot_has_caught_up(
 ) -> PgResult<Datum> {
     check_is_binary_upgrade("binary_upgrade_logical_slot_has_caught_up")?;
     let _ = fcinfo;
-    panic!(
-        "binary_upgrade_logical_slot_has_caught_up: LogicalReplicationSlotHasPendingWal \
-         (replication/walsender.c) unported"
-    );
+    // unported: LogicalReplicationSlotHasPendingWal (replication/walsender.c).
+    Err(upgrade_unported("binary_upgrade_logical_slot_has_caught_up"))
 }
 
 pub fn fc_binary_upgrade_replorigin_advance(
@@ -244,10 +251,9 @@ pub fn fc_binary_upgrade_replorigin_advance(
     if fcinfo.argisnull(0) {
         null_arg("binary_upgrade_replorigin_advance")?;
     }
-    panic!(
-        "binary_upgrade_replorigin_advance: ReplicationOriginNameForLogicalRep / \
-         replorigin_by_name (replication/origin.c) unported"
-    );
+    // unported: ReplicationOriginNameForLogicalRep / replorigin_by_name
+    // (replication/origin.c).
+    Err(upgrade_unported("binary_upgrade_replorigin_advance"))
 }
 
 pub fn fc_binary_upgrade_add_sub_rel_state(
