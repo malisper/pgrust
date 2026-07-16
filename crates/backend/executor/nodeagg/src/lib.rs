@@ -66,6 +66,7 @@ pub use compact::{
     topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,
     agg_hash_compact_intern, agg_hash_compact_mk_admit, agg_hash_compact_mk_admit1,
+    agg_hash_compact_over_limits, agg_hash_compact_probe_coded,
     agg_hash_compact_mk_admit_multi, agg_hash_compact_ngroups, agg_hash_compact_try_arm_mk_multi,
     agg_hash_compact_mk_shape, agg_hash_compact_reduced_admissible,
     agg_hash_compact_sink_admissible, agg_hash_compact_sink_would_refuse,

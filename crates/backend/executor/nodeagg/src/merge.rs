@@ -70,12 +70,48 @@ const COMBINE_NUMERIC_SUMX2: Oid = 3341;
 const COMBINE_NUMERIC: Oid = 3337;
 const INTERNALOID: Oid = 2281;
 
+// Byref non-internal combine kinds (q29coded lane, merge-face increment):
+// int4_avg_combine 3324 over the _int8[2] {count,sum} transarray (shared by
+// avg/sum(int2) and avg/sum(int4)) and text_larger 458 / text_smaller 459
+// over a text transvalue (min/max(text), memcmp-tier collations only — the
+// admission gate). Both states are plain inline varlena images: the install
+// relocates them into the handed buffer like the internal kinds, the serial
+// bucket merge combines them through the production fmgr entry points, and
+// the bucket-parallel merge runs them natively (pure adds / memcmp+len
+// pick-pointer). Before this, these combines refused `init_finalize_merge`
+// entirely — q29-class partials (avg(length(text)) + min(text)) fell to the
+// classic tuple-queue + leader-re-hash path, THE measured q29 wall.
+const COMBINE_INT4_AVG: Oid = 3324;
+const F_TEXT_LARGER: Oid = 458;
+const F_TEXT_SMALLER: Oid = 459;
+const INT8ARRAYOID: Oid = 1016;
+const TEXTOID: Oid = 25;
+
+/// `PGRUST_AGG_MERGE_BYREF=0|off` kill switch for the byref non-internal
+/// combine kinds (AvgInt8Array / VarlenaMinMax): off restores the historical
+/// refusal — affected shapes keep the classic tuple-queue merge.
+fn merge_byref_kinds_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_AGG_MERGE_BYREF").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 // How the merge owns and combines one transno's state (per the whitelists).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum CombineKind {
     Byval,
     PolyInt128 { sum_x2: bool },
     NumericAgg { sum_x2: bool },
+    /// int4_avg_combine over the _int8[2] transarray (fixed 40-byte 4B-U
+    /// image after relocation; payload at ARR_OVERHEAD_NONULLS_1).
+    AvgInt8Array,
+    /// text_smaller/text_larger over a text transvalue (admitted under
+    /// memcmp-tier collations only, so the native compare is memcmp + length
+    /// tiebreak — `varstrfastcmp_c` — and text ties are byte-equal, making
+    /// merge order unobservable). bpchar is excluded (its trailing-blank tie
+    /// survivors differ by padding).
+    VarlenaMinMax { larger: bool },
 }
 
 // One worker table, self-contained: `buf` owns the [pergroups][tuple][states]
@@ -699,6 +735,24 @@ pub(crate) fn init_finalize_merge<'mcx>(
             }
         } else if trans_typ[t].byval && COMBINE_WHITELIST.contains(&trans_fnoid[t]) {
             CombineKind::Byval
+        } else if trans_fnoid[t] == COMBINE_INT4_AVG
+            && aggref.aggtranstype == INT8ARRAYOID
+            && merge_byref_kinds_enabled()
+        {
+            // avg/sum(int2|int4): the {count,sum} transarray — element adds,
+            // reassociation-invariant like the byval int sums.
+            CombineKind::AvgInt8Array
+        } else if matches!(trans_fnoid[t], F_TEXT_SMALLER | F_TEXT_LARGER)
+            && aggref.aggtranstype == TEXTOID
+            && ::lanefold::str_collation_safe(aggref.inputcollid)
+            && merge_byref_kinds_enabled()
+        {
+            // min/max(text) under a memcmp-tier collation: the comparison is
+            // memcmp + length tiebreak, ties are byte-equal, so any combine
+            // order yields byte-identical survivors. Non-memcmp collations
+            // refuse (locale order in worker threads + tie identity are not
+            // in this increment's proof).
+            CombineKind::VarlenaMinMax { larger: trans_fnoid[t] == F_TEXT_LARGER }
         } else {
             return Ok(None);
         };
@@ -830,6 +884,15 @@ pub(crate) fn init_finalize_merge<'mcx>(
         && !parallel_merge_disabled()
         && ::guc_tables::lane_pool::agg_exchange_admits(node.numGroups as f64))
     .then(|| ::guc_tables::lane_pool::agg_exchange_cap() as u32);
+    if merge_stats_enabled() {
+        eprintln!(
+            "AGG_MERGE_STATS engage: node={} kinds={:?} par={} exchange={:?}",
+            node.plan.plan_node_id,
+            kinds,
+            par.is_some(),
+            exchange_cap,
+        );
+    }
     let handoff = Arc::new(AggTableHandoff::new(kinds.clone(), exchange_cap));
     let registry_key = partial as *const Agg<'_> as usize;
     registry_insert(registry_key, &handoff);
@@ -887,6 +950,12 @@ unsafe fn states_extra_bytes(pg: *const AggPerGroup, kinds: &[CombineKind]) -> u
                 let st = unsafe { &*(s.trans_value.as_usize() as *const NumericAggState) };
                 align16(core::mem::size_of::<NumericAggState>() + st.digits_bytes())
             }
+            CombineKind::AvgInt8Array | CombineKind::VarlenaMinMax { .. } => {
+                // SAFETY: non-null byref transvalue is a live plain inline
+                // varlena image (transition/combine outputs are never
+                // toasted; the relocation below asserts the form).
+                align16(unsafe { varsize_any(s.trans_value.as_usize() as *const u8) })
+            }
         };
     }
     bytes
@@ -931,6 +1000,26 @@ unsafe fn relocate_states_into(
                     let digits = state.add(core::mem::size_of::<NumericAggState>()).cast::<i32>();
                     state.cast::<NumericAggState>().write(sp.relocated_into(digits));
                     off += align16(core::mem::size_of::<NumericAggState>() + sp.digits_bytes());
+                }
+                CombineKind::AvgInt8Array | CombineKind::VarlenaMinMax { .. } => {
+                    // Verbatim image copy into the 16-aligned slot. The
+                    // sources are plain inline images by construction: the
+                    // avg transarray is the accum family's 4B-U MAXALIGNed
+                    // aggcontext image; text min/max transvalues are
+                    // ExecAggCopyTransValue datumCopies of detoasted inputs
+                    // (short or 4B-U — never compressed/external).
+                    let sp = pg.trans_value.as_usize() as *const u8;
+                    debug_assert!(
+                        varatt_is_1b(sp) || varatt_is_4b_u(sp),
+                        "handed byref transvalue must be a plain inline varlena"
+                    );
+                    debug_assert!(
+                        !matches!(k, CombineKind::AvgInt8Array) || varatt_is_4b_u(sp),
+                        "avg transarray images are 4B-U MAXALIGNed"
+                    );
+                    let len = varsize_any(sp);
+                    core::ptr::copy_nonoverlapping(sp, state, len);
+                    off += align16(len);
                 }
             }
             pg.trans_value = Datum::from_usize(state as usize);
@@ -1802,12 +1891,24 @@ unsafe fn synth_state_vals_pg(
         // and each entry replays once).
         out[transno] = unsafe {
             let s = &*pg.as_ptr().add(transno);
-            if s.trans_value_is_null || matches!(k, CombineKind::Byval) {
+            if s.trans_value_is_null
+                || matches!(
+                    k,
+                    CombineKind::Byval
+                        | CombineKind::AvgInt8Array
+                        | CombineKind::VarlenaMinMax { .. }
+                )
+            {
+                // Byval rides inline; the byref non-internal kinds cross the
+                // classic row path as their PLAIN datum (these transtypes
+                // have no serialfn) — the handed image outlives the replay.
                 NullableDatum { value: s.trans_value, isnull: s.trans_value_is_null }
             } else {
                 let mut buf = ::pqformat::pq_begintypsend(per_tuple)?;
                 match *k {
-                    CombineKind::Byval => unreachable!(),
+                    CombineKind::Byval
+                    | CombineKind::AvgInt8Array
+                    | CombineKind::VarlenaMinMax { .. } => unreachable!(),
                     CombineKind::PolyInt128 { sum_x2 } => {
                         let st = &*(s.trans_value.as_usize() as *const Int128AggState);
                         ::adt_numeric::aggregates::int128_agg_state_serialize(
@@ -2291,6 +2392,63 @@ fn combine_one_par(c: &ParCombine, dst: &mut AggPerGroup, src: &AggPerGroup) -> 
                 }
             }
         }
+        return Ok(());
+    }
+    if matches!(c.kind, CombineKind::AvgInt8Array | CombineKind::VarlenaMinMax { .. }) {
+        // Native byref arms (both combines are strict): NULL handling is the
+        // strict adopt-pointer path (the PolyInt128 precedent — relocated
+        // states are owned by the run and consumed exactly once).
+        if src.trans_value_is_null {
+            return Ok(());
+        }
+        if dst.trans_value_is_null {
+            dst.trans_value = src.trans_value;
+            dst.trans_value_is_null = false;
+            dst.no_trans_value = false;
+            return Ok(());
+        }
+        match c.kind {
+            CombineKind::AvgInt8Array => {
+                // int4_avg_combine's element adds, run natively on the
+                // relocated 4B-U transarray images (payload at the no-nulls
+                // 1-D overhead — the fmgr port's exact layout).
+                // SAFETY: relocation copied/asserted 4B-U images into
+                // 16-aligned handed slots; dst is uniquely reachable through
+                // this claimer's bucket and src feeds exactly once.
+                unsafe {
+                    let d = (dst.trans_value.as_usize() as *mut u8)
+                        .add(::lanefold::ARR_OVERHEAD_NONULLS_1)
+                        .cast::<i64>();
+                    let s = (src.trans_value.as_usize() as *const u8)
+                        .add(::lanefold::ARR_OVERHEAD_NONULLS_1)
+                        .cast::<i64>();
+                    *d += *s;
+                    *d.add(1) += *s.add(1);
+                }
+            }
+            CombineKind::VarlenaMinMax { larger } => {
+                // text_smaller/larger's exact pick under a memcmp-tier
+                // collation: memcmp + length tiebreak; C returns arg1 (dst)
+                // only on a STRICT win, so ties take the src datum — for
+                // text, ties are byte-equal, so either pointer is
+                // byte-identical output.
+                // SAFETY: relocated plain inline images (relocation assert).
+                unsafe {
+                    let (dp, dl) = var_payload(dst.trans_value.as_usize() as *const u8);
+                    let (sp, sl) = var_payload(src.trans_value.as_usize() as *const u8);
+                    let cmp = ::varlena::varstrfastcmp_c(
+                        core::slice::from_raw_parts(dp, dl),
+                        core::slice::from_raw_parts(sp, sl),
+                    );
+                    let keep_dst = if larger { cmp > 0 } else { cmp < 0 };
+                    if !keep_dst {
+                        dst.trans_value = src.trans_value;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        dst.no_trans_value = false;
         return Ok(());
     }
     if c.strict {
