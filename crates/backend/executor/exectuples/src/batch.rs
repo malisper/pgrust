@@ -200,7 +200,7 @@ impl<'mcx> SoaDeformPlan<'mcx> {
 /// adapter publishes into slots.
 ///
 /// EPOCH DISCIPLINE (phase4 design §2/§8.1): `epoch` is the row-group index
-/// within the scan. A scan pins its `Rc<Part>` for its whole lifetime, so the
+/// within the scan. A scan pins its `Arc<Part>` for its whole lifetime, so the
 /// rg-index is unique and rescan-stable per scan — a part-cache refresh can
 /// never swap dictionary content under a live scan (a reopen is a new scan,
 /// hence a new pin and a fresh epoch space). Consumers key per-code memos on

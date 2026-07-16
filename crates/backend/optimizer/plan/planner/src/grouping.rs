@@ -1580,6 +1580,16 @@ fn create_partial_grouping_paths<'mcx>(
     extra: &mut GroupPathExtra<'mcx>,
     force_rel_creation: bool,
 ) -> PgResult<Option<RelId>> {
+    // M5-3 (§2.3): a covered shape gets NO partial-aggregation machinery at
+    // all under engine=runtime — no partially-grouped rel, hence no grouped
+    // Gather Merges and no finalize-over-Gather paths; the serial Agg over
+    // the serial scan is the plan the runtime router picks up. Returning
+    // None here is the ordinary "partial grouping not possible" answer the
+    // caller already handles. force_rel_creation (a partitionwise parent's
+    // requirement) wins — but partitioned shapes never classify covered.
+    if !force_rel_creation && crate::m5_suppress::m5_suppress_gather(run)? {
+        return Ok(None);
+    }
     let parse = run.parse();
 
     // Partially aggregated NON-partial paths exist only under a parent doing
@@ -1830,6 +1840,12 @@ fn create_partial_grouping_paths<'mcx>(
 }
 
 // gather_grouping_paths (planner.c).
+// M5-3 note: NO suppression gate here — a partially-grouped rel's MAIN
+// pathlist is populated exclusively by these gathers (its own paths are
+// partial), and set_cheapest right after would find an empty pathlist
+// ("could not devise a query plan"). Covered shapes are suppressed
+// UPSTREAM instead: create_partial_grouping_paths returns None, so this
+// function is never reached for them.
 fn gather_grouping_paths<'mcx>(run: &mut PlannerRun<'mcx>, rel: RelId) -> PgResult<()> {
     let groupby_pathkeys: mcx::PgVec<'mcx, types_pathnodes::PathKey> = {
         let n = run.root.num_groupby_pathkeys as usize;
@@ -2406,6 +2422,13 @@ fn create_partial_distinct_paths<'mcx>(
         if !input.consider_parallel || input.partial_pathlist.is_empty() {
             return Ok(());
         }
+    }
+    // M5-3 (§2.3): covered shapes build no partial-distinct machinery at
+    // all (the partial-distinct rel's main pathlist is fed only by its own
+    // gathers — suppressing those alone would leave it path-less); the
+    // serial Unique/Agg plan is what the runtime distinct sink admits.
+    if crate::m5_suppress::m5_suppress_gather(run)? {
+        return Ok(());
     }
     let parse = run.parse();
     // Parallel DISTINCT ON would lose the deterministic row choice.
@@ -3023,9 +3046,13 @@ fn create_ordered_paths<'mcx>(
     // generate_gather_paths made a plain Gather and order-preserving Gather
     // Merges already; what remains is sorting a partial path (fully or
     // incrementally) and putting a Gather Merge on top.
+    // M5-3 (§2.3): suppressed under engine=runtime for covered shapes,
+    // like every other Gather/Gather Merge construction site.
+    let m5_suppress = crate::m5_suppress::m5_suppress_gather(run)?;
     if run.root.rel(ordered_rel).consider_parallel
         && !run.root.sort_pathkeys.is_empty()
         && !run.root.rel(input_rel).partial_pathlist.is_empty()
+        && !m5_suppress
     {
         let cheapest_partial_path = run.root.rel(input_rel).partial_pathlist[0];
         let partials =

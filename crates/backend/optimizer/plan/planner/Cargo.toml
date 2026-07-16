@@ -90,6 +90,7 @@ gist = { path = "../../../access/gist/gist" }
 nbtree = { path = "../../../access/nbtree/nbtree" }
 nodeagg = { path = "../../../executor/nodeagg" }
 nodehash = { path = "../../../executor/nodehash" }
+lanefold = { path = "../../../executor/lanefold" }
 vars = { path = "../../util/vars" }
 coerce = { path = "../../../parser/coerce" }
 parser_small1 = { path = "../../../parser/parser_small1" }

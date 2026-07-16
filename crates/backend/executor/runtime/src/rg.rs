@@ -19,7 +19,9 @@ use crate::sync::{lock, Mutex};
 
 use types_error::{PgError, ERROR};
 
-/// Umbra's initial priority p_0 = 10^4 (SIGMOD'21 §3.2). INERT in M0.
+/// Umbra's initial priority p_0 = 10^4 (SIGMOD'21 §3.2). As of M5-4 this
+/// seeds the slot stride (equal shares: every RG holds p_0 — the decaying
+/// update `p_{i+1} = max(p_min, λ·p_i)` is M5-5's, deliberately not here).
 pub const INITIAL_PRIORITY: u32 = 10_000;
 
 /// The work body of one pipeline's task set. M0 exercises this with
@@ -83,6 +85,11 @@ pub(crate) struct RgProgress {
     pub(crate) started: Vec<bool>,
     pub(crate) done: Vec<bool>,
     pub(crate) aborted: bool,
+    /// Published-but-not-finalized task sets (live pipelines). Sequential
+    /// walk: 0 or 1 by construction. DAG dispatch (M5+1): the RG completes
+    /// only when `live == 0` AND nothing is ready — a finishing pipeline
+    /// with live siblings releases its slot without completing the RG.
+    pub(crate) live: usize,
 }
 
 /// RG completion state the submitting leader parks on (§2.5: submit-and-
@@ -240,12 +247,50 @@ pub struct ResourceGroup {
     pub(crate) progress: Mutex<RgProgress>,
     pub(crate) completion: Completion,
     pub(crate) stats: RgStats,
-    /// INERT until M5 (stride activation): decaying priority seed. Present
-    /// so per-task bookkeeping never needs restructuring (lit-review §5.4).
+    /// Priority feeding the slot stride (M5-4: constant p_0 = equal shares;
+    /// M5-5 LIVE: decays with consumed CPU, `p(q) = max(p_min, p0·λ^q)`,
+    /// applied at the task-completion charge site in sched.rs; monotone
+    /// non-increasing over the RG's life).
     pub(crate) priority: AtomicU32,
-    /// INERT until M5: CPU nanoseconds consumed by this RG's tasks (the
-    /// quantity stride passes advance by).
+    /// M5-5 decay bookkeeping: last consumed-CPU quantum count the decay
+    /// was applied at (CAS-guarded — each boundary applies exactly once
+    /// across racing workers).
+    pub(crate) decay_quanta: AtomicU64,
+    /// CPU nanoseconds consumed by this RG's tasks — the quantity stride
+    /// passes advance by (LIVE as of M5-4), and the per-RG CPU-share
+    /// readback of the fairness instruments (§3.5).
     pub(crate) cpu_consumed_ns: AtomicU64,
+    /// Session-affinity token of the submitting leader (0 = none): the
+    /// equal-pass pick tiebreak prefers workers sticky-bound to this session
+    /// (M5-4; set via Runtime::submit_with_affinity — QuerySpec deliberately
+    /// unchanged for backward compatibility, integration-train note).
+    pub(crate) session_token: u64,
+    /// Query-level stride account (M5+1 pipeline-DAG dispatch, m5-planner
+    /// §3.6): the QUERY is the fair-share principal — under DAG dispatch all
+    /// of the RG's live pipeline slots advance THIS account (pass advances
+    /// on the SUM of their consumed quanta) and each slot's pass word
+    /// mirrors it, so a query with 4 live pipelines gets the same aggregate
+    /// share as a single-pipeline peer. Unused (stays 0) in sequential-walk
+    /// mode. With ONE pipeline the account's value sequence is identical to
+    /// the slot's own fetch_add — single-pipeline scheduling is unchanged
+    /// by construction.
+    pub(crate) pass_account: AtomicU64,
+    /// Dependency depth per task set (M5+1, §3.6): depth[i] = length of the
+    /// longest dependency chain of task sets ABOVE i (its downstream
+    /// release). Within-query pick priority is deepest-first (ties by
+    /// submission = index order). Computed once at construction from the
+    /// deps DAG; immutable.
+    pub(crate) depth: Vec<u64>,
+    /// Scheduler back-reference for the queued-abort reap (M5-4 slot-
+    /// reclamation fix): an aborted RG still in the wait queue completes
+    /// promptly instead of waiting for a slot to free. Weak — the RG never
+    /// keeps the scheduler alive.
+    pub(crate) sched: std::sync::Weak<crate::sched::Scheduler>,
+    /// Submit→service instrument channel (§3.5), scheduler-clock ns:
+    /// submit time, first task admission, completion. 0 = not yet.
+    pub(crate) submit_ns: AtomicU64,
+    pub(crate) first_service_ns: AtomicU64,
+    pub(crate) done_ns: AtomicU64,
 }
 
 impl ResourceGroup {
@@ -254,11 +299,22 @@ impl ResourceGroup {
         spec: QuerySpec,
         pinned: bool,
         class: RgClass,
+        session_token: u64,
+        sched: std::sync::Weak<crate::sched::Scheduler>,
     ) -> Arc<ResourceGroup> {
         let n = spec.tasksets.len();
         for (i, ts) in spec.tasksets.iter().enumerate() {
             for &d in &ts.deps {
                 assert!(d < i, "task-set deps must be DAG-ordered (dep {d} >= index {i})");
+            }
+        }
+        // Dependency depth (§3.6): longest chain of dependents above each
+        // task set. Descending index order finalizes depth[j] before j is
+        // visited as anyone's dep (dependents always have larger indices).
+        let mut depth = vec![0u64; n];
+        for j in (0..n).rev() {
+            for &d in &spec.tasksets[j].deps {
+                depth[d] = depth[d].max(depth[j] + 1);
             }
         }
         let task = QueryTaskLifecycle::with_owner(Arc::new(SchedulerOwner));
@@ -275,25 +331,64 @@ impl ResourceGroup {
                 started: vec![false; n],
                 done: vec![false; n],
                 aborted: false,
+                live: 0,
             }),
             completion: Completion::new(),
             stats: RgStats::default(),
             priority: AtomicU32::new(INITIAL_PRIORITY),
+            decay_quanta: AtomicU64::new(0),
             cpu_consumed_ns: AtomicU64::new(0),
+            session_token,
+            pass_account: AtomicU64::new(0),
+            depth,
+            sched,
+            submit_ns: AtomicU64::new(0),
+            first_service_ns: AtomicU64::new(0),
+            done_ns: AtomicU64::new(0),
         })
     }
 
     /// First not-yet-started task set whose deps have all finalized, marked
-    /// started. One task set of an RG is active at a time in M0 (single
-    /// slot; bushy parallelism deliberately avoided — 2014 §pipelines).
+    /// started. One task set of an RG is active at a time on the sequential
+    /// walk (single slot; the M0 shape — DAG dispatch is the M5+1 opt-in,
+    /// see [`ResourceGroup::ready_all`]).
     pub(crate) fn next_ready(&self, progress: &mut RgProgress) -> Option<usize> {
         for i in 0..self.tasksets.len() {
             if !progress.started[i] && self.tasksets[i].deps.iter().all(|&d| progress.done[d]) {
                 progress.started[i] = true;
+                progress.live += 1;
                 return Some(i);
             }
         }
         None
+    }
+
+    /// EVERY not-yet-started task set whose deps have all finalized, capped
+    /// at `max` (the caller's slot capacity), deepest-first (§3.6
+    /// within-query priority; stable sort keeps submission = index order on
+    /// ties). Marks the taken ones started; the rest stay unstarted-ready
+    /// and are re-found by the next call (a later finalize with freed
+    /// capacity). Returns `(taken, deferred)` where `deferred` counts ready
+    /// task sets left behind for lack of capacity. M5+1 DAG dispatch only.
+    pub(crate) fn ready_all(
+        &self,
+        progress: &mut RgProgress,
+        max: usize,
+    ) -> (Vec<usize>, usize) {
+        let mut ready: Vec<usize> = (0..self.tasksets.len())
+            .filter(|&i| {
+                !progress.started[i]
+                    && self.tasksets[i].deps.iter().all(|&d| progress.done[d])
+            })
+            .collect();
+        ready.sort_by_key(|&i| std::cmp::Reverse(self.depth[i]));
+        let deferred = ready.len().saturating_sub(max);
+        ready.truncate(max);
+        for &i in &ready {
+            progress.started[i] = true;
+            progress.live += 1;
+        }
+        (ready, deferred)
     }
 
     pub fn query_id(&self) -> u64 {
@@ -400,8 +495,21 @@ impl RgHandle {
     /// the cleanup rides the ordinary last-worker-out protocol, completing
     /// the RG as Aborted. Idempotent (first recorded error wins; the close
     /// is a no-op on an already-closed word).
+    ///
+    /// M5-4 slot-reclamation fix: an aborted RG still QUEUED (never admitted
+    /// to a slot) must not wait for a slot to free before completing — the
+    /// reap removes it from the wait queue and completes it promptly.
+    /// Exactly-once with the admission pop: both remove under the membership
+    /// lock, and whoever removes the RG is the one that completes it. The
+    /// cancel-then-reap order closes the race with admission: an RG popped
+    /// after the cancel is observed aborted at the pop (completed there); an
+    /// RG popped before it starts normally and aborts through the ordinary
+    /// generation-refusal drain.
     pub fn abort(&self) {
         self.rg.task.cancel(abort_error());
+        if let Some(sched) = self.rg.sched.upgrade() {
+            sched.reap_queued_abort(&self.rg);
+        }
     }
 
     /// Abort observation for work bodies that subdivide a COALESCED claim
@@ -418,5 +526,34 @@ impl RgHandle {
     /// The submitting query's id (WFIN marker correlation key).
     pub fn query_id(&self) -> u64 {
         self.rg.query_id
+    }
+
+    /// CPU nanoseconds consumed by this RG's tasks so far — the per-RG CPU
+    /// share readback of the multi-query fairness instruments (§3.5; the
+    /// proportional-share error of the K-sweep gate is computed from this).
+    pub fn cpu_consumed_ns(&self) -> u64 {
+        use crate::sync::atomic::Ordering;
+        self.rg.cpu_consumed_ns.load(Ordering::Relaxed)
+    }
+
+    /// Submit→service instrument channel (§3.5), scheduler-clock ns:
+    /// `(submit_ns, first_service_ns, done_ns)`; 0 = not (yet) recorded.
+    /// submit→first_service is the time-to-service the MULTI-arm latency
+    /// distributions read; submit→done is the completion latency.
+    pub fn service_times(&self) -> (u64, u64, u64) {
+        use crate::sync::atomic::Ordering;
+        (
+            self.rg.submit_ns.load(Ordering::Relaxed),
+            self.rg.first_service_ns.load(Ordering::Relaxed),
+            self.rg.done_ns.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Current (possibly decayed) priority — M5-5 instrument readback:
+    /// p0 = fresh; p_min = fully-decayed floor. Tests assert the decay
+    /// trajectory and the floor clamp through this.
+    pub fn priority(&self) -> u32 {
+        use crate::sync::atomic::Ordering;
+        self.rg.priority.load(Ordering::Relaxed)
     }
 }

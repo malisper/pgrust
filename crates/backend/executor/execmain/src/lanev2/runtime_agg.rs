@@ -36,22 +36,27 @@
 //! WFIN markers (M0 acceptance instrument contract): emitted by the
 //! runtime's generic sched.rs channel under `PGRUST_MORSEL_MARKERS=1` —
 //! `MORSEL|WFIN|qid=..|pipe=..|worker=..|t_us=..|tasks=..|task_avg_us=..`
-//! per (worker, task set); pipe = task-set index (0 = ACCEPT, 1 = COMBINE).
-//! The arm's own duplicate emitter was removed at m2-integration: with the
-//! sched channel armed, double emission (different time bases) garbled the
-//! instrument parser's spread verdicts.
+//! per (worker, task set); pipe = task-set index. Under the default 3-set
+//! sealed plumbing (combine-parallel lane): 0 = ACCEPT, 1 = FREEZE (parallel
+//! per-Local SEAL), 2 = COMBINE; under `PGRUST_RUNTIME_AGG_PARSEAL=0` the
+//! 2-set layout is 0 = ACCEPT, 1 = COMBINE (and the single-threaded SEAL
+//! emits its own `MORSEL|AGGSEAL|arm=2set|...|dur_us=..` line when markers
+//! are armed). The arm's own duplicate WFIN emitter was removed at
+//! m2-integration: with the sched channel armed, double emission (different
+//! time bases) garbled the instrument parser's spread verdicts.
 
 use core::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::EStateData;
 use ::nodeagg::sink::{
     sink_build_emit_plan, sink_combine_bucket, sink_emit_bucket, sink_null_only_run,
     sink_partition_remainder, sink_remainder_null_block, sink_remainder_spill_bucket,
-    sink_resolve_combines, sink_route_records, sink_run_from_spill, sink_run_spill_bucket,
-    sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge, sink_topn_merge_fragments,
+    sink_resolve_combines, sink_route_records, sink_run_from_bucket_table, sink_run_from_spill,
+    sink_run_spill_bucket, sink_spill_row_bytes, sink_topn_candidates, sink_topn_merge,
+    sink_topn_merge_fragments,
     LaneAggTable, SinkCombineFn, SinkEmitAcc, SinkEmitBuf, SinkEmitPlan, SinkKeySpec,
     SinkLocalView, SinkPart, SinkRun, SinkTableHandle, SinkTopnCand, SinkTopnSpec, SINK_NBUCKETS,
     SINK_NULL_BUCKET,
@@ -61,8 +66,9 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::router::{self, ArmClass, ArmCounter};
 use super::stats::{self, RefuseReason, ShapeClass};
-use super::{lane_trace, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
+use super::{lane_trace, lane_trace_enabled, seq_scan_fusible, ScanFeedShape, ScanK2Scratch};
 
 // ---------------------------------------------------------------------------
 // The sink: ParallelSink impl + engagement-shared control state.
@@ -82,6 +88,130 @@ pub(super) struct AggSinkLocal {
     /// the sink is EA-armed (`sink.ea_scan_node.is_some()`); rides the Local
     /// through SEAL exactly like the agg state it sits beside.
     instr: super::runtime_instr::InstrumentPartial,
+    /// numa-combine diagnostic (sampled only when the two-level arm is
+    /// engaged): per-morsel socket-half votes of the ACCEPT worker driving
+    /// this Local — measures how well the pool-half locals split tracks
+    /// real socket placement (the finalize NUMAC marker's agreement term).
+    /// Behavior never reads it.
+    numa_votes: [u32; 2],
+    /// agg192-contention CPROBE: lifetime cap/pressure flushes of this Local
+    /// and their bytes (runs are drained by spill epochs, so `runs.len()` at
+    /// seal undercounts). Thread-owned; emitted on the AGGSEAL marker line —
+    /// discriminates DOP-scaled bounded-cap flush amplification (real extra
+    /// work) from shared-line contention (stall-only inflation).
+    probe_flushes: u64,
+    probe_flush_bytes: u64,
+    /// α-gate controller state (cachebudget lane; see the module section by
+    /// [`alpha_gate_floor`]). Thread-owned like everything else here; rides
+    /// the Local through SEAL for the AGGSEAL observability sums only —
+    /// behavior after seal never reads it.
+    alpha: AlphaGate,
+}
+
+/// Per-Local α-gate state (Müller ADAPTIVE): a pure function of this
+/// worker's OWN fold/flush stream — no shared reads, no shared writes.
+#[derive(Default)]
+struct AlphaGate {
+    /// Rows folded into the table since the last flush (any kind).
+    window_rows: u64,
+    /// Demoted: this Local's flush threshold is the sink's `alpha_floor`.
+    demoted: bool,
+    /// Rows folded since the demote (the re-probe budget's clock).
+    rows_since_demote: u64,
+    /// Observability (AGGSEAL marker sums): demote / collapse-restore /
+    /// hysteresis re-probe transition counts.
+    demotes: u64,
+    restores: u64,
+    reprobes: u64,
+}
+
+/// Summed α-gate transition counts for an AGGSEAL marker line.
+fn alpha_sums(locals: &[AggSinkLocal]) -> (u64, u64, u64) {
+    locals.iter().fold((0, 0, 0), |(d, r, p), l| {
+        (d + l.alpha.demotes, r + l.alpha.restores, p + l.alpha.reprobes)
+    })
+}
+
+impl AlphaGate {
+    /// The effective flush threshold for this Local right now. Undemoted
+    /// (or controller unarmed): exactly `sink.cap` — the incumbent cadence.
+    #[inline]
+    fn cap(&self, sink: &AggSink) -> u32 {
+        match sink.alpha_floor {
+            Some(f) if self.demoted => f,
+            _ => sink.cap,
+        }
+    }
+
+    /// Fold accounting, once per staged batch (survivor count — rows that
+    /// actually probed the table; qual-dropped rows never touch it).
+    #[inline]
+    fn absorbed(&mut self, rows: usize) {
+        self.window_rows += rows as u64;
+        if self.demoted {
+            self.rows_since_demote += rows as u64;
+        }
+    }
+
+    /// A CAP flush fired with `entries` distinct groups in the run:
+    /// adjudicate α = window_rows / entries against α₀ and transition.
+    #[inline]
+    fn on_cap_flush(&mut self, entries: usize, sink: &AggSink) {
+        self.adjudicate(
+            entries,
+            sink.alpha_floor,
+            sink.cap,
+            agg_alpha0_x100(),
+            agg_alpha_reprobe_mult(),
+        );
+    }
+
+    /// The controller core (env-free for the unit tests; the knobs arrive
+    /// as arguments).
+    fn adjudicate(
+        &mut self,
+        entries: usize,
+        alpha_floor: Option<u32>,
+        full_cap: u32,
+        alpha0_x100: u64,
+        reprobe_mult: u64,
+    ) {
+        let rows = self.window_rows;
+        self.window_rows = 0;
+        if alpha_floor.is_none() || entries == 0 {
+            return;
+        }
+        // α ≥ α₀ ⟺ rows × 100 ≥ entries × α₀×100 (integer, no fp).
+        let collapse_ok = rows.saturating_mul(100) >= (entries as u64) * alpha0_x100;
+        if self.demoted {
+            if collapse_ok {
+                // The floor window itself collapsed — the phase changed;
+                // give the table its budget share back immediately.
+                self.demoted = false;
+                self.restores += 1;
+            } else if reprobe_mult > 0
+                && self.rows_since_demote >= reprobe_mult.saturating_mul(full_cap as u64)
+            {
+                // Müller hysteresis: one full-cap probe window — the NEXT
+                // fill re-adjudicates (and re-demotes if α is still low,
+                // restarting this clock).
+                self.demoted = false;
+                self.reprobes += 1;
+            }
+        } else if !collapse_ok {
+            self.demoted = true;
+            self.rows_since_demote = 0;
+            self.demotes += 1;
+        }
+    }
+
+    /// A non-cap (budget-pressure) flush emptied the table: the fill window
+    /// restarts; no adjudication (the window didn't reach the threshold —
+    /// its α is not the fill-window statistic the controller is defined on).
+    #[inline]
+    fn on_pressure_flush(&mut self) {
+        self.window_rows = 0;
+    }
 }
 
 /// A Local's spill face: its single-writer spill file (epochs of
@@ -118,6 +248,13 @@ struct AggSink {
     /// must match — the emit plan's MultiComp columns came from it).
     mk: Option<::nodeagg::MkShape>,
     cap: u32,
+    /// α-gate demoted flush threshold (cachebudget lane; [`alpha_gate_floor`]
+    /// — Some arms the per-Local controller, None = structurally off for
+    /// this engagement). Fixed at construction like `cap`.
+    alpha_floor: Option<u32>,
+    /// Per-socket shared-table EXPERIMENT face (cachebudget D2, hard
+    /// default-OFF; see [`SharedAggFace`]). None on every default boot.
+    shared: Option<SharedAggFace>,
     /// Per-Local budget: work_mem × hash_mem_multiplier (R3 envelope).
     budget: usize,
     key_words: usize,
@@ -193,6 +330,13 @@ struct AggSink {
     /// Lock-free mirror of `adopted` for the per-claim combine check
     /// (written once at SEAL, which happens-before every combine claim).
     adopted_flag: AtomicBool,
+    /// Forked-Local census for the 3-set parallel seal's adopt-skip: a seal
+    /// claim may skip its partition pass only when it can PROVE the adopt
+    /// census will take the table wholesale (exactly one fork). Counted at
+    /// fork (accept set), read at seal (deps=[accept] — final by then).
+    /// Overcounting (a stale-generation re-fork) only costs a wasted
+    /// partition pass — the safe direction.
+    forks: AtomicUsize,
     /// Abort/observability control (shared with the engagement payload).
     rg: OnceLock<runtime::WeakRgHandle>,
     failed: AtomicBool,
@@ -222,6 +366,12 @@ struct AggSink {
     combine_splits: AtomicU64,
     split_depth_max: AtomicU64,
     split_uniq: AtomicU64,
+    /// combine16 observability: in-memory merge claims and the merged
+    /// tables' entry-set grow / two-level-convert counts (flat presized
+    /// tables must show 0/0 — the engagement gate's evidence line).
+    combine16_claims: AtomicU64,
+    combine16_grows: AtomicU64,
+    combine16_converts: AtomicU64,
     /// EA-on-morsels (ea-morsels.md §2): Some(scan plan_node_id) ONLY when
     /// engaged under EXPLAIN ANALYZE — the single EA flag for this sink;
     /// None on every other path (dead-when-off).
@@ -234,12 +384,218 @@ struct AggSink {
     /// mode and on every non-EA path: zero clock reads.
     ea_timer: bool,
     ea_epoch: std::time::Instant,
+    /// Two-level socket-local combine (numa-combine item 1): Some = the
+    /// engaged claims-shape (armed at construction — kill switch + DOP
+    /// threshold + all-byval combines). None = the flat 256-partition pass,
+    /// byte-and-time identical to before the lane.
+    numa: Option<NumaCombine>,
 }
 
 // SAFETY: out_emit cells are written only by the exclusive claimer of their
 // partition (the runtime's exactly-once combine claim) and read only by
-// finalize, which happens-after every combine by last-worker-out.
+// finalize, which happens-after every combine by last-worker-out. The
+// numa-combine partial slots have the same discipline one level down: slot
+// (h,b) is written only by the pass-A claim that popped (h,b) (cursor
+// fetch_add = exactly-once ownership) and consumed only by bucket b's
+// elected FINAL claim, whose counter Acquire pairs with the writers'
+// Release increments.
 unsafe impl Sync for AggSink {}
+
+// ---------------------------------------------------------------------------
+// Two-level socket-local combine (numa-combine lane, item 1).
+// ---------------------------------------------------------------------------
+
+/// The engaged claims-shape's shared state. The partition space doubles to
+/// `2 × SINK_NBUCKETS` CLAIM CREDITS; each credit pops one pass-A item
+/// (half h, bucket b) from the per-half cursors — SELF-STEERED: the claiming
+/// worker samples its own socket and drains its own half's cursor first,
+/// then steals. Pass-A merges bucket b across ONLY half h's sealed locals
+/// and freezes the result into a single-bucket partial [`SinkRun`]; the
+/// claim that completes a bucket's SECOND partial is elected to run the
+/// FINAL stage (2-way partial merge + the unchanged combine tail) at once.
+///
+/// Credit/item accounting: 512 credits, 512 items; a `fetch_add` pop < 256
+/// owns its item exactly once, and a credit that finds both cursors ≥ 256
+/// has proven every item is already popped — no loss, no dup, no waiting.
+///
+/// Byte identity vs the flat pass: first-seen order COMPOSES across
+/// contiguous locals halves (partial-0 replays half 0's arrivals in the
+/// flat order, partial-1 follows — a key first seen in half 1 trails every
+/// half-0-first key in both shapes), and the all-byval gate keeps state
+/// regrouping bit-exact (the whitelist is int adds / min-max / bool —
+/// associative). Covered by sink.rs `two_level_partial_runs_match_flat_*`.
+struct NumaCombine {
+    /// Pass-A claim cursors, one per locals half.
+    cursors: [AtomicU32; 2],
+    /// Per-bucket completion counters; 1→2 elects the FINAL claim.
+    done: Vec<AtomicU8>,
+    /// `2 × SINK_NBUCKETS` partial slots (h-major); single writer per slot
+    /// (the popping claim), single consumer (the elected final).
+    partials: Vec<UnsafeCell<Option<SinkRun>>>,
+    /// Observability (NUMAC finalize marker; behavior never reads these).
+    steer_hit: AtomicU64,
+    steer_miss: AtomicU64,
+    /// Buckets whose final ran the FLAT body (ineligible: NULL bucket,
+    /// <2 locals, frozen engagement, over-budget verdict, or a pass-A
+    /// asymmetry after an error).
+    finals_flat: AtomicU64,
+    partial_ns: AtomicU64,
+    final_ns: AtomicU64,
+    /// Live partial-run bytes (transient retained state between a bucket's
+    /// pass-A and its final) + the observed peak.
+    partial_bytes: AtomicUsize,
+    partial_bytes_peak: AtomicUsize,
+}
+
+// SAFETY: the partial slots are single-writer / single-consumer by the
+// claims discipline (cursor-pop = exactly-once slot ownership; the 1→2
+// counter election = exactly-once consumption, Acquire-paired with the
+// writers' Release increments — see the AggSink Sync comment); every other
+// field is an atomic.
+unsafe impl Sync for NumaCombine {}
+
+impl NumaCombine {
+    fn new() -> NumaCombine {
+        NumaCombine {
+            cursors: [AtomicU32::new(0), AtomicU32::new(0)],
+            done: (0..SINK_NBUCKETS).map(|_| AtomicU8::new(0)).collect(),
+            partials: (0..2 * SINK_NBUCKETS).map(|_| UnsafeCell::new(None)).collect(),
+            steer_hit: AtomicU64::new(0),
+            steer_miss: AtomicU64::new(0),
+            finals_flat: AtomicU64::new(0),
+            partial_ns: AtomicU64::new(0),
+            final_ns: AtomicU64::new(0),
+            partial_bytes: AtomicUsize::new(0),
+            partial_bytes_peak: AtomicUsize::new(0),
+        }
+    }
+
+    /// Pop one pass-A item, own half first. `None` = every item is popped
+    /// (this credit's work is done).
+    fn pop(&self, my: usize) -> Option<(usize, usize)> {
+        debug_assert!(my < 2);
+        for (attempt, h) in [my, 1 - my].into_iter().enumerate() {
+            let b = self.cursors[h].fetch_add(1, Ordering::Relaxed) as usize;
+            if b < SINK_NBUCKETS {
+                if attempt == 0 {
+                    self.steer_hit.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.steer_miss.fetch_add(1, Ordering::Relaxed);
+                }
+                return Some((h, b));
+            }
+        }
+        None
+    }
+
+    fn note_partial_bytes(&self, n: usize) {
+        let live = self.partial_bytes.fetch_add(n, Ordering::Relaxed) + n;
+        self.partial_bytes_peak.fetch_max(live, Ordering::Relaxed);
+    }
+
+    fn release_partial_bytes(&self, n: usize) {
+        self.partial_bytes.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
+/// `PGRUST_RUNTIME_AGG_NUMA_COMBINE` kill switch (default ON): 0/off = the
+/// flat 256-partition combine everywhere, byte-and-time identical to the
+/// pre-lane binary.
+fn numa_combine_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_RUNTIME_AGG_NUMA_COMBINE_DOP` engagement threshold (default 96 —
+/// the 48xl two-socket regime; the flat pass is byte-identical below it, so
+/// small DOPs keep the exact t21 shape). Lower it to force the engaged
+/// shape through the 16-thread byte gates.
+fn numa_combine_dop_min() -> i32 {
+    static N: OnceLock<i32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE_DOP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(96)
+    })
+}
+
+/// The claiming thread's socket HALF (0/1), for claim steering and the
+/// locals-split agreement diagnostic. Linux: `sched_getcpu` + the
+/// /sys/devices/system/node/*/cpulist map (nodes split into two halves for
+/// >2-node topologies; single-node machines map everything to 0 — the
+/// steering degrades to a plain shared cursor, still correct). Elsewhere:
+/// `None` (callers fall back to the claim credit's own half — deterministic,
+/// which is what the non-Linux unit/e2e environments want).
+fn numa_current_half() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            fn sched_getcpu() -> core::ffi::c_int;
+        }
+        static MAP: OnceLock<Vec<u8>> = OnceLock::new();
+        let map = MAP.get_or_init(|| {
+            let mut nodes: Vec<Vec<usize>> = Vec::new();
+            for node in 0..1024usize {
+                let Ok(list) = std::fs::read_to_string(format!(
+                    "/sys/devices/system/node/node{node}/cpulist"
+                )) else {
+                    break;
+                };
+                let mut cpus = Vec::new();
+                for part in list.trim().split(',').filter(|s| !s.is_empty()) {
+                    let mut ends = part.splitn(2, '-');
+                    let lo: usize = match ends.next().and_then(|s| s.parse().ok()) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let hi: usize =
+                        ends.next().and_then(|s| s.parse().ok()).unwrap_or(lo);
+                    cpus.extend(lo..=hi);
+                }
+                nodes.push(cpus);
+            }
+            let nnodes = nodes.len().max(1);
+            let ncpus = nodes.iter().map(|c| c.iter().max().map_or(0, |m| m + 1)).max().unwrap_or(0);
+            let mut map = vec![0u8; ncpus];
+            for (n, cpus) in nodes.iter().enumerate() {
+                let half = u8::from(n >= nnodes.div_ceil(2));
+                for &c in cpus {
+                    map[c] = half;
+                }
+            }
+            map
+        });
+        // SAFETY: no preconditions; vDSO-backed on Linux.
+        let cpu = unsafe { sched_getcpu() };
+        if cpu >= 0 {
+            return Some(map.get(cpu as usize).copied().unwrap_or(0) as usize);
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The engaged shape's locals split: CONTIGUOUS halves of the sealed slice
+/// (slot order). Contiguity is load-bearing — it is what makes first-seen
+/// order compose (see [`NumaCombine`]); a sampled per-Local socket grouping
+/// would be nondeterministic run-to-run AND break the flat-order identity.
+fn numa_half_slice(locals: &[AggSinkLocal], h: usize) -> &[AggSinkLocal] {
+    let mid = locals.len() / 2;
+    if h == 0 {
+        &locals[..mid]
+    } else {
+        &locals[mid..]
+    }
+}
 
 /// Top-N materialization modes (topn-winners-only §3.2). `WinnersOnly` is
 /// the product default when the spec arms: each combine claim materializes
@@ -326,6 +682,31 @@ fn topn_winners_spill_enabled() -> bool {
             std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL").as_deref(),
             Ok("0") | Ok("off")
         )
+    })
+}
+
+/// `PGRUST_RUNTIME_AGG_PARSEAL` (default ON): the 3-set sealed plumbing —
+/// SEAL's per-Local partition pass runs parallel across Local slots (its own
+/// task set between ACCEPT and COMBINE, the distinct sink's SEALCVT shape).
+/// 0/off restores the 2-set plumbing (single-threaded SEAL) exactly — the
+/// A/B and rollback channel (combine-parallel lane).
+fn parseal_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_PARSEAL").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_MORSEL_MARKERS=1` (the sched.rs WFIN channel's env, re-read here
+/// for the arm's own AGGSEAL line): default OFF — zero cost beyond one
+/// branch per SEAL.
+fn agg_markers_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
@@ -450,18 +831,102 @@ impl AggSink {
         unsafe { *self.out_emit[part as usize].get() = buf };
         Ok(())
     }
+
+    // --- SEAL decomposition (combine-parallel lane) ---------------------
+    // The 2-set arm's single-threaded seal and the 3-set arm's parallel
+    // per-Local seal share these pieces; the ORDER differs (2-set: census →
+    // partition loop → topn resolution; 3-set: per-claim partition with an
+    // adopt-shape skip, then census + topn in sealed_ready). Outcomes are
+    // byte-identical: partition_remainder is a pure function of one Local's
+    // table, and both census decisions read post-accept state that no seal
+    // work mutates.
+
+    /// TRUE TABLE ADOPT census (dop1-tax2 inc-1b), verbatim from the 2-set
+    /// seal. True = adopted (callers skip partition/combine work).
+    fn try_adopt_census(&self, locals: &mut [AggSinkLocal]) -> bool {
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        if self.adopt_shape && !frozen {
+            if let [l] = &mut *locals {
+                if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
+                    let t = l.table.take().expect("checked Some");
+                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
+                    self.adopted_flag.store(true, Ordering::SeqCst);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Partition ONE Local's remainder table + the R3 SEAL-index accounting
+    /// (per-Local, so safely parallel across seal claims — the refusal flag
+    /// is idempotent and fail-closed).
+    fn seal_partition_local(&self, l: &mut AggSinkLocal) {
+        // Canonical (text-bearing) shapes partition by canonical bytes;
+        // word shapes by key words — the handle dispatches.
+        l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
+        // R3 accounting (m2-integration audit): the SEAL index is per-Local
+        // retained memory that lives through the whole combine phase —
+        // charge it like a run. Crossing = budget refusal (R5 whole-attempt
+        // rerun), never an error. Table mem includes the intern table (text
+        // shapes) — it lives through combine too.
+        if let Some(p) = &l.part {
+            l.run_bytes += p.bytes();
+            let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
+            if l.run_bytes + table_mem > self.budget {
+                self.refuse_budget();
+            }
+        }
+    }
+
+    /// combine16 evidence: fold one merged bucket table's construction
+    /// counters into the sink totals (three relaxed adds per claim — 256
+    /// claims per engagement, noise). Flat presized tables must report
+    /// grows == converts == 0; the incumbent path on a large canonical
+    /// shape reports the degenerate-top-byte growth this lane removes.
+    fn note_combine16(&self, t: &LaneAggTable) {
+        self.combine16_claims.fetch_add(1, Ordering::Relaxed);
+        self.combine16_grows.fetch_add(t.grow_count() as u64, Ordering::Relaxed);
+        self.combine16_converts.fetch_add(t.convert_count() as u64, Ordering::Relaxed);
+    }
+
+    /// §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2),
+    /// verbatim from the 2-set seal: the single-Local pass-through shape
+    /// never builds a merged table, so an armed selection resolves
+    /// FullDrain HERE, before the first combine claim.
+    fn resolve_topn_at_seal(&self, locals: &[AggSinkLocal]) {
+        if self.topn.is_some() {
+            let passthrough = matches!(
+                locals,
+                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+            );
+            let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
+            self.topn_mode.store(mode.encode(), Ordering::Release);
+            if passthrough {
+                lane_trace("runtime-agg topn: pass-through shape at SEAL — mode=full");
+            }
+        }
+    }
 }
 
 impl runtime::ParallelSink for AggSink {
     type Local = AggSinkLocal;
 
     fn fork(&self, _worker: usize) -> AggSinkLocal {
+        self.forks.fetch_add(1, Ordering::SeqCst);
         AggSinkLocal::default()
     }
 
     fn accept_local(&self, local: &mut AggSinkLocal, worker: usize, range: runtime::MorselRange) {
         if self.failed.load(Ordering::SeqCst) {
             return;
+        }
+        // numa two-level diagnostic (engaged only): one socket-half vote per
+        // morsel — the finalize NUMAC marker's locals-split agreement term.
+        if self.numa.is_some() {
+            if let Some(h) = numa_current_half() {
+                local.numa_votes[h] += 1;
+            }
         }
         let r = catch_unwind(AssertUnwindSafe(|| accept_morsel_body(self, local, worker, range)));
         match r {
@@ -492,10 +957,19 @@ impl runtime::ParallelSink for AggSink {
 
     /// SEAL: partition every Local's remainder table (single-threaded by
     /// the last-worker-out protocol; counting sort, one pass per Local).
+    /// This is the PGRUST_RUNTIME_AGG_PARSEAL=0 arm — the 3-set sealed
+    /// plumbing runs the same pieces with the partition pass parallel
+    /// across Local slots (see the SealedParallelSink impl below).
     fn seal(&self, locals: &mut [AggSinkLocal]) {
         if self.failed.load(Ordering::SeqCst) {
             return;
         }
+        // Shared-table experiment drain (single-threaded here; before the
+        // adopt census — injected runs correctly decline the adopt).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(locals);
+        }
+        let t0 = agg_markers_on().then(std::time::Instant::now);
         // TRUE TABLE ADOPT decision (dop1-tax2 inc-1b) — LIVE STATE at SEAL
         // (the sealed-Local census is final: last-worker-out; a widened
         // engagement forked >=2 Locals and takes the merge arms below).
@@ -511,56 +985,42 @@ impl runtime::ParallelSink for AggSink {
         // the wholesale table hand-off cannot filter them, so it stands
         // down and the combine's member filter runs instead. An armed-but-
         // never-frozen freeze dropped nothing — the adopt stays valid.
-        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
-        if self.adopt_shape && !frozen {
-            if let [l] = &mut *locals {
-                if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
-                    let t = l.table.take().expect("checked Some");
-                    *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
-                    self.adopted_flag.store(true, Ordering::SeqCst);
-                    return;
-                }
-            }
+        if self.try_adopt_census(locals) {
+            return;
         }
         for l in locals.iter_mut() {
-            // Canonical (text-bearing) shapes partition by canonical bytes;
-            // word shapes by key words — the handle dispatches.
-            l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
-            // R3 accounting (m2-integration audit): the SEAL index is
-            // per-Local retained memory that lives through the whole combine
-            // phase — charge it like a run. Crossing = budget refusal (R5
-            // whole-attempt rerun), never an error. Table mem includes the
-            // intern table (text shapes) — it lives through combine too.
-            if let Some(p) = &l.part {
-                l.run_bytes += p.bytes();
-                let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
-                if l.run_bytes + table_mem > self.budget {
-                    self.refuse_budget();
-                    return;
-                }
+            self.seal_partition_local(l);
+            if self.failed.load(Ordering::SeqCst) {
+                return;
             }
         }
-        // §3.2 step 2 — SEAL mode resolution (topn-winners-only inc-2):
-        // the single-Local pass-through shape never builds a merged table,
-        // so an armed selection has nothing to run on. Resolve FullDrain
-        // HERE, before the first combine claim, instead of degrading
-        // mid-claim (the sealed census is final and uniform across claims;
-        // SEAL happens-before every combine by last-worker-out).
-        if self.topn.is_some() {
-            let passthrough = matches!(
-                locals,
-                [l] if l.runs.is_empty() && l.spill.is_none() && l.table.is_some()
+        self.resolve_topn_at_seal(locals);
+        if let Some(t0) = t0 {
+            let rows: usize =
+                locals.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            // Marker channel (PGRUST_MORSEL_MARKERS=1, the WFIN sibling):
+            // the single-threaded seal's duration — the phase the 3-set arm
+            // parallelizes; its A/B evidence line.
+            let flushes: u64 = locals.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(locals);
+            eprintln!(
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}",
+                locals.len(),
+                t0.elapsed().as_micros()
             );
-            let mode = resolve_topn_mode_seal(self.topn_mode(), passthrough);
-            self.topn_mode.store(mode.encode(), Ordering::Release);
-            if passthrough {
-                lane_trace("runtime-agg topn: pass-through shape at SEAL — mode=full");
-            }
         }
     }
 
     fn partitions(&self) -> u64 {
-        SINK_NBUCKETS as u64
+        // numa two-level (item 1): the partition space doubles to CLAIM
+        // CREDITS — one per (half, bucket) pass-A item; bucket finals are
+        // elected inline by the second finisher.
+        if self.numa.is_some() {
+            2 * SINK_NBUCKETS as u64
+        } else {
+            SINK_NBUCKETS as u64
+        }
     }
 
     fn combine(&self, part: u64, _worker: usize, locals: &[AggSinkLocal]) {
@@ -575,6 +1035,203 @@ impl runtime::ParallelSink for AggSink {
             return;
         }
         let r = catch_unwind(AssertUnwindSafe(|| -> PgResult<CombineOutcome> {
+            // Two-level socket-local shape (numa-combine item 1): `part` is
+            // a CLAIM CREDIT, not a bucket — the pass-A pop decides the
+            // (half, bucket) this claim serves. Flat shape: `part` IS the
+            // bucket, exactly the t21 body.
+            match &self.numa {
+                Some(nc) => self.combine_numa(nc, part, locals),
+                None => self.combine_bucket_flat(part as usize, locals),
+            }
+        }));
+        match r {
+            Ok(Ok(CombineOutcome::Done)) => {}
+            Ok(Ok(CombineOutcome::OverBudget)) => {
+                lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
+                self.refuse_budget();
+            }
+            Ok(Ok(CombineOutcome::TopnDeclined)) => {
+                // Winners-only refusal (§3.2 step 3): fail-closed, count-
+                // gated ≈0 (structurally unreachable on cbstore feeds —
+                // sort-b decision 6). The e2e leg-R gate greps this line.
+                lane_trace(
+                    "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
+                );
+                self.refuse_topn();
+            }
+            Ok(Err(e)) => self.fail(e),
+            Err(_panic) => {
+                self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
+            }
+        }
+    }
+
+    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
+    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
+    /// Locals drop with the plumbing right after.
+    fn finalize(&self, locals: &[AggSinkLocal]) {
+        if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        // numa-combine NUMAC marker (WFIN sibling, PGRUST_MORSEL_MARKERS=1):
+        // steering + phase attribution + the locals-split/socket agreement
+        // votes, read before the Locals drop.
+        if let Some(nc) = &self.numa {
+            if agg_markers_on() {
+                let mid = locals.len() / 2;
+                let (mut agree, mut votes) = (0u64, 0u64);
+                for (i, l) in locals.iter().enumerate() {
+                    let h = usize::from(i >= mid);
+                    agree += u64::from(l.numa_votes[h]);
+                    votes += u64::from(l.numa_votes[0]) + u64::from(l.numa_votes[1]);
+                }
+                eprintln!(
+                    "MORSEL|NUMAC|locals={}|steer_hit={}|steer_miss={}|finals_flat={}|partial_ms={}|final_ms={}|partial_peak_bytes={}|half_agree={agree}/{votes}",
+                    locals.len(),
+                    nc.steer_hit.load(Ordering::Relaxed),
+                    nc.steer_miss.load(Ordering::Relaxed),
+                    nc.finals_flat.load(Ordering::Relaxed),
+                    nc.partial_ns.load(Ordering::Relaxed) / 1_000_000,
+                    nc.final_ns.load(Ordering::Relaxed) / 1_000_000,
+                    nc.partial_bytes_peak.load(Ordering::Relaxed),
+                );
+            }
+        }
+        self.finalize_publish(locals)
+    }
+}
+
+impl AggSink {
+    /// One credit of the engaged two-level shape: pop a pass-A item (own
+    /// socket half first), build that half's single-bucket partial, and —
+    /// when this claim completes the bucket's SECOND partial — run the
+    /// bucket's FINAL stage immediately (election by counter; exactly once).
+    fn combine_numa(
+        &self,
+        nc: &NumaCombine,
+        credit: u64,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<CombineOutcome> {
+        // Steering: real socket where we can sample it; the credit's own
+        // half elsewhere (deterministic — the non-Linux test environments).
+        let my = numa_current_half()
+            .unwrap_or(usize::from(credit >= SINK_NBUCKETS as u64));
+        let Some((h, b)) = nc.pop(my) else {
+            return Ok(CombineOutcome::Done);
+        };
+        let t0 = std::time::Instant::now();
+        if self.numa_bucket_eligible(b, locals) {
+            let merged = self.merge_bucket_subset(b, numa_half_slice(locals, h))?;
+            let run = sink_run_from_bucket_table(b, &merged);
+            nc.note_partial_bytes(run.bytes());
+            // SAFETY: (h,b) was popped exactly once (cursor fetch_add) —
+            // this claim is the slot's single writer; the elected final's
+            // counter Acquire pairs with our Release increment below.
+            unsafe { *nc.partials[h * SINK_NBUCKETS + b].get() = Some(run) };
+        }
+        nc.partial_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        // Election: the claim that brings the bucket to 2 partials runs the
+        // final. AcqRel: Release publishes our partial store, Acquire sees
+        // the sibling's.
+        if nc.done[b].fetch_add(1, Ordering::AcqRel) + 1 < 2 {
+            return Ok(CombineOutcome::Done);
+        }
+        if self.failed.load(Ordering::SeqCst) {
+            return Ok(CombineOutcome::Done);
+        }
+        let t0 = std::time::Instant::now();
+        // SAFETY: bucket b's final runs exactly once (the 1→2 election);
+        // both pass-A writers have released their slots.
+        let p0 = unsafe { (*nc.partials[b].get()).take() };
+        let p1 = unsafe { (*nc.partials[SINK_NBUCKETS + b].get()).take() };
+        let out = match (p0, p1) {
+            (Some(r0), Some(r1)) => {
+                nc.release_partial_bytes(r0.bytes() + r1.bytes());
+                let views = [
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r0),
+                        remainder: None,
+                    },
+                    SinkLocalView {
+                        spilled: &[],
+                        runs: core::slice::from_ref(&r1),
+                        remainder: None,
+                    },
+                ];
+                let ctr = self.topn.is_some();
+                let tb = ctr.then(std::time::Instant::now);
+                // t22 merge graft: spankey combine_ns also meters the numa
+                // final-stage merge (observational CTR band; the flat path's
+                // timer in merge_bucket_subset reproduces spankey's original
+                // placement byte-for-byte at <96 DOP).
+                let spk_tb = ::nodeagg::spankey::spankey_t0();
+                let merged = sink_combine_bucket(
+                    b,
+                    self.key_words,
+                    self.state_bytes,
+                    &views,
+                    &self.combines,
+                )?;
+                ::nodeagg::spankey::spankey_lap(
+                    &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
+                    spk_tb,
+                );
+                if let Some(tb) = tb {
+                    self.topn_ctr
+                        .build_ns
+                        .fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                self.combine_tail(b, merged, locals.len())
+            }
+            (p0, p1) => {
+                // Ineligible bucket (both claims computed the same verdict:
+                // NULL bucket, <2 locals, frozen, over budget) — or a pass-A
+                // asymmetry behind an in-flight failure. Either way the flat
+                // body is correct and self-contained: pass A only READS the
+                // sealed locals, so nothing was consumed.
+                if let Some(r) = &p0 {
+                    nc.release_partial_bytes(r.bytes());
+                }
+                if let Some(r) = &p1 {
+                    nc.release_partial_bytes(r.bytes());
+                }
+                drop((p0, p1));
+                nc.finals_flat.fetch_add(1, Ordering::Relaxed);
+                self.combine_bucket_flat(b, locals)
+            }
+        };
+        nc.final_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        out
+    }
+
+    /// Whether bucket `b` takes the two-level pass. MUST be a pure function
+    /// of the sealed state (both halves' claims compute it independently and
+    /// their verdicts have to agree): the NULL bucket is routed flat (a
+    /// partial run carries the NULL group out-of-band, which would move its
+    /// first-seen slot), single-local shapes keep the pass-through arm,
+    /// FROZEN engagements keep the member-filter arm on tiny tables, and an
+    /// over-budget verdict routes to the flat body's combine-split.
+    fn numa_bucket_eligible(&self, b: usize, locals: &[AggSinkLocal]) -> bool {
+        if b == SINK_NULL_BUCKET || locals.len() < 2 {
+            return false;
+        }
+        if self.freeze.as_ref().is_some_and(|f| f.frozen()) {
+            return false;
+        }
+        let (rows, content) = self.bucket_estimate(b, locals);
+        est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
+            <= self.budget
+    }
+
+    /// The flat (t21) per-bucket combine body: pass-through arm, pre-build
+    /// size check, combine-split fallback, in-memory merge, tail.
+    fn combine_bucket_flat(
+        &self,
+        b: usize,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<CombineOutcome> {
+        {
             // SINGLE-LOCAL PASS-THROUGH (dop1-tax fix 3): exactly one sealed
             // Local and zero flushed runs — the merged bucket table would be
             // a verbatim re-insert of the Local's rows, so emit straight
@@ -615,7 +1272,7 @@ impl runtime::ParallelSink for AggSink {
                             &self.emit,
                             t.table(),
                             p,
-                            part as usize,
+                            b,
                         )?;
                         if let Some(t0) = t0 {
                             self.topn_ctr
@@ -623,58 +1280,13 @@ impl runtime::ParallelSink for AggSink {
                                 .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                             self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
                         }
-                        self.retain_bucket(part, buf, locals.len())?;
+                        self.retain_bucket(b as u64, buf, locals.len())?;
                         return Ok(CombineOutcome::Done);
                     }
                 }
             }
-            let b = part as usize;
-            let state_words = self.state_bytes / 8;
-            let canon = self.key_words == 0;
-            // Canonical (bytes-mode) spill faces carry variable-width
-            // records: divide by the MINIMUM record width (over-counts
-            // rows — the safe direction, the distinct record's discipline).
-            let row_bytes = if canon {
-                ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
-            } else {
-                sink_spill_row_bytes(self.key_words, state_words)
-            };
-            // Pre-build size check (M3.5 §3), from the DIRECTORY + in-memory
-            // counts only — nothing is read from disk before this decision.
-            // Rows over-count duplicates across faces, so the check is
-            // conservative in the safe direction. Canonical shapes add a
-            // KEY-CONTENT term (their merged table owns the byte images):
-            // spill part lengths and run key-byte ranges are O(1) directory
-            // reads; the remainder's share is approximated by its table's
-            // retained memory scaled to the bucket's row fraction —
-            // over-counting (entry+state overhead included), never under.
-            let mut rows = 0usize;
-            let mut content = 0usize;
-            for l in locals {
-                if let Some(sp) = &l.spill {
-                    let blen = sp.file.part_len(b as u32) as usize;
-                    rows += blen / row_bytes;
-                    if canon {
-                        content += blen;
-                    }
-                }
-                for r in &l.runs {
-                    rows += (r.starts[b + 1] - r.starts[b]) as usize;
-                    if canon {
-                        content += (r.key_offs[r.starts[b + 1] as usize]
-                            - r.key_offs[r.starts[b] as usize])
-                            as usize;
-                    }
-                }
-                if let (Some(t), Some(p)) = (&l.table, &l.part) {
-                    let brows = (p.starts[b + 1] - p.starts[b]) as usize;
-                    rows += brows;
-                    if canon && brows > 0 {
-                        let n = t.table().nrows().max(1);
-                        content += t.mem_used() / n * brows;
-                    }
-                }
-            }
+            // Pre-build size check (M3.5 §3) — see [`Self::bucket_estimate`].
+            let (rows, content) = self.bucket_estimate(b, locals);
             if est_table_bytes(self, rows).saturating_add(content.saturating_mul(3) / 2)
                 > self.budget
             {
@@ -713,7 +1325,7 @@ impl runtime::ParallelSink for AggSink {
                 }
                 let mut sel = winners_split.then(|| SplitSel {
                     spec: self.topn.as_ref().expect("winners split has a spec"),
-                    part: part as u16,
+                    part: b as u16,
                     lists: Vec::new(),
                 });
                 let mut acc = SinkEmitAcc::default();
@@ -724,76 +1336,165 @@ impl runtime::ParallelSink for AggSink {
                 }
                 if let Some(sel) = sel {
                     let bound = sel.spec.bound as usize;
-                    // SAFETY: partition `part` is claimed exactly once
-                    // (runtime contract); this is its single writer.
+                    // SAFETY: bucket `b` is combined exactly once (runtime
+                    // claim / numa final election); this is its single
+                    // writer.
                     unsafe {
-                        *self.topn_cands[part as usize].get() =
+                        *self.topn_cands[b].get() =
                             sink_topn_merge_fragments(sel.lists, bound);
                     }
                 }
                 // R3: the split result is retained emit content like any
                 // other combine result — meter it (retain_bucket is the
                 // single writer of the claimed partition's slot).
-                self.retain_bucket(part, acc.finish(), locals.len())?;
+                self.retain_bucket(b as u64, acc.finish(), locals.len())?;
                 return Ok(CombineOutcome::Done);
             }
-            // In-memory path: rebuild each Local's spilled face for this
-            // bucket — open-by-name on THIS thread (the file is frozen:
-            // combine deps-follows accept), one synthesized run per Local
-            // plus its in-memory NULL blocks in the NULL bucket.
-            let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
-            for l in locals {
-                let mut v: Vec<SinkRun> = Vec::new();
-                if let Some(sp) = &l.spill {
-                    let ctx = ::mcx::MemoryContext::new("m35-agg-spill-read");
-                    if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
-                        let bytes = r.read_to_end()?;
-                        r.close()?;
-                        v.push(if canon {
-                            ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
-                        } else {
-                            sink_run_from_spill(b, self.key_words, state_words, &bytes)?
-                        });
-                    }
-                    if b == SINK_NULL_BUCKET {
-                        for nb in &sp.null_blocks {
-                            v.push(sink_null_only_run(self.key_words, state_words, nb.clone()));
-                        }
+            // In-memory path — see [`Self::merge_bucket_subset`].
+            let merged = self.merge_bucket_subset(b, locals)?;
+            self.combine_tail(b, merged, locals.len())
+        }
+    }
+
+    /// Pre-build size estimate of bucket `b` across `locals` — (rows,
+    /// canonical key content), from the DIRECTORY + in-memory counts only;
+    /// nothing is read from disk before the caller's decision. Rows
+    /// over-count duplicates across faces, so the check is conservative in
+    /// the safe direction. Canonical shapes add a KEY-CONTENT term (their
+    /// merged table owns the byte images): spill part lengths and run
+    /// key-byte ranges are O(1) directory reads; the remainder's share is
+    /// approximated by its table's retained memory scaled to the bucket's
+    /// row fraction — over-counting (entry+state overhead included), never
+    /// under. Pure function of the sealed state (the numa two-level arm
+    /// relies on both halves' claims computing the same verdict).
+    fn bucket_estimate(&self, b: usize, locals: &[AggSinkLocal]) -> (usize, usize) {
+        let state_words = self.state_bytes / 8;
+        let canon = self.key_words == 0;
+        // Canonical (bytes-mode) spill faces carry variable-width records:
+        // divide by the MINIMUM record width (over-counts rows — the safe
+        // direction, the distinct record's discipline).
+        let row_bytes = if canon {
+            ::nodeagg::sink::sink_canon_min_record_bytes(state_words)
+        } else {
+            sink_spill_row_bytes(self.key_words, state_words)
+        };
+        let mut rows = 0usize;
+        let mut content = 0usize;
+        for l in locals {
+            if let Some(sp) = &l.spill {
+                let blen = sp.file.part_len(b as u32) as usize;
+                rows += blen / row_bytes;
+                if canon {
+                    content += blen;
+                }
+            }
+            for r in &l.runs {
+                rows += (r.starts[b + 1] - r.starts[b]) as usize;
+                if canon {
+                    content += (r.key_offs[r.starts[b + 1] as usize]
+                        - r.key_offs[r.starts[b] as usize])
+                        as usize;
+                }
+            }
+            if let (Some(t), Some(p)) = (&l.table, &l.part) {
+                let brows = (p.starts[b + 1] - p.starts[b]) as usize;
+                rows += brows;
+                if canon && brows > 0 {
+                    let n = t.table().nrows().max(1);
+                    content += t.mem_used() / n * brows;
+                }
+            }
+        }
+        (rows, content)
+    }
+
+    /// In-memory merge of bucket `b` across `locals` — a CONTIGUOUS slice of
+    /// the sealed vec (the whole slice = the flat pass; a half = the numa
+    /// two-level pass A; first-seen order composes only because the slices
+    /// are contiguous). Rebuilds each Local's spilled face for this bucket —
+    /// open-by-name on THIS thread (the file is frozen: combine
+    /// deps-follows accept), one synthesized run per Local plus its
+    /// in-memory NULL blocks in the NULL bucket.
+    fn merge_bucket_subset(
+        &self,
+        b: usize,
+        locals: &[AggSinkLocal],
+    ) -> PgResult<LaneAggTable> {
+        let state_words = self.state_bytes / 8;
+        let canon = self.key_words == 0;
+        let mut synth: Vec<Vec<SinkRun>> = Vec::with_capacity(locals.len());
+        for l in locals {
+            let mut v: Vec<SinkRun> = Vec::new();
+            if let Some(sp) = &l.spill {
+                let ctx = ::mcx::MemoryContext::new("m35-agg-spill-read");
+                if let Some(mut r) = sp.file.read_part(ctx.mcx(), b as u32)? {
+                    let bytes = r.read_to_end()?;
+                    r.close()?;
+                    v.push(if canon {
+                        ::nodeagg::sink::sink_run_from_spill_bytes(b, state_words, &bytes)?
+                    } else {
+                        sink_run_from_spill(b, self.key_words, state_words, &bytes)?
+                    });
+                }
+                if b == SINK_NULL_BUCKET {
+                    for nb in &sp.null_blocks {
+                        v.push(sink_null_only_run(self.key_words, state_words, nb.clone()));
                     }
                 }
-                synth.push(v);
             }
-            // Std-collections audit note: this views Vec is a per-claim
-            // allocation, but the combine morsel space is a FIXED 256
-            // partitions x dop-sized views — bounded per engagement,
-            // independent of data volume (accepted; a borrowed view cannot
-            // be retained across claims without lifetime erasure).
-            let views: Vec<SinkLocalView<'_>> = locals
-                .iter()
-                .zip(synth.iter())
-                .map(|(l, s)| SinkLocalView {
-                    spilled: s,
-                    runs: &l.runs,
-                    remainder: match (&l.table, &l.part) {
-                        (Some(t), Some(p)) => Some(t.remainder_view(p)),
-                        _ => None,
-                    },
-                })
-                .collect();
-            let ctr = self.topn.is_some();
-            let t0 = ctr.then(std::time::Instant::now);
-            let merged = sink_combine_bucket(
-                b,
-                self.key_words,
-                self.state_bytes,
-                &views,
-                &self.combines,
-            )?;
-            if let Some(t0) = t0 {
-                self.topn_ctr
-                    .build_ns
-                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
+            synth.push(v);
+        }
+        // Std-collections audit note: this views Vec is a per-claim
+        // allocation, but the combine morsel space is a FIXED 256
+        // partitions x dop-sized views — bounded per engagement,
+        // independent of data volume (accepted; a borrowed view cannot
+        // be retained across claims without lifetime erasure).
+        let views: Vec<SinkLocalView<'_>> = locals
+            .iter()
+            .zip(synth.iter())
+            .map(|(l, s)| SinkLocalView {
+                spilled: s,
+                runs: &l.runs,
+                remainder: match (&l.table, &l.part) {
+                    (Some(t), Some(p)) => Some(t.remainder_view(p)),
+                    _ => None,
+                },
+            })
+            .collect();
+        let t0 = self.topn.is_some().then(std::time::Instant::now);
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
+        let merged = sink_combine_bucket(
+            b,
+            self.key_words,
+            self.state_bytes,
+            &views,
+            &self.combines,
+        )?;
+        ::nodeagg::spankey::spankey_lap(
+            &::nodeagg::spankey::SPANKEY_CTRS.combine_ns,
+            spk_t0,
+        );
+        self.note_combine16(&merged);
+        if let Some(t0) = t0 {
+            self.topn_ctr
+                .build_ns
+                .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        Ok(merged)
+    }
+
+    /// The combine tail, shared by the flat body and the numa final stage:
+    /// freeze member filter → top-N selection → emit materialization →
+    /// retain. Single writer of bucket `b`'s output slots (the caller holds
+    /// the exactly-once claim/election).
+    fn combine_tail(
+        &self,
+        b: usize,
+        merged: LaneAggTable,
+        nlocals: usize,
+    ) -> PgResult<CombineOutcome> {
+        {
+            let locals_len = nlocals;
             // Freeze member filter (band-2a q18): a FROZEN engagement emits
             // ONLY set members — pre-freeze stragglers are undercounted
             // past the freeze point and must never leave the sink. Rows
@@ -814,7 +1515,7 @@ impl runtime::ParallelSink for AggSink {
                     fz.note_stragglers((merged.nrows() - rows.len()) as u64);
                     let buf =
                         ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
-                    self.retain_bucket(part, buf, locals.len())?;
+                    self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
             }
@@ -835,7 +1536,7 @@ impl runtime::ParallelSink for AggSink {
                     let selected = if topn_fault_decline() {
                         None // leg-R fault injection: the unreachable decline
                     } else {
-                        sink_topn_candidates(&merged, spec, part as u16)
+                        sink_topn_candidates(&merged, spec, b as u16)
                     };
                     let Some(mut cands) = selected else {
                         return Ok(CombineOutcome::TopnDeclined);
@@ -857,16 +1558,17 @@ impl runtime::ParallelSink for AggSink {
                             .expect("candidate row present in its own row set")
                             as u32;
                     }
-                    // SAFETY: partition `part` is claimed exactly once
-                    // (runtime contract); this is its single writer.
-                    unsafe { *self.topn_cands[part as usize].get() = cands };
+                    // SAFETY: bucket `b` is combined exactly once (runtime
+                    // claim / numa final election); this is its single
+                    // writer.
+                    unsafe { *self.topn_cands[b].get() = cands };
                     let t0 = std::time::Instant::now();
                     let buf = ::nodeagg::sink::sink_emit_bucket_rows(&self.emit, &merged, &rows)?;
                     self.topn_ctr
                         .emit_ns
                         .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
-                    self.retain_bucket(part, buf, locals.len())?;
+                    self.retain_bucket(b as u64, buf, locals_len)?;
                     return Ok(CombineOutcome::Done);
                 }
                 // FullDrain: candidate row indices == full emit buf row
@@ -876,16 +1578,17 @@ impl runtime::ParallelSink for AggSink {
                     let selected = if topn_fault_decline() {
                         None // leg-R fault injection: FullDrain must degrade
                     } else {
-                        sink_topn_candidates(&merged, spec, part as u16)
+                        sink_topn_candidates(&merged, spec, b as u16)
                     };
                     match selected {
-                        // SAFETY: partition `part` is claimed exactly once
-                        // (runtime contract); this is its single writer.
+                        // SAFETY: bucket `b` is combined exactly once
+                        // (runtime claim / numa final election); this is its
+                        // single writer.
                         Some(c) => {
                             self.topn_ctr
                                 .cand_rows
                                 .fetch_add(c.len() as u64, Ordering::Relaxed);
-                            unsafe { *self.topn_cands[part as usize].get() = c }
+                            unsafe { *self.topn_cands[b].get() = c }
                         }
                         None => self.topn_degraded.store(true, Ordering::Release),
                     }
@@ -894,7 +1597,7 @@ impl runtime::ParallelSink for AggSink {
                         .fetch_add(ts.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
-            let t0 = ctr.then(std::time::Instant::now);
+            let t0 = self.topn.is_some().then(std::time::Instant::now);
             let buf = sink_emit_bucket(&self.emit, &merged)?;
             if let Some(t0) = t0 {
                 self.topn_ctr
@@ -902,38 +1605,16 @@ impl runtime::ParallelSink for AggSink {
                     .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 self.topn_ctr.mat_rows.fetch_add(buf.nrows as u64, Ordering::Relaxed);
             }
-            self.retain_bucket(part, buf, locals.len())?;
+            self.retain_bucket(b as u64, buf, locals_len)?;
             Ok(CombineOutcome::Done)
-        }));
-        match r {
-            Ok(Ok(CombineOutcome::Done)) => {}
-            Ok(Ok(CombineOutcome::OverBudget)) => {
-                lane_trace("runtime-agg: combine partition over budget (split depth cap or spill disarmed) — serial rerun");
-                self.refuse_budget();
-            }
-            Ok(Ok(CombineOutcome::TopnDeclined)) => {
-                // Winners-only refusal (§3.2 step 3): fail-closed, count-
-                // gated ≈0 (structurally unreachable on cbstore feeds —
-                // sort-b decision 6). The e2e leg-R gate greps this line.
-                lane_trace(
-                    "runtime-agg: topn-winners-refused (NULL order transvalue) — serial rerun",
-                );
-                self.refuse_topn();
-            }
-            Ok(Err(e)) => self.fail(e),
-            Err(_panic) => {
-                self.fail(PgError::new(ERROR, "runtime agg sink combine panicked").into())
-            }
         }
     }
 
-    /// Publish: the adopted table (TRUE TABLE ADOPT — the pointer hand-off)
-    /// or the 256 emit buffers, moved out (O(partitions), the §6 contract).
-    /// Locals drop with the plumbing right after.
-    fn finalize(&self, locals: &[AggSinkLocal]) {
-        if self.failed.load(Ordering::SeqCst) {
-            return;
-        }
+    /// Publish (the ParallelSink::finalize body): the adopted table (TRUE
+    /// TABLE ADOPT — the pointer hand-off) or the 256 emit buffers, moved
+    /// out (O(partitions), the §6 contract). Locals drop with the plumbing
+    /// right after.
+    fn finalize_publish(&self, locals: &[AggSinkLocal]) {
         // EA-on-morsels: merge the accept-phase instrument partials before
         // the Locals drop (O(workers) sums — the §6-of-m2-sinks minimal-
         // finalize ruling holds). Runs on the adopt path too — the
@@ -978,6 +1659,103 @@ impl runtime::ParallelSink for AggSink {
         };
         *self.published.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(SinkPublished::Emit(bufs, winners));
+    }
+}
+
+/// The 3-set arm (combine-parallel lane, PGRUST_RUNTIME_AGG_PARSEAL — default
+/// ON): identical sink semantics to the 2-set ParallelSink impl above, with
+/// the SEAL partition pass PARALLEL across Local slots (one freeze claim per
+/// slot; the distinct sink's SEALCVT precedent). Rationale: the 2-set SEAL is
+/// single-threaded and O(forked Locals × remainder rows) — a per-Local
+/// locality-capped table makes that O(DOP × cap), a serial term that GROWS
+/// with DOP while the parallel combine share shrinks (measured DOP-15 gap
+/// 5-10ms on q17/q34; Amdahl-fatal at DOP 192 — notes/combine-parallel-lane.md).
+/// Byte identity: partition_remainder is a pure per-Local function, and the
+/// whole-census decisions (TRUE TABLE ADOPT, top-N SEAL resolution) run
+/// exactly once in `sealed_ready` (single-threaded, happens-before every
+/// combine claim) — same inputs, same order, same outputs as the 2-set seal.
+impl runtime::SealedParallelSink for AggSink {
+    type Local = AggSinkLocal;
+    type Sealed = AggSinkLocal;
+
+    fn fork(&self, worker: usize) -> AggSinkLocal {
+        <Self as runtime::ParallelSink>::fork(self, worker)
+    }
+
+    fn accept_local(&self, local: &mut AggSinkLocal, worker: usize, range: runtime::MorselRange) {
+        <Self as runtime::ParallelSink>::accept_local(self, local, worker, range)
+    }
+
+    /// Freeze one Local: the per-Local partition pass, parallel across
+    /// slots. The TRUE-TABLE-ADOPT shape SKIPS the pass when it can prove
+    /// the census will take the table wholesale (exactly one fork — the
+    /// dop1-tax2 "no partition index is ever built" property preserved);
+    /// an overcounted census (stale re-fork) partitions anyway and the
+    /// adopt in `sealed_ready` simply ignores the index — the safe
+    /// direction, never an unpartitioned Local reaching the merge arms.
+    fn seal(&self, _worker: usize, mut local: AggSinkLocal) -> AggSinkLocal {
+        if self.failed.load(Ordering::SeqCst) {
+            return local;
+        }
+        let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
+        let adopt_skip = self.adopt_shape
+            && !frozen
+            && self.forks.load(Ordering::SeqCst) == 1
+            && local.runs.is_empty()
+            && local.spill.is_none()
+            && local.table.is_some();
+        if !adopt_skip {
+            let r = catch_unwind(AssertUnwindSafe(|| self.seal_partition_local(&mut local)));
+            if r.is_err() {
+                self.fail(PgError::new(ERROR, "runtime agg sink seal panicked").into());
+            }
+        }
+        local
+    }
+
+    /// Exactly-once whole-census decisions, single-threaded under the
+    /// freeze set's last-worker-out, strictly before any combine claim:
+    /// the 2-set seal's census pieces verbatim (partitioning already done
+    /// per claim above).
+    fn sealed_ready(&self, sealed: &mut Vec<AggSinkLocal>) {
+        if self.failed.load(Ordering::SeqCst) {
+            return;
+        }
+        // Shared-table experiment drain (single-threaded here by
+        // last-worker-out; before the adopt census).
+        if let Some(sh) = self.shared.as_ref() {
+            sh.drain_into(sealed);
+        }
+        if agg_markers_on() {
+            // The 3-set arm's AGGSEAL sibling line (single-threaded here by
+            // last-worker-out of the freeze set): the flush-amplification
+            // census the CPROBE channel reads (see AggSinkLocal doc).
+            let rows: usize =
+                sealed.iter().map(|l| l.table.as_ref().map_or(0, |t| t.table().nrows())).sum();
+            let flushes: u64 = sealed.iter().map(|l| l.probe_flushes).sum();
+            let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
+            let (ad, ar, ap) = alpha_sums(sealed);
+            eprintln!(
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0",
+                sealed.len(),
+            );
+        }
+        if self.try_adopt_census(sealed) {
+            return;
+        }
+        self.resolve_topn_at_seal(sealed);
+    }
+
+    fn partitions(&self) -> u64 {
+        <Self as runtime::ParallelSink>::partitions(self)
+    }
+
+    fn combine(&self, part: u64, sealed: &[AggSinkLocal]) {
+        <Self as runtime::ParallelSink>::combine(self, part, 0, sealed)
+    }
+
+    fn finalize(&self, sealed: &[AggSinkLocal]) {
+        <Self as runtime::ParallelSink>::finalize(self, sealed)
     }
 }
 
@@ -1568,6 +2346,7 @@ fn split_views_and_emit(
         let t0 = ctr.then(std::time::Instant::now);
         let view = [SinkLocalView { spilled: &null_runs, runs: &[], remainder: None }];
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        sink.note_combine16(&t);
         if let Some(t0) = t0 {
             sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -1644,6 +2423,7 @@ fn split_subparts_and_emit(
         let ctr = sink.topn.is_some();
         let t0 = ctr.then(std::time::Instant::now);
         let t = sink_combine_bucket(b, sink.key_words, sink.state_bytes, &view, &sink.combines)?;
+        sink.note_combine16(&t);
         if let Some(t0) = t0 {
             sink.topn_ctr.build_ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -1842,12 +2622,23 @@ fn sink_drain_range<'mcx>(
     };
     loop {
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
-        // held across this point), budget-check table + runs.
+        // held across this point), budget-check table + runs. The threshold
+        // is the α-gate's per-Local effective cap (== sink.cap until a fill
+        // window adjudicates a demote — flush WHEN only, never results).
         if let Some((run, intern_reset)) =
-            ::nodeagg::sink::agg_sink_flush_if_due(agg, sink.cap)
+            ::nodeagg::sink::agg_sink_flush_if_due(agg, local.alpha.cap(sink))
         {
-            local.run_bytes += run.bytes();
-            local.runs.push(run);
+            local.alpha.on_cap_flush(run.nrows(), sink);
+            local.probe_flushes += 1;
+            local.probe_flush_bytes += run.bytes() as u64;
+            // Shared-table EXPERIMENT (D2, default OFF): an absorbed run's
+            // rows live in the socket table — the run is DROPPED, holding
+            // no Local memory; a refusal (closed face) is the spill
+            // fallback: the run rides the incumbent path below.
+            if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                local.run_bytes += run.bytes();
+                local.runs.push(run);
+            }
             // The flush RESET the compact table: every cached code -> state
             // pointer is a dangling table row — drop the dict-code cache.
             dgs.invalidate();
@@ -1917,8 +2708,15 @@ fn sink_drain_range<'mcx>(
                     if let Some((run, intern_reset)) =
                         ::nodeagg::sink::agg_sink_flush_now(agg)
                     {
-                        local.run_bytes += run.bytes();
-                        local.runs.push(run);
+                        local.alpha.on_pressure_flush();
+                        local.probe_flushes += 1;
+                        local.probe_flush_bytes += run.bytes() as u64;
+                        // Shared-table experiment: as at the cap flush —
+                        // absorption drains the pressure outright.
+                        if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                            local.run_bytes += run.bytes();
+                            local.runs.push(run);
+                        }
                         if intern_reset {
                             mks.epoch = None;
                             mks.code_ids.clear();
@@ -1942,10 +2740,36 @@ fn sink_drain_range<'mcx>(
                         spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?;
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                        // RESIDUAL pressure after flush+spill = the
+                        // unspillable floor (q33's byref aggcontext class,
+                        // proportionality-audit). One counted line makes
+                        // every future envelope cliff self-diagnosing —
+                        // without it the refusal is silent and only shows
+                        // as a 10-15x serial-rerun wall.
+                        if lane_trace_enabled() {
+                            lane_trace(&format!(
+                                "runtime-agg: budget-refused (residual) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                                local.run_bytes,
+                                ::nodeagg::sink::agg_sink_table_mem(agg),
+                                ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                                sink.budget,
+                            ));
+                        }
                         return Err(AcceptFail::Budget);
                     }
                 }
-                None => return Err(AcceptFail::Budget),
+                None => {
+                    if lane_trace_enabled() {
+                        lane_trace(&format!(
+                            "runtime-agg: budget-refused (spill disarmed) worker={worker} run_bytes={} table_mem={} aggctx={} budget={}",
+                            local.run_bytes,
+                            ::nodeagg::sink::agg_sink_table_mem(agg),
+                            ::nodeagg::sink::agg_sink_aggctx_mem(agg),
+                            sink.budget,
+                        ));
+                    }
+                    return Err(AcceptFail::Budget);
+                }
             }
         }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
@@ -1977,6 +2801,9 @@ fn sink_drain_range<'mcx>(
             )? {
                 return Err(AcceptFail::Budget);
             }
+            // α numerator (batched route contract as the EA count below:
+            // idxs holds this batch's survivors — the rows that probed).
+            local.alpha.absorbed(idxs.len());
             if ea {
                 // The sink-legal expr-key route is the batched one (per-row
                 // routing errors above): idxs holds this batch's survivors.
@@ -2008,6 +2835,10 @@ fn sink_drain_range<'mcx>(
                     "mk drain without a worker shape",
                 ))
             })?;
+            // α numerator staging: scan_mk_batch's survivor-less PREWHERE
+            // window returns BEFORE survivor collection — pre-clear so the
+            // count below can never re-read a previous batch's survivors.
+            mks.rows.clear();
             if !super::scan_mk_batch(
                 agg,
                 ss,
@@ -2031,10 +2862,17 @@ fn sink_drain_range<'mcx>(
                     "worker mk feed demoted mid-build",
                 )));
             }
+            // α numerator: the mk feed's own survivor collection (freeze-
+            // filtered rows never probed — they were dropped before the
+            // pack; survivor-less windows counted 0 via the pre-clear).
+            local.alpha.absorbed(mks.rows.len());
             continue;
         }
         let ScanK2Scratch { rows, keys, knull, .. } = k2s;
         super::scan_collect_survivors(ss, estate, n, rows)?;
+        // α numerator: both K2 legs (dict window and plain keys) fold
+        // exactly these survivors.
+        local.alpha.absorbed(rows.len());
         if ea {
             local.instr.rows.survived += rows.len() as u64;
         }
@@ -2111,6 +2949,10 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // (the leader's liveness reap counts these against `launched`).
     let _exit = ExitBump(&payload.exited);
+    // Liveness-battery injection (test-only, default-off): the wedge-class
+    // exit — panic before binding or driving; the reap must convert it into
+    // a prompt error (scripts/runtime-liveness-e2e.sh).
+    super::test_helper_panic("agg");
     // F1 fail-closed accounting: a helper that cannot participate must NEVER
     // vanish silently — every early exit below counts itself as a refusal
     // (the leader's started==0 && refused>=launched probe is its fallback
@@ -2592,18 +3434,89 @@ fn sink_cap_override() -> Option<u32> {
 /// `PGRUST_RUNTIME_AGG_LOCALITY_CAP`: 0 = off (budget cap exactly), N =
 /// entry bound override. Default = the wave-1 ladder knee (see
 /// notes/q36-radix-lane.md).
-fn sink_locality_cap() -> Option<u32> {
-    static N: OnceLock<Option<u32>> = OnceLock::new();
+fn sink_locality_cap() -> LocalityCap {
+    static N: OnceLock<LocalityCap> = OnceLock::new();
     *N.get_or_init(|| {
         match std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
         {
-            Some(0) => None,
-            Some(c) => Some(c.max(1024)),
-            None => Some(SINK_LOCALITY_CAP_DEFAULT),
+            Some(0) => LocalityCap::Off,
+            Some(c) => LocalityCap::Fixed(c.max(1024)),
+            None => LocalityCap::Default,
         }
     })
+}
+
+/// The locality-cap env verdict: `Fixed` = an explicit
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CAP=N` (the pure A/B channel — the
+/// NDV-adaptive rule never rewrites it), `Default` = unset (the adaptive
+/// rule applies), `Off` = the 0 kill switch.
+#[derive(Clone, Copy)]
+enum LocalityCap {
+    Off,
+    Default,
+    Fixed(u32),
+}
+
+/// NDV-ADAPTIVE locality cap (distinct-sidecar-cap lane — the q36-radix
+/// close-out's flagged refinement): the 64K-vs-1M adjudication (repeat pair
+/// -3aef/-2af4, reproduced against r2 exactly) showed a REAL per-query
+/// split, not pod drift — q36 (9.76M est groups) runs ~10% faster at 1M,
+/// q16 (17.6M) ~16% faster at 64K, q33 (~1e8) cap-flat 256K-1M. Mechanism
+/// reading: at the higher NDV the worker table re-fills quickly at ANY cap,
+/// so the smallest (L2-resident) table wins outright; in the mid band the
+/// duplicate-absorption of a larger (L3-resident) table repays its slower
+/// probes. Rule (defended by the ladder in notes/distinct-sidecar-cap.md):
+///   est >= 12M            -> 64K (SINK_LOCALITY_CAP_DEFAULT; today's cap)
+///   2M <= est < 12M       -> 1M  (SINK_LOCALITY_CAP_WIDE; the q36 band)
+///   est < 2M              -> 64K (cap barely binds; tranche-proven regime)
+/// `PGRUST_RUNTIME_AGG_LOCALITY_NDV=0` kills adaptivity (fixed 64K default,
+/// train-19 behavior exactly); an explicit LOCALITY_CAP=N is authoritative.
+fn agg_locality_ndv_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_NDV").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The q36-band (mid-NDV) locality cap — see [`agg_locality_ndv_enabled`].
+const SINK_LOCALITY_CAP_WIDE: u32 = 1 << 20;
+
+/// `PGRUST_RUNTIME_AGG_LOCALITY_CANON` (default ON since train-20): extend
+/// the locality cap to CANONICAL (Intern-bearing) Mk shapes (the q17 class:
+/// 17M UserID×SearchPhrase groups; the q40 CaseDict residual). The canonical
+/// flush/SEAL/combine machinery exists since train-17 text-kernels (canon
+/// shapes already flush at the BUDGET cap); the train-19 exclusion was the
+/// car3/car4 seam, not a mechanism gap. Default flipped ON at the train-20
+/// merge: the lane's ladder measured q17 -28% (byte-MATCH) and the
+/// canon-family guard pair (q13/q15/q17/q19/q37/q40 @100M mt16, jobs
+/// -1784092204-0df8 vs -1784092208-06ce) adjudicated ZERO regressions with
+/// q19 -30%. `=0`/`off` restores the exclusion.
+fn agg_locality_canon_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CANON").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// Resolve the engaged locality bound for this shape's plan-estimated group
+/// count. `None` = no locality bound (kill switch).
+fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
+    match sink_locality_cap() {
+        LocalityCap::Off => None,
+        LocalityCap::Fixed(c) => Some(c),
+        LocalityCap::Default => {
+            if agg_locality_ndv_enabled() && (2_000_000..12_000_000).contains(&est_groups) {
+                Some(SINK_LOCALITY_CAP_WIDE)
+            } else {
+                Some(SINK_LOCALITY_CAP_DEFAULT)
+            }
+        }
+    }
 }
 
 /// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
@@ -2624,12 +3537,307 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 /// estimate gate (fail-closed to serial), never an engagement the final
 /// gate would reject, and word-keyed spill-armed shapes vacate that gate
 /// entirely.
+/// agg192-contention (48xl window-B verdict 2): the locality cap was
+/// DOP-INDEPENDENT — ~64K entries ≈ 3.6-3.9MB per worker table, which is
+/// locality-correct for ONE worker but aggregates to ~690MB of live
+/// random-probed table bytes at 191 workers, spilling the shared SLC
+/// between 64 and 128 workers. The measured signature: instructions and
+/// LLC-miss COUNTS flat, stall_backend_mem x4-5, system-wide miss RATE
+/// saturating at ~1.7-1.9 G/s and then COLLAPSING at 191 (q19 1.24 G/s <
+/// its own 128-dop rate — queueing overload = the 191<128 regression).
+/// Fix: above the 16-worker anchor, scale the locality bound so the
+/// AGGREGATE stays at the anchor's working set (cap x 16 / dop), floored
+/// (default 16K entries ≈ 0.9MB — near-L2-resident per worker at any DOP)
+/// so flush cadence and the per-flush dict/intern-cache resets stay sane.
+/// dop <= 16 is UNCHANGED by construction (the mt16 official channel is
+/// byte-flat). `PGRUST_RUNTIME_AGG_DOPCAP=0` restores the DOP-independent
+/// bound; `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` is the ladder A/B knob.
+fn agg_dopcap_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Per-worker floor for the DOP-scaled locality bound (see
+/// [`agg_dopcap_enabled`]) — BYTE-denominated (cache-budget lit-review
+/// refinement 2, Schuhknecht VLDB15 class: the flush scatter's output
+/// shares the private cache with the table, so the floor must be a byte
+/// budget, not an entry count — an entry floor silently overflows L2 on
+/// state-heavy shapes). Default 1MB of table bytes at the sink's own
+/// entry estimate (16+8+state+16): ≈18K entries on the q19-class 56B
+/// entry, proportionally fewer on heavy states — table + flush output +
+/// scan batch fit a Neoverse-V2 core's private 2MB L2 with headroom.
+/// `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` overrides the BYTE budget (A/B knob).
+fn agg_dopcap_floor_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|f| *f >= 64 * 1024)
+            .unwrap_or(1 << 20)
+    })
+}
+
+/// The DOP anchor: at or below this width the locality bound is exactly
+/// the calibrated per-worker cap (the q36-ladder 64K / mid-NDV 1M bands);
+/// above it the AGGREGATE working set is held at the anchor's.
+const DOPCAP_ANCHOR: u32 = 16;
+
+/// Budget-size ladder knob (`PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR`, default
+/// [`DOPCAP_ANCHOR`]): scales the AGGREGATE budget for the calibration
+/// ladder Michael chartered (8 = 0.5x, 32 = 2x the anchor working set) —
+/// the budget-response curve adjudicates whether the anchor sits at the
+/// knee per width, and a 2x-helps-at-96-but-hurts-at-191 shape is the
+/// per-socket-split signature. CALIBRATION/A-B channel on the stride/
+/// decay env precedent, not product surface — the ratified anchor stays
+/// the compiled constant. Clamped to [2, 191] so a typo cannot disable
+/// the budget outright (the kill switch is DOPCAP=0). The dop<=anchor
+/// early-out uses the SAME value, so a widened anchor also widens the
+/// unscaled band (exactly the 2x-aggregate semantics).
+fn agg_dopcap_anchor() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|a| a.clamp(2, 191))
+            .unwrap_or(DOPCAP_ANCHOR)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// α-gate controller (cachebudget lane — Müller et al., SIGMOD 2015 "Cache-
+// Efficient Aggregation: Hashing Is Sorting", the ADAPTIVE controller,
+// adapted to the sink's bounded-Local flush discipline).
+//
+// The DOP-aware budget (agg192-contention) sizes every worker's locality
+// table as a share of the shared cache — but a share is only WORTH holding
+// when the table actually collapses rows (repeat keys fold in place). When
+// a worker's key stream is near-unique, the table is a WRITE BUFFER: every
+// row inserts, nothing folds, and its cache residency buys nothing while
+// still charging the aggregate SLC budget the other workers' tables need
+// (the window-B root cause, at any width). Müller's runtime signal
+// adjudicates this per worker with zero synchronization: at table FILL
+// compute the collapse ratio α = rows-absorbed / distinct-entries-flushed.
+// α below α₀ ⇒ demote that worker's flush threshold to the byte-denominated
+// L2 floor (agg192's — the flush scatter shares the private cache, so the
+// floor is bytes at the shape's entry estimate) and flush through; α at or
+// above α₀ ⇒ keep the budget share. Re-probe after ~10× the full table's
+// row volume (Müller's hysteresis: one full-cap fill window re-adjudicates
+// a phase change; a wrong re-probe costs footprint only — the retained
+// capacity means no realloc).
+//
+// Byte-identity law: the effective cap changes only WHEN flushes happen —
+// flush cadence is semantics-free (the dopcap precedent: runs merge
+// first-seen, W≡F≡D and selection totality are cadence-independent) — and
+// the controller is per-Local thread-owned state with ZERO new shared
+// writes (the condcache lesson). Demotion requires a first full-cap FILL,
+// so engagements that never fill (low NDV, adopt/pass-through shapes) are
+// byte-and-time identical by construction. Freeze-armed (LIMIT-k) shapes
+// are structurally excluded at engagement (bounded output, nothing to buy).
+// Kill switch: PGRUST_RUNTIME_AGG_ALPHAGATE=0.
+// ---------------------------------------------------------------------------
+
+fn agg_alphagate_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// α₀ ×100 (`PGRUST_RUNTIME_AGG_ALPHA0`, default 2.0): the collapse ratio
+/// below which a filled table is adjudicated a write buffer. 2.0 = each
+/// entry absorbed under two rows across the fill window — the table at most
+/// halved its flush volume, too little to earn a shared-cache share (the
+/// demote trades ≤2× sequential flush bytes for the aggregate footprint).
+/// The 48xl calibration ladder sweeps this knob (composes with agg192's
+/// DOPCAP_ANCHOR ladder).
+fn agg_alpha0_x100() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA0")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|a| a.is_finite() && *a >= 1.0 && *a <= 100.0)
+            .map(|a| (a * 100.0) as u64)
+            .unwrap_or(200)
+    })
+}
+
+/// Re-probe row multiple (`PGRUST_RUNTIME_AGG_ALPHA_REPROBE`, default 10 —
+/// Müller's "periodically re-probe after processing ~10× the cache volume
+/// of input"): a demoted Local restores the full threshold for one probe
+/// window after `mult × full-cap` rows. 0 = never re-probe (a demote is
+/// then sticky until a floor window shows collapse).
+fn agg_alpha_reprobe_mult() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_ALPHA_REPROBE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+    })
+}
+
+/// The α-gate's demoted flush threshold for this engagement, resolved ONCE
+/// at construction: `Some(floor_entries)` arms the controller. Reuses
+/// agg192's byte-denominated L2 floor (`PGRUST_RUNTIME_AGG_DOPCAP_FLOOR`,
+/// default 1MB at the shape's own 16+8+state+16 entry estimate) — the same
+/// "table + flush scatter fit the private L2" constant, deliberately shared
+/// so the calibration ladder moves both together. None (controller off):
+/// kill switch; dop at or under the DOPCAP anchor (see below);
+/// fixed-cap A/B override (PGRUST_RUNTIME_AGG_CAP stays authoritative, the
+/// locality-bound law); freeze-armed shapes (caller gates); or a floor at/
+/// above the engaged cap (nothing to demote to).
+///
+/// ANCHOR GATE (this lane's mt16 100M ON/OFF pair verdict): at or under
+/// the anchor width the aggregate working set already sits at the ratified
+/// SLC constant — demoting write-buffer tables there paid flush-EVENT
+/// overhead (dict-code cache invalidation + run setup at ~3.5× the
+/// cadence: q32 hot +9%, q19 +2.5%, suite otherwise flat 1.0026) and
+/// bought no residency anyone needed at 16 workers. Above the anchor is
+/// the window-B regime the controller is FOR (per-worker shares shrink
+/// below adjudication value; dopcap scales caps toward the floor and the
+/// α-gate decides which workers deserve their share). Sharing
+/// [`agg_dopcap_anchor`] means a window-D re-anchoring moves the α-gate's
+/// engagement band with it — one calibration channel, one knob. The
+/// official mt16 channel is therefore byte-AND-time identical by
+/// construction (the dopcap boarding precedent).
+fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
+    if !agg_alphagate_enabled()
+        || dop <= agg_dopcap_anchor() as i32
+        || sink_cap_override().is_some()
+    {
+        return None;
+    }
+    let entry = 16u64 + 8 + state_bytes as u64 + 16;
+    let floor =
+        (agg_dopcap_floor_bytes() / entry.max(1)).clamp(1 << 12, u32::MAX as u64) as u32;
+    (floor < cap).then_some(floor)
+}
+
+// ---------------------------------------------------------------------------
+// Per-socket SHARED aggregate table EXPERIMENT (cachebudget D2, hard
+// default-OFF — docs/design/shared-agg-table-experiment.md §4 and the
+// nodeagg::sink::SharedCountTable section doc). The mid-NDV architecture
+// decider for the next 48xl window; NOT a product default candidate until
+// the measurement spec's verdicts land (and the emit-order law is settled).
+// ---------------------------------------------------------------------------
+
+/// `PGRUST_RUNTIME_AGG_SHARED_TABLE=1` arms the experiment (default OFF).
+fn agg_shared_table_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(), Ok("1"))
+    })
+}
+
+/// Engagement band upper bound in estimated groups
+/// (`PGRUST_RUNTIME_AGG_SHARED_MAX`, default 1M ≈ a socket-SLC share at the
+/// 16B count-entry: 36MB × 0.5 / 16B — the design note's band arithmetic).
+/// The band's LOWER bound is the engaged sink cap itself (below it the
+/// per-worker Locals never fill and today's path is already optimal).
+fn agg_shared_table_max_groups() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1 << 20)
+    })
+}
+
+/// Band lower-bound OVERRIDE (`PGRUST_RUNTIME_AGG_SHARED_MIN`, experiment/
+/// e2e forcing channel): None = the engaged sink cap (the default band
+/// floor — below the cap Locals never fill and there is nothing to
+/// absorb). The e2e forced legs set 1 so engagement does not hinge on the
+/// corpus's planner group estimates.
+fn agg_shared_table_min_groups() -> Option<u64> {
+    static N: OnceLock<Option<u64>> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_SHARED_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    })
+}
+
+/// The experiment face: one shared count table per socket half (the
+/// numa-combine socket map; non-Linux / single-node folds to table 0).
+/// Prototype scope (recorded in the design note): single-int-word K2 keys,
+/// COUNT-only states.
+struct SharedAggFace {
+    tables: [::nodeagg::sink::SharedCountTable; 2],
+    /// Observability: runs absorbed / runs kept on the incumbent path
+    /// after a close (the SHAREDAGG marker line).
+    merged_runs: AtomicU64,
+    kept_runs: AtomicU64,
+}
+
+impl SharedAggFace {
+    fn new(est_groups: u64) -> SharedAggFace {
+        // Each socket table can in the worst case hold EVERY group (groups
+        // are not socket-partitioned — both halves may touch a key), so
+        // both size at the estimate; 25% headroom absorbs estimate error
+        // before the close-fallback fires.
+        let cap = (est_groups + est_groups / 4).max(64) as usize;
+        SharedAggFace {
+            tables: [
+                ::nodeagg::sink::SharedCountTable::new(cap),
+                ::nodeagg::sink::SharedCountTable::new(cap),
+            ],
+            merged_runs: AtomicU64::new(0),
+            kept_runs: AtomicU64::new(0),
+        }
+    }
+
+    /// Try to absorb a flushed run into the calling worker's socket table.
+    /// `true` = absorbed (drop the run); `false` = keep it on the incumbent
+    /// runs path (closed face / overflow — the spill fallback).
+    fn absorb(&self, run: &::nodeagg::sink::SinkRun) -> bool {
+        let half = numa_current_half().unwrap_or(0).min(1);
+        if self.tables[half].merge_run(run) {
+            self.merged_runs.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            self.kept_runs.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// SEAL-time drain (single-threaded by the seal contract): inject the
+    /// socket tables' contents as runs on the first sealed Local — the
+    /// combine consumes them exactly like flushed runs.
+    fn drain_into(&self, locals: &mut [AggSinkLocal]) {
+        let Some(l0) = locals.first_mut() else { return };
+        for t in &self.tables {
+            if let Some(run) = t.drain_to_run() {
+                l0.run_bytes += run.bytes();
+                l0.runs.push(run);
+            }
+        }
+        if agg_markers_on() {
+            eprintln!(
+                "MORSEL|SHAREDAGG|members={},{}|closed={},{}|merged_runs={}|kept_runs={}",
+                self.tables[0].reserved(),
+                self.tables[1].reserved(),
+                u8::from(self.tables[0].is_closed()),
+                u8::from(self.tables[1].is_closed()),
+                self.merged_runs.load(Ordering::Relaxed),
+                self.kept_runs.load(Ordering::Relaxed),
+            );
+        }
+    }
+}
+
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
     ngroups_limit: u64,
     dop: i32,
     word_keyed: bool,
+    est_groups: u64,
 ) -> u32 {
     let base = sink_cap_for(state_bytes, budget, ngroups_limit);
     // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
@@ -2637,8 +3845,22 @@ fn sink_cap_engaged(
     if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
         return base;
     }
-    match sink_locality_cap() {
-        Some(l) => base.min(l),
+    match sink_locality_cap_for(est_groups) {
+        Some(l) => {
+            let mut l = l;
+            let anchor = agg_dopcap_anchor();
+            if agg_dopcap_enabled() && dop as u32 > anchor {
+                let scaled =
+                    ((l as u64 * anchor as u64) / (dop as u64).max(1)) as u32;
+                // Byte-denominated floor at THIS shape's entry estimate
+                // (the same 16+8+state+16 arithmetic as sink_cap_for).
+                let entry = 16u64 + 8 + state_bytes as u64 + 16;
+                let floor = (agg_dopcap_floor_bytes() / entry.max(1))
+                    .clamp(1 << 12, u32::MAX as u64) as u32;
+                l = scaled.max(floor).min(l);
+            }
+            base.min(l)
+        }
         None => base,
     }
 }
@@ -2808,11 +4030,14 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_agg_pool_dop();
+    // M5-1: the router is the DOP source (bench GUC verbatim when set; else
+    // engine=runtime arms at pgrust.runtime_dop; else 0 = today's path).
+    let dop = router::arm_dop(ArmClass::Agg);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(false);
     }
     let Some(rt) = runtime::global() else { return Ok(false) };
+    router::tick(ArmClass::Agg, ArmCounter::Offered);
 
     // EA-on-morsels (ea-morsels.md §5/§6): from here the session is ARMED —
     // under EXPLAIN ANALYZE every refusal records its first failing gate for
@@ -2823,6 +4048,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // --- Plan shape gates (fail-closed). Refusals trace AND (under EA)
     // record for the per-node EXPLAIN line.
     fn refuse(estate: &mut EStateData<'_>, ea: bool, node_id: i32, why: &'static str) {
+        // M5-1: every agg-arm refusal feeds the router's consolidated
+        // taxonomy alongside the trace / EA transparency line.
+        router::tick_refused(ArmClass::Agg, why);
         lane_trace(&format!("runtime-agg: refused ({why})"));
         if ea {
             estate.runtime_ea_record_refusal(node_id, "agg", why);
@@ -2833,6 +4061,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         return Ok(false);
     }
     if estate.es_epq_active {
+        router::tick_refused(ArmClass::Agg, "epq");
         return Ok(false);
     }
     // Instrument MODE gate: INSTRUMENT_ROWS (TIMING OFF, inc-1) or
@@ -3062,10 +4291,18 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             || ::nodeagg::sink::sink_spill_canon_enabled());
     // Word-keyedness for the locality cap = the canonical predicate below
     // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
-    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes are
-    // excluded from the cap by construction (train-19 car3/car4 seam).
+    // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes
+    // stayed excluded from the cap at train-19 (car3/car4 seam);
+    // PGRUST_RUNTIME_AGG_LOCALITY_CANON=1 opts them in (the q17/q40 probe
+    // channel — see [`agg_locality_canon_enabled`]).
     let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
-    let sink_cap = sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, word_keyed);
+    let cap_shape_ok = word_keyed || agg_locality_canon_enabled();
+    // Plan-estimated group count for the NDV-adaptive locality rule (the
+    // same leader estimate the compact layout law reads; the adaptive bands
+    // in [`sink_locality_cap_for`] were calibrated on this figure).
+    let est_groups = agg.plan.numGroups.max(1) as u64;
+    let sink_cap =
+        sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, cap_shape_ok, est_groups);
     if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
         lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
     }
@@ -3134,7 +4371,6 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         refuse(estate, ea, node_id, "granule floor");
         return Ok(false);
     }
-
     // --- Engage.
     // Canonical (text-bearing) shapes merge on canonical key BYTES:
     // key_words 0 = the combine's bytes mode.
@@ -3145,6 +4381,43 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         mk.as_ref().map_or(1, |s| if s.two_words { 2 } else { 1 })
     };
     let byref_states = ::nodeagg::sink::sink_combines_byref(&combines);
+    // DOP-elastic admission (tails192 #5): floors above ran against the
+    // POOL dop; arm only what the work can feed (kill:
+    // PGRUST_RUNTIME_ELASTIC_DOP=0). BYREF-FLOOR GUARD (cross-lane
+    // constraint, proportionality-audit @ a39910a0b, q33@dop2 172s
+    // root-cause): byref state classes (AvgInt8/PolyInt128) accumulate an
+    // UNSPILLABLE per-Local aggcontext floor ~= est_groups/W x per-group
+    // bytes, while agg_sink_budget_pressure refuses at hash_mem_limit/2 —
+    // a per-worker CONSTANT. Narrowing W raises the floor toward the trip
+    // and a refusal costs a wasted drive + TRUE-serial rerun (~100x wall).
+    // Never narrow below the floor-safe width:
+    //   w_floor = ceil(est_groups x per_group_bytes / (budget/2))
+    // per_group_bytes = state_bytes + key_words*8 + 48 (row + aggcontext
+    // headroom — deliberately conservative: it only makes elastic narrow
+    // LESS; the audit's root fix packs these classes inline and will
+    // retire the term). est_groups = the same leader plan estimate the
+    // locality law reads (coordinate: proportionality-audit).
+    let dop = {
+        let elastic = super::runtime_scan::elastic_dop(dop, total_granules);
+        if elastic < dop && byref_states {
+            let half_budget = (budget as u64 / 2).max(1);
+            let per_group = state_bytes as u64 + (key_words as u64) * 8 + 48;
+            let w_floor = est_groups
+                .saturating_mul(per_group)
+                .div_ceil(half_budget)
+                .max(1)
+                .min(dop as u64) as i32;
+            let guarded = elastic.max(w_floor);
+            if guarded > elastic {
+                lane_trace(&format!(
+                    "runtime-agg: elastic byref-floor guard {elastic}->{guarded} (est_groups={est_groups})"
+                ));
+            }
+            guarded
+        } else {
+            elastic
+        }
+    };
     // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
     // the adopted table's rows must be self-contained past helper teardown
     // (a byref transvalue points into a worker aggcontext).
@@ -3226,11 +4499,47 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         }
         None => None,
     };
+    // Shared-table EXPERIMENT engagement (D2, default OFF): K2 single-int-
+    // word, COUNT-only states, no topn/freeze composition, est groups in
+    // (engaged cap, band max] — below the band Locals never fill; above it
+    // the table cannot be SLC-resident and the incumbent partitioned path
+    // is the right answer (and remains the runtime fallback either way).
+    let shared = if agg_shared_table_enabled()
+        && drain == SinkDrain::K2
+        && key_words == 1
+        // ONE count transition: the state block is a single AggPerGroup
+        // (16B — Datum + flag bytes), the layout the shared face folds
+        // (wave-4 finding: the raw-transvalue 8B guess never engaged).
+        && state_bytes == core::mem::size_of::<::execexpr::AggPerGroup>()
+        && dop > 1
+        && topn.is_none()
+        && freeze.is_none()
+        && ::nodeagg::sink::agg_sink_all_count(agg)
+        && est_groups > agg_shared_table_min_groups().unwrap_or(sink_cap as u64)
+        && est_groups <= agg_shared_table_max_groups()
+    {
+        lane_trace(&format!(
+            "runtime-agg: SHARED-TABLE experiment engaged (est_groups={est_groups})"
+        ));
+        Some(SharedAggFace::new(est_groups))
+    } else {
+        None
+    };
     let sink = Arc::new(AggSink {
         drain,
         red,
         mk,
         cap: sink_cap,
+        // Freeze-armed (LIMIT-k admission) shapes stay on the incumbent
+        // cadence: their live group set is k-bounded post-freeze, so the
+        // α-gate has no footprint to reclaim and the freeze-window byte
+        // surface stays untouched.
+        alpha_floor: if freeze.is_some() {
+            None
+        } else {
+            alpha_gate_floor(state_bytes, sink_cap, dop)
+        },
+        shared,
         budget,
         key_words,
         state_bytes,
@@ -3261,6 +4570,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         adopt_shape,
         adopted: Mutex::new(None),
         adopted_flag: AtomicBool::new(false),
+        forks: AtomicUsize::new(0),
+        combine16_claims: AtomicU64::new(0),
+        combine16_grows: AtomicU64::new(0),
+        combine16_converts: AtomicU64::new(0),
         rg: OnceLock::new(),
         failed: AtomicBool::new(false),
         error: Mutex::new(None),
@@ -3276,6 +4589,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         ea_instr: Mutex::new(None),
         ea_timer: ea && super::runtime_instr::ea_timer(estate),
         ea_epoch: std::time::Instant::now(),
+        // Two-level socket-local combine (numa-combine item 1): kill switch
+        // + DOP threshold (default 96 — engages on the 48xl regime, never
+        // at mt16 defaults) + the all-byval gate (partial-run state blocks
+        // are copied verbatim across claims; byref blocks would dangle, and
+        // the byval whitelist is what makes half-regrouping bit-exact).
+        numa: (numa_combine_enabled() && dop >= numa_combine_dop_min() && !byref_states)
+            .then(NumaCombine::new),
     });
     engage(agg, estate, rt, dop, total_granules, starts, agg_node, sink)
 }
@@ -3316,10 +4636,26 @@ fn engage<'mcx>(
         query_id: AtomicU64::new(0),
     });
 
+    // Arming-phase decomposition spans (tails192 #5): the agg arm had NO
+    // l.* gtrace coverage while its submit->first-service window measures
+    // 2.0-5.7ms at 16-core (vs the scan arm's 0.25ms standing channel) --
+    // the launched-helper ceremony is the at-191 tiny-query tax suspect.
+    // PGRUST_GATHER_TRACE-gated, free when off.
+    parallel::gtrace("l.agg.engage.begin");
     xact::EnterParallelMode();
+    // Router counter choke point (M5-1): Engaged = ceremony entered;
+    // Completed = the runtime answered; Fallback = R5 serial rerun.
+    router::tick(ArmClass::Agg, ArmCounter::Engaged);
     let engaged =
         engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, &sink);
     xact::ExitParallelMode();
+    parallel::gtrace("l.agg.engage.end");
+    if let Ok(done) = &engaged {
+        router::tick(
+            ArmClass::Agg,
+            if *done { ArmCounter::Completed } else { ArmCounter::Fallback },
+        );
+    }
     engaged
 }
 
@@ -3341,35 +4677,57 @@ fn engage_ceremony<'mcx>(
 ) -> PgResult<bool> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_agg_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
+    // SinkProbe surface (M5-1, the §3.5 lane_trace remainder): captured out
+    // of the ceremony body and reported at RG completion.
+    let mut sink_probe: Option<Arc<runtime::SinkProbe>> = None;
+    let probe_out = &mut sink_probe;
 
     let body = (|mut_submitted: &mut Option<runtime::RgHandle>| -> PgResult<EngageOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
+        parallel::gtrace("l.agg.dsm.end");
         let nworkers = parallel::nworkers(pcxt);
         if nworkers <= 0 {
             return Ok(EngageOutcome::Fallback);
         }
         parallel::InstallQueryTaskBinding(pcxt, parallel::QueryTaskBindingPolicy::default())?;
+        parallel::gtrace("l.agg.qtb.end");
         payload
             .pcxt_shared
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        // The sink's two task sets over the cbstore granule geometry.
+        // The sink's task sets over the cbstore granule geometry. Default
+        // (combine-parallel lane): the 3-set sealed plumbing — ACCEPT →
+        // FREEZE (per-Local SEAL partition, parallel across slots) →
+        // COMBINE. PGRUST_RUNTIME_AGG_PARSEAL=0 restores the 2-set shape
+        // (single-threaded SEAL in the accept set's finalize) exactly.
         let source = Arc::new(CbstoreGranuleSource { starts });
-        let runtime::SinkTaskSets { accept, combine, probe: _probe } = runtime::sink_tasksets(
-            Arc::clone(sink),
-            source,
-            rt.nthreads(),
-            0,
-        );
+        let tasksets = if parseal_enabled() {
+            let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
+                runtime::sealed_sink_tasksets(
+                    Arc::clone(sink),
+                    source,
+                    rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                    0,
+                );
+            *probe_out = Some(probe);
+            vec![accept, freeze, combine]
+        } else {
+            let runtime::SinkTaskSets { accept, combine, probe } =
+                runtime::sink_tasksets(Arc::clone(sink), source, rt.nthreads(), 0);
+            *probe_out = Some(probe);
+            vec![accept, combine]
+        };
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        parallel::gtrace("l.agg.sink.end");
+        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
             query_id: qid,
-            tasksets: vec![accept, combine],
-        });
+            tasksets,
+        }, router::session_affinity_token());
+        parallel::gtrace("l.agg.submit.end");
         payload
             .rg
             .set(rg.downgrade())
@@ -3380,6 +4738,7 @@ fn engage_ceremony<'mcx>(
         *mut_submitted = Some(rg.clone());
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
+        parallel::gtrace("l.agg.launch.end");
         if launched <= 0 {
             lane_trace("runtime-agg: zero workers launched");
             drain_rg(rt, &rg);
@@ -3521,6 +4880,12 @@ fn engage_ceremony<'mcx>(
     let outcome = body?;
     destroy?;
 
+    // SinkProbe report (M5-1): stale_locals_dropped / combine_refusals now
+    // have a surface — router counters + a lane_trace line per engagement.
+    if let Some(probe) = &sink_probe {
+        router::sink_probe_complete(ArmClass::Agg, probe);
+    }
+
     match outcome {
         EngageOutcome::Fallback => {
             lane_trace("runtime-agg: fallback to serial arm");
@@ -3551,6 +4916,18 @@ fn engage_ceremony<'mcx>(
                     sink.split_depth_max.load(Ordering::Relaxed)
                 ));
             }
+            // combine16 evidence line (e2e-grepped): flat presized merged
+            // tables must never grow or convert; the incumbent arm on a
+            // large canonical shape shows the degenerate-top-byte growth.
+            let c16_claims = sink.combine16_claims.load(Ordering::Relaxed);
+            if c16_claims > 0 {
+                lane_trace(&format!(
+                    "runtime-agg: COMBINE16 flat={} claims={c16_claims} grows={} converts={}",
+                    ::nodeagg::sink::sink_combine16_enabled() as u32,
+                    sink.combine16_grows.load(Ordering::Relaxed),
+                    sink.combine16_converts.load(Ordering::Relaxed)
+                ));
+            }
             // EA-on-morsels merge (clean Completed only): write the bypassed
             // scan node's rows/nfiltered/loops from the sealed accept-phase
             // merge (ea-morsels.md §3 — node-exact rows; the Agg root ticks
@@ -3568,7 +4945,9 @@ fn engage_ceremony<'mcx>(
                             agg.plan.plan.plan_node_id,
                             scan_node,
                             -1,
-                            2,
+                            // Task-set count: 3 under the sealed plumbing
+                            // (accept/freeze/combine), 2 under PARSEAL=0.
+                            if parseal_enabled() { 3 } else { 2 },
                             m.workers as u64,
                             &m,
                         ),
@@ -3619,6 +4998,11 @@ fn engage_ceremony<'mcx>(
                             c.emit_ns.load(Ordering::Relaxed) / 1_000,
                         ));
                     }
+                    // spankey copy-tax decomposition (measurement only,
+                    // PGRUST_SPANKEY_CTR=1): print-and-reset per engagement.
+                    if let Some(s) = ::nodeagg::spankey::spankey_report_reset() {
+                        lane_trace(&s);
+                    }
                     // Freeze evidence line (e2e legs grep this): FROZEN
                     // engagements emit exactly `bound` member groups.
                     if let Some(fz) = &sink.freeze {
@@ -3641,6 +5025,9 @@ fn engage_ceremony<'mcx>(
                     lane_trace(&format!(
                         "runtime-agg: complete (table adopt), groups={rows}"
                     ));
+                    if let Some(s) = ::nodeagg::spankey::spankey_report_reset() {
+                        lane_trace(&s);
+                    }
                     ::nodeagg::sink::agg_sink_adopt_table(agg, table, sink.emit.clone());
                 }
             }
@@ -3746,5 +5133,194 @@ mod topn_mode_tests {
         }
         // Unknown encodings decode fail-closed to FullDrain.
         assert_eq!(TopnMode::decode(97), TopnMode::FullDrain);
+    }
+}
+
+#[cfg(test)]
+mod alpha_gate_tests {
+    use super::AlphaGate;
+
+    const FLOOR: Option<u32> = Some(16_384);
+    const CAP: u32 = 65_536;
+    const A0: u64 = 200; // α₀ = 2.0
+    const RP: u64 = 10;
+
+    fn fill_and_flush(g: &mut AlphaGate, rows: u64, entries: usize) {
+        g.absorbed(rows as usize);
+        g.adjudicate(entries, FLOOR, CAP, A0, RP);
+    }
+
+    /// Write-buffer window (α ≈ 1) demotes; a collapsing floor window
+    /// (α ≥ α₀) restores immediately — the phase-change fast path.
+    #[test]
+    fn demote_then_collapse_restore() {
+        let mut g = AlphaGate::default();
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // α = 1.0
+        assert!(g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 0));
+        // Floor window with strong collapse: 3 rows/entry.
+        fill_and_flush(&mut g, 3 * 16_384, 16_384);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 1, 0));
+    }
+
+    /// The α₀ boundary is INCLUSIVE-keep: exactly α₀ keeps the share
+    /// (rows×100 ≥ entries×α₀×100), just under demotes.
+    #[test]
+    fn alpha0_boundary() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, 2 * CAP as u64, CAP as usize); // α = 2.0
+        assert!(!g.demoted);
+        fill_and_flush(&mut g, 2 * CAP as u64 - 1, CAP as usize); // just under
+        assert!(g.demoted);
+    }
+
+    /// Müller hysteresis: a demoted Local with persistently low α re-probes
+    /// (full threshold restored) only after reprobe_mult × full-cap rows,
+    /// then re-demotes on the next low-α full window, restarting the clock.
+    #[test]
+    fn reprobe_after_ten_cache_volumes() {
+        let mut g = AlphaGate::default();
+        fill_and_flush(&mut g, CAP as u64, CAP as usize); // demote
+        assert!(g.demoted);
+        // Floor windows at α=1: 10×CAP rows = 40 floor fills before the
+        // re-probe budget is met.
+        let mut reprobed_at = None;
+        for i in 0..50 {
+            fill_and_flush(&mut g, 16_384, 16_384);
+            if !g.demoted {
+                reprobed_at = Some(i);
+                break;
+            }
+        }
+        // 10 × 65_536 rows / 16_384 rows-per-window = 40 windows.
+        assert_eq!(reprobed_at, Some(39));
+        assert_eq!((g.demotes, g.restores, g.reprobes), (1, 0, 1));
+        // The probe window fails again → re-demote, clock restarted.
+        fill_and_flush(&mut g, CAP as u64, CAP as usize);
+        assert!(g.demoted);
+        assert_eq!(g.demotes, 2);
+        assert_eq!(g.rows_since_demote, 0);
+    }
+
+    /// reprobe_mult = 0 pins a low-α demote (sticky mode).
+    #[test]
+    fn reprobe_zero_is_sticky() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, FLOOR, CAP, A0, 0);
+        assert!(g.demoted);
+        for _ in 0..1000 {
+            g.absorbed(16_384);
+            g.adjudicate(16_384, FLOOR, CAP, A0, 0);
+        }
+        assert!(g.demoted);
+        assert_eq!(g.reprobes, 0);
+    }
+
+    /// Unarmed controller (alpha_floor = None) never transitions and the
+    /// effective threshold never leaves sink.cap — the kill-switch/serial/
+    /// freeze identity. Pressure flushes reset the window without
+    /// adjudication.
+    #[test]
+    fn unarmed_and_pressure_identity() {
+        let mut g = AlphaGate::default();
+        g.absorbed(CAP as usize);
+        g.adjudicate(CAP as usize, None, CAP, A0, RP);
+        assert!(!g.demoted);
+        assert_eq!((g.demotes, g.restores, g.reprobes), (0, 0, 0));
+        // Pressure flush: window resets, no verdict.
+        g.absorbed(100);
+        g.on_pressure_flush();
+        assert_eq!(g.window_rows, 0);
+        assert!(!g.demoted);
+        // Empty run (entries = 0) never adjudicates.
+        g.adjudicate(0, FLOOR, CAP, A0, RP);
+        assert!(!g.demoted);
+    }
+}
+
+#[cfg(test)]
+mod numa_combine_tests {
+    use super::{NumaCombine, SINK_NBUCKETS};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    /// The credit/item law: 2×SINK_NBUCKETS pops (any mix of preferred
+    /// halves) own each (half, bucket) item EXACTLY once; every later pop
+    /// proves exhaustion (None). Serial form of the claims argument.
+    #[test]
+    fn pop_owns_every_item_exactly_once() {
+        let nc = NumaCombine::new();
+        let mut seen = vec![false; 2 * SINK_NBUCKETS];
+        for credit in 0..2 * SINK_NBUCKETS {
+            // Adversarial preference mix: alternate + skew.
+            let my = usize::from(credit % 3 == 0);
+            let (h, b) = nc.pop(my).expect("credits == items");
+            let slot = h * SINK_NBUCKETS + b;
+            assert!(!seen[slot], "item ({h},{b}) popped twice");
+            seen[slot] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "every item popped");
+        assert_eq!(nc.pop(0), None, "exhaustion proven");
+        assert_eq!(nc.pop(1), None);
+    }
+
+    /// Steering preference: with items available on both halves, a pop
+    /// serves its own half first; once the own half drains, it steals.
+    #[test]
+    fn pop_prefers_own_half_then_steals() {
+        let nc = NumaCombine::new();
+        for _ in 0..SINK_NBUCKETS {
+            let (h, _) = nc.pop(1).unwrap();
+            assert_eq!(h, 1, "own half first");
+        }
+        assert_eq!(nc.steer_hit.load(Ordering::Relaxed), SINK_NBUCKETS as u64);
+        // Half 1 drained: half-1 workers steal from half 0.
+        let (h, _) = nc.pop(1).unwrap();
+        assert_eq!(h, 0, "steal after own half drains");
+        assert_eq!(nc.steer_miss.load(Ordering::Relaxed), 1);
+    }
+
+    /// The concurrent claims argument end-to-end: N threads race pops and
+    /// the per-bucket 1→2 election; every item is owned once, every bucket
+    /// elects exactly one FINAL, and no thread ever waits (a None pop is
+    /// terminal for that credit).
+    #[test]
+    fn concurrent_pop_and_election() {
+        let nc = Arc::new(NumaCombine::new());
+        let nthreads = 8;
+        let credits = 2 * SINK_NBUCKETS / nthreads;
+        let mut handles = Vec::new();
+        for t in 0..nthreads {
+            let nc = Arc::clone(&nc);
+            handles.push(std::thread::spawn(move || {
+                let mut popped = Vec::new();
+                let mut finals = Vec::new();
+                for c in 0..credits {
+                    let my = usize::from((t + c) % 2 == 1);
+                    let (h, b) = nc.pop(my).expect("credits == items");
+                    popped.push((h, b));
+                    if nc.done[b].fetch_add(1, Ordering::AcqRel) + 1 == 2 {
+                        finals.push(b);
+                    }
+                }
+                (popped, finals)
+            }));
+        }
+        let mut all_popped = vec![0u32; 2 * SINK_NBUCKETS];
+        let mut all_finals = vec![0u32; SINK_NBUCKETS];
+        for h in handles {
+            let (popped, finals) = h.join().unwrap();
+            for (hh, b) in popped {
+                all_popped[hh * SINK_NBUCKETS + b] += 1;
+            }
+            for b in finals {
+                all_finals[b] += 1;
+            }
+        }
+        assert!(all_popped.iter().all(|&c| c == 1), "each item owned exactly once");
+        assert!(all_finals.iter().all(|&c| c == 1), "each bucket elects exactly one final");
     }
 }

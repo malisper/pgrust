@@ -40,9 +40,10 @@ use ::executils::{EStateData, EcxtId};
 use crate::distinctset::{DistinctKeyKind, DistinctSet};
 use crate::AggStateData;
 
-/// Value-hash partition count. 64 keeps per-worker fixed overhead low while
-/// giving the combine task set ≥ 4x DOP-15 claims.
-pub const PLAIN_PD_PARTS: usize = 64;
+/// Value-hash partition count. 256 keeps the combine task set ≥ 4x claims
+/// at DOP > 64 (c8g.48xlarge readiness: 192 vCPU); per-worker fixed overhead
+/// stays small (sets are lazily allocated per partition).
+pub const PLAIN_PD_PARTS: usize = 256;
 
 /// SplitMix64 finalizer — the partition router. Any deterministic mixer
 /// works (partitioning must only agree across workers); this one is
@@ -57,7 +58,7 @@ fn route64(x: u64) -> u64 {
 
 #[inline]
 fn part_of_int(k: i64) -> usize {
-    (route64(k as u64) >> 58) as usize // top 6 bits → 0..64
+    (route64(k as u64) >> 56) as usize // top 8 bits → 0..256
 }
 
 #[inline]
@@ -67,7 +68,7 @@ fn part_of_bytes(content: &[u8]) -> usize {
     for &b in content {
         h = (h ^ b as u64).wrapping_mul(0x100000001b3);
     }
-    (route64(h) >> 58) as usize
+    (route64(h) >> 56) as usize
 }
 
 /// The admitted shape, derived once on the leader (`plain_pd_derive_spec`).
