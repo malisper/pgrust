@@ -104,10 +104,6 @@ const CAS_NOT_ENFORCED: i32 = 0x40;
 const CAS_ENFORCED: i32 = 0x80;
 
 // Which pointers C's processCASbits caller passes (NULL target + bit = error).
-// not_valid_exec: the executor path for this production handles NOT VALID
-// (domain constraints); the table lanes stay loud until notvalid lands.
-// enforced_exec: the executor path handles NOT ENFORCED (ALTER TABLE ..
-// ALTER CONSTRAINT plus CHECK/FOREIGN KEY creation).
 #[derive(Default)]
 struct CasTargets {
     deferrable: bool,
@@ -115,8 +111,6 @@ struct CasTargets {
     is_enforced: bool,
     not_valid: bool,
     no_inherit: bool,
-    not_valid_exec: bool,
-    enforced_exec: bool,
 }
 
 struct CasBits {
@@ -1179,7 +1173,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(5).ival(),
                     view.l(5),
                     "CHECK",
-                    CasTargets { not_valid: true, no_inherit: true, not_valid_exec: true, ..Default::default() },
+                    CasTargets { not_valid: true, no_inherit: true, ..Default::default() },
                 )?;
                 n.skip_validation = cas.not_valid;
                 n.is_no_inherit = cas.no_inherit;
@@ -1197,7 +1191,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(3).ival(),
                     view.l(3),
                     "NOT NULL",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.initially_valid = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
@@ -1286,7 +1280,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(5).ival(),
                     view.l(5),
                     "CHECK",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: true },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true },
                 )?;
                 n.is_enforced = cas.is_enforced;
                 n.skip_validation = cas.not_valid;
@@ -1304,7 +1298,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).ival(),
                     view.l(4),
                     "NOT NULL",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: false },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true },
                 )?;
                 n.skip_validation = cas.not_valid;
                 n.is_no_inherit = cas.no_inherit;
@@ -1328,7 +1322,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "UNIQUE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1348,7 +1342,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(3).ival(),
                     view.l(3),
                     "UNIQUE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1368,7 +1362,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).ival(),
                     view.l(4),
                     "PRIMARY KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1390,7 +1384,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "PRIMARY KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1414,7 +1408,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "EXCLUDE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1478,7 +1472,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(12).ival(),
                     view.l(12),
                     "FOREIGN KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false, not_valid_exec: true, enforced_exec: true },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -6187,7 +6181,6 @@ impl<'mcx> Parser<'mcx> {
                         initdeferred: true,
                         is_enforced: true,
                         no_inherit: true,
-                        enforced_exec: true,
                         ..Default::default()
                     },
                 )?;
@@ -7199,7 +7192,7 @@ impl<'mcx> Parser<'mcx> {
                         initdeferred: true,
                         is_enforced: false,
                         not_valid: false,
-                        no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                        no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -11038,12 +11031,6 @@ impl<'mcx> Parser<'mcx> {
                 )));
             }
             out.is_enforced = true;
-        }
-        if out.not_valid && !t.not_valid_exec {
-            panic!("gram_core: NOT VALID {constr_type} constraints unported");
-        }
-        if !out.is_enforced && !t.enforced_exec {
-            panic!("gram_core: NOT ENFORCED {constr_type} constraints unported");
         }
         Ok(out)
     }
