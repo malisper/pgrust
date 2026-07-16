@@ -42,7 +42,7 @@ pub fn fc_cash_out(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         let buf = unsafe { &mut *c.get() };
         let body: &mut [u8; crate::CASH_OUT_BUFLEN] =
             (&mut buf[..crate::CASH_OUT_BUFLEN]).try_into().unwrap();
-        let len = crate::cash_out_into(value, body);
+        let len = crate::cash_out_into(value, body)?;
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
     })

@@ -694,10 +694,15 @@ fn order_dir(dir: i32) -> ScanDirection {
     }
 }
 
+// unported: ExecIndexBuildScanKeys legs the planner can still reach raise a
+// clean ERRCODE_FEATURE_NOT_SUPPORTED error (plan-init time, safe unwind).
 #[cold]
 #[inline(never)]
-fn scankey_case_unported(what: &str) -> ! {
-    panic!("nodeindexscan: ExecIndexBuildScanKeys {what} not ported")
+fn scankey_case_unported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("index scan over {what} is not yet implemented"))
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 /// `ExecIndexBuildScanKeys`, cases 1 (indexkey op Const), 2 (runtime key),
@@ -790,9 +795,11 @@ pub fn exec_index_build_scan_keys<'mcx>(
                         // C treats a non-Const member as a runtime key
                         // targeting the subkey; the runtime-key table here
                         // addresses top-level keys only.
-                        None => scankey_case_unported(
-                            "RowCompareExpr runtime (non-Const) row member",
-                        ),
+                        None => {
+                            return Err(scankey_case_unported(
+                                "a row comparison with a non-constant member",
+                            ))
+                        }
                     };
 
                     let mut sub = ScanKeyData::empty();
@@ -823,11 +830,15 @@ pub fn exec_index_build_scan_keys<'mcx>(
                 debug_assert!(!isorderby);
                 debug_assert!(saop.useOr);
                 if !::indexam::IndexAmKind::from_relam(index.rd_rel.relam).amsearcharray() {
-                    scankey_case_unported("ScalarArrayOpExpr on a non-amsearcharray AM");
+                    return Err(scankey_case_unported(
+                        "a scalar-array qual on a non-amsearcharray access method",
+                    ));
                 }
                 let leftop = saop.args.nth(0);
                 if leftop.node_tag() == NodeTag::T_RelabelType {
-                    scankey_case_unported("RelabelType-wrapped index key");
+                    return Err(scankey_case_unported(
+                        "a binary-compatible (RelabelType) scalar-array index key",
+                    ));
                 }
                 let var = leftop
                     .as_var()

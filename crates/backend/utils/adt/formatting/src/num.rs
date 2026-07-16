@@ -64,12 +64,12 @@ struct NumLocale {
     currency: &'static [u8],
 }
 
-// need_locale under a non-C lc_monetary/lc_numeric loud-panics in
-// pglc_localeconv; under C locale all conv strings are empty, so both arms
-// produce the same defaults ('.'/','/' '/'-'/'+').
-fn num_prepare_locale(num: &NUMDesc) -> NumLocale {
-    if num.need_locale != 0 {
-        let l = ::pg_locale::pglc_localeconv();
+// need_locale under a non-C lc_monetary/lc_numeric raises pglc_localeconv's
+// clean feature error; under C locale all conv strings are empty, so both
+// arms produce the same defaults ('.'/','/' '/'-'/'+').
+fn num_prepare_locale(num: &NUMDesc) -> ::types_error::PgResult<NumLocale> {
+    Ok(if num.need_locale != 0 {
+        let l = ::pg_locale::pglc_localeconv()?;
         NumLocale {
             negative: if !l.negative_sign.is_empty() {
                 l.negative_sign.as_bytes()
@@ -97,7 +97,7 @@ fn num_prepare_locale(num: &NUMDesc) -> NumLocale {
             thousands: b",",
             currency: b" ",
         }
-    }
+    })
 }
 
 fn get_last_relevant_decnum(num: &[u8]) -> Option<usize> {
@@ -392,7 +392,7 @@ pub fn num_processor_to_char(
         np.num_count += 1;
     }
 
-    np.loc = num_prepare_locale(np.num);
+    np.loc = num_prepare_locale(np.num)?;
 
     for n in nodes {
         if n.typ == NODE_TYPE_END {
@@ -854,7 +854,7 @@ pub fn num_processor_from_char(
         },
     };
 
-    np.loc = num_prepare_locale(np.num);
+    np.loc = num_prepare_locale(np.num)?;
 
     let mut idx = 0usize;
     while nodes[idx].typ != NODE_TYPE_END {

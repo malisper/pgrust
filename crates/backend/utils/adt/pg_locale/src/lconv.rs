@@ -37,9 +37,16 @@ static C_LOCALE_LCONV: PgLconv = PgLconv {
 // C caches one converted copy guarded by CurrentLocaleConvValid (the monetary/
 // numeric assign hooks invalidate it); constant here until the pg_localeconv_r
 // port admits non-C locales.
-pub fn pglc_localeconv() -> &'static PgLconv {
+pub fn pglc_localeconv() -> ::types_error::PgResult<&'static PgLconv> {
     if !monetary_and_numeric_are_c() {
-        panic!("PGLC_localeconv: non-C lc_monetary/lc_numeric requires pg_localeconv_r (unported)");
+        // unported: pg_localeconv_r (PGLC_localeconv non-C arm).
+        return Err(Box::new(
+            ::types_error::PgError::error(
+                "money/number formatting under a non-C lc_monetary or \
+                 lc_numeric locale is not yet implemented",
+            )
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
-    &C_LOCALE_LCONV
+    Ok(&C_LOCALE_LCONV)
 }

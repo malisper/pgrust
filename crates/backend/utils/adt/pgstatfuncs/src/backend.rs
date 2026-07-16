@@ -1,5 +1,5 @@
 use ::datum::Datum;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use backend_status::LocalPgBackendStatus;
@@ -145,10 +145,14 @@ pub fn fc_pg_stat_get_backend_client_addr(
         return Ok(fcinfo.return_null());
     }
     match ss_family(&be.st_clientaddr.addr) {
-        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => panic!(
-            "pg_stat_get_backend_client_addr (pgstatfuncs.c:920): inet datum \
-             unported — adt network lane"
-        ),
+        // unported: inet datum — adt network lane.
+        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => Err(Box::new(
+            PgError::error(
+                "pg_stat_get_backend_client_addr: reporting an inet client \
+                 address is not yet implemented",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        )),
         _ => Ok(fcinfo.return_null()),
     }
 }
@@ -167,10 +171,14 @@ pub fn fc_pg_stat_get_backend_client_port(
         return Ok(fcinfo.return_null());
     }
     match ss_family(&be.st_clientaddr.addr) {
-        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => panic!(
-            "pg_stat_get_backend_client_port (pgstatfuncs.c:963): \
-             pg_getnameinfo_all port unported — adt network lane"
-        ),
+        // unported: pg_getnameinfo_all port — adt network lane.
+        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => Err(Box::new(
+            PgError::error(
+                "pg_stat_get_backend_client_port: reporting an inet client \
+                 port is not yet implemented",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        )),
         f if f == libc::AF_UNIX as i32 => Ok(Datum::from_i32(-1)),
         _ => Ok(fcinfo.return_null()),
     }

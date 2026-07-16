@@ -5,7 +5,7 @@
 use ::datum::Datum;
 use ::mcx::Mcx;
 use ::types_core::{Oid, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_fmgr::{
     varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction,
 };
@@ -395,7 +395,14 @@ fn indexam_property(
         // C returns NULL for an invalid/non-index AM OID; a real out-of-core
         // index AM is an unported lane, not a NULL.
         if amoid != 0 && is_index_am(amoid)? {
-            panic!("unported: amutils over non-core index AM {amoid}");
+            // unported: out-of-core index AM property lane.
+            return Err(Box::new(
+                PgError::error(format!(
+                    "index AM properties for non-core access method {amoid} \
+                     are not yet implemented"
+                ))
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
         }
         return Ok(None);
     };
@@ -537,7 +544,14 @@ pub fn fc_pg_indexam_progress_phasename(
         _ => match am_flags(amoid) {
             Some(_) => None,
             None if is_index_am(amoid)? => {
-                panic!("unported: ambuildphasename for non-core index AM {amoid}")
+                // unported: out-of-core index AM build-phase-name lane.
+                return Err(Box::new(
+                    PgError::error(format!(
+                        "build phase names for non-core access method {amoid} \
+                         are not yet implemented"
+                    ))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
             }
             None => None,
         },

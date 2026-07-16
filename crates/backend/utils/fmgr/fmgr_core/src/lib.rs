@@ -8,6 +8,9 @@ pub mod ported;
 #[cfg(test)]
 mod tests;
 
+use alloc::boxed::Box;
+use alloc::format;
+
 use ::datum::Datum;
 use ::fmgr::{FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData, TRACK_FUNC_ALL};
 use ::types_core::{primitive::InvalidOid, Oid};
@@ -130,7 +133,21 @@ fn builtin_not_ported(
     if let Some(b) = late_builtin(oid) {
         return (b.func)(flinfo, fcinfo);
     }
-    panic!("fmgr: builtin function {oid} is in the canonical table but not ported");
+    // unported: the canonical row exists but no port registered; raise a
+    // clean feature error instead of panicking (the fn is user-callable).
+    Err(builtin_not_ported_err(oid))
+}
+
+#[cold]
+#[inline(never)]
+fn builtin_not_ported_err(oid: Oid) -> Box<::types_error::PgError> {
+    let name = fmgr_isbuiltin(oid).map_or("?", |b| b.name);
+    Box::new(
+        ::types_error::PgError::error(format!(
+            "function {name} (OID {oid}) is not yet implemented"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 const fn build_builtins() -> [FmgrBuiltin; FMGR_NBUILTINS] {

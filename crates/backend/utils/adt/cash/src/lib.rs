@@ -86,7 +86,7 @@ fn nonempty_or(sym: &'static str, default: &'static str) -> &'static str {
 }
 
 pub fn cash_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<Cash> {
-    let lconvert = pglc_localeconv();
+    let lconvert = pglc_localeconv()?;
     let fpoint = clamp_fpoint(lconvert);
     let dsymbol = dsymbol_of(lconvert);
     let ssymbol = ssymbol_of(lconvert, dsymbol).as_bytes();
@@ -201,8 +201,8 @@ pub fn cash_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<
 
 pub const CASH_OUT_BUFLEN: usize = 128;
 
-pub fn cash_out_into(value: Cash, out: &mut [u8; CASH_OUT_BUFLEN]) -> usize {
-    let lconvert = pglc_localeconv();
+pub fn cash_out_into(value: Cash, out: &mut [u8; CASH_OUT_BUFLEN]) -> PgResult<usize> {
+    let lconvert = pglc_localeconv()?;
     let points = clamp_fpoint(lconvert);
     // As with frac_digits, mon_grouping gets a plausibility range check.
     let mon_group = {
@@ -341,7 +341,7 @@ pub fn cash_out_into(value: Cash, out: &mut [u8; CASH_OUT_BUFLEN]) -> usize {
             }
         }
     }
-    n
+    Ok(n)
 }
 
 pub fn cash_recv(buf: &mut StringInfo<'_>) -> PgResult<Cash> {
@@ -455,23 +455,23 @@ pub const fn cashsmaller(c1: Cash, c2: Cash) -> Cash {
     }
 }
 
-fn scale_factor() -> i64 {
-    let fpoint = clamp_fpoint(pglc_localeconv());
+fn scale_factor() -> PgResult<i64> {
+    let fpoint = clamp_fpoint(pglc_localeconv()?);
     let mut scale: i64 = 1;
     for _ in 0..fpoint {
         scale *= 10;
     }
-    scale
+    Ok(scale)
 }
 
 // C goes through DirectFunctionCall2(int8mul): its bigint-out-of-range error
 // is the parity surface.
 pub fn int4_cash(amount: i32) -> PgResult<Cash> {
-    adt_int8::int8mul(amount as i64, scale_factor())
+    adt_int8::int8mul(amount as i64, scale_factor()?)
 }
 
 pub fn int8_cash(amount: i64) -> PgResult<Cash> {
-    adt_int8::int8mul(amount, scale_factor())
+    adt_int8::int8mul(amount, scale_factor()?)
 }
 
 const SMALL_WORDS: [&str; 28] = [
@@ -593,7 +593,7 @@ pub fn cash_words<'mcx>(mcx: Mcx<'mcx>, value: Cash) -> PgResult<Varlena<'mcx>> 
 }
 
 pub fn cash_numeric(money: Cash) -> PgResult<NumericImage> {
-    let fpoint = clamp_fpoint(pglc_localeconv());
+    let fpoint = clamp_fpoint(pglc_localeconv()?);
     let mut result = adt_numeric::int64_to_numeric(money);
 
     if fpoint > 0 {
@@ -601,7 +601,7 @@ pub fn cash_numeric(money: Cash) -> PgResult<NumericImage> {
         // inputs; rounding the scale operand's dscale up to fpoint forces an
         // exact quotient, then the explicit round trims it to fpoint.
         let scale = adt_numeric::numeric_round_common(
-            adt_numeric::int64_to_numeric(scale_factor()).num(),
+            adt_numeric::int64_to_numeric(scale_factor()?).num(),
             fpoint,
         )?;
         let quotient = adt_numeric::numeric_div_common(result.num(), scale.num())?;
@@ -612,7 +612,7 @@ pub fn cash_numeric(money: Cash) -> PgResult<NumericImage> {
 }
 
 pub fn numeric_cash(amount: Num<'_>) -> PgResult<Cash> {
-    let scale = adt_numeric::int64_to_numeric(scale_factor());
+    let scale = adt_numeric::int64_to_numeric(scale_factor()?);
     let scaled = adt_numeric::numeric_mul_common(amount, scale.num())?;
     adt_numeric::numeric_int8(scaled.num())
 }

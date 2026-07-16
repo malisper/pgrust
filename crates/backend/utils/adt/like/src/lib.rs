@@ -54,10 +54,17 @@ fn ilike_nondeterministic() -> Box<PgError> {
         .into()
 }
 
+// unported: like_match.c MB arm for non-UTF8 multibyte database encodings;
+// clean feature error (LIKE/ILIKE evaluation, safe unwind).
 #[cold]
 #[inline(never)]
-fn mb_matchtext_unported(encoding: pg_enc) -> ! {
-    panic!("MB_MatchText: non-UTF8 multibyte database encoding {encoding} unported (like_match.c MB arm)")
+fn mb_matchtext_unported(encoding: pg_enc) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(format!(
+            "LIKE in a non-UTF8 multibyte database encoding ({encoding}) is not yet implemented"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 #[inline]
@@ -301,7 +308,7 @@ pub fn generic_match_text(s: &[u8], p: &[u8], collation: Oid) -> PgResult<i32> {
     } else if mbutils::GetDatabaseEncoding() == PG_UTF8 {
         match_text::<Utf8Cs>(s, p, locale)
     } else {
-        mb_matchtext_unported(mbutils::GetDatabaseEncoding())
+        return Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
     }
 }
 
@@ -350,7 +357,7 @@ pub fn generic_text_ic_like(
             return if mbutils::GetDatabaseEncoding() == PG_UTF8 {
                 match_text::<Utf8Cs>(&str_, &pat, &LOCALE_NONE)
             } else {
-                mb_matchtext_unported(mbutils::GetDatabaseEncoding())
+                return Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
             };
         }
         lower_into(&mut scratch.p, p);
@@ -358,7 +365,7 @@ pub fn generic_text_ic_like(
         if mbutils::GetDatabaseEncoding() == PG_UTF8 {
             match_text::<Utf8Cs>(&scratch.s, &scratch.p, &LOCALE_NONE)
         } else {
-            mb_matchtext_unported(mbutils::GetDatabaseEncoding())
+            return Err(mb_matchtext_unported(mbutils::GetDatabaseEncoding()))
         }
     } else {
         match_text::<SbIc>(s, p, locale)

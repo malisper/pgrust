@@ -99,7 +99,12 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 }
 
 pub fn fc_domain_recv(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("domain_recv (domains.c): binary input lane unported — unit backend-utils-adt-misc2");
+    // unported: domain_recv (domains.c) binary input lane — unit
+    // backend-utils-adt-misc2.
+    Err(Box::new(
+        PgError::error("binary input for domain types is not yet implemented")
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
 // C's extra/mcxt per-callsite memo collapses into the engine's per-domain memo.

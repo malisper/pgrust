@@ -393,13 +393,20 @@ fn lower_gt_upper() -> PgError {
 }
 
 // PG_DETOAST_DATUM_PACKED over a bound value; only the plain/short lanes are
-// live — a toast pointer or inline-compressed bound panics loudly.
-fn detoast_bound_packed(val: Datum) -> Datum {
+// live — a toast pointer or inline-compressed bound raises a clean feature
+// error (unported: the bound detoast lane).
+fn detoast_bound_packed(val: Datum) -> PgResult<Datum> {
     let p = val.as_usize() as *const u8;
     if varatt_is_1b(p) || varatt_is_4b_u(p) {
-        val
+        Ok(val)
     } else {
-        panic!("range bound detoast lane unported (external/compressed varlena bound)");
+        Err(Box::new(
+            PgError::error(
+                "range bounds over toasted (external or compressed) values \
+                 are not yet implemented",
+            )
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ))
     }
 }
 
@@ -443,13 +450,13 @@ pub fn range_serialize<'m>(
     let mut msize = RANGE_HDRSZ;
     if range_has_lbound(flags) {
         if typlen == -1 {
-            lower.val = detoast_bound_packed(lower.val);
+            lower.val = detoast_bound_packed(lower.val)?;
         }
         msize = datum_compute_size(msize, lower.val, typbyval, typalign, typlen, typstorage);
     }
     if range_has_ubound(flags) {
         if typlen == -1 {
-            upper.val = detoast_bound_packed(upper.val);
+            upper.val = detoast_bound_packed(upper.val)?;
         }
         msize = datum_compute_size(msize, upper.val, typbyval, typalign, typlen, typstorage);
     }

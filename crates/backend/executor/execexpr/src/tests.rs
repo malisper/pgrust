@@ -2400,15 +2400,26 @@ mod json {
     }
 
     #[test]
-    #[should_panic(expected = "EEOP_CASE_TESTVAL_EXT")]
-    fn ext_case_test_without_permission_stays_loud() {
+    fn ext_case_test_without_permission_is_clean_feature_error() {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
                 CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
             )
             .unwrap();
-            let _ = exec_init_expr(mcx, Some(ct), ParamBind::NONE);
+            let err = match exec_init_expr(mcx, Some(ct), ParamBind::NONE) {
+                Ok(_) => panic!("expected a feature error"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err.sqlstate(),
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED
+            );
+            assert!(
+                err.message().contains("not yet implemented"),
+                "{}",
+                err.message()
+            );
         });
     }
 }
