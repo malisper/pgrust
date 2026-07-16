@@ -3864,12 +3864,497 @@ pub fn agg_sink_emit_drained(node: &mut AggStateData<'_>) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-socket SHARED aggregate table — the mid-NDV architecture EXPERIMENT
+// (cachebudget lane D2; docs/design/shared-agg-table-experiment.md). Hard
+// default-OFF (PGRUST_RUNTIME_AGG_SHARED_TABLE=1 in the executor arms it).
+//
+// Design (a) of the design note: a Folklore*-class single-word-CAS
+// open-addressing table (Xue & Marcus PVLDB'25's winning variant — written
+// from scratch, the reference impl was consulted as literature only),
+// PER SOCKET, sized at engagement to fit a socket-SLC share. PROTOTYPE
+// SCOPE (recorded in the design note §4): single-int-word keys, COUNT-only
+// states (count(*) / count(col) — i64 add is the one atomic fold the
+// architecture question needs; the footprint-vs-coherence verdict is
+// state-class-independent to first order). Workers keep their bounded
+// Locals as the heavy-hitter pre-pass (Polychroniou composition): the
+// shared face absorbs at FLUSH cadence — a flushed run's rows CAS/add into
+// the socket table and the run is dropped instead of retained, so combine
+// volume collapses to the (≤2) socket tables plus whatever overflowed.
+//
+// SPILL FALLBACK (the literature has no spill story; we do): occupancy is
+// reserved run-by-run BEFORE merging; a reservation that would cross the
+// sized capacity closes the face — that run and every later flush ride the
+// EXISTING partitioned runs/spill path, and the combine key-merges both
+// sources correctly by construction (runs from different sources are
+// exactly what it merges). Fail-closed, no mid-run split.
+//
+// Result-identity class: insertion race order makes slot layout
+// nondeterministic; the seal drain SORTS by key so a given dataset drains
+// deterministically, but the merged first-seen order still differs from
+// the incumbent's — LIMIT-boundary tie shapes are therefore outside the
+// byte-identity law (the experiment's e2e corpus carries total ORDER BY;
+// adoption as a default requires the canonical re-sort law — design note
+// §4). The experiment gate refuses topn/freeze shapes.
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicBool as ShAtomicBool, AtomicU64 as ShAtomicU64, AtomicUsize as ShAtomicUsize, Ordering as ShOrdering};
+
+pub struct SharedCountTable {
+    /// Slot key words; 0 = EMPTY sentinel (the literal key 0 rides the
+    /// dedicated side slot below — Datum 0 is a common int key).
+    keys: Box<[ShAtomicU64]>,
+    /// Per-slot i64 count accumulators (parallel to `keys`).
+    counts: Box<[ShAtomicU64]>,
+    mask: usize,
+    /// Conservative member reservations (run rows reserved up front; hits
+    /// on existing keys over-reserve, which only closes the face early —
+    /// the safe direction).
+    members: ShAtomicUsize,
+    cap_members: usize,
+    /// Closed = a reservation crossed capacity; every later merge refuses
+    /// (callers route runs to the incumbent path).
+    closed: ShAtomicBool,
+    /// The literal key-word 0 group (presence + count).
+    zero_present: ShAtomicBool,
+    zero_count: ShAtomicU64,
+    /// The out-of-band NULL group (SinkRun::null_states).
+    null_present: ShAtomicBool,
+    null_count: ShAtomicU64,
+}
+
+impl SharedCountTable {
+    /// `cap_members` live groups, slots ≥ 2× that (power of two) — probe
+    /// termination is structural: reservations bound distinct keys to
+    /// cap_members ≤ slots/2, so an empty slot always exists.
+    pub fn new(cap_members: usize) -> SharedCountTable {
+        let cap_members = cap_members.max(64);
+        let slots = (cap_members * 2).next_power_of_two();
+        SharedCountTable {
+            keys: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
+            counts: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
+            mask: slots - 1,
+            members: ShAtomicUsize::new(0),
+            cap_members,
+            closed: ShAtomicBool::new(false),
+            zero_present: ShAtomicBool::new(false),
+            zero_count: ShAtomicU64::new(0),
+            null_present: ShAtomicBool::new(false),
+            null_count: ShAtomicU64::new(0),
+        }
+    }
+
+    /// Merge a flushed single-word count run into the shared face.
+    /// `true` = absorbed (caller DROPS the run); `false` = the face is/
+    /// became closed — caller keeps the run on the incumbent path. Any
+    /// number of worker threads may call concurrently.
+    pub fn merge_run(&self, run: &SinkRun) -> bool {
+        debug_assert_eq!(run.key_words, 1, "shared count face is single-word-keyed");
+        // State block = one AggPerGroup (16B = 2 words): word 0 the count
+        // Datum, word 1 the trans_value_is_null/no_trans_value flag bytes —
+        // structurally 0 for count (seeded non-null, never nulled).
+        debug_assert_eq!(run.state_words, 2, "shared count face is count-state only");
+        if self.closed.load(ShOrdering::Acquire) {
+            return false;
+        }
+        let n = run.nrows();
+        // FAIL-CLOSED flags pre-pass BEFORE any reservation or slot write:
+        // a set trans_value_is_null / no_trans_value byte is not the count
+        // shape this face folds — refuse the whole run (it rides the
+        // incumbent path; never a partial merge). ONLY the two bool bytes
+        // are meaningful: AggPerGroup is repr(C) {Datum, bool, bool} and
+        // the trailing 6 PADDING bytes are UNDEFINED in fold-written
+        // states (the wave-5 finding: requiring a fully-zero word refused
+        // every real run — merged_runs=0 with the face live).
+        const FLAG_BYTES: u64 = 0xFFFF;
+        for i in 0..n {
+            if run.states[i * 2 + 1] & FLAG_BYTES != 0 {
+                return false;
+            }
+        }
+        if run.null_states.as_ref().is_some_and(|b| b[1] & FLAG_BYTES != 0) {
+            return false;
+        }
+        // Reserve BEFORE touching slots: crossing capacity closes the face
+        // with the reservation backed out — no partial run is ever merged.
+        if self.members.fetch_add(n, ShOrdering::AcqRel) + n > self.cap_members {
+            self.members.fetch_sub(n, ShOrdering::AcqRel);
+            self.closed.store(true, ShOrdering::Release);
+            return false;
+        }
+        // RESERVATION RELEASE LAW: rows resolving to an EXISTING key (or
+        // the key-0 side slot) release their reservation below, so steady-
+        // state `members` counts CLAIMED SLOTS, not cumulative flushed
+        // rows. Duplicate keys across runs are the COMMON case (every key
+        // recurs in ~W×flushes runs); without the release the face closes
+        // after ~cap total flushed rows regardless of NDV (the concurrent-
+        // oracle unit test caught exactly this). Claimed slots therefore
+        // never exceed cap_members ≤ slots/2 — probe termination stays
+        // structural. Transient in-flight reservations (Σ concurrent runs'
+        // rows) can spuriously close a face genuinely NEAR capacity —
+        // fail-safe direction (the run rides the incumbent path).
+        let mut release = 0usize;
+        for i in 0..n {
+            let key = run.keys[i];
+            let cnt = run.states[i * 2];
+            if key == 0 {
+                self.zero_present.store(true, ShOrdering::Release);
+                self.zero_count.fetch_add(cnt, ShOrdering::Relaxed);
+                release += 1;
+                continue;
+            }
+            let mut pos = (sink_hash(key, 0) as usize) & self.mask;
+            loop {
+                let cur = self.keys[pos].load(ShOrdering::Acquire);
+                if cur == key {
+                    self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                    release += 1;
+                    break;
+                }
+                if cur == 0 {
+                    match self.keys[pos].compare_exchange(
+                        0,
+                        key,
+                        ShOrdering::AcqRel,
+                        ShOrdering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            // Fresh slot claim: consumes its reservation.
+                            self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                            break;
+                        }
+                        Err(now) if now == key => {
+                            self.counts[pos].fetch_add(cnt, ShOrdering::Relaxed);
+                            release += 1;
+                            break;
+                        }
+                        Err(_) => { /* raced claim by another key: keep probing */ }
+                    }
+                } else {
+                    pos = (pos + 1) & self.mask;
+                    continue;
+                }
+                // CAS lost to a DIFFERENT key landing in this slot: advance.
+                pos = (pos + 1) & self.mask;
+            }
+        }
+        if release > 0 {
+            self.members.fetch_sub(release, ShOrdering::AcqRel);
+        }
+        if let Some(block) = run.null_states.as_ref() {
+            self.null_present.store(true, ShOrdering::Release);
+            self.null_count.fetch_add(block[0], ShOrdering::Relaxed);
+        }
+        true
+    }
+
+    /// Claimed slots + in-flight reservations (observability; equals the
+    /// live distinct group count at quiescence).
+    pub fn reserved(&self) -> usize {
+        self.members.load(ShOrdering::Relaxed)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(ShOrdering::Relaxed)
+    }
+
+    /// Seal-time drain into a bucket-major [`SinkRun`] (the exact
+    /// sink_flush_table framing, so the combine consumes it like any
+    /// flushed run). SINGLE-THREADED BY CONTRACT: called at SEAL, after
+    /// every accept worker has settled (the runtime's seal ordering is the
+    /// happens-before). Rows are sorted by key first — a given dataset
+    /// drains deterministically regardless of insertion races. `None` =
+    /// nothing was absorbed.
+    pub fn drain_to_run(&self) -> Option<SinkRun> {
+        let mut pairs: Vec<(u64, u64)> = Vec::with_capacity(self.reserved().min(self.mask + 1));
+        for pos in 0..=self.mask {
+            let key = self.keys[pos].load(ShOrdering::Acquire);
+            if key != 0 {
+                pairs.push((key, self.counts[pos].load(ShOrdering::Acquire)));
+            }
+        }
+        if self.zero_present.load(ShOrdering::Acquire) {
+            pairs.push((0, self.zero_count.load(ShOrdering::Acquire)));
+        }
+        let null = self
+            .null_present
+            .load(ShOrdering::Acquire)
+            .then(|| vec![self.null_count.load(ShOrdering::Acquire), 0]);
+        if pairs.is_empty() && null.is_none() {
+            return None;
+        }
+        pairs.sort_unstable_by_key(|&(k, _)| k);
+        // Bucket-major framing, verbatim from sink_flush_table.
+        let mut counts = [0u32; SINK_NBUCKETS];
+        for &(k, _) in &pairs {
+            counts[bucket_of(sink_hash(k, 0))] += 1;
+        }
+        let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+        let mut acc = 0u32;
+        starts.push(0);
+        for c in counts {
+            acc += c;
+            starts.push(acc);
+        }
+        let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+        let n = pairs.len();
+        let mut keys: Vec<u64> = vec![0; n];
+        // Emitted states are valid AggPerGroup blocks: [count, flags=0].
+        let mut states: Vec<u64> = vec![0; n * 2];
+        for &(k, c) in &pairs {
+            let b = bucket_of(sink_hash(k, 0));
+            let slot = cursor[b] as usize;
+            cursor[b] += 1;
+            keys[slot] = k;
+            states[slot * 2] = c;
+        }
+        Some(SinkRun {
+            key_words: 1,
+            state_words: 2,
+            starts,
+            keys,
+            states,
+            null_states: null,
+            key_offs: Vec::new(),
+            key_bytes: Vec::new(),
+            hashes: Vec::new(),
+            gid_gen: 0,
+        })
+    }
+}
+
+/// Experiment gate helper: every aggregate is a COUNT (count(*) 2803 /
+/// count(col) 2147), unfiltered, un-DISTINCTed — the i64-add state class
+/// the shared count face folds atomically.
+pub fn agg_sink_all_count(node: &AggStateData<'_>) -> bool {
+    const COUNT_STAR: Oid = 2803;
+    const COUNT_ANY: Oid = 2147;
+    !node.peragg.is_empty()
+        && node.peragg.iter().all(|pa| {
+            let ar = pa.aggref;
+            (ar.aggfnoid == COUNT_STAR || ar.aggfnoid == COUNT_ANY)
+                && ar.aggfilter.is_none()
+                && ar.aggdistinct.is_nil()
+                && ar.aggorder.is_nil()
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests: pure kernels, no executor.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SharedCountTable (cachebudget D2 experiment) ----------------
+
+    /// Build a single-word count run from (key, count) pairs (+ optional
+    /// NULL-group count), framed exactly like sink_flush_table.
+    fn count_run(pairs: &[(u64, u64)], null: Option<u64>) -> SinkRun {
+        let mut counts = [0u32; SINK_NBUCKETS];
+        for &(k, _) in pairs {
+            counts[bucket_of(sink_hash(k, 0))] += 1;
+        }
+        let mut starts = vec![0u32];
+        let mut acc = 0u32;
+        for c in counts {
+            acc += c;
+            starts.push(acc);
+        }
+        let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+        let mut keys = vec![0u64; pairs.len()];
+        let mut states = vec![0u64; pairs.len() * 2];
+        for &(k, c) in pairs {
+            let b = bucket_of(sink_hash(k, 0));
+            let s = cursor[b] as usize;
+            cursor[b] += 1;
+            keys[s] = k;
+            states[s * 2] = c;
+        }
+        SinkRun {
+            key_words: 1,
+            state_words: 2,
+            starts,
+            keys,
+            states,
+            null_states: null.map(|c| vec![c, 0]),
+            key_offs: Vec::new(),
+            key_bytes: Vec::new(),
+            hashes: Vec::new(),
+            gid_gen: 0,
+        }
+    }
+
+    fn drained_map(t: &SharedCountTable) -> (std::collections::HashMap<u64, u64>, Option<u64>) {
+        let run = t.drain_to_run().expect("non-empty drain");
+        // Bucket framing must be internally consistent.
+        assert_eq!(run.starts.len(), SINK_NBUCKETS + 1);
+        assert_eq!(*run.starts.last().unwrap() as usize, run.nrows());
+        for b in 0..SINK_NBUCKETS {
+            for i in run.starts[b] as usize..run.starts[b + 1] as usize {
+                assert_eq!(bucket_of(sink_hash(run.keys[i], 0)), b, "bucket-major framing");
+            }
+        }
+        let map = run
+            .keys
+            .iter()
+            .copied()
+            .zip(run.states.chunks(2).map(|st| {
+                assert_eq!(st[1] & 0xFFFF, 0, "drained states are valid non-null AggPerGroup blocks");
+                st[0]
+            }))
+            .collect();
+        (map, run.null_states.as_ref().map(|b| b[0]))
+    }
+
+    /// Concurrent merges against a HashMap oracle: 8 threads × interleaved
+    /// runs over an adversarial key set (dense small ints incl. the literal
+    /// 0 side-slot key, plus hash-colliding sparse keys), with a NULL
+    /// group. The drain must equal the oracle exactly.
+    #[test]
+    fn shared_count_concurrent_oracle() {
+        // Capacity must clear the worst-case TRANSIENT reservation window
+        // (Σ concurrent runs' rows ≈ 8×900 in-flight + ≤900 claimed), not
+        // just the distinct-key count — the release law keeps steady-state
+        // at claimed slots, but pre-checks see in-flight reservations.
+        let t = SharedCountTable::new(16384);
+        let mut oracle: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        let mut per_thread: Vec<Vec<(Vec<(u64, u64)>, Option<u64>)>> = vec![Vec::new(); 8];
+        let mut null_total = 0u64;
+        for th in 0..8u64 {
+            for r in 0..6u64 {
+                let mut pairs = Vec::new();
+                for i in 0..500u64 {
+                    // Overlapping keys across threads/runs; key 0 included.
+                    let k = (i * (th % 3 + 1) + r) % 900;
+                    let c = th + r + i % 7 + 1;
+                    pairs.push((k, c));
+                    *oracle.entry(k).or_insert(0) += c;
+                }
+                let null = (r % 2 == 0).then_some(th + r + 1);
+                if let Some(n) = null {
+                    null_total += n;
+                }
+                // count_run wants unique keys per run (a real flush is a
+                // dedup'd table) — fold duplicates first.
+                let mut folded: std::collections::HashMap<u64, u64> =
+                    std::collections::HashMap::new();
+                for (k, c) in pairs {
+                    *folded.entry(k).or_insert(0) += c;
+                }
+                let folded: Vec<(u64, u64)> = folded.into_iter().collect();
+                // Rebuild the oracle-side dedup accounting: already added above.
+                per_thread[th as usize].push((folded, null));
+            }
+        }
+        let tr = &t;
+        std::thread::scope(|s| {
+            for runs in per_thread.iter() {
+                s.spawn(move || {
+                    for (pairs, null) in runs {
+                        assert!(tr.merge_run(&count_run(pairs, *null)), "capacity was sized");
+                    }
+                });
+            }
+        });
+        assert!(!t.is_closed());
+        let (map, null) = drained_map(&t);
+        assert_eq!(map, oracle);
+        assert_eq!(null, Some(null_total));
+    }
+
+    /// The reservation RELEASE law: repeated runs over the SAME key set —
+    /// the production steady state (every key recurs in ~W×flushes runs) —
+    /// must never burn capacity. Under the pre-release design this closed
+    /// the face after ~cap total flushed ROWS regardless of NDV (the wave-3
+    /// fleet failure).
+    #[test]
+    fn shared_count_repeat_keys_do_not_burn_capacity() {
+        let t = SharedCountTable::new(512);
+        let pairs: Vec<(u64, u64)> = (1..=100u64).map(|k| (k, 1)).collect();
+        for _ in 0..1000 {
+            assert!(t.merge_run(&count_run(&pairs, None)), "repeat keys must release");
+        }
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 100, "steady state counts claimed slots only");
+        let (map, _) = drained_map(&t);
+        assert_eq!(map.len(), 100);
+        assert!(map.values().all(|&c| c == 1000));
+    }
+
+    /// The spill fallback: a reservation crossing capacity CLOSES the face
+    /// with the run unmerged, and everything absorbed before the close
+    /// drains intact (the refused run rides the incumbent path).
+    #[test]
+    fn shared_count_overflow_closes() {
+        let t = SharedCountTable::new(64);
+        let small: Vec<(u64, u64)> = (1..=40u64).map(|k| (k, 1)).collect();
+        assert!(t.merge_run(&count_run(&small, None)));
+        let big: Vec<(u64, u64)> = (100..=200u64).map(|k| (k, 2)).collect();
+        assert!(!t.merge_run(&count_run(&big, None)), "over-capacity run refused");
+        assert!(t.is_closed());
+        // Closed face refuses everything, even a tiny run.
+        assert!(!t.merge_run(&count_run(&[(7, 1)], None)));
+        let (map, null) = drained_map(&t);
+        assert_eq!(map.len(), 40);
+        assert_eq!(map[&7], 1);
+        assert_eq!(null, None);
+    }
+
+    /// Drain determinism: same content, different insertion order →
+    /// byte-identical runs (the sort-by-key law).
+    #[test]
+    fn shared_count_drain_deterministic() {
+        let a = SharedCountTable::new(256);
+        let b = SharedCountTable::new(256);
+        let pairs: Vec<(u64, u64)> = (0..100u64).map(|k| (k * 37 % 251, k + 1)).collect();
+        let mut folded: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for &(k, c) in &pairs {
+            *folded.entry(k).or_insert(0) += c;
+        }
+        let folded: Vec<(u64, u64)> = folded.into_iter().collect();
+        let mut rev = folded.clone();
+        rev.reverse();
+        assert!(a.merge_run(&count_run(&folded, Some(3))));
+        assert!(b.merge_run(&count_run(&rev, Some(3))));
+        let ra = a.drain_to_run().unwrap();
+        let rb = b.drain_to_run().unwrap();
+        assert_eq!(ra.keys, rb.keys);
+        assert_eq!(ra.states, rb.states);
+        assert_eq!(ra.starts, rb.starts);
+        assert_eq!(ra.null_states, rb.null_states);
+    }
+
+    /// Empty face drains to None (no ghost runs at seal).
+    #[test]
+    fn shared_count_empty_drain() {
+        assert!(SharedCountTable::new(64).drain_to_run().is_none());
+    }
+
+    /// FAIL-CLOSED flags pre-pass: a null-marked (or padding-dirty) state
+    /// block refuses the WHOLE run before any reservation or slot write —
+    /// refusal, not closure (later clean runs still merge).
+    #[test]
+    fn shared_count_nonzero_flags_refused() {
+        let t = SharedCountTable::new(64);
+        let mut bad = count_run(&[(5, 1)], None);
+        bad.states[1] = 1; // trans_value_is_null byte
+        assert!(!t.merge_run(&bad));
+        let mut bad2 = count_run(&[(6, 1)], None);
+        bad2.states[1] = 1 << 8; // no_trans_value byte
+        assert!(!t.merge_run(&bad2));
+        assert!(!t.is_closed());
+        assert_eq!(t.reserved(), 0, "refused before reserving");
+        assert!(t.drain_to_run().is_none());
+        // UNDEFINED PADDING (bytes 2..8 of the flags word) must be
+        // ACCEPTED — fold-written AggPerGroup padding is garbage in
+        // practice (the wave-5 all-runs-refused failure).
+        let mut padded = count_run(&[(5, 2)], None);
+        padded.states[1] = 0xDEAD_BEEF_0000_0000 | (0xCAFE << 16);
+        assert!(t.merge_run(&padded));
+        let (map, _) = drained_map(&t);
+        assert_eq!(map[&5], 2);
+    }
 
     const STATE_BYTES: usize = core::mem::size_of::<AggPerGroup>() * 2;
 
