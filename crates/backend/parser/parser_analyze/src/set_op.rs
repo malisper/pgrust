@@ -248,14 +248,18 @@ fn transformSetOperationTree<'mcx>(
     if isLeaf {
         let selectQuery = set_op_leaf_analyze(mcx, pstate, stmt)?;
 
-        if !pstate.p_namespace.is_empty() {
-            panic!(
-                "transformSetOperationTree (analyze.c): contain_vars_of_level check \
-                 (CREATE RULE namespace) unported — unit backend-parser-analyze"
-            );
+        let query_node = Node::mk(mcx, selectQuery)?;
+
+        // C (analyze.c:2124-2139): a non-empty namespace happens inside a
+        // rule, where OLD/NEW are visible; the member statement only errors
+        // if it actually references a same-level relation.
+        if !pstate.p_namespace.is_empty() && vars::contain_vars_of_level(query_node, 1)? {
+            return Err(setop_refers_to_same_level(
+                pstate,
+                vars::locate_var_of_level(query_node, 1)?,
+            ));
         }
 
-        let query_node = Node::mk(mcx, selectQuery)?;
         let selectQuery = query_node.as_query().expect("just built");
 
         let mut columns: PgVec<'mcx, (Option<&'mcx str>, Oid, i32, Oid)> =
@@ -569,6 +573,23 @@ fn setop_column_count_mismatch(
                 tlist_location(rtargetlist),
                 mbutils::GetDatabaseEncoding(),
             ))
+            .into_error()
+            .with_error_location(ErrorLocation::new("analyze.c", 0, "transformSetOperationTree")),
+    )
+}
+
+#[cold]
+fn setop_refers_to_same_level(pstate: &ParseState<'_, '_>, location: i32) -> Box<PgError> {
+    use types_error::{ErrorLocation, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
+    Box::new(
+        elog::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(
+                "UNION/INTERSECT/EXCEPT member statement cannot refer to other relations of \
+                 same query level"
+                    .to_string(),
+            )
+            .errposition(parser_errposition(pstate, location, mbutils::GetDatabaseEncoding()))
             .into_error()
             .with_error_location(ErrorLocation::new("analyze.c", 0, "transformSetOperationTree")),
     )

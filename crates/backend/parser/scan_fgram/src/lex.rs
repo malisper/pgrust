@@ -641,7 +641,17 @@ impl<'mcx> Scanner<'mcx> {
             let len = wchar::unicode_utf8len(c) as usize;
             self.addlit(&buf[..len])?;
         } else {
-            panic!("scan_fgram: pg_unicode_to_server for non-UTF8 server encoding is unported");
+            // unported: pg_unicode_to_server's conversion-proc lane. The main
+            // SQL parser pins UTF-8, so this only fires off-path (e.g. the
+            // pg_stat_statements normalizer on a non-UTF8 database) — raise a
+            // clean 0A000 rather than panic.
+            return Err(self.lexerr(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                "Unicode escape values above 007F are not supported yet for \
+                 non-UTF8 server encodings",
+                None,
+                None,
+            ));
         }
         self.saw_non_ascii = true;
         Ok(())
