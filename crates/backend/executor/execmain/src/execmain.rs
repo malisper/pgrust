@@ -297,6 +297,19 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     Ok(parked)
 }
 
+// replanfix increment-1 kill switch: PGRUST_EXEC_SKELETON_CUSTOM_GATE=0
+// restores the pre-gate behavior (custom plans pay skeleton-candidate
+// ceremony at executor start). Latched once per process.
+fn skeleton_custom_gate_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_EXEC_SKELETON_CUSTOM_GATE").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 // Park-side disarm on the QueryDesc's own executor: the eligibility gates and
 // per-run-state release of standard_executor_end's TLS-park branch, in place.
 #[inline(never)]
@@ -669,7 +682,18 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         && qd.operation == CmdType::CMD_SELECT
         && qd.instrument_options == 0
         && query_env.is_null()
-        && qd.crosscheck_snapshot.is_none();
+        && qd.crosscheck_snapshot.is_none()
+        // One-shot CUSTOM plans can never hit the skeleton slot (reuse keys
+        // on the exact CachedPlan; BuildCachedPlan mints a fresh handle per
+        // replan) and the park side already refuses them — so don't pay the
+        // candidate ceremony (guaranteed-miss take_if_match + the estate-owned
+        // param_stable_install copy) on their behalf. Same predicate the park
+        // gate trusts (skeleton_disarm_in_place); is_installed: test fixtures
+        // shim only the seams they use. Kill switch reverts to pre-gate
+        // behavior (customs treated as candidates again).
+        && (skeleton_custom_gate_disabled()
+            || (plancache_portal_seams::is_source_generic_plan::is_installed()
+                && plancache_portal_seams::is_source_generic_plan::call(qd.cplan)));
 
     if skeleton_candidate {
         if let Some(sk) =
