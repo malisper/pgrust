@@ -345,6 +345,23 @@ fn pd_grow_project_enabled() -> bool {
     })
 }
 
+/// q9internals inc-2 kill switch: `PGRUST_RUNTIME_DISTINCT_RUN_MEMO=0`
+/// restores the per-row hash+probe and the unconditional staged push
+/// exactly (default ON). The memo exploits the sorted banks' contiguous
+/// (group key, DISTINCT value) runs: a row whose int key words equal the
+/// previous row's resolves to the same group id without probing, and a
+/// staged (group, value) pair equal to the previously accepted pair for
+/// that memo run is dropped before staging — a duplicate insert is a set
+/// no-op by construction, so value arrays, replay order, and every
+/// frozen-table byte are identical; only `staged_rows` (a projection-
+/// geometry denominator) sees fewer rows.
+fn pd_run_memo_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_RUN_MEMO").map_or(true, |v| v != "0")
+    })
+}
+
 /// batch-insert lane: L1 prefetch hint (lanetable's idiom, copied — the
 /// stringhash2 seam owns the table-internal machinery; this is driver-side).
 #[inline(always)]
@@ -497,11 +514,32 @@ pub struct PdBuilder<'mcx> {
     /// dedupsub I3 projection input: staged values fed so far (the
     /// denominator of expected_worker_rows / staged_rows).
     staged_rows: u64,
+    /// q9internals inc-2 run memo (int-only specs, nkeys <= MEMO_KEYS;
+    /// `memo_g == u32::MAX` = no run). The sorted banks cluster rows by
+    /// group key: a row whose key words + null mask equal the previous
+    /// row's takes the memoized group id and skips hash+probe entirely.
+    memo_on: bool,
+    memo_g: u32,
+    memo_nulls: u32,
+    memo_words: [i64; MEMO_KEYS],
+    /// Last staged (group, value) pair (`last_sg == u32::MAX` = none):
+    /// a consecutive duplicate is dropped before staging (set-semantics
+    /// no-op — the pair is already delivered to that group's set/tape).
+    last_sg: u32,
+    last_sv: i64,
 }
+
+/// q9internals inc-2: memoized key width (covers the q9/q10 family's 1-2
+/// int keys; wider int specs keep the per-row probe).
+const MEMO_KEYS: usize = 4;
 
 impl<'mcx> PdBuilder<'mcx> {
     pub fn new(spec: Arc<PdSpec>, budget: usize, mcx: Option<Mcx<'mcx>>) -> Self {
         let nprobe = spec.nkeys();
+        let memo_on = pd_run_memo_enabled()
+            && !spec.has_bytes_keys()
+            && nprobe > 0
+            && nprobe <= MEMO_KEYS;
         PdBuilder {
             spec,
             table: vec![0u32; INIT_TABLE],
@@ -528,6 +566,12 @@ impl<'mcx> PdBuilder<'mcx> {
             touch_stamp: Vec::new(),
             touch_epoch: 0,
             staged_rows: 0,
+            memo_on,
+            memo_g: u32::MAX,
+            memo_nulls: 0,
+            memo_words: [0; MEMO_KEYS],
+            last_sg: u32::MAX,
+            last_sv: 0,
         }
     }
 
@@ -560,6 +604,25 @@ impl<'mcx> PdBuilder<'mcx> {
             self.dsets[g].seen_null = true;
             return Ok(PdFeed::Ok);
         };
+        // q9internals inc-2: consecutive-duplicate skip. The previous
+        // accepted pair was staged (and will flush) or already inserted —
+        // either way group g's distinct union already holds v, and the
+        // duplicate insert this push would replay is a set no-op. Value
+        // arrays, append order, and every frozen/spilled union byte are
+        // identical. Sorted banks make duplicates overwhelmingly
+        // consecutive. staged_rows still counts the skipped row: it is the
+        // projection ratio's ROW denominator (expected_worker_rows is raw
+        // plan rows) — starving it would inflate the ratio by the dup
+        // factor and over-reserve the dominant sets toward the raw row
+        // count (memory + budget-crossing distortion).
+        if self.memo_on {
+            if self.last_sg == g as u32 && self.last_sv == v {
+                self.staged_rows += 1;
+                return Ok(PdFeed::Ok);
+            }
+            self.last_sg = g as u32;
+            self.last_sv = v;
+        }
         self.stage_g.push(g as u32);
         self.stage_v.push(v);
         if self.stage_v.len() >= PD_STAGE_BATCH {
@@ -836,6 +899,49 @@ impl<'mcx> PdBuilder<'mcx> {
         h
     }
 
+    /// Int-only group resolution with the q9internals inc-2 run memo: same
+    /// key words + null mask as the previous row resolve without hash+probe
+    /// (sorted banks cluster group keys into runs). Group ids are stable for
+    /// the builder's whole life (freeze consumes it; groups are never
+    /// removed), so a memo hit is exactly the id the probe would return —
+    /// byte-identity by construction. Memo off (kill switch / bytes keys /
+    /// wide specs) = the historical per-row path verbatim.
+    #[inline]
+    fn resolve_group_int(&mut self, words: &[i64], nulls: u32) -> u32 {
+        let nkeys = words.len();
+        if self.memo_on
+            && self.memo_g != u32::MAX
+            && self.memo_nulls == nulls
+            && self.memo_words[..nkeys] == *words
+        {
+            return self.memo_g;
+        }
+        let h = key_hash(words, nulls);
+        let (found, slot_idx) = self.probe(words, nulls, h, &KeySrc::None);
+        let g = match found {
+            Some(g) => g,
+            None => self.create_group(words, nulls, h, slot_idx, &KeySrc::None),
+        };
+        if self.memo_on {
+            self.memo_g = g;
+            self.memo_nulls = nulls;
+            self.memo_words[..nkeys].copy_from_slice(words);
+        }
+        g
+    }
+
+    /// Test seam (identity oracles): force the run memo + dup-skip arm on
+    /// or off regardless of the process-global kill switch. Admission
+    /// shape guards are re-applied — never arms a bytes/wide spec.
+    #[cfg(test)]
+    fn set_run_memo(&mut self, on: bool) {
+        let nprobe = self.spec.nkeys();
+        self.memo_on =
+            on && !self.spec.has_bytes_keys() && nprobe > 0 && nprobe <= MEMO_KEYS;
+        self.memo_g = u32::MAX;
+        self.last_sg = u32::MAX;
+    }
+
     /// Feed one row from the (deformed) scan slot. `tmp` is a per-row-reset
     /// expr context whose per-tuple memory absorbs text detoast copies (the
     /// set retains its own canonical image — collect_distinct_set's law).
@@ -876,12 +982,7 @@ impl<'mcx> PdBuilder<'mcx> {
             }
         }
         let g = (if !self.spec.has_bytes_keys() {
-            let h = key_hash(&words[..nkeys], nulls);
-            let (found, slot_idx) = self.probe(&words[..nkeys], nulls, h, &KeySrc::None);
-            match found {
-                Some(g) => g,
-                None => self.create_group(&words[..nkeys], nulls, h, slot_idx, &KeySrc::None),
-            }
+            self.resolve_group_int(&words[..nkeys], nulls)
         } else {
             // Detach the staging buffers from `self` so the KeySrc borrow
             // and the &mut self create can coexist; restored below (an
@@ -1419,6 +1520,9 @@ fn merge_bucket_refs(spec: &PdSpec, tables: &[&PdHandedTable], b: usize) -> PdMe
             .map(|p| (p.starts[b + 1] - p.starts[b]) as usize)
             .sum(),
     );
+    // q9internals inc-3: all donors are known here — arm the anticipatory
+    // per-set reserve (the split paths keep the exact per-donor bound).
+    m.set_donor_hint(tables.len());
     for &t in tables {
         m.absorb(t, b);
     }
@@ -1453,6 +1557,13 @@ pub struct PdBucketMerger<'s> {
     /// Bucket-local open-addressed probe over the output groups.
     table: Vec<u32>,
     hashes: Vec<u64>,
+    /// q9internals inc-3: total donors this merge will absorb (0 = unknown
+    /// — per-donor exact reserves, the pre-inc-3 behavior) + how many have
+    /// been absorbed. Known donor counts let the per-set reserve target
+    /// anticipate the donors still to come instead of re-growing (and
+    /// re-rehashing the whole set) once per donor.
+    donor_hint: usize,
+    absorbed: usize,
 }
 
 impl<'s> PdBucketMerger<'s> {
@@ -1469,7 +1580,22 @@ impl<'s> PdBucketMerger<'s> {
             },
             table: vec![0; 64],
             hashes: Vec::new(),
+            donor_hint: 0,
+            absorbed: 0,
         }
+    }
+
+    /// q9internals inc-3: declare the total donor count (the non-split
+    /// combine knows all its tables up front). ONLY a reserve-geometry
+    /// input: with n roughly-equal donors the per-donor exact bound
+    /// re-grows the same dst set ~log2(n) times, each grow a full-set
+    /// rehash (~2x final len of reinsert volume at q9's disjoint
+    /// per-worker sets); scaling the target by the donors still to come
+    /// makes the first reserve final. The split paths keep hint 0: their
+    /// per-absorb budget checks (mem_bytes-driven split decisions) must
+    /// not see anticipatory capacity.
+    pub fn set_donor_hint(&mut self, n: usize) {
+        self.donor_hint = n;
     }
 
     /// dedupsub reserve wave (vecaudit boardable item): pre-size the
@@ -1508,6 +1634,10 @@ impl<'s> PdBucketMerger<'s> {
         let nsets = self.spec.sets.len();
         let has_bytes = self.spec.has_bytes_keys();
         let key_kinds = &self.spec.key_kinds;
+        self.absorbed += 1;
+        // q9internals inc-3: donors still to come INCLUDING this one (>= 1;
+        // 1 when the hint is unset/exhausted = the per-donor exact bound).
+        let donors_left = (self.donor_hint + 1).saturating_sub(self.absorbed).max(1);
         let PdBucketMerger { out, table, hashes, .. } = self;
         let parts = t.parts.as_ref().expect("grouped tables are partitioned");
         let (s, e) = (parts.starts[b] as usize, parts.starts[b + 1] as usize);
@@ -1607,9 +1737,15 @@ impl<'s> PdBucketMerger<'s> {
                 // needed), one jump instead of the per-absorb doubling
                 // ladder. Int values only (bytes sets pass an empty
                 // `vals`; the emptiness guards in reserve_projected keep
-                // bytes/replay arms untouched).
+                // bytes/replay arms untouched). q9internals inc-3: with a
+                // donor hint, anticipate the donors still to come (equal-
+                // share extrapolation of THIS donor's contribution) so the
+                // first reserve is the last — the per-donor exact bound
+                // re-grew the same big set once per donor, a full-set
+                // rehash each time. Geometry only; grow_to_cap census
+                // measured 5.05%/4.19% of q9/q10 rt16 cycles at t23.
                 if !vals.is_empty() && pd_grow_project_enabled() {
-                    let target = dset.len() + vals.len();
+                    let target = dset.len() + vals.len() * donors_left;
                     if target >= PD_PROJECT_MIN {
                         dset.reserve_projected(target);
                     }
@@ -3506,6 +3642,139 @@ mod tests {
         let o0 = drive(&spec0, false);
         let p0 = drive(&spec0, true);
         assert_eq!(o0.set_ints, p0.set_ints);
+    }
+
+    /// q9internals inc-2: run-memo + consecutive-dup-skip identity. A
+    /// clustered corpus (group-key runs with repeated (k,v) pairs — the
+    /// sorted-bank shape) plus adversarial faces (interleaved groups, NULLs
+    /// inside runs, same value re-appearing across groups/runs, memo-width
+    /// boundary) must freeze BYTE-IDENTICAL tables with the memo on vs off,
+    /// staged and unstaged. Also pins the accounting equality under skip.
+    #[test]
+    fn run_memo_identity() {
+        let spec = Arc::new(PdSpec {
+            key_atts: vec![0],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+            vocab: vec![],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+            max_att: 2,
+            worker_budget: usize::MAX,
+            expected_worker_rows: 0,
+        });
+        // Corpus: runs of (k, v) with in-run duplicates (dup-skip face),
+        // occasional NULLs inside runs (must not break the skip), group
+        // interleaving every 7th run (memo miss face), and values that
+        // recur in LATER runs of the same group (non-consecutive dup: must
+        // NOT be skipped by the memo, dedup'd by the set as before).
+        let mut corpus: Vec<(i64, Option<i64>)> = Vec::new();
+        for run in 0..4000i64 {
+            let k = if run % 7 == 0 { run % 3 } else { run % 29 };
+            let base = (run % 11) * 100; // recurs across runs of the same k
+            for rep in 0..(1 + run % 6) {
+                corpus.push((k, Some(base)));
+                if rep == 2 {
+                    corpus.push((k, None)); // NULL inside the run
+                    corpus.push((k, Some(base))); // dup straddling the NULL
+                }
+            }
+            corpus.push((k, Some(base + run))); // distinct tail per run
+        }
+        assert!(corpus.len() > 2 * PD_STAGE_BATCH, "corpus spans windows");
+        let drive = |memo: bool, staged: bool| -> PdHandedTable {
+            let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
+            b.set_batch_insert(staged);
+            b.set_run_memo(memo);
+            for &(k, v) in &corpus {
+                let g = b.resolve_group_int(&[k], 0) as usize;
+                if staged {
+                    assert!(matches!(b.stage_push(g, v).unwrap(), PdFeed::Ok));
+                } else {
+                    match v {
+                        Some(v) => b.dsets[g].insert_i64(v),
+                        None => b.dsets[g].seen_null = true,
+                    }
+                }
+            }
+            if staged {
+                b.flush_staged();
+                let exact: usize = b.dsets.iter().map(|d| d.mem_bytes()).sum();
+                assert_eq!(b.total_set_mem, exact, "delta accounting drifted under skip");
+            }
+            b.freeze().unwrap()
+        };
+        let oracle = drive(false, false);
+        for (memo, staged) in [(true, false), (false, true), (true, true)] {
+            let t = drive(memo, staged);
+            assert_eq!(oracle.ngroups, t.ngroups, "memo={memo} staged={staged}");
+            assert_eq!(oracle.keys, t.keys, "memo={memo} staged={staged}");
+            assert_eq!(
+                oracle.set_ints, t.set_ints,
+                "value arrays identical incl. order (memo={memo} staged={staged})"
+            );
+            assert_eq!(oracle.set_int_offs, t.set_int_offs, "memo={memo} staged={staged}");
+            assert_eq!(oracle.set_null, t.set_null, "memo={memo} staged={staged}");
+        }
+    }
+
+    /// q9internals inc-3: the donor-hint anticipatory combine reserve is
+    /// pure geometry — merged output byte-identical with the hint armed vs
+    /// not, on overlapping AND disjoint donor value sets, and the armed
+    /// merge's big dst set reaches final capacity by the end of donor 1
+    /// (no per-donor re-grow).
+    #[test]
+    fn donor_hint_merge_identity() {
+        let spec = Arc::new(PdSpec {
+            key_atts: vec![0],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I64)],
+            vocab: vec![],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+            max_att: 2,
+            worker_budget: usize::MAX,
+            expected_worker_rows: 0,
+        });
+        // 4 donors, one dominant group: donor d holds values in a mostly
+        // disjoint range (the q9 UserID-clustered shape) plus a shared
+        // overlap slice (dedup face).
+        let tables: Vec<PdHandedTable> = (0..4i64)
+            .map(|d| {
+                let mut b = PdBuilder::new(Arc::clone(&spec), usize::MAX, None);
+                for i in 0..(3 * PD_PROJECT_MIN as i64) {
+                    let k = [i % 5]; // 5 groups
+                    let h = key_hash(&k, 0);
+                    let (found, slot) = b.probe(&k, 0, h, &KeySrc::None);
+                    let g = match found {
+                        Some(g) => g,
+                        None => b.create_group(&k, 0, h, slot, &KeySrc::None),
+                    } as usize;
+                    let v = if i % 97 == 0 { i } else { d * 1_000_000_000 + i };
+                    b.dsets[g].insert_i64(v);
+                }
+                b.freeze().unwrap()
+            })
+            .collect();
+        let refs: Vec<&PdHandedTable> = tables.iter().collect();
+        let nbuckets = PD_GROUP_PARTS;
+        for b in 0..nbuckets {
+            let hinted = merge_bucket_refs(&spec, &refs, b);
+            // Hint-less control: drive the merger without set_donor_hint.
+            let mut m = PdBucketMerger::new(&spec);
+            for &t in &refs {
+                m.absorb(t, b);
+            }
+            let plain = m.finish();
+            assert_eq!(hinted.ngroups, plain.ngroups, "bucket {b}");
+            assert_eq!(hinted.keys, plain.keys, "bucket {b}");
+            for (i, (h, p)) in hinted.dsets.iter().zip(plain.dsets.iter()).enumerate() {
+                match (h, p) {
+                    (Some(h), Some(p)) => {
+                        assert_eq!(h.ints(), p.ints(), "bucket {b} set {i} values+order");
+                        assert_eq!(h.seen_null, p.seen_null, "bucket {b} set {i}");
+                    }
+                    (None, None) => {}
+                    _ => panic!("bucket {b} set {i}: arm mismatch"),
+                }
+            }
+        }
     }
 
     /// M3.5 §4 round-trip: drain values → records → rebuild → merge with the
