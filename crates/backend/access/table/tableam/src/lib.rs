@@ -1044,7 +1044,7 @@ pub fn pgrcolumnar_analyze_gather_rows(
     per_row: &mut dyn FnMut(&mut SlotData<'_>) -> PgResult<()>,
 ) -> PgResult<u64> {
     match scan {
-        TableScanDesc::Cbstore(c) => c.analyze_gather_rows(refs, pool, slot, per_row),
+        TableScanDesc::Pgrcolumnar(c) => c.analyze_gather_rows(refs, pool, slot, per_row),
         TableScanDesc::Heap(_) => panic!("cbstore_analyze_gather_rows: heap scan"),
     }
 }
