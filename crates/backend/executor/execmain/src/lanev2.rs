@@ -46,11 +46,15 @@ mod runtime_plaindistinct;
 mod runtime_scan;
 mod runtime_sort;
 mod push;
+mod rowmode;
 mod stats;
 
 pub use exprkey::ExprKeyState;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
+pub(crate) use rowmode::try_own_project_set;
+#[cfg(test)]
+pub(crate) use rowmode::rowmode_set_for_tests;
 
 use std::sync::OnceLock;
 
@@ -12423,24 +12427,17 @@ pub fn try_own_result<'mcx>(
         None => {
             // The no-FROM row: exec_result's childless body, statement for
             // statement (entry CFI → one-time gate → per-call ctx reset →
-            // drained guard → mark done + project the single row).
-            crate::cfi()?;
+            // drained guard → mark done + project the single row) — the
+            // shared `noderesult::lane_result_childless_next` seam, also the
+            // row-mode `ResultRowSource` face (rowmode.rs).
             // One OWNED tick per lane-owned Result execution: the call that
             // consumes the gate and/or emits; the drained tail calls after it
-            // don't re-tick.
+            // don't re-tick. (Stats stay at this call site so the seam is a
+            // pure code move of the select1 hot path's body.)
             if rs.rs_checkqual || !rs.rs_done {
                 stats::tick_owned(ShapeClass::ResultNode);
             }
-            if rs.rs_checkqual && !crate::noderesult::lane_result_gate(rs, estate)? {
-                return Ok(Some(None));
-            }
-            let ecxt = rs.ps.ps_ExprContext.expect("ResultState without ExprContext");
-            estate.reset_expr_context(ecxt);
-            if rs.rs_done {
-                return Ok(Some(None));
-            }
-            rs.rs_done = true;
-            Ok(Some(Some(crate::noderesult::lane_result_project(&mut rs.ps, estate)?)))
+            Ok(Some(crate::noderesult::lane_result_childless_next(rs, estate)?))
         }
         Some(crate::procnode::PlanStateNode::Sort(_)) => {
             // Child admission BEFORE any state effect. (Instrumented trees
@@ -13031,10 +13028,13 @@ pub fn try_own_append<'mcx>(
 }
 
 // ===========================================================================
-// ProjectSet: DOCUMENTED WHOLESALE REFUSE (wave-5 evaluation, 2026-07-12).
+// ProjectSet: wholesale refuse BY DEFAULT (wave-5 evaluation, 2026-07-12),
+// with the row-mode facility's default-OFF unlock behind it (Phase 0 of
+// docs/design/single-executor-migration.md, item 0.5; rowmode.rs).
 //
-// Verdict: do NOT host. The SRF tlist expansion is per-tuple stateful in
-// three ways the lane would have to carry, for zero engagement:
+// The wave-5 verdict stands for the DEFAULT config: the SRF tlist expansion
+// is per-tuple stateful in three ways the batched lane would have to carry,
+// for zero engagement:
 //   * the multi-call protocol itself — `pending_srf_tuples` resumes a
 //     half-emitted expansion across `exec_proc_node` calls, `args_valid`
 //     pins evaluated arg datums across those calls (query-context armed),
@@ -13044,24 +13044,18 @@ pub fn try_own_append<'mcx>(
 //   * `ExecProjectSRF` interleaves per-tuple context resets between (not
 //     within) expansions — a batched drive would need the exact reset
 //     points replayed to keep by-ref datum lifetimes identical.
-// An expanding-`TupleOp` hosting (the join-probe pause/resume shape over
-// `pending_srf_tuples`) is model-compatible in principle, but it could only
-// chain over a lane-owned child pipeline — and ProjectSet children in
-// practice are bare scans, which refuse standalone ownership (admission
-// economics, STANDALONE_SCAN_NO_UPSIDE), so the hook would engage nowhere.
-// Reusing `exec_project_set`'s own body per-tuple would add a lane layer
-// over a refused child — exactly the shape §4's economics forbid. Refuse,
-// and re-evaluate when the design's "SRFs = expanding operator" phase item
-// lands (design doc §4 "Everything else is hostable, staged deliberately").
+// The "SRFs = expanding operator" phase item now EXISTS as
+// `rowmode::ProjectSetOp` — an expanding `TupleOp` whose pause/resume IS
+// `pending_srf_tuples` and whose bodies are `exec_project_set`'s own seams
+// (reset points replayed exactly; nodeprojectset.rs) — over the one child
+// shape with a lane-ownable row face today, the childless Result
+// (`SELECT generate_series(...)`). It is engagement-coverage work, not a
+// perf lever (migration doc: the facility's value is the contract), so it
+// stays behind the default-OFF `PGRUST_LANE_V2_ROWMODE` knob: knob OFF,
+// `rowmode::try_own_project_set` ticks the wholesale `srf-set-expansion`
+// refuse exactly as the pre-rowmode hook did and `project_set_arm` falls
+// through to the unchanged `exec_project_set`.
 // ===========================================================================
-
-/// Tick the documented ProjectSet wholesale refuse (module doc above; the
-/// `project_set_arm` dispatch hook calls this and always falls through to
-/// the unchanged `exec_project_set`).
-#[inline]
-pub fn refuse_project_set() {
-    stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::SrfSetExpansion);
-}
 
 // ===========================================================================
 // Lane-v2 parallel exact-DISTINCT partials (lane-v2-pardistinct;
