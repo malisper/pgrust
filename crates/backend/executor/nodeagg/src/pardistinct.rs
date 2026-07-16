@@ -609,10 +609,15 @@ impl<'mcx> PdBuilder<'mcx> {
         // either way group g's distinct union already holds v, and the
         // duplicate insert this push would replay is a set no-op. Value
         // arrays, append order, and every frozen/spilled union byte are
-        // identical; only staged_rows (projection geometry) sees fewer
-        // rows. Sorted banks make duplicates overwhelmingly consecutive.
+        // identical. Sorted banks make duplicates overwhelmingly
+        // consecutive. staged_rows still counts the skipped row: it is the
+        // projection ratio's ROW denominator (expected_worker_rows is raw
+        // plan rows) — starving it would inflate the ratio by the dup
+        // factor and over-reserve the dominant sets toward the raw row
+        // count (memory + budget-crossing distortion).
         if self.memo_on {
             if self.last_sg == g as u32 && self.last_sv == v {
+                self.staged_rows += 1;
                 return Ok(PdFeed::Ok);
             }
             self.last_sg = g as u32;
