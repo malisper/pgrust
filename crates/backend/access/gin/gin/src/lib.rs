@@ -57,6 +57,18 @@ pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: gin {what}")
 }
 
+// unported: feature arms that a user can reach through plain SQL (an
+// unsupported opclass / element type at CREATE INDEX or scan setup) raise a
+// clean 0A000 instead of panicking; invariant/data-format arms stay loud.
+#[cold]
+#[inline(never)]
+pub(crate) fn unsupported(what: String) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(what)
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn oom(n: usize) -> Box<::types_error::PgError> {
