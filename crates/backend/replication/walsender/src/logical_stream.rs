@@ -48,6 +48,11 @@ thread_local! {
     static LOGICAL_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
     // WalSndWaitForWal's RecentFlushPtr (C function-static).
     static RECENT_FLUSH_PTR: Cell<XLogRecPtr> = const { Cell::new(InvalidXLogRecPtr) };
+    // XLogBackgroundFlush's lastflush pacing is caller-owned state since the
+    // M4 walwriter migration; each walsender is a persistent thread (the C
+    // per-process function-static analog), so one per walsender thread.
+    static WAL_FLUSH_PACING: Cell<transam_xlog::WalFlushPacing> =
+        const { Cell::new(transam_xlog::WalFlushPacing::new()) };
 }
 
 // StartLogicalReplication (walsender.c:1447).
@@ -302,7 +307,9 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
         // If we're shutting down, trigger pending WAL to be written out so we
         // don't wait for WAL the walwriter will never write.
         if crate::GOT_STOPPING.with(|c| c.get()) {
-            transam_xlog::XLogBackgroundFlush()?;
+            let mut pacing = WAL_FLUSH_PACING.with(Cell::get);
+            transam_xlog::XLogBackgroundFlush(&mut pacing)?;
+            WAL_FLUSH_PACING.with(|c| c.set(pacing));
         }
 
         let recent_flush = transam_xlog::GetFlushRecPtr(None);
