@@ -163,7 +163,7 @@ pub fn AllocDeadEndChild() -> Option<i32> {
 pub fn ReleasePostmasterChildSlot(child_slot: i32) -> bool {
     enum Released {
         DeadEnd,
-        Pooled,
+        Pooled(bool),
     }
     let released = with_registry(|reg| {
         let pos = reg
@@ -190,17 +190,28 @@ pub fn ReleasePostmasterChildSlot(child_slot: i32) -> bool {
                 pmchild.bkend_type as u32
             );
         }
+        // The PMChildFlags store must precede the freelist push, INSIDE the
+        // registry lock: AssignPostmasterChildSlot pops under this same lock
+        // but checks/marks the flag AFTER releasing it — so once a slot is
+        // visible in the freelist its flag must already read UNUSED.
+        // Pre-fix the store ran after the lock was dropped, and a concurrent
+        // assign of the just-pushed slot raced it into "postmaster child
+        // slot is already in use" (the chaos-round pmchild lib.rs:131
+        // panic; C is immune — both sides run on the single postmaster
+        // thread, and the threaded port's P-pool assigns from backend
+        // threads too).
+        let was_assigned = pmsignal::MarkPostmasterChildSlotUnassigned(pmchild.child_slot);
         pool.freelist.push(pmchild.child_slot);
-        Released::Pooled
+        Released::Pooled(was_assigned)
     });
     match released {
         Released::DeadEnd => {
             let _ = report(DEBUG2, "releasing dead-end backend");
             true
         }
-        Released::Pooled => {
+        Released::Pooled(was_assigned) => {
             let _ = report(DEBUG2, format!("releasing pm child slot {child_slot}"));
-            pmsignal::MarkPostmasterChildSlotUnassigned(child_slot)
+            was_assigned
         }
     }
 }

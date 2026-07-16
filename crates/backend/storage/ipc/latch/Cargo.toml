@@ -17,4 +17,6 @@ timeout_seams = { path = "../../../utils/misc/timeout_seams" }
 latch_seams = { path = "../latch_seams" }
 procsignal_seams = { path = "../procsignal_seams" }
 waiteventset_seams = { path = "../waiteventset_seams" }
+waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
+waiter = { path = "../waiter" }
 lmgr_proc_seams = { path = "../../lmgr/lmgr_proc_seams" }

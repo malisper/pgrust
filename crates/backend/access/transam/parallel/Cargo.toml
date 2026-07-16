@@ -12,6 +12,7 @@ path = "src/lib.rs"
 hba_seams = { path = "../../../libpq/hba_seams" }
 backend_progress = { path = "../../../utils/activity/backend_progress" }
 parallel_seams = { path = "../parallel_seams" }
+session = { path = "../../session" }
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
@@ -33,8 +34,10 @@ xact = { path = "../xact" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }
 bgworker = { path = "../../../postmaster/bgworker" }
 lmgr_proc = { path = "../../../storage/lmgr/lmgr_proc" }
+procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 procsignal = { path = "../../../storage/ipc/procsignal" }
 latch = { path = "../../../storage/ipc/latch" }
+shm_mq = { path = "../../../storage/ipc/shm_mq" }
 catalog_namespace = { path = "../../../catalog/catalog_namespace" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
 pg_enum = { path = "../../../catalog/pg_enum" }
@@ -43,11 +46,11 @@ typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 
 [dev-dependencies]
 types_startup = { path = "../../../../_support/types/types_startup" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 mcx = { path = "../../../../_support/mcx" }
 pmsignal = { path = "../../../storage/ipc/pmsignal" }
 waiteventset = { path = "../../../storage/ipc/waiteventset" }
 fd = { path = "../../../storage/file/fd" }
-shm_mq = { path = "../../../storage/ipc/shm_mq" }
 tqueue = { path = "../../../executor/tqueue" }
 instrument = { path = "../../../executor/instrument" }
 controldata_utils = { path = "../../../../common/controldata_utils" }

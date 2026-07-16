@@ -447,7 +447,7 @@ pub static ENTRIES: &[BatchFn] = &[
     // === date comparators — AOT qual (ne-admission census close) ===
     // date is int32 days; DATE_NOBEGIN/NOEND sentinels are i32::MIN/MAX, so
     // date.c's comparators are plain int compares (the same fact laneexec's
-    // translate whitelist and the cbstore zone-qual extraction already
+    // translate whitelist and the pgrcolumnar zone-qual extraction already
     // carry). Registered here so the central census matches the consumers.
     cmp_aot_saop(1086, "date_eq", I4, Eq),
     cmp_aot_saop(1091, "date_ne", I4, Ne),

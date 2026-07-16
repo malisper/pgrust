@@ -9,7 +9,7 @@
 //! memcmp 21% of the warm profile), and the hash-grouped text arm pays
 //! detoast+hash+memcmp per row into ~as many group states as rows (measured
 //! LOSS — its density tier now refuses upfront). This arm exploits the
-//! cbstore dict facts instead (the dictminmax foundation, verified in
+//! pgrcolumnar dict facts instead (the dictminmax foundation, verified in
 //! writer.rs): every CB-bank text chunk is dict-encoded, per-epoch (row
 //! group) dictionaries are DEDUPLICATED and BYTE-SORTED, and a dict-lane
 //! window's codes satisfy `values[i] == table.datum(code(i))`.
@@ -17,12 +17,13 @@
 //! Build (per staged window, batch-wise): group ON THE (epoch, code) INTEGER
 //! DOMAIN — a per-epoch direct-indexed `code → state` map (dense, ≤ 65,536
 //! entries by the writer's dict admission); per surviving row ONE array
-//! index plus one append of the DISTINCT arg value onto the state's chain
-//! (a shared `(value, next)` pool — no per-state allocation). No hashing, no
+//! index plus one append of (DISTINCT arg value, state) onto a shared log
+//! (`finish_build` counting-sorts it into contiguous per-state value runs —
+//! no per-state allocation, no pointer chasing at emit). No hashing, no
 //! detoast, no string compare, no transition program on the build path. The
 //! state's key materializes ONCE per distinct (epoch, code): the dict
 //! entry's varlena IMAGE is copied into the arm's arena (C-identical datum
-//! bytes — the cbstore fill's Raw gather for a dict chunk publishes exactly
+//! bytes — the pgrcolumnar fill's Raw gather for a dict chunk publishes exactly
 //! `dict[code]`, so this is the datum every row of the state carried).
 //!
 //! Emit (streamed, one group per pull): per-epoch states listed in CODE
@@ -31,10 +32,12 @@
 //! which IS `varstr_cmp` order under the admitted memcmp-tier collation
 //! (C/POSIX/DEFAULT→C, `lanefold::str_collation_safe`), i.e. the plan
 //! Sort's ASC group order. Adjacent equal-content states (the same phrase in
-//! different epochs) merge into ONE group: their chains union into the
-//! pertrans exact-DISTINCT set (dedup exactly there), the group finalizes
-//! through the UNCHANGED `agg_sorted_emit` tail (set replay through the real
-//! transfn — the COUNT shortcut included — then HAVING + projection).
+//! different epochs) merge into ONE group: their value runs dedup exactly —
+//! small groups by pairwise compares straight into the count state (the
+//! cgemit fastpath), the rest through the pertrans exact-DISTINCT set — and
+//! the group finalizes through the UNCHANGED `agg_sorted_emit` tail (set
+//! replay through the real transfn — the COUNT shortcut included — then
+//! HAVING + projection).
 //!
 //! Byte identity vs the C path (and vs both incumbent arms):
 //!   * same groups: within an epoch distinct codes are distinct bytes
@@ -47,7 +50,7 @@
 //!     text order (admission refuses DESC and non-memcmp collations). Two
 //!     distinct groups never compare equal, so the order is total. NULL
 //!     group keys cannot exist here (dict codes have no NULL representation
-//!     and cbstore stores no NULLs; any non-dict window degrades BEFORE
+//!     and pgrcolumnar stores no NULLs; any non-dict window degrades BEFORE
 //!     being absorbed);
 //!   * same values: the same distinct multiset per group replays through
 //!     the SAME set machinery (`process_ordered_aggregates`); the admission
@@ -58,7 +61,7 @@
 //!     grouping columns and aggregates), and the key image is the very datum
 //!     the C row path's slot carried for every row of the group.
 //!
-//! Memory / degrade: everything (arena, chain pool, state vecs, map) meters
+//! Memory / degrade: everything (arena, value log, state vecs, map) meters
 //! against HALF the displaced tuplesort's budget. Crossing it — or meeting a
 //! non-dict/unsorted-dict window, a fallback-bearing batch, a NULL arg, or a
 //! non-inline dict image — DEGRADES to the narrow-sort arm exactly once: the
@@ -72,7 +75,7 @@
 //! Admission (v1, deliberately tight — the Q14 shape): the narrow-sort
 //! admission, exactly ONE text/varchar grouping column, exactly ONE
 //! transition which is a set-mode COUNT(DISTINCT <bare int Var>) pertrans
-//! (`set_count_transfn` + `direct_att`), cbstore scan + dict staging armed
+//! (`set_count_transfn` + `direct_att`), pgrcolumnar scan + dict staging armed
 //! by the drive, single ASC memcmp-tier text sort prefix. Everything else
 //! refuses to the incumbent arms, byte-identically.
 
@@ -100,8 +103,6 @@ enum CgPhase {
     Emit,
 }
 
-/// Sentinel for "load the current replay state's chain head".
-const REPLAY_HEAD: u32 = u32::MAX;
 
 /// One accepted batch's outcome (transactional bookkeeping for the degrade):
 /// `consumed` survivor rows were fully absorbed into states; `keep == false`
@@ -124,18 +125,36 @@ pub(crate) struct CodedGroupState<'mcx> {
     /// arena is metered against the arm's budget (≤ work_mem/2, itself
     /// capped « 4GiB) and one dict entry overshoots by < 1GiB.
     spans: Vec<(u32, u32)>,
-    /// Per state: chain head (pool index + 1; never 0 — a state is created
-    /// by the row that appends its first value).
-    heads: Vec<u32>,
-    /// Shared DISTINCT-arg chain pool: (sign-extended value, next + 1).
+    /// Shared DISTINCT-arg log, in absorb order: (sign-extended value,
+    /// state). `finish_build` counting-sorts it into `vals_flat` (contiguous
+    /// per-state value runs, addressed by `state_off`) and frees it — the
+    /// emit never chases pointers (lane-v2 cgemit).
     pool: Vec<(i64, u32)>,
+    /// Emit (built at `finish_build`): per-state contiguous value runs.
+    /// State `s`'s values are `vals_flat[state_off[s]..state_off[s+1]]`.
+    vals_flat: Vec<i64>,
+    state_off: Vec<u32>,
     arena: Vec<u8>,
-    /// Per-epoch direct map: code → state index + 1 (0 = unseen). Dense
-    /// (`ndict`-sized), rebuilt at every epoch roll.
+    /// Code-domain mode, fixed at the first absorbed window: `Some(true)` =
+    /// PART-GLOBAL codes (the v7 stitch): `code_map` is indexed by
+    /// `global_code(local)` (dense 0..gndv over the part's union dict),
+    /// keyed on the scan-stable gepoch, and NEVER cleared at epoch rolls —
+    /// the same string in every row group lands on ONE state (its image
+    /// copied once part-wide), and because global codes are strictly
+    /// byte-rank ordered part-wide the whole build closes into a SINGLE
+    /// merge run (the k-way emit machinery degenerates to a run walk).
+    /// `Some(false)` = per-epoch local codes (below). A mid-build mode flip
+    /// degrades (defensive; a pinned scan's stitch is column-stable).
+    mode_global: Option<bool>,
+    /// Direct map: code → state index + 1 (0 = unseen). Local mode: dense
+    /// `ndict`-sized, rebuilt at every epoch roll (`cur_epoch` = epoch).
+    /// Global mode: dense `gndv`-sized, built once (`cur_epoch` = gepoch).
     cur_epoch: Option<u64>,
     code_map: Vec<u32>,
-    /// (code, state) pairs created in the CURRENT epoch, sorted by code at
-    /// the epoch close — code order IS byte order (sorted dicts).
+    /// (code, state) pairs not yet closed into a run, sorted by code at the
+    /// close — code order IS byte order (sorted dicts; global codes are
+    /// byte-rank by construction). Local mode closes per epoch; global mode
+    /// closes once at finish (states are globally unique, one total run).
     epoch_pairs: Vec<(u32, u32)>,
     /// Closed epochs: `runs[e] = [start, end)` into `order`, whose entries
     /// are state indices in byte order within the epoch.
@@ -146,9 +165,14 @@ pub(crate) struct CodedGroupState<'mcx> {
     heap: Vec<u32>,
     /// Scratch: the current merged group's state indices.
     gstates: Vec<u32>,
-    /// Degrade replay cursor.
-    replay_state: usize,
-    replay_next: u32,
+    /// Emit scratch: the current group's chain values (all epochs) and the
+    /// batched-insert hash pass (lane-v2 cgemit — see `agg_codedgroup_emit_next`).
+    vals: Vec<i64>,
+    val_hashes: Vec<u64>,
+    /// Degrade replay cursor (index into `pool` — replay runs in Building
+    /// phase, before any materialization; the narrowed sort absorbs the
+    /// multiset, so log order is as good as chain order).
+    replay_idx: usize,
     /// Spare outer-format virtual slot: synthesized reps + degrade replay.
     rep_slot: SlotData<'mcx>,
     budget: usize,
@@ -165,9 +189,13 @@ impl CodedGroupState<'_> {
     #[inline]
     fn mem(&self) -> usize {
         self.arena.capacity()
-            + self.pool.capacity() * core::mem::size_of::<(i64, u32)>()
+            // Log entries carry a +12B finish-build materialization reserve
+            // (vals_flat 8B + state_off share) so the budget meter covers
+            // the counting-sort's transient peak too.
+            + self.pool.capacity() * (core::mem::size_of::<(i64, u32)>() + 12)
+            + self.vals_flat.capacity() * 8
+            + self.state_off.capacity() * 4
             + self.spans.capacity() * 8
-            + self.heads.capacity() * 4
             + self.code_map.capacity() * 4
             + self.epoch_pairs.capacity() * 8
             + self.order.capacity() * 4
@@ -188,6 +216,40 @@ impl CodedGroupState<'_> {
             } else {
                 &img[4..varatt::varsize_4b(img.as_ptr())]
             }
+        }
+    }
+
+    /// Epoch roll: close the outgoing epoch's run and reset `code_map` to
+    /// all-zero over `[0, map_size)` for the incoming identity. Default arm
+    /// ([`cg_touched_clear_enabled`]) zeroes only the slots the closing
+    /// epoch WROTE — the exact set is `epoch_pairs`' map indexes (every
+    /// first-seen insert writes both, nothing else writes the map) — and the
+    /// allocation only grows; the kill-switch arm restores the full
+    /// `clear()+resize(map_size, 0)` domain memset. Both arms establish the
+    /// same visible state: `code_map[0..map_size]` all zero, `epoch_pairs`
+    /// empty. Must zero BEFORE `close_epoch` drains `epoch_pairs`.
+    fn roll_epoch(&mut self, ident: u64, map_size: usize) {
+        if cg_touched_clear_enabled() {
+            for &(mcode, _) in &self.epoch_pairs {
+                self.code_map[mcode as usize] = 0;
+            }
+            self.close_epoch();
+            self.cur_epoch = Some(ident);
+            if self.code_map.len() < map_size {
+                // Domain-work tripwire: the GROWTH is domain-sized (the
+                // first build in GLOBAL mode is the gndv-sized member).
+                let grow = map_size - self.code_map.len();
+                ::exectuples::domain_work_tick(grow * 4, grow);
+                self.code_map.resize(map_size, 0);
+            }
+        } else {
+            self.close_epoch();
+            self.cur_epoch = Some(ident);
+            self.code_map.clear();
+            self.code_map.resize(map_size, 0);
+            // Domain-work tripwire: the kill-switch arm re-zeroes the
+            // whole domain per roll — the exposure this lane closed.
+            ::exectuples::domain_work_tick(map_size * 4, map_size);
         }
     }
 
@@ -380,6 +442,59 @@ fn codedgroup_budget() -> usize {
     crate::distinct_set_budget() / 2
 }
 
+/// `PGRUST_LANE_V2_CGEMIT` kill switch (default ON; `0`/`off` restores the
+/// per-element pooled-set union): the emit-tail small-group COUNT(DISTINCT)
+/// fastpath + batched set inserts. `PGRUST_LANE_V2_CGEMIT_SMALL` overrides
+/// the fastpath length bound (default 16; the pairwise dedup is O(n²) in
+/// registers below it). Results are byte-identical under every arm — the
+/// count is the value multiset's support cardinality either way.
+fn cgemit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CGEMIT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn cgemit_small_max() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_CGEMIT_SMALL")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(16)
+    })
+}
+
+/// `PGRUST_LANE_V2_CGTOUCHED` kill switch (default ON; `0`/`off` restores the
+/// full-domain re-zeroing): LOCAL-mode epoch rolls clear only the `code_map`
+/// slots this epoch actually WROTE (the exact set is `epoch_pairs` — every
+/// first-seen insert records its map index there) and the map only grows,
+/// instead of `clear()+resize(ndict, 0)` re-zeroing the whole per-RG dict
+/// domain on every roll (proportionality-audit B3: O(touched codes) useful
+/// work, O(ndict) memset per row group per worker). Map contents visible to
+/// the algorithm are identical under both arms: all-zero over
+/// `[0, map_size)` at every epoch start.
+fn cg_touched_clear_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_CGTOUCHED").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Distinct count of a small value slice by pairwise compares (no hashing,
+/// no table). Exact-set semantics: |support of the multiset|.
+#[inline]
+fn count_distinct_small(vals: &[i64]) -> i64 {
+    let mut n = 0i64;
+    for i in 0..vals.len() {
+        let v = vals[i];
+        if !vals[..i].contains(&v) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Planner-estimate economics: engage EXACTLY the density band the
 /// hash-grouped arm's tier refuses (near-unique keys, the Q14 class) — the
 /// higher-density single-text-key shapes keep the measured hash-arm text
@@ -435,9 +550,11 @@ pub fn agg_codedgroup_begin<'mcx>(
         kind,
         natts,
         spans: Vec::new(),
-        heads: Vec::new(),
         pool: Vec::new(),
+        vals_flat: Vec::new(),
+        state_off: Vec::new(),
         arena: Vec::new(),
+        mode_global: None,
         cur_epoch: None,
         code_map: Vec::new(),
         epoch_pairs: Vec::new(),
@@ -446,8 +563,9 @@ pub fn agg_codedgroup_begin<'mcx>(
         cursor: Vec::new(),
         heap: Vec::new(),
         gstates: Vec::new(),
-        replay_state: 0,
-        replay_next: REPLAY_HEAD,
+        vals: Vec::new(),
+        val_hashes: Vec::new(),
+        replay_idx: 0,
         rep_slot,
         budget: codedgroup_budget(),
         mcx,
@@ -479,27 +597,45 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
     let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
     debug_assert!(matches!(cg.phase, CgPhase::Building));
     debug_assert!(lane.table.sorted, "caller admits sorted dicts only");
-    let ndict = lane.table.ndict as usize;
-    if cg.cur_epoch != Some(lane.table.epoch) {
-        cg.close_epoch();
-        cg.cur_epoch = Some(lane.table.epoch);
-        cg.code_map.clear();
-        cg.code_map.resize(ndict, 0);
+    let t = lane.table;
+    let ndict = t.ndict as usize;
+    // Code-domain mode, fixed at the first window (field doc). A flip mid
+    // build degrades before absorbing anything from this batch.
+    let global = t.has_stitch();
+    match cg.mode_global {
+        None => cg.mode_global = Some(global),
+        Some(m) if m != global => return CgAccept { consumed: 0, keep: false },
+        Some(_) => {}
     }
-    debug_assert!(cg.code_map.len() >= ndict, "dict size is fixed per epoch");
+    let (ident, map_size) = if global {
+        ((t.gepoch), t.gndv as usize)
+    } else {
+        ((t.epoch), ndict)
+    };
+    if cg.cur_epoch != Some(ident) {
+        // Local mode: epoch roll (close the run, reset the map). Global
+        // mode: gepoch is scan-stable, so only the FIRST window lands here.
+        debug_assert!(!global || cg.cur_epoch.is_none(), "gepoch is scan-stable");
+        cg.roll_epoch(ident, map_size);
+    }
+    debug_assert!(cg.code_map.len() >= map_size, "map size is fixed per identity");
     for (idx, &i) in rows.iter().enumerate() {
         // NULL DISTINCT arg: C feeds it through seen_null; this arm keeps
-        // v1 simple and degrades (unreachable on cbstore — no NULLs).
+        // v1 simple and degrades (unreachable on pgrcolumnar — no NULLs).
         if argn[i as usize] {
             return CgAccept { consumed: idx, keep: false };
         }
         let code = lane.code(i as usize) as usize;
         debug_assert!(code < ndict, "filler contract: code < ndict");
-        let s = match cg.code_map[code] {
+        // Map index: part-global byte-rank code when stitched (one state
+        // per distinct string part-wide), local code otherwise.
+        let mcode = if global { t.global_code(code as u32) as usize } else { code };
+        debug_assert!(mcode < cg.code_map.len(), "stitch contract: global code < gndv");
+        let s = match cg.code_map[mcode] {
             0 => {
-                // First surviving row of (epoch, code): land the dict
+                // First surviving row of (identity, code): land the dict
                 // entry's varlena image in the arena (8-aligned).
-                let p = lane.table.datum(code as u32).as_usize() as *const u8;
+                let p = t.datum(code as u32).as_usize() as *const u8;
                 // SAFETY: dict entries are live decoded varlena datums for
                 // the pinned scan's lifetime (SoaDictTable contract),
                 // readable through their header.
@@ -507,7 +643,7 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
                     (varatt::varatt_is_1b_e(p), varatt::varsize_any(p))
                 };
                 if external {
-                    // Non-inline image (never produced by the cbstore
+                    // Non-inline image (never produced by the pgrcolumnar
                     // decode); refuse the row — the caller degrades.
                     return CgAccept { consumed: idx, keep: false };
                 }
@@ -518,10 +654,9 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
                 // SAFETY: as above — `len` bytes readable at `p`.
                 cg.arena.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
                 cg.spans.push((off as u32, len as u32));
-                cg.heads.push(0);
                 let s = (cg.spans.len() - 1) as u32;
-                cg.code_map[code] = s + 1;
-                cg.epoch_pairs.push((code as u32, s));
+                cg.code_map[mcode] = s + 1;
+                cg.epoch_pairs.push((mcode as u32, s));
                 s
             }
             m => m - 1,
@@ -533,8 +668,7 @@ pub fn agg_codedgroup_accept_batch<'mcx>(
             DistinctKeyKind::Int64 => d.as_i64(),
             DistinctKeyKind::Bytes => unreachable!("codedgroup admission is int-arg only"),
         };
-        cg.pool.push((v, cg.heads[s as usize]));
-        cg.heads[s as usize] = cg.pool.len() as u32;
+        cg.pool.push((v, s));
     }
     CgAccept { consumed: rows.len(), keep: cg.mem() <= cg.budget }
 }
@@ -545,6 +679,30 @@ pub fn agg_codedgroup_finish_build(node: &mut AggStateData<'_>) {
     let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
     debug_assert!(matches!(cg.phase, CgPhase::Building));
     cg.close_epoch();
+    // Materialize the absorb-order value log into contiguous per-state runs
+    // (counting sort; one sequential read pass + one scatter write pass) and
+    // free the log — the emit reads slices instead of chasing chains, and no
+    // degrade can happen past this point (input fully absorbed).
+    {
+        let ns = cg.nstates();
+        cg.state_off.clear();
+        cg.state_off.resize(ns + 1, 0);
+        for &(_, s) in &cg.pool {
+            cg.state_off[s as usize + 1] += 1;
+        }
+        for i in 0..ns {
+            cg.state_off[i + 1] += cg.state_off[i];
+        }
+        let mut cur: Vec<u32> = cg.state_off[..ns].to_vec();
+        cg.vals_flat.clear();
+        cg.vals_flat.resize(cg.pool.len(), 0);
+        for &(v, s) in &cg.pool {
+            let c = &mut cur[s as usize];
+            cg.vals_flat[*c as usize] = v;
+            *c += 1;
+        }
+        cg.pool = Vec::new();
+    }
     cg.cursor = cg.runs.iter().map(|&(start, _)| start).collect();
     cg.heap.clear();
     for r in 0..cg.runs.len() as u32 {
@@ -559,6 +717,13 @@ pub fn agg_codedgroup_finish_build(node: &mut AggStateData<'_>) {
         cg.heap_sift_down(i);
     }
     cg.phase = CgPhase::Emit;
+}
+
+/// Code-domain mode after at least one absorbed window: `Some(true)` =
+/// part-global stitch codes, `Some(false)` = per-epoch local codes, `None`
+/// = nothing absorbed yet. Observability for the drive's engagement trace.
+pub fn agg_codedgroup_mode_global(node: &AggStateData<'_>) -> Option<bool> {
+    node.codedgroup.as_deref().and_then(|cg| cg.mode_global)
 }
 
 /// Whether the arm is mid-emit (the drive resumes here BEFORE the dynamic
@@ -603,24 +768,18 @@ pub fn agg_codedgroup_emit_next<'mcx>(
     estate.reset_expr_context(node.ps_ExprContext);
     let mcx = estate.es_query_cxt;
     {
-        // Union the group's chains into the pertrans set (dedup exactly
-        // there); the reused set cycles through ps.dset — the replay tail
-        // clears it and puts it back.
-        let AggStateData { codedgroup, pertrans_sort, .. } = node;
-        let cg = codedgroup.as_deref_mut().expect("codedgroup state");
-        let pt = &mut pertrans_sort[0];
-        let mut set = pt.dset.take().unwrap_or_else(DistinctSet::new);
-        debug_assert!(set.len() == 0 && !set.seen_null, "replay returns the set cleared");
-        for gi in 0..cg.gstates.len() {
-            let s = cg.gstates[gi];
-            let mut link = cg.heads[s as usize];
-            while link != 0 {
-                let (v, next) = cg.pool[(link - 1) as usize];
-                set.insert_i64(v);
-                link = next;
+        // Multi-state groups (the same phrase across epochs) collect their
+        // runs into the emit scratch; the common single-state group reads
+        // its `vals_flat` run in place (no copy) below.
+        let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
+        cg.vals.clear();
+        if cg.gstates.len() > 1 {
+            for gi in 0..cg.gstates.len() {
+                let s = cg.gstates[gi] as usize;
+                let (a, b) = (cg.state_off[s] as usize, cg.state_off[s + 1] as usize);
+                cg.vals.extend_from_slice(&cg.vals_flat[a..b]);
             }
         }
-        pt.dset = Some(set);
     }
     // Group-init transition state (initialize_aggregates' one-transition
     // body; byval/null by admission, so no aggcontext copy).
@@ -635,6 +794,55 @@ pub fn agg_codedgroup_emit_next<'mcx>(
                 trans_value_is_null: init.isnull,
                 no_trans_value: init.isnull,
             });
+        }
+    }
+    {
+        // COUNT the group's distinct values (lane-v2 cgemit). Small groups —
+        // the overwhelming majority on the near-unique shapes this arm
+        // admits — dedup by pairwise compares and apply the count directly
+        // to the just-initialized pergroup state (the distinctfin shortcut's
+        // own arithmetic; the pooled set stays empty, so the drain's
+        // set-mode arm adds 0 and recycles it). Everything else unions into
+        // the pertrans set batch-wise (one hashing pass), and the drain
+        // counts it exactly as before. Byte identity: the count is the value
+        // multiset's support cardinality under i64 equality in every arm.
+        let base = node.pergroup_base;
+        let AggStateData { codedgroup, pertrans_sort, .. } = node;
+        let cg = codedgroup.as_deref_mut().expect("codedgroup state");
+        let pt = &mut pertrans_sort[0];
+        // Single-state groups read their run in place; merged groups read
+        // the scratch the collect above filled.
+        let vals: &[i64] = if cg.gstates.len() == 1 {
+            let s = cg.gstates[0] as usize;
+            &cg.vals_flat[cg.state_off[s] as usize..cg.state_off[s + 1] as usize]
+        } else {
+            &cg.vals
+        };
+        // SAFETY: transno 0 of the once-allocated pergroup array, just
+        // initialized above.
+        let pg = base.as_ptr();
+        let fast = cgemit_enabled()
+            && pt.set_count_transfn
+            && crate::distinctfin_enabled()
+            && !pt.dset_degraded
+            && vals.len() <= cgemit_small_max()
+            // SAFETY: as `pg` above — the drain's own state guards.
+            && unsafe { !(*pg).no_trans_value && !(*pg).trans_value_is_null };
+        if fast {
+            // SAFETY: `pg` as above; non-null by-val i64 count state per the
+            // guard read.
+            unsafe { crate::count_distinct_apply(pg, count_distinct_small(vals))? };
+        } else {
+            let mut set = pt.dset.take().unwrap_or_else(DistinctSet::new);
+            debug_assert!(set.len() == 0 && !set.seen_null, "replay returns the set cleared");
+            if cgemit_enabled() {
+                set.insert_i64_batch(vals, &mut cg.val_hashes);
+            } else {
+                for &v in vals {
+                    set.insert_i64(v);
+                }
+            }
+            pt.dset = Some(set);
         }
     }
     // Synthesized representative (adopt_merged's argument — module doc).
@@ -660,29 +868,17 @@ pub fn agg_codedgroup_next_replay<'a, 'mcx>(
 ) -> Option<&'a mut SlotData<'mcx>> {
     let cg = node.codedgroup.as_deref_mut().expect("codedgroup state");
     debug_assert!(matches!(cg.phase, CgPhase::Building));
-    loop {
-        if cg.replay_state >= cg.nstates() {
-            let mcx = cg.mcx;
-            exectuples::exec_clear_tuple(&mut cg.rep_slot, mcx);
-            return None;
-        }
-        let link = if cg.replay_next == REPLAY_HEAD {
-            cg.heads[cg.replay_state]
-        } else {
-            cg.replay_next
-        };
-        if link == 0 {
-            cg.replay_state += 1;
-            cg.replay_next = REPLAY_HEAD;
-            continue;
-        }
-        let (v, next) = cg.pool[(link - 1) as usize];
-        cg.replay_next = next;
-        let key = cg.key_datum(cg.replay_state as u32);
-        let arg = cg.arg_datum(v);
-        cg.build_row(key, Some(arg));
-        return Some(&mut cg.rep_slot);
+    if cg.replay_idx >= cg.pool.len() {
+        let mcx = cg.mcx;
+        exectuples::exec_clear_tuple(&mut cg.rep_slot, mcx);
+        return None;
     }
+    let (v, s) = cg.pool[cg.replay_idx];
+    cg.replay_idx += 1;
+    let key = cg.key_datum(s);
+    let arg = cg.arg_datum(v);
+    cg.build_row(key, Some(arg));
+    Some(&mut cg.rep_slot)
 }
 
 #[cfg(test)]
@@ -691,6 +887,86 @@ mod tests {
     // scripts/lane-distinct-set-e2e.sh's codefeed battery; the unit surface
     // below covers the header-form reader the merge comparator relies on.
     use super::*;
+
+    #[test]
+    fn roll_epoch_touched_clear_invariant() {
+        // Default arm (PGRUST_LANE_V2_CGTOUCHED unset = ON): every roll must
+        // establish the map contract — all-zero over [0, map_size), pairs
+        // drained into a code-sorted run — while the allocation only grows
+        // and only the closing epoch's touched slots get written. This is
+        // the proportionality-audit B3 regression pin: a reintroduced
+        // full-domain clear stays byte-identical, but a touched-walk that
+        // misses a slot poisons the NEXT epoch — this test is the miss
+        // detector (stale slot 7 from epoch 1, reused map in epoch 2).
+        let m: &'static ::mcx::MemoryContext =
+            Box::leak(Box::new(::mcx::MemoryContext::new("cg-roll-test")));
+        let mcx = m.mcx();
+        let rep_slot =
+            ::exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, None);
+        let mut cg = CodedGroupState {
+            phase: CgPhase::Building,
+            key_att: 0,
+            arg_att: 0,
+            kind: DistinctKeyKind::Int64,
+            natts: 1,
+            spans: Vec::new(),
+            pool: Vec::new(),
+            vals_flat: Vec::new(),
+            state_off: Vec::new(),
+            arena: Vec::new(),
+            mode_global: Some(false),
+            cur_epoch: None,
+            code_map: Vec::new(),
+            epoch_pairs: Vec::new(),
+            runs: Vec::new(),
+            order: Vec::new(),
+            cursor: Vec::new(),
+            heap: Vec::new(),
+            gstates: Vec::new(),
+            vals: Vec::new(),
+            val_hashes: Vec::new(),
+            replay_idx: 0,
+            rep_slot,
+            budget: 1 << 20,
+            mcx,
+        };
+        // Epoch 1, ndict 10: first roll builds the map; touch codes 7 then 3
+        // (the accept discipline writes map[m] = s+1 AND pushes (m, s)).
+        cg.roll_epoch(1, 10);
+        assert_eq!(cg.cur_epoch, Some(1));
+        assert!(cg.code_map.len() >= 10);
+        assert!(cg.code_map.iter().all(|&v| v == 0));
+        assert!(cg.runs.is_empty());
+        cg.code_map[7] = 1;
+        cg.epoch_pairs.push((7, 0));
+        cg.code_map[3] = 2;
+        cg.epoch_pairs.push((3, 1));
+        // Epoch 2, SMALLER ndict 6: the retained map may stay larger, but the
+        // visible prefix must be all-zero (esp. slot 3) and so must the
+        // retained tail (slot 7 — a stale nonzero there is the bug class).
+        cg.roll_epoch(2, 6);
+        assert_eq!(cg.cur_epoch, Some(2));
+        assert!(cg.code_map.len() >= 6);
+        assert!(
+            cg.code_map.iter().all(|&v| v == 0),
+            "stale epoch-1 slots must be zeroed: {:?}",
+            cg.code_map
+        );
+        assert!(cg.epoch_pairs.is_empty());
+        assert_eq!(cg.runs.len(), 1);
+        // The closed run is code-sorted: code 3 -> state 1, code 7 -> state 0.
+        assert_eq!(&cg.order[..], &[1, 0]);
+        // Epoch 3, LARGER ndict 12: grow-only resize extends with zeros.
+        cg.code_map[5] = 3;
+        cg.epoch_pairs.push((5, 2));
+        cg.roll_epoch(3, 12);
+        assert!(cg.code_map.len() >= 12);
+        assert!(cg.code_map.iter().all(|&v| v == 0));
+        assert_eq!(cg.runs.len(), 2);
+        // An empty epoch closes no run (close_epoch's empty guard).
+        cg.roll_epoch(4, 12);
+        assert_eq!(cg.runs.len(), 2);
+    }
 
     #[test]
     fn content_reads_both_header_forms() {
@@ -718,5 +994,39 @@ mod tests {
         };
         assert_eq!(content(&arena, 0), b"abc");
         assert_eq!(content(&arena, short_off), b"abc");
+    }
+
+    #[test]
+    fn count_distinct_small_matches_set_semantics() {
+        // Boundary + duplicate shapes.
+        assert_eq!(count_distinct_small(&[]), 0);
+        assert_eq!(count_distinct_small(&[7]), 1);
+        assert_eq!(count_distinct_small(&[7, 7]), 1);
+        assert_eq!(count_distinct_small(&[7, -7, 7, 0, -7]), 3);
+        assert_eq!(count_distinct_small(&[i64::MIN, i64::MAX, 0, i64::MIN]), 3);
+        // Deterministic pseudo-random parity vs the exact-set count across
+        // the fastpath length band (incl. the default threshold boundary).
+        let mut x = 0x9e3779b97f4a7c15u64;
+        for len in 0..=17 {
+            for trial in 0..64 {
+                let mut vals = Vec::with_capacity(len);
+                for _ in 0..len {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    // Narrow domain to force duplicates.
+                    vals.push((x % (1 + (trial as u64 % 7))) as i64 - 3);
+                }
+                let mut set = DistinctSet::new();
+                for &v in &vals {
+                    set.insert_i64(v);
+                }
+                assert_eq!(
+                    count_distinct_small(&vals),
+                    set.len() as i64,
+                    "len={len} trial={trial} vals={vals:?}"
+                );
+            }
+        }
     }
 }

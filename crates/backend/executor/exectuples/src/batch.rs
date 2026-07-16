@@ -14,6 +14,108 @@ use ::types_tuple::{CompactAttribute, HeapTupleData, SizeofHeapTupleHeader};
 pub const SOA_MAX_ROWS: usize = MaxHeapTuplesPerPage;
 pub const SOA_BM_WORDS: usize = SOA_MAX_ROWS.div_ceil(64);
 
+/// Visit the positions of `pos..n` whose bit is SET in `live`, ascending;
+/// `live = None` visits every position (the dense loop, unchanged codegen).
+/// WORD-GRANULAR SKIP (the q22 sort-feed lever, one shared implementation):
+/// an all-clear word advances 64 positions in one compare, and set bits
+/// within a sparse word iterate by trailing-zeros — so a batched loop whose
+/// per-position work is nothing on cleared bits (the caller's contract: a
+/// cleared bit is a definitive rejection with no observable effect) collapses
+/// its per-row ceremony to one word test per 64 rows on sparse selections,
+/// at ~one extra compare per word on dense ones.
+///
+/// The visited stream is EXACTLY the plain loop's surviving positions in the
+/// same order (differential-tested); an `Err` from `f` stops the walk at that
+/// position, exactly as the plain loop's `?` would. Bits at or past `n` are
+/// ignored (the last word is masked as a belt — producers stage zeros there
+/// by contract); when `Some`, `live` must cover bit `n - 1`.
+#[inline(always)]
+pub fn for_each_live<E>(
+    live: Option<&[u64]>,
+    pos: u32,
+    n: u32,
+    mut f: impl FnMut(u32) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(words) = live else {
+        for i in pos..n {
+            f(i)?;
+        }
+        return Ok(());
+    };
+    if pos >= n {
+        return Ok(());
+    }
+    let last = ((n - 1) / 64) as usize;
+    debug_assert!(words.len() > last, "live words must cover bit n-1");
+    let mut w = (pos / 64) as usize;
+    // Mask off bits below `pos` in the first word; bits at/past `n` are
+    // zero by the producer's contract (belt: mask the last word anyway).
+    let mut bits = words[w] & (!0u64 << (pos % 64));
+    loop {
+        if w == last && n % 64 != 0 {
+            bits &= (1u64 << (n % 64)) - 1;
+        }
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            f(i)?;
+        }
+        if w == last {
+            return Ok(());
+        }
+        w += 1;
+        bits = words[w];
+    }
+}
+
+/// Single-body variant of [`for_each_live`]: the SAME visited stream (`None`
+/// = every position), but the dense case runs through the same word loop
+/// with all-set words — so the caller's row body is instantiated ONCE, not
+/// duplicated into separate dense and sparse loop arms. Use this when `f`
+/// is large and the dense case is hot: duplicating a big row body into two
+/// arms measurably regressed the hashgroup span accept's unfiltered leg
+/// (q9/q10 +9%), while the all-set word walk costs ~2 extra ops per row.
+#[inline(always)]
+pub fn for_each_live_onebody<E>(
+    live: Option<&[u64]>,
+    pos: u32,
+    n: u32,
+    mut f: impl FnMut(u32) -> Result<(), E>,
+) -> Result<(), E> {
+    if pos >= n {
+        return Ok(());
+    }
+    let last = ((n - 1) / 64) as usize;
+    debug_assert!(live.is_none_or(|w| w.len() > last), "live words must cover bit n-1");
+    #[inline(always)]
+    fn word_at(live: Option<&[u64]>, w: usize) -> u64 {
+        match live {
+            Some(s) => s[w],
+            None => !0u64,
+        }
+    }
+    let mut w = (pos / 64) as usize;
+    // Mask off bits below `pos` in the first word; bits at/past `n` are
+    // masked at the last word (dense words need the mask; bitmap producers
+    // stage zeros there by contract — the mask is their belt).
+    let mut bits = word_at(live, w) & (!0u64 << (pos % 64));
+    loop {
+        if w == last && n % 64 != 0 {
+            bits &= (1u64 << (n % 64)) - 1;
+        }
+        while bits != 0 {
+            let i = (w as u32) * 64 + bits.trailing_zeros();
+            bits &= bits - 1;
+            f(i)?;
+        }
+        if w == last {
+            return Ok(());
+        }
+        w += 1;
+        bits = word_at(live, w);
+    }
+}
+
 /// Fixed-width prefix plan: every column below `ncols` has `attlen > 0`.
 pub struct SoaDeformPlan<'mcx> {
     ncols: u16,
@@ -64,11 +166,11 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 
     /// Columnar-AM plan: `ncols` only, NO offset chain — usable exclusively
-    /// with batch fills that ignore tuple offsets (cbstore's `batch_deform`
+    /// with batch fills that ignore tuple offsets (pgrcolumnar's `batch_deform`
     /// stages decoded Datums per column, so varlena columns are stageable
     /// and the fixed-width-prefix restriction does not apply). The heap
     /// deform paths must never see this plan (they index `offs`); callers
-    /// install it only on cbstore scan states, whose `TableScanDesc`
+    /// install it only on pgrcolumnar scan states, whose `TableScanDesc`
     /// dispatch never reaches the heap deform (`is_virtual` guards it).
     pub fn columnar(mcx: Mcx<'mcx>, ncols: usize) -> Option<SoaDeformPlan<'mcx>> {
         if ncols == 0 || ncols > u16::MAX as usize {
@@ -91,14 +193,14 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 }
 
-/// Identity + content handle of one per-row-group dictionary (cbstore dict
+/// Identity + content handle of one per-row-group dictionary (pgrcolumnar dict
 /// encoding): decoded text Datums, code = index. The pointer is the storage
 /// adapter's and stays valid while the window is staged (until the next
 /// batch fill / endscan) — the same lifetime contract as the text Datums the
 /// adapter publishes into slots.
 ///
 /// EPOCH DISCIPLINE (phase4 design §2/§8.1): `epoch` is the row-group index
-/// within the scan. A scan pins its `Rc<Part>` for its whole lifetime, so the
+/// within the scan. A scan pins its `Arc<Part>` for its whole lifetime, so the
 /// rg-index is unique and rescan-stable per scan — a part-cache refresh can
 /// never swap dictionary content under a live scan (a reopen is a new scan,
 /// hence a new pin and a fresh epoch space). Consumers key per-code memos on
@@ -111,10 +213,10 @@ impl<'mcx> SoaDeformPlan<'mcx> {
 /// is `same_identity` (epoch match); nothing here prevents carrying it —
 /// implementing that plumbing is explicitly out of scope for now.
 ///
-/// CONTRACT: dict-coded columns are NULL-free today (cbstore stores no
+/// CONTRACT: dict-coded columns are NULL-free today (pgrcolumnar stores no
 /// NULLs). That is a per-chunk proof the filler asserts by writing
 /// `isnull = false` on gather — NOT a type invariant of this struct; the
-/// per-lane isnull currency stays so a NULL-capable cbstore v2 only changes
+/// per-lane isnull currency stays so a NULL-capable pgrcolumnar v2 only changes
 /// the fillers (phase4 design §8.3).
 #[derive(Clone, Copy)]
 pub struct SoaDictTable {
@@ -139,6 +241,17 @@ pub struct SoaDictTable {
     /// Scan-unique stitch identity: stable across every RG (and rescan) of
     /// one pinned scan, distinct across scans. 0 iff `stitch` is null.
     pub gepoch: u64,
+    /// LAZY SUB-FRAMED DICTIONARY SEAM (pgrcolumnar CHUNK_FLAG_DICT_FRAMED):
+    /// null = every entry's bytes are materialized (the historical
+    /// contract). Non-null = `dict[code]` POINTERS are always valid but a
+    /// code's entry BYTES exist only after an ensure covering it: `datum()`
+    /// / `ensure_code()` ensure per code; any consumer reading entry bytes
+    /// OUTSIDE those accessors (whole-dict sweeps, rank binary searches, raw
+    /// `dict` slices) must call `ensure_all()` first. Same lifetime as
+    /// `dict` (the publisher's staged-window contract).
+    pub lazy: *const (),
+    pub lazy_ensure: Option<unsafe fn(*const (), u32)>,
+    pub lazy_ensure_all: Option<unsafe fn(*const ())>,
 }
 
 impl SoaDictTable {
@@ -167,12 +280,50 @@ impl SoaDictTable {
     }
 
     /// Decode one code. Bounds are the filler's contract (`code < ndict`).
+    /// Lazy sub-framed dicts ensure the code's entry bytes first (the seam
+    /// no-ops on fully-materialized tables — `lazy_ensure` is None).
     #[inline]
     pub fn datum(&self, code: u32) -> Datum {
         debug_assert!(code < self.ndict);
+        self.ensure_code(code);
         // SAFETY: filler contract — `dict` spans `ndict` Datums and outlives
         // the staged window; `code` is in range for every staged row.
         unsafe { *self.dict.add(code as usize) }
+    }
+
+    /// Materialize one code's entry bytes (lazy sub-framed dicts; no-op
+    /// otherwise). For consumers that pass raw `dict` slices onward but know
+    /// the exact codes they will read.
+    #[inline]
+    pub fn ensure_code(&self, code: u32) {
+        if let Some(f) = self.lazy_ensure {
+            // SAFETY: seam contract — `lazy` is the publisher's live ensure
+            // state for this table (window lifetime, like `dict` itself).
+            unsafe { f(self.lazy, code) };
+        }
+    }
+
+    /// Decode one code WITHOUT the lazy ensure. ONLY for cells covered by
+    /// a stale-cell contract (PREWHERE-armed batches: consumers read
+    /// SELECTED rows only — `seq_scan_batch_lane_armed`): the pointer is
+    /// always valid, its BYTES may be unmaterialized.
+    #[inline]
+    pub fn datum_no_ensure(&self, code: u32) -> Datum {
+        debug_assert!(code < self.ndict);
+        // SAFETY: filler contract as `datum` (pointer validity is
+        // ensure-independent).
+        unsafe { *self.dict.add(code as usize) }
+    }
+
+    /// Materialize EVERY entry's bytes (lazy sub-framed dicts; no-op
+    /// otherwise). Required before whole-dict sweeps, rank binary searches,
+    /// or any raw `dict` slice read not covered code-by-code.
+    #[inline]
+    pub fn ensure_all(&self) {
+        if let Some(f) = self.lazy_ensure_all {
+            // SAFETY: seam contract, as `ensure_code`.
+            unsafe { f(self.lazy) };
+        }
     }
 }
 
@@ -252,14 +403,14 @@ pub struct SoaBatch<'mcx> {
     // (or left None = per-row) by the fill every window.
     text_spans: PgVec<'mcx, Option<SoaTextSpan>>,
     text_any: bool,
-    // Length-lane arming (fold length admissions over cbstore text columns):
+    // Length-lane arming (fold length admissions over pgrcolumnar text columns):
     // 0 = none, LEN_WANT_BYTES = octet length, LEN_WANT_CHARS = UTF-8
-    // character length. Armed once at feed arm (cbstore scans only); the
+    // character length. Armed once at feed arm (pgrcolumnar scans only); the
     // AM's batch fill answers the column's values cells with
     // `Datum::from_i64(length)` for every staged SELECTED row instead of
     // varlena datum pointers (post-qual for dict-answered qual columns — the
     // gather/convert step). Heap fills never see an armed column (the
-    // arming seam refuses non-cbstore scans).
+    // arming seam refuses non-pgrcolumnar scans).
     len_want: PgVec<'mcx, u8>,
     len_any: bool,
 }
@@ -381,6 +532,30 @@ impl<'mcx> SoaBatch<'mcx> {
         self.dict_lanes[c] = None;
     }
 
+    /// `gather_dict_lane` under a PREWHERE selection (stale-cell contract:
+    /// consumers of this batch read SELECTED rows only): identical cell
+    /// writes, but a lazy sub-framed dict ensures only selected rows'
+    /// codes — unselected cells hold valid POINTERS whose bytes may stay
+    /// unmaterialized. Bit i of `sel` = staged row i selected.
+    pub fn gather_dict_lane_sel(&mut self, c: usize, sel: &[u64]) {
+        let Some(lane) = self.dict_lane(c) else { return };
+        if lane.table.lazy_ensure.is_none() {
+            return self.gather_dict_lane(c);
+        }
+        let n = self.nrows as usize;
+        let values = &mut self.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        let isnull = &mut self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+        isnull.fill(false);
+        for (i, v) in values.iter_mut().enumerate() {
+            let code = lane.code(i);
+            if sel.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) {
+                lane.table.ensure_code(code);
+            }
+            *v = lane.table.datum_no_ensure(code);
+        }
+        self.dict_lanes[c] = None;
+    }
+
     /// Length-lane arm (once, at fold-feed arm): column `c`'s values cells
     /// carry `Datum::from_i64(length)` for staged selected rows (see the
     /// field doc). `kind` is `LEN_WANT_BYTES`/`LEN_WANT_CHARS`.
@@ -480,7 +655,7 @@ impl<'mcx> SoaBatch<'mcx> {
         &self.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + self.nrows as usize]
     }
 
-    // Columnar-AM staging (cbstore): the AM writes decoded vectors directly
+    // Columnar-AM staging (pgrcolumnar): the AM writes decoded vectors directly
     // (subject to `lane_fill_wanted`; dict-answered columns skip the fill).
     #[inline]
     pub fn col_values_mut(&mut self, c: usize) -> &mut [Datum] {
@@ -776,7 +951,7 @@ pub fn soa_store_prefix<'mcx>(slot: &mut SlotData<'mcx>, soa: &SoaBatch<'_>, i: 
     let h = match slot {
         SlotData::BufferHeap(b) => &mut b.base,
         SlotData::Heap(h) => h,
-        // Columnar-AM (cbstore) scans use virtual slots the AM's
+        // Columnar-AM (pgrcolumnar) scans use virtual slots the AM's
         // batch_store_slot fully populates; the prefix publish is a no-op
         // (and MUST be: dict-answered / fill-skipped SoA cells are stale).
         SlotData::Virtual(_) => return true,

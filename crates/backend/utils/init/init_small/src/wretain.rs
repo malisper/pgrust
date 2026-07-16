@@ -62,6 +62,12 @@ pub fn candidate() -> bool {
     CANDIDATE.get()
 }
 
+pub fn refuse_park() {
+    CANDIDATE.set(false);
+    WARM_CLAIM.set(false);
+    PARKING.set(false);
+}
+
 #[inline]
 pub fn warm_claim() -> bool {
     WARM_CLAIM.get()

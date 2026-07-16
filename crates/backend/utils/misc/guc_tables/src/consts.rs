@@ -126,6 +126,12 @@ pub const RECOVERY_PREFETCH_TRY: i32 = 2;
 pub const REGEX_ENGINE_SPENCER: i32 = 0;
 pub const REGEX_ENGINE_RE2: i32 = 1;
 pub const REGEX_ENGINE_AUTO: i32 = 2;
+// pgrust-only parallel-engine selector (M5-0, docs/design/m5-planner.md
+// §2.2): legacy = the ported Gather machinery byte-for-byte (runtime arms
+// only via the per-arm bench GUCs, which layer BENEATH this switch);
+// runtime = the M5 unified admission router owns plan-shape routing.
+pub const PARALLEL_ENGINE_LEGACY: i32 = 0;
+pub const PARALLEL_ENGINE_RUNTIME: i32 = 1;
 pub const RECOVERY_TARGET_ACTION_PAUSE: i32 = 0;
 pub const RELSEG_SIZE: i32 = 131072;
 // tcopprot.h restrict_nonsystem_relation_kind flag bits.

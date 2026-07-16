@@ -1,0 +1,33 @@
+[package]
+name = "auxjob"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auxjob"
+path = "src/lib.rs"
+
+[dependencies]
+auxprocess = { path = "../auxprocess" }
+backend_status = { path = "../../utils/activity/backend_status" }
+bgjobs = { path = "../bgjobs" }
+elog = { path = "../../utils/error/elog" }
+guc_file_seams = { path = "../../utils/misc/guc_file_seams" }
+init_small = { path = "../../utils/init/init_small" }
+interrupt = { path = "../interrupt" }
+ipc = { path = "../../storage/ipc/ipc" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+miscinit = { path = "../../utils/init/miscinit" }
+postinit = { path = "../../utils/init/postinit" }
+postmaster_seams = { path = "../postmaster_seams" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+procsignal_seams = { path = "../../storage/ipc/procsignal_seams" }
+resowner = { path = "../../utils/resowner/resowner" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_guc = { path = "../../../_support/types/types_guc" }
+types_resowner = { path = "../../../_support/types/types_resowner" }
+types_storage = { path = "../../../_support/types/types_storage" }
+waitevent_seams = { path = "../../utils/activity/waitevent_seams" }
+libc = "0.2"

@@ -326,17 +326,17 @@ pub fn get_relation_info<'mcx>(
         r.serverid = serverid;
         r.fdwroutine = Some(routine);
     } else {
-        let is_cbstore = tableam_vocab::is_cbstore_am_oid(relation.rd_rel.relam);
-        let sorted_attnos = if is_cbstore && ::costsize::gucs::cbstore_scan_pathkeys() {
-            cbstore_sorted_pathkey_attnos(run, &relation)?
+        let is_pgrcolumnar = tableam_vocab::is_pgrcolumnar_am_oid(relation.rd_rel.relam);
+        let sorted_attnos = if is_pgrcolumnar && ::costsize::gucs::pgrcolumnar_scan_pathkeys() {
+            pgrcolumnar_sorted_pathkey_attnos(run, &relation)?
         } else {
             PgVec::new_in(run.mcx)
         };
         // Per-column on-disk bytes for column-fraction seqscan disk costing
-        // (costsize::cbstore_scan_col_fraction); footer-less parts leave it
+        // (costsize::pgrcolumnar_scan_col_fraction); footer-less parts leave it
         // empty (fraction 1.0 = C behavior).
-        let col_bytes = if is_cbstore && ::costsize::gucs::cbstore_colfrac_cost() {
-            match ::tableam::cbstore_footer_col_bytes(&relation)? {
+        let col_bytes = if is_pgrcolumnar && ::costsize::gucs::pgrcolumnar_colfrac_cost() {
+            match ::tableam::pgrcolumnar_footer_col_bytes(&relation)? {
                 Some(v) => {
                     let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
                     for b in v {
@@ -352,8 +352,8 @@ pub fn get_relation_info<'mcx>(
         // Ingest-time per-column NDV for no-pg_statistic group-key
         // estimation (selfuncs::add_unique_group_var); footer-less parts
         // leave it empty (ratio fallback = prior behavior).
-        let col_ndv = if is_cbstore && ::costsize::gucs::cbstore_footer_ndv_est() {
-            match ::tableam::cbstore_footer_ndv(&relation)? {
+        let col_ndv = if is_pgrcolumnar && ::costsize::gucs::pgrcolumnar_footer_ndv_est() {
+            match ::tableam::pgrcolumnar_footer_ndv(&relation)? {
                 Some(v) => {
                     let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
                     for b in v {
@@ -366,16 +366,29 @@ pub fn get_relation_info<'mcx>(
         } else {
             PgVec::new_in(run.mcx)
         };
+        // Meta zero-count answerability (q2box lane): every committed RG
+        // carries v7 zero/empty counts. Consumed by m5_suppress's
+        // CbPlainAggFold keying — a qualed count-only shape may only be
+        // suppressed to serial when the footer META answer can actually
+        // serve it (v<=6-lineage banks measured 5x serial-instead-of-
+        // Gather otherwise). Served from the session part cache (one flag
+        // walk per cached Part lookup; the footer serves above already
+        // pay the cache probe).
+        let zerocnt_all = is_pgrcolumnar
+            && ::tableam::pgrcolumnar_footer_zerocnt_all(&relation)?.unwrap_or(false);
         let r = run.root.rel_mut(rel);
         r.serverid = 0;
         r.fdwroutine = None;
-        if is_cbstore {
-            // cbstore refuses TID/TID-range and bitmap scans; the flag also
-            // routes Gather costing to cbstore_parallel_setup_cost.
-            r.amflags |= types_pathnodes::AMFLAG_CBSTORE;
-            r.cbstore_sorted_attnos = sorted_attnos;
-            r.cbstore_col_bytes = col_bytes;
-            r.cbstore_col_ndv = col_ndv;
+        if is_pgrcolumnar {
+            // pgrcolumnar refuses TID/TID-range and bitmap scans; the flag also
+            // routes Gather costing to pgrcolumnar_parallel_setup_cost.
+            r.amflags |= types_pathnodes::AMFLAG_PGRCOLUMNAR;
+            if zerocnt_all {
+                r.amflags |= types_pathnodes::AMFLAG_PGRCOLUMNAR_ZEROCNT;
+            }
+            r.pgrcolumnar_sorted_attnos = sorted_attnos;
+            r.pgrcolumnar_col_bytes = col_bytes;
+            r.pgrcolumnar_col_ndv = col_ndv;
         } else {
             // Heap AM always provides scan_bitmap/scan_tid_range.
             r.amflags |= AMFLAG_HAS_TID_RANGE;
@@ -1545,17 +1558,17 @@ pub fn get_dependent_generated_columns<'mcx>(
     Ok(dependent_cols)
 }
 
-// cbstore v5 footer sorted columns admissible as ascending scan pathkeys.
+// pgrcolumnar v5 footer sorted columns admissible as ascending scan pathkeys.
 // int/date/timestamp default btree order IS the footer tracker's signed
 // order; text requires a memcmp-ordered collation (collate_is_c); bpchar's
-// space-padded comparison never matches byte order and cbstore admits no
+// space-padded comparison never matches byte order and pgrcolumnar admits no
 // other types.
-fn cbstore_sorted_pathkey_attnos<'mcx>(
+fn pgrcolumnar_sorted_pathkey_attnos<'mcx>(
     run: &PlannerRun<'mcx>,
     relation: &Relation<'_>,
 ) -> PgResult<PgVec<'mcx, i16>> {
     let mut out: PgVec<'mcx, i16> = PgVec::new_in(run.mcx);
-    let Some(sorted) = ::tableam::cbstore_footer_sorted(relation)? else {
+    let Some(sorted) = ::tableam::pgrcolumnar_footer_sorted(relation)? else {
         return Ok(out);
     };
     use types_core::catalog::{DATEOID, INT2OID, INT4OID, INT8OID, TEXTOID, TIMESTAMPOID,

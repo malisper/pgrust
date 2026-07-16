@@ -341,6 +341,10 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         backend_startup::loaded_ssl::set(true);
     }
 
+    // M2 pool-binding: reserve PGPROCs for the standing runtime executor
+    // gang BEFORE MaxBackends is computed (0 unless PGRUST_RUNTIME=1 —
+    // byte-identical sizing with the runtime off).
+    init_small::globals::SetRuntimeGangProcs(launch_backend::rtgang::gang_procs_wanted());
     postinit::InitializeMaxBackends()?;
     pmchild_seams::init_postmaster_child_slots::call();
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the

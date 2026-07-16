@@ -102,6 +102,7 @@ use crate::{agg_sorted_emit, AggStateData};
 /// `nulls_first` are the plan Sort's flags for that prefix position.
 /// `collation` is the plan Sort's collation for that key — consulted only
 /// for text keys (`varstr_cmp`'s authority); 0 for integer keys.
+#[derive(Clone)]
 pub struct HashGroupOrderKey {
     pub key_idx: usize,
     pub desc: bool,
@@ -116,7 +117,7 @@ pub struct HashGroupOrderKey {
 /// `(arena offset << 32) | len`; byte equality is the grouping operator's
 /// equality (deterministic-collation `texteq` — module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HgKeyKind {
+pub(crate) enum HgKeyKind {
     Int16,
     Int32,
     Int64,
@@ -203,6 +204,18 @@ pub(crate) struct HashGroupedState<'mcx> {
     /// Per group: cached set memory total (capacity-based), so the shared
     /// accounting updates by delta on the current group only.
     set_mem: Vec<usize>,
+    /// Mixed-shape batched fast leg (fold admission): the node's NON-distinct
+    /// transitions, classified into the exact-integer vocabulary
+    /// (`pardistinct::vocab_kind`). Empty = all-distinct shape (v1) or fold
+    /// admission off/refused — the batched accept then parks sets only.
+    vocab: Vec<crate::pardistinct::PdVocab>,
+    /// Sidecar fold states, two i64 words `(acc, count)` per vocab entry per
+    /// group at `[g*2*vocab.len() ..]` — the pardistinct worker-state layout.
+    /// Batch-absorbed rows fold HERE; per-row-path rows (deferred reps,
+    /// fallbacks) advance `pergroup` through the transition program as
+    /// always. `hg_fold_combine` merges the sidecar into `pergroup` exactly
+    /// once, at finish (post rep-replay) or at degrade entry.
+    fold: Vec<i64>,
     /// Residual phase: group already preloaded into the node (emitted).
     consumed: Vec<bool>,
     remaining: usize,
@@ -380,6 +393,91 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
     est_groups * per_group * 2.0 <= hashgroup_budget() as f64
 }
 
+/// The RUNTIME DISTINCT SINK's economics twin of
+/// [`agg_hashgroup_economical`] (distinct-bytes car). The budget-fit term
+/// is UNCHANGED (group tables never spill; only set values do): estimated
+/// groups must fit the per-Local budget with 2x slack. Density reads its
+/// own threshold (`PGRUST_RUNTIME_DISTINCT_MINRPG`) — MEASURED 2026-07-14
+/// (job pgrust-m0-accept-1784045139-06ee, 10M v7u bank, wm=1GB,
+/// condcache=on): with the tier at 1.0 the near-unique CB-q14 class
+/// (SearchPhrase text key, ~1.6 rows/group, 835k merged groups) ENGAGES
+/// with full parity + morsel-elastic disturb (4.7%) but LOSES —
+/// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
+/// the leader-side adopt/emit tail (concat + rep synthesis + order +
+/// per-group emit over 835k groups) dominates, the q19@10M
+/// "emit/combine-bound near-unique" class. The serial-calibrated 8.0
+/// therefore prices the ADOPT tail.
+///
+/// `paremit` (parallel-emit car): the caller proved the shape rides the
+/// emission-in-combine fast path (`pd_paremit_cols` — ordered
+/// per-partition emit buckets built by workers; the leader tail collapses
+/// to the cross-bucket merge + datum memcpy), which removes exactly the
+/// serial floor the 8.0 tier priced. Those shapes read their own default
+/// (1.0; `PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG` is the re-pricing
+/// channel) so the near-unique q14 class engages by default. The
+/// budget-fit term applies unchanged to both tiers.
+///
+/// `dop_budget` (q14-100m lane, the K2 100M admission): `Some((per_local
+/// envelope bytes, dop))` when the caller proved the FULL bounded-memory
+/// stack is armed — a live paremit recipe, a resolved K2 top-N selection
+/// (leader retention ≤ bound×parts candidates, never the merged group
+/// set), and the M3.5 spill arm (accept-side value pressure). Under that
+/// stack the single-halved-serial-budget fit term (`hashgroup_budget`)
+/// prices the WRONG machine: the runtime sink re-budgets every Local to
+/// the full R3 envelope, the combine's union bound (`worker_budget ×
+/// sealed.len()`) plus value-hash splits already bound each partition's
+/// merged table dynamically, and per-partition tables are est/256-sized.
+/// The fit term therefore becomes the same union bound the combine
+/// enforces: `est_groups × per_group × 2 ≤ envelope × dop` (CB q14@100M:
+/// 5.43M est × 640 = 3.48GB vs 512MB serial-halved → refused; vs 2GiB ×
+/// 16 = 32GiB → admits; the 10M engagement admits under BOTH terms —
+/// this face only ADDS engagements, never removes one). `None` = the
+/// serial-halved term exactly (every non-topn caller, and the
+/// `PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET=0` rollback channel).
+pub fn agg_hashgroup_economical_sink(
+    node: &AggStateData<'_>,
+    force: bool,
+    input_rows: f64,
+    paremit: bool,
+    dop_budget: Option<(usize, u32)>,
+) -> bool {
+    if force {
+        return true;
+    }
+    const PER_GROUP_EST: f64 = 256.0;
+    const PER_TEXT_KEY_EST: f64 = 64.0;
+    fn sink_min_rpg() -> f64 {
+        static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_DISTINCT_MINRPG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8.0)
+        })
+    }
+    fn paremit_min_rpg() -> f64 {
+        static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0)
+        })
+    }
+    let min_rpg = if paremit { paremit_min_rpg() } else { sink_min_rpg() };
+    let est_groups = (node.plan.numGroups as f64).max(1.0);
+    if input_rows > 0.0 && input_rows < min_rpg * est_groups {
+        return false;
+    }
+    let per_group =
+        PER_GROUP_EST + PER_TEXT_KEY_EST * agg_hashgroup_text_key_count(node) as f64;
+    let fit_budget = match dop_budget {
+        Some((envelope, dop)) => (envelope as f64) * f64::from(dop.max(1)),
+        None => hashgroup_budget() as f64,
+    };
+    est_groups * per_group * 2.0 <= fit_budget
+}
+
 /// Whether the arm is mid-emit (the drive routes straight to
 /// `agg_hashgroup_emit_next`, never touching the plan's Sort node).
 pub fn agg_hashgroup_emitting(node: &AggStateData<'_>) -> bool {
@@ -407,6 +505,7 @@ pub fn agg_hashgroup_residual_active(node: &AggStateData<'_>) -> bool {
 /// transvalues, which the rescan's own aggcontext reset frees).
 pub fn agg_hashgroup_reset(node: &mut AggStateData<'_>) {
     if let Some(mut hg) = node.hashgroup.take() {
+        let bytes = hg.mem();
         let mcx = hg.mcx;
         exectuples::exec_clear_tuple(&mut hg.rep_slot, mcx);
         for d in hg.dsets.iter_mut().flatten() {
@@ -414,6 +513,21 @@ pub fn agg_hashgroup_reset(node: &mut AggStateData<'_>) {
         }
         // The node-side pertrans dset slots may hold the current group's
         // swapped-in sets; the group-boundary restart clears those.
+        drop(hg);
+        // The DISTINCT-sink half of 69b97573f's teardown discipline (the
+        // q33-lane flag: "the same teardown release belongs in the distinct
+        // sink"): the runtime distinct sink adopts its merged result HERE
+        // (agg_hashgroup_adopt_merged), and the parallel build that produced
+        // it churned a multi-GB per-worker working set in helper threads
+        // that have already exited — all freed-but-retained by mimalloc.
+        // mi_collect(force) purges those abandoned segments so a repeat
+        // execution (1session try-2) rebuilds inside the same RSS envelope
+        // instead of ratcheting toward the pod cgroup ceiling. Same >=64MB
+        // engagement floor as the agg sink's release (the serial hashgroup
+        // arm passes through here too; sub-64MB builds skip the collect).
+        if bytes >= crate::SINK_RELEASE_MIN_BYTES {
+            crate::hashagg_release_retained("hashgroup_teardown");
+        }
     }
 }
 
@@ -477,6 +591,8 @@ pub fn agg_hashgroup_begin<'mcx>(
         pergroup: Vec::new(),
         dsets: Vec::new(),
         set_mem: Vec::new(),
+        vocab: Vec::new(),
+        fold: Vec::new(),
         consumed: Vec::new(),
         remaining: 0,
         cur: None,
@@ -804,6 +920,9 @@ fn create_group<'mcx>(
         hg.dsets.push(None);
     }
     hg.set_mem.push(0);
+    if !hg.vocab.is_empty() {
+        hg.fold.resize(hg.fold.len() + 2 * hg.vocab.len(), 0);
+    }
     hg.consumed.push(false);
     hg.remaining += 1;
     if let Some(slot_idx) = slot_idx {
@@ -813,6 +932,7 @@ fn create_group<'mcx>(
         + rep_len
         + hg.numtrans * core::mem::size_of::<AggPerGroup>()
         + hg.nsort * core::mem::size_of::<Option<DistinctSet<'_>>>()
+        + hg.vocab.len() * 2 * core::mem::size_of::<i64>()
         + GROUP_FIXED_COST;
     // 7/8 load factor (generic table only; the stringhash map self-grows).
     if slot_idx.is_some() && (hg.ngroups() + 1) * 8 > hg.table.len() * 7 {
@@ -998,6 +1118,650 @@ pub fn agg_hashgroup_accept<'mcx>(
     Ok(hg.mem() <= hg.budget)
 }
 
+/// Batch-feed shape (0-based OUTER attnos) for the lanev2 batched accept.
+/// `fold_atts` lists the staged cells of the ARG-BEARING vocab entries, in
+/// `vocab` order (CountStar consumes no cell) — the accept's `folds` slice
+/// contract.
+pub struct HgBatchShape {
+    pub key_atts: Vec<u16>,
+    pub set_args: Vec<u16>,
+    pub fold_atts: Vec<u16>,
+    pub vocab: Vec<crate::pardistinct::PdVocab>,
+}
+
+/// Batch-feed shape probe (the lanev2 batched accept, hot-levers-t11
+/// lever 2 conversion 3): `Some(shape)` (0-based OUTER attnos) when EVERY
+/// grouping key is an integer kind and EVERY transition of the node is
+/// either (a) a set-mode pertrans with a bare integer-Var argument
+/// (`direct_att`: single input, no FILTER) or (b) — mixed-shape fold
+/// admission, `allow_fold` (the Q10-class sums alongside the DISTINCT) — a
+/// plain transition in the exact-integer vocabulary
+/// (`pardistinct::vocab_kind`: count(*)/count(x)/sum(int2/4)/avg(int2/4),
+/// single bare-Var argument, no FILTER/DISTINCT/ORDER). Under that shape
+/// the transition program's whole per-row effect is "park each set
+/// pertrans' arg + advance the vocab folds" — the batched accept reproduces
+/// `run_row` exactly from staged column cells without projecting a slot or
+/// running the program (folds accumulate in the sidecar words;
+/// `hg_fold_combine` merges them into the real trans states at finish/
+/// degrade). `allow_fold=false` = the historical all-set-mode gate exactly.
+///
+/// `allow_text` (named-kernels-distinct, the filtered grouped-distinct
+/// batch feed): TEXT/VARCHAR grouping keys are admitted to the batched
+/// accepts — the span/row arms stage each staged cell's inline varlena
+/// content through the SAME `probe_buf`/`probe_spans` discipline as the
+/// per-row `stage_text_keys` (identical bytes: the staged pgrcolumnar cell is
+/// the decoded datum; non-inline images route to the per-row path, whose
+/// detoast yields the same content), probe read-only (`smap.find` on the
+/// stringhash single-key engagement / the generic content probe), and
+/// defer every probe MISS to the per-row path (`NeedSlot` — group creation
+/// order and rep bytes stay byte-identical). `allow_text=false` = the
+/// historical int-keys-only gate exactly.
+/// Callable only after `agg_hashgroup_begin`.
+pub fn agg_hashgroup_batch_shape(
+    node: &AggStateData<'_>,
+    allow_fold: bool,
+    allow_text: bool,
+) -> Option<HgBatchShape> {
+    let hg = node.hashgroup.as_deref()?;
+    if !allow_text && hg.key_kinds.iter().any(|k| matches!(k, HgKeyKind::Text)) {
+        return None;
+    }
+    debug_assert!(
+        hg.smap.is_none() || (hg.nkeys == 1 && hg.key_kinds[0] == HgKeyKind::Text),
+        "smap engages only on a single text key"
+    );
+    if hg.numtrans != node.pertrans_sort.len() && !allow_fold {
+        return None;
+    }
+    let mut args = Vec::with_capacity(node.pertrans_sort.len());
+    for ps in &node.pertrans_sort {
+        if !matches!(
+            ps.set_kind,
+            Some(DistinctKeyKind::Int16 | DistinctKeyKind::Int32 | DistinctKeyKind::Int64)
+        ) {
+            return None;
+        }
+        args.push(ps.direct_att?);
+    }
+    let (vocab, fold_atts) = if hg.numtrans == node.pertrans_sort.len() {
+        (Vec::new(), Vec::new())
+    } else {
+        hg_fold_vocab(node)?
+    };
+    Some(HgBatchShape { key_atts: hg.key_atts.clone(), set_args: args, fold_atts, vocab })
+}
+
+/// Classify the node's NON-distinct transitions into the exact-integer fold
+/// vocabulary (`pd_derive_spec`'s vocab loop, the serial face): every
+/// remaining transition must be a FILTER-less, DISTINCT-less, ORDER-less
+/// aggregate over at most one bare OUTER-Var int2/int4/int8 argument whose
+/// aggfnoid maps through `pardistinct::vocab_kind`. Returns the vocab (in
+/// first-peragg order) plus the staged-cell atts of its arg-bearing entries
+/// (same order — the accept's `folds` contract). `None` refuses the whole
+/// mixed admission (the per-row program path stands).
+fn hg_fold_vocab(
+    node: &AggStateData<'_>,
+) -> Option<(Vec<crate::pardistinct::PdVocab>, Vec<u16>)> {
+    use crate::pardistinct::{PdInt, PdVocab};
+    let desc = node.persort.as_ref()?.first_slot.base().tts_tupleDescriptor.as_ref()?;
+    let int_kind = |t: ::types_core::Oid| match t {
+        INT2OID => Some(PdInt::I16),
+        INT4OID => Some(PdInt::I32),
+        INT8OID => Some(PdInt::I64),
+        _ => None,
+    };
+    // The aggregate's single plain-Var argument (0-based outer attno) —
+    // `pd_derive_spec`'s arg extraction, verbatim.
+    let arg_att = |ar: &::types_nodes::primnodes::Aggref<'_>| -> Option<u16> {
+        if ar.aggfilter.is_some() || ar.args.len() != 1 {
+            return None;
+        }
+        let tle = ar.args.iter().next()?.as_target_entry()?;
+        let v = tle.expr.as_var()?;
+        (v.varno == ::execexpr::OUTER_VAR
+            && v.varlevelsup == 0
+            && v.varattno >= 1
+            && (v.varattno as i32) <= desc.natts)
+            .then(|| (v.varattno - 1) as u16)
+    };
+    let mut seen: Vec<bool> = vec![false; node.numtrans];
+    for ps in &node.pertrans_sort {
+        seen[ps.transno] = true;
+    }
+    let mut vocab: Vec<PdVocab> = Vec::new();
+    let mut fold_atts: Vec<u16> = Vec::new();
+    for pa in node.peragg.iter() {
+        let transno = pa.transno as usize;
+        if seen[transno] {
+            continue;
+        }
+        seen[transno] = true;
+        let ar = pa.aggref;
+        if !ar.aggdistinct.is_nil() || !ar.aggorder.is_nil() || ar.aggfilter.is_some() {
+            return None;
+        }
+        let att = if ar.args.is_nil() {
+            None
+        } else {
+            let a = arg_att(ar)?;
+            let k = int_kind(desc.attr(a as usize).atttypid)?;
+            Some((a, k))
+        };
+        let kind = crate::pardistinct::vocab_kind(ar.aggfnoid, att)?;
+        if let Some((a, _)) = att {
+            fold_atts.push(a);
+        }
+        vocab.push(PdVocab { transno: transno as u32, kind });
+    }
+    if !seen.iter().all(|&s| s) {
+        // A transition no peragg names (shared/invisible): refuse.
+        return None;
+    }
+    Some((vocab, fold_atts))
+}
+
+/// Arm the sidecar fold vocabulary on a just-begun (empty) build — called by
+/// the lanev2 drive exactly when the batched mixed shape's column mapping
+/// succeeded (an armed vocab whose batch never engages would only waste the
+/// per-group sidecar words; the combine no-ops on all-zero folds).
+pub fn agg_hashgroup_arm_fold(
+    node: &mut AggStateData<'_>,
+    vocab: Vec<crate::pardistinct::PdVocab>,
+) {
+    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+    debug_assert_eq!(hg.ngroups(), 0, "fold arms before the first group");
+    debug_assert!(hg.fold.is_empty());
+    hg.vocab = vocab;
+}
+
+/// One clean staged row through the batched fast leg. `key_datums`/`key_nulls`
+/// are the row's grouping-key cells (one per key, `agg_hashgroup_batch_shape`
+/// order) and `args` the row's DISTINCT-arg cells (one per pertrans). On a
+/// probe hit this is the whole row: switch to the group and run `run_row`'s
+/// set collect verbatim (park semantics — `direct_att` proved the program
+/// parks exactly these cells), then the same shared-set accounting and
+/// budget verdict as `agg_hashgroup_accept`. On a probe miss it does
+/// NOTHING and returns `NeedSlot`: group creation defers the row as the
+/// group's representative (a materialized slot), so the caller must emit
+/// the row and route it through the per-row `agg_hashgroup_accept` —
+/// byte-identical creation order and rep bytes.
+pub enum HgBatchRow {
+    /// Row fully absorbed; the payload is `mem() <= budget` (false = the
+    /// caller must degrade, exactly as `agg_hashgroup_accept`'s `Ok(false)`).
+    Absorbed(bool),
+    /// Probe miss: materialize the row and feed it per-row.
+    NeedSlot,
+}
+
+/// Content bytes of an INLINE (1B- or uncompressed-4B-header) varlena
+/// datum, no detoast, no copy. `None` = external/compressed image — the
+/// caller routes the row through the per-row path, whose
+/// `datum_varlena_packed` detoast produces the identical content bytes.
+///
+/// # Safety
+/// `d` is a non-null live varlena datum whose header (and, for inline
+/// images, full body) is readable — the staged-cell contract of the
+/// batched accepts (pgrcolumnar staged text cells are decoded in-window
+/// images).
+#[inline]
+unsafe fn inline_varlena_bytes<'a>(d: Datum) -> Option<&'a [u8]> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — header readable; sizes from the header
+    // bound the body reads.
+    unsafe {
+        if varatt::varatt_is_1b(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ_SHORT),
+                varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT,
+            ))
+        } else if varatt::varatt_is_4b_u(p) {
+            Some(core::slice::from_raw_parts(
+                p.add(varatt::VARHDRSZ),
+                varatt::varsize_4b(p) - varatt::VARHDRSZ,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// Key-extraction outcome of the batched accepts' shared per-row key pass:
+/// stage the row's key cells into `words` (+ text content into the probe
+/// staging), or defer the row (`None` = a non-inline text image).
+#[inline]
+fn hg_stage_batch_keys(
+    hg: &mut HashGroupedState<'_>,
+    read: impl Fn(usize) -> (Datum, bool),
+) -> Option<([i64; 32], u32)> {
+    let mut words = [0i64; 32];
+    let mut nulls = 0u32;
+    let mut text_cleared = false;
+    for i in 0..hg.nkeys {
+        let (d, isnull) = read(i);
+        if isnull {
+            nulls |= 1 << i;
+            words[i] = 0;
+            continue;
+        }
+        match hg.key_kinds[i] {
+            HgKeyKind::Int16 => words[i] = d.as_i16() as i64,
+            HgKeyKind::Int32 => words[i] = d.as_i32() as i64,
+            HgKeyKind::Int64 => words[i] = d.as_i64(),
+            HgKeyKind::Text => {
+                // SAFETY: staged-cell contract (fn doc above).
+                let b = unsafe { inline_varlena_bytes(d) }?;
+                if !text_cleared {
+                    hg.probe_buf.clear();
+                    text_cleared = true;
+                }
+                let off = hg.probe_buf.len();
+                hg.probe_buf.extend_from_slice(b);
+                hg.probe_spans[i] = (off as u32, b.len() as u32);
+                words[i] = 0;
+            }
+        }
+    }
+    Some((words, nulls))
+}
+
+/// Read-only group probe over the staged key pass ([`hg_stage_batch_keys`]
+/// already ran): the stringhash single-text-key map (`find` — never
+/// inserts) or the generic content probe. `None` = probe miss (creation
+/// defers to the per-row path).
+#[inline]
+fn hg_probe_staged(hg: &HashGroupedState<'_>, words: &[i64], nulls: u32) -> Option<u32> {
+    if let Some(smap) = hg.smap.as_ref() {
+        if nulls != 0 {
+            hg.null_group
+        } else {
+            let (poff, plen) = hg.probe_spans[0];
+            let bytes = &hg.probe_buf[poff as usize..(poff + plen) as usize];
+            smap.find(bytes, &hg.arena)
+        }
+    } else {
+        let h = hg.key_hash(words, nulls);
+        hg.probe(words, nulls, h).0
+    }
+}
+
+pub fn agg_hashgroup_accept_batch_row(
+    node: &mut AggStateData<'_>,
+    key_datums: &[Datum],
+    key_nulls: &[bool],
+    args: &[(Datum, bool)],
+    folds: &[(Datum, bool)],
+) -> HgBatchRow {
+    debug_assert!(matches!(
+        node.hashgroup.as_deref(),
+        Some(HashGroupedState { phase: HgPhase::Building, .. })
+    ));
+    let found = {
+        let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+        debug_assert_eq!(key_datums.len(), hg.nkeys);
+        let Some((words, nulls)) =
+            hg_stage_batch_keys(hg, |i| (key_datums[i], key_nulls[i]))
+        else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgBatchRow::NeedSlot;
+        };
+        let nkeys = hg.nkeys;
+        hg_probe_staged(hg, &words[..nkeys], nulls)
+    };
+    let Some(g) = found else {
+        return HgBatchRow::NeedSlot;
+    };
+    switch_to(node, g);
+    // run_row's set collect, verbatim semantics (flag is always set for a
+    // direct_att pertrans: unconditional single-input park, no FILTER).
+    for (ps, &(d, isnull)) in node.pertrans_sort.iter_mut().zip(args.iter()) {
+        let kind = ps.set_kind.expect("batch shape: set-mode pertrans");
+        let dset = ps.dset.get_or_insert_with(DistinctSet::new);
+        if isnull {
+            dset.seen_null = true;
+            continue;
+        }
+        match kind {
+            DistinctKeyKind::Int16 => dset.insert_i64(d.as_i16() as i64),
+            DistinctKeyKind::Int32 => dset.insert_i64(d.as_i32() as i64),
+            DistinctKeyKind::Int64 => dset.insert_i64(d.as_i64()),
+            DistinctKeyKind::Bytes => unreachable!("batch shape excludes byte sets"),
+        }
+    }
+    // Shared-accounting update (the accept's existing-group arm, verbatim).
+    let sets: usize = node
+        .pertrans_sort
+        .iter()
+        .map(|ps| ps.dset.as_ref().map_or(0, |d| d.mem_bytes()))
+        .sum();
+    let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
+    let c = g as usize;
+    // Vocab folds (mixed-shape admission): the pardistinct worker fold,
+    // verbatim, into the group's sidecar words. `folds` carries the staged
+    // cells of the arg-bearing vocab entries in vocab order (the shape's
+    // `fold_atts` contract).
+    if !hg.vocab.is_empty() {
+        let base = c * 2 * hg.vocab.len();
+        let mut fi = 0usize;
+        for (vi, v) in hg.vocab.iter().enumerate() {
+            let (acc, cnt) = (base + 2 * vi, base + 2 * vi + 1);
+            match v.kind {
+                crate::pardistinct::PdVocabKind::CountStar => hg.fold[acc] += 1,
+                crate::pardistinct::PdVocabKind::CountAny { .. } => {
+                    let (_, isnull) = folds[fi];
+                    fi += 1;
+                    if !isnull {
+                        hg.fold[acc] += 1;
+                    }
+                }
+                crate::pardistinct::PdVocabKind::SumInt { kind, .. }
+                | crate::pardistinct::PdVocabKind::AvgInt { kind, .. } => {
+                    let (d, isnull) = folds[fi];
+                    fi += 1;
+                    if !isnull {
+                        hg.fold[acc] += kind.read(d);
+                        hg.fold[cnt] += 1;
+                    }
+                }
+            }
+        }
+    }
+    hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
+    hg.set_mem[c] = sets;
+    HgBatchRow::Absorbed(hg.mem() <= hg.budget)
+}
+
+/// Where a batched span stopped (q9q10-serial lane increment 2).
+pub enum HgSpanStop {
+    /// Every candidate row in `[pos, n)` absorbed (`absorbed` = fast rows;
+    /// sel-dead rows are skipped and counted nowhere, as in the per-row leg).
+    Done { absorbed: u32 },
+    /// Rows `[pos, at)` absorbed; row `at` needs the per-row path (probe
+    /// miss — group creation defers the row as its representative — or a
+    /// forced-fallback bit). The caller emits + accepts row `at`, then
+    /// re-enters at `at + 1`.
+    NeedSlot { at: u32, absorbed: u32 },
+    /// The shared budget crossed AFTER row `at` was fully absorbed — the
+    /// caller degrades (exactly `HgBatchRow::Absorbed(false)`), and the
+    /// remaining rows ride the per-row post-degrade path.
+    Budget { at: u32, absorbed: u32 },
+}
+
+/// Batched span accept: process staged rows `[pos, n)` in ONE call with the
+/// loop-invariant state hoisted — no per-row hashgroup deref, no per-row
+/// `switch_to` (set parks and vocab folds write the STORAGE arrays directly
+/// under the `cur == None` invariant established by the entry `switch_out`),
+/// no per-row call marshaling. Semantics are the per-row
+/// [`agg_hashgroup_accept_batch_row`] loop, byte-for-byte: same row order,
+/// same group-creation order (the stop/resume protocol keeps probe misses
+/// at their exact positions), same per-row shared-budget accounting and
+/// degrade point.
+///
+/// `views` carries one `(values, isnull)` cell-pointer pair per column in
+/// shape order: `nkeys` grouping keys, then `nargs` DISTINCT args, then the
+/// arg-bearing fold-vocab cells. `sel`/`fb` are the staged window's
+/// whole-qual and forced-fallback bitmap words.
+///
+/// # Safety
+/// Every pointer pair in `views` must span `n` staged rows and stay valid
+/// for the duration of the call (the lanev2 staged-window snapshot
+/// contract); `sel`/`fb` must cover bit `n - 1`.
+pub unsafe fn agg_hashgroup_accept_batch_span(
+    node: &mut AggStateData<'_>,
+    views: &[(*const Datum, *const bool)],
+    nargs: usize,
+    sel: Option<&[u64]>,
+    fb: &[u64],
+    pos: u32,
+    n: u32,
+) -> HgSpanStop {
+    debug_assert!(matches!(
+        node.hashgroup.as_deref(),
+        Some(HashGroupedState { phase: HgPhase::Building, .. })
+    ));
+    // Establish the storage invariant: no group's state loaded in the node.
+    switch_out(node);
+    let AggStateData { hashgroup, pertrans_sort, .. } = node;
+    let hg = hashgroup.as_deref_mut().expect("hashgroup state");
+    let nkeys = hg.nkeys;
+    let nsort = hg.nsort;
+    let nvocab = hg.vocab.len();
+    debug_assert_eq!(views.len(), nkeys + nargs + hg_fold_cells(&hg.vocab));
+    let mut absorbed = 0u32;
+    let mut i = pos;
+    while i < n {
+        let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
+        if let Some(s) = sel {
+            // Word skip (the q22 survivor-walk precedent): an all-dead sel
+            // word advances 64 rows in one test. Forced-fallback rows carry
+            // a SET sel bit (the refsort contract), so no NeedSlot row is
+            // ever skipped with its word.
+            if i % 64 == 0 && i + 64 <= n && s[w] == 0 {
+                i += 64;
+                continue;
+            }
+            if s[w] & bit == 0 {
+                i += 1;
+                continue; // qual-filtered (exact whole-qual verdict)
+            }
+        }
+        if fb[w] & bit != 0 {
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        }
+        let ii = i as usize;
+        let Some((words, nulls)) = hg_stage_batch_keys(hg, |j| {
+            let (v, nl) = views[j];
+            // SAFETY: caller contract — `views` spans `n` staged rows.
+            unsafe { (*v.add(ii), *nl.add(ii)) }
+        }) else {
+            // Non-inline text image: the per-row path detoasts it.
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        };
+        let Some(g) = hg_probe_staged(hg, &words[..nkeys], nulls) else {
+            return HgSpanStop::NeedSlot { at: i, absorbed };
+        };
+        let c = g as usize;
+        // Set parks, straight into storage (cur == None invariant).
+        let mut sets = 0usize;
+        for (j, ps) in pertrans_sort.iter().enumerate() {
+            debug_assert!(ps.dset.is_none(), "cur == None: every set is in storage");
+            let kind = ps.set_kind.expect("batch shape: set-mode pertrans");
+            let (v, nl) = views[nkeys + j];
+            // SAFETY: caller contract, as above.
+            let (d, isnull) = unsafe { (*v.add(ii), *nl.add(ii)) };
+            let dset = hg.dsets[c * nsort + j].get_or_insert_with(DistinctSet::new);
+            if isnull {
+                dset.seen_null = true;
+            } else {
+                match kind {
+                    DistinctKeyKind::Int16 => dset.insert_i64(d.as_i16() as i64),
+                    DistinctKeyKind::Int32 => dset.insert_i64(d.as_i32() as i64),
+                    DistinctKeyKind::Int64 => dset.insert_i64(d.as_i64()),
+                    DistinctKeyKind::Bytes => unreachable!("batch shape excludes byte sets"),
+                }
+            }
+            sets += dset.mem_bytes();
+        }
+        hg.total_set_mem = hg.total_set_mem + sets - hg.set_mem[c];
+        hg.set_mem[c] = sets;
+        // Vocab folds (mixed-shape admission), sidecar words.
+        if nvocab != 0 {
+            let base = c * 2 * nvocab;
+            let mut fi = nkeys + nargs;
+            for (vi, v) in hg.vocab.iter().enumerate() {
+                let (acc, cnt) = (base + 2 * vi, base + 2 * vi + 1);
+                match v.kind {
+                    crate::pardistinct::PdVocabKind::CountStar => hg.fold[acc] += 1,
+                    crate::pardistinct::PdVocabKind::CountAny { .. } => {
+                        let (_, nl) = views[fi];
+                        fi += 1;
+                        // SAFETY: caller contract, as above.
+                        if !unsafe { *nl.add(ii) } {
+                            hg.fold[acc] += 1;
+                        }
+                    }
+                    crate::pardistinct::PdVocabKind::SumInt { kind, .. }
+                    | crate::pardistinct::PdVocabKind::AvgInt { kind, .. } => {
+                        let (vv, nl) = views[fi];
+                        fi += 1;
+                        // SAFETY: caller contract, as above.
+                        let (d, isnull) = unsafe { (*vv.add(ii), *nl.add(ii)) };
+                        if !isnull {
+                            hg.fold[acc] += kind.read(d);
+                            hg.fold[cnt] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        absorbed += 1;
+        if hg.mem() > hg.budget {
+            return HgSpanStop::Budget { at: i, absorbed };
+        }
+        i += 1;
+    }
+    HgSpanStop::Done { absorbed }
+}
+
+/// Number of staged fold cells a vocab consumes (arg-bearing entries only).
+pub fn hg_fold_cells(vocab: &[crate::pardistinct::PdVocab]) -> usize {
+    vocab
+        .iter()
+        .filter(|v| !matches!(v.kind, crate::pardistinct::PdVocabKind::CountStar))
+        .count()
+}
+
+/// Merge the sidecar fold words into the REAL per-group transition states —
+/// once, with no group loaded (post `switch_out`): at build finish (after
+/// the deferred-rep replay advanced `pergroup` through the program) or at
+/// degrade entry (reps ride the narrowed sort instead). State arms mirror
+/// `agg_hashgroup_adopt_merged`'s vocab materialization, COMBINING with the
+/// program-accumulated state instead of overwriting:
+/// - count(*)/count(x): int8inc's non-null i64 state; checked add with C's
+///   exact "bigint out of range" surface (`count_distinct_apply`).
+/// - sum(int2/4): int8 state, NULL iff no non-null input ever arrived (the
+///   non-strict null-initval law) — a zero-count fold leaves it untouched.
+/// - avg(int2/4): Int8TransTypeData int8[2] {count, sum}; a fresh array
+///   image is copied into aggcontext (never mutated in place — the state
+///   may still be the shared initval when no per-row row touched it).
+/// Fold words zero after the merge (double-apply guard).
+fn hg_fold_combine(node: &mut AggStateData<'_>) -> PgResult<()> {
+    use crate::pardistinct::PdVocabKind;
+    let AggStateData { hashgroup, agg_node, trans_typ, .. } = node;
+    let Some(hg) = hashgroup.as_deref_mut() else {
+        return Ok(());
+    };
+    if hg.vocab.is_empty() {
+        return Ok(());
+    }
+    debug_assert!(hg.cur.is_none(), "fold combine runs with no group loaded");
+    let nvocab = hg.vocab.len();
+    let numtrans = hg.numtrans;
+    let n = hg.ngroups();
+    for g in 0..n {
+        for (vi, v) in hg.vocab.iter().enumerate() {
+            let acc = hg.fold[g * 2 * nvocab + 2 * vi];
+            let cnt = hg.fold[g * 2 * nvocab + 2 * vi + 1];
+            let pg = &mut hg.pergroup[g * numtrans + v.transno as usize];
+            match v.kind {
+                // NULL authority note: `trans_value_is_null` is the state's
+                // SQL-null truth. `no_trans_value` is NOT — it is the
+                // strict-init latch only (C's noTransValue), which the
+                // non-strict transition steps (int2/int4_sum's class,
+                // `agg_trans_byval`) faithfully never clear: a sum state
+                // advanced by the rep replay still has `no_trans_value ==
+                // true` from its NULL initval. Deciding replace-vs-add on
+                // that stale latch overwrote the rep's contribution (the
+                // q10 parity bug: every group's sum short by exactly its
+                // deferred representative's value).
+                PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => {
+                    if acc != 0 {
+                        debug_assert!(!pg.trans_value_is_null, "count initval 0 is never NULL");
+                        // SAFETY: live pergroup slot holding the non-null
+                        // by-val i64 count state (initval '0'; int8inc/
+                        // int8inc_any only ever produce non-null i64).
+                        unsafe { crate::count_distinct_apply(pg, acc)? };
+                    }
+                }
+                PdVocabKind::SumInt { .. } => {
+                    if cnt > 0 {
+                        if pg.trans_value_is_null {
+                            pg.trans_value = Datum::from_i64(acc);
+                        } else {
+                            pg.trans_value =
+                                Datum::from_i64(pg.trans_value.as_i64().wrapping_add(acc));
+                        }
+                        pg.trans_value_is_null = false;
+                        pg.no_trans_value = false;
+                    }
+                }
+                PdVocabKind::AvgInt { .. } => {
+                    if cnt > 0 {
+                        // Read the current Int8TransTypeData image (initcond
+                        // '{0,0}' — never NULL; every producer in this
+                        // engine emits the canonical 40-byte 4B-header
+                        // no-nulls int8[2]).
+                        if pg.trans_value_is_null {
+                            return Err(Box::new(::types_error::PgError::error(
+                                "hashgroup fold: NULL avg transition state".to_string(),
+                            )));
+                        }
+                        let hdr = unsafe {
+                            core::slice::from_raw_parts(
+                                pg.trans_value.as_usize() as *const u8,
+                                4,
+                            )
+                        };
+                        let word = u32::from_ne_bytes(hdr.try_into().expect("4 bytes"));
+                        if word != ::types_tuple::varatt::set_varsize_4b_word(40) {
+                            return Err(Box::new(::types_error::PgError::error(
+                                "hashgroup fold: unexpected avg transition state image"
+                                    .to_string(),
+                            )));
+                        }
+                        let full = unsafe {
+                            core::slice::from_raw_parts(
+                                pg.trans_value.as_usize() as *const u8,
+                                40,
+                            )
+                        };
+                        let ocnt =
+                            i64::from_ne_bytes(full[24..32].try_into().expect("8 bytes"));
+                        let osum =
+                            i64::from_ne_bytes(full[32..40].try_into().expect("8 bytes"));
+                        let mut img = [0u8; 40];
+                        img[0..4].copy_from_slice(
+                            &::types_tuple::varatt::set_varsize_4b_word(40).to_ne_bytes(),
+                        );
+                        img[4..8].copy_from_slice(&1i32.to_ne_bytes()); // ndim
+                        img[8..12].copy_from_slice(&0i32.to_ne_bytes()); // dataoffset
+                        img[12..16].copy_from_slice(&INT8OID.to_ne_bytes()); // elemtype
+                        img[16..20].copy_from_slice(&2i32.to_ne_bytes()); // dims[0]
+                        img[20..24].copy_from_slice(&1i32.to_ne_bytes()); // lbound[0]
+                        img[24..32].copy_from_slice(&ocnt.wrapping_add(cnt).to_ne_bytes());
+                        img[32..40].copy_from_slice(&osum.wrapping_add(acc).to_ne_bytes());
+                        let typ = trans_typ[v.transno as usize];
+                        // SAFETY: `img` is a live, well-formed varlena image
+                        // for the copy's duration; agg_node live, no &mut.
+                        let copied = unsafe {
+                            ::execexpr::agg_datum_copy(
+                                agg_node.as_ref().aggcontext(),
+                                Datum::from_usize(img.as_ptr() as usize),
+                                typ.len,
+                            )?
+                        };
+                        pg.trans_value = copied;
+                        pg.trans_value_is_null = false;
+                        pg.no_trans_value = false;
+                    }
+                }
+            }
+        }
+    }
+    hg.fold.iter_mut().for_each(|w| *w = 0);
+    Ok(())
+}
+
 /// Build complete (input exhausted, no degrade): replay every group's
 /// DEFERRED representative row through the transition program, then order
 /// the groups by the plan Sort's prefix (module doc: total, C-identical
@@ -1032,8 +1796,10 @@ pub fn agg_hashgroup_finish_build<'mcx>(
         switch_to(node, g as u32);
         run_row(node, estate, RowSlot::Rep)?;
     }
-    // Park the last group's state back into storage, then order.
+    // Park the last group's state back into storage, merge the sidecar
+    // folds into the real trans states (mixed-shape batch), then order.
     switch_out(node);
+    hg_fold_combine(node)?;
     let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
     let mcx = hg.mcx;
     exectuples::exec_clear_tuple(&mut hg.rep_slot, mcx);
@@ -1043,10 +1809,82 @@ pub fn agg_hashgroup_finish_build<'mcx>(
     Ok(())
 }
 
+/// Compare two group rows — possibly from DIFFERENT key stores — under the
+/// plan Sort's prefix `spec` (total, C-identical order — module doc). Each
+/// side is `(keys, keynulls, arena, row)` in the packed-span convention.
+/// The ONE ordering authority shared by the build finish, the merged
+/// adoption ([`order_groups`]), and the runtime distinct sink's paremit
+/// bucket merge — byte-identity across those arms depends on this being
+/// the same comparator. Distinct groups never compare Equal on the full
+/// prefix (unique keys; deterministic collations tie-break by bytes).
+pub(crate) fn cmp_group_rows(
+    spec: &[HashGroupOrderKey],
+    nkeys: usize,
+    kinds: &[HgKeyKind],
+    a: (&[i64], &[u32], &[u8], usize),
+    b: (&[i64], &[u32], &[u8], usize),
+) -> PgResult<core::cmp::Ordering> {
+    let (akeys, anulls, aarena, ai) = a;
+    let (bkeys, bnulls, barena, bi) = b;
+    for k in spec.iter() {
+        let (na, nb) = (
+            anulls[ai] & (1 << k.key_idx) != 0,
+            bnulls[bi] & (1 << k.key_idx) != 0,
+        );
+        let ord = match (na, nb) {
+            (true, true) => core::cmp::Ordering::Equal,
+            (true, false) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Less
+                } else {
+                    core::cmp::Ordering::Greater
+                }
+            }
+            (false, true) => {
+                if k.nulls_first {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Less
+                }
+            }
+            (false, false) => {
+                let (wa, wb) =
+                    (akeys[ai * nkeys + k.key_idx], bkeys[bi * nkeys + k.key_idx]);
+                let ord = if kinds[k.key_idx] == HgKeyKind::Text {
+                    // C's text btree order: varstr_cmp under the plan
+                    // Sort's collation (module doc — deterministic
+                    // collations tie-break by bytes, so byte-distinct
+                    // keys never compare equal).
+                    let (oa, la) = unpack_span(wa);
+                    let (ob, lb) = unpack_span(wb);
+                    ::varlena::varstr_cmp(
+                        &aarena[oa..oa + la],
+                        &barena[ob..ob + lb],
+                        k.collation,
+                    )?
+                    .cmp(&0)
+                } else {
+                    wa.cmp(&wb)
+                };
+                if k.desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        };
+        if ord != core::cmp::Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(core::cmp::Ordering::Equal)
+}
+
 /// Order group indices by the plan Sort's prefix (total, C-identical order —
-/// module doc). Shared by the build finish and the parallel-partials merged
-/// adoption.
-fn order_groups(
+/// module doc). Shared by the build finish, the parallel-partials merged
+/// adoption, and the runtime distinct sink's per-partition paremit bucket
+/// build (the same comparator then drives the leader's cross-bucket merge).
+pub(crate) fn order_groups(
     keys: &[i64],
     keynulls: &[u32],
     spec: &[HashGroupOrderKey],
@@ -1061,65 +1899,27 @@ fn order_groups(
     let mut cmp_err = None;
     order.sort_unstable_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
-        for k in spec.iter() {
-            let (na, nb) = (
-                keynulls[a] & (1 << k.key_idx) != 0,
-                keynulls[b] & (1 << k.key_idx) != 0,
-            );
-            let ord = match (na, nb) {
-                (true, true) => core::cmp::Ordering::Equal,
-                (true, false) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Less
-                    } else {
-                        core::cmp::Ordering::Greater
-                    }
+        match cmp_group_rows(
+            spec,
+            nkeys,
+            kinds,
+            (keys, keynulls, arena, a),
+            (keys, keynulls, arena, b),
+        ) {
+            Ok(ord) => {
+                debug_assert!(
+                    ord != core::cmp::Ordering::Equal || a == b,
+                    "distinct groups compare equal on the full prefix"
+                );
+                ord
+            }
+            Err(e) => {
+                if cmp_err.is_none() {
+                    cmp_err = Some(e);
                 }
-                (false, true) => {
-                    if k.nulls_first {
-                        core::cmp::Ordering::Greater
-                    } else {
-                        core::cmp::Ordering::Less
-                    }
-                }
-                (false, false) => {
-                    let (wa, wb) = (keys[a * nkeys + k.key_idx], keys[b * nkeys + k.key_idx]);
-                    let ord = if kinds[k.key_idx] == HgKeyKind::Text {
-                        // C's text btree order: varstr_cmp under the plan
-                        // Sort's collation (module doc — deterministic
-                        // collations tie-break by bytes, so byte-distinct
-                        // keys never compare equal).
-                        let (oa, la) = unpack_span(wa);
-                        let (ob, lb) = unpack_span(wb);
-                        match ::varlena::varstr_cmp(
-                            &arena[oa..oa + la],
-                            &arena[ob..ob + lb],
-                            k.collation,
-                        ) {
-                            Ok(c) => c.cmp(&0),
-                            Err(e) => {
-                                if cmp_err.is_none() {
-                                    cmp_err = Some(e);
-                                }
-                                core::cmp::Ordering::Equal
-                            }
-                        }
-                    } else {
-                        wa.cmp(&wb)
-                    };
-                    if k.desc {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                }
-            };
-            if ord != core::cmp::Ordering::Equal {
-                return ord;
+                core::cmp::Ordering::Equal
             }
         }
-        debug_assert!(a == b || cmp_err.is_some(), "distinct groups compare equal on the full prefix");
-        core::cmp::Ordering::Equal
     });
     if let Some(e) = cmp_err {
         return Err(e);
@@ -1219,13 +2019,17 @@ pub fn agg_hashgroup_next_rep<'a, 'mcx>(
 
 /// Degrade step 2: flip to the residual phase — the table becomes the
 /// narrow-sort emit chain's partial-state store (`residual_preload`). The
-/// CURRENT group's live state parks back into storage first.
-pub fn agg_hashgroup_set_residual(node: &mut AggStateData<'_>) {
+/// CURRENT group's live state parks back into storage first, then the
+/// sidecar folds (mixed-shape batch) merge into the stored trans states —
+/// the resurrected partials must carry every batch-absorbed row.
+pub fn agg_hashgroup_set_residual(node: &mut AggStateData<'_>) -> PgResult<()> {
     switch_out(node);
+    hg_fold_combine(node)?;
     let hg = node.hashgroup.as_deref_mut().expect("hashgroup state");
     debug_assert!(matches!(hg.phase, HgPhase::Building));
     debug_assert_eq!(hg.rep_cursor, hg.ngroups(), "every representative rides the sort");
     hg.phase = HgPhase::Residual;
+    Ok(())
 }
 
 /// Lane-v2 pardistinct (pardistinct.rs): adopt a MERGED parallel-partial
@@ -1254,6 +2058,8 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
     const INT2OID: ::types_core::Oid = 21;
     const INT4OID: ::types_core::Oid = 23;
     const INT8OID: ::types_core::Oid = 20;
+    const TEXTOID: ::types_core::Oid = 25;
+    const VARCHAROID: ::types_core::Oid = 1043;
     debug_assert!(node.hashgroup.is_none());
     debug_assert!(node.force_distinct_set);
     let mcx = estate.es_query_cxt;
@@ -1274,6 +2080,10 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         key_kinds.push(match desc.attr((col - 1) as usize).atttypid {
             INT2OID => HgKeyKind::Int16,
             INT4OID => HgKeyKind::Int32,
+            // distinct-bytes car: text keys arrive as arena spans in the
+            // merged result (`PdMerged::key_arena`) — the same packed-span
+            // convention this arm's serial build uses.
+            TEXTOID | VARCHAROID => HgKeyKind::Text,
             _ => HgKeyKind::Int64,
         });
     }
@@ -1290,6 +2100,11 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         let mut scratch =
             exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
         let natts = desc.natts as usize;
+        // Text-key scratch varlenas (distinct-bytes car): one 4B-header
+        // text image per text key column, rebuilt per group and kept live
+        // until the minimal-tuple copy below detaches it (the AvgInt
+        // stack-image discipline).
+        let mut text_bufs: Vec<Vec<u8>> = vec![Vec::new(); nkeys];
         for g in 0..n {
             exectuples::exec_clear_tuple(&mut scratch, mcx);
             {
@@ -1308,9 +2123,19 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
                         HgKeyKind::Int16 => ::datum::Datum::from_i16(w as i16),
                         HgKeyKind::Int32 => ::datum::Datum::from_i32(w as i32),
                         HgKeyKind::Int64 => ::datum::Datum::from_i64(w),
-                        // pardistinct admission is integer-key only; the
-                        // oid map above never yields Text.
-                        HgKeyKind::Text => unreachable!("pardistinct merged keys are integer-only"),
+                        HgKeyKind::Text => {
+                            let (off, len) = unpack_span(w);
+                            let buf = &mut text_bufs[i];
+                            buf.clear();
+                            buf.extend_from_slice(
+                                &::types_tuple::varatt::set_varsize_4b_word((len + 4) as u32)
+                                    .to_ne_bytes(),
+                            );
+                            buf.extend_from_slice(&merged.key_arena[off..off + len]);
+                            // Live until the minimal-tuple copy this
+                            // iteration; rebuilt next group.
+                            ::datum::Datum::from_usize(buf.as_ptr() as usize)
+                        }
                     };
                 }
             }
@@ -1402,8 +2227,15 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         })
         .collect();
     let total_set_mem = set_mem.iter().sum();
-    let order =
-        order_groups(&merged.keys, &merged.keynulls, &order_spec, nkeys, &key_kinds, &[], n)?;
+    let order = order_groups(
+        &merged.keys,
+        &merged.keynulls,
+        &order_spec,
+        nkeys,
+        &key_kinds,
+        &merged.key_arena,
+        n,
+    )?;
     let rep_slot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc));
     node.hashgroup = Some(Box::new(HashGroupedState {
@@ -1418,7 +2250,9 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         table: Vec::new(),
         hashes,
         keys: merged.keys,
-        arena: Vec::new(),
+        // distinct-bytes car: text-key content rides the merged arena
+        // (spans packed in `keys` — this arm's own convention).
+        arena: merged.key_arena,
         probe_buf: Vec::new(),
         probe_spans: vec![(0, 0); nkeys],
         keynulls: merged.keynulls,
@@ -1426,6 +2260,9 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         pergroup,
         dsets: merged.dsets,
         set_mem,
+        // Adoption materializes REAL trans states above; no sidecar folds.
+        vocab: Vec::new(),
+        fold: Vec::new(),
         consumed: vec![false; n],
         remaining: n,
         cur: None,
@@ -1434,8 +2271,8 @@ pub fn agg_hashgroup_adopt_merged<'mcx>(
         budget: hashgroup_budget(),
         rep_slot,
         rep_cursor: 0,
-        // Parallel merged adoption is int-key-only (key_kinds above); the
-        // stringhash table never engages here.
+        // The merged adoption emits only (no probing); the stringhash
+        // table never engages here.
         smap: None,
         null_group: None,
         mcx,

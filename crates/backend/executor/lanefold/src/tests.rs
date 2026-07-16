@@ -1,4 +1,4 @@
-// Ported from the cbstore branch's nodeagg lanefold_tests, restricted to the
+// Ported from the pgrcolumnar branch's nodeagg lanefold_tests, restricted to the
 // harvested surface: the tests there that drove the whole executor
 // (exec_agg_batched, dict windows, textlen, DISTINCT, metadata) stay behind;
 // what ports is the kernel-level byte-parity contract — classifier admission
@@ -995,6 +995,81 @@ fn fold_rows_grouped_parity() {
             (0..n).filter(|i| i % ngroups == g).map(|i| data[i].clone()).collect();
         let want = reference_fold(mcx, &plan, &gdata, |_| true, specs.len());
         assert_parity(&plan, &group_pgs[g], &want);
+    }
+}
+
+// avgpack: the PACKED grouped fold ([count, sum] inline in the AvgAccum
+// pergroup slot, avgpack_mask bit set) accumulates exactly the transarray
+// arm's {count, sum} over the same rows, and leaves other transnos'
+// representations untouched.
+#[test]
+fn fold_rows_grouped_avgpack_parity() {
+    let mcx = leaked_mcx();
+    let a_sum = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a_avg = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a0 = NodeList::nil();
+    let specs = [
+        mk_spec(1219, false, &a0), // count(*)
+        mk_spec(1841, true, &a_sum),
+        mk_spec(1963, false, &a_avg),
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    let avg_transno = plan
+        .trans
+        .iter()
+        .find(|t| t.kind == LaneKind::AvgAccum)
+        .expect("avg admitted")
+        .transno;
+    let n = 160usize;
+    let ngroups = 3usize;
+    let data: Vec<Vec<Option<i64>>> = (0..n)
+        .map(|i| vec![if i % 6 == 0 { None } else { Some(i as i64 * 17 - 900) }])
+        .collect();
+    let cols = TestCols::new(&[4], &data);
+    let idxs: Vec<u32> = (0..n as u32).collect();
+
+    // Reference arm: the transarray representation.
+    let mut ref_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    let ref_groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(ref_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as fold_rows_grouped_parity.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &ref_groups, mcx).expect("fold") };
+
+    // Packed arm: the AvgAccum slot seeded [0, 0] (== the {0,0} initval).
+    let mut pk_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    for pgs in pk_pgs.iter_mut() {
+        // SAFETY: the slot is 16 repr(C) bytes, 8-aligned.
+        unsafe {
+            (&mut pgs[avg_transno as usize] as *mut AggPerGroup)
+                .cast::<[i64; 2]>()
+                .write([0, 0]);
+        }
+    }
+    let pk_groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(pk_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as above; the mask names exactly the packed transno.
+    unsafe {
+        fold_rows_grouped_mm(&plan, &cols, &idxs, &pk_groups, mcx, None, 1u64 << avg_transno)
+            .expect("packed fold");
+    }
+
+    for g in 0..ngroups {
+        // Unpacked transarray payload: {count, sum} at +24 of the varlena.
+        let rp = ref_pgs[g][avg_transno as usize].trans_value.as_usize() as *const u8;
+        // SAFETY: live transarray installed by pergroups_for.
+        let want =
+            unsafe { [rp.add(24).cast::<i64>().read(), rp.add(32).cast::<i64>().read()] };
+        // SAFETY: the packed slot holds two i64 words.
+        let got = unsafe {
+            (&pk_pgs[g][avg_transno as usize] as *const AggPerGroup).cast::<[i64; 2]>().read()
+        };
+        assert_eq!(got, want, "group {g}");
+        // Other transnos are representation-untouched by the mask.
+        assert_eq!(pk_pgs[g][0].trans_value.as_i64(), ref_pgs[g][0].trans_value.as_i64());
     }
 }
 
@@ -2750,7 +2825,7 @@ fn len_staged_lane_folds_i64_and_skips_guards() {
 // ===========================================================================
 
 // One epoch's dictionary + a coded lane over it. The dict is byte-sorted +
-// deduplicated exactly like the cbstore writer (payload slice cmp — memcmp
+// deduplicated exactly like the pgrcolumnar writer (payload slice cmp — memcmp
 // then length, i.e. varstrfastcmp_c's order); values cells are dict[code]
 // (the Raw gather's pointer identity).
 struct DictEpoch {
@@ -2834,6 +2909,9 @@ impl LaneCols for DictTestCols {
                 stitch: std::ptr::null(),
                 gndv: 0,
                 gepoch: 0,
+                lazy: core::ptr::null(),
+                lazy_ensure: None,
+                lazy_ensure_all: None,
             },
         })
     }
@@ -2963,7 +3041,7 @@ fn fold_rows_grouped_dictcode_memo_parity() {
         // SAFETY: per-group arrays cover every transno and are not moved
         // while the pointers live; the lane holds live inline varlenas;
         // codes satisfy the col_codes contract by construction.
-        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm).expect("fold") };
+        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm, 0).expect("fold") };
     };
     for (bi, (ep, rows)) in batches.iter().enumerate() {
         run_batch(ep, rows, &mut mm_pgs, Some(&mut mm));
@@ -3140,6 +3218,7 @@ fn fold_code_group_multiplicity_parity() {
                 n,
                 NonNull::new(code_pgs[g].as_mut_ptr()).unwrap(),
                 mcx,
+                0,
             )
             .expect("code fold");
         }
@@ -3245,7 +3324,7 @@ fn granule_meta_fold_matches_fold_batch() {
     ];
     let plan = classify(mcx, &specs).expect("admits");
     assert_eq!(granule_meta_len_cols(&plan), Some(vec![0u16]));
-    // A no-NULLs "granule" (cbstore stores no NULLs) with empties mixed in.
+    // A no-NULLs "granule" (pgrcolumnar stores no NULLs) with empties mixed in.
     let data: Vec<Option<Datum>> = (0..37)
         .map(|i| {
             Some(match i % 5 {
@@ -3287,4 +3366,198 @@ fn granule_meta_fold_matches_fold_batch() {
         }
         assert_parity(&plan, &got, &want);
     }
+}
+
+// ---- footer-stat meta fold (agg_meta_cols / fold_agg_meta) ----------------
+
+// Admission matrix: count / plain int min-max / affine divk==1 int sum-avg /
+// bare int8 sum-avg / plain octet_length sum admit; transforms on min/max,
+// divk != 1 sums, and residual-carrying plans refuse. Guard columns join
+// mm_cols for the caller's interval re-proof.
+#[test]
+fn agg_meta_cols_admission() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let count_star_args = NodeList::nil();
+    let a0 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a2 = arg_list(mcx, mk_var(mcx, 3, INT8OID));
+    let a3 = arg_list(mcx, mk_int_op(mcx, 4, INT4OID, 9, 177, true)); // v + 9 (guarded)
+    let a4 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 5, TEXTV)));
+    let specs = [
+        mk_spec(1219, false, &count_star_args), // count(*)
+        mk_spec(2804, false, &a0),              // count(v0)
+        mk_spec(1841, true, &a0),               // sum(int4 v0)
+        mk_spec(1963, false, &a0),              // avg(int4 v0)
+        mk_spec(769, true, &a0),                // min(v0)
+        mk_spec(768, true, &a0),                // max(v0)
+        mk_spec(2746, true, &a2),               // sum(int8 v2)
+        mk_spec(1841, true, &a3),               // sum(v3 + 9), data-guarded
+        mk_spec(1841, true, &a4),               // sum(octet_length(v4))
+    ];
+    let plan = classify(mcx, &specs).expect("plan admits");
+    assert!(plan.resid.is_empty());
+    let cols = agg_meta_cols(&plan).expect("footer-answerable plan");
+    assert_eq!(cols.mm_cols, vec![0u16, 3], "min/max col + guard col");
+    assert_eq!(cols.sum_cols, vec![0u16, 2, 3]);
+    assert_eq!(cols.len_cols, vec![4u16]);
+
+    // Transformed min/max is not footer-derivable (min(v*3) != min(v)).
+    let a_mm = arg_list(mcx, mk_int_op(mcx, 1, INT2OID, 3, 170, true)); // v * 3
+    let plan = classify(mcx, &[mk_spec(769, true, &a_mm)]).expect("classify admits");
+    assert!(agg_meta_cols(&plan).is_none(), "transformed min refused");
+    // Integer division is not linear.
+    let a_div = arg_list(mcx, mk_int_op(mcx, 1, INT2OID, 7, 172, true)); // v / 7
+    let plan = classify(mcx, &[mk_spec(1841, true, &a_div)]).expect("classify admits");
+    assert!(agg_meta_cols(&plan).is_none(), "divk sum refused");
+    // Residual transitions keep the whole node on the scan drive.
+    let a_bad = arg_list(mcx, mk_int_op(mcx, 2, INT2OID, 1000, F_INT42DIV, false));
+    let plan =
+        classify(mcx, &[mk_spec(1841, true, &a0), mk_spec(1841, true, &a_bad)]).expect("admits");
+    assert!(!plan.resid.is_empty());
+    assert!(agg_meta_cols(&plan).is_none(), "residual plan refused");
+    // Char-count length lanes have no footer stats.
+    let a_chr = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
+    let plan = classify(mcx, &[mk_spec(1841, true, &a_chr)]).expect("classify admits");
+    assert!(agg_meta_cols(&plan).is_none(), "VarLenChars refused");
+}
+
+// fold_agg_meta vs fold_batch over the identical all-rows-passing unit: the
+// footer triple (rows, exact (min, max), exact sums, Σ octet_length) is
+// computed independently from the data and must reproduce fold_batch's
+// pergroup bytes exactly (the bit-equality contract the plain fold drive's
+// meta arm rides on).
+#[test]
+fn fold_agg_meta_parity_with_fold_batch() {
+    install_utf8_seams();
+    let mcx = leaked_mcx();
+    let count_star_args = NodeList::nil();
+    let a0 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a1 = arg_list(mcx, mk_var(mcx, 2, INT2OID));
+    let a2 = arg_list(mcx, mk_var(mcx, 3, INT8OID));
+    let a3 = arg_list(mcx, mk_int_op(mcx, 4, INT4OID, 9, 177, true)); // v + 9 (guarded)
+    let a4 = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 5, TEXTV)));
+    let specs = [
+        mk_spec(1219, false, &count_star_args), // count(*)
+        mk_spec(2804, false, &a0),              // count(v0)
+        mk_spec(1841, true, &a0),               // sum(int4 v0)
+        mk_spec(1963, false, &a0),              // avg(int4 v0)
+        mk_spec(769, true, &a0),                // min(v0)
+        mk_spec(768, true, &a0),                // max(v0)
+        mk_spec(771, true, &a1),                // min(int2 v1)
+        mk_spec(2746, true, &a2),               // sum(int8 v2)
+        mk_spec(1841, true, &a3),               // sum(v3 + 9)
+        mk_spec(1841, true, &a4),               // sum(octet_length(v4))
+    ];
+    let plan = classify(mcx, &specs).expect("plan admits");
+    let cols = agg_meta_cols(&plan).expect("footer-answerable plan");
+
+    // A pgrcolumnar-shaped unit: NO NULLs, mixed signs, i64-extreme-free int8.
+    let ints: Vec<(i64, i64, i64, i64)> = (0..300)
+        .map(|i| {
+            let i = i as i64;
+            (
+                (i * 37 % 2011) - 1000,
+                (i * 13 % 251) - 125,
+                (i * 104_729 % 1_000_003) - 500_000,
+                (i * 7 % 401) - 200,
+            )
+        })
+        .collect();
+    let texts: Vec<Datum> = (0..300)
+        .map(|i| match i % 4 {
+            0 => vl_short(b"http://a.example/x?q=1"),
+            1 => vl_short(b""),
+            2 => vl_4b(&[b'a'; 300]),
+            _ => vl_short("héllo".as_bytes()),
+        })
+        .collect();
+    let rows_datum: Vec<Vec<Option<Datum>>> = ints
+        .iter()
+        .zip(&texts)
+        .map(|(&(a, b, c, d), &t)| {
+            vec![
+                Some(Datum::from_i32(a as i32)),
+                Some(Datum::from_i16(b as i16)),
+                Some(Datum::from_i64(c)),
+                Some(Datum::from_i32(d as i32)),
+                Some(t),
+            ]
+        })
+        .collect();
+    let n = rows_datum.len();
+    let tcols = TestCols::from_datum_rows(5, &rows_datum);
+    let rows = selmask(n, |_| true);
+
+    // Reference: the ordinary staged fold over the all-ones selection.
+    let gc = unsafe { check_guards(&plan, &tcols, &rows, |_| None) };
+    assert_eq!(gc, GuardCheck::Pass { zone: false, data: true });
+    let mut want = pergroups_for(mcx, &plan, specs.len());
+    unsafe {
+        fold_batch(&plan, &tcols, &rows, n, NonNull::new(want.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+
+    // Footer arithmetic, computed independently of the fold kernels.
+    let int_col = |c: u16, i: usize| match c {
+        0 => ints[i].0,
+        1 => ints[i].1,
+        2 => ints[i].2,
+        3 => ints[i].3,
+        _ => unreachable!(),
+    };
+    let mm_of = |c: u16| {
+        let vals = (0..n).map(|i| int_col(c, i));
+        (vals.clone().min().unwrap(), vals.max().unwrap())
+    };
+    let sum_of = |c: u16| (0..n).map(|i| int_col(c, i) as i128).sum::<i128>();
+    let len_of = |c: u16| {
+        assert_eq!(c, 4);
+        texts.iter().map(|&d| oracle_bytelen(d)).sum::<i64>()
+    };
+    // The executor-side guard re-proof the arm performs before folding.
+    for g in plan.guards.iter() {
+        assert!(cols.mm_cols.contains(&g.col));
+        let (mn, mx) = mm_of(g.col);
+        assert!(g.lo <= mn && mx <= g.hi, "unit passes the guard interval");
+    }
+    let mut got = pergroups_for(mcx, &plan, specs.len());
+    unsafe {
+        fold_agg_meta(
+            &plan,
+            n as i64,
+            mm_of,
+            sum_of,
+            len_of,
+            NonNull::new(got.as_mut_ptr()).unwrap(),
+            mcx,
+        )
+        .expect("meta fold");
+    }
+    assert_parity(&plan, &got, &want);
+
+    // Two-unit accumulation (RG after RG): fold_batch over the doubled data
+    // vs two meta applications — the arm folds unit-by-unit into live state.
+    let mut want2 = pergroups_for(mcx, &plan, specs.len());
+    unsafe {
+        fold_batch(&plan, &tcols, &rows, n, NonNull::new(want2.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+        fold_batch(&plan, &tcols, &rows, n, NonNull::new(want2.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let mut got2 = pergroups_for(mcx, &plan, specs.len());
+    for _ in 0..2 {
+        unsafe {
+            fold_agg_meta(
+                &plan,
+                n as i64,
+                mm_of,
+                sum_of,
+                len_of,
+                NonNull::new(got2.as_mut_ptr()).unwrap(),
+                mcx,
+            )
+            .expect("meta fold");
+        }
+    }
+    assert_parity(&plan, &got2, &want2);
 }

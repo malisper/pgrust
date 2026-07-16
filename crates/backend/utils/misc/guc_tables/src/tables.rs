@@ -337,6 +337,11 @@ pub static regex_engine_options: &[config_enum_entry] = &[
     config_enum_entry { name: "re2", val: REGEX_ENGINE_RE2, hidden: false },
 ];
 
+pub static pgrust_parallel_engine_options: &[config_enum_entry] = &[
+    config_enum_entry { name: "legacy", val: PARALLEL_ENGINE_LEGACY, hidden: false },
+    config_enum_entry { name: "runtime", val: PARALLEL_ENGINE_RUNTIME, hidden: false },
+];
+
 pub static backslash_quote_options: &[config_enum_entry] = &[
     config_enum_entry { name: "safe_encoding", val: BACKSLASH_QUOTE_SAFE_ENCODING, hidden: false },
     config_enum_entry { name: "on", val: BACKSLASH_QUOTE_ON, hidden: false },
@@ -628,7 +633,7 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // harness / kill-switch path. The session backing cell IS the gate the
     // executor reads, so SET / SET LOCAL re-evaluates it on the next query.
     GucBoolSetting { name: "pgrust.lane_executor", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the lane-v2 push executor."), long_desc: None, flags: 0, variable: &vars::pgrust_lane_executor, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust.condition_cache: the cbstore per-granule qual-verdict cache
+    // pgrust.condition_cache: the pgrcolumnar per-granule qual-verdict cache
     // (ClickHouse QueryConditionCache counterpart; approved 2026-07-10 as
     // the one sanctioned cross-query in-memory cache, GUC-gated). Default
     // OFF; benchmark arms enable it explicitly and record it in manifests.
@@ -798,6 +803,11 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // pgrust.condition_cache_size: the condition cache's LRU byte budget
     // (default 100MB — ClickHouse's query_condition_cache_size default).
     GucIntSetting { name: "pgrust.condition_cache_size", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the memory budget of the cbstore condition cache."), long_desc: None, flags: GUC_UNIT_KB, variable: &vars::pgrust_condition_cache_size, boot_val: GucDefaultValue::Int(102400), min: 0, max: MAX_KILOBYTES, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
+    // DOP cap for runtime-engine engagements, consulted ONLY under
+    // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
+    // bench pool GUCs never do). 0 = auto (available cores at engagement).
+    GucIntSetting { name: "pgrust.runtime_dop", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the degree of parallelism for runtime-engine engagements (0 = number of cores)."), long_desc: None, flags: 0, variable: &vars::pgrust_runtime_dop, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesReal: &[GucRealSetting] = &[
@@ -956,6 +966,14 @@ pub static ConfigureNamesEnum: &[GucEnumSetting] = &[
     GucEnumSetting { name: "recovery_init_sync_method", context: PGC_SIGHUP, group: ERROR_HANDLING_OPTIONS, short_desc: Some("Sets the method for synchronizing the data directory before crash recovery."), long_desc: None, flags: 0, variable: &vars::recovery_init_sync_method, boot_val: GucDefaultValue::Enum(DATA_DIR_SYNC_METHOD_FSYNC), options: GucEnumOptions::Inline(recovery_init_sync_method_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "debug_logical_replication_streaming", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Forces immediate streaming or serialization of changes in large transactions."), long_desc: Some("On the publisher, it allows streaming or serializing each change in logical decoding. On the subscriber, it allows serialization of all changes to files and notifies the parallel apply workers to read and apply them at the end of the transaction."), flags: GUC_NOT_IN_SAMPLE, variable: &vars::debug_logical_replication_streaming, boot_val: GucDefaultValue::Enum(DEBUG_LOGICAL_REP_STREAMING_BUFFERED), options: GucEnumOptions::Inline(debug_logical_replication_streaming_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "regex_engine", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Selects the regexp engine: auto dispatches compatible patterns to RE2, the rest to Spencer."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::regex_engine, boot_val: GucDefaultValue::Enum(REGEX_ENGINE_AUTO), options: GucEnumOptions::Inline(regex_engine_options), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.parallel_engine (M5-0, docs/design/m5-planner.md §2.2): the
+    // product parallel-engine selector. legacy (default) = today's ported
+    // Gather machinery byte-for-byte, runtime arms only via the per-arm bench
+    // pool GUCs (which layer BENEATH this switch and are never affected by
+    // it); runtime = the M5 unified admission router owns plan-shape routing.
+    // Visible row (the condition_cache precedent): a product surface, not a
+    // debug toggle.
+    GucEnumSetting { name: "pgrust.parallel_engine", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Selects the parallel query engine: legacy Gather machinery or the morsel runtime router."), long_desc: None, flags: 0, variable: &vars::pgrust_parallel_engine, boot_val: GucDefaultValue::Enum(PARALLEL_ENGINE_RUNTIME), options: GucEnumOptions::Inline(pgrust_parallel_engine_options), check_hook: None, assign_hook: None, show_hook: None },
     GucEnumSetting { name: "io_method", context: PGC_POSTMASTER, group: RESOURCES_IO, short_desc: Some("Selects the method for executing asynchronous I/O."), long_desc: None, flags: 0, variable: &vars::io_method, boot_val: GucDefaultValue::Enum(IOMETHOD_WORKER), options: GucEnumOptions::External(&option_sets::io_method_options), check_hook: None, assign_hook: Some(&hooks::assign_io_method), show_hook: None },
     GucEnumSetting { name: "hnsw.iterative_scan", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the mode for iterative scans"), long_desc: None, flags: 0, variable: &vars::hnsw_iterative_scan, boot_val: GucDefaultValue::Enum(0), options: GucEnumOptions::Inline(hnsw_iterative_scan_options), check_hook: None, assign_hook: None, show_hook: None },
 ];

@@ -215,6 +215,67 @@ pub(super) trait BatchEmit<'mcx> {
     fn key_dict_lane(&self) -> Option<::exectuples::SoaDictLane> {
         None
     }
+
+    /// Staged-window base for ref-carrying sinks (the refsort feed): (row
+    /// group, rg-global row index of staged row 0); the ref of staged row
+    /// `i` is `base + i`. Default `None` = no ref mode (heap batches, non-
+    /// scan emits) — a ref-carrying sink must demote to the legacy feed.
+    fn window_ref(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// The refsort fast leg's batch view for scan column `col`:
+    /// `(key_values, key_isnull, fallback_words, sel_words)` — see
+    /// `nodeseqscan::seq_scan_refsort_key_batch` for the soundness contract.
+    /// Default `None` = every row takes the per-row `emit` path.
+    fn refsort_key_batch(
+        &self,
+        _col: u16,
+        _n: u32,
+    ) -> Option<(&[::datum::Datum], &[bool], &[u64], Option<&[u64]>)> {
+        None
+    }
+
+    /// Physical rowref base of the CURRENT staged batch (tie-ordering rule
+    /// 2, the zone-adaptive rowref-selection sort feed): staged row `i`'s
+    /// rowref is `base + i`. Default: never serves (only the pgrcolumnar-backed
+    /// seqscan emit face carries physical rowrefs).
+    fn rowref_base(&self) -> Option<u64> {
+        None
+    }
+
+    /// Stitched dict-code view of scan column `col` for the CURRENT staged
+    /// window (the DictCode sort-key class, docs/design/dict-code-flow.md
+    /// inc-1): codes + per-RG dict identity, with the v7 part-global stitch
+    /// published when the scan carries one. `Some` certifies only the
+    /// window's codes/dict identity; a consumer using codes for ORDER
+    /// semantics must additionally gate on `table.has_stitch()` and fail
+    /// closed otherwise. Default: never serves (only the pgrcolumnar-backed
+    /// seqscan emit face can).
+    fn refsort_dictcode_batch(&mut self, _col: u16) -> Option<::exectuples::SoaDictLane> {
+        None
+    }
+
+    /// Column-independent staged-batch masks for the refsort fast leg:
+    /// `(fallback_words, sel_words)` — see
+    /// `nodeseqscan::seq_scan_refsort_batch_masks` for the soundness
+    /// contract. Default `None` = no certified masks (the caller fails
+    /// closed or takes the per-row emit path).
+    fn refsort_batch_masks(&self, _n: u32) -> Option<(&[u64], Option<&[u64]>)> {
+        None
+    }
+
+    /// Survivor-bit snapshot of the CURRENT staged batch's qual selection:
+    /// a CLEARED bit means `emit(i)` returns `None` with no observable
+    /// side effect (the staged qual verdict already rejected row i without
+    /// running the original qual — the PREWHERE selection contract; requal
+    /// and fallback rows carry SET bits), so a batch-feeding sink may skip
+    /// cleared rows without the `emit` call. Weaker than a qual-verdict
+    /// lane: SET bits may still be filtered by `emit` itself. Default
+    /// `None` = no live bitmap; every position must go through `emit`.
+    fn live_sel(&self) -> Option<[u64; ::exectuples::SOA_BM_WORDS]> {
+        None
+    }
 }
 
 /// Batch-granular accept face for pipeline-BREAKER sinks (the Phase-3
@@ -234,10 +295,12 @@ pub(super) trait BatchEmit<'mcx> {
 /// the real breakers, which are structurally `NeedMore`). The capacity-one
 /// `RootAdapter` (the PG pull face) stays per-row by design.
 ///
-/// Byte-identity: the default impl is literally the per-row feed loop the
-/// operator ran before (same emit, same accept, same order); overrides must
-/// keep the same per-row delegation in the same order — dispatch granularity
-/// is the ONLY change.
+/// Byte-identity: the default impl is the per-row feed loop the operator ran
+/// before (same emit, same accept, same order), word-skipping positions the
+/// feed's `live_sel` snapshot proves emit-dead (a cleared bit = `emit`
+/// returns None with no observable effect, so the surviving feed stream is
+/// identical); overrides must keep the same per-row delegation in the same
+/// order — dispatch granularity and emit-dead skips are the ONLY changes.
 pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
     /// Feed staged rows `pos..n` through `emit` into the sink.
     fn accept_batch<E: BatchEmit<'mcx>>(
@@ -247,7 +310,14 @@ pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
         n: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
-        for i in pos..n {
+        // Word-skip the feed's qual-survivor snapshot (`live_sel`): a
+        // cleared bit answers `emit` with None and no observable effect, so
+        // skipping it is feed-stream-identical — the per-row emit ceremony
+        // collapses to one word test per 64 rows on selective quals (the
+        // q22 sort-feed lever, generalized; CFI cadence for skipped rows
+        // follows the page-level staging check, the topk-cut precedent).
+        let live = emit.live_sel();
+        ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             if let Some(slot) = emit.emit(i, estate)? {
                 match self.accept(slot, estate)? {
                     SinkFeed::NeedMore => {}
@@ -259,8 +329,8 @@ pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 

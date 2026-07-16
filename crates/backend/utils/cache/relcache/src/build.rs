@@ -41,10 +41,10 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
     {
         return Ok(());
     }
-    // cbstore is identified by pg_am.amname, not amhandler: the closed-AM
-    // engine never invokes handlers (docs/design/cbstore-impl.md §7.1).
+    // pgrcolumnar is identified by pg_am.amname, not amhandler: the closed-AM
+    // engine never invokes handlers (docs/design/pgrcolumnar-impl.md §7.1).
     if syscache_seams::pg_am_amname::call(relam)?.as_deref() == Some("cbstore") {
-        tableam_vocab::register_cbstore_table_am(relam);
+        tableam_vocab::register_pgrcolumnar_table_am(relam);
         return Ok(());
     }
     match syscache_seams::pg_am_amhandler::call(relam)? {

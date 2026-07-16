@@ -152,6 +152,22 @@ pub fn ProcSignalShmemResetAfterCrash() {
 }
 
 pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
+    proc_signal_init_internal(cancel_key, true)
+}
+
+/// M2 pool-binding: a STANDING runtime executor re-takes its slot per
+/// engagement WITHOUT re-registering the exit callback — its first
+/// (connect-time) ProcSignalInit registered once, the thread never
+/// proc_exits between engagements, and a per-call registration would grow
+/// the exit-callback stack unboundedly over the query stream. Every
+/// per-task backend keeps using `ProcSignalInit` (register per task; the
+/// task's proc_exit drain consumes it — the wpool retained-thread
+/// contract).
+pub fn ProcSignalReinitStanding(cancel_key: &[u8]) -> PgResult<()> {
+    proc_signal_init_internal(cancel_key, false)
+}
+
+fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgResult<()> {
     debug_assert!(cancel_key.len() <= MAX_CANCEL_KEY_LENGTH);
     let my_proc_number = g::MyProcNumber();
     if my_proc_number < 0 {
@@ -216,8 +232,22 @@ pub fn ProcSignalInit(cancel_key: &[u8]) -> PgResult<()> {
             t.set(handlers);
         }
     });
-    ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
+    if register_cleanup {
+        ipc_seams::on_shmem_exit::call(CleanupProcSignalState, 0);
+    }
     Ok(())
+}
+
+/// M2 pool-binding: a STANDING runtime executor releases its ProcSignal
+/// slot while PARKED (re-initing per engagement): a live slot whose owner
+/// never drains signals wedges every WaitForProcSignalBarrier — e.g. the
+/// SMGRRELEASE barrier early in DROP DATABASE. A released slot reads as
+/// absorbed-of-everything (pss_barrierGeneration = u64::MAX). No-op
+/// without a slot.
+pub fn ProcSignalRelease() {
+    if MY_PROC_SIGNAL_SLOT.get().is_some() {
+        CleanupProcSignalState(0, 0);
+    }
 }
 
 pub const NUM_THREAD_SIGNALS: usize = 32;
@@ -243,6 +273,47 @@ fn thread_signal_bit(signo: i32) -> u32 {
         "thread signal {signo} out of range"
     );
     1u32 << signo as u32
+}
+
+/// M4 bgjobs multi-job seat (docs/design/m4-bgjobs.md §3.2): one dispatcher
+/// thread hosts several migrated daemons' signal planes. A job's
+/// thread-signal identity — the procsignal slot registration
+/// (MY_PROC_SIGNAL_SLOT; the SHARED pending word is already per-job via
+/// pss_pid) plus the per-thread handler table (the tables differ between
+/// daemons: e.g. bgwriter SIGINT=Ignore, walwriter SIGINT=shutdown) — is
+/// stashed here while the job is not the thread's bound identity.
+pub struct ThreadSignalIdentity {
+    slot: Option<usize>,
+    handlers: [ThreadSignalHandler; NUM_THREAD_SIGNALS],
+}
+
+impl ThreadSignalIdentity {
+    pub const fn unbound() -> ThreadSignalIdentity {
+        ThreadSignalIdentity {
+            slot: None,
+            handlers: [ThreadSignalHandler::Unset; NUM_THREAD_SIGNALS],
+        }
+    }
+}
+
+impl Default for ThreadSignalIdentity {
+    fn default() -> Self {
+        ThreadSignalIdentity::unbound()
+    }
+}
+
+/// Exchange the calling thread's signal identity with `saved`.
+/// Self-inverse: bind and unbind are the same call (the seat swap
+/// discipline — LIFO, RAII-guarded by the caller).
+pub fn swap_thread_signal_identity(saved: &mut ThreadSignalIdentity) {
+    let cur = MY_PROC_SIGNAL_SLOT.get();
+    MY_PROC_SIGNAL_SLOT.set(saved.slot);
+    saved.slot = cur;
+    THREAD_SIGNAL_HANDLERS.with(|t| {
+        let cur = t.get();
+        t.set(saved.handlers);
+        saved.handlers = cur;
+    });
 }
 
 // pqsignal (port/pqsignal.c) for the thread model: dispositions are the
@@ -381,9 +452,12 @@ pub fn DrainThreadSignals() -> PgResult<()> {
 
 fn CleanupProcSignalState(_code: i32, _arg: usize) {
     // Clear first so a signal arriving after this point ignores the slot.
-    let slot_index = MY_PROC_SIGNAL_SLOT
-        .get()
-        .expect("CleanupProcSignalState called without a ProcSignal slot");
+    // Tolerate an already-released slot: a standing runtime executor
+    // (parallel::standing) releases at every park, so its thread-exit
+    // callback usually finds nothing to do.
+    let Some(slot_index) = MY_PROC_SIGNAL_SLOT.get() else {
+        return;
+    };
     MY_PROC_SIGNAL_SLOT.set(None);
     let slot = &proc_signal().psh_slot[slot_index];
     let my_pid = g::MyProcPid();

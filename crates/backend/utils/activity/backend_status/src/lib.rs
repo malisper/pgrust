@@ -119,6 +119,17 @@ pub fn MyBEEntry() -> Option<&'static PgBackendStatus> {
     MY_BE_ENTRY.get()
 }
 
+/// M4 bgjobs multi-job seat (docs/design/m4-bgjobs.md §3.2): one dispatcher
+/// thread hosts several migrated daemons' identities; each job's beentry
+/// binding (set by its pgstat_beinit, consumed by its shmem-exit shutdown
+/// hook) is stashed here while the job is not the thread's bound identity.
+/// Self-inverse exchange (the seat swap discipline).
+pub fn swap_my_beentry(saved: &mut Option<&'static PgBackendStatus>) {
+    let cur = MY_BE_ENTRY.get();
+    MY_BE_ENTRY.set(*saved);
+    *saved = cur;
+}
+
 fn NumBackendStatSlots() -> i32 {
     g::MaxBackends() + NUM_AUXILIARY_PROCS
 }

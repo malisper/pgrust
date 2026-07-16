@@ -1,14 +1,18 @@
-// Thread-model boundary (notes/waiteventset-threads.md): C's SIGURG wakeup
-// channels cannot route to one backend-thread, so latch wakeups use C's own
-// self-pipe arm — one nonblocking pipe per backend, registered pid->write-end
-// (SetLatch writes the target's pipe where C would kill(pid, SIGURG)).
-// Readiness keeps C's #ifdef split: epoll on Linux, kqueue elsewhere.
+// Thread-model boundary (notes/waiteventset-threads.md): readiness keeps
+// C's #ifdef split — epoll on Linux, kqueue elsewhere — for socket waits.
+// The latch-wake half is the Waiter (storage/ipc/waiter): a WL_LATCH_SET
+// event registers the thread's waiter wake-pipe read end, the wait blocks
+// in fd-park mode, and SetLatch unparks the waker handle the owner
+// published into Latch.waker. The old pid-keyed WAKEUP_REGISTRY and the
+// per-backend self-pipe it routed are GONE — the pid-collision hijack and
+// stale-rekey deafness wedge classes are structurally impossible (handles
+// are token-validated, republished at every wait).
 #![allow(non_snake_case)]
 
 use std::cell::{Cell, RefCell};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use init_small::globals::MyProcPid;
+use init_small::globals::{IsUnderPostmaster, MyProcPid};
 use types_core::{pgsocket, PGINVALID_SOCKET};
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL};
 use types_storage::latch::{Latch, LatchHandle};
@@ -39,15 +43,15 @@ pub(crate) struct WaitEventSetData {
 
 thread_local! {
     static SETS: RefCell<Vec<Option<WaitEventSetData>>> = const { RefCell::new(Vec::new()) };
-    // (read_fd, write_fd) of this backend's wakeup pipe (C selfpipe_*fd).
-    static WAKEUP_PIPE: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
-    // C's `static volatile sig_atomic_t waiting`.
-    static WAITING: Cell<bool> = const { Cell::new(false) };
+    // Once-per-thread InitializeWaitEventSupport tripwire (C ran it once per
+    // process; wretain warm claims deliberately skip it).
+    static WES_INITIALIZED: Cell<bool> = const { Cell::new(false) };
 }
 
-// pid -> wakeup-pipe write fd; locked only at backend init and on
-// cross-backend wakes (where C pays a kill(2) syscall).
-static WAKEUP_REGISTRY: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+// The postmaster thread's waiter handle (packed word, 0 = not yet
+// published): the ONE well-known wake route that used to ride the pid
+// registry (SendPostmasterSignal's kill(PostmasterPid, SIGUSR1) analog).
+static POSTMASTER_WAKER: AtomicU64 = AtomicU64::new(0);
 
 #[cold]
 #[inline(never)]
@@ -77,80 +81,49 @@ fn run_with_set<R>(handle: WaitEventSetHandle, f: impl FnOnce(&mut WaitEventSetD
 
 pub fn InitializeWaitEventSupport() -> PgResult<()> {
     assert!(
-        WAKEUP_PIPE.get().is_none(),
+        !WES_INITIALIZED.get(),
         "InitializeWaitEventSupport called twice in this backend"
     );
+    WES_INITIALIZED.set(true);
 
-    let mut pipefd = [0i32; 2];
-    // SAFETY: pipe(2) into a 2-slot array.
-    if unsafe { libc::pipe(pipefd.as_mut_ptr()) } < 0 {
-        return Err(os_error(FATAL, "pipe() failed"));
+    // The waiter wake pipe replaces C's self-pipe (created eagerly here to
+    // keep the per-backend fd accounting where it always was).
+    if let Err(errno) = waiter::ensure_wake_pipe() {
+        return Err(Box::new(PgError::new(
+            FATAL,
+            format!("waiter wake pipe creation failed: errno {errno}"),
+        )));
     }
-    for (fd, end) in [(pipefd[0], "read-end"), (pipefd[1], "write-end")] {
-        // SAFETY: fcntl on the fds just created.
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
-            return Err(os_error(
-                FATAL,
-                &format!("fcntl(F_SETFL) failed on {end} of self-pipe"),
-            ));
-        }
-        // SAFETY: as above.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-            return Err(os_error(
-                FATAL,
-                &format!("fcntl(F_SETFD) failed on {end} of self-pipe"),
-            ));
-        }
-    }
-
     fd::ReserveExternalFD()?;
     fd::ReserveExternalFD()?;
 
-    WAKEUP_PIPE.set(Some((pipefd[0], pipefd[1])));
-
-    let pid = MyProcPid();
-    let mut registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = registry.iter_mut().find(|(p, _)| *p == pid) {
-        entry.1 = pipefd[1];
-    } else {
-        registry.push((pid, pipefd[1]));
+    // The postmaster publishes its well-known waker (children have
+    // IsUnderPostmaster set before they reach this in InitPostmasterChild).
+    if !IsUnderPostmaster() {
+        POSTMASTER_WAKER.store(waiter::current_handle().as_u64(), Ordering::Release);
     }
     Ok(())
 }
 
-/// Retained-thread pid refresh (wretain): a warm-claimed pool standby keeps
-/// its wakeup pipe across tasks but runs each task under a fresh synthetic
-/// MyProcPid, and WakeupOtherProc resolves targets by task pid — the entry
-/// must follow the pid or every cross-thread SetLatch to this thread is lost
-/// (shm_mq wakes, ConditionVariable broadcasts, SendThreadSignal).
+/// Pooled-thread reuse boundary (wretain warm claim): reissue this thread's
+/// waiter token so handles published for the previous task go stale. The
+/// old pid-keyed registry rekey this replaces was itself a wedge source (a
+/// missed rekey silently dropped every wake); the waiter has no registry to
+/// rekey — the live route is republished at every wait entry.
 pub fn RekeyWakeupRegistry() {
-    let (_, write_fd) = WAKEUP_PIPE
-        .get()
-        .expect("RekeyWakeupRegistry before InitializeWaitEventSupport");
-    let pid = MyProcPid();
-    let mut registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    match registry.iter_mut().find(|(_, w)| *w == write_fd) {
-        Some(entry) => entry.0 = pid,
-        None => registry.push((pid, write_fd)),
-    }
+    waiter::reissue_current_token();
 }
 
-/// Diagnostics for MQ stall self-reports: the registry write fd for `pid`
-/// (None = no mapping, i.e. a SetLatch aimed at that pid wakes nobody) plus
-/// the registry length. Cold path only — takes the registry lock.
-pub fn WakeupRegistrySnapshot(pid: i32) -> (Option<i32>, usize) {
-    let registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    (
-        registry.iter().find(|(p, _)| *p == pid).map(|(_, w)| *w),
-        registry.len(),
-    )
+/// C: kill(PostmasterPid, SIGUSR1) analog for SendPostmasterSignal's
+/// fallback path — the single well-known cross-thread kick that used to be
+/// pid-routed. Wakes the postmaster's waiter (fd-park aware: serverloop
+/// blocks in epoll/kqueue on its accept sockets + latch).
+pub fn WakeupPostmaster() {
+    waiter::unpark_word(POSTMASTER_WAKER.load(Ordering::Acquire));
 }
 
 fn wakeup_read_fd() -> i32 {
-    WAKEUP_PIPE
-        .get()
-        .expect("InitializeWaitEventSupport has not run in this backend")
-        .0
+    waiter::wake_read_fd()
 }
 
 pub fn CreateWaitEventSet(nevents: i32) -> PgResult<WaitEventSetHandle> {
@@ -192,11 +165,62 @@ pub fn FreeWaitEventSet(handle: WaitEventSetHandle) {
             .and_then(Option::take)
     }) {
         Ok(set) => set,
-        // Registry TLS already destroyed (thread exit): the OS reclaims fds.
+        // Registry TLS already destroyed (thread exit). Only PROCESS death
+        // reclaims kernel fds, which is why WaitEventSetReleaseGuard frees
+        // every still-registered set before TLS teardown; a call landing
+        // here can only race that guard, whose sweep already freed the set.
         Err(_) => return,
     };
     if let Some(set) = set {
         set.backend.free();
+    }
+}
+
+// Frees every set still registered on this thread. BackendSet deliberately
+// has no Drop (docs/no-drop.md keeps drop authority in explicit owners), so
+// a set that is still live when the thread's TLS unwinds would leak its
+// epoll/kqueue fd: C's "static, never freed" sets (LatchWaitSet, FeBeWaitSet)
+// are reclaimed by process death, and a session THREAD's death reclaims
+// nothing (chaos F2: 2 leaked epoll fds per connection under churn).
+fn release_thread_wait_event_sets() {
+    // Defensive try_with: the guard drops before TLS destruction on the
+    // launch paths, but an exotic exit must degrade to the old leak, not
+    // panic inside unwinding.
+    let Ok(sets) = SETS.try_with(|sets| std::mem::take(&mut *sets.borrow_mut())) else {
+        return;
+    };
+    for set in sets.into_iter().flatten() {
+        set.backend.free();
+    }
+}
+
+/// Backend-thread teardown for this thread's WaitEventSets: Drop frees every
+/// set still registered — the thread-model analog of C's reclaim-at-process-
+/// death for the deliberately-never-freed sets (LatchWaitSet, FeBeWaitSet).
+/// Held at the top of the child thread (LocalLatchReleaseGuard house style),
+/// declared AFTER the latch guard so it drops FIRST: strictly after
+/// run_child_task has drained the deferred proc_exit callback stacks (no
+/// callback can wait on a freed set), and before the local latch slot the
+/// sets reference is recycled. Thread-scoped, not per-task: a parked wretain
+/// standby keeps its sets warm; only thread exit frees them.
+#[must_use]
+pub struct WaitEventSetReleaseGuard(());
+
+impl WaitEventSetReleaseGuard {
+    pub fn new() -> Self {
+        Self(())
+    }
+}
+
+impl Default for WaitEventSetReleaseGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for WaitEventSetReleaseGuard {
+    fn drop(&mut self) {
+        release_thread_wait_event_sets();
     }
 }
 
@@ -323,13 +347,11 @@ pub fn WaitEventSetWait(
     };
 
     waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
-    WAITING.set(true);
 
     let result = run_with_set(handle, |set| {
         wait_loop(set, timeout, cur_timeout, start_time, occurred_events)
     });
 
-    WAITING.set(false);
     waitevent_seams::pgstat_report_wait_end::call();
     result
 }
@@ -346,10 +368,17 @@ fn wait_loop(
     let mut returned_events: i32 = 0;
 
     while returned_events == 0 {
+        let mut fd_parked = false;
         if let Some(l) = latch {
             if !l.is_set() {
-                // C: store, pg_memory_barrier, recheck; the SeqCst store+load
-                // pair carries that edge (notes/latch-atomics.md).
+                // Dekker arm: publish the wake route first, then
+                // maybe_sleeping (SeqCst store), then recheck — matching
+                // WaitLatch's waiter path (notes/latch-atomics.md; the
+                // Acquire pairing lives in set_latch).
+                l.waker.store(
+                    waiter::current_handle().as_u64(),
+                    std::sync::atomic::Ordering::Release,
+                );
                 l.set_maybe_sleeping(true);
             }
             if l.is_set() {
@@ -368,6 +397,14 @@ fn wait_loop(
                 // Poll once with zero timeout for non-latch events that fit.
                 cur_timeout = 0;
                 timeout = 0;
+            } else {
+                // fd-park: unparks aimed at this thread now write the wake
+                // pipe registered in this set. A notification that already
+                // landed (wake-before-park) degrades the block to a poll.
+                fd_parked = waiter::begin_fd_park();
+                if !fd_parked {
+                    cur_timeout = 0;
+                }
             }
         }
 
@@ -379,6 +416,9 @@ fn wait_loop(
         )?;
 
         if let Some(l) = latch {
+            if fd_parked {
+                waiter::end_fd_park();
+            }
             if l.maybe_sleeping.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 l.set_maybe_sleeping(false);
             }
@@ -407,64 +447,14 @@ pub fn WaitEventSetCanReportClosed() -> bool {
     true
 }
 
-fn send_wakeup_byte(write_fd: i32) {
-    let dummy = [0u8; 1];
-    loop {
-        // SAFETY: 1-byte write to a live nonblocking pipe fd.
-        let rc = unsafe { libc::write(write_fd, dummy.as_ptr().cast(), 1) };
-        if rc >= 0 {
-            return;
-        }
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        if errno == libc::EINTR {
-            continue;
-        }
-        // EAGAIN: queued bytes already wake the waiter; others: C's handler
-        // cannot elog, silently ignore.
-        return;
-    }
-}
-
-// Signal-handler/critical-section reachable: no allocation, no errors.
-pub fn WakeupMyProc() {
-    if WAITING.get() {
-        if let Some((_, write_fd)) = WAKEUP_PIPE.get() {
-            send_wakeup_byte(write_fd);
-        }
-    }
-}
-
-// C: kill(pid, SIGURG); here: write the target backend's wakeup pipe.
-pub fn WakeupOtherProc(pid: i32) {
-    let registry = WAKEUP_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, write_fd)) = registry.iter().find(|(p, _)| *p == pid) {
-        send_wakeup_byte(*write_fd);
-    }
-}
-
-// Read all pending data from the wakeup pipe (C drain()).
+// Read all pending data from the waiter wake pipe (C drain()). The
+// lost-wake fault injection (PGRUST_TEST_DROP_WAKE_1IN) now lives at the
+// Waiter layer (waiter::unpark drops every Nth cross-thread wake).
 pub(crate) fn drain() -> PgResult<()> {
-    let fd = wakeup_read_fd();
-    let mut buf = [0u8; 1024];
-    loop {
-        // SAFETY: read into a stack buffer of the stated length.
-        let rc = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if rc < 0 {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
-                return Ok(());
-            }
-            if errno == libc::EINTR {
-                continue;
-            }
-            return Err(os_error(ERROR, "read() on self-pipe failed"));
-        }
-        if rc == 0 {
-            return Err(wes_error("unexpected EOF on self-pipe"));
-        }
-        if (rc as usize) < buf.len() {
-            return Ok(());
-        }
+    match waiter::drain_wake_fd() {
+        Ok(()) => Ok(()),
+        Err(0) => Err(wes_error("unexpected EOF on waiter wake pipe")),
+        Err(_errno) => Err(os_error(ERROR, "read() on waiter wake pipe failed")),
     }
 }
 
@@ -494,8 +484,6 @@ pub fn init_seams() {
     s::modify_wait_event::set(ModifyWaitEvent);
     s::wait_event_set_wait_one::set(wait_event_set_wait_one);
     s::free_wait_event_set::set(FreeWaitEventSet);
-    s::wakeup_my_proc::set(WakeupMyProc);
-    s::wakeup_other_proc::set(WakeupOtherProc);
+    s::wakeup_postmaster::set(WakeupPostmaster);
     s::rekey_wakeup_registry::set(RekeyWakeupRegistry);
-    s::wakeup_registry_snapshot::set(WakeupRegistrySnapshot);
 }

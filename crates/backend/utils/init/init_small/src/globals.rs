@@ -132,6 +132,14 @@ scalar_global! {
     MAX_WORKER_PROCESSES, max_worker_processes, set_max_worker_processes, i32, 8;
     MAX_PARALLEL_WORKERS, max_parallel_workers, set_max_parallel_workers, i32, 8;
     MAX_BACKENDS, MaxBackends, SetMaxBackends, i32, 0;
+    // M2 pool-binding: PGPROCs boot-reserved for the STANDING runtime
+    // executor gang (parallel::standing) — an extra MaxBackends term and a
+    // widened bgworker freelist segment (postinit::InitializeMaxBackends,
+    // lmgr_proc::InitProcGlobal), so the gang never competes with the
+    // bgworker/parallel-worker budgets. Set by the postmaster BEFORE
+    // InitializeMaxBackends, only under PGRUST_RUNTIME=1; default 0 =
+    // byte-identical sizing.
+    RUNTIME_GANG_PROCS, RuntimeGangProcs, SetRuntimeGangProcs, i32, 0;
 
     VACUUM_BUFFER_USAGE_LIMIT, VacuumBufferUsageLimit, SetVacuumBufferUsageLimit, i32, 2048;
     VACUUM_COST_PAGE_HIT, VacuumCostPageHit, SetVacuumCostPageHit, i32, 1;

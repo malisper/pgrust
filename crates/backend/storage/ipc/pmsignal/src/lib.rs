@@ -124,7 +124,7 @@ pub fn SendPostmasterSignal(reason: PMSignalReason) {
     if postmaster_seams::signal_postmaster_sigusr1::is_installed() {
         postmaster_seams::signal_postmaster_sigusr1::call();
     } else {
-        waiteventset_seams::wakeup_other_proc::call(g::PostmasterPid());
+        waiteventset_seams::wakeup_postmaster::call();
     }
 }
 

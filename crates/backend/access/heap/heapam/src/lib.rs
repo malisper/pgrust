@@ -371,6 +371,53 @@ pub fn heap_setscanlimits(
     scan.rs_numblocks = num_blks;
 }
 
+/// Position the scan on the block-range morsel claim `[b0, b1)` (M1 heap
+/// morsel source): the heap analog of pgrcolumnar's `set_granule_range`, and a
+/// repositionable `heap_setscanlimits` — callable between claims (the
+/// previous claim drained to `end_of_scan`, or never started). The claim
+/// unit is one block, so the range maps directly onto the
+/// `rs_startblock`/`rs_numblocks` limit walk C's TID-range scans use:
+/// forward iteration visits exactly blocks `b0..b1`, no wrap.
+///
+/// Morsel-positioned scans never follow or report the syncscan hint (their
+/// start position is the runtime's claim, not a scan-order heuristic), so
+/// `SO_ALLOW_SYNC` is cleared — which also satisfies the
+/// `heap_setscanlimits` invariant this function inherits.
+pub fn heap_set_block_range(
+    scan: &mut HeapScanDescData<'_>,
+    b0: u64,
+    b1: u64,
+) -> PgResult<()> {
+    if scan.rs_base.rs_parallel.is_some() {
+        return Err(elog_error(
+            "heap: block-range positioning on a parallel scan".to_string(),
+        ));
+    }
+    if b0 >= b1 || b1 > scan.rs_nblocks as u64 {
+        return Err(elog_error(format!(
+            "heap: invalid block range [{b0}, {b1}) of {}",
+            scan.rs_nblocks
+        )));
+    }
+    scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
+    // Unconditional reset to the un-inited state (end_of_scan shape): a
+    // drained previous claim already looks like this; a defensive caller
+    // repositioning mid-claim releases the pin here.
+    scan.rs_ctup = None;
+    scan.rs_cpage = core::ptr::null_mut();
+    if let Some(pin) = scan.rs_cbuf.take() {
+        pin.release();
+    }
+    scan.rs_cblock = InvalidBlockNumber;
+    scan.rs_prefetch_block = InvalidBlockNumber;
+    scan.rs_inited = false;
+    scan.rs_ntuples = 0;
+    scan.rs_cindex = 0;
+    scan.rs_startblock = b0 as BlockNumber;
+    scan.rs_numblocks = (b1 - b0) as BlockNumber;
+    Ok(())
+}
+
 // Const generics stand in for C's four constant-folded call sites.
 //
 // # Safety

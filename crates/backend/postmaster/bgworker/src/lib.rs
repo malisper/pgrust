@@ -24,7 +24,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, LOG,
 };
 use types_startup::StartupData;
-use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
+use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
 
 #[cfg(test)]
 mod tests;
@@ -660,12 +660,17 @@ pub fn WaitForBackgroundWorkerStartup(
             return Ok((status, pid));
         }
 
-        let rc = latch::WaitLatch(
-            g::MyLatch(),
-            WL_LATCH_SET | WL_POSTMASTER_DEATH,
-            0,
-            WAIT_EVENT_BGWORKER_STARTUP,
-        )?;
+        // Recheck cadence (shm_mq stall.rs rationale): the wake for this
+        // wait is postmaster-routed and was production-lost (pm-pid
+        // collision class); a bounded sleep re-polls the slot instead of
+        // sleeping forever on a dropped wake.
+        let recheck = ::shm_mq::stall::recheck_ms();
+        let (flags, timeout) = if recheck > 0 {
+            (WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, recheck)
+        } else {
+            (WL_LATCH_SET | WL_POSTMASTER_DEATH, 0)
+        };
+        let rc = latch::WaitLatch(g::MyLatch(), flags, timeout, WAIT_EVENT_BGWORKER_STARTUP)?;
         if rc & WL_POSTMASTER_DEATH != 0 {
             return Ok((BgwHandleStatus::BGWH_POSTMASTER_DIED, 0));
         }
@@ -684,12 +689,14 @@ pub fn WaitForBackgroundWorkerShutdown(handle: &BackgroundWorkerHandle) -> PgRes
             return Ok(status);
         }
 
-        let rc = latch::WaitLatch(
-            g::MyLatch(),
-            WL_LATCH_SET | WL_POSTMASTER_DEATH,
-            0,
-            WAIT_EVENT_BGWORKER_SHUTDOWN,
-        )?;
+        // Recheck cadence — see WaitForBackgroundWorkerStartup.
+        let recheck = ::shm_mq::stall::recheck_ms();
+        let (flags, timeout) = if recheck > 0 {
+            (WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH, recheck)
+        } else {
+            (WL_LATCH_SET | WL_POSTMASTER_DEATH, 0)
+        };
+        let rc = latch::WaitLatch(g::MyLatch(), flags, timeout, WAIT_EVENT_BGWORKER_SHUTDOWN)?;
         if rc & WL_POSTMASTER_DEATH != 0 {
             return Ok(BgwHandleStatus::BGWH_POSTMASTER_DIED);
         }
@@ -796,6 +803,16 @@ thread_local! {
 
 pub fn MyBgworkerEntry() -> Option<BackgroundWorker> {
     MY_BGWORKER_ENTRY.with(|e| e.borrow().clone())
+}
+
+/// M2 pool-binding: a STANDING runtime executor (parallel::standing) is a
+/// bgworker-SHAPED thread that never goes through the registry/dispatch
+/// machinery — it adopts a synthetic entry so the ordinary bgworker
+/// connect path (`BackgroundWorkerInitializeConnectionByOid`, which
+/// consults `MyBgworkerEntry` for the DATABASE_CONNECTION flag) works
+/// unchanged. Thread-local; call once at thread identity setup.
+pub fn adopt_worker_entry(worker: BackgroundWorker) {
+    MY_BGWORKER_ENTRY.with(|e| *e.borrow_mut() = Some(worker));
 }
 
 pub fn bgworker_die() -> PgResult<()> {
@@ -912,6 +929,24 @@ fn run_worker_body(worker: &BackgroundWorker) -> PgResult<()> {
     if init_small::wretain::warm_claim() {
         gtrace("w.retain.claim_warm");
         lmgr_proc::ReattachRetainedProc(BackendType::BgWorker)?;
+        // SINVAL-LEAK FIX: the retained sinval slot's exit callback re-arms
+        // HERE, in the same breath as the PGPROC's (ReattachRetainedProc just
+        // re-registered ProcKill). It used to re-arm only in InitPostgres's
+        // warm arm — leaving a window (ReattachRetainedProc .. InitPostgres)
+        // where a task failure exits through a drain whose ProcKill FREES the
+        // PGPROC while nothing releases the still-claimed sinval slot: the
+        // procno returns to the freelist with proc_states[procno].procPid
+        // still holding the PREVIOUS task's pid, and every later claimant of
+        // that procno fails SharedInvalBackendInit with "sinval slot for
+        // backend N is already in use by process M". The window fired
+        // organically whenever a leader tore down its parallel context before
+        // a warm-claimed pool worker reached the connect (cancel mid-launch,
+        // early query end): ParallelWorkerMain errors pre-connect ("could not
+        // map dynamic shared memory segment", lock-group join refusal) — the
+        // standing chaos flake (notes/INBOX-standing-gang-dev-wedge-
+        // 2026-07-13.md item 3). Exit-callback LIFO keeps C's release order:
+        // CleanupInvalidationState before ProcKill.
+        sinval::ReattachRetainedBackend()?;
     } else {
         lmgr_proc::InitProcess(BackendType::BgWorker)?;
     }

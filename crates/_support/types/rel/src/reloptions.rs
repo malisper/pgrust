@@ -116,56 +116,56 @@ pub struct BrinOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CbstoreCodec {
+pub enum PgrcolumnarCodec {
     Auto,
     Lz4,
     Zstd,
     Plain,
 }
 
-pub const CBSTORE_CLUSTER_KEY_MAX: usize = 512;
-pub const CBSTORE_CODEC_COLS_MAX: usize = 2048;
+pub const PGRCOLUMNAR_CLUSTER_KEY_MAX: usize = 512;
+pub const PGRCOLUMNAR_CODEC_COLS_MAX: usize = 2048;
 
-// cbstore AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
+// pgrcolumnar AM storage options (CREATE TABLE ... USING cbstore WITH (...)).
 // Strings live in fixed inline buffers so RdOptions stays Copy; lengths are
 // validated at option-parse time.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CbstoreOptions {
-    pub codec: CbstoreCodec,
+pub struct PgrcolumnarOptions {
+    pub codec: PgrcolumnarCodec,
     pub zstd_level: i32,
     // Same contract as StdRdOptions.parallel_workers (-1 = unset): pins the
     // planner's worker count for scans of this relation, overriding the
     // row-group-based default sizing (C's compute_parallel_worker honors
-    // the reloption first; cbstore does too).
+    // the reloption first; pgrcolumnar does too).
     pub parallel_workers: i32,
     cluster_key_len: u16,
-    cluster_key_buf: [u8; CBSTORE_CLUSTER_KEY_MAX],
+    cluster_key_buf: [u8; PGRCOLUMNAR_CLUSTER_KEY_MAX],
     codec_cols_len: u16,
-    codec_cols_buf: [u8; CBSTORE_CODEC_COLS_MAX],
+    codec_cols_buf: [u8; PGRCOLUMNAR_CODEC_COLS_MAX],
 }
 
-impl Default for CbstoreOptions {
-    fn default() -> CbstoreOptions {
-        CbstoreOptions {
+impl Default for PgrcolumnarOptions {
+    fn default() -> PgrcolumnarOptions {
+        PgrcolumnarOptions {
             // Ingest default flipped Auto -> Lz4 (train #8): decode-hot
             // scans want LZ4's decompression speed; ZSTD stays opt-in via
             // WITH (codec = 'zstd'). New ingests only — existing chunks
             // carry their codec in the chunk header.
-            codec: CbstoreCodec::Lz4,
+            codec: PgrcolumnarCodec::Lz4,
             zstd_level: 3,
             parallel_workers: -1,
             cluster_key_len: 0,
-            cluster_key_buf: [0; CBSTORE_CLUSTER_KEY_MAX],
+            cluster_key_buf: [0; PGRCOLUMNAR_CLUSTER_KEY_MAX],
             codec_cols_len: 0,
-            codec_cols_buf: [0; CBSTORE_CODEC_COLS_MAX],
+            codec_cols_buf: [0; PGRCOLUMNAR_CODEC_COLS_MAX],
         }
     }
 }
 
-impl CbstoreOptions {
+impl PgrcolumnarOptions {
     /// false = value too long (caller reports the option error).
     pub fn set_cluster_key(&mut self, v: &str) -> bool {
-        if v.len() > CBSTORE_CLUSTER_KEY_MAX {
+        if v.len() > PGRCOLUMNAR_CLUSTER_KEY_MAX {
             return false;
         }
         self.cluster_key_buf[..v.len()].copy_from_slice(v.as_bytes());
@@ -174,7 +174,7 @@ impl CbstoreOptions {
     }
 
     pub fn set_codec_cols(&mut self, v: &str) -> bool {
-        if v.len() > CBSTORE_CODEC_COLS_MAX {
+        if v.len() > PGRCOLUMNAR_CODEC_COLS_MAX {
             return false;
         }
         self.codec_cols_buf[..v.len()].copy_from_slice(v.as_bytes());
@@ -202,7 +202,7 @@ pub enum RdOptions {
     Gist(GistOptions),
     SpGist(SpGistOptions),
     Brin(BrinOptions),
-    Cbstore(CbstoreOptions),
+    Pgrcolumnar(PgrcolumnarOptions),
     Hnsw(HnswOptions),
 }
 
@@ -224,9 +224,9 @@ impl RdOptions {
     }
 
     #[inline]
-    pub fn cbstore(&self) -> Option<&CbstoreOptions> {
+    pub fn pgrcolumnar(&self) -> Option<&PgrcolumnarOptions> {
         match self {
-            RdOptions::Cbstore(o) => Some(o),
+            RdOptions::Pgrcolumnar(o) => Some(o),
             _ => None,
         }
     }
@@ -242,7 +242,7 @@ impl RdOptions {
             RdOptions::Gist(o) => Some(o.fillfactor),
             RdOptions::SpGist(o) => Some(o.fillfactor),
             RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_)
-            | RdOptions::Cbstore(_) | RdOptions::Hnsw(_) => None,
+            | RdOptions::Pgrcolumnar(_) | RdOptions::Hnsw(_) => None,
         }
     }
 

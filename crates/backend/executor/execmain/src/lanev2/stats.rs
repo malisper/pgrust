@@ -84,19 +84,19 @@ pub(super) enum ShapeClass {
     SubqueryScan = 10,
     Append = 11,
     ProjectSet = 12,
-    /// cbstore-backed SeqScan (the CbstoreSource tranche): counted apart
+    /// pgrcolumnar-backed SeqScan (the PgrcolumnarSource tranche): counted apart
     /// from heap seqscans because the admission economics differ (standalone
-    /// cbstore scans ARE lane-owned — the per-row drive lacks the batch
-    /// kernels) and the regress corpus has no cbstore tables (its floor
-    /// seeds from the dedicated cbstore e2e corpus).
+    /// pgrcolumnar scans ARE lane-owned — the per-row drive lacks the batch
+    /// kernels) and the regress corpus has no pgrcolumnar tables (its floor
+    /// seeds from the dedicated pgrcolumnar e2e corpus).
     CbScan = 13,
-    /// Metadata-answered plain agg over a bare cbstore scan (the metaagg
+    /// Metadata-answered plain agg over a bare pgrcolumnar scan (the metaagg
     /// footer-answer arm). OWNED ticks once per metadata-answered execution
-    /// event; refusals tick ONLY for cbstore-backed plain-agg offers (heap
+    /// event; refusals tick ONLY for pgrcolumnar-backed plain-agg offers (heap
     /// scans are out of the arm's scope and tick nothing here) — structural
     /// reasons once per memoized per-node choice, runtime reasons per
-    /// offered call. The regress corpus has no cbstore tables; the floor
-    /// seeds from the cbstore e2e corpus.
+    /// offered call. The regress corpus has no pgrcolumnar tables; the floor
+    /// seeds from the pgrcolumnar e2e corpus.
     MetaAgg = 14,
     /// Streaming top-k cutoff pre-filter on the sort breaker feed: OWNED =
     /// one tick per sort feed the pre-filter ARMED on (engagement evidence
@@ -110,8 +110,8 @@ pub(super) enum ShapeClass {
     /// refusals tick the dynamic per-call gates (EPQ/backward) here and the
     /// agg-side shape refusal under aggbuild.
     Gather = 16,
-    /// Zone-ordered adaptive top-N traversal on a cbstore-fed bounded sort
-    /// (docs/design/cbstore-zone-adaptive.md): OWNED = one tick per sort
+    /// Zone-ordered adaptive top-N traversal on a pgrcolumnar-fed bounded sort
+    /// (docs/design/pgrcolumnar-zone-adaptive.md): OWNED = one tick per sort
     /// feed the adaptive granule order ARMED on (never a refusal class —
     /// non-admission keeps the physical-order feed). Demotions (ambiguous
     /// boundary tie observed → exact physical re-feed) are the
@@ -185,7 +185,7 @@ pub(super) enum RefuseReason {
     /// An in-lane kill switch is off. The master `PGRUST_LANE_V2` switch is
     /// checked by the dispatch hooks *before* any lane code runs and never
     /// ticks this; the metaagg arm's `PGRUST_LANE_V2_METAAGG=0` disarm ticks
-    /// it (once per memoized per-node choice on a cbstore-backed plain agg).
+    /// it (once per memoized per-node choice on a pgrcolumnar-backed plain agg).
     EnvOff = 0,
     /// EvalPlanQual re-check active (model-incompatible, §4).
     Epq = 1,
@@ -241,7 +241,7 @@ pub(super) enum RefuseReason {
     AdmissionEconomicsNoConsumer = 19,
     /// Dynamic tiny-input row-floor (§4 endgame refuse-set): the relation is
     /// too small for lane ownership to recover its own admission-probe cost
-    /// (armed 2026-07-12 at the cbstore standalone hook — the memoized tiny
+    /// (armed 2026-07-12 at the pgrcolumnar standalone hook — the memoized tiny
     /// verdict is taken BEFORE the qual-translate/arm cascade runs).
     TinyInputFloor = 20,
     /// Join-side shape refuse (hash-join breaker and NestLoop TupleOp) —
@@ -276,14 +276,14 @@ pub(super) enum RefuseReason {
     /// REFUSES the compact table (the C table spills; distinct-spill is v2,
     /// per the plan's 2.2 item). Ticked per build decision.
     CompactSpillRisk = 26,
-    /// Stage-2.1 dict-code grouping (cbstore dict-group feed): the offered
-    /// cbstore K2 fold shape cannot host dict-code grouping — varlena-guard
+    /// Stage-2.1 dict-code grouping (pgrcolumnar dict-group feed): the offered
+    /// pgrcolumnar K2 fold shape cannot host dict-code grouping — varlena-guard
     /// (str MIN/MAX) fold plans, an unarmable columnar prefix, or a staging
     /// consumer conflict. Mode-choice observability inside a still-lane-owned
     /// build (like the compact rows); ticked once per build decision.
     DictGroupShape = 27,
     /// Metaagg arm structural shape refuse (once per memoized per-node
-    /// choice on a cbstore-backed plain agg): a transition set that is not
+    /// choice on a pgrcolumnar-backed plain agg): a transition set that is not
     /// all-footer-answerable (classify_meta None — floats/bools/bitwise/
     /// text, FILTER, DISTINCT/ORDER BY, non-affine transforms), or a scan
     /// that is not bare (qual/projection/zone quals).
@@ -293,7 +293,7 @@ pub(super) enum RefuseReason {
     /// interval is unproven against the visible rows' footer min/max — the
     /// per-row drive owns the call and raises C's overflow error at C's row.
     MetaRuntime = 29,
-    /// cbstore standalone scan: the scan HAS a qual, but no staged kernel
+    /// pgrcolumnar standalone scan: the scan HAS a qual, but no staged kernel
     /// armed for it — the PREWHERE walker/translate refused the shape
     /// (anchored/underscore/escape LIKE classes, non-whitelisted comparators,
     /// hybrid prefixes below the engagement gate). Split out of
@@ -303,10 +303,10 @@ pub(super) enum RefuseReason {
     /// verdict, like the cbscan admission row.
     QualNotVectorizable = 30,
     /// Plain-agg (ungrouped) plans whose transitions read NO input columns —
-    /// pure count(*)-style census shapes. Deliberately refused by the cbstore
+    /// pure count(*)-style census shapes. Deliberately refused by the pgrcolumnar
     /// per-row breaker-feed admission (lane-v2-noqualfeed): the census answer
     /// needs no data decode at all (heap: the incumbent fused drive's
-    /// storeless advance; cbstore: the MetaAggScan footer path / the empty
+    /// storeless advance; pgrcolumnar: the MetaAggScan footer path / the empty
     /// needed-set per-row walk), so a batch-decoded feed has nothing to win.
     CountOnlyCensus = 31,
     /// Multi-key packed grouping (multikey spike §2.4): the 2..N-key shape
@@ -431,6 +431,8 @@ static TOPKCUT_ROWS_CUT: AtomicU64 = AtomicU64::new(0);
 /// arrival-order-sensitive tie at the LIMIT cut and re-fed physical-order.
 static ADAPTIVE_TOPK_DEMOTED: AtomicU64 = AtomicU64::new(0);
 static ADAPTIVE_TOPK_TIE_RELAXED: AtomicU64 = AtomicU64::new(0);
+/// Rule-2 rowref-selection adaptive feeds that finished exact (no demote).
+static ADAPTIVE_TOPK_ROWREF_EXACT: AtomicU64 = AtomicU64::new(0);
 
 /// Group-level emit-side top-N boundary effect counters (lane-v2 topnemit;
 /// informational `counter` dump lines). `SEEN` counts groups walked by an
@@ -444,13 +446,29 @@ static TOPNEMIT_GROUPS_CUT: AtomicU64 = AtomicU64::new(0);
 /// first_slot scatter); `FEEDS` counts armed feeds.
 static BATCHEMIT_GROUPS: AtomicU64 = AtomicU64::new(0);
 static BATCHEMIT_FEEDS: AtomicU64 = AtomicU64::new(0);
+/// Topkfin (top-k group selection before finalize/emit; hot-c1) effect
+/// counters (informational `counter` dump lines). `GROUPS` counts groups the
+/// selection scan walked; `SELECTED` counts survivors finalized + emitted
+/// (≤ the sort bound); `DEMOTED` counts armed passes that declined (no
+/// compact table or a NULL order-key transvalue) back to the batched feed.
+static TOPKFIN_GROUPS: AtomicU64 = AtomicU64::new(0);
+static TOPKFIN_SELECTED: AtomicU64 = AtomicU64::new(0);
+static TOPKFIN_DEMOTED: AtomicU64 = AtomicU64::new(0);
+/// Refsort (late-materialization top-N) engagement counters (informational
+/// `counter` dump lines): `OWNED` = feeds the refsort arm completed (narrow
+/// puts + winner gather); `DEMOTED` = armed feeds that demoted back to the
+/// legacy wide feed (mid-feed ref loss or a gather failure -- always before
+/// any output escaped).
+static REFSORT_OWNED: AtomicU64 = AtomicU64::new(0);
+static REFSORT_DEMOTED: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
 
 /// The accounting arm switch: `PGRUST_LANE_V2_STATS=<dir>`. Resolved once per
-/// process, like `lanev2::enabled()`.
-fn stats_dir() -> Option<&'static PathBuf> {
+/// process, like `lanev2::enabled()`. Shared with the M5 router's counters
+/// (router.rs) so one harness switch arms both surfaces.
+pub(super) fn stats_dir() -> Option<&'static PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| std::env::var_os("PGRUST_LANE_V2_STATS").map(PathBuf::from))
         .as_ref()
@@ -507,6 +525,39 @@ pub(super) fn tick_adaptive_topk_tie_relaxed() {
     arm_dump_on_thread_exit();
 }
 
+/// Record one completed refsort (late-materialization top-N) feed.
+#[inline]
+pub(super) fn tick_refsort_owned() {
+    if stats_dir().is_none() {
+        return;
+    }
+    REFSORT_OWNED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one refsort demotion (armed feed fell back to the legacy wide
+/// feed before any output escaped).
+#[inline]
+pub(super) fn tick_refsort_demoted() {
+    if stats_dir().is_none() {
+        return;
+    }
+    REFSORT_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one rule-2 rowref-selection adaptive top-N feed that finished
+/// exact (no demotion; survivor selection pinned to the physical feed's by
+/// the (key, rowref) bounded-heap total order).
+#[inline]
+pub(super) fn tick_adaptive_topk_rowref_exact() {
+    if stats_dir().is_none() {
+        return;
+    }
+    ADAPTIVE_TOPK_ROWREF_EXACT.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 /// Record one engaged top-k pre-filter batch: `seen` rows offered, `cut`
 /// rows discarded ahead of the tuplesort.
 #[inline]
@@ -540,6 +591,29 @@ pub(super) fn tick_batchemit_groups(groups: u64, feeds: u64) {
     }
     BATCHEMIT_GROUPS.fetch_add(groups, Relaxed);
     BATCHEMIT_FEEDS.fetch_add(feeds, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one owned topkfin feed: `groups` walked by the selection scan,
+/// `selected` survivors finalized + emitted.
+#[inline]
+pub(super) fn tick_topkfin_groups(groups: u64, selected: u64) {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPKFIN_GROUPS.fetch_add(groups, Relaxed);
+    TOPKFIN_SELECTED.fetch_add(selected, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// Record one topkfin decline (armed pass fell back to the batched feed
+/// before any side effect).
+#[inline]
+pub(super) fn tick_topkfin_demoted() {
+    if stats_dir().is_none() {
+        return;
+    }
+    TOPKFIN_DEMOTED.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -615,6 +689,10 @@ fn dump() {
         ADAPTIVE_TOPK_TIE_RELAXED.load(Relaxed)
     ));
     out.push_str(&format!(
+        "counter\tadaptivetopk-rowref-exact\t{}\n",
+        ADAPTIVE_TOPK_ROWREF_EXACT.load(Relaxed)
+    ));
+    out.push_str(&format!(
         "counter\ttopnemit-groups-seen\t{}\n",
         TOPNEMIT_GROUPS_SEEN.load(Relaxed)
     ));
@@ -629,6 +707,26 @@ fn dump() {
     out.push_str(&format!(
         "counter\tbatchemit-feeds\t{}\n",
         BATCHEMIT_FEEDS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-groups\t{}\n",
+        TOPKFIN_GROUPS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-selected\t{}\n",
+        TOPKFIN_SELECTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\ttopkfin-demoted\t{}\n",
+        TOPKFIN_DEMOTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\trefsort-owned\t{}\n",
+        REFSORT_OWNED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\trefsort-demoted\t{}\n",
+        REFSORT_DEMOTED.load(Relaxed)
     ));
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));

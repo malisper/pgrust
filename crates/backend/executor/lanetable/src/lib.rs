@@ -1,4 +1,4 @@
-//! lanetable — the lane-native compact-row aggregation table (cbstore-v2
+//! lanetable — the lane-native compact-row aggregation table (pgrcolumnar-v2
 //! plan Stage 2.2, closing the measured 2.4–3.3×/6.6× aggregation-table gap
 //! vs ClickHouse's HashMap/StringHashMap on the Stage-0 shim parity rig).
 //!
@@ -60,11 +60,67 @@ pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 /// executor's 1024-row batches that sampling left the first 100 rows of
 /// EVERY batch unprefetched (~10% of all probes) and paid two clock reads
 /// per batch — both visible in the in-situ Q16 profile (2026-07-15,
-/// serialgap2: vdso/clock_gettime/Timespec::now lines). Engaged probes are
-/// DRAM-bound (~60-120ns/iter vs ~100ns DRAM), so the solved look-ahead is
-/// always a handful; a fixed mid-clamp distance covers the whole batch with
-/// zero measurement overhead.
+/// serialgap2: vdso/clock_gettime/Timespec::now lines). A fixed distance
+/// covers the whole batch with zero measurement overhead.
+///
+/// The distance is PER RUN SHAPE (C3 lane, 2026-07-13,
+/// notes/hot-c3-probe-prefetch.md):
+/// - Inline16 (one 16 B slot line resolves the compare):
+///   [`PREFETCH_LOOKAHEAD_INLINE`] = 24. Same-pod restart-arm ladder on
+///   the v7u 10M bank read Q16/Q36 serial 8→16 = −7%, 16→24 = −2.6%,
+///   24→32 = flat — at 8 the hint lands only ~8 hit-iterations (~tens
+///   of ns) before use, short of DRAM latency; the plateau starts ~24.
+/// - Salt8 / Int128 (entry line + dependent row line per probe):
+///   [`PREFETCH_LOOKAHEAD`] = 8. The same ladder read the 2-key i128
+///   class WORSE at 24 (same-pod Q32 +4.4%, Q15 +2.0%, Q31 +1.8%): the
+///   demand stream is already two lines deep per row, and a longer
+///   speculative hint stream competes for the same fill buffers.
+/// PGRUST_LANE_V2_PROBE_LOOKAHEAD overrides BOTH at boot (0 = no
+/// in-loop hints) — the A/B channel that measured these tables.
 pub const PREFETCH_LOOKAHEAD: usize = 8;
+
+/// Inline16-run look-ahead (see [`PREFETCH_LOOKAHEAD`]).
+pub const PREFETCH_LOOKAHEAD_INLINE: usize = 24;
+
+/// Runtime channel for the engaged look-ahead distance
+/// (`PGRUST_LANE_V2_PROBE_LOOKAHEAD`; default = the caller's per-shape
+/// constant, 0 = no in-loop hints). Read once, loaded into a register
+/// per batch — zero hot-loop cost. C3 probe-prefetch A/B channel.
+#[inline]
+fn probe_lookahead(shape_default: usize) -> usize {
+    static LA: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    LA.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_PROBE_LOOKAHEAD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+    })
+    .unwrap_or(shape_default)
+}
+
+/// Long-key arena projection channel (stringhash2 re-charter inc-0, see
+/// [`LaneAggTable::reserve_arena_projection`]): default ON;
+/// `PGRUST_LANE_V2_ARENA_RESERVE=0` falls back to `Vec`'s amortized
+/// doubling (the same-pod A/B arm). Read once per process.
+#[inline]
+fn arena_reserve_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_ARENA_RESERVE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
+// C3 lane note (2026-07-13, notes/hot-c3-probe-prefetch.md): a two-stage
+// row-line prefetch for the Salt8/Int128 runs (read the hinted home slot
+// d ahead, prefetch the row its ref points at) was built and MEASURED
+// WORSE — Q17 +9.7%, Q32/Q33 +2% — because the home-slot row is fetched
+// even when the probe resolves elsewhere in the chain or the salt
+// mismatches: pure extra DRAM traffic on a loop already at the
+// bandwidth/MSHR floor. Same floor logic refused a batched+prefetched
+// stringhash IntSet insert (Q5/Q9/Q10 flat: iterations are independent,
+// so OoO runahead already extracts the available MLP). Do not rebuild
+// either without new evidence that the floor moved.
 
 const SALT_SHIFT: u32 = 48;
 const REF_MASK: u64 = (1 << SALT_SHIFT) - 1;
@@ -444,6 +500,20 @@ pub struct LaneAggTable {
     /// The NULL group's row (out-of-band — CH ZeroValueStorage idiom).
     null_row: Option<usize>,
     total_members: usize,
+    /// Construction-time `capacity_hint` (expected member count), kept for
+    /// the long-key arena projection in [`Self::reserve_arena_projection`].
+    expected_members: usize,
+    /// Two-level conversion gate. `with_config` tables convert at
+    /// [`TWO_LEVEL_THRESHOLD`]; [`Self::with_flat_capacity`] tables never
+    /// convert (combine16: a combine claim's keys carry a CONSTANT hash top
+    /// byte — the sink bucket — so `bucket_of` would funnel every member
+    /// into one sub-EntrySet and the other 255 would be dead weight).
+    convert_enabled: bool,
+    /// Entry-set grow count (combine16 evidence channel: the merged bucket
+    /// table must never grow when presized from the claim's arrival count).
+    grows: u32,
+    /// Two-level conversion count (same channel).
+    converts: u32,
 }
 
 /// Probe outcome: pointer to the row's state bytes + whether the group is
@@ -519,7 +589,63 @@ impl LaneAggTable {
             buckets,
             null_row: None,
             total_members: 0,
+            expected_members: capacity_hint,
+            convert_enabled: true,
+            grows: 0,
+            converts: 0,
         }
+    }
+
+    /// FLAT presized constructor (combine16): one single-level entry set
+    /// sized past the 0.5-fill grow line for `members_hint` members, and the
+    /// two-level conversion SUPPRESSED for the table's lifetime.
+    ///
+    /// Built for combine-claim merged tables, where (a) the member count is
+    /// bounded up front by the claim's arrival count (runs + remainder
+    /// directory reads), so a presized flat set never grows, and (b) bytes-
+    /// mode probes reuse the carried SINK hash, whose top byte is the sink
+    /// bucket — CONSTANT within a claim — so the two-level `bucket_of`
+    /// (hash >> 56) would route every member into ONE sub-EntrySet (which
+    /// then re-grows through full rehashes) while the other 255 presized
+    /// sets are allocated + zeroed and never touched.
+    ///
+    /// Byte-invisible vs [`Self::with_config`]: entry-set layout and growth
+    /// affect only probe step sequences — dedup semantics (key equality,
+    /// saved-hash confirm) and ROW INSERTION ORDER are identical, and every
+    /// read-back is insertion-order.
+    pub fn with_flat_capacity(
+        repr: KeyRepr,
+        state_bytes: usize,
+        members_hint: usize,
+        hash: HashKind,
+        layout: EntryLayout,
+    ) -> LaneAggTable {
+        let mut t = LaneAggTable::with_config(repr, state_bytes, 0, hash, layout);
+        debug_assert!(t.buckets.is_none(), "hint 0 builds single-level");
+        t.single = EntrySet::with_capacity_pow2(members_hint.saturating_mul(2), t.slot_words);
+        t.convert_enabled = false;
+        t
+    }
+
+    /// Pre-extend the long-key arena (combine16): the caller knows the
+    /// claim's key-byte volume up front; reserving it kills the doubling
+    /// reallocs (each of which copies the whole arena). A hint is never a
+    /// cap — `insert_bytes` extends past it freely. Offsets (and therefore
+    /// bytes) are reservation-independent.
+    pub fn reserve_arena(&mut self, bytes: usize) {
+        self.arena.reserve(bytes);
+    }
+
+    /// Entry-set grows since birth (combine16 evidence channel).
+    #[inline]
+    pub fn grow_count(&self) -> u32 {
+        self.grows
+    }
+
+    /// Two-level conversions since birth (0 or 1; combine16 channel).
+    #[inline]
+    pub fn convert_count(&self) -> u32 {
+        self.converts
     }
 
     #[inline]
@@ -803,6 +929,19 @@ impl LaneAggTable {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
         let sw = if INLINE { 2 } else { 1 };
+        // C3 channel (a register for the whole run): per-shape slot-line
+        // hint distance (Inline16 resolves in the slot; Salt8 pays a
+        // dependent row line — see PREFETCH_LOOKAHEAD), clamped to the
+        // staged batch: a filtered window hands ~35 survivors of the
+        // 256-row window, where distance 24 forfeits ~2/3 of the hint
+        // coverage (Q15/Q31 same-pod +2% — the short-batch clamp keeps
+        // them at ~8 while full windows keep 24).
+        let la = probe_lookahead(if INLINE {
+            PREFETCH_LOOKAHEAD_INLINE
+        } else {
+            PREFETCH_LOOKAHEAD
+        })
+        .min(keys.len() / 4);
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             // Hoisted raw parts (re-derived after every insert — see
@@ -821,8 +960,8 @@ impl LaneAggTable {
             let rows_stride = self.rows.stride_words;
             let salt_on = !INLINE && self.total_members > SALT_DISABLE_MAX_ENTRIES;
             while i < keys.len() {
-                let j = i + PREFETCH_LOOKAHEAD;
-                if j < keys.len() {
+                let j = i + la;
+                if la != 0 && j < keys.len() {
                     // SAFETY: j < keys.len() == hashes.len().
                     let h = unsafe { *hashes.get_unchecked(j) };
                     let (e_ptr_j, mask_j) = if bp.is_null() {
@@ -1174,6 +1313,9 @@ impl LaneAggTable {
     ) {
         debug_assert_eq!(keys.len(), hashes.len());
         let kw = self.key_words;
+        // C3 channel (see probe_fold_hashed_run; Int128 is Salt8-only —
+        // the same short-batch clamp applies).
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(keys.len() / 4);
         let mut i = 0usize;
         'rehoist: while i < keys.len() {
             let bp: *mut EntrySet = match &mut self.buckets {
@@ -1190,8 +1332,8 @@ impl LaneAggTable {
             let rows_stride = self.rows.stride_words;
             let salt_on = self.total_members > SALT_DISABLE_MAX_ENTRIES;
             while i < keys.len() {
-                let j = i + PREFETCH_LOOKAHEAD;
-                if j < keys.len() {
+                let j = i + la;
+                if la != 0 && j < keys.len() {
                     // SAFETY: j < keys.len() == hashes.len().
                     let h = unsafe { *hashes.get_unchecked(j) };
                     let (e_ptr_j, mask_j) = if bp.is_null() {
@@ -1415,6 +1557,9 @@ impl LaneAggTable {
             packed
         } else {
             let off = self.arena.len() as u64;
+            if self.arena.len() + key.len() > self.arena.capacity() {
+                self.reserve_arena_projection(key.len());
+            }
             self.arena.extend_from_slice(key);
             off
         };
@@ -1435,6 +1580,44 @@ impl LaneAggTable {
         Probe { states: unsafe { p.add(self.key_words).cast() }, is_new: true }
     }
 
+    /// Grow the long-key arena toward its PROJECTED final size instead of
+    /// letting `Vec` double (stringhash2 re-charter inc-0; vecaudit census
+    /// handoff, CONTESTED:stringhash2 — accepted): the arena is
+    /// `Vec::new()` at construction and fed one `extend_from_slice` per new
+    /// > 8 B key, so every doubling memcpies the ENTIRE arena — on
+    /// q34/q35-class tables (~18M URL-length keys per build) that is a
+    /// hundreds-of-MB realloc-copy stream, while `capacity_hint` sized only
+    /// the entry sets. The projection scales the observed
+    /// arena-bytes-per-member by the construction-time member hint, so a
+    /// well-hinted build takes one large reservation in place of
+    /// ~log2(final/first) full-arena copies; a missing or exceeded hint
+    /// falls back to 2x geometric growth (amortized cost unchanged, never
+    /// worse than the old shape). Offsets, contents, group ids and
+    /// iteration order are untouched — capacity only, so results are
+    /// byte-identical by construction. NOTE [`Self::mem_used`] accounts
+    /// `arena.capacity()`: the projection lands in memory accounting
+    /// earlier than doubling would, bounded by what the build reaches
+    /// anyway plus hint skew. `PGRUST_LANE_V2_ARENA_RESERVE=0` kills the
+    /// projection (same-pod A/B channel).
+    #[cold]
+    #[inline(never)]
+    fn reserve_arena_projection(&mut self, add: usize) {
+        if !arena_reserve_enabled() {
+            return; // extend_from_slice falls back to Vec doubling
+        }
+        let len = self.arena.len();
+        let members = self.total_members.max(1);
+        let expected = self.expected_members.max(members);
+        let projected = len
+            .saturating_mul(expected)
+            .checked_div(members)
+            .unwrap_or(len)
+            .saturating_add(add);
+        let target = projected
+            .max(self.arena.capacity().saturating_mul(2))
+            .max(len + add);
+        self.arena.reserve(target - len);
+    }
     // -- NULL group ---------------------------------------------------------
 
     /// The NULL key's group (out-of-band; SQL GROUP BY treats NULLs as one
@@ -1474,7 +1657,10 @@ impl LaneAggTable {
     /// Returns true when any layout changed (caller re-derives positions).
     fn grow_if_needed(&mut self, hash: u64) -> bool {
         let mut changed = false;
-        if self.buckets.is_none() && self.total_members + 1 > TWO_LEVEL_THRESHOLD {
+        if self.convert_enabled
+            && self.buckets.is_none()
+            && self.total_members + 1 > TWO_LEVEL_THRESHOLD
+        {
             self.convert_two_level();
             changed = true;
         }
@@ -1488,6 +1674,7 @@ impl LaneAggTable {
 
     #[cold]
     fn grow_set(&mut self, hash: u64) {
+        self.grows = self.grows.saturating_add(1);
         let sw = self.slot_words;
         let newcap = {
             let set = self.set_for(hash);
@@ -1515,6 +1702,7 @@ impl LaneAggTable {
     #[cold]
     fn convert_two_level(&mut self) {
         debug_assert!(self.buckets.is_none());
+        self.converts = self.converts.saturating_add(1);
         let sw = self.slot_words;
         let per_bucket = (self.total_members / 128).next_power_of_two().max(64);
         let mut bs: Vec<EntrySet> =

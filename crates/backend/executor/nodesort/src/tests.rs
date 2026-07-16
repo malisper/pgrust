@@ -15,39 +15,62 @@ use ::types_tuple::{
 use crate::*;
 
 const INT4OID: u32 = 23;
+const INT8OID: u32 = 20;
 const INT4_LT: u32 = 97;
+const INT8_LT: u32 = 412;
 const INTEGER_BTREE_FAM: u32 = 1976;
 const BTREE_AM: u32 = 403;
 const F_BTINT4SORTSUPPORT: u32 = 3130;
+const F_BTINT8SORTSUPPORT: u32 = 3131;
 
 static SEAMS: Once = Once::new();
 
 fn install_seams() {
     SEAMS.call_once(|| {
         syscache_seams::lookup_pg_type_shape::set(|typid| {
-            Ok((typid == INT4OID).then_some(PgTypeShape {
-                typlen: 4,
-                typbyval: true,
-                typalign: TYPALIGN_INT,
-                typstorage: TYPSTORAGE_PLAIN,
-                typcollation: 0,
-            }))
+            Ok(match typid {
+                INT4OID => Some(PgTypeShape {
+                    typlen: 4,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                INT8OID => Some(PgTypeShape {
+                    typlen: 8,
+                    typbyval: true,
+                    typalign: TYPALIGN_INT,
+                    typstorage: TYPSTORAGE_PLAIN,
+                    typcollation: 0,
+                }),
+                _ => None,
+            })
         });
         syscache_seams::lookup_pg_amop_members_by_operator::set(|mcx, opno| {
-            assert_eq!(opno, INT4_LT);
+            // int4 `<` (the plans' key-0) and int8 `<` (the refsort rule-2
+            // ref tie-break column).
+            let ty = match opno {
+                INT4_LT => INT4OID,
+                INT8_LT => INT8OID,
+                other => panic!("unexpected operator lookup {other}"),
+            };
             let mut v = PgVec::new_in(mcx);
             v.push(syscache_seams::PgAmopMemberShape {
                 amopfamily: INTEGER_BTREE_FAM,
-                amoplefttype: INT4OID,
-                amoprighttype: INT4OID,
+                amoplefttype: ty,
+                amoprighttype: ty,
                 amopstrategy: 1,
                 amopmethod: BTREE_AM,
             });
             Ok(v)
         });
         syscache_seams::lookup_pg_amproc::set(|opfamily, left, right, procnum| {
-            assert_eq!((opfamily, left, right, procnum), (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2));
-            Ok(F_BTINT4SORTSUPPORT)
+            assert_eq!((opfamily, procnum), (INTEGER_BTREE_FAM, 2));
+            Ok(match (left, right) {
+                (INT4OID, INT4OID) => F_BTINT4SORTSUPPORT,
+                (INT8OID, INT8OID) => F_BTINT8SORTSUPPORT,
+                other => panic!("unexpected amproc lookup {other:?}"),
+            })
         });
     });
 }
@@ -422,4 +445,260 @@ fn lane_datum_sort_direct_key_matches_emit_path() {
         outs.push(out);
     }
     assert_eq!(outs[0], outs[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Lane refsort (late-materialization top-N) seams.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refsort_ref_encode_roundtrip() {
+    for (rg, row) in [
+        (0u32, 0u32),
+        (0, 1),
+        (1, 0),
+        (7, 12345),
+        (u32::MAX, 0),
+        (0, u32::MAX),
+        (u32::MAX, u32::MAX),
+        (0x8000_0000, 0x8000_0000),
+    ] {
+        let r = refsort_encode(rg, row);
+        assert_eq!(refsort_decode(r), (rg, row), "ref {r:#x}");
+        // Round-trips through the Datum currency the tuplesort carries.
+        assert_eq!(Datum::from_i64(r).as_i64(), r);
+    }
+    // Refs order within one row group follows the row index (not load-bearing
+    // for correctness — the sort orders by key — but documents the packing).
+    assert!(refsort_encode(3, 10) < refsort_encode(3, 11));
+}
+
+/// 2-col synthetic (int4 key, int8 ref) desc, hand-built like `int4_desc`.
+fn refsort_key_desc(mcx: Mcx<'static>) -> Rc<TupleDescData<'static>> {
+    use ::types_tuple::TYPALIGN_DOUBLE;
+    let key = FormData_pg_attribute {
+        attnum: 1,
+        atttypid: INT4OID,
+        attlen: 4,
+        attbyval: true,
+        attalign: TYPALIGN_INT,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let refatt = FormData_pg_attribute {
+        attnum: 2,
+        atttypid: 20, // INT8OID
+        atttypmod: -1,
+        attlen: 8,
+        attbyval: true,
+        attalign: TYPALIGN_DOUBLE,
+        attstorage: TYPSTORAGE_PLAIN,
+        ..Default::default()
+    };
+    let mut attrs = PgVec::new_in(mcx);
+    let mut compact = PgVec::new_in(mcx);
+    for att in [key, refatt] {
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    Rc::new(TupleDescData {
+        natts: 2,
+        tdtypeid: 2249,
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs: compact,
+        attrs,
+    })
+}
+
+/// Full refsort node cycle: narrow bounded feed -> sorted winner refs ->
+/// buffered winners served (in order) by BOTH emit faces (`sort_lane_next`
+/// and the `exec_sort` fallback drain) -> rescan clears everything.
+#[test]
+fn refsort_feed_gather_emit_and_rescan() {
+    // Outer shape: 2 int4 columns (so !datumSort), leading key = col 1.
+    let (mut node, mut estate, desc, _feed) = setup(2, vec![], 0);
+    sort_set_tuple_bound(&mut node, 2);
+    assert!(node.bounded && node.bound == 2);
+    let mcx = estate.es_query_cxt;
+
+    let kdesc = refsort_key_desc(mcx);
+    sort_lane_begin_refsort(&mut node, kdesc.clone(), false).unwrap();
+    assert_eq!(
+        sort_lane_refsort_key_desc(&node).unwrap().natts,
+        2,
+        "key desc memoized on the node"
+    );
+    // Keys 5, 1, 3, 2 at refs (rg 7, rows 100..104): bound 2 keeps 1 and 2.
+    for (i, key) in [5i32, 1, 3, 2].into_iter().enumerate() {
+        sort_lane_put_refsort(
+            &mut node,
+            Datum::from_i32(key),
+            false,
+            refsort_encode(7, 100 + i as u32),
+        )
+        .unwrap();
+    }
+    sort_lane_finish(&mut node, &mut estate).unwrap();
+    assert!(node.sort_done());
+
+    // Winner refs come back in sorted key order: key 1 (row 101), then key 2
+    // (row 103). The caller must read AT MOST `bound` refs: a bounded
+    // tuplesort ERRORS when read past its bound ("retrieved too many tuples
+    // in a bounded sort"), exactly like C -- the production gather loop caps
+    // at bound for this reason.
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 101))); // key 1
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 103))); // key 2
+
+    // Buffer the gathered winners (outer format: key, payload).
+    sort_lane_refsort_push_winner(
+        &mut node,
+        mcx,
+        &[Datum::from_i32(1), Datum::from_i32(11)],
+        &[false, false],
+    )
+    .unwrap();
+    sort_lane_refsort_push_winner(
+        &mut node,
+        mcx,
+        &[Datum::from_i32(2), Datum::from_i32(22)],
+        &[false, false],
+    )
+    .unwrap();
+    assert_eq!(sort_lane_refsort_winners(&node), 2);
+
+    // Emit face 1: sort_lane_next pops the buffer, never the narrow sort.
+    let id = sort_lane_next(&mut node, &mut estate).unwrap().unwrap();
+    let mut isnull = false;
+    assert_eq!(exectuples::slot_getattr(estate.slot_mut(id), 1, &mut isnull).as_i32(), 1);
+    assert_eq!(exectuples::slot_getattr(estate.slot_mut(id), 2, &mut isnull).as_i32(), 11);
+
+    // Emit face 2 (fallback safety): a mid-stream fall back to `exec_sort`'s
+    // drain leg serves the SAME buffer — the outer fetch must never run
+    // (sort_Done is set), and the narrow tuplesort is never read as output.
+    let got = exec_sort(&mut node, &mut estate, desc.clone(), |_| {
+        panic!("outer fetched after sort_Done")
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(exectuples::slot_getattr(estate.slot_mut(got), 1, &mut isnull).as_i32(), 2);
+    assert_eq!(exectuples::slot_getattr(estate.slot_mut(got), 2, &mut isnull).as_i32(), 22);
+
+    // Drained: EOF from both faces.
+    assert!(sort_lane_next(&mut node, &mut estate).unwrap().is_none());
+
+    // Rescan (no randomAccess): refs/winners never cross a rescan.
+    let need_outer = exec_rescan_sort(&mut node, &mut estate).unwrap();
+    assert!(need_outer);
+    assert!(!node.sort_done());
+    assert_eq!(sort_lane_refsort_winners(&node), 0);
+    // The node re-feeds through the ORDINARY begin afterwards (the demote /
+    // non-refsort path): byte-safe legacy feed over the same node state.
+    sort_lane_begin(&mut node, desc.clone()).unwrap();
+    sort_lane_finish(&mut node, &mut estate).unwrap();
+    assert!(sort_lane_next(&mut node, &mut estate).unwrap().is_none());
+}
+
+/// Rule-2 refsort (lazytopn): the ref column joins the comparator — the
+/// bounded selection is the (key, ref-ascending) TOTAL ORDER, so full-key
+/// ties at the LIMIT cut select the physically-earliest refs and emit in
+/// ref order, independent of put order. Under the plain single-key
+/// comparator the same feed's tie survivors are heap-shape arbitrary (the
+/// Q25 rule-2 landing's KEY FACT) — this pins the rule-2 leg exactly.
+#[test]
+fn refsort_rule2_ties_select_earliest_refs_in_ref_order() {
+    let (mut node, mut estate, _desc, _feed) = setup(2, vec![], 0);
+    sort_set_tuple_bound(&mut node, 2);
+    let mcx = estate.es_query_cxt;
+    sort_lane_begin_refsort(&mut node, refsort_key_desc(mcx), true).unwrap();
+    // Three full-key ties (key 1) put in NON-ref order + one worse key.
+    // Rule-2 order: (1,100) < (1,102) < (1,103) < (2,101); bound 2 keeps
+    // the two physically-earliest tie members.
+    for (key, rg, row) in [(1i32, 7u32, 103u32), (2, 7, 101), (1, 7, 100), (1, 7, 102)] {
+        sort_lane_put_refsort(&mut node, Datum::from_i32(key), false, refsort_encode(rg, row))
+            .unwrap();
+    }
+    sort_lane_finish(&mut node, &mut estate).unwrap();
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 100)));
+    assert_eq!(sort_lane_refsort_next_ref(&mut node).unwrap(), Some((7, 102)));
+}
+
+/// The demote reset (`sort_lane_reset_for_refeed`) drops the narrow sort,
+/// the marker, and the buffer; the sticky refusal flag survives.
+#[test]
+fn refsort_reset_for_refeed_clears_state_and_refusal_sticks() {
+    let (mut node, mut estate, desc, _feed) = setup(2, vec![], 0);
+    sort_set_tuple_bound(&mut node, 4);
+    let mcx = estate.es_query_cxt;
+    sort_lane_begin_refsort(&mut node, refsort_key_desc(mcx), false).unwrap();
+    sort_lane_put_refsort(&mut node, Datum::from_i32(9), false, refsort_encode(1, 2)).unwrap();
+    assert!(!sort_lane_refsort_refused(&node));
+    sort_lane_refsort_refuse(&mut node);
+    sort_lane_reset_for_refeed(&mut node);
+    assert!(!node.sort_done());
+    assert_eq!(sort_lane_refsort_winners(&node), 0);
+    assert!(sort_lane_refsort_refused(&node), "demote refusal is sticky");
+    // Legacy re-feed over the same node state works.
+    sort_lane_begin(&mut node, desc.clone()).unwrap();
+    sort_lane_finish(&mut node, &mut estate).unwrap();
+    assert!(sort_lane_next(&mut node, &mut estate).unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// for_each_put: the skip-mask put iterator must visit EXACTLY the positions
+// the plain pos..n loop would offer to an emit that answers None on
+// bit-cleared rows — same positions, same order — for arbitrary masks,
+// pos offsets and ragged tails. (The sort feed's put-stream identity.)
+// ---------------------------------------------------------------------------
+#[test]
+fn for_each_put_matches_plain_loop_on_set_bits() {
+    // Deterministic xorshift; no external deps.
+    let mut seed = 0x9E3779B97F4A7C15u64;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for case in 0..500 {
+        let n: u32 = match case % 5 {
+            0 => 1,
+            1 => 63,
+            2 => 64,
+            3 => 65,
+            _ => (rng() % (64 * exectuples::SOA_BM_WORDS as u64 - 1) + 1) as u32,
+        };
+        let pos: u32 = (rng() % (n as u64 + 1)) as u32;
+        let mut words = [0u64; exectuples::SOA_BM_WORDS];
+        for w in words.iter_mut() {
+            *w = match case % 4 {
+                0 => 0,
+                1 => !0,
+                _ => rng(),
+            };
+        }
+        // Producer contract: bits at/past n are zero.
+        for i in n..(64 * exectuples::SOA_BM_WORDS as u32) {
+            words[(i / 64) as usize] &= !(1u64 << (i % 64));
+        }
+        let expected: Vec<u32> = (pos..n)
+            .filter(|&i| words[(i / 64) as usize] & (1u64 << (i % 64)) != 0)
+            .collect();
+        let mut got = Vec::new();
+        for_each_put(Some(&words), pos, n, |i| {
+            got.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(got, expected, "case {case} n={n} pos={pos}");
+        // None mask = the plain loop.
+        let mut all = Vec::new();
+        for_each_put(None, pos, n, |i| {
+            all.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(all, (pos..n).collect::<Vec<_>>());
+    }
 }
