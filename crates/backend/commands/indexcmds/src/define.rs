@@ -1188,15 +1188,11 @@ pub(crate) fn ResolveOpClass(
     accessMethodName: &str,
     accessMethodId: Oid,
 ) -> PgResult<Oid> {
-    let mut names: [&str; 4] = [""; 4];
-    let nnames = opclass.len();
-    if nnames == 0 || nnames > 3 {
-        unported("ResolveOpClass: improper qualified opclass name");
-    }
-    for (i, n) in opclass.iter().enumerate() {
-        names[i] = n.as_string().expect("opclass holds Strings").sval;
-    }
-    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+    // C DeconstructQualifiedName's default arm raises the improper-qualified-name
+    // error itself for 0 or >3 parts; collect every part so it can.
+    let names: Vec<&str> =
+        opclass.iter().map(|n| n.as_string().expect("opclass holds Strings").sval).collect();
+    let (schemaname, opcname) = catalog_namespace::DeconstructQualifiedName(&names)?;
 
     let opClassId = if let Some(schemaname) = schemaname {
         let namespaceId = catalog_namespace::LookupExplicitNamespace(schemaname, false)?;
@@ -1212,7 +1208,7 @@ pub(crate) fn ResolveOpClass(
         return Err(err(
             format!(
                 "operator class \"{}\" does not exist for access method \"{}\"",
-                if schemaname.is_some() { names[..nnames].join(".") } else { opcname.to_string() },
+                if schemaname.is_some() { names.join(".") } else { opcname.to_string() },
                 accessMethodName
             ),
             ERRCODE_UNDEFINED_OBJECT,
@@ -1223,7 +1219,7 @@ pub(crate) fn ResolveOpClass(
         return Err(err(
             format!(
                 "operator class \"{}\" does not exist for access method \"{}\"",
-                names[..nnames].join("."),
+                names.join("."),
                 accessMethodName
             ),
             ERRCODE_UNDEFINED_OBJECT,
@@ -1233,7 +1229,7 @@ pub(crate) fn ResolveOpClass(
         return Err(err(
             format!(
                 "operator class \"{}\" does not accept data type {}",
-                names[..nnames].join("."),
+                names.join("."),
                 format_type::format_type_be(attrType)?
             ),
             ERRCODE_DATATYPE_MISMATCH,

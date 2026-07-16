@@ -223,7 +223,14 @@ fn check_create_in_namespace(mcx: Mcx<'_>, namespaceoid: Oid) -> PgResult<()> {
 // object_ownercheck (aclchk.c): superuser fast path, per typecmds precedent.
 fn ownercheck_or_loud(name: &str) -> PgResult<()> {
     if !superuser::superuser()? {
-        panic!("tsearchcmds: object_ownercheck for non-superusers unported ({name})");
+        // unported: object_ownercheck for non-superusers (aclchk lane)
+        let _ = name;
+        return Err(Box::new(
+            types_error::PgError::error(
+                "altering text search objects as a non-superuser is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     Ok(())
 }

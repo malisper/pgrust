@@ -120,7 +120,11 @@ pub fn BeginCopyTo<'mcx, 's>(
     let need_transcoding = !(file_encoding == mbutils::GetDatabaseEncoding()
         || file_encoding == wchar::PG_SQL_ASCII);
     if !opts.binary && file_encoding >= wchar::PG_SJIS {
-        unported("TO with a client-only encoding (pg_encoding_mblen escape walk)");
+        // unported: COPY TO with a client-only encoding (pg_encoding_mblen escape walk)
+        return Err(Box::new(
+            PgError::error("COPY TO with a client-only encoding is not supported yet".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let dest = match filename {

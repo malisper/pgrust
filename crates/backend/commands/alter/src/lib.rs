@@ -685,6 +685,12 @@ pub fn ExecAlterOwnerStmt<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterOwnerStmt<'mcx>) -> 
             AlterObjectOwner_internal(mcx, address.classId, address.objectId, newowner)?;
             Ok(address)
         }
-        other => panic!("ExecAlterOwnerStmt (alter.c): object type {other:?} unported"),
+        // unported: ExecAlterOwnerStmt (alter.c) remaining object-type arms
+        _ => Err(Box::new(
+            types_error::PgError::error(
+                "changing the owner of this type of object is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        )),
     }
 }

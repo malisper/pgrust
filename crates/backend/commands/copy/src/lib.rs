@@ -111,7 +111,11 @@ pub fn DoCopy<'mcx>(
 ) -> PgResult<u64> {
     let is_from = stmt.is_from;
     if stmt.is_program {
-        unported("TO/FROM PROGRAM (OpenPipeStream lane)");
+        // unported: COPY TO/FROM PROGRAM (OpenPipeStream lane)
+        return Err(Box::new(
+            PgError::error("COPY TO/FROM PROGRAM is not supported yet".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let userid = miscinit_seams::get_user_id::call();
