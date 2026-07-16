@@ -303,6 +303,12 @@ pub static pgrust_lane_executor: GucBoolVar = GucSlot::new("pgrust_lane_executor
 // OFF, LRU-bounded by the size GUC (KB).
 pub static pgrust_condition_cache: GucBoolVar = GucSlot::new("pgrust_condition_cache");
 pub static pgrust_condition_cache_size: GucIntVar = GucSlot::new("pgrust_condition_cache_size");
+// pgrust-only: pgrust.parallel_engine + pgrust.runtime_dop (M5-0,
+// docs/design/m5-planner.md §2.2; no C symbol). The engine selector routes
+// covered serial shapes to the morsel runtime under `runtime`; the DOP knob
+// is consulted ONLY under engine=runtime (never by the per-arm bench GUCs).
+pub static pgrust_parallel_engine: GucEnumVar = GucSlot::new("pgrust_parallel_engine");
+pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
 // pgrust-only: pgrust.regex_pattern_program (no C symbol; the anchored
 // pattern-program fast tier under the auto RE2 dispatch — regexp_alt owns
 // the backing and installs the accessors).

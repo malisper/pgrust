@@ -1,9 +1,11 @@
-// Claim-time readahead scope guard (parallelism-redesign §2.8, M1 lane B):
+// Claim-time readahead scope guard (parallelism-redesign §2.8, M1 lane B;
+// serial default flipped 2026-07-15 — cold-readahead lane, ratified):
 // over a REAL multi-row-group part written by the production writer,
-// (a) a SERIAL scan drive NEVER issues readahead — arm A serial-vs-CH-mt1
-//     stays prefetch-free per Michael's standing directive; the guard is
-//     structural (claim_next_rg's serial arm has no advise path), so this
-//     holds with the env gate at its default (ON);
+// (a) a SERIAL scan drive advises at the default through the CLAIM channel
+//     (rgs_claim_readahead) and NEVER through the legacy parallel channel
+//     (rgs_readahead == 0 stays structural);
+//     PGRUST_CBSTORE_READAHEAD_SERIAL=0 restores the historical
+//     prefetch-free serial arm;
 // (b) a PARALLEL scan drive advises exactly the next unclaimed row group
 //     per claim (nrgs - 1 in-range advises for a single-worker drive) and
 //     stages byte-identical row counts to the serial drive;
@@ -182,8 +184,8 @@ fn write_part(tag: &str) -> (String, usize) {
     (path, n_rows)
 }
 
-fn open_part(path: &str) -> Rc<cbstore::reader::Part> {
-    Rc::new(cbstore::reader::Part::open(path, 2).unwrap().expect("part exists"))
+fn open_part(path: &str) -> std::sync::Arc<cbstore::reader::Part> {
+    std::sync::Arc::new(cbstore::reader::Part::open(path, 2).unwrap().expect("part exists"))
 }
 
 // Drive next_window to exhaustion; returns total staged rows.
@@ -199,26 +201,49 @@ fn drive(scan: &mut CbScanDescData<'_>) -> usize {
 }
 
 #[test]
-fn serial_scan_never_advises() {
+fn serial_scan_advises_claim_channel_only() {
     let _g = ENV_LOCK.lock().unwrap();
     let (path, n_rows) = write_part("serial");
     let part = open_part(&path);
     assert!(part.rgs.len() >= 3, "fixture must span row groups");
     let ctx = MemoryContext::new("cbreadahead-serial");
     let mcx = ctx.mcx();
-    // Env gate at its default (ON): the serial guard must be structural,
-    // not env-dependent.
+    // Defaults (2026-07-15 flip): the serial drive advises through the
+    // CLAIM channel; the legacy parallel-arm channel stays structurally 0.
     let mut scan = CbScanDescData::new_with_part(
         scan_base(mcx, 41011, None),
         Some(part),
         vec![ColType::I64, ColType::Text],
     );
     assert_eq!(drive(&mut scan), n_rows);
-    assert_eq!(scan.rgs_readahead, 0, "serial scans must never advise");
-    // Rescan: still none.
+    assert!(scan.rgs_claim_readahead > 0, "serial default advises (claim channel)");
+    assert_eq!(scan.rgs_readahead, 0, "legacy parallel channel stays 0 on serial");
+    // Rescan advises again (fresh physical pass).
+    let before = scan.rgs_claim_readahead;
     scan.reset_position();
     assert_eq!(drive(&mut scan), n_rows);
-    assert_eq!(scan.rgs_readahead, 0, "serial rescan must never advise");
+    assert!(scan.rgs_claim_readahead > before, "serial rescan advises again");
+    assert_eq!(scan.rgs_readahead, 0);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn serial_opt_out_restores_prefetch_free_arm() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("serialoptout");
+    let part = open_part(&path);
+    let ctx = MemoryContext::new("cbreadahead-serialoptout");
+    let mcx = ctx.mcx();
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD_SERIAL", "0");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41018, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD_SERIAL");
+    assert_eq!(drive(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "SERIAL=0 restores the prefetch-free arm");
+    assert_eq!(scan.rgs_readahead, 0);
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -291,5 +316,105 @@ fn advise_extents_cover_every_rg_and_column_subset() {
     // Out-of-range RG and empty column set: refused, no panic.
     assert!(!part.advise_willneed(part.rgs.len(), &[0, 1]));
     assert!(!part.advise_willneed(0, &[]));
+    std::fs::remove_file(&path).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Claim-drive / serial readahead (cold-readahead lane): the runtime morsel
+// drive's set_granule_range hook and the OPT-IN serial knob, counted in
+// rgs_claim_readahead so the legacy serial guard above stays exact.
+// ---------------------------------------------------------------------------
+
+// Drive the scan claim-by-claim through set_granule_range (whole-RG claims,
+// the runtime drive's whole_boundary_claims shape); returns staged rows.
+fn drive_claims(scan: &mut CbScanDescData<'_>) -> usize {
+    let (_total, starts) = scan.granule_geometry().unwrap();
+    let mut staged = 0usize;
+    for w in starts.windows(2) {
+        scan.set_granule_range(w[0], w[1]).unwrap();
+        loop {
+            let n = scan.next_window().unwrap();
+            if n == 0 {
+                break;
+            }
+            staged += n as usize;
+        }
+    }
+    staged
+}
+
+#[test]
+fn claim_drive_advises_own_and_next_rg() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("claimdrive");
+    let part = open_part(&path);
+    let nrgs = part.rgs.len();
+    assert!(nrgs >= 3, "fixture must span row groups");
+    let ctx = MemoryContext::new("cbreadahead-claim");
+    let mcx = ctx.mcx();
+    // Defaults: readahead ON, claim depth 1, serial knob OFF.
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41014, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    // Per RG switch: own RG + 1 ahead, out-of-range successor of the last
+    // RG skipped => 2*(nrgs-1) + 1.
+    assert_eq!(scan.rgs_claim_readahead, (2 * (nrgs - 1) + 1) as u64);
+    assert_eq!(scan.rgs_readahead, 0, "legacy counter untouched by the claim drive");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn claim_drive_kill_switches() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("claimkill");
+    let part = open_part(&path);
+    let ctx = MemoryContext::new("cbreadahead-claimkill");
+    let mcx = ctx.mcx();
+    // Global kill switch silences the claim drive too.
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD", "0");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41015, None),
+        Some(part.clone()),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD");
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "PGRUST_CBSTORE_READAHEAD=0 must kill claim advises");
+    drop(scan);
+    // Hook-scoped switch: PGRUST_CBSTORE_READAHEAD_CLAIMS=off.
+    let ctx2 = MemoryContext::new("cbreadahead-claimoff");
+    let mcx2 = ctx2.mcx();
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD_CLAIMS", "off");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx2, 41016, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD_CLAIMS");
+    assert_eq!(drive_claims(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "CLAIMS=off must disable the claim hook");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn serial_kill_switch_covers_claim_channel() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let (path, n_rows) = write_part("serialkill");
+    let part = open_part(&path);
+    let ctx = MemoryContext::new("cbreadahead-serialkill");
+    let mcx = ctx.mcx();
+    std::env::set_var("PGRUST_CBSTORE_READAHEAD", "0");
+    let mut scan = CbScanDescData::new_with_part(
+        scan_base(mcx, 41017, None),
+        Some(part),
+        vec![ColType::I64, ColType::Text],
+    );
+    std::env::remove_var("PGRUST_CBSTORE_READAHEAD");
+    assert_eq!(drive(&mut scan), n_rows);
+    assert_eq!(scan.rgs_claim_readahead, 0, "global kill switch silences the serial drive");
+    assert_eq!(scan.rgs_readahead, 0);
     std::fs::remove_file(&path).unwrap();
 }

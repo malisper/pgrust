@@ -270,6 +270,62 @@ impl<'mcx> DistinctSet<'mcx> {
         self.len()
     }
 
+    /// batch-insert lane: prefetch the probe line an `insert_i64(k)` will
+    /// touch (look-ahead driver hint — no semantic effect). Promoted arm
+    /// prefetches the IntSet cell; the legacy arm prefetches the slot word
+    /// (its `ints` deref stays a miss — legacy tables promote at
+    /// `should_promote` anyway, so the window is short-lived).
+    #[inline(always)]
+    pub(crate) fn prefetch_i64(&self, k: i64) {
+        // Promoted arm only: pre-promotion tables (Empty/Legacy) are small
+        // and cache-resident — a hint there is pure overhead.
+        if let ProbeTab::Int(t) = &self.table {
+            t.prefetch(k);
+        }
+    }
+
+    /// Projection reserve (dedupsub I3): pre-size the int probe table for
+    /// an expected final key count, replacing the doubling-rehash ladder
+    /// with one jump. Arms: a PROMOTED IntSet reserves directly; a
+    /// still-EMPTY set with a large-enough target installs a pre-sized
+    /// IntSet arm up front (the promotion-at-56 size gate exists to spare
+    /// SMALL sets the stringhash fixed cost — a target past the gate is
+    /// exactly the promotion verdict, taken early with zero rebuild).
+    /// Legacy-with-entries and bytes arms no-op; replay-only sets
+    /// (`from_values`: Empty table, populated value arrays) are excluded by
+    /// the emptiness guard. Pure geometry: set contents, insertion order,
+    /// and every downstream byte are untouched by any target value.
+    ///
+    /// q9internals inc-1: the reserve covers the VALUE array too — `ints`
+    /// is the other half of a big set's memory and was still growing
+    /// through Vec's realloc-doubling ladder (~1x final bytes of memcpy
+    /// per big set) after the table reserve landed. Same accounting story
+    /// as the table jump (capacity is metered by the caller's window
+    /// re-account); capacity is a non-surface.
+    #[inline]
+    pub(crate) fn reserve_projected(&mut self, target_len: usize) {
+        match &mut self.table {
+            ProbeTab::Int(t) => {
+                t.reserve_for(target_len);
+                if target_len > self.ints.capacity() {
+                    self.ints.reserve(target_len - self.ints.len());
+                }
+            }
+            ProbeTab::Empty
+                if stringhash_set_enabled()
+                    && self.ints.is_empty()
+                    && self.spans.is_empty()
+                    && target_len >= stringhash_promote_len().max(1) =>
+            {
+                let mut t = ::stringhash::IntSet::new();
+                t.reserve_for(target_len);
+                self.table = ProbeTab::Int(t);
+                self.ints.reserve(target_len);
+            }
+            _ => {}
+        }
+    }
+
     /// Bytes the set holds (capacities — actual allocation, the conservative
     /// figure the work_mem budget check wants).
     pub(crate) fn mem_bytes(&self) -> usize {
@@ -977,6 +1033,61 @@ mod tests {
         assert_eq!(b.len(), 0);
         b.insert_bytes(b"fresh");
         assert_eq!(b.len(), 1);
+    }
+
+    /// dedupsub I3: reserve_projected arms — fresh-empty installs a
+    /// pre-sized Int arm past the promote gate, small targets stay on the
+    /// legacy ladder, replay-only sets are untouched, dedup exact always.
+    #[test]
+    fn reserve_projected_arms_and_guards() {
+        // Fresh set, big target: pre-sized Int arm, no legacy phase.
+        let mut s = DistinctSet::new();
+        s.reserve_projected(50_000);
+        // q9internals inc-1: the value array is pre-sized too — no realloc
+        // ladder while filling to the target (geometry pin: capacity holds
+        // the target and the fill never moves the buffer).
+        assert!(s.ints.capacity() >= 50_000);
+        let base_ptr = s.ints.as_ptr();
+        for i in 0..50_000i64 {
+            s.insert_i64(i * 7);
+            s.insert_i64(i * 7); // immediate dup
+        }
+        assert_eq!(s.len(), 50_000);
+        assert_eq!(s.ints()[0], 0);
+        assert_eq!(s.ints.as_ptr(), base_ptr, "value array reallocated despite reserve");
+        // Small target below the promote gate: table decision deferred
+        // (legacy on first insert), dedup unchanged.
+        let mut t = DistinctSet::new();
+        t.reserve_projected(4);
+        for _ in 0..3 {
+            t.insert_i64(1);
+            t.insert_i64(2);
+        }
+        assert_eq!(t.len(), 2);
+        // Promoted set: reserve is a plain table jump; values keep order.
+        let mut p = DistinctSet::new();
+        for i in 0..200i64 {
+            p.insert_i64(i);
+        }
+        p.reserve_projected(30_000);
+        assert!(p.ints.capacity() >= 30_000, "promoted-arm reserve covers the value array");
+        for i in 0..200i64 {
+            p.insert_i64(i); // still dups
+        }
+        assert_eq!(p.len(), 200);
+        assert_eq!(p.ints()[199], 199);
+        // Replay-only set (from_values): the emptiness guard leaves the
+        // probe table Empty (inserting into such a set is forbidden anyway).
+        let mut r = DistinctSet::from_values(
+            DistinctKeyKind::Int64,
+            vec![1, 2, 3],
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+        r.reserve_projected(100_000);
+        assert!(matches!(r.table, ProbeTab::Empty));
+        assert_eq!(r.ints(), &[1, 2, 3]);
     }
 
     #[test]

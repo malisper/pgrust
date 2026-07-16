@@ -310,9 +310,11 @@ pub(super) struct CaseDictSpec {
     /// ELSE: the const's raw text payload bytes.
     pub(super) else_bytes: Vec<u8>,
     /// Per-(epoch, code) intern-id cache for the THEN column (the mk
-    /// Intern arm's cache discipline, its own identity roll).
+    /// Intern arm's cache discipline, its own identity roll). Entry
+    /// encoding: 0 = unset, `id + 1` otherwise (`reset_code_id_cache` —
+    /// the zero-page allocation is the q40 vecstate fix).
     pub(super) cd_epoch: Option<(bool, u64)>,
-    pub(super) cd_code_ids: Vec<Option<u32>>,
+    pub(super) cd_code_ids: Vec<u32>,
     /// Memoized ELSE intern id (cleared with the intern cache).
     pub(super) else_id: Option<u32>,
     /// Per-batch condition scratch (indexed by staged row).
@@ -1728,6 +1730,46 @@ enum ChVerdict {
     Disarm,
 }
 
+/// Opt-in for the zero-page (fresh alloc_zeroed) code→intern-id cache
+/// allocation (`PGRUST_EXPRKEY_ZEROPAGE=1`). Default OFF — MEASURED
+/// (board-or-hold wave, notes/vecstate-lane.md): the fresh-mmap-per-
+/// execution strategy showed a consistent official-channel hot try-2
+/// spike (+6-14% on q40; allocator page-churn class) while the eager
+/// u32-memset refill below carries the SAME -27% diagnostic win (the win
+/// is the u32 id+1 representation — memset-optimizable at half the bytes
+/// vs the old `Vec<Option<u32>>` ptr::write fill — not the lazy paging).
+fn zeropage_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_EXPRKEY_ZEROPAGE").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
+
+/// Reset a code → intern-id cache for a new (epoch) identity. Entry
+/// encoding: 0 = unset, `id + 1` otherwise.
+///
+/// vecstate q40 fix (notes/vecstate-lane.md wave-3): under a v7 stitch
+/// `size` is the part-GLOBAL dict NDV (URL @100M ≈ 18.3M) and the
+/// historical `clear()+resize(size, None)` eagerly `ptr::write`-filled the
+/// whole gndv-sized array per worker per execution — 38% of q40's total
+/// cycles. The fresh `vec![0; size]` goes through `alloc_zeroed` (kernel
+/// zero pages for large sizes): untouched codes never cost a write and the
+/// resident set is O(touched pages), so the per-query working memory
+/// stays bounded by what the query actually references (no-large-caches
+/// law: the cache still dies with the scan — only the FILL became lazy).
+pub(super) fn reset_code_id_cache(cache: &mut Vec<u32>, size: usize) {
+    if zeropage_cache_enabled() {
+        *cache = vec![0u32; size];
+    } else {
+        // Kill-switch arm: the historical buffer-retaining eager refill.
+        cache.clear();
+        cache.resize(size, 0);
+    }
+}
+
 impl CodeHistState {
     fn new(ntrans: usize, has_str: bool) -> CodeHistState {
         CodeHistState {
@@ -1781,6 +1823,8 @@ fn ch_flush<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("expr-key feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // avgpack: packed inline AvgAccum slots (sink worker builds only).
+    let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
     for &code in &ch.touched {
         let c = code as usize;
         let n = ch.hist[c] as i64;
@@ -1798,7 +1842,7 @@ fn ch_flush<'mcx>(
         // aggcx is the node's agg context; strd is a live inline varlena
         // image copy for str plans (begin_epoch/simg discipline); guards
         // proven per code at first touch.
-        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx)? };
+        unsafe { ::lanefold::fold_code_group(plan, vals, strd, n, pg, aggcx, avgpack_mask)? };
     }
     ch.touched.clear();
     // The advances above bypassed the per-group str memo.
@@ -2555,7 +2599,7 @@ fn exprkey_mk_batch<'mcx>(
         };
         let fast_kernel = m.fast.is_some();
         let MultiKeyChain { case_dict, mks, .. } = &mut **m;
-        let super::MkScratch { packbuf, keys1, keys2, epoch, code_ids, .. } = mks;
+        let super::MkScratch { packbuf, keys1, epoch, code_ids, .. } = mks;
         packbuf.clear();
         packbuf.resize(rows.len(), 0u128);
         'comps: for comp in shape.comps.iter() {
@@ -2675,8 +2719,7 @@ fn exprkey_mk_batch<'mcx>(
                             };
                             if cd.cd_epoch != Some(ident) {
                                 cd.cd_epoch = Some(ident);
-                                cd.cd_code_ids.clear();
-                                cd.cd_code_ids.resize(size, None);
+                                reset_code_id_cache(&mut cd.cd_code_ids, size);
                             }
                             for (k, &i) in rows.iter().enumerate() {
                                 let id = if cd.cond[i as usize] {
@@ -2691,8 +2734,8 @@ fn exprkey_mk_batch<'mcx>(
                                         local as usize
                                     };
                                     match cd.cd_code_ids[code] {
-                                        Some(id) => id,
-                                        None => {
+                                        c if c != 0 => c - 1,
+                                        _ => {
                                             let d = lane.table.datum(local);
                                             // SAFETY: dict entries are live
                                             // non-null text varlenas for the
@@ -2705,7 +2748,8 @@ fn exprkey_mk_batch<'mcx>(
                                                 agg,
                                                 v.data(),
                                             );
-                                            cd.cd_code_ids[code] = Some(id);
+                                            debug_assert!(id != u32::MAX, "id+1 encoding");
+                                            cd.cd_code_ids[code] = id + 1;
                                             id
                                         }
                                     }
@@ -2758,8 +2802,7 @@ fn exprkey_mk_batch<'mcx>(
                             };
                             if *epoch != Some(ident) {
                                 *epoch = Some(ident);
-                                code_ids.clear();
-                                code_ids.resize(size, None);
+                                reset_code_id_cache(code_ids, size);
                             }
                             debug_assert!(code_ids.len() >= size);
                             for (k, &i) in rows.iter().enumerate() {
@@ -2775,8 +2818,8 @@ fn exprkey_mk_batch<'mcx>(
                                 };
                                 debug_assert!(code < size, "stitch contract: code < gndv");
                                 let id = match code_ids[code] {
-                                    Some(id) => id,
-                                    None => {
+                                    c if c != 0 => c - 1,
+                                    _ => {
                                         let d = lane.table.datum(local);
                                         // SAFETY: dict entries are live
                                         // non-null text varlenas for the
@@ -2790,7 +2833,8 @@ fn exprkey_mk_batch<'mcx>(
                                             agg,
                                             v.data(),
                                         );
-                                        code_ids[code] = Some(id);
+                                        debug_assert!(id != u32::MAX, "id+1 encoding");
+                                        code_ids[code] = id + 1;
                                         id
                                     }
                                 };
@@ -2822,14 +2866,12 @@ fn exprkey_mk_batch<'mcx>(
                 }
             }
         }
-        if !unpackable {
-            if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-            } else {
-                keys1.clear();
-                keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
-            }
+        if !unpackable && !shape.two_words {
+            // One-word shapes narrow u128 -> i64 (a real stride change).
+            // Two-word shapes probe the accumulator in place at the probe
+            // block below (mk_keys2_lane — mkaccept inc-1).
+            keys1.clear();
+            keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
         }
     }
     if unpackable {
@@ -2845,7 +2887,9 @@ fn exprkey_mk_batch<'mcx>(
             unreachable!("mk batch requires the Multi kind")
         };
         if shape.two_words {
-            ::nodeagg::agg_hash_compact_batch_mk2(agg, &m.mks.keys2, groups)?;
+            let super::MkScratch { packbuf, keys2, .. } = &mut m.mks;
+            let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+            ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
         } else {
             ::nodeagg::agg_hash_compact_batch_mk1(agg, &m.mks.keys1, groups)?;
         }

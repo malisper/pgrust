@@ -209,3 +209,103 @@ pub fn runtime_sort_pool_dop() -> i32 {
     }
     pool_option_dop("pgrust.runtime_sort_pool")
 }
+
+// ---------------------------------------------------------------------------
+// M5-0 engine switch (docs/design/m5-planner.md §2.2): `pgrust.parallel_engine`
+// selects the PRODUCT engine. Everything above in this file is the per-arm
+// DEVELOPER/bench override layer BENEATH that switch and is deliberately
+// untouched by it — arm forcing recipes and manifests keep working verbatim
+// in BOTH engine settings. Layering, top to bottom:
+//   1. pgrust.parallel_engine (session GUC; default legacy = zero change),
+//   2. PGRUST_RUNTIME=1 (process master switch; the pool exists),
+//   3. per-arm pool GUCs + PGRUST_RUNTIME_* kills (bench/dev overrides),
+//   4. the arm's own fail-closed shape/binder admission walk.
+// Under engine=runtime the M5-1 unified router consults `pgrust.runtime_dop`
+// for covered shapes; absent a pool the engine degrades to legacy with a
+// loud-once server-log line. The pool-availability probe and the degrade
+// live at the router (execmain::lanev2::router) — this crate cannot see the
+// runtime pool.
+// ---------------------------------------------------------------------------
+
+/// Whether the session selects the runtime engine
+/// (`pgrust.parallel_engine = runtime`). This is ONLY the GUC read — pool
+/// availability and the loud-once degrade are the router's
+/// (`execmain::lanev2::router::engine_runtime_active`), the sole consumer
+/// allowed to act on this.
+#[inline]
+pub fn parallel_engine_is_runtime() -> bool {
+    crate::backing::pgrust_parallel_engine() == crate::consts::PARALLEL_ENGINE_RUNTIME
+}
+
+/// Per-arm enabled predicates for the M5-1 router's engine=runtime layer:
+/// the SAME kill-switch + lane-master gates the bench getters embed, exposed
+/// so the router honors `PGRUST_RUNTIME_*` kills when arming at
+/// `pgrust.runtime_dop` (bench GUC unset). The sort arm's kill
+/// (`PGRUST_RUNTIME_SORT`/`_FULL`) lives at the arm site and keeps gating
+/// after the dop read — its predicate here is the lane master only.
+pub fn runtime_scan_arm_enabled() -> bool {
+    runtime_scan_env_ok()
+}
+pub fn runtime_agg_arm_enabled() -> bool {
+    runtime_agg_env_ok()
+}
+pub fn runtime_distinct_arm_enabled() -> bool {
+    runtime_distinct_env_ok()
+}
+pub fn runtime_hashjoin_arm_enabled() -> bool {
+    runtime_hashjoin_env_ok()
+}
+pub fn runtime_sort_arm_enabled() -> bool {
+    crate::backing::pgrust_lane_executor()
+}
+
+/// The product runtime DOP (`pgrust.runtime_dop`), resolved: 0 = auto
+/// (available cores, the design default); explicit values clamped to
+/// available cores (the runtime pool's width — its leaders park rather than
+/// participate, so DOP above cores only adds claim-starved threads).
+/// Consulted ONLY under engine=runtime (the M5-1 router); the per-arm bench
+/// getters above never read it, and it never reads them.
+pub fn runtime_dop() -> i32 {
+    static CORES: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    let cores = *CORES
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get() as i32));
+    let v = crate::backing::pgrust_runtime_dop();
+    if v <= 0 {
+        cores
+    } else {
+        v.min(cores)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bitmap-morsels arming (bitmap-morsels lane): the FORCED/explicit knob for
+// executing a serial-plan plain Agg over a Bitmap Heap Scan as morselized
+// claims over the frozen shared bitmap at DOP N. Layering DIFFERS from the
+// sibling arms in one deliberate way (lane charter): the env switch
+// PGRUST_RUNTIME_BITMAP is an ENABLE (default OFF — absence disarms), not a
+// kill switch, because the arm is pre-boarding and race-only. Everything
+// else matches: PGRUST_RUNTIME=1 + the customized option
+// `pgrust.runtime_bitmap_pool` + the lane master switch; the mode selector
+// (PGRUST_RUNTIME_BITMAP_MODE=A|B) lives with the arm in
+// execmain::lanev2::runtime_bitmap.
+// ---------------------------------------------------------------------------
+
+/// Enable + master gates for the runtime bitmap-heap arm (default OFF).
+fn runtime_bitmap_env_ok() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_BITMAP").as_deref(), Ok("1") | Ok("on"))
+    });
+    on && crate::backing::pgrust_lane_executor()
+}
+
+/// The armed runtime bitmap-heap DOP: `pgrust.runtime_bitmap_pool` clamped
+/// to available cores, or 0 when unarmed (enable switch absent, option
+/// unset/invalid/<=0, lane off). Callers additionally gate on
+/// `PGRUST_RUNTIME=1` + a started pool + the shape/binder admission.
+pub fn runtime_bitmap_pool_dop() -> i32 {
+    if !runtime_bitmap_env_ok() {
+        return 0;
+    }
+    pool_option_dop("pgrust.runtime_bitmap_pool")
+}
