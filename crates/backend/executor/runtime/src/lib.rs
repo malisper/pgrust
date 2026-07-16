@@ -415,6 +415,7 @@ impl Runtime {
         let mut idle = 0u32;
         loop {
             if let Some(outcome) = rg.try_outcome() {
+                self.sched.stat_flush_all(local);
                 return Some(outcome);
             }
             self.execution_permits().acquire();
@@ -426,6 +427,7 @@ impl Runtime {
                 Step::Idle => {
                     idle += 1;
                     if idle >= max_idle {
+                        self.sched.stat_flush_all(local);
                         return rg.try_outcome();
                     }
                     std::thread::sleep(std::time::Duration::from_micros(500));
@@ -437,11 +439,104 @@ impl Runtime {
 
     #[cfg(not(loom))]
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
+        if !crate::sched::step_v2() {
+            return self.drive_pinned_v1(local, rg);
+        }
+        // STEP-V2 loop (agg192-contention, 48xl finding #1): the permit is
+        // held ACROSS steps (acquired once, released around parks and at
+        // exit) instead of acquire/release per step — same law ("any
+        // task-executing thread holds one": Retry/pick windows are a
+        // superset of execution, exactly the pool loop's charter) with the
+        // per-step global mutex+condvar traffic removed. Retry parks after a
+        // bounded spin instead of spinning the whole invalidated-slot window
+        // (seal / last-out / straggler tails): publish and completion both
+        // wake_all, and the epoch is captured BEFORE the failing step, so
+        // the park is lost-wakeup-free.
+        let cprobe = crate::sched::cprobe_enabled();
+        let mut held = false;
+        let mut retries = 0u32;
+        let outcome = loop {
+            if let Some(outcome) = rg.try_outcome() {
+                // Drive over — flush any WFIN/stats accumulation this
+                // driver still holds (a worker whose last task did not
+                // observe exhaustion emits here).
+                self.sched.stat_flush_all(local);
+                local.wfin_flush_all();
+                break outcome;
+            }
+            let epoch = self.park_epoch();
+            if !held {
+                if cprobe {
+                    let t0 = std::time::Instant::now();
+                    self.execution_permits().acquire();
+                    local.drive.permit_wait_ns += t0.elapsed().as_nanos() as u64;
+                } else {
+                    self.execution_permits().acquire();
+                }
+                held = true;
+            }
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            match step {
+                Step::Ran => retries = 0,
+                Step::Retry => {
+                    local.drive.steps_retry += 1;
+                    retries += 1;
+                    if retries >= crate::sched::RETRY_PARK_AFTER {
+                        retries = 0;
+                        self.execution_permits().release();
+                        held = false;
+                        local.drive.parks += 1;
+                        self.park(epoch);
+                    } else if cprobe {
+                        let t0 = std::time::Instant::now();
+                        std::thread::yield_now();
+                        local.drive.retry_spin_ns += t0.elapsed().as_nanos() as u64;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+                Step::Idle => {
+                    retries = 0;
+                    if rg.try_outcome().is_some() {
+                        continue;
+                    }
+                    self.execution_permits().release();
+                    held = false;
+                    local.drive.parks += 1;
+                    self.park(epoch);
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        };
+        if held {
+            self.execution_permits().release();
+        }
+        if cprobe {
+            let d = &local.drive;
+            eprintln!(
+                "MORSEL|CPROBE|worker={}|tasks={}|morsels={}|busy_us={}|retry={}|retry_us={}|permit_us={}|cas_retry={}|lookups={}|parks={}",
+                local.worker_id(),
+                d.tasks,
+                d.morsels,
+                d.busy_ns / 1000,
+                d.steps_retry,
+                d.retry_spin_ns / 1000,
+                d.permit_wait_ns / 1000,
+                d.cas_retries,
+                d.pinned_lookups,
+                d.parks,
+            );
+        }
+        outcome
+    }
+
+    /// The pre-STEP-V2 pinned drive (kill switch `PGRUST_RUNTIME_STEP_V2=0`):
+    /// per-step permit acquire/release, unthrottled Retry yield-spin.
+    #[cfg(not(loom))]
+    fn drive_pinned_v1(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         loop {
             if let Some(outcome) = rg.try_outcome() {
-                // WFIN marker channel: the drive is over — flush any
-                // participation this driver still holds (a worker whose last
-                // task did not observe exhaustion emits here).
+                self.sched.stat_flush_all(local);
                 local.wfin_flush_all();
                 return outcome;
             }

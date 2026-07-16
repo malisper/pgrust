@@ -998,6 +998,81 @@ fn fold_rows_grouped_parity() {
     }
 }
 
+// avgpack: the PACKED grouped fold ([count, sum] inline in the AvgAccum
+// pergroup slot, avgpack_mask bit set) accumulates exactly the transarray
+// arm's {count, sum} over the same rows, and leaves other transnos'
+// representations untouched.
+#[test]
+fn fold_rows_grouped_avgpack_parity() {
+    let mcx = leaked_mcx();
+    let a_sum = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a_avg = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let a0 = NodeList::nil();
+    let specs = [
+        mk_spec(1219, false, &a0), // count(*)
+        mk_spec(1841, true, &a_sum),
+        mk_spec(1963, false, &a_avg),
+    ];
+    let plan = classify(mcx, &specs).expect("admits");
+    let avg_transno = plan
+        .trans
+        .iter()
+        .find(|t| t.kind == LaneKind::AvgAccum)
+        .expect("avg admitted")
+        .transno;
+    let n = 160usize;
+    let ngroups = 3usize;
+    let data: Vec<Vec<Option<i64>>> = (0..n)
+        .map(|i| vec![if i % 6 == 0 { None } else { Some(i as i64 * 17 - 900) }])
+        .collect();
+    let cols = TestCols::new(&[4], &data);
+    let idxs: Vec<u32> = (0..n as u32).collect();
+
+    // Reference arm: the transarray representation.
+    let mut ref_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    let ref_groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(ref_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as fold_rows_grouped_parity.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &ref_groups, mcx).expect("fold") };
+
+    // Packed arm: the AvgAccum slot seeded [0, 0] (== the {0,0} initval).
+    let mut pk_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    for pgs in pk_pgs.iter_mut() {
+        // SAFETY: the slot is 16 repr(C) bytes, 8-aligned.
+        unsafe {
+            (&mut pgs[avg_transno as usize] as *mut AggPerGroup)
+                .cast::<[i64; 2]>()
+                .write([0, 0]);
+        }
+    }
+    let pk_groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(pk_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as above; the mask names exactly the packed transno.
+    unsafe {
+        fold_rows_grouped_mm(&plan, &cols, &idxs, &pk_groups, mcx, None, 1u64 << avg_transno)
+            .expect("packed fold");
+    }
+
+    for g in 0..ngroups {
+        // Unpacked transarray payload: {count, sum} at +24 of the varlena.
+        let rp = ref_pgs[g][avg_transno as usize].trans_value.as_usize() as *const u8;
+        // SAFETY: live transarray installed by pergroups_for.
+        let want =
+            unsafe { [rp.add(24).cast::<i64>().read(), rp.add(32).cast::<i64>().read()] };
+        // SAFETY: the packed slot holds two i64 words.
+        let got = unsafe {
+            (&pk_pgs[g][avg_transno as usize] as *const AggPerGroup).cast::<[i64; 2]>().read()
+        };
+        assert_eq!(got, want, "group {g}");
+        // Other transnos are representation-untouched by the mask.
+        assert_eq!(pk_pgs[g][0].trans_value.as_i64(), ref_pgs[g][0].trans_value.as_i64());
+    }
+}
+
 // ---- fold-coverage tier 2: float MIN/MAX, bool_and/or, bit_and/or ----
 
 const F32V: Oid = ::types_core::catalog::FLOAT4OID;
@@ -2966,7 +3041,7 @@ fn fold_rows_grouped_dictcode_memo_parity() {
         // SAFETY: per-group arrays cover every transno and are not moved
         // while the pointers live; the lane holds live inline varlenas;
         // codes satisfy the col_codes contract by construction.
-        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm).expect("fold") };
+        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm, 0).expect("fold") };
     };
     for (bi, (ep, rows)) in batches.iter().enumerate() {
         run_batch(ep, rows, &mut mm_pgs, Some(&mut mm));
@@ -3143,6 +3218,7 @@ fn fold_code_group_multiplicity_parity() {
                 n,
                 NonNull::new(code_pgs[g].as_mut_ptr()).unwrap(),
                 mcx,
+                0,
             )
             .expect("code fold");
         }

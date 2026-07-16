@@ -3784,8 +3784,17 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
     // ignored by the parsers); default-off = zero cost.
     if sfin_enabled() {
         if let Some((rgsw, dictb, gscan, wins)) = seq_scan_cb_drive_counters(node) {
+            // dz_* = the DOMAIN-WORK tripwire totals (exectuples
+            // domain_work, proportionality-audit): bytes/entries of
+            // knowingly domain-sized work (full-domain clears, eager
+            // whole-dict fills, dense dict pointer-table builds) drained
+            // at scan shutdown so gates can watch the domain:touched
+            // ratio against cb_granules/cb_windows. Process-wide totals —
+            // serial legs read per-query-exact, parallel drives smear
+            // across emitters (tripwire semantics, not attribution).
+            let (dzb, dze) = ::exectuples::domain_work_take();
             eprintln!(
-                "MORSEL|SFIN|cb_rgswitch={rgsw}|cb_dictbuild={dictb}|cb_granules={gscan}|cb_windows={wins}"
+                "MORSEL|SFIN|cb_rgswitch={rgsw}|cb_dictbuild={dictb}|cb_granules={gscan}|cb_windows={wins}|dz_bytes={dzb}|dz_entries={dze}"
             );
         }
     }
@@ -3802,9 +3811,15 @@ pub fn exec_end_seq_scan(node: &mut SeqScanState<'_>) -> PgResult<()> {
 }
 
 // Condition-cache stats line at scan shutdown (armed scans only): the
-// cumulative process counters, DEBUG1 like every lane stats line.
-fn condcache_stats_summary(node: &SeqScanState<'_>) {
+// cumulative process counters, DEBUG1 like every lane stats line. Folds
+// this scan's per-scan stat cells first so the line includes its own
+// counts (the cells otherwise fold at scan-desc drop, which happens after
+// this summary in shutdown/park order).
+fn condcache_stats_summary(node: &mut SeqScanState<'_>) {
     if node.batch_soa.as_deref().is_some_and(|b| b.cond_armed) {
+        if let Some(sd) = node.ss.ss_currentScanDesc.as_mut() {
+            ::tableam::table_scan_condcache_fold_stats(sd);
+        }
         let (h, m, i, e) = ::tableam::condcache_stats();
         ::laneexec::log_condcache_stats(h, m, i, e);
     }
