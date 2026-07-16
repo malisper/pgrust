@@ -999,6 +999,65 @@ pub fn agg_hash_compact_armed(node: &AggStateData<'_>) -> bool {
     node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some())
 }
 
+/// Budget peek for the coded-group feed (q29coded lane): TRUE = the armed
+/// compact build has crossed the backstop's half limits, so the caller must
+/// tear down its pointer caches and only THEN call
+/// [`agg_hash_compact_disarm`] — the coded feed's per-code caches point
+/// INTO the compact rows, which die with the migration, so it cannot let
+/// [`agg_hash_compact_backstop`] migrate as a side effect the way the
+/// cache-free feeds do. Exactly the backstop's classic-arm accounting
+/// (table + intern + store-once canon + aggcontext subtree, live rows);
+/// `false` when not armed. Never called on sink builds (the coded arm is
+/// not sink-admissible), where live-bytes accounting would differ.
+pub fn agg_hash_compact_over_limits(node: &AggStateData<'_>) -> bool {
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
+    let Some(ph) = node.perhash.as_ref() else { return false };
+    let Some(ch) = ph.compact.as_ref() else { return false };
+    debug_assert!(ph.sink_cap.is_none(), "coded-group builds are never sink builds");
+    let mem = ch.table.mem_used()
+        + ch.intern.as_ref().map_or(0, ::lanetable::LaneAggTable::mem_used)
+        + ch.canon_store.len()
+        + ch.canon_offs.len() * 4
+        + aggctx.context().subtree_used();
+    (ch.table.len() as u64) >= ph.hash_ngroups_limit / 2 || mem >= ph.hash_mem_limit / 2
+}
+
+/// Coded-group single resolve (q29coded lane): intern `bytes` — the Dict
+/// expr-key memo's OUTPUT VALUE payload — and probe the armed mk1
+/// single-Intern table by the id (one group per distinct output value; the
+/// packed one-word image is the zero-extended id, exactly the mk pack
+/// convention), seeding a NEW group with the same `trans_init` datumCopy
+/// loop as every other arrival. The caller checked
+/// [`agg_hash_compact_over_limits`] this batch — this path never migrates,
+/// so the returned pointer is stable until the caller-driven teardown.
+pub fn agg_hash_compact_probe_coded<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    bytes: &[u8],
+) -> PgResult<NonNull<AggPerGroup>> {
+    let id = agg_hash_compact_intern(node, bytes);
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
+    let AggStateData { perhash, trans_init, trans_typ, .. } = node;
+    let ph = perhash.as_mut().expect("hashed Agg has perhash");
+    let ch = ph.compact.as_mut().expect("coded probe requires an armed table");
+    debug_assert!(
+        matches!(&ch.key, CompactKeySpec::Multi(s) if !s.two_words
+            && s.comps.len() == 1
+            && s.comps[0].kind == MkCompKind::Intern),
+        "coded probe requires the mk1 single-Intern shape"
+    );
+    debug_assert!(!ch.sink_mode, "coded-group builds are never sink builds");
+    let avgpack_mask = ch.avgpack_mask;
+    let k = id as u64 as i64;
+    let pr = ch.table.probe_int(k, ch.table.hash_key_int(k as u64));
+    if pr.is_new {
+        seed_new_groups(aggctx, trans_init, trans_typ, &[pr.states], &[0], avgpack_mask)?;
+    }
+    // SAFETY: probe never returns null state pointers.
+    Ok(unsafe { NonNull::new_unchecked(pr.states.cast::<AggPerGroup>()) })
+}
+
 /// Live group count of the armed compact table (`None` = not armed). The
 /// freeze install election reads this after each batch.
 pub fn agg_hash_compact_ngroups(node: &AggStateData<'_>) -> Option<usize> {
