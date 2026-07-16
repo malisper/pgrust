@@ -3769,15 +3769,20 @@ impl SharedCountTable {
         }
         let n = run.nrows();
         // FAIL-CLOSED flags pre-pass BEFORE any reservation or slot write:
-        // a nonzero flags word (a null-marked state, or non-zeroed padding)
-        // is not the count shape this face folds — refuse the whole run
-        // (it rides the incumbent path; never a partial merge).
+        // a set trans_value_is_null / no_trans_value byte is not the count
+        // shape this face folds — refuse the whole run (it rides the
+        // incumbent path; never a partial merge). ONLY the two bool bytes
+        // are meaningful: AggPerGroup is repr(C) {Datum, bool, bool} and
+        // the trailing 6 PADDING bytes are UNDEFINED in fold-written
+        // states (the wave-5 finding: requiring a fully-zero word refused
+        // every real run — merged_runs=0 with the face live).
+        const FLAG_BYTES: u64 = 0xFFFF;
         for i in 0..n {
-            if run.states[i * 2 + 1] != 0 {
+            if run.states[i * 2 + 1] & FLAG_BYTES != 0 {
                 return false;
             }
         }
-        if run.null_states.as_ref().is_some_and(|b| b[1] != 0) {
+        if run.null_states.as_ref().is_some_and(|b| b[1] & FLAG_BYTES != 0) {
             return false;
         }
         // Reserve BEFORE touching slots: crossing capacity closes the face
@@ -4006,7 +4011,7 @@ mod tests {
             .iter()
             .copied()
             .zip(run.states.chunks(2).map(|st| {
-                assert_eq!(st[1], 0, "drained states are valid non-null AggPerGroup blocks");
+                assert_eq!(st[1] & 0xFFFF, 0, "drained states are valid non-null AggPerGroup blocks");
                 st[0]
             }))
             .collect();
@@ -4144,12 +4149,20 @@ mod tests {
     fn shared_count_nonzero_flags_refused() {
         let t = SharedCountTable::new(64);
         let mut bad = count_run(&[(5, 1)], None);
-        bad.states[1] = 1; // trans_value_is_null
+        bad.states[1] = 1; // trans_value_is_null byte
         assert!(!t.merge_run(&bad));
+        let mut bad2 = count_run(&[(6, 1)], None);
+        bad2.states[1] = 1 << 8; // no_trans_value byte
+        assert!(!t.merge_run(&bad2));
         assert!(!t.is_closed());
         assert_eq!(t.reserved(), 0, "refused before reserving");
         assert!(t.drain_to_run().is_none());
-        assert!(t.merge_run(&count_run(&[(5, 2)], None)));
+        // UNDEFINED PADDING (bytes 2..8 of the flags word) must be
+        // ACCEPTED — fold-written AggPerGroup padding is garbage in
+        // practice (the wave-5 all-runs-refused failure).
+        let mut padded = count_run(&[(5, 2)], None);
+        padded.states[1] = 0xDEAD_BEEF_0000_0000 | (0xCAFE << 16);
+        assert!(t.merge_run(&padded));
         let (map, _) = drained_map(&t);
         assert_eq!(map[&5], 2);
     }
