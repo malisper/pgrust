@@ -2826,3 +2826,211 @@ fn stream_source_abort_wakes_starved_workers() {
     work.assert_all_executed_once();
     pool.shutdown();
 }
+
+/// WS-A batchsource inc-1: deterministic equivalence of the extracted
+/// [`GranuleMap`]/[`GranuleMapSource`]/[`Segments`] geometry against the
+/// pre-extraction sources' code, ported verbatim as oracles (behavior
+/// preservation is the whole game — these tests pin the bit-for-bit claim).
+mod granule_map_tests {
+    use std::ops::Range;
+    use std::sync::Arc;
+
+    use crate::{GranuleMap, GranuleMapSource, MorselSource, Segments, SyntheticMorselSource};
+
+    /// The legacy scan-arm source's boundary search
+    /// (runtime_scan.rs `PgrcolumnarGranuleSource::next_boundary_after`),
+    /// ported verbatim as the equivalence oracle.
+    fn legacy_boundary_after(starts: &[u64], start: u64) -> u64 {
+        let total = starts.last().copied().unwrap_or(0);
+        match starts.binary_search(&start) {
+            Ok(i) => starts.get(i + 1).copied().unwrap_or(total),
+            Err(i) => starts.get(i).copied().unwrap_or(total),
+        }
+    }
+
+    /// morsel_body's open-coded coalesced-claim segmentation (the
+    /// pre-extraction loop, runtime_scan.rs), ported verbatim as the
+    /// `segments()` oracle. `None` starts = the heap path (whole range).
+    fn legacy_segments(starts: Option<&[u64]>, range: Range<u64>) -> Vec<Range<u64>> {
+        let mut out = Vec::new();
+        let mut seg = range.start;
+        while seg < range.end {
+            let seg_end = match starts {
+                Some(starts) => {
+                    let bound = match starts.binary_search(&seg) {
+                        Ok(i) => starts[i + 1],
+                        Err(i) => starts[i],
+                    };
+                    bound.min(range.end)
+                }
+                None => range.end,
+            };
+            out.push(seg..seg_end);
+            seg = seg_end;
+        }
+        out
+    }
+
+    fn map_over(starts: &[u64]) -> GranuleMap {
+        GranuleMap::with_boundaries(Arc::new(starts.to_vec()), 2)
+    }
+
+    /// Fixture with short interior RGs (reopen-append seals partial RGs):
+    /// the map is a real prefix sum, never `rg * k`.
+    const UNEVEN: &[u64] = &[0, 8, 11, 19, 24];
+
+    #[test]
+    fn boundary_after_matches_legacy_source() {
+        for starts in [&[0u64, 8][..], UNEVEN, &[0]] {
+            let map = map_over(starts);
+            let total = starts.last().copied().unwrap();
+            // Full sweep covers start-on-boundary and mid-RG starts.
+            for s in 0..total {
+                assert_eq!(
+                    map.boundary_after(s),
+                    legacy_boundary_after(starts, s),
+                    "starts={starts:?} s={s}"
+                );
+                assert!(map.boundary_after(s) > s, "MorselSource contract");
+                assert!(map.boundary_after(s) <= total, "MorselSource contract");
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_after_duplicate_starts_match_legacy() {
+        // Zero-granule RGs would produce duplicate prefix-sum entries;
+        // defensively pin that the guarded form answers exactly as the
+        // legacy source did (behavior preservation, not endorsement).
+        let starts: &[u64] = &[0, 4, 4, 9];
+        let map = map_over(starts);
+        for s in 0..9 {
+            assert_eq!(map.boundary_after(s), legacy_boundary_after(starts, s), "s={s}");
+        }
+    }
+
+    #[test]
+    fn unbounded_map_is_boundary_free() {
+        let map = GranuleMap::unbounded(37, 16);
+        assert_eq!(map.total(), 37);
+        assert_eq!(map.c0(), 16);
+        assert_eq!(map.nbounds(), 0);
+        for s in 0..37 {
+            // The MorselSource trait default: no interior boundaries.
+            assert_eq!(map.boundary_after(s), 37);
+        }
+        let segs: Vec<_> = map.segments(3..20).collect();
+        assert_eq!(segs, vec![3..20], "boundary-free claims yield once");
+    }
+
+    #[test]
+    fn with_boundaries_geometry_accessors() {
+        let map = map_over(UNEVEN);
+        assert_eq!(map.total(), 24);
+        assert_eq!(map.c0(), 2);
+        assert_eq!(map.nbounds(), 4, "nrgs = len - 1 (the LFIN channel)");
+    }
+
+    #[test]
+    fn segments_match_morsel_body_oracle() {
+        let map = map_over(UNEVEN);
+        // Every legal claim shape: aligned/mid-RG starts, single-epoch,
+        // coalesced multi-epoch, claims ending mid-RG.
+        for start in 0..24u64 {
+            for end in (start + 1)..=24 {
+                let got: Vec<_> = map.segments(start..end).collect();
+                let want = legacy_segments(Some(UNEVEN), start..end);
+                assert_eq!(got, want, "claim {start}..{end}");
+            }
+        }
+        // Heap path parity: Segments::whole == the oracle's None branch.
+        let got: Vec<_> = Segments::whole(5..17).collect();
+        assert_eq!(got, legacy_segments(None, 5..17));
+    }
+
+    #[test]
+    fn segments_more_tracks_unyielded_work() {
+        let map = map_over(UNEVEN);
+        let mut segs = map.segments(2..20);
+        let mut yielded = 2u64;
+        while let Some(seg) = segs.next() {
+            yielded = seg.end;
+            assert_eq!(segs.more(), yielded < 20, "after seg {seg:?}");
+        }
+        assert_eq!(yielded, 20);
+        assert!(!Segments::whole(0..0).more(), "empty claim has no work");
+    }
+
+    /// Epoch-alignment property test over seeded pseudo-random geometry
+    /// (plain xorshift; no proptest dep — workspace law): every yielded
+    /// segment is non-empty, consecutive, covers the claim exactly, and
+    /// never crosses an interior hard boundary.
+    #[test]
+    fn segments_epoch_alignment_property() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next_rand = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound.max(1)
+        };
+        for _case in 0..200 {
+            let nrgs = 1 + next_rand(12) as usize;
+            let mut starts = vec![0u64];
+            for _ in 0..nrgs {
+                let rg_granules = 1 + next_rand(9);
+                starts.push(starts.last().unwrap() + rg_granules);
+            }
+            let total = *starts.last().unwrap();
+            let map = GranuleMap::with_boundaries(Arc::new(starts.clone()), 2);
+            for _claim in 0..8 {
+                let a = next_rand(total);
+                let b = a + 1 + next_rand(total - a);
+                let mut cursor = a;
+                for seg in map.segments(a..b) {
+                    assert!(seg.start < seg.end, "non-empty");
+                    assert_eq!(seg.start, cursor, "consecutive");
+                    assert!(
+                        !starts.iter().any(|&s| seg.start < s && s < seg.end),
+                        "segment {seg:?} crosses a hard boundary ({starts:?})"
+                    );
+                    cursor = seg.end;
+                }
+                assert_eq!(cursor, b, "claim covered exactly");
+            }
+        }
+    }
+
+    #[test]
+    fn granule_map_source_delegates_and_passes_posture_through() {
+        let map = Arc::new(map_over(UNEVEN));
+        // Posture is EXPLICIT and independent of geometry: all four
+        // combinations must read back exactly as constructed.
+        for (whole, coalesce) in [(false, false), (true, false), (false, true), (true, true)] {
+            let src = GranuleMapSource::new(Arc::clone(&map), whole, coalesce);
+            assert_eq!(src.whole_boundary_claims(), whole);
+            assert_eq!(src.coalesce_claims(), coalesce);
+            assert_eq!(src.total_granules(), 24);
+            assert_eq!(src.startup_c0(), 2);
+            for s in 0..24 {
+                assert_eq!(src.next_boundary_after(s), map.boundary_after(s));
+            }
+        }
+        assert!(GranuleMapSource::new(map, false, false).stream_state().is_none());
+    }
+
+    #[test]
+    fn granule_map_source_matches_synthetic_source_shape() {
+        // A regular-boundary map answers exactly like the M0 synthetic
+        // source with the same geometry (the scheduler-facing contract).
+        let starts: Vec<u64> = (0..=3).map(|i| i * 8).collect();
+        let map = Arc::new(GranuleMap::with_boundaries(Arc::new(starts), 16));
+        let src = GranuleMapSource::new(map, false, false);
+        let synth = SyntheticMorselSource::with_boundaries(24, 8);
+        assert_eq!(src.total_granules(), synth.total_granules());
+        assert_eq!(src.startup_c0(), synth.startup_c0());
+        for s in 0..24 {
+            assert_eq!(src.next_boundary_after(s), synth.next_boundary_after(s), "s={s}");
+        }
+    }
+}
