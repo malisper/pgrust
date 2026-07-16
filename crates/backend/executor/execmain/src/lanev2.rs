@@ -4883,77 +4883,6 @@ fn scan_mk_batch<'mcx>(
                             exprkey::reset_code_id_cache(code_ids, size);
                         }
                         debug_assert!(code_ids.len() >= size);
-                        if ::nodeagg::agg_hash_compact_intern_batch_engaged(agg) {
-                            // Batched first-touch resolve (stringhash2
-                            // inc-2): stage the window's UNRESOLVED codes in
-                            // encounter order, resolve them in one
-                            // probe_bytes_batch (entry-line look-ahead over
-                            // the DRAM-resident intern table — 15.1% of
-                            // q34's cycles sit in this per-row chain at the
-                            // t22 census), then fill the deferred rows.
-                            // Encounter order == the per-row loop's
-                            // insertion order, so the dense ids and the
-                            // table are byte-identical to the per-row path.
-                            // PEND marks (bit 31) never outlive the window:
-                            // every staged code has >=1 deferred row whose
-                            // fixup rewrites the mark.
-                            const PEND: u32 = 1 << 31;
-                            let mut iguards: Vec<::types_fmgr::PackedVarlena<'_>> =
-                                Vec::new();
-                            let mut idefer: Vec<(u32, u32)> = Vec::new();
-                            for (k, &i) in rows.iter().enumerate() {
-                                let local = lane.code(i as usize);
-                                debug_assert!(
-                                    (local as usize) < ndict,
-                                    "filler contract: code < ndict"
-                                );
-                                let code = if global {
-                                    lane.table.global_code(local) as usize
-                                } else {
-                                    local as usize
-                                };
-                                debug_assert!(code < size, "stitch contract: global code < gndv");
-                                match code_ids[code] {
-                                    0 => {
-                                        let d = lane.table.datum(local);
-                                        // SAFETY: dict entries are live
-                                        // non-null text varlenas for the
-                                        // staged window (dict lane contract;
-                                        // kernel selection proved the
-                                        // column type).
-                                        let v = unsafe {
-                                            ::types_fmgr::datum_varlena_packed(d, mcx)
-                                        }?;
-                                        code_ids[code] = PEND | (iguards.len() as u32);
-                                        iguards.push(v);
-                                        idefer.push((k as u32, code as u32));
-                                    }
-                                    c if c & PEND != 0 => idefer.push((k as u32, code as u32)),
-                                    c => packbuf[k] |= ((c - 1) as u128) << off_bits,
-                                }
-                            }
-                            if !iguards.is_empty() {
-                                let itexts: Vec<&[u8]> =
-                                    iguards.iter().map(|v| v.data()).collect();
-                                let mut iids: Vec<u32> = Vec::new();
-                                ::nodeagg::agg_hash_compact_intern_batch(agg, &itexts, &mut iids);
-                                for &(k, code) in idefer.iter() {
-                                    let c = code_ids[code as usize];
-                                    let id = if c & PEND != 0 {
-                                        let id = iids[(c & !PEND) as usize];
-                                        debug_assert!(
-                                            id & PEND == 0,
-                                            "intern id under the PEND bit (id+1 encoding)"
-                                        );
-                                        code_ids[code as usize] = id + 1;
-                                        id
-                                    } else {
-                                        c - 1
-                                    };
-                                    packbuf[k as usize] |= (id as u128) << off_bits;
-                                }
-                            }
-                        } else {
                         for (k, &i) in rows.iter().enumerate() {
                             let local = lane.code(i as usize);
                             debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
@@ -4986,7 +4915,6 @@ fn scan_mk_batch<'mcx>(
                             };
                             packbuf[k] |= (id as u128) << off_bits;
                         }
-                        }
                     }
                     None => {
                         // Raw-answered window (non-dict key chunk): intern
@@ -4999,41 +4927,14 @@ fn scan_mk_batch<'mcx>(
                             rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
                             "cbstore no-NULLs proof violated in a multi-key window"
                         );
-                        if ::nodeagg::agg_hash_compact_intern_batch_engaged(agg) {
-                            // Batched per-row resolve (stringhash2 inc-2):
-                            // no memo on Raw windows — stage every row's
-                            // text and resolve the window in one
-                            // probe_bytes_batch. Slice order == the per-row
-                            // loop's insertion order: byte-identical ids.
-                            let mut iguards: Vec<::types_fmgr::PackedVarlena<'_>> =
-                                Vec::with_capacity(rows.len());
-                            for &i in rows.iter() {
-                                let d = values[i as usize];
-                                // SAFETY: staged non-null live text varlena
-                                // (the columnar fill stages decoded Datums;
-                                // kernel selection proved the column type).
-                                let v =
-                                    unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
-                                iguards.push(v);
-                            }
-                            let itexts: Vec<&[u8]> =
-                                iguards.iter().map(|v| v.data()).collect();
-                            let mut iids: Vec<u32> = Vec::new();
-                            ::nodeagg::agg_hash_compact_intern_batch(agg, &itexts, &mut iids);
-                            for (k, &id) in iids.iter().enumerate() {
-                                packbuf[k] |= (id as u128) << off_bits;
-                            }
-                        } else {
-                            for (k, &i) in rows.iter().enumerate() {
-                                let d = values[i as usize];
-                                // SAFETY: staged non-null live text varlena
-                                // (the columnar fill stages decoded Datums;
-                                // kernel selection proved the column type).
-                                let v =
-                                    unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
-                                let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
-                                packbuf[k] |= (id as u128) << off_bits;
-                            }
+                        for (k, &i) in rows.iter().enumerate() {
+                            let d = values[i as usize];
+                            // SAFETY: staged non-null live text varlena (the
+                            // columnar fill stages decoded Datums; kernel
+                            // selection proved the column type).
+                            let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                            let id = ::nodeagg::agg_hash_compact_intern(agg, v.data());
+                            packbuf[k] |= (id as u128) << off_bits;
                         }
                     }
                 }
