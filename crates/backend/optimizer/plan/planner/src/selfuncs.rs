@@ -26,17 +26,92 @@ pub const STATISTIC_KIND_HISTOGRAM: i16 = 2;
 pub const STATISTIC_KIND_DECHIST: i16 = 5;
 pub const STATISTIC_KIND_CORRELATION: i16 = 3;
 
+// ---------------------------------------------------------------------------
+// Per-planning-cycle attribute-stats memo (replanfix2 T1). The callgrind map
+// of one custom-plan replan showed the pg_statistic fetch+decode pipeline at
+// ~23% of the bind path: the bundle was rebuilt ~9x per cycle (each rebuild
+// re-searching the syscache and re-copying/re-deconstructing slot arrays on
+// first touch). C pins the syscache tuple per examine_variable and points
+// into it; the memo gets the same effect one altitude up — ONE arena-leaked
+// bundle per (relid, attnum, inh) per planning cycle, shared by reference,
+// so the OnceCell slot decodes also happen once per cycle. COST ONLY: the
+// same syscache row feeds every consumer; the only divergence class is a
+// concurrent mid-cycle pg_statistic update C's re-searches could observe
+// (estimates-only, nondeterministic in C, never exercised by regress).
+// Storage lives in PlannerRun.att_stats_memo (opaque there; this module owns
+// both sides of the cast). Kill switch: PGRUST_PLANNER_STATS_MEMO=0 restores
+// the per-call fetch (bundles still arena-leaked — VariableStatData holds
+// references either way).
+// ---------------------------------------------------------------------------
+
+fn stats_memo_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_PLANNER_STATS_MEMO").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+pub(crate) fn leak_bundle<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    bundle: PgStatisticBundle<'mcx>,
+) -> PgResult<&'mcx PgStatisticBundle<'mcx>> {
+    // forget_box_in (ForgetSafe census on the bundle types): drop glue never
+    // runs, the plan arena's reset reclaims the bytes — the same discipline
+    // as the run itself (ArenaForget in standard_planner).
+    Ok(mcx::forget_box_in(mcx, bundle)?)
+}
+
+pub(crate) fn get_att_stats<'mcx>(
+    run: &PlannerRun<'mcx>,
+    relid: Oid,
+    attnum: i16,
+    inh: bool,
+) -> PgResult<Option<&'mcx PgStatisticBundle<'mcx>>> {
+    if stats_memo_disabled() {
+        return match syscache_seams::lookup_pg_statistic_bundle::call(
+            run.mcx, relid, attnum, inh,
+        )? {
+            Some(b) => Ok(Some(leak_bundle(run.mcx, b)?)),
+            None => Ok(None),
+        };
+    }
+    let key = (relid, attnum, inh);
+    let hit = run
+        .att_stats_memo
+        .borrow()
+        .iter()
+        .find_map(|(k, v)| (*k == key).then_some(*v));
+    if let Some(v) = hit {
+        // SAFETY: the pointer was created below from &'mcx PgStatisticBundle
+        // <'mcx> leaked into run.mcx (this function is the only writer); the
+        // arena outlives the run, and planning is single-threaded.
+        return Ok(v.map(|p| unsafe { p.cast::<PgStatisticBundle<'mcx>>().as_ref() }));
+    }
+    let fetched = match syscache_seams::lookup_pg_statistic_bundle::call(
+        run.mcx, relid, attnum, inh,
+    )? {
+        Some(b) => Some(&*leak_bundle(run.mcx, b)?),
+        None => None,
+    };
+    run.att_stats_memo
+        .borrow_mut()
+        .push((key, fetched.map(|r| core::ptr::NonNull::from(r).cast())));
+    Ok(fetched)
+}
+
 pub(crate) fn clamp_probability(p: f64) -> f64 {
     p.clamp(0.0, 1.0)
 }
 
-// VariableStatData (selfuncs.h); `stats` is the decoded statsTuple.
+// VariableStatData (selfuncs.h); `stats` is the decoded statsTuple, shared
+// by reference from the per-cycle memo (or arena-leaked one-offs) so slot
+// decodes happen once per planning cycle.
 pub struct VariableStatData<'mcx> {
     pub var: Option<NodeId>,
     pub rel: Option<RelId>,
     pub vartype: u32,
     pub isunique: bool,
-    pub stats: Option<PgStatisticBundle<'mcx>>,
+    pub stats: Option<&'mcx PgStatisticBundle<'mcx>>,
     pub acl_ok: bool,
 }
 
@@ -1232,7 +1307,7 @@ pub fn examine_variable<'mcx>(
 }
 
 struct SimpleVarStats<'mcx> {
-    stats: Option<PgStatisticBundle<'mcx>>,
+    stats: Option<&'mcx PgStatisticBundle<'mcx>>,
     acl_ok: bool,
     force_unique: bool,
 }
@@ -1307,12 +1382,7 @@ fn examine_expression_index_stats<'mcx>(
             }
             // Stats only from non-partial indexes.
             if index.indpred.is_empty() {
-                vardata.stats = syscache_seams::lookup_pg_statistic_bundle::call(
-                    run.mcx,
-                    index.indexoid,
-                    (pos + 1) as i16,
-                    false,
-                )?;
+                vardata.stats = get_att_stats(run, index.indexoid, (pos + 1) as i16, false)?;
                 vardata.acl_ok = if vardata.stats.is_some() {
                     all_rows_selectable(run, &run.root, varno, None)?
                 } else {
@@ -1341,11 +1411,16 @@ fn examine_expression_index_stats<'mcx>(
                 }
                 if types_nodes::equal(node, expr) {
                     let stat_oid = info.stat_oid;
-                    vardata.stats = Some(syscache_seams::statext_expressions_load::call(
+                    // Keyed by statistics object, not (rel, att): not memoized
+                    // (rare path); arena-leaked so the ref shape is uniform.
+                    vardata.stats = Some(leak_bundle(
                         run.mcx,
-                        stat_oid,
-                        inh,
-                        pos as i32,
+                        syscache_seams::statext_expressions_load::call(
+                            run.mcx,
+                            stat_oid,
+                            inh,
+                            pos as i32,
+                        )?,
                     )?);
                     vardata.acl_ok = all_rows_selectable(run, &run.root, varno, None)?;
                     break 'stats;
@@ -1406,12 +1481,7 @@ fn examine_simple_variable<'mcx>(
     let rte = rte_at(run, root, varno as usize);
     match rte.rtekind {
         RTEKind::RTE_RELATION => {
-            let stats = syscache_seams::lookup_pg_statistic_bundle::call(
-                run.mcx,
-                rte.relid,
-                varattno,
-                rte.inh,
-            )?;
+            let stats = get_att_stats(run, rte.relid, varattno, rte.inh)?;
             // C: acl_ok = all_rows_selectable when a stats tuple was found,
             // true otherwise (suppress leakproofness checks).
             let acl_ok = if stats.is_some() {
@@ -2282,9 +2352,7 @@ fn brincostestimate(
         } else {
             (indexoid, (indexcol + 1) as i16, false)
         };
-        if let Some(bundle) =
-            syscache_seams::lookup_pg_statistic_bundle::call(mcx, stat_relid, stat_attnum, stat_inh)?
-        {
+        if let Some(bundle) = get_att_stats(run, stat_relid, stat_attnum, stat_inh)? {
             if let Some(slot) =
                 bundle.slots.iter().find(|sl| sl.kind == STATISTIC_KIND_CORRELATION)
             {
@@ -2413,20 +2481,13 @@ fn btcostestimate(
                 // the table's stats; expression columns read the index's own
                 // pg_statistic row (colnum = indexcol+1, inh false).
                 let stats = if attno != 0 {
-                    let rte = run.rte(index_rel_relid as usize);
-                    syscache_seams::lookup_pg_statistic_bundle::call(
-                        run.mcx,
-                        rte.relid,
-                        attno as i16,
-                        rte.inh,
-                    )?
+                    let (relid, inh) = {
+                        let rte = run.rte(index_rel_relid as usize);
+                        (rte.relid, rte.inh)
+                    };
+                    get_att_stats(run, relid, attno as i16, inh)?
                 } else {
-                    syscache_seams::lookup_pg_statistic_bundle::call(
-                        run.mcx,
-                        index_indexoid,
-                        (indexcol + 1) as i16,
-                        false,
-                    )?
+                    get_att_stats(run, index_indexoid, (indexcol + 1) as i16, false)?
                 };
                 let vardata = VariableStatData {
                     var: None,
@@ -2582,9 +2643,7 @@ fn btcostestimate(
         } else {
             (indexoid, 1, false)
         };
-        if let Some(bundle) = syscache_seams::lookup_pg_statistic_bundle::call(
-            run.mcx, stat_relid, stat_attno, stat_inh,
-        )? {
+        if let Some(bundle) = get_att_stats(run, stat_relid, stat_attno, stat_inh)? {
             let sortop = lsyscache::get_opfamily_member(
                 opfamily0,
                 opcintype0,

@@ -160,6 +160,17 @@ pub struct PlannerRun<'mcx> {
     /// never suppresses subquery levels) and only under
     /// pgrust.parallel_engine=runtime, so legacy planning never writes it.
     pub m5_suppress_gather: Option<bool>,
+    /// Per-planning-cycle attribute-statistics memo (replanfix2 T1):
+    /// (relid, attnum, inh) -> arena-leaked decoded pg_statistic bundle
+    /// (None = row absent, negative-memoized). Values are planner-crate
+    /// pointers (`selfuncs::get_att_stats` owns both sides), kept OPAQUE
+    /// here so this _support crate takes no backend dependency. RefCell
+    /// because the selfuncs read paths hold `&PlannerRun` alongside subroot
+    /// borrows (planning is single-threaded). COST ONLY: same lookups, same
+    /// values, freed with the run's arena — bounded per cycle, never
+    /// cross-query state.
+    pub att_stats_memo:
+        core::cell::RefCell<PgVec<'mcx, ((u32, i16, bool), Option<core::ptr::NonNull<()>>)>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -181,7 +192,7 @@ mcx::forget_safe_struct!(
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
-        swapped_parent_subroot, m5_suppress_gather },
+        swapped_parent_subroot, m5_suppress_gather, att_stats_memo },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -206,6 +217,7 @@ impl<'mcx> PlannerRun<'mcx> {
             cte_subpath_infos: PgVec::new_in(mcx),
             swapped_parent_subroot: None,
             m5_suppress_gather: None,
+            att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
         }
     }
 
