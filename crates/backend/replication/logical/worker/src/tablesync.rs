@@ -269,10 +269,29 @@ fn process_syncing_tables_for_apply(mcx: Mcx<'static>, current_lsn: XLogRecPtr) 
 
     if started_tx {
         xact::CommitTransactionCommand()?;
-        // Two-phase PENDING->ENABLED (AllTablesyncsReady) is unported; the
-        // subscription creation path never enables two_phase yet.
     }
     Ok(())
+}
+
+// AllTablesyncsReady (tablesync.c): the subscription has relations and every
+// one of them is READY.
+pub(crate) fn all_tablesyncs_ready(mcx: Mcx<'_>) -> PgResult<bool> {
+    let subid = my_sub(|s| s.oid);
+    let mut started_tx = false;
+    if !xact::IsTransactionState() {
+        xact::StartTransactionCommand()?;
+        started_tx = true;
+    }
+    let not_ready = GetSubscriptionRelations(mcx, subid, true)?.len();
+    let has_subrels = if not_ready > 0 {
+        true
+    } else {
+        !GetSubscriptionRelations(mcx, subid, false)?.is_empty()
+    };
+    if started_tx {
+        xact::CommitTransactionCommand()?;
+    }
+    Ok(has_subrels && not_ready == 0)
 }
 
 // make_copy_attnamelist (tablesync.c:726): remote attnames as the COPY FROM

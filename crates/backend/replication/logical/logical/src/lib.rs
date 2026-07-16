@@ -539,15 +539,25 @@ pub fn CreateDecodingContext(
 
     startup_cb_maybe(&ctx, false)?;
 
-    let receive_rewrites = {
+    let (receive_rewrites, mark_two_phase) = {
         let opc = ctx.opc();
         opc.twophase &= slot.data.get().two_phase || opc.twophase_opt_given;
-        if opc.twophase && !slot.data.get().two_phase {
-            unported("CreateDecodingContext: enabling two_phase on slot");
-        }
-        opc.options.receive_rewrites
+        (opc.options.receive_rewrites, opc.twophase && !slot.data.get().two_phase)
     };
     let mut ctx = ctx;
+    // Mark slot to allow two_phase decoding if not already marked
+    // (logical.c:597).
+    if mark_two_phase {
+        slot.with_mutex(|| {
+            let mut d = slot.data.get();
+            d.two_phase = true;
+            d.two_phase_at = start_lsn;
+            slot.data.set(d);
+        });
+        ReplicationSlotMarkDirty();
+        ReplicationSlotSave()?;
+        ctx.snapshot_builder.set_two_phase_at(start_lsn);
+    }
     ctx.reorder.output_rewrites = receive_rewrites;
 
     let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();

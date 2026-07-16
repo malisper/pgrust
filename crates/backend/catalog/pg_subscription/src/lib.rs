@@ -423,6 +423,53 @@ pub fn UpdateSubscriptionRelState<'mcx>(
     rel.close(NoLock)
 }
 
+// UpdateTwoPhaseState (subscriptioncmds.c): transition
+// pg_subscription.subtwophasestate. C hosts it in subscriptioncmds.c and
+// exports it for the apply worker; it lives beside the other pg_subscription
+// catalog updaters here.
+pub fn UpdateTwoPhaseState<'mcx>(mcx: Mcx<'mcx>, suboid: Oid, new_state: u8) -> PgResult<()> {
+    debug_assert!(matches!(
+        new_state,
+        LOGICALREP_TWOPHASE_STATE_DISABLED
+            | LOGICALREP_TWOPHASE_STATE_PENDING
+            | LOGICALREP_TWOPHASE_STATE_ENABLED
+    ));
+    let rel = table::table_open(mcx, SubscriptionRelationId, RowExclusiveLock)?;
+    let Some(tup) = SearchSysCacheCopy(
+        mcx,
+        SUBSCRIPTIONOID,
+        SysCacheKey::Value(Datum::from_oid(suboid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for subscription oid {suboid}"
+        ))));
+    };
+
+    let mut values = [Datum::null(); Natts_pg_subscription];
+    let mut nulls = [false; Natts_pg_subscription];
+    let mut replaces = [false; Natts_pg_subscription];
+    values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =
+        Datum::from_char(new_state as i8);
+    replaces[(Anum_pg_subscription_subtwophasestate - 1) as usize] = true;
+
+    let mut new_tup = heaptuple::heap_modify_tuple(
+        mcx,
+        tup.as_tuple(),
+        rel.descr(),
+        &values,
+        &nulls,
+        &replaces,
+    )?;
+    let otid = tup.as_tuple().t_self;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut new_tup)?;
+
+    rel.close(RowExclusiveLock)
+}
+
 pub fn GetSubscriptionRelState<'mcx>(
     mcx: Mcx<'mcx>,
     subid: Oid,
