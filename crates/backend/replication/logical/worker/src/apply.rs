@@ -13,7 +13,6 @@
 //   identical for default opclasses, divergence recorded for custom ones.
 // - The DirtySnapshot lookup snapshot is GetLatestSnapshot + C's
 //   table_tuple_lock retry protocol.
-// - TRUNCATE apply refuses loudly (ExecuteTruncateGuts unported here).
 use std::ffi::CString;
 
 use datum::Datum;
@@ -147,7 +146,7 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         MSG_INSERT => apply_handle_insert(mcx, &mut r),
         MSG_UPDATE => apply_handle_update(mcx, &mut r),
         MSG_DELETE => apply_handle_delete(mcx, &mut r),
-        MSG_TRUNCATE => panic!("unported: TRUNCATE apply (ExecuteTruncateGuts)"),
+        MSG_TRUNCATE => apply_handle_truncate(mcx, &mut r),
         MSG_MESSAGE => Ok(()), // transactional messages are ignored by apply
         MSG_STREAM_START | MSG_STREAM_STOP | MSG_STREAM_COMMIT | MSG_STREAM_ABORT
         | MSG_STREAM_PREPARE => {
@@ -884,5 +883,61 @@ fn apply_handle_delete(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
     }
 
     logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
+    end_replication_step()
+}
+
+// apply_handle_truncate (worker.c:3232). Even if the publisher used CASCADE,
+// C explicitly replays without further cascading (DROP_RESTRICT); the
+// TargetPrivilegesCheck / run-as-owner arm follows the port's existing
+// convention in the other handlers (elided, recorded divergence).
+fn apply_handle_truncate(mcx: Mcx<'static>, r: &mut Reader<'_>) -> PgResult<()> {
+    begin_replication_step(mcx)?;
+
+    let (remote_relids, _cascade, restart_seqs) = logicalproto::logicalrep_read_truncate(r)?;
+    let subid = my_sub(|s| s.oid);
+
+    let mut rels: Vec<Relation<'static>> = Vec::new();
+    let mut relids: Vec<Oid> = Vec::new();
+    let mut relids_logged: Vec<Oid> = Vec::new();
+
+    for relid in remote_relids {
+        let (entry, rel) = logicalrelation::logicalrep_rel_open(
+            mcx,
+            relid,
+            types_rel::AccessExclusiveLock,
+            subid,
+        )?;
+        if !should_apply_changes_for_rel(&entry) {
+            logicalrelation::logicalrep_rel_close(rel, types_rel::AccessExclusiveLock)?;
+            continue;
+        }
+        if rel.rd_rel.relkind == types_rel::RELKIND_PARTITIONED_TABLE {
+            // C fans the truncate out to the leaf partitions
+            // (find_all_inheritors); partitioned targets are unported in this
+            // apply worker across all handlers.
+            panic!("unported: TRUNCATE apply on a partitioned table");
+        }
+        if heapam::relation_is_logically_logged(&rel) {
+            relids_logged.push(rel.rd_id);
+        }
+        relids.push(rel.rd_id);
+        rels.push(rel);
+    }
+
+    if !rels.is_empty() {
+        tablecmds::ExecuteTruncateGuts(
+            mcx,
+            &mut rels,
+            &mut relids,
+            &mut relids_logged,
+            types_nodes::parsenodes::DropBehavior::DROP_RESTRICT,
+            restart_seqs,
+        )?;
+    }
+
+    for rel in rels {
+        logicalrelation::logicalrep_rel_close(rel, types_rel::NoLock)?;
+    }
+
     end_replication_step()
 }
