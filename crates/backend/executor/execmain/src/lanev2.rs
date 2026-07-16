@@ -4950,11 +4950,11 @@ fn scan_mk_batch<'mcx>(
             spankey_lap(ctr, spk_t0);
         }
     }
-    // Split the accumulator into the packed key lane and probe.
+    // Split the accumulator into the packed key lane and probe (two-word
+    // shapes view the accumulator in place — mkaccept inc-1).
     if shape.two_words {
-        keys2.clear();
-        keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-        ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+        let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+        ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
     } else {
         keys1.clear();
         keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
@@ -5052,8 +5052,12 @@ unsafe fn agg_fold_staged_mm<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // avgpack: packed inline AvgAccum slots — nonzero only on sink worker
+    // builds (the armed table's creation-time mask; representation state
+    // travels WITH the table that holds the states).
+    let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
     // SAFETY: caller contract (above) is exactly fold_rows_grouped_mm's.
-    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm) }
+    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm, avgpack_mask) }
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
@@ -11507,11 +11511,12 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
                     }
                 }
             }
-            // Split the accumulator into the packed key lane and probe.
+            // Split the accumulator into the packed key lane and probe
+            // (two-word shapes view the accumulator in place — mkaccept
+            // inc-1).
             if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-                ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+                let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+                ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
             } else {
                 keys1.clear();
                 keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));

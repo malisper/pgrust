@@ -191,13 +191,13 @@ fn sizing_dopscale_width_ramp() {
     let params = SizingParams { t_max_ns: 2_000_000, t_min_ns: 500_000 };
     // Identity band (includes the whole 16-core fleet + mt16 vectors).
     for w in [1u64, 4, 15, 16, 32] {
-        let p = params.scaled_for_width(w);
+        let p = crate::sizing::dopscale_ramp(params, w);
         assert_eq!((p.t_max_ns, p.t_min_ns), (2_000_000, 500_000), "w={w} must be identity");
     }
     // Ramp: monotone in W, capped at ×2.5 from 191.
-    let p96 = params.scaled_for_width(96);
-    let p191 = params.scaled_for_width(191);
-    let p256 = params.scaled_for_width(256);
+    let p96 = crate::sizing::dopscale_ramp(params, 96);
+    let p191 = crate::sizing::dopscale_ramp(params, 191);
+    let p256 = crate::sizing::dopscale_ramp(params, 256);
     assert!(p96.t_max_ns > 2_000_000 && p96.t_max_ns < p191.t_max_ns);
     assert_eq!(p191.t_max_ns, 5_000_000); // 2ms × 2.5
     assert_eq!(p256.t_max_ns, p191.t_max_ns, "cap at DOPSCALE_W1");
@@ -206,7 +206,7 @@ fn sizing_dopscale_width_ramp() {
         assert_eq!(p.t_min_ns, 500_000);
     }
     // Exact ramp arithmetic at w=112: frac=(112−32)/159, x=1+1.5·frac.
-    let p112 = params.scaled_for_width(112);
+    let p112 = crate::sizing::dopscale_ramp(params, 112);
     let expect = (2_000_000f64 * (1.0 + 1.5 * (80.0 / 159.0))) as u64;
     assert_eq!(p112.t_max_ns, expect);
 }
