@@ -243,11 +243,13 @@ fn launcher_body() -> PgResult<Never> {
     // never a cluster crash-restart.
     #[cfg(debug_assertions)]
     {
-        thread_local! {
-            static LAUNCHER_PANIC_FIRED: Cell<bool> = const { Cell::new(false) };
-        }
+        // Process-global one-shot (NOT a thread_local: fires once per
+        // postmaster lifetime so a relaunched launcher doesn't re-panic,
+        // and the pinned session TLS census stays untouched).
+        static LAUNCHER_PANIC_FIRED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if std::env::var("PGRUST_TEST_AUTOVAC_PANIC_LAUNCHER").is_ok()
-            && !LAUNCHER_PANIC_FIRED.replace(true)
+            && !LAUNCHER_PANIC_FIRED.swap(true, Relaxed)
         {
             panic!("injected autovacuum launcher panic for containment test");
         }

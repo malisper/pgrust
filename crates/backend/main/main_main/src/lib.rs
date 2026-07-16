@@ -147,7 +147,16 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             panic!("GucInfoMain unported: unit backend-utils-misc-help-config")
         }
         DispatchOption::Single => {
-            panic!("PostgresSingleUserMain unported: unit backend-tcop-postgres (single-user arm)")
+            // PostgresSingleUserMain is unported (backend-tcop-postgres
+            // single-user arm). --single is the documented disaster-recovery
+            // entry point, so refuse cleanly at startup instead of
+            // panicking: an operator mid-recovery must see a message and
+            // exit(1), not an abort with a backtrace (panicfix-bgaudit).
+            elog::write_stderr(
+                "single-user mode (--single) is not supported yet by this server.\n\
+                 Start the server normally and connect with a client instead.\n",
+            );
+            std::process::exit(1);
         }
         DispatchOption::Postmaster => postmaster::PostmasterMain(argv),
     }
