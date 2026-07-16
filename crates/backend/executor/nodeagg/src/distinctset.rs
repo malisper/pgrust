@@ -295,10 +295,22 @@ impl<'mcx> DistinctSet<'mcx> {
     /// (`from_values`: Empty table, populated value arrays) are excluded by
     /// the emptiness guard. Pure geometry: set contents, insertion order,
     /// and every downstream byte are untouched by any target value.
+    ///
+    /// q9internals inc-1: the reserve covers the VALUE array too — `ints`
+    /// is the other half of a big set's memory and was still growing
+    /// through Vec's realloc-doubling ladder (~1x final bytes of memcpy
+    /// per big set) after the table reserve landed. Same accounting story
+    /// as the table jump (capacity is metered by the caller's window
+    /// re-account); capacity is a non-surface.
     #[inline]
     pub(crate) fn reserve_projected(&mut self, target_len: usize) {
         match &mut self.table {
-            ProbeTab::Int(t) => t.reserve_for(target_len),
+            ProbeTab::Int(t) => {
+                t.reserve_for(target_len);
+                if target_len > self.ints.capacity() {
+                    self.ints.reserve(target_len - self.ints.len());
+                }
+            }
             ProbeTab::Empty
                 if stringhash_set_enabled()
                     && self.ints.is_empty()
@@ -308,6 +320,7 @@ impl<'mcx> DistinctSet<'mcx> {
                 let mut t = ::stringhash::IntSet::new();
                 t.reserve_for(target_len);
                 self.table = ProbeTab::Int(t);
+                self.ints.reserve(target_len);
             }
             _ => {}
         }
@@ -1030,12 +1043,18 @@ mod tests {
         // Fresh set, big target: pre-sized Int arm, no legacy phase.
         let mut s = DistinctSet::new();
         s.reserve_projected(50_000);
+        // q9internals inc-1: the value array is pre-sized too — no realloc
+        // ladder while filling to the target (geometry pin: capacity holds
+        // the target and the fill never moves the buffer).
+        assert!(s.ints.capacity() >= 50_000);
+        let base_ptr = s.ints.as_ptr();
         for i in 0..50_000i64 {
             s.insert_i64(i * 7);
             s.insert_i64(i * 7); // immediate dup
         }
         assert_eq!(s.len(), 50_000);
         assert_eq!(s.ints()[0], 0);
+        assert_eq!(s.ints.as_ptr(), base_ptr, "value array reallocated despite reserve");
         // Small target below the promote gate: table decision deferred
         // (legacy on first insert), dedup unchanged.
         let mut t = DistinctSet::new();
@@ -1051,6 +1070,7 @@ mod tests {
             p.insert_i64(i);
         }
         p.reserve_projected(30_000);
+        assert!(p.ints.capacity() >= 30_000, "promoted-arm reserve covers the value array");
         for i in 0..200i64 {
             p.insert_i64(i); // still dups
         }
