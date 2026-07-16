@@ -2038,8 +2038,7 @@ impl<'mcx> Parser<'mcx> {
             }
             // AlterExtensionContentsStmt: ALTER EXTENSION name add_drop
             // {object_type_name name | object_type_any_name any_name |
-            //  FUNCTION function_with_argtypes} (cast/opclass/opfamily/
-            // aggregate/operator/domain/transform/type forms stay loud).
+            //  FUNCTION function_with_argtypes} (all 13 gram.y forms ported).
             697 => {
                 let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
                 n.extname = Some(view.v(3).str_val());
@@ -2066,6 +2065,72 @@ impl<'mcx> Parser<'mcx> {
                     _ => ObjectType::OBJECT_ROUTINE,
                 };
                 n.object = view.v(6).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop {AGGREGATE aggregate_with_argtypes | DOMAIN_P
+            // Typename | OPERATOR operator_with_argtypes | TYPE_P Typename}:
+            // object is the $6 node directly.
+            699 | 701 | 703 | 709 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = match rule {
+                    699 => ObjectType::OBJECT_AGGREGATE,
+                    701 => ObjectType::OBJECT_DOMAIN,
+                    703 => ObjectType::OBJECT_OPERATOR,
+                    _ => ObjectType::OBJECT_TYPE,
+                };
+                n.object = view.v(6).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop CAST '(' Typename AS Typename ')':
+            // C: object = list_make2($7, $9).
+            700 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = ObjectType::OBJECT_CAST;
+                n.object = Some(Node::mk_list(
+                    mcx,
+                    NodeList::make2(
+                        mcx,
+                        view.v(7).node().expect("Typename"),
+                        view.v(9).node().expect("Typename"),
+                    )?,
+                )?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop OPERATOR {CLASS|FAMILY} any_name USING name:
+            // C: object = lcons(makeString($9), $7).
+            704 | 705 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = if rule == 704 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut names = view.v(7).list();
+                names.lcons(mcx, Node::mk_string(mcx, view.v(9).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop TRANSFORM FOR Typename LANGUAGE name:
+            // C: object = list_make2($7, makeString($9)).
+            708 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = ObjectType::OBJECT_TRANSFORM;
+                n.object = Some(Node::mk_list(
+                    mcx,
+                    NodeList::make2(
+                        mcx,
+                        view.v(7).node().expect("Typename"),
+                        Node::mk_string(mcx, view.v(9).str_val())?,
+                    )?,
+                )?);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1710 => {
@@ -7658,7 +7723,7 @@ impl<'mcx> Parser<'mcx> {
                 let arg = Node::mk_string(mcx, view.v(2).str_val())?;
                 *yyval = def_elem(mcx, "parallel", Some(arg), view.l(1))?;
             }
-            // createfunc_opt_item (TRANSFORM 1197 stays loud).
+            // createfunc_opt_item
             1195 => {
                 let arg = Node::mk_list(mcx, view.v(2).list())?;
                 *yyval = def_elem(mcx, "as", Some(arg), view.l(1))?;
@@ -7667,8 +7732,24 @@ impl<'mcx> Parser<'mcx> {
                 let arg = Node::mk_string(mcx, view.v(2).str_val())?;
                 *yyval = def_elem(mcx, "language", Some(arg), view.l(1))?;
             }
+            // createfunc_opt_item: TRANSFORM transform_type_list
+            1197 => {
+                let arg = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "transform", Some(arg), view.l(1))?;
+            }
             1198 => {
                 *yyval = def_elem(mcx, "window", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            // transform_type_list: FOR TYPE_P Typename
+            //                    | transform_type_list ',' FOR TYPE_P Typename
+            1210 => {
+                *yyval =
+                    YYSTYPE::List(NodeList::make1(mcx, view.v(3).node().expect("Typename"))?);
+            }
+            1211 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(5).node().expect("Typename"))?;
+                *yyval = YYSTYPE::List(list);
             }
             // func_as
             1200 => {
