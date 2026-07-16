@@ -1046,20 +1046,21 @@ fn adjust_standard_join_alias_expression<'mcx>(
     }
 }
 
-// flatten_group_exprs (var.c): GROUP-RTE Vars replaced by the referenced
-// grouping expressions (shared, not copied — the arena share is our copy
-// model). Serves both C arms: root == NULL (deparse/pushdown) and the planner
-// call, whose mark_nullable_by_grouping leg is a no-op because group Vars
-// carry varnullingrels only under grouping sets (parse_agg.c buildGroupedVar),
-// which the planner caller rejects loudly. sublevels_up stays 0 because
-// Query/SubLink descent is a loud panic, so IncrementVarSublevelsUp and the
-// agglevelsup < sublevels_up arm are unreachable here.
+// flatten_group_exprs (var.c:951-1101), the root == NULL arm (deparse and
+// qual-pushdown analysis; the planner's root != NULL arm with
+// mark_nullable_by_grouping lives in planner/flatten_group.rs): GROUP-RTE
+// Vars are replaced by the referenced grouping expressions. At
+// sublevels_up == 0 the replacement is shared, not copied - the arena share
+// is our copy model and every consumer here is read-only. Below a subquery
+// the replacement is a fresh copy with its variable levels shifted down,
+// C's copyObject + IncrementVarSublevelsUp(newnode, sublevels_up, 0).
 pub fn flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Query<'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
-    Ok(fge_mutate(mcx, query, node)?.unwrap_or(node))
+    let mut ctx = FgeCtx { mcx, query, sublevels_up: 0 };
+    Ok(fge_mutate(&mut ctx, node)?.unwrap_or(node))
 }
 
 /// None = unchanged (caller keeps the original list).
@@ -1068,7 +1069,8 @@ pub fn flatten_group_exprs_list<'mcx>(
     query: &Query<'mcx>,
     list: &NodeList<'mcx>,
 ) -> PgResult<Option<&'mcx NodeList<'mcx>>> {
-    match fge_list(mcx, query, list)? {
+    let mut ctx = FgeCtx { mcx, query, sublevels_up: 0 };
+    match fge_list(&mut ctx, list)? {
         None => Ok(None),
         Some(new) => Ok(Some(
             Node::mk_list(mcx, new)?.as_list().expect("mk_list yields a List"),
@@ -1076,15 +1078,22 @@ pub fn flatten_group_exprs_list<'mcx>(
     }
 }
 
-fn fge_list<'mcx>(
+struct FgeCtx<'a, 'mcx> {
     mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
+    /// The query whose GROUP RTE is being flattened; Var lookups always
+    /// resolve against this level's rtable (C keeps context->query fixed).
+    query: &'a Query<'mcx>,
+    sublevels_up: i32,
+}
+
+fn fge_list<'mcx>(
+    ctx: &mut FgeCtx<'_, 'mcx>,
     list: &NodeList<'mcx>,
 ) -> PgResult<Option<NodeList<'mcx>>> {
     let mut changed = false;
     let mut out: Vec<Node<'mcx>> = Vec::with_capacity(list.len());
     for item in list.iter() {
-        match fge_mutate(mcx, query, item)? {
+        match fge_mutate(ctx, item)? {
             Some(new) => {
                 changed = true;
                 out.push(new);
@@ -1097,31 +1106,37 @@ fn fge_list<'mcx>(
     }
     let mut l = NodeList::nil();
     for n in out {
-        l.lappend(mcx, n)?;
+        l.lappend(ctx.mcx, n)?;
     }
     Ok(Some(l))
 }
 
-#[cold]
-#[inline(never)]
-fn fge_unported(what: &str) -> ! {
-    panic!("flatten_group_exprs (var.c): {what} unported")
+fn fge_opt<'mcx>(
+    ctx: &mut FgeCtx<'_, 'mcx>,
+    node: Option<Node<'mcx>>,
+) -> PgResult<Option<Node<'mcx>>> {
+    match node {
+        None => Ok(None),
+        Some(n) => fge_mutate(ctx, n),
+    }
 }
 
+// flatten_group_exprs_mutator (var.c:993-1101); None = unchanged.
 fn fge_mutate<'mcx>(
-    mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
+    ctx: &mut FgeCtx<'_, 'mcx>,
     node: Node<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
     use types_nodes::primnodes as pn;
     use types_nodes::RTEKind;
+    let mcx = ctx.mcx;
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
-            if var.varlevelsup != 0 {
+            if var.varlevelsup as i32 != ctx.sublevels_up {
                 return Ok(None);
             }
-            let rte = query
+            let rte = ctx
+                .query
                 .rtable
                 .nth(var.varno as usize - 1)
                 .as_range_tbl_entry()
@@ -1131,6 +1146,20 @@ fn fge_mutate<'mcx>(
             }
             debug_assert!(var.varattno > 0);
             let newvar = rte.groupexprs.nth(var.varattno as usize - 1);
+            if ctx.sublevels_up != 0 {
+                // The replacement lands inside a subquery, so its variables
+                // move down with it; the copy keeps the level shift off the
+                // shared groupexprs entry.
+                let copy = rewrite_manip::copy_node(mcx, newvar)?;
+                rewrite_manip::IncrementVarSublevelsUp(copy, ctx.sublevels_up, 0)?;
+                if copy.node_tag() == NodeTag::T_Var {
+                    let location = var.location;
+                    // SAFETY: copy is the fresh exclusive tree made above.
+                    unsafe { copy.with_mut::<pn::Var, _>(|v| v.location = location) }
+                        .expect("Var");
+                }
+                return Ok(Some(copy));
+            }
             // C preserves the original Var's location on a Var replacement.
             if let Some(v) = newvar.as_var() {
                 if v.location != var.location {
@@ -1146,21 +1175,31 @@ fn fge_mutate<'mcx>(
             }
             Ok(Some(newvar))
         }
-        NodeTag::T_Const | NodeTag::T_Param | NodeTag::T_CaseTestExpr => Ok(None),
-        // C: a GroupingFunc of the original or higher level (always, with
-        // sublevels_up pinned at 0) holds no grouped Vars; not recursed into.
-        NodeTag::T_GroupingFunc => Ok(None),
+        // C: a GroupingFunc of the flatten level or higher holds no grouped
+        // Vars of this level; a lower one may hold them in its refs' exprs.
+        NodeTag::T_GroupingFunc => {
+            if node.as_grouping_func().unwrap().agglevelsup as i32 >= ctx.sublevels_up {
+                Ok(None)
+            } else {
+                nodes_core::expression_tree_mutator(mcx, node, &mut |n| fge_mutate(ctx, n))
+            }
+        }
         NodeTag::T_Aggref => {
-            // C: at the agg's own level only aggdirectargs can hold grouped
-            // Vars; args/order/filter are not recursed into.
             let a = node.as_aggref().unwrap();
-            // sublevels_up is pinned at 0 here, so nonzero agglevelsup means
-            // a higher-level agg: no grouped Vars of this level inside (C
-            // skips recursing into aggregates of higher levels).
-            if a.agglevelsup != 0 {
+            let agglevelsup = a.agglevelsup as i32;
+            if agglevelsup > ctx.sublevels_up {
+                // Higher-level agg: no grouped Vars of this level inside (C
+                // skips recursing into aggregates of higher levels).
                 return Ok(None);
             }
-            match fge_list(mcx, query, &a.aggdirectargs)? {
+            if agglevelsup < ctx.sublevels_up {
+                return nodes_core::expression_tree_mutator(mcx, node, &mut |n| {
+                    fge_mutate(ctx, n)
+                });
+            }
+            // C: at the agg's own level only aggdirectargs can hold grouped
+            // Vars; args/order/filter are not recursed into.
+            match fge_list(ctx, &a.aggdirectargs)? {
                 None => Ok(None),
                 Some(aggdirectargs) => Ok(Some(Node::mk(
                     mcx,
@@ -1189,290 +1228,241 @@ fn fge_mutate<'mcx>(
                 )?)),
             }
         }
-        NodeTag::T_TargetEntry => {
-            let tle = node.as_target_entry().unwrap();
-            match fge_mutate(mcx, query, tle.expr)? {
-                None => Ok(None),
-                Some(expr) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::TargetEntry {
-                        expr,
-                        resno: tle.resno,
-                        resname: tle.resname,
-                        ressortgroupref: tle.ressortgroupref,
-                        resorigtbl: tle.resorigtbl,
-                        resorigcol: tle.resorigcol,
-                        resjunk: tle.resjunk,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_List => match fge_list(mcx, query, node.as_list().unwrap())? {
-            None => Ok(None),
-            Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
-        },
-        NodeTag::T_OpExpr => {
-            let o = node.as_op_expr().unwrap();
-            match fge_list(mcx, query, &o.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::OpExpr {
-                        opno: o.opno,
-                        opfuncid: o.opfuncid,
-                        opresulttype: o.opresulttype,
-                        opretset: o.opretset,
-                        opcollid: o.opcollid,
-                        inputcollid: o.inputcollid,
-                        args,
-                        location: o.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_FuncExpr => {
-            let f = node.as_func_expr().unwrap();
-            match fge_list(mcx, query, &f.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::FuncExpr {
-                        funcid: f.funcid,
-                        funcresulttype: f.funcresulttype,
-                        funcretset: f.funcretset,
-                        funcvariadic: f.funcvariadic,
-                        funcformat: f.funcformat,
-                        funccollid: f.funccollid,
-                        inputcollid: f.inputcollid,
-                        args,
-                        location: f.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_BoolExpr => {
-            let b = node.as_bool_expr().unwrap();
-            match fge_list(mcx, query, &b.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::BoolExpr { boolop: b.boolop, args, location: b.location },
-                )?)),
-            }
-        }
-        NodeTag::T_ScalarArrayOpExpr => {
-            let s = node.as_scalar_array_op_expr().unwrap();
-            match fge_list(mcx, query, &s.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::ScalarArrayOpExpr {
-                        opno: s.opno,
-                        opfuncid: s.opfuncid,
-                        hashfuncid: s.hashfuncid,
-                        negfuncid: s.negfuncid,
-                        useOr: s.useOr,
-                        inputcollid: s.inputcollid,
-                        args,
-                        location: s.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_CoalesceExpr => {
-            let c = node.as_coalesce_expr().unwrap();
-            match fge_list(mcx, query, &c.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::CoalesceExpr {
-                        coalescetype: c.coalescetype,
-                        coalescecollid: c.coalescecollid,
-                        args,
-                        location: c.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_MinMaxExpr => {
-            let m = node.as_min_max_expr().unwrap();
-            match fge_list(mcx, query, &m.args)? {
-                None => Ok(None),
-                Some(args) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::MinMaxExpr {
-                        minmaxtype: m.minmaxtype,
-                        minmaxcollid: m.minmaxcollid,
-                        inputcollid: m.inputcollid,
-                        op: m.op,
-                        args,
-                        location: m.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_ArrayExpr => {
-            let a = node.as_array_expr().unwrap();
-            match fge_list(mcx, query, &a.elements)? {
-                None => Ok(None),
-                Some(elements) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::ArrayExpr {
-                        array_typeid: a.array_typeid,
-                        array_collid: a.array_collid,
-                        element_typeid: a.element_typeid,
-                        elements,
-                        multidims: a.multidims,
-                        list_start: a.list_start,
-                        list_end: a.list_end,
-                        location: a.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_CaseExpr => {
-            let c = node.as_case_expr().unwrap();
-            let arg = fge_opt(mcx, query, c.arg)?;
-            let args = fge_list(mcx, query, &c.args)?;
-            let defresult = fge_opt(mcx, query, c.defresult)?;
-            if arg.is_none() && args.is_none() && defresult.is_none() {
-                return Ok(None);
-            }
-            let mut new_args = NodeList::nil();
-            match args {
-                Some(l) => new_args = l,
-                None => {
-                    for x in c.args.iter() {
-                        new_args.lappend(mcx, x)?;
-                    }
-                }
-            }
-            Ok(Some(Node::mk(
-                mcx,
-                pn::CaseExpr {
-                    casetype: c.casetype,
-                    casecollid: c.casecollid,
-                    arg: arg.or(c.arg),
-                    args: new_args,
-                    defresult: defresult.or(c.defresult),
-                    location: c.location,
-                },
-            )?))
-        }
-        NodeTag::T_CaseWhen => {
-            let w = node.as_case_when().unwrap();
-            let expr = fge_opt(mcx, query, w.expr)?;
-            let result = fge_opt(mcx, query, w.result)?;
-            if expr.is_none() && result.is_none() {
+        // expression_tree_mutator (nodes_core) rebuilds a SubLink for a
+        // changed testexpr but does not descend subselect; C's Query arm
+        // (query_tree_mutator one level down) is the descent below.
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            let new_test = match sl.testexpr {
+                None => None,
+                Some(te) => fge_mutate(ctx, te)?,
+            };
+            let new_sub =
+                fge_query_descend(ctx, sl.subselect.as_query().expect("SubLink holds a Query"))?;
+            if new_test.is_none() && new_sub.is_none() {
                 return Ok(None);
             }
             Ok(Some(Node::mk(
                 mcx,
-                pn::CaseWhen {
-                    expr: expr.or(w.expr),
-                    result: result.or(w.result),
-                    location: w.location,
+                pn::SubLink {
+                    subLinkType: sl.subLinkType,
+                    subLinkId: sl.subLinkId,
+                    testexpr: new_test.or(sl.testexpr),
+                    operName: sl.operName.clone_in(mcx)?,
+                    subselect: new_sub.unwrap_or(sl.subselect),
+                    location: sl.location,
                 },
             )?))
         }
-        NodeTag::T_NullTest => {
-            let n = node.as_null_test().unwrap();
-            match fge_opt(mcx, query, n.arg)? {
-                None => Ok(None),
-                Some(arg) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::NullTest {
-                        arg: Some(arg),
-                        nulltesttype: n.nulltesttype,
-                        argisrow: n.argisrow,
-                        location: n.location,
-                    },
-                )?)),
-            }
+        NodeTag::T_Query => {
+            fge_query_descend(ctx, node.as_query().expect("Query"))
         }
-        NodeTag::T_FieldSelect => {
-            let f = node.as_field_select().unwrap();
-            match fge_mutate(mcx, query, f.arg)? {
-                None => Ok(None),
-                Some(arg) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::FieldSelect { arg, ..*f },
-                )?)),
-            }
-        }
-        NodeTag::T_RelabelType => {
-            let r = node.as_relabel_type().unwrap();
-            match fge_mutate(mcx, query, r.arg)? {
-                None => Ok(None),
-                Some(arg) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::RelabelType {
-                        arg,
-                        resulttype: r.resulttype,
-                        resulttypmod: r.resulttypmod,
-                        resultcollid: r.resultcollid,
-                        relabelformat: r.relabelformat,
-                        location: r.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_CoerceViaIO => {
-            let c = node.as_coerce_via_io().unwrap();
-            match fge_mutate(mcx, query, c.arg)? {
-                None => Ok(None),
-                Some(arg) => Ok(Some(Node::mk(
-                    mcx,
-                    pn::CoerceViaIO {
-                        arg,
-                        resulttype: c.resulttype,
-                        resultcollid: c.resultcollid,
-                        coerceformat: c.coerceformat,
-                        location: c.location,
-                    },
-                )?)),
-            }
-        }
-        NodeTag::T_ArrayCoerceExpr => {
-            let a = node.as_array_coerce_expr().unwrap();
-            let arg = fge_mutate(mcx, query, a.arg)?;
-            let elemexpr = fge_opt(mcx, query, a.elemexpr)?;
-            if arg.is_none() && elemexpr.is_none() {
-                Ok(None)
-            } else {
-                Ok(Some(Node::mk(
-                    mcx,
-                    pn::ArrayCoerceExpr {
-                        arg: arg.unwrap_or(a.arg),
-                        elemexpr: elemexpr.or(a.elemexpr),
-                        ..*a
-                    },
-                )?))
-            }
-        }
-        NodeTag::T_ConvertRowtypeExpr => {
-            let c = node.as_convert_rowtype_expr().unwrap();
-            match fge_mutate(mcx, query, c.arg)? {
-                None => Ok(None),
-                Some(arg) => Ok(Some(Node::mk(mcx, pn::ConvertRowtypeExpr { arg, ..*c })?)),
-            }
-        }
-        NodeTag::T_SubLink | NodeTag::T_Query => {
-            fge_unported("GROUP-var flattening below a subquery")
-        }
-        other => fge_unported(&format!("{other:?} mutator arm")),
+        // flatten_group_exprs_mutator's default arm: expression_tree_mutator.
+        _ => nodes_core::expression_tree_mutator(mcx, node, &mut |n| fge_mutate(ctx, n)),
     }
 }
 
-fn fge_opt<'mcx>(
-    mcx: Mcx<'mcx>,
-    query: &Query<'mcx>,
-    node: Option<Node<'mcx>>,
+// The sub-Query descent of flatten_group_exprs_mutator: C runs
+// query_tree_mutator (QTW_IGNORE_GROUPEXPRS) with sublevels_up bumped; the
+// copying mutator is realized as a whole-Query out/read deep copy walked in
+// place, taken only when a grouped Var of the flatten level actually occurs
+// below (the common untouched subquery stays shared). None = unchanged.
+fn fge_query_descend<'mcx>(
+    ctx: &mut FgeCtx<'_, 'mcx>,
+    q: &'mcx Query<'mcx>,
 ) -> PgResult<Option<Node<'mcx>>> {
-    match node {
-        None => Ok(None),
-        Some(n) => fge_mutate(mcx, query, n),
+    if !fge_query_has_grouped_vars(ctx, q)? {
+        return Ok(None);
     }
+    let qnode = rewrite_manip::copy_query_node(ctx.mcx, q)?;
+    fge_query_inplace(ctx, qnode)?;
+    Ok(Some(qnode))
+}
+
+fn fge_query_has_grouped_vars<'mcx>(
+    ctx: &FgeCtx<'_, 'mcx>,
+    q: &'mcx Query<'mcx>,
+) -> PgResult<bool> {
+    use types_nodes::parsenodes::RTEKind;
+    struct W<'a, 'x> {
+        parse: &'a Query<'x>,
+        sublevels_up: i32,
+        found: bool,
+    }
+    impl<'mcx> NodeWalker<'mcx> for W<'_, 'mcx> {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            if let Some(v) = node.as_var() {
+                if v.varlevelsup as i32 == self.sublevels_up {
+                    let rte = self
+                        .parse
+                        .rtable
+                        .nth(v.varno as usize - 1)
+                        .as_range_tbl_entry()
+                        .expect("rtable entry");
+                    if rte.rtekind == RTEKind::RTE_GROUP {
+                        self.found = true;
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            if let Some(q) = node.as_query() {
+                self.sublevels_up += 1;
+                let r = query_tree_walker(q, self, 0);
+                self.sublevels_up -= 1;
+                return r;
+            }
+            expression_tree_walker(node, self)
+        }
+        fn visit_query_ref(&mut self, q: &'mcx Query<'mcx>) -> PgResult<bool> {
+            self.sublevels_up += 1;
+            let r = query_tree_walker(q, self, 0);
+            self.sublevels_up -= 1;
+            r
+        }
+    }
+    let mut w = W { parse: ctx.query, sublevels_up: ctx.sublevels_up + 1, found: false };
+    query_tree_walker(q, &mut w, 0)?;
+    Ok(w.found)
+}
+
+// query_tree_mutator legs of the descent, applied in place through the
+// exclusive copy made by fge_query_descend. windowClause frame offsets and
+// the sort/group/distinct clauses carry no expressions; nested GROUP RTEs
+// keep their exprs (QTW_IGNORE_GROUPEXPRS).
+fn fge_query_inplace<'mcx>(ctx: &mut FgeCtx<'_, 'mcx>, qnode: Node<'mcx>) -> PgResult<()> {
+    use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
+    let mcx = ctx.mcx;
+    let q = qnode.as_query().expect("Query");
+    ctx.sublevels_up += 1;
+
+    let new_target = fge_list(ctx, &q.targetList)?;
+    let new_returning = fge_list(ctx, &q.returningList)?;
+    let new_having = fge_opt(ctx, q.havingQual)?;
+    let new_limit_off = fge_opt(ctx, q.limitOffset)?;
+    let new_limit_cnt = fge_opt(ctx, q.limitCount)?;
+    let new_setops = fge_opt(ctx, q.setOperations)?;
+    let new_jointree = match q.jointree {
+        None => None,
+        Some(jt) => {
+            let fl = fge_list(ctx, &jt.fromlist)?;
+            let quals = fge_opt(ctx, jt.quals)?;
+            if fl.is_some() || quals.is_some() {
+                Some(mcx::alloc_leak_in(
+                    mcx,
+                    types_nodes::primnodes::FromExpr {
+                        fromlist: match fl {
+                            Some(l) => l,
+                            None => jt.fromlist.clone_in(mcx)?,
+                        },
+                        quals: quals.or(jt.quals),
+                    },
+                )?)
+            } else {
+                None
+            }
+        }
+    };
+    for cte_node in &q.cteList {
+        let cte = cte_node.as_common_table_expr().expect("cteList cell");
+        if let Some(cq) = cte.ctequery {
+            debug_assert!(cq.node_tag() == NodeTag::T_Query);
+            // Part of the exclusive copy already: walk it in place.
+            if fge_query_has_grouped_vars(ctx, cq.as_query().expect("Query"))? {
+                fge_query_inplace(ctx, cq)?;
+            }
+        }
+    }
+    for rte_node in &q.rtable {
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
+        match rte.rtekind {
+            RTEKind::RTE_SUBQUERY => {
+                if let Some(sub) = rte.subquery {
+                    if let Some(newsub) = fge_query_descend(ctx, sub)? {
+                        let newsub = newsub.as_query().expect("Query");
+                        // SAFETY: rte_node is part of the exclusive copy.
+                        unsafe {
+                            rte_node
+                                .with_mut::<RangeTblEntry, _>(|r| r.subquery = Some(newsub))
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
+            RTEKind::RTE_FUNCTION => {
+                if let Some(l) = fge_list(ctx, &rte.functions)? {
+                    // SAFETY: as above.
+                    unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.functions = l) }
+                        .expect("RangeTblEntry");
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                if let Some(tf) = rte.tablefunc {
+                    if let Some(new) = fge_mutate(ctx, tf)? {
+                        // SAFETY: as above.
+                        unsafe {
+                            rte_node.with_mut::<RangeTblEntry, _>(|r| r.tablefunc = Some(new))
+                        }
+                        .expect("RangeTblEntry");
+                    }
+                }
+            }
+            RTEKind::RTE_VALUES => {
+                if let Some(l) = fge_list(ctx, &rte.values_lists)? {
+                    // SAFETY: as above.
+                    unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.values_lists = l) }
+                        .expect("RangeTblEntry");
+                }
+            }
+            // QTW_IGNORE_GROUPEXPRS: nested GROUP RTEs keep their exprs.
+            _ => {}
+        }
+        if let Some(l) = fge_list(ctx, &rte.securityQuals)? {
+            // SAFETY: as above.
+            unsafe { rte_node.with_mut::<RangeTblEntry, _>(|r| r.securityQuals = l) }
+                .expect("RangeTblEntry");
+        }
+    }
+
+    ctx.sublevels_up -= 1;
+
+    if new_target.is_some()
+        || new_returning.is_some()
+        || new_having.is_some()
+        || new_limit_off.is_some()
+        || new_limit_cnt.is_some()
+        || new_setops.is_some()
+        || new_jointree.is_some()
+    {
+        // SAFETY: qnode is the exclusive copy made by fge_query_descend.
+        unsafe {
+            qnode.with_mut::<Query, _>(|qm| {
+                if let Some(t) = new_target {
+                    qm.targetList = t;
+                }
+                if let Some(r) = new_returning {
+                    qm.returningList = r;
+                }
+                if new_having.is_some() {
+                    qm.havingQual = new_having;
+                }
+                if new_limit_off.is_some() {
+                    qm.limitOffset = new_limit_off;
+                }
+                if new_limit_cnt.is_some() {
+                    qm.limitCount = new_limit_cnt;
+                }
+                if new_setops.is_some() {
+                    qm.setOperations = new_setops;
+                }
+                if let Some(jt) = new_jointree {
+                    qm.jointree = Some(jt);
+                }
+            })
+        }
+        .expect("Query");
+    }
+    Ok(())
 }
 
 struct ContainNoopPhv {

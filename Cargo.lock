@@ -18106,6 +18106,7 @@ dependencies = [
  "copyfuncs",
  "mcx",
  "nodes_core",
+ "rewrite_manip",
  "types_core",
  "types_error",
  "types_nodes",

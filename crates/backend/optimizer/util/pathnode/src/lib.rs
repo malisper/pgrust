@@ -445,10 +445,13 @@ pub fn reparameterize_path<'mcx>(
     {
         return Ok(Some(create_resultscan_path(run, rel_id, required_outer)?));
     }
-    panic!(
-        "reparameterize_path (pathnode.c): pathtype {pathtype} arm unported; \
-         parameterized-append lane"
-    );
+    // C's default arm returns NULL: a path kind we cannot reparameterize is
+    // simply unavailable at this parameterization; callers skip it. The
+    // per-pathtype rebuild arms C has beyond SeqScan/Result (IndexScan,
+    // BitmapHeapScan, SubqueryScan, Material, Memoize, Append, MergeAppend,
+    // ...) are unported, so those kinds fall through to None here too --
+    // fewer parameterized-append plan choices than C, never a wrong plan.
+    Ok(None)
 }
 
 // add_path (pathnode.c).

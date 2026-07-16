@@ -3238,10 +3238,18 @@ pub(crate) fn copy_expr<'mcx>(
             }
             Ok(copy)
         }
-        other => panic!(
-            "copyObject (pullup_replace_vars): {other:?} copy arm unported \
-             (simple-view expression set)"
-        ),
+        // Everything else: same treatment as the SubLink arm above -- the
+        // generic deep copy plus the level shift is exactly C's copyObject +
+        // IncrementVarSublevelsUp(newnode, sublevels_up, 0) (the explicit
+        // arms above are the common shapes, kept for allocation economy; the
+        // T_Var arm's varlevelsup += levels_delta equals the min-0 bump).
+        _ => {
+            let copy = rewrite_manip::copy_node(mcx, node)?;
+            if levels_delta > 0 {
+                rewrite_manip::IncrementVarSublevelsUp(copy, levels_delta as i32, 0)?;
+            }
+            Ok(copy)
+        }
     }
 }
 
@@ -4417,10 +4425,15 @@ pub fn expand_virtual_generated_columns<'mcx>(
             continue;
         }
         if parse.onConflict.is_some() {
-            panic!(
-                "expand_virtual_generated_columns (prepjointree.c): ON CONFLICT \
-                 over a virtual-generated relation unported"
-            );
+            // C rewrites the ON CONFLICT clauses through the same replacement
+            // pass; that arm is unported -- fail clean before execution.
+            table::table_close(rel, types_rel::NoLock)?;
+            return Err(types_error::PgError::error(
+                "ON CONFLICT on a relation with virtual generated columns is not implemented"
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .into());
         }
         assert!(!rte.lateral);
         let mut tlist = NodeList::nil();
