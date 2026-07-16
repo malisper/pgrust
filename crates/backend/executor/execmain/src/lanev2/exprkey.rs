@@ -64,14 +64,24 @@ fn exprkey_enabled() -> bool {
     })
 }
 
-/// Kill switch for the coded-group arm (q29coded lane): the Dict key class
-/// groups by the INTERN ID of the memo's output value on the compact mk1
-/// single-Intern table instead of probing the staged C tuplehash with the
-/// output TEXT. `PGRUST_LANE_V2_CODEDKEY=0|off` restores the staged leg.
+/// Opt-in switch for the coded-group arm (q29coded lane): the Dict key
+/// class groups by the INTERN ID of the memo's output value on the compact
+/// mk1 single-Intern table instead of probing the staged C tuplehash with
+/// the output TEXT. Default OFF — MEASURED REGRESSION at the q29@100M
+/// lpp15 face (5.11s vs 3.00s staged; byte gates green, par16/serial
+/// controls flat, zero budget teardowns): the partial's OUTPUT CONTRACT is
+/// still materialized text rows through the Gather tuple queues, so the
+/// coded table defers every group's key materialization from INSERT time
+/// (parallel, overlapped with the scan) to EMIT time (the pipeline-
+/// critical leader/queue face) and pays an intern re-image on top — +70%
+/// wall at +6.6% cycles (stall, not compute; notes/q29coded-lane.md). The
+/// arm becomes profitable only when the handoff itself is id-keyed (the
+/// merge-face increments); until then it is the opt-in substrate.
+/// `PGRUST_LANE_V2_CODEDKEY=1|on` engages.
 fn codedkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("0") | Ok("off"))
+        matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
