@@ -43,24 +43,75 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
     // blocking_io_section is only reachable from task bodies inside
     // worker_step, where the permit is held.
     let _blocking_reg = unsafe { crate::blocking::PermitThreadReg::new(rt.execution_permits()) };
-    loop {
-        let epoch = rt.park_epoch();
-        rt.execution_permits().acquire();
-        crate::io::note_permit(true);
-        let step = rt.worker_step(&mut local);
-        crate::io::note_permit(false);
-        rt.execution_permits().release();
-        // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
-        crate::io::boundary_reap();
-        match step {
-            Step::Ran => {}
-            // Retry: the coordinator is mid-invalidation (slot word invalid,
-            // active bit not yet cleared) — a transient window; yield rather
-            // than burn the permit path (and the loom models require the
-            // no-lone-progress hint on exactly this edge).
-            Step::Retry => std::thread::yield_now(),
-            Step::Idle => rt.park(epoch),
-            Step::Stop => break,
+    if crate::sched::step_v2() {
+        // STEP-V2 (agg192-contention, 48xl finding #1): permit held ACROSS
+        // steps (released around parks and at exit) — the per-step global
+        // semaphore acquire/release was a shared-line hot spot at high DOP —
+        // and Retry parks after a bounded spin instead of spinning the whole
+        // invalidated-slot window (publish/completion wake_all; the epoch is
+        // captured before the failing step, so the park is lost-wakeup-free).
+        // `PGRUST_RUNTIME_STEP_V2=0` restores the loop below.
+        let mut held = false;
+        let mut retries = 0u32;
+        loop {
+            let epoch = rt.park_epoch();
+            if !held {
+                rt.execution_permits().acquire();
+                crate::io::note_permit(true);
+                held = true;
+            }
+            let step = rt.worker_step(&mut local);
+            // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
+            crate::io::boundary_reap();
+            match step {
+                Step::Ran => retries = 0,
+                Step::Retry => {
+                    local.drive.steps_retry += 1;
+                    retries += 1;
+                    if retries >= crate::sched::RETRY_PARK_AFTER {
+                        retries = 0;
+                        crate::io::note_permit(false);
+                        rt.execution_permits().release();
+                        held = false;
+                        rt.park(epoch);
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+                Step::Idle => {
+                    retries = 0;
+                    crate::io::note_permit(false);
+                    rt.execution_permits().release();
+                    held = false;
+                    rt.park(epoch);
+                }
+                Step::Stop => break,
+            }
+        }
+        if held {
+            crate::io::note_permit(false);
+            rt.execution_permits().release();
+        }
+    } else {
+        loop {
+            let epoch = rt.park_epoch();
+            rt.execution_permits().acquire();
+            crate::io::note_permit(true);
+            let step = rt.worker_step(&mut local);
+            crate::io::note_permit(false);
+            rt.execution_permits().release();
+            // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
+            crate::io::boundary_reap();
+            match step {
+                Step::Ran => {}
+                // Retry: the coordinator is mid-invalidation (slot word
+                // invalid, active bit not yet cleared) — a transient window;
+                // yield rather than burn the permit path (and the loom models
+                // require the no-lone-progress hint on exactly this edge).
+                Step::Retry => std::thread::yield_now(),
+                Step::Idle => rt.park(epoch),
+                Step::Stop => break,
+            }
         }
     }
     rt.register_worker_ring(worker, None);

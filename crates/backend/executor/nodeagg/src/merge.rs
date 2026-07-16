@@ -2387,10 +2387,12 @@ fn merge_bucket_par(
     for p in ctx.parts {
         total += (p.starts[b + 1] - p.starts[b]) as usize;
     }
-    let mut out = Vec::new();
     if total == 0 {
-        return Ok(out);
+        return Ok(Vec::new());
     }
+    // dedupsub reserve wave (vecaudit rider): the merged bucket is bounded
+    // by the donors' partition totals, computed above — allocate once.
+    let mut out = Vec::with_capacity(total);
     let cap = (total * 2).next_power_of_two().max(16);
     s.probe.clear();
     s.probe.resize(cap, (0, PROBE_EMPTY));

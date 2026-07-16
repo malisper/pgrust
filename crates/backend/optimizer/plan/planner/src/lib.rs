@@ -28,6 +28,7 @@ pub mod pathnode;
 pub mod plancat;
 pub mod partprune;
 pub mod like_support;
+pub mod m5_suppress;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
 pub mod array_selfuncs;

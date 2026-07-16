@@ -466,8 +466,9 @@ static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
 
 /// The accounting arm switch: `PGRUST_LANE_V2_STATS=<dir>`. Resolved once per
-/// process, like `lanev2::enabled()`.
-fn stats_dir() -> Option<&'static PathBuf> {
+/// process, like `lanev2::enabled()`. Shared with the M5 router's counters
+/// (router.rs) so one harness switch arms both surfaces.
+pub(super) fn stats_dir() -> Option<&'static PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| std::env::var_os("PGRUST_LANE_V2_STATS").map(PathBuf::from))
         .as_ref()

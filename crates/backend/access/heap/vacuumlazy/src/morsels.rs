@@ -2,7 +2,7 @@
 //! (RATIFIED 2026-07-13, decisions of record 1-5 + the inc-1 claim-boundary
 //! quiesce amendment).
 //!
-//! Shape (doc §3): behind `PGRUST_RUNTIME_VACUUM=1` (requires
+//! Shape (doc §3): default ON, `PGRUST_RUNTIME_VACUUM=0` kills (requires
 //! `PGRUST_RUNTIME=1`; default OFF) the heap scan of one `heap_vacuum_rel`
 //! invocation runs as an RG-PER-ROUND leader loop: each round builds a
 //! [`VacuumBlockSource`] skip map (VM skip rules as granule admission, doc
@@ -88,18 +88,24 @@ use init_small::globals as g;
 // ---------------------------------------------------------------------------
 
 fn flag_enabled() -> bool {
+    // Train-21 default flip (W1 closed per protocol; battery-gated): the
+    // morsel arm is ON by default under the runtime master switch;
+    // PGRUST_RUNTIME_VACUUM=0 is the kill switch. Layering unchanged:
+    // PGRUST_RUNTIME=0 still disarms everything above this flag.
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_VACUUM").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_RUNTIME_VACUUM").is_ok_and(|v| v.trim() == "0")
+    })
 }
 
 /// Engagement trace (PGRUST_VACUUM_TRACE=1): the §9 battery's engagement /
 /// kill-switch oracle channel. Default-off, zero cost.
-fn vtrace_enabled() -> bool {
+pub(crate) fn vtrace_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_VACUUM_TRACE").is_ok_and(|v| v.trim() == "1"))
 }
 
-fn vtrace(msg: &str) {
+pub(crate) fn vtrace(msg: &str) {
     if vtrace_enabled() {
         eprintln!("vacuum-morsels: {msg}");
     }
@@ -407,6 +413,52 @@ pub(crate) fn scan_rounds(vacrel: &mut LVRelState<'_, '_>, k: i32) -> PgResult<S
             }
         }
         clock.merge_ns += t_merge.elapsed().as_nanos() as u64;
+
+        // W1 forensics (trace-gated): per-Local claim/run ledger + store
+        // totals, so a phantom-index-entry recurrence attributes to a claim
+        // (block == granule + resume offset when nothing is skipped; use
+        // source.block_of to map exactly). Families discriminated:
+        //   A (worker collection miss): store items < lpdead fold, gap maps
+        //     to one claim's granule range;
+        //   B (snapshot/search miss): store items == lpdead fold and the
+        //     "index snapshot" line (lib.rs) reports unsorted or a removed
+        //     shortfall.
+        if vtrace_enabled() {
+            for l in &locals {
+                let mut claims = String::new();
+                for c in &l.claims {
+                    use std::fmt::Write as _;
+                    let _ = write!(
+                        claims,
+                        "{}{}-{}{}",
+                        if claims.is_empty() { "" } else { "," },
+                        c.start,
+                        c.end,
+                        if c.scanned { "" } else { "!" }
+                    );
+                }
+                let run_items: usize = l.runs.iter().map(|r| r.offsets.len()).sum();
+                vtrace(&format!(
+                    "w1 local slot={} claims={} runs={} run_items={} lpdead={} \
+                     first_run_blk={} last_run_blk={} claim_ranges=[{}]",
+                    l.worker,
+                    l.claims.len(),
+                    l.runs.len(),
+                    run_items,
+                    l.counters.lpdead_items,
+                    l.runs.first().map(|r| r.block as i64).unwrap_or(-1),
+                    l.runs.last().map(|r| r.block as i64).unwrap_or(-1),
+                    claims,
+                ));
+            }
+            vtrace(&format!(
+                "w1 merge done locals={} store_items={} lpdead_fold={} shared_num_dead={}",
+                locals.len(),
+                vacrel.dead_items_info.num_items,
+                vacrel.folds.counters.lpdead_items,
+                shared.num_dead_items.load(Ordering::Relaxed),
+            ));
+        }
 
         // Deferred blocking-cleanup pages (§5.3): leader-serial, BEFORE the
         // round's INDEX phase, so the round's dead set is complete.

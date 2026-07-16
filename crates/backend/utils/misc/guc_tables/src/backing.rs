@@ -46,6 +46,15 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // unit idiom); default 102400 KB = 100 MB, ClickHouse's
     // query_condition_cache_size default. LRU-evicted at that bound.
     (pgrust_condition_cache_size_cell, i32, pgrust_condition_cache_size, set_pgrust_condition_cache_size, 102400),
+    // pgrust.parallel_engine (pgrust-only, M5-0): the product parallel-engine
+    // selector (consts::PARALLEL_ENGINE_*). Default RUNTIME since the M5
+    // boarding flip (§4.4 criteria met; `legacy` restores pre-M5 planning
+    // byte-for-byte); the per-arm bench pool GUCs layer BENEATH the switch
+    // and keep working verbatim either way.
+    (pgrust_parallel_engine_cell, i32, pgrust_parallel_engine, set_pgrust_parallel_engine, 1),
+    // pgrust.runtime_dop (pgrust-only, M5-0): the product DOP knob, consulted
+    // ONLY under engine=runtime (the M5-1 router). 0 = auto (available cores).
+    (pgrust_runtime_dop_cell, i32, pgrust_runtime_dop, set_pgrust_runtime_dop, 0),
     (check_function_bodies_cell, bool, check_function_bodies, set_check_function_bodies, true),
     (default_with_oids_cell, bool, default_with_oids, set_default_with_oids, false),
     (current_role_is_superuser_cell, bool, current_role_is_superuser, set_current_role_is_superuser, false),

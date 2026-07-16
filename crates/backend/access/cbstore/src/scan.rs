@@ -225,7 +225,7 @@ struct GatherScratch {
 /// Dict-coded view of one staged window column: u32 codes into the
 /// per-row-group dictionary of decoded text Datums, plus the STABLE
 /// DICTIONARY IDENTITY key (`epoch` = row-group index; dict content per RG
-/// is immutable and the scan pins its `Rc<Part>`, so the key is stable
+/// is immutable and the scan pins its `Arc<Part>`, so the key is stable
 /// across rescans). Slices live until the granule's next decode of a
 /// different (rg, granule) key — granule-long, covering every window staged
 /// from it.
@@ -388,11 +388,15 @@ struct CondState {
     fp: u128,
     cur_rg: u32,
     entry: Option<std::sync::Arc<crate::condcache::RgEntry>>,
+    // Per-scan hit/miss cells (folded into the process counters at drop or
+    // via condcache_fold_stats) — the shared per-window fetch_add was the
+    // 16-worker cache-line contention on condcache-hot scans (census U7).
+    stats: crate::condcache::LocalStats,
 }
 
 pub struct CbScanDescData<'mcx> {
     pub rs_base: TableScanDescData<'mcx>,
-    part: Option<std::rc::Rc<Part>>,
+    part: Option<std::sync::Arc<Part>>,
     coltypes: Vec<ColType>,
     needed: Vec<bool>,
     needed_idx: Vec<u16>,
@@ -449,11 +453,22 @@ pub struct CbScanDescData<'mcx> {
     // with the staged prefix's canonical fingerprint. None = unarmed.
     cond: Option<Box<CondState>>,
     // Claim-time readahead env gate (PGRUST_CBSTORE_READAHEAD; default on),
-    // read once per scan. STRUCTURAL SCOPE GUARD: the flag is only ever
-    // consulted inside claim_next_rg's PARALLEL arm — serial scans never
-    // advise regardless of the env (arm A serial-vs-CH-mt1 stays
-    // prefetch-free per Michael's standing directive).
+    // read once per scan — the global kill switch for every advise path
+    // (legacy parallel arm, claim drive, serial drive, footer sections).
     readahead: bool,
+    // Claim-drive readahead depth (cold-readahead lane): on a NEW row group
+    // entered through `set_granule_range` (a runtime morsel claim), advise
+    // the claimed RG's own needed-column extents plus this many RGs ahead.
+    // 0 = hook off. Gated by `readahead` (the global kill switch) at every
+    // use. Bounded by construction: at most (1 + depth) madvise spans per
+    // RG switch, no queue, no allocation — the advised bytes are exactly
+    // what the scan is about to read anyway.
+    ra_claims: usize,
+    // Serial physical-order drive readahead — DEFAULT ON (ratified
+    // 2026-07-15, superseding the historical arm-A no-prefetch convention;
+    // see env_readahead_serial). PGRUST_CBSTORE_READAHEAD_SERIAL=0 is the
+    // opt-out; the global kill switch also silences it.
+    ra_serial: bool,
     // pgstat-style counters for the verdict's bytes-read accounting.
     pub granules_pruned: u64,
     // Subset of granules_pruned attributed to a bloom rejection (the granule
@@ -468,6 +483,10 @@ pub struct CbScanDescData<'mcx> {
     // Row groups whose chunk extents were advised (claim-time readahead).
     // Test/observability channel: a serial scan must always read 0 here.
     pub rgs_readahead: u64,
+    // Row groups advised by the CLAIM-DRIVE / serial hooks (cold-readahead
+    // lane) — separate from `rgs_readahead` so the legacy serial guard
+    // (readahead_scope.rs: serial physical drive reads 0) stays exact.
+    pub rgs_claim_readahead: u64,
     // Granules answered wholesale from footer metadata (never decoded):
     // the sorted-fold v7 length-stats arm plus the plain-fold footer-stat
     // arm (agg_meta_peek — whole-RG consumes count the RG's granules).
@@ -500,11 +519,36 @@ fn env_off(name: &str) -> bool {
 }
 
 // Claim-time readahead gate: default ON; PGRUST_CBSTORE_READAHEAD=0/off is
-// the kill switch. Parallel scans only — the serial guard is structural
-// (claim_next_rg's serial arm never consults this).
+// the global kill switch across every advise path.
 fn env_readahead_on() -> bool {
     !matches!(
         std::env::var("PGRUST_CBSTORE_READAHEAD").as_deref(),
+        Ok("0") | Ok("off") | Ok("OFF"),
+    )
+}
+
+// Claim-drive readahead depth: RGs advised AHEAD of a claimed row group
+// (own RG always advised when the hook is on). Default 1. "0"/"off"
+// disables the claim-drive hook; the global PGRUST_CBSTORE_READAHEAD=0
+// kill switch disables every advise. Read at scan construction (same
+// contract as env_readahead_on — tests set/unset around construction).
+fn env_readahead_claims() -> usize {
+    match std::env::var("PGRUST_CBSTORE_READAHEAD_CLAIMS").as_deref() {
+        Ok("off") | Ok("OFF") => 0,
+        Ok(s) => s.trim().parse::<usize>().map_or(1, |n| n.min(8)),
+        Err(_) => 1,
+    }
+}
+
+// Serial physical-order drive readahead — DEFAULT ON since 2026-07-15:
+// Michael ratified flipping the historical arm-A no-prefetch convention
+// after the cold-readahead lane's paired serial 100M A/B (cold geomean
+// -23.2%, hot flat, outputs byte-identical; notes/cold-readahead-lane.md).
+// PGRUST_CBSTORE_READAHEAD_SERIAL=0/off restores the historical
+// prefetch-free serial arm for comparisons.
+fn env_readahead_serial() -> bool {
+    !matches!(
+        std::env::var("PGRUST_CBSTORE_READAHEAD_SERIAL").as_deref(),
         Ok("0") | Ok("off") | Ok("OFF"),
     )
 }
@@ -564,7 +608,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     #[doc(hidden)]
     pub fn new_with_part(
         rs_base: TableScanDescData<'mcx>,
-        part: Option<std::rc::Rc<Part>>,
+        part: Option<std::sync::Arc<Part>>,
         coltypes: Vec<ColType>,
     ) -> CbScanDescData<'mcx> {
         let ncols = coltypes.len();
@@ -601,6 +645,8 @@ impl<'mcx> CbScanDescData<'mcx> {
             adaptive: None,
             cond: None,
             readahead: env_readahead_on(),
+            ra_claims: env_readahead_claims(),
+            ra_serial: env_readahead_serial(),
             granules_pruned: 0,
             granules_bloom_pruned: 0,
             granules_scanned: 0,
@@ -609,6 +655,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             granules_bound_skipped: 0,
             adaptive_probe_reverts: 0,
             rgs_readahead: 0,
+            rgs_claim_readahead: 0,
             granules_meta: 0,
             rg_switches: 0,
             dict_builds: 0,
@@ -667,7 +714,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// pipelines): (total granules, row-group start prefix sums — the hard
     /// morsel boundaries, since row group == dictionary epoch). None = empty
     /// table. The starts vector is returned BY VALUE (nrgs+1 u64s) so the
-    /// Send+Sync morsel source never carries the thread-bound Rc<Part>.
+    /// Send+Sync morsel source never carries an Rc-era thread-bound Part (now Arc-shared; kept by value for interface stability).
     pub fn granule_geometry(&self) -> Option<(u64, Vec<u64>)> {
         let part = self.part.as_ref()?;
         Some((part.total_granules(), part.granule_starts().to_vec()))
@@ -718,6 +765,18 @@ impl<'mcx> CbScanDescData<'mcx> {
         // successive claims land in the same row group; everything at
         // granule grain resets per claim.
         if !(self.rg_claimed && self.rg == rg) {
+            // Claim-drive readahead (cold-readahead lane): the runtime
+            // morsel drive's analog of claim_next_rg's parallel-arm advise
+            // (this entry point is the pool workers' claim funnel — the
+            // runtime crate's own doc names the missing readahead as the
+            // M1 gap). Advise own RG + ra_claims ahead on the RG switch
+            // only (whole-boundary claims make that once per RG; coalesced
+            // multi-epoch claims advance rg per segment and re-advise the
+            // remainder ahead). PGRUST_CBSTORE_READAHEAD=0 kills it;
+            // PGRUST_CBSTORE_READAHEAD_CLAIMS=off disables just this hook.
+            if self.readahead && self.ra_claims > 0 {
+                self.advise_claim_window(rg);
+            }
             self.rg = rg;
             self.rg_checked = false;
             self.rg_switches += 1;
@@ -837,6 +896,15 @@ impl<'mcx> CbScanDescData<'mcx> {
             None => {
                 let r = self.serial_next;
                 self.serial_next += 1;
+                // Serial readahead — DEFAULT ON (ra_serial; ratified
+                // 2026-07-15, superseding the historical arm-A structural
+                // prohibition). Counts into rgs_claim_readahead, never
+                // rgs_readahead — the legacy counter stays a parallel-
+                // Gather-arm channel. PGRUST_CBSTORE_READAHEAD_SERIAL=0
+                // restores the historical prefetch-free serial arm.
+                if self.readahead && self.ra_serial {
+                    self.advise_claim_window(r);
+                }
                 r
             }
         }
@@ -847,12 +915,37 @@ impl<'mcx> CbScanDescData<'mcx> {
     // byte is touched (extents come from footer metadata), and RGs the scan
     // would prune wholesale (zone-refused) are skipped rather than fetched.
     fn advise_rg(&mut self, rg: usize) {
-        let Some(part) = self.part.as_ref() else { return };
-        if rg >= part.rgs.len() || self.needed_idx.is_empty() || !self.rg_zone_ok(rg) {
-            return;
-        }
-        if part.advise_willneed(rg, &self.needed_idx) {
+        if self.advise_rg_extents(rg) {
             self.rgs_readahead += 1;
+        }
+    }
+
+    // Claim-drive / serial-drive variant (cold-readahead lane): identical
+    // advise, separate counter — the legacy serial guard (readahead_scope
+    // tests) keeps its exact `rgs_readahead == 0` invariant.
+    fn advise_rg_claim(&mut self, rg: usize) {
+        if self.advise_rg_extents(rg) {
+            self.rgs_claim_readahead += 1;
+        }
+    }
+
+    fn advise_rg_extents(&mut self, rg: usize) -> bool {
+        let Some(part) = self.part.as_ref() else { return false };
+        if rg >= part.rgs.len() || self.needed_idx.is_empty() || !self.rg_zone_ok(rg) {
+            return false;
+        }
+        part.advise_willneed(rg, &self.needed_idx)
+    }
+
+    // Claim-schedule-driven readahead (cold-readahead lane): entering row
+    // group `rg` through a claim, advise its own needed-column extents
+    // (the kernel streams the RG body in behind the granule-by-granule
+    // decode — the cold first-touch overlap) plus `ra_claims` RGs ahead
+    // (cross-RG overlap at the claim tail). Zone-refused RGs are skipped
+    // by advise_rg_extents; out-of-range successors fall out of bounds.
+    fn advise_claim_window(&mut self, rg: usize) {
+        for r in rg..=rg.saturating_add(self.ra_claims) {
+            self.advise_rg_claim(r);
         }
     }
 
@@ -1145,7 +1238,12 @@ impl<'mcx> CbScanDescData<'mcx> {
             return false;
         }
         crate::condcache::set_capacity(capacity);
-        self.cond = Some(Box::new(CondState { fp, cur_rg: u32::MAX, entry: None }));
+        self.cond = Some(Box::new(CondState {
+            fp,
+            cur_rg: u32::MAX,
+            entry: None,
+            stats: Default::default(),
+        }));
         true
     }
 
@@ -1187,13 +1285,25 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// legs entirely. false = miss (or unarmed): evaluate as always, then
     /// `condcache_store` the bits.
     pub fn condcache_lookup(&mut self, sel: &mut [u64]) -> bool {
-        let Some((entry, slot)) = self.cond_slot() else { return false };
-        if entry.lookup(slot, sel) {
-            crate::condcache::count_hit();
-            true
-        } else {
-            crate::condcache::count_miss();
-            false
+        let hit = match self.cond_slot() {
+            Some((entry, slot)) => entry.lookup(slot, sel),
+            None => return false,
+        };
+        // Count in the per-scan cell (cond is Some — cond_slot said so);
+        // the shared statics see one fold at scan teardown, not one
+        // fetch_add per window (the q21/q8 contention line, census U7).
+        if let Some(cond) = self.cond.as_deref_mut() {
+            cond.stats.count(hit);
+        }
+        hit
+    }
+
+    /// Fold this scan's condition-cache stat cells into the process
+    /// counters (idempotent; CondState's drop folds too — this exists so a
+    /// stats read at scan shutdown sees the scan's own counts).
+    pub fn condcache_fold_stats(&mut self) {
+        if let Some(cond) = self.cond.as_deref_mut() {
+            cond.stats.fold();
         }
     }
 
@@ -1898,7 +2008,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             if soa.dict_want(c) {
                 // Zero-decode dict lane: codes + RG dictionary + epoch =
                 // rg index (dict content per RG is immutable and the scan
-                // pins its Rc<Part>, so the epoch key is stable across
+                // pins its Arc<Part>, so the epoch key is stable across
                 // rescans). Values/isnull cells stay stale per the
                 // set_dict_lane contract.
                 // v7 stitch: local -> part-global codes for this (rg, col),
@@ -2145,7 +2255,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// the chunk is dict-encoded and already decoded (codes-only decode):
     /// per-row u32 codes into the per-row-group dictionary of decoded text
     /// Datums, plus the identity key. `epoch` = row-group index — dict
-    /// content per RG is immutable and the scan pins its `Rc<Part>`, so the
+    /// content per RG is immutable and the scan pins its `Arc<Part>`, so the
     /// key is stable across rescans and per-code memos keyed on it stay
     /// valid for the life of the scan. `sorted` = codes are byte-rank order
     /// (CHUNK_FLAG_DICT_SORTED), gating dict-code range predicates.

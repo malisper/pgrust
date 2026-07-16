@@ -100,6 +100,41 @@ impl SegFile {
         total
     }
 
+    /// Advisory readahead over the logical byte range [off, off+len):
+    /// POSIX_FADV_WILLNEED per underlying segment span, so a following
+    /// `read_exact_at` sequence overlaps its later ranges' disk fetches
+    /// with the earlier ranges' synchronous reads. Purely advisory —
+    /// kernel errors ignored, missing segments end the walk, no-op off
+    /// Linux (cold-readahead lane).
+    pub fn advise_willneed(&mut self, off: u64, len: u64) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let (mut off, mut len) = (off, len);
+            while len > 0 {
+                let segno = (off / SEG_BYTES) as usize;
+                let seg_off = off % SEG_BYTES;
+                let take = (SEG_BYTES - seg_off).min(len);
+                let Ok(f) = self.seg_for(segno, false) else { return };
+                // SAFETY: plain libc call on a live fd; advisory only.
+                unsafe {
+                    libc::posix_fadvise(
+                        f.as_raw_fd(),
+                        seg_off as libc::off_t,
+                        take as libc::off_t,
+                        libc::POSIX_FADV_WILLNEED,
+                    );
+                }
+                off += take;
+                len -= take;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (off, len);
+        }
+    }
+
     /// md contract: every non-last segment is exactly SEG_BYTES; pad every
     /// segment's tail to a BLCKSZ multiple so mdnblocks' division is exact.
     pub fn pad_and_sync(&mut self, logical_end: u64) -> PgResult<()> {
@@ -136,8 +171,46 @@ pub struct SegMap {
     maplen: usize,
 }
 
+// SAFETY (coldio lane, process-shared mappings): the mapping is PROT_READ
+// over sealed segment bytes for its whole lifetime — no &mut access exists
+// (bytes() hands out &[u8] only) and Drop's munmap runs exactly once when
+// the last holder goes away. Concurrent readers on any thread are the mmap
+// contract itself.
+unsafe impl Send for SegMap {}
+unsafe impl Sync for SegMap {}
+
+// Process-shared SegMap registry (coldio lane): one live mapping per
+// (seg0 dev, seg0 ino, maplen). Motivation (measured, notes/coldio-lane.md
+// step-1): the part cache is THREAD-local, so every runtime pool worker
+// used to mmap the same part privately — N workers = N mappings = each page
+// cache page taking up to N separate minor faults (one per mapping's PTEs)
+// serialized on the process's mmap_lock, and re-taken across queries/reps
+// as morsel assignment shifts. q33@100M cold: 48.6s sys / ~1.1M minflt on
+// the official 32GB substrate, 28.2s sys with memory pressure removed —
+// mapping fan-out, not reads (majflt ~0). One shared mapping = one PTE fill
+// per page per process, persistent for as long as any part-cache entry
+// holds the Arc. Keyed by maplen so a published append (longer file) mints
+// a new mapping; the old dies with its last holder. The registry holds
+// Weak — it never extends a mapping's lifetime. Kill switch:
+// PGRUST_CBSTORE_SHARED_MAP=0/off (historical private mapping per open).
+static SHARED_MAPS: std::sync::Mutex<
+    Option<std::collections::HashMap<(u64, u64, usize), std::sync::Weak<SegMap>>>,
+> = std::sync::Mutex::new(None);
+
+fn shared_map_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_CBSTORE_SHARED_MAP").as_deref(),
+            Ok("0") | Ok("off") | Ok("OFF"),
+        )
+    })
+}
+
 impl SegMap {
-    pub fn open(base: &str) -> PgResult<Option<SegMap>> {
+    // Stat pass shared by open/open_shared: the segment files plus the
+    // reservation length ((nsegs-1)*SEG_BYTES + last seg len). None = empty.
+    fn stat_segs(base: &str) -> PgResult<Option<(Vec<File>, Vec<u64>, usize)>> {
         let mut files: Vec<File> = Vec::new();
         loop {
             let p = seg_path(base, files.len());
@@ -162,6 +235,43 @@ impl SegMap {
             return Ok(None);
         }
         let maplen = ((files.len() - 1) as u64 * SEG_BYTES + *lens.last().unwrap()) as usize;
+        Ok(Some((files, lens, maplen)))
+    }
+
+    /// Process-shared open: return the live mapping for this part state if
+    /// any thread already holds one, else map and register. `dev`/`ino` are
+    /// seg0's (the part-cache identity vocabulary — the caller already
+    /// stat'd them; a recreate changes ino, a published append changes
+    /// maplen, so equal keys imply the identical sealed byte image).
+    pub fn open_shared(
+        base: &str,
+        dev: u64,
+        ino: u64,
+    ) -> PgResult<Option<std::sync::Arc<SegMap>>> {
+        let Some((files, lens, maplen)) = SegMap::stat_segs(base)? else { return Ok(None) };
+        if !shared_map_enabled() {
+            return Ok(Some(std::sync::Arc::new(SegMap::map_segs(&files, &lens, maplen)?)));
+        }
+        let key = (dev, ino, maplen);
+        let mut guard = SHARED_MAPS.lock().unwrap();
+        let map = guard.get_or_insert_with(Default::default);
+        if let Some(live) = map.get(&key).and_then(std::sync::Weak::upgrade) {
+            return Ok(Some(live));
+        }
+        // Map under the lock (mmap manipulates only the address space — no
+        // I/O) so two racing opens never double-map the same key.
+        let fresh = std::sync::Arc::new(SegMap::map_segs(&files, &lens, maplen)?);
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, std::sync::Arc::downgrade(&fresh));
+        Ok(Some(fresh))
+    }
+
+    pub fn open(base: &str) -> PgResult<Option<SegMap>> {
+        let Some((files, lens, maplen)) = SegMap::stat_segs(base)? else { return Ok(None) };
+        Ok(Some(SegMap::map_segs(&files, &lens, maplen)?))
+    }
+
+    fn map_segs(files: &[File], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
         unsafe {
             let reserve = libc::mmap(
                 std::ptr::null_mut(),
@@ -196,7 +306,7 @@ impl SegMap {
                 #[cfg(target_os = "linux")]
                 libc::madvise(p, lens[i] as usize, libc::MADV_SEQUENTIAL);
             }
-            Ok(Some(SegMap { ptr: reserve as *const u8, maplen }))
+            Ok(SegMap { ptr: reserve as *const u8, maplen })
         }
     }
 

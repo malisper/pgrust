@@ -35,8 +35,10 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod exprkey;
+mod router;
 mod runtime_agg;
 mod runtime_agg_sorted;
+mod runtime_bitmap;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
@@ -47,6 +49,8 @@ mod push;
 mod stats;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use router::engine_runtime_active;
+pub(crate) use router::query_start as router_query_start;
 
 use std::sync::OnceLock;
 
@@ -75,11 +79,40 @@ pub fn enabled() -> bool {
 /// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`
 /// logs lane engagement events to stderr. Resolved once per process.
 fn lane_trace(event: &str) {
-    static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
-    }) {
+    if lane_trace_enabled() {
         eprintln!("[lane-v2] {event}");
+    }
+}
+
+/// Whether the engagement trace is armed — callers gating format! work
+/// (router trace lines) check this before building the string.
+fn lane_trace_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// M5-2 liveness-battery fault injection (test-only, default-off — dead
+/// unless the env var is set at server start): `PGRUST_TEST_HELPER_PANIC=
+/// <arm>[,<arm>...]` (or `all`; arms: scan/agg/distinct/hashjoin/sort)
+/// makes every helper of the named arm(s) panic BEFORE binding or driving.
+/// This is the exact all-helpers-exit-without-driving wedge geometry of the
+/// m35-spill inc-2c agg wedge (a pinned RG is invisible to pool workers, so
+/// with every helper gone nobody steps it and the leader parks forever) —
+/// the geometry the leader's ExitBump reap must convert into a prompt,
+/// recoverable error. scripts/runtime-liveness-e2e.sh is the standing
+/// battery over this knob. Resolved once per process.
+fn test_helper_panic(arm: &str) {
+    static KNOB: OnceLock<Option<String>> = OnceLock::new();
+    let Some(v) = KNOB.get_or_init(|| std::env::var("PGRUST_TEST_HELPER_PANIC").ok()) else {
+        return;
+    };
+    if v.split(',').any(|a| {
+        let a = a.trim();
+        a == "all" || a.eq_ignore_ascii_case(arm)
+    }) {
+        panic!("pgrust: test helper panic injection ({arm})");
     }
 }
 
@@ -1344,6 +1377,20 @@ impl<'mcx> Operator<'mcx> for IndexOnlyScanEmit {
 /// Try to let the lane own a `BitmapHeapScan`. The caller must have already
 /// run the bitmap setup (the arm does, unconditionally, before this).
 #[inline]
+/// bitmap-morsels lane: the runtime bitmap-heap arm (plain Agg root over a
+/// serial-plan Bitmap Heap Scan, morselized claims over the frozen shared
+/// bitmap). Refusal falls through to the UNCHANGED serial paths (including
+/// the fused agg-over-bitmap batch drive) byte-identically; admission +
+/// refuse-set live in `runtime_bitmap`. Dispatched from procnode's agg_arm
+/// BEFORE the bitmap is built (the arm builds it once, leader-side).
+pub fn try_own_agg_over_bitmap_heap_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    b: &mut crate::procnode::BitmapHeapPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    runtime_bitmap::try_own_plain_agg_over_bitmap_runtime(agg, b, estate)
+}
+
 pub fn try_own_bitmap_heap_scan<'mcx>(
     bhs: &mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -4241,9 +4288,12 @@ struct MkScratch {
     keys2: Vec<[u64; 2]>,
     // Identity of the code -> intern-id cache: (is_global, id). Per-epoch
     // (RG index, cleared per roll) or — under a v7 stitch — part-global
-    // (scan-stable gepoch, never cleared within one scan).
+    // (scan-stable gepoch, never cleared within one scan). Entry encoding:
+    // 0 = unset, `id + 1` otherwise (exprkey::reset_code_id_cache — the
+    // zero-page allocation is the vecstate q40 fix: the gndv-sized eager
+    // None-fill was 38% of q40's cycles).
     epoch: Option<(bool, u64)>,
-    code_ids: Vec<Option<u32>>,
+    code_ids: Vec<u32>,
     /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
     /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
     /// cache. `None` until this worker observes FROZEN.
@@ -4764,6 +4814,10 @@ fn scan_mk_batch<'mcx>(
     for (j, comp) in shape.comps.iter().enumerate() {
         let att = comp.att as usize;
         let off_bits = comp.off as u32 * 8;
+        // spankey copy-tax band timer (measurement only): Intern components
+        // (datum views + code_ids + DictLazy ensures + intern resolves) vs
+        // word components, per batch.
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
         match comp.kind {
             ::nodeagg::MkCompKind::Int { width } => {
                 let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
@@ -4826,8 +4880,7 @@ fn scan_mk_batch<'mcx>(
                         };
                         if *epoch != Some(ident) {
                             *epoch = Some(ident);
-                            code_ids.clear();
-                            code_ids.resize(size, None);
+                            exprkey::reset_code_id_cache(code_ids, size);
                         }
                         debug_assert!(code_ids.len() >= size);
                         for (k, &i) in rows.iter().enumerate() {
@@ -4840,8 +4893,8 @@ fn scan_mk_batch<'mcx>(
                             };
                             debug_assert!(code < size, "stitch contract: global code < gndv");
                             let id = match code_ids[code] {
-                                Some(id) => id,
-                                None => {
+                                c if c != 0 => c - 1,
+                                _ => {
                                     // First surviving row of (identity,
                                     // code): materialize dict[code] once,
                                     // intern.
@@ -4855,7 +4908,8 @@ fn scan_mk_batch<'mcx>(
                                     }?;
                                     let id =
                                         ::nodeagg::agg_hash_compact_intern(agg, v.data());
-                                    code_ids[code] = Some(id);
+                                    debug_assert!(id != u32::MAX, "id+1 encoding");
+                                    code_ids[code] = id + 1;
                                     id
                                 }
                             };
@@ -4886,12 +4940,21 @@ fn scan_mk_batch<'mcx>(
                 }
             }
         }
+        {
+            use ::nodeagg::spankey::{spankey_lap, SPANKEY_CTRS as S};
+            let ctr = if matches!(comp.kind, ::nodeagg::MkCompKind::Intern) {
+                &S.pack_intern_ns
+            } else {
+                &S.pack_word_ns
+            };
+            spankey_lap(ctr, spk_t0);
+        }
     }
-    // Split the accumulator into the packed key lane and probe.
+    // Split the accumulator into the packed key lane and probe (two-word
+    // shapes view the accumulator in place — mkaccept inc-1).
     if shape.two_words {
-        keys2.clear();
-        keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-        ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+        let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+        ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
     } else {
         keys1.clear();
         keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
@@ -4906,7 +4969,9 @@ fn scan_mk_batch<'mcx>(
     // plan column (a dict component is never in `plan.cols` — admission);
     // the plan is unguarded; each pergroup was installed by the compact
     // probe within this batch.
+    let spk_t0 = ::nodeagg::spankey::spankey_t0();
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+    ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.fold_ns, spk_t0);
     // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
     // table reaches the bound wins the CAS and publishes its first `bound`
     // groups' canonical keys. Correct from ANY table state — nothing was
@@ -4987,8 +5052,12 @@ unsafe fn agg_fold_staged_mm<'mcx>(
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
     let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // avgpack: packed inline AvgAccum slots — nonzero only on sink worker
+    // builds (the armed table's creation-time mask; representation state
+    // travels WITH the table that holds the states).
+    let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
     // SAFETY: caller contract (above) is exactly fold_rows_grouped_mm's.
-    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm) }
+    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm, avgpack_mask) }
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:
@@ -5414,9 +5483,14 @@ fn sort_feed_if_needed<'mcx>(
             // ladder (a dense boundary tie would re-feed the whole scan: the
             // Q25@100M cliff class fix-100m-engagement retired). Refsort still
             // owns adaptive-off and tracked feeds (its ratified e2e arms).
-            // Follow-up (landing note): extend the narrow comparator with the
-            // ref column to reclaim refsort under the relaxed default.
-            let refsort = if narrow.is_none() && tie != TieMode::Rowref {
+            // LAZYTOPN (the chartered follow-up, delivered): under
+            // `topn_lazyfetch_enabled` the narrow comparator EXTENDS with the
+            // ref column (rule-2 (key, ref) total order — selection-exact,
+            // demote-free, byte-identical to the wide rowref arm by
+            // construction), reclaiming refsort under the relaxed default.
+            let refsort = if narrow.is_none()
+                && (tie != TieMode::Rowref || topn_lazyfetch_enabled())
+            {
                 refsort_arm(state, ss, &outer_desc)
             } else {
                 None
@@ -5424,7 +5498,7 @@ fn sort_feed_if_needed<'mcx>(
             let mut fed = false;
             if let Some(spec) = &refsort {
                 lane_trace("refsort armed (bounded sort late materialization)");
-                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tracked, estate)? {
+                if sort_feed_refsort(state, ss, &outer_desc, spec, topk, tie, estate)? {
                     fed = true;
                 } else {
                     // Demoted before any output escaped: sticky-refuse the
@@ -6953,6 +7027,20 @@ fn refsort_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_TOPN_LAZYFETCH` kill switch (default ON; lazytopn lane).
+/// Governs the two lazytopn increments: (a) refsort arming under the
+/// relaxed rowref default (the rule-2 (key, ref) narrow comparator — the
+/// train-10 landing follow-up), and (b) the refsort accept-side needed-set
+/// narrowing (key ∪ qual during the narrow feed; the full set restores
+/// before the winner gather). `0|off` restores the pre-lane behavior
+/// exactly: refsort only on Off/Track tie modes, full-needed accept.
+fn topn_lazyfetch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_TOPN_LAZYFETCH").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 /// Bound cap (matches the adaptive walk's): past this the top-N is
 /// scan-shaped anyway and the winner gather stops being "a handful of rows".
 const REFSORT_MAX_BOUND: i64 = 1 << 16;
@@ -7255,13 +7343,31 @@ fn sort_feed_refsort<'mcx>(
     outer_desc: &::types_tuple::TupleDescData<'static>,
     spec: &RefSortSpec,
     topk: Option<TopkCut>,
-    tie_track: bool,
+    tie: TieMode,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let key_desc = refsort_key_desc(sort, outer_desc, spec.key_resno_outer);
-    ::nodesort::sort_lane_begin_refsort(sort, key_desc)?;
-    if tie_track {
+    // Rowref (relaxed default, lazytopn): the ref column joins the
+    // comparator — rule-2 (key, ref) total order, selection-exact, no tie
+    // machinery. Track keeps the byte-exact demote ladder; Off keeps the
+    // plain leading-key comparator (physical-order feed, ties invisible to
+    // selection by arrival order).
+    ::nodesort::sort_lane_begin_refsort(sort, key_desc, tie == TieMode::Rowref)?;
+    if tie == TieMode::Track {
         ::nodesort::sort_lane_topk_tie_track_arm(sort);
+    } else if tie == TieMode::Rowref {
+        lane_trace("refsort rule-2 comparator armed (rowref tie-break)");
+    }
+    // Accept-side needed-set narrowing (lazytopn): the narrow feed reads
+    // only the key (fast leg) and the qual columns (staging + per-row
+    // requal); every other tlist column decodes ONLY at the winner gather.
+    // Restored unconditionally after the drain — the gather's needed-set
+    // guard demotes on any cell outside the CURRENT set, and the demote
+    // re-feed (legacy wide feed) reads every tlist column.
+    let narrowed = topn_lazyfetch_enabled()
+        && ::nodeseqscan::seq_scan_cb_narrow_needed(ss, &[spec.key_attno_scan]);
+    if narrowed {
+        lane_trace("refsort accept narrowed (key+qual needed set)");
     }
     let dir = estate.es_direction;
     estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
@@ -7272,7 +7378,12 @@ fn sort_feed_refsort<'mcx>(
         topk: topk.map(TopkCutState::new),
         demoted: false,
     };
-    drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate)?;
+    let drained =
+        drain_pipeline(ss, &mut SeqScanSource, &mut SeqScanFilterProject, &mut sink, estate);
+    if narrowed {
+        ::nodeseqscan::seq_scan_cb_restore_needed(ss);
+    }
+    drained?;
     let demoted = sink.demoted;
     estate.es_direction = dir;
     if demoted {
@@ -8625,8 +8736,9 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Armed-only, before any side effect (two placeholder GUC lookups).
-    if ::guc_tables::runtime_pool::runtime_distinct_pool_dop() <= 0
+    // Armed-only, before any side effect (M5-1: the router's arming read —
+    // bench GUC verbatim, else engine=runtime at pgrust.runtime_dop).
+    if router::arm_dop(router::ArmClass::Distinct) <= 0
         || !runtime::runtime_enabled()
     {
         return Ok(None);
@@ -11399,11 +11511,12 @@ impl<'a, 'mcx> StagedFoldAggSink<'a, 'mcx> {
                     }
                 }
             }
-            // Split the accumulator into the packed key lane and probe.
+            // Split the accumulator into the packed key lane and probe
+            // (two-word shapes view the accumulator in place — mkaccept
+            // inc-1).
             if shape.two_words {
-                keys2.clear();
-                keys2.extend(packbuf.iter().map(|&w| [w as u64, (w >> 64) as u64]));
-                ::nodeagg::agg_hash_compact_batch_mk2(agg, keys2, groups)?;
+                let lane = ::nodeagg::mk_keys2_lane(packbuf, keys2);
+                ::nodeagg::agg_hash_compact_batch_mk2(agg, lane, groups)?;
             } else {
                 keys1.clear();
                 keys1.extend(packbuf.iter().map(|&w| w as u64 as i64));
