@@ -1023,6 +1023,24 @@ pub fn cbstore_analyze_fetch_row(
     }
 }
 
+// Parallel ANALYZE sample fetch (loadfinal lane, PGRUST_ANALYZE_SAMPLE_POOL):
+// materialize `refs` (ascending (rg, rg-global row) sample positions) into
+// `slot` in order via `per_row`, decoding granules on `pool` threads. Rows,
+// values, and order are identical to per-ref cbstore_analyze_fetch_row
+// fetches by construction. Returns the number of granule decode tasks.
+pub fn cbstore_analyze_gather_rows(
+    scan: &mut TableScanDesc<'_>,
+    refs: &[(u32, u32)],
+    pool: usize,
+    slot: &mut SlotData<'_>,
+    per_row: &mut dyn FnMut(&mut SlotData<'_>) -> PgResult<()>,
+) -> PgResult<u64> {
+    match scan {
+        TableScanDesc::Cbstore(c) => c.analyze_gather_rows(refs, pool, slot, per_row),
+        TableScanDesc::Heap(_) => panic!("cbstore_analyze_gather_rows: heap scan"),
+    }
+}
+
 pub fn table_endscan(scan: TableScanDesc<'_>) -> PgResult<()> {
     match scan {
         TableScanDesc::Heap(h) => heap::scan_end(h),
