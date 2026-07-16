@@ -392,9 +392,13 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
 }
 
 // libpqrcv_startstreaming's logical arm (libpqwalreceiver.c:554).
-fn start_logical_streaming(conn: &mut PgConn, startpos: XLogRecPtr) -> PgResult<()> {
+fn start_logical_streaming(
+    conn: &mut PgConn,
+    startpos: XLogRecPtr,
+    two_phase: bool,
+) -> PgResult<()> {
     let slot = my_sub(|s| s.slotname.clone().expect("slotname checked by caller"));
-    start_logical_streaming_on(conn, &slot, startpos)
+    start_logical_streaming_opts(conn, &slot, startpos, two_phase)
 }
 
 // Same, on an explicit slot (the tablesync catchup stream).
@@ -402,6 +406,15 @@ pub(crate) fn start_logical_streaming_on(
     conn: &mut PgConn,
     slotname: &str,
     startpos: XLogRecPtr,
+) -> PgResult<()> {
+    start_logical_streaming_opts(conn, slotname, startpos, false)
+}
+
+fn start_logical_streaming_opts(
+    conn: &mut PgConn,
+    slotname: &str,
+    startpos: XLogRecPtr,
+    two_phase: bool,
 ) -> PgResult<()> {
     let slot = slotname.to_string();
     let (publications, binary, origin_opt) = my_sub(|s| {
@@ -412,8 +425,9 @@ pub(crate) fn start_logical_streaming_on(
         )
     });
 
-    // Streaming and two-phase are never requested: the pgrust subscriber
-    // handles neither yet.
+    // Streaming (in-progress transactions) is never requested: the pgrust
+    // subscriber does not handle it yet. two_phase is requested only by
+    // run_apply_worker's PENDING->ENABLED transition.
     let pubnames = publications
         .iter()
         .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
@@ -432,6 +446,9 @@ pub(crate) fn start_logical_streaming_on(
     cmd.push_str(&format!(", publication_names {pubnames_literal}"));
     if binary {
         cmd.push_str(", binary 'true'");
+    }
+    if two_phase {
+        cmd.push_str(", two_phase 'on'");
     }
     cmd.push(')');
 
@@ -572,12 +589,41 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     // IDENTIFY_SYSTEM does some initialization upstream.
     let _ = walreceiver::client::identify_system(&mut conn)?;
 
-    // Two-phase stays PENDING/DISABLED here: the pending->enabled transition
-    // needs tablesync (AllTablesyncsReady), inc E.
+    // run_apply_worker (worker.c:4546): decide whether to enable two_phase
+    // now — the subscription is PENDING and every tablesync is READY.
+    let enable_two_phase = my_sub(|s| s.twophasestate)
+        == pg_subscription::LOGICALREP_TWOPHASE_STATE_PENDING
+        && tablesync::all_tablesyncs_ready(mcx)?;
 
     apply::logicalrep_relmap_prepare()?;
 
-    start_logical_streaming(&mut conn, origin_startpos)?;
+    start_logical_streaming(&mut conn, origin_startpos, enable_two_phase)?;
+
+    if enable_two_phase {
+        // C: streaming started with two_phase; persist ENABLED so a restart
+        // does not re-request it.
+        xact::StartTransactionCommand()?;
+        // C: pg_subscription update might involve TOAST access — snapshot.
+        let snap = snapmgr::GetTransactionSnapshot()?;
+        snapmgr::PushActiveSnapshot(&snap)?;
+        pg_subscription::UpdateTwoPhaseState(
+            mcx,
+            my_sub(|s| s.oid),
+            pg_subscription::LOGICALREP_TWOPHASE_STATE_ENABLED,
+        )?;
+        snapmgr::PopActiveSnapshot()?;
+        xact::CommitTransactionCommand()?;
+        MY_SUBSCRIPTION.with(|s| {
+            if let Some(s) = s.borrow_mut().as_mut() {
+                s.twophasestate = pg_subscription::LOGICALREP_TWOPHASE_STATE_ENABLED;
+            }
+        });
+        let name = my_sub(|s| s.name.clone());
+        let _ = elog::elog(
+            LOG,
+            format!("logical replication apply worker for subscription \"{name}\" two_phase is ENABLED"),
+        );
+    }
 
     // start_apply (worker.c:4506).
     let r = apply_loop(&mut conn, origin_startpos);
