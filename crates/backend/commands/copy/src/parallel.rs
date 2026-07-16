@@ -134,6 +134,88 @@ fn sort_encoders(rt: &runtime::Runtime) -> usize {
     req.unwrap_or(dop(rt) as usize).clamp(1, 32)
 }
 
+/// load-r3 M2: column-sharded stitch pool threads
+/// (PGRUST_PARALLEL_COPY_STITCH_POOL=<n>, default 0 = inline stitch —
+/// measured 2026-07-15: inline stitch = 44.7 s intern on the ordered-commit
+/// path + 35.5 s rank/blob at finish, of the 165 s 100M parsort wall).
+fn stitch_pool_threads() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_STITCH_POOL")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
+/// loadcommit C1: PGRUST_PARALLEL_COPY_FILL_V2=1 — loser-tree merge fill
+/// (zero per-row allocation, single-copy row emission). Default OFF; the
+/// emitted row sequence is byte-identical by construction (loadsort.rs
+/// `v2_less` + the v2_matches_heap_reference oracle).
+fn fill_v2() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_V2").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// loadcommit C0: PGRUST_PARALLEL_COPY_FILL_SPLIT=1 — per-row advance
+/// (run read+decode) timing inside the merge fill. Diagnostic arm only;
+/// default OFF = one untaken branch per row.
+fn fill_split() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_SPLIT").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// loadcommit C2a: PGRUST_PARALLEL_COPY_FILL_FADV=<MB> — per-run sliding
+/// POSIX_FADV_WILLNEED window on the merge fill's run files (kernel
+/// readahead overlapping the advance I/O with merge CPU). Pure hint,
+/// zero effect on bytes; default 0 = off; capped 64 MB/run. Page-cache
+/// pressure = runs x window (291 x 4 MB ≈ 1.2 GB at 100M defaults).
+fn fill_fadv_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_FADV")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(64)
+            * (1 << 20)
+    })
+}
+
+/// loadcommit C2b: PGRUST_PARALLEL_COPY_FILL_PREFETCH=<threads> — explicit
+/// bounded run prefetch for the merge fill (512 KB chunks, capacity-2
+/// channels, consume-on-arrival: the shape the C2a fadvise refutation
+/// points at). Requires FILL_V2=1; default 0 = off.
+fn fill_prefetch() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARALLEL_COPY_FILL_PREFETCH")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(16)
+    })
+}
+
+/// loadcommit RUNLZ4: PGRUST_COPY_RUNLZ4=1 — lz4-compress the sort run
+/// files (spill write side + merge read side; ~74 -> ~30 GB of NVMe
+/// traffic EACH WAY at 100M — the bandwidth-law lever). Requires
+/// FILL_V2=1 (the decode seam lives in the V2 sources); default OFF,
+/// fail-closed: without V2 the spill/merge both stay raw.
+fn run_lz4() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_COPY_RUNLZ4").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// The single spill+merge mode decision (both sides MUST agree).
+fn run_lz4_effective() -> bool {
+    run_lz4() && fill_v2()
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -670,6 +752,15 @@ struct WorkerSortState {
     codec: cbstore::loadsort::RowCodec,
     keybuf: Vec<u8>,
     rowbuf: Vec<u8>,
+    /// Phase-wall accumulators (load-r3 M0; ptrace-gated — stay zero and
+    /// untouched per-row when tracing is off).
+    t_parse: std::time::Duration,
+    t_key: std::time::Duration,
+    t_spill: std::time::Duration,
+    /// Run-file bytes written by this worker (compressed size under RUNLZ4).
+    spill_bytes: u64,
+    rows: u64,
+    runs: u32,
 }
 
 thread_local! {
@@ -755,6 +846,9 @@ impl ParCopyShared {
         } else {
             None
         };
+        // load-r3 M0 phase walls: per-row Instants only in sort mode AND
+        // only when tracing is armed (the default path takes one branch).
+        let trace = self.sort.is_some() && ptrace_enabled();
         let mut since_cfi = 0u32;
         loop {
             since_cfi += 1;
@@ -762,6 +856,7 @@ impl ParCopyShared {
                 since_cfi = 0;
                 postgres_seams::check_for_interrupts::call()?;
             }
+            let t0 = if trace { Some(std::time::Instant::now()) } else { None };
             wcx.row_cx.reset();
             exectuples::exec_clear_tuple(&mut wcx.slot, wcx.mcx);
             // SAFETY (lifetime erasure): per-row datums land in row_cx and
@@ -809,11 +904,20 @@ impl ParCopyShared {
                             .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
                     ));
                 }
+                let t1 = t0.map(|t0| {
+                    let now = std::time::Instant::now();
+                    st.t_parse += now - t0;
+                    now
+                });
                 st.keybuf.clear();
                 cbstore::sortkey::encode_sort_key(&sort.keys, &base.tts_values, &mut st.keybuf);
                 st.rowbuf.clear();
                 st.codec.serialize_row(&base.tts_values, &mut st.rowbuf)?;
                 st.batch.push(&st.keybuf, &st.rowbuf);
+                st.rows += 1;
+                if let Some(t1) = t1 {
+                    st.t_key += t1.elapsed();
+                }
                 if st.batch.bytes() >= sort.budget {
                     self.spill_worker_batch(st)?;
                 }
@@ -847,8 +951,11 @@ impl ParCopyShared {
             seq
         ));
         self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
+        let t0 = std::time::Instant::now();
         st.batch.sort();
-        st.batch.spill_run(&path)?;
+        st.spill_bytes += st.batch.spill_run_opts(&path, run_lz4_effective())?;
+        st.t_spill += t0.elapsed();
+        st.runs += 1;
         ptrace(&format!("sort run spilled seq={seq}"));
         Ok(())
     }
@@ -1012,6 +1119,12 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             codec: cbstore::loadsort::RowCodec::new(shared.plan.coltypes.clone()),
             keybuf: Vec::with_capacity(sp.key_w),
             rowbuf: Vec::new(),
+            t_parse: std::time::Duration::ZERO,
+            t_key: std::time::Duration::ZERO,
+            t_spill: std::time::Duration::ZERO,
+            spill_bytes: 0,
+            rows: 0,
+            runs: 0,
         });
         Ok(ParCopyWorkerCx {
             mcx,
@@ -1063,6 +1176,17 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
                 shared.fail_hard(e);
             }
         }
+        // load-r3 M0: the per-worker phase decomposition of the parse+spill
+        // pole (trace-gated; accumulators are zero when tracing is off).
+        ptrace(&format!(
+            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={} spillbytes={}",
+            st.t_parse.as_secs_f64(),
+            st.t_key.as_secs_f64(),
+            st.t_spill.as_secs_f64(),
+            st.rows,
+            st.runs,
+            st.spill_bytes,
+        ));
     }
 
     drop(wcx);
@@ -1105,14 +1229,58 @@ fn merge_sorted_runs(
     let sort = shared.sort.as_ref().expect("merge without sort mode");
     let paths =
         std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
-    let mut merge = cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?;
+    // loadcommit C1: the merge kernel — BinaryHeap (default, byte-proven)
+    // or the loser tree (opt-in, byte-identical order by construction).
+    enum MergeKind {
+        V1(cbstore::loadsort::RunMerge),
+        V2(cbstore::loadsort::RunMergeV2),
+    }
+    let prefetch = if fill_v2() { fill_prefetch() } else { 0 };
+    let lz4 = run_lz4_effective();
+    if run_lz4() && !fill_v2() {
+        ptrace("runlz4 refused: requires PGRUST_PARALLEL_COPY_FILL_V2=1 (raw runs used)");
+    }
+    let mut merge = if prefetch > 0 {
+        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_prefetch(
+            &paths,
+            sort.key_w,
+            prefetch,
+            lz4,
+        )?)
+    } else if fill_v2() {
+        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_opts(&paths, sort.key_w, lz4)?)
+    } else {
+        MergeKind::V1(cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?)
+    };
+    if fill_split() {
+        match &mut merge {
+            MergeKind::V1(m) => m.set_timed(true),
+            MergeKind::V2(m) => m.set_timed(true),
+        }
+    }
+    let fadv = fill_fadv_bytes();
+    if fadv > 0 {
+        match &mut merge {
+            MergeKind::V1(m) => m.set_fadvise(fadv),
+            MergeKind::V2(m) => m.set_fadvise(fadv),
+        }
+    }
     // Eager unlink: the open fds keep the data; a crash from here leaves
     // no orphan files.
     for p in &paths {
         let _ = std::fs::remove_file(p);
     }
     let nenc = sort_encoders(shared.rt);
-    ptrace(&format!("sort merge over {} runs encoders={nenc}", paths.len()));
+    ptrace(&format!(
+        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch} runlz4={}",
+        paths.len(),
+        match &merge {
+            MergeKind::V1(_) => "v1",
+            MergeKind::V2(_) => "v2",
+        },
+        fadv >> 20,
+        lz4 as u8,
+    ));
 
     const RG: usize = cbstore::format::RG_ROWS;
     struct Batch {
@@ -1202,18 +1370,39 @@ fn merge_sorted_runs(
                     }
                     let t0 = std::time::Instant::now();
                     let mut merge_done = false;
-                    while cur.lens.len() < RG {
-                        match merge.next_entry(&mut key, &mut row) {
-                            Ok(true) => {
-                                cur.arena.extend_from_slice(&row);
-                                cur.lens.push(row.len() as u32);
-                                n_rows += 1;
+                    match &mut merge {
+                        MergeKind::V1(m) => {
+                            while cur.lens.len() < RG {
+                                match m.next_entry(&mut key, &mut row) {
+                                    Ok(true) => {
+                                        cur.arena.extend_from_slice(&row);
+                                        cur.lens.push(row.len() as u32);
+                                        n_rows += 1;
+                                    }
+                                    Ok(false) => {
+                                        merge_done = true;
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
-                            Ok(false) => {
-                                merge_done = true;
-                                break;
+                        }
+                        MergeKind::V2(m) => {
+                            // loadcommit C1: rows land straight in the
+                            // batch arena — no pump-local key/row copies.
+                            while cur.lens.len() < RG {
+                                match m.next_row_into(&mut cur.arena) {
+                                    Ok(Some(l)) => {
+                                        cur.lens.push(l);
+                                        n_rows += 1;
+                                    }
+                                    Ok(None) => {
+                                        merge_done = true;
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
                             }
-                            Err(e) => return Err(e),
                         }
                     }
                     t_fill += t0.elapsed();
@@ -1237,8 +1426,16 @@ fn merge_sorted_runs(
                     }
                 }
             })();
+            // loadcommit C0: fill decomposition (advance = run read+decode
+            // inside the merge; 0.00 unless PGRUST_PARALLEL_COPY_FILL_SPLIT=1;
+            // heap/copy share = fill − advance).
+            let (adv_s, run_bytes, comp_bytes) = match &merge {
+                MergeKind::V1(m) => m.fill_stats(),
+                MergeKind::V2(m) => m.fill_stats(),
+            };
             ptrace(&format!(
-                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent}",
+                "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent} \
+                 fill split: advance {adv_s:.2}s runbytes={run_bytes} compbytes={comp_bytes}",
                 t_fill.as_secs_f64(),
                 t_send.as_secs_f64(),
             ));
@@ -1316,8 +1513,10 @@ fn merge_sorted_runs(
             "parallel load-sort merge lost batches (committed != sent)",
         )));
     }
+    let (c_stitch, c_pwrite, c_meta, c_bytes) = writer.commit_phase_split();
     ptrace(&format!(
-        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed}",
+        "sort merge done: {:.2}s total (commit {:.2}s) rows={n_rows} rgs={committed} \
+         commit split: stitch {c_stitch:.2}s pwrite {c_pwrite:.2}s meta {c_meta:.2}s bytes={c_bytes}",
         t_merge.elapsed().as_secs_f64(),
         t_commit.as_secs_f64(),
     ));
@@ -1511,6 +1710,13 @@ pub(crate) fn copy_from_parallel<'mcx>(
         // Belt+braces: admission already refused cluster keys.
         return Ok(None);
     };
+    // load-r3 M2: column-sharded stitch pool (opt-in). AFTER the plan — the
+    // plan snapshots capture flags from the writer's live stitch builders.
+    let sp = stitch_pool_threads();
+    if sp > 0 {
+        writer.install_stitch_pool(sp)?;
+        ptrace(&format!("stitch pool requested threads={sp}"));
+    }
 
     let shared = Arc::new(ParCopyShared {
         rt,
@@ -1564,7 +1770,14 @@ pub(crate) fn copy_from_parallel<'mcx>(
         Ceremony::Refused => Ok(None),
         Ceremony::Done(processed) => {
             // Publish (footer + header, durable) — the serial finish.
+            let tf = std::time::Instant::now();
             writer.finish_parallel_ingest()?;
+            let (f_stitch, f_footer, f_sync, f_blob_bytes) = writer.finish_phase_split();
+            ptrace(&format!(
+                "finish split: wall {:.2}s stitch {f_stitch:.2}s footer {f_footer:.2}s \
+                 sync {f_sync:.2}s blob_bytes={f_blob_bytes}",
+                tf.elapsed().as_secs_f64(),
+            ));
             pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, processed as i64);
             ptrace(&format!("done rows={processed}"));
             Ok(Some(processed))
@@ -1618,6 +1831,10 @@ fn ceremony(
         let mut input_done = false;
         let mut closed = false;
         let mut bytes_read = 0u64;
+        // load-r3 M0: leader read-pump walls (block granularity — free).
+        let t_loop = std::time::Instant::now();
+        let mut t_read = std::time::Duration::ZERO;
+        let mut t_seg = std::time::Duration::ZERO;
         let window = window(k);
         let mut ready: Vec<ChunkDesc> = Vec::new();
         let outcome = loop {
@@ -1645,14 +1862,18 @@ fn ceremony(
             let mut read_any = false;
             if !input_done && !error_seen && published.saturating_sub(next_commit) < window {
                 let mut buf = vec![0u8; READ_BLOCK];
+                let tr = std::time::Instant::now();
                 let n = cstate.copy_read_stream(&mut buf)?;
+                t_read += tr.elapsed();
                 bytes_read += n as u64;
                 pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, bytes_read as i64);
                 read_any = n > 0;
                 if n > 0 {
                     buf.truncate(n);
                     let abuf = Arc::new(buf);
+                    let ts = std::time::Instant::now();
                     let consumed = seg.feed(&abuf, n, &mut ready);
+                    t_seg += ts.elapsed();
                     if seg.eoc {
                         // End-of-copy marker: never segment past it. A
                         // frontend stream drains protocol-level (serial's
@@ -1689,8 +1910,11 @@ fn ceremony(
                     rt.notify_source_progress();
                     closed = true;
                     ptrace(&format!(
-                        "input closed chunks={published} rows={} bytes={bytes_read}",
-                        seg.rows_total
+                        "input closed chunks={published} rows={} bytes={bytes_read} read {:.2}s seg {:.2}s wall {:.2}s",
+                        seg.rows_total,
+                        t_read.as_secs_f64(),
+                        t_seg.as_secs_f64(),
+                        t_loop.elapsed().as_secs_f64(),
                     ));
                 }
             } else if error_seen && !closed {
