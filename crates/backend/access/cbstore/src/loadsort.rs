@@ -183,20 +183,145 @@ impl SortBatch {
 
     /// Write the (sorted) batch as one run and clear the batch for reuse.
     pub fn spill_run(&mut self, path: &std::path::Path) -> PgResult<()> {
+        self.spill_run_opts(path, false).map(|_| ())
+    }
+
+    /// Spill the sorted batch as one run file; returns the file bytes
+    /// written. `lz4` (loadcommit RUNLZ4 lever) writes the SAME logical
+    /// entry stream inside lz4-compressed ~512 KB chunks: `RLZ4` magic,
+    /// then frames `[raw_len u32 le][comp_len u32 le][lz4 block]`. Chunk
+    /// boundaries are byte-level (entries may straddle); the reader
+    /// reassembles a byte stream identical to the raw format, so the
+    /// merge is unaffected by construction.
+    pub fn spill_run_opts(&mut self, path: &std::path::Path, lz4: bool) -> PgResult<u64> {
         let f = std::fs::File::create(path).map_err(|e| io_err("run create", e))?;
         let mut w = BufWriter::with_capacity(1 << 20, f);
-        for &(off, len) in &self.index {
-            let e = &self.arena[off as usize..off as usize + len as usize];
-            let rowlen = (len as usize - self.key_w) as u32;
-            w.write_all(&e[..self.key_w]).map_err(|e| io_err("run write", e))?;
-            w.write_all(&rowlen.to_le_bytes()).map_err(|e| io_err("run write", e))?;
-            w.write_all(&e[self.key_w..]).map_err(|e| io_err("run write", e))?;
+        let mut written: u64 = 0;
+        if !lz4 {
+            for &(off, len) in &self.index {
+                let e = &self.arena[off as usize..off as usize + len as usize];
+                let rowlen = (len as usize - self.key_w) as u32;
+                w.write_all(&e[..self.key_w]).map_err(|e| io_err("run write", e))?;
+                w.write_all(&rowlen.to_le_bytes()).map_err(|e| io_err("run write", e))?;
+                w.write_all(&e[self.key_w..]).map_err(|e| io_err("run write", e))?;
+                written += self.key_w as u64 + 4 + rowlen as u64;
+            }
+        } else {
+            w.write_all(&RUN_LZ4_MAGIC).map_err(|e| io_err("run write", e))?;
+            written += 4;
+            let mut chunk: Vec<u8> = Vec::with_capacity(RUN_CHUNK + 4096);
+            let mut comp: Vec<u8> = Vec::new();
+            for &(off, len) in &self.index {
+                let e = &self.arena[off as usize..off as usize + len as usize];
+                let rowlen = (len as usize - self.key_w) as u32;
+                chunk.extend_from_slice(&e[..self.key_w]);
+                chunk.extend_from_slice(&rowlen.to_le_bytes());
+                chunk.extend_from_slice(&e[self.key_w..]);
+                if chunk.len() >= RUN_CHUNK {
+                    written += write_lz4_frame(&mut w, &mut chunk, &mut comp)?;
+                }
+            }
+            written += write_lz4_frame(&mut w, &mut chunk, &mut comp)?;
         }
         w.flush().map_err(|e| io_err("run flush", e))?;
         self.arena.clear();
         self.index.clear();
-        Ok(())
+        Ok(written)
     }
+}
+
+// ---- loadcommit RUNLZ4: run-file compression framing ------------------------
+
+const RUN_LZ4_MAGIC: [u8; 4] = *b"RLZ4";
+/// Target raw bytes per compressed chunk (entries may straddle chunks).
+const RUN_CHUNK: usize = 512 << 10;
+/// Corruption guard: no sane frame exceeds this (chunks are ~512 KB plus
+/// one row; rows are bounded by the varlena cap long before this).
+const RUN_FRAME_CAP: usize = 1 << 30;
+
+/// Compress + write `chunk` as one frame, clearing it; returns file bytes.
+/// Empty chunk = no frame (0 bytes).
+fn write_lz4_frame(
+    w: &mut BufWriter<std::fs::File>,
+    chunk: &mut Vec<u8>,
+    comp: &mut Vec<u8>,
+) -> PgResult<u64> {
+    if chunk.is_empty() {
+        return Ok(0);
+    }
+    let max = lz4_flex::block::get_maximum_output_size(chunk.len());
+    if comp.len() < max {
+        comp.resize(max, 0);
+    }
+    let n = lz4_flex::block::compress_into(chunk, comp)
+        .map_err(|e| Box::new(PgError::error(format!("run lz4 compress: {e}"))))?;
+    w.write_all(&(chunk.len() as u32).to_le_bytes()).map_err(|e| io_err("run write", e))?;
+    w.write_all(&(n as u32).to_le_bytes()).map_err(|e| io_err("run write", e))?;
+    w.write_all(&comp[..n]).map_err(|e| io_err("run write", e))?;
+    chunk.clear();
+    Ok(8 + n as u64)
+}
+
+/// Read one lz4 frame from `r` into `raw` (resized to the frame's raw
+/// length). Returns Ok(false) on clean EOF at a frame boundary; any other
+/// truncation or length corruption is an error. `comp` is reused scratch.
+/// On success adds the frame's file bytes to `*disk_bytes`.
+fn read_lz4_frame(
+    r: &mut impl Read,
+    comp: &mut Vec<u8>,
+    raw: &mut Vec<u8>,
+    disk_bytes: &mut u64,
+) -> std::io::Result<bool> {
+    let mut hdr = [0u8; 8];
+    let mut got = 0usize;
+    while got < 8 {
+        let n = r.read(&mut hdr[got..])?;
+        if n == 0 {
+            if got == 0 {
+                return Ok(false);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "truncated run frame header",
+            ));
+        }
+        got += n;
+    }
+    let raw_len = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) as usize;
+    let comp_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+    if raw_len == 0 || raw_len > RUN_FRAME_CAP || comp_len == 0 || comp_len > RUN_FRAME_CAP {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "corrupt run frame lengths",
+        ));
+    }
+    comp.resize(comp_len, 0);
+    r.read_exact(comp)?;
+    raw.resize(raw_len, 0);
+    let n = lz4_flex::block::decompress_into(comp, raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if n != raw_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "run frame decompressed length mismatch",
+        ));
+    }
+    *disk_bytes += 8 + comp_len as u64;
+    Ok(true)
+}
+
+/// Consume + verify the RLZ4 magic (the reader mode comes from the knob,
+/// never from sniffing; a mismatch fails loud).
+fn check_run_magic(r: &mut impl Read) -> std::io::Result<()> {
+    let mut m = [0u8; 4];
+    r.read_exact(&mut m)?;
+    if m != RUN_LZ4_MAGIC {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "run file lacks RLZ4 magic (spill/merge lz4 mode mismatch)",
+        ));
+    }
+    Ok(())
 }
 
 // ---- run reader + k-way merge ----------------------------------------------
@@ -232,6 +357,46 @@ fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
 
 /// Prefetched chunk size.
 const PRE_CHUNK: usize = 512 << 10;
+
+/// loadcommit RUNLZ4: pump-side decode source (no prefetch) — frames are
+/// read + decompressed on demand, one bounded chunk resident per reader.
+struct Lz4Source {
+    r: BufReader<std::fs::File>,
+    raw: Vec<u8>,
+    pos: usize,
+    comp: Vec<u8>,
+    eof: bool,
+    disk: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl std::io::Read for Lz4Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.raw.len() {
+            if self.eof {
+                return Ok(0);
+            }
+            let mut d = 0u64;
+            match read_lz4_frame(&mut self.r, &mut self.comp, &mut self.raw, &mut d) {
+                Ok(true) => {
+                    self.pos = 0;
+                    self.disk.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(false) => {
+                    self.eof = true;
+                    return Ok(0);
+                }
+                Err(e) => {
+                    self.eof = true;
+                    return Err(e);
+                }
+            }
+        }
+        let n = buf.len().min(self.raw.len() - self.pos);
+        buf[..n].copy_from_slice(&self.raw[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
 
 /// Consumer side of one run's prefetch channel: a plain byte stream.
 struct PrefetchSource {
@@ -272,11 +437,16 @@ impl std::io::Read for PrefetchSource {
 
 /// One run's feeder-side state (owned by a pool thread).
 struct FeedRun {
-    f: std::fs::File,
+    f: BufReader<std::fs::File>,
     tx: Option<std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>>,
     /// Chunk read but not yet accepted by the (full) channel.
     pending: Option<std::io::Result<Vec<u8>>>,
     eof: bool,
+    /// loadcommit RUNLZ4: decode frames in the feeder (the pump then
+    /// consumes decompressed bytes exactly as in raw mode).
+    lz4: bool,
+    comp: Vec<u8>,
+    disk: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Pool of prefetch threads; joined (after `stop`) on drop.
@@ -310,32 +480,51 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
                         progress = true;
                         break;
                     }
-                    let mut chunk = vec![0u8; PRE_CHUNK];
-                    let mut got = 0usize;
-                    let mut err = None;
-                    while got < chunk.len() {
-                        match r.f.read(&mut chunk[got..]) {
-                            Ok(0) => break,
-                            Ok(n) => got += n,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    if r.lz4 {
+                        let mut raw = Vec::new();
+                        let mut d = 0u64;
+                        match read_lz4_frame(&mut r.f, &mut r.comp, &mut raw, &mut d) {
+                            Ok(true) => {
+                                r.disk.fetch_add(d, std::sync::atomic::Ordering::Relaxed);
+                                r.pending = Some(Ok(raw));
+                            }
+                            Ok(false) => {
+                                r.eof = true;
+                                continue; // clean boundary EOF: close on next pass
+                            }
                             Err(e) => {
-                                err = Some(e);
-                                break;
+                                r.pending = Some(Err(e));
+                                r.eof = true;
                             }
                         }
-                    }
-                    if let Some(e) = err {
-                        r.pending = Some(Err(e));
-                        r.eof = true;
                     } else {
-                        if got < chunk.len() {
+                        let mut chunk = vec![0u8; PRE_CHUNK];
+                        let mut got = 0usize;
+                        let mut err = None;
+                        while got < chunk.len() {
+                            match r.f.read(&mut chunk[got..]) {
+                                Ok(0) => break,
+                                Ok(n) => got += n,
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                                Err(e) => {
+                                    err = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(e) = err {
+                            r.pending = Some(Err(e));
                             r.eof = true;
+                        } else {
+                            if got < chunk.len() {
+                                r.eof = true;
+                            }
+                            if got == 0 {
+                                continue; // clean boundary EOF: close on next pass
+                            }
+                            chunk.truncate(got);
+                            r.pending = Some(Ok(chunk));
                         }
-                        if got == 0 {
-                            continue; // clean boundary EOF: close on next pass
-                        }
-                        chunk.truncate(got);
-                        r.pending = Some(Ok(chunk));
                     }
                 }
                 let p = r.pending.take().unwrap();
@@ -372,6 +561,7 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
 /// C2b prefetch channel.
 enum RunSrc {
     Buf(BufReader<std::fs::File>),
+    Lz4(Lz4Source),
     Pre(PrefetchSource),
 }
 
@@ -380,6 +570,7 @@ impl std::io::Read for RunSrc {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             RunSrc::Buf(r) => r.read(buf),
+            RunSrc::Lz4(z) => z.read(buf),
             RunSrc::Pre(p) => p.read(buf),
         }
     }
@@ -564,9 +755,10 @@ impl RunMerge {
         }
     }
 
-    /// (advance seconds — 0.0 unless timed, run bytes consumed).
-    pub fn fill_stats(&self) -> (f64, u64) {
-        (self.stats.t_advance.as_secs_f64(), self.stats.bytes)
+    /// (advance seconds — 0.0 unless timed, logical run bytes consumed,
+    /// compressed disk bytes — always 0 for the raw-only heap merge).
+    pub fn fill_stats(&self) -> (f64, u64, u64) {
+        (self.stats.t_advance.as_secs_f64(), self.stats.bytes, 0)
     }
 
     /// Copy the next entry (global key order) into the caller's buffers.
@@ -627,36 +819,79 @@ pub struct RunMergeV2 {
     losers: Vec<u32>,
     winner: u32,
     stats: FillStats,
+    /// loadcommit RUNLZ4: compressed bytes actually read from disk
+    /// (fill_stats third field; 0 in raw mode).
+    disk: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// loadcommit C2b: keeps the prefetch threads alive; joined on drop.
     _pool: Option<PrefetchPool>,
 }
 
 impl RunMergeV2 {
     pub fn open(paths: &[std::path::PathBuf], key_w: usize) -> PgResult<RunMergeV2> {
+        Self::open_opts(paths, key_w, false)
+    }
+
+    /// Direct (pump-thread) sources; `lz4` = RUNLZ4-framed run files.
+    pub fn open_opts(
+        paths: &[std::path::PathBuf],
+        key_w: usize,
+        lz4: bool,
+    ) -> PgResult<RunMergeV2> {
+        let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut readers = Vec::with_capacity(paths.len());
         for p in paths {
-            readers.push(RunReader::open(p, key_w)?);
+            if lz4 {
+                let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+                let mut r = BufReader::with_capacity(1 << 20, f);
+                check_run_magic(&mut r).map_err(|e| io_err("run magic", e))?;
+                let src = RunSrc::Lz4(Lz4Source {
+                    r,
+                    raw: Vec::new(),
+                    pos: 0,
+                    comp: Vec::new(),
+                    eof: false,
+                    disk: std::sync::Arc::clone(&disk),
+                });
+                readers.push(RunReader::from_src(src, key_w)?);
+            } else {
+                readers.push(RunReader::open(p, key_w)?);
+            }
         }
-        Self::from_readers(readers, None)
+        Self::from_readers(readers, None, disk)
     }
 
     /// loadcommit C2b (PGRUST_PARALLEL_COPY_FILL_PREFETCH=<n>): prefetch-fed
-    /// merge — `threads` pool threads stream 512 KB chunks per run through
-    /// bounded channels; byte stream identical to the direct open by
-    /// construction (oracle extends v2_matches_heap_reference).
+    /// merge — `threads` pool threads stream chunks per run through bounded
+    /// channels (decoding RUNLZ4 frames feeder-side when `lz4`); byte
+    /// stream identical to the direct open by construction (oracle extends
+    /// v2_matches_heap_reference).
     pub fn open_prefetch(
         paths: &[std::path::PathBuf],
         key_w: usize,
         threads: usize,
+        lz4: bool,
     ) -> PgResult<RunMergeV2> {
         let threads = threads.clamp(1, 16);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut buckets: Vec<Vec<FeedRun>> = (0..threads).map(|_| Vec::new()).collect();
         let mut sources = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
             let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+            let mut f = BufReader::with_capacity(if lz4 { 64 << 10 } else { 8 << 10 }, f);
+            if lz4 {
+                check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
+            }
             let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(2);
-            buckets[i % threads].push(FeedRun { f, tx: Some(tx), pending: None, eof: false });
+            buckets[i % threads].push(FeedRun {
+                f,
+                tx: Some(tx),
+                pending: None,
+                eof: false,
+                lz4,
+                comp: Vec::new(),
+                disk: std::sync::Arc::clone(&disk),
+            });
             sources.push(PrefetchSource { rx, cur: Vec::new(), pos: 0, eof: false });
         }
         let mut handles = Vec::with_capacity(threads);
@@ -676,12 +911,13 @@ impl RunMergeV2 {
         for src in sources {
             readers.push(RunReader::from_src(RunSrc::Pre(src), key_w)?);
         }
-        Self::from_readers(readers, Some(pool))
+        Self::from_readers(readers, Some(pool), disk)
     }
 
     fn from_readers(
         readers: Vec<RunReader>,
         pool: Option<PrefetchPool>,
+        disk: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> PgResult<RunMergeV2> {
         let k = readers.len();
         let mut losers = vec![u32::MAX; k.max(1)];
@@ -690,7 +926,14 @@ impl RunMergeV2 {
         } else {
             Self::build(&readers, &mut losers, k, 1)
         };
-        Ok(RunMergeV2 { readers, losers, winner, stats: FillStats::default(), _pool: pool })
+        Ok(RunMergeV2 {
+            readers,
+            losers,
+            winner,
+            stats: FillStats::default(),
+            disk,
+            _pool: pool,
+        })
     }
 
     /// Play the tournament under node x, storing losers; returns the winner.
@@ -721,9 +964,14 @@ impl RunMergeV2 {
         }
     }
 
-    /// (advance seconds — 0.0 unless timed, run bytes consumed).
-    pub fn fill_stats(&self) -> (f64, u64) {
-        (self.stats.t_advance.as_secs_f64(), self.stats.bytes)
+    /// (advance seconds — 0.0 unless timed, logical run bytes consumed,
+    /// compressed disk bytes read — 0 in raw mode).
+    pub fn fill_stats(&self) -> (f64, u64, u64) {
+        (
+            self.stats.t_advance.as_secs_f64(),
+            self.stats.bytes,
+            self.disk.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Append the next row (global key order) to `arena`; returns its
@@ -924,6 +1172,17 @@ mod tests {
         dup_keys: bool,
         seed: u64,
     ) -> (Vec<std::path::PathBuf>, usize) {
+        spill_random_runs_opts(dir, runs, rows_per_run, dup_keys, seed, false)
+    }
+
+    fn spill_random_runs_opts(
+        dir: &std::path::Path,
+        runs: usize,
+        rows_per_run: usize,
+        dup_keys: bool,
+        seed: u64,
+        lz4: bool,
+    ) -> (Vec<std::path::PathBuf>, usize) {
         let codec = RowCodec::new(vec![ColType::I32, ColType::I64, ColType::Text]);
         let keys = [(0u16, CbSortKeyKind::Int32), (1, CbSortKeyKind::Int64)];
         let kw = fixed_key_width(&keys).unwrap();
@@ -957,7 +1216,7 @@ mod tests {
             }
             batch.sort();
             let p = dir.join(format!("run-{r}"));
-            batch.spill_run(&p).unwrap();
+            batch.spill_run_opts(&p, lz4).unwrap();
             paths.push(p);
         }
         (paths, kw)
@@ -989,7 +1248,7 @@ mod tests {
         assert_eq!(arena, ref_arena, "V2 row bytes diverge from the heap reference");
         assert_eq!(v2.fill_stats().1, v1.fill_stats().1, "run-bytes accounting diverges");
         // C2b: the prefetch-fed merge must emit the identical stream.
-        let mut vp = RunMergeV2::open_prefetch(paths, kw, 3).unwrap();
+        let mut vp = RunMergeV2::open_prefetch(paths, kw, 3, false).unwrap();
         let mut p_arena: Vec<u8> = Vec::new();
         let mut p_lens: Vec<u32> = Vec::new();
         while let Some(l) = vp.next_row_into(&mut p_arena).unwrap() {
@@ -1013,6 +1272,114 @@ mod tests {
         let (paths, kw) = spill_random_runs(&dir, 9, 400, true, 7);
         assert_v2_matches_v1(&paths, kw);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// loadcommit RUNLZ4: the lz4-framed runs must reproduce the raw
+    /// reference byte stream through BOTH decode paths (pump-side
+    /// Lz4Source and feeder-side prefetch decode), including cross-run
+    /// key ties, and the compressed files must actually be smaller.
+    #[test]
+    fn lz4_runs_match_raw_reference() {
+        for (dup, seed) in [(false, 42u64), (true, 7u64)] {
+            let draw = tmpdir(&format!("lzraw{seed}"));
+            let dlz = tmpdir(&format!("lzlz{seed}"));
+            let (raw_paths, kw) = spill_random_runs_opts(&draw, 9, 500, dup, seed, false);
+            let (lz_paths, kw2) = spill_random_runs_opts(&dlz, 9, 500, dup, seed, true);
+            assert_eq!(kw, kw2);
+            // identical logical rows (same LCG stream), so the raw merge is
+            // the reference for both lz4 decode paths.
+            let mut r = RunMergeV2::open(&raw_paths, kw).unwrap();
+            let mut ref_arena = Vec::new();
+            let mut ref_lens = Vec::new();
+            while let Some(l) = r.next_row_into(&mut ref_arena).unwrap() {
+                ref_lens.push(l);
+            }
+            let raw_disk: u64 =
+                raw_paths.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+            let lz_disk: u64 =
+                lz_paths.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+            assert!(
+                lz_disk < raw_disk,
+                "lz4 runs not smaller: {lz_disk} vs {raw_disk}"
+            );
+            for prefetch in [0usize, 3] {
+                let mut m = if prefetch == 0 {
+                    RunMergeV2::open_opts(&lz_paths, kw, true).unwrap()
+                } else {
+                    RunMergeV2::open_prefetch(&lz_paths, kw, prefetch, true).unwrap()
+                };
+                let mut arena = Vec::new();
+                let mut lens = Vec::new();
+                while let Some(l) = m.next_row_into(&mut arena).unwrap() {
+                    lens.push(l);
+                }
+                assert_eq!(lens, ref_lens, "lz4 lens diverge (prefetch={prefetch})");
+                assert_eq!(arena, ref_arena, "lz4 bytes diverge (prefetch={prefetch})");
+                let (_, logical, disk) = m.fill_stats();
+                assert_eq!(logical, {
+                    let (_, l2, _) = r.fill_stats();
+                    l2
+                });
+                assert!(disk > 0 && disk <= lz_disk, "disk accounting: {disk} vs {lz_disk}");
+            }
+            let _ = std::fs::remove_dir_all(&draw);
+            let _ = std::fs::remove_dir_all(&dlz);
+        }
+    }
+
+    /// Truncation and corruption must surface as errors (never a short
+    /// silent stream, never a panic/hang) through both decode paths.
+    #[test]
+    fn lz4_truncation_and_corruption_error() {
+        let d = tmpdir("lztrunc");
+        let (paths, kw) = spill_random_runs_opts(&d, 1, 400, false, 5, true);
+        let whole = std::fs::read(&paths[0]).unwrap();
+        let consume = |paths: &[std::path::PathBuf], prefetch: usize| -> PgResult<u64> {
+            let mut m = if prefetch == 0 {
+                RunMergeV2::open_opts(paths, kw, true)?
+            } else {
+                RunMergeV2::open_prefetch(paths, kw, prefetch, true)?
+            };
+            let mut arena = Vec::new();
+            let mut n = 0u64;
+            while let Some(_l) = m.next_row_into(&mut arena)? {
+                n += 1;
+                arena.clear();
+            }
+            Ok(n)
+        };
+        // sanity: intact file merges fully
+        assert_eq!(consume(&paths, 0).unwrap(), 400);
+        for cut in [2usize, 7, 40, whole.len() - 3] {
+            let p = d.join(format!("cut{cut}"));
+            std::fs::write(&p, &whole[..cut]).unwrap();
+            let ps = vec![p];
+            for prefetch in [0usize, 2] {
+                match consume(&ps, prefetch) {
+                    Err(_) => {}
+                    Ok(n) => panic!("truncated at {cut} (prefetch={prefetch}) yielded Ok({n})"),
+                }
+            }
+        }
+        // Corrupt the first frame's raw_len (byte 4, after the magic):
+        // detected as a decompressed-length mismatch. (A flipped literal
+        // byte INSIDE an lz4 block is undetectable at this layer — lz4
+        // blocks carry no checksum, matching PG temp-file behavior; the
+        // statement-scoped run files share that contract.)
+        let mut bad = whole.clone();
+        bad[4] ^= 0x40;
+        let p = d.join("corrupt");
+        std::fs::write(&p, &bad).unwrap();
+        for prefetch in [0usize, 2] {
+            assert!(
+                consume(&[p.clone()], prefetch).is_err(),
+                "corrupt frame length accepted (prefetch={prefetch})"
+            );
+        }
+        // raw file handed to the lz4 reader = loud magic mismatch
+        let (rawp, _) = spill_random_runs_opts(&d.join("."), 1, 10, false, 9, false);
+        assert!(consume(&rawp, 0).is_err(), "raw file accepted as lz4");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

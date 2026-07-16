@@ -201,6 +201,21 @@ fn fill_prefetch() -> usize {
     })
 }
 
+/// loadcommit RUNLZ4: PGRUST_COPY_RUNLZ4=1 — lz4-compress the sort run
+/// files (spill write side + merge read side; ~74 -> ~30 GB of NVMe
+/// traffic EACH WAY at 100M — the bandwidth-law lever). Requires
+/// FILL_V2=1 (the decode seam lives in the V2 sources); default OFF,
+/// fail-closed: without V2 the spill/merge both stay raw.
+fn run_lz4() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_COPY_RUNLZ4").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// The single spill+merge mode decision (both sides MUST agree).
+fn run_lz4_effective() -> bool {
+    run_lz4() && fill_v2()
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -742,6 +757,8 @@ struct WorkerSortState {
     t_parse: std::time::Duration,
     t_key: std::time::Duration,
     t_spill: std::time::Duration,
+    /// Run-file bytes written by this worker (compressed size under RUNLZ4).
+    spill_bytes: u64,
     rows: u64,
     runs: u32,
 }
@@ -936,7 +953,7 @@ impl ParCopyShared {
         self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
         let t0 = std::time::Instant::now();
         st.batch.sort();
-        st.batch.spill_run(&path)?;
+        st.spill_bytes += st.batch.spill_run_opts(&path, run_lz4_effective())?;
         st.t_spill += t0.elapsed();
         st.runs += 1;
         ptrace(&format!("sort run spilled seq={seq}"));
@@ -1105,6 +1122,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             t_parse: std::time::Duration::ZERO,
             t_key: std::time::Duration::ZERO,
             t_spill: std::time::Duration::ZERO,
+            spill_bytes: 0,
             rows: 0,
             runs: 0,
         });
@@ -1161,12 +1179,13 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
         // load-r3 M0: the per-worker phase decomposition of the parse+spill
         // pole (trace-gated; accumulators are zero when tracing is off).
         ptrace(&format!(
-            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={}",
+            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={} spillbytes={}",
             st.t_parse.as_secs_f64(),
             st.t_key.as_secs_f64(),
             st.t_spill.as_secs_f64(),
             st.rows,
             st.runs,
+            st.spill_bytes,
         ));
     }
 
@@ -1217,14 +1236,19 @@ fn merge_sorted_runs(
         V2(cbstore::loadsort::RunMergeV2),
     }
     let prefetch = if fill_v2() { fill_prefetch() } else { 0 };
+    let lz4 = run_lz4_effective();
+    if run_lz4() && !fill_v2() {
+        ptrace("runlz4 refused: requires PGRUST_PARALLEL_COPY_FILL_V2=1 (raw runs used)");
+    }
     let mut merge = if prefetch > 0 {
         MergeKind::V2(cbstore::loadsort::RunMergeV2::open_prefetch(
             &paths,
             sort.key_w,
             prefetch,
+            lz4,
         )?)
     } else if fill_v2() {
-        MergeKind::V2(cbstore::loadsort::RunMergeV2::open(&paths, sort.key_w)?)
+        MergeKind::V2(cbstore::loadsort::RunMergeV2::open_opts(&paths, sort.key_w, lz4)?)
     } else {
         MergeKind::V1(cbstore::loadsort::RunMerge::open(&paths, sort.key_w)?)
     };
@@ -1248,13 +1272,14 @@ fn merge_sorted_runs(
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
-        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch}",
+        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch} runlz4={}",
         paths.len(),
         match &merge {
             MergeKind::V1(_) => "v1",
             MergeKind::V2(_) => "v2",
         },
         fadv >> 20,
+        lz4 as u8,
     ));
 
     const RG: usize = cbstore::format::RG_ROWS;
@@ -1404,13 +1429,13 @@ fn merge_sorted_runs(
             // loadcommit C0: fill decomposition (advance = run read+decode
             // inside the merge; 0.00 unless PGRUST_PARALLEL_COPY_FILL_SPLIT=1;
             // heap/copy share = fill − advance).
-            let (adv_s, run_bytes) = match &merge {
+            let (adv_s, run_bytes, comp_bytes) = match &merge {
                 MergeKind::V1(m) => m.fill_stats(),
                 MergeKind::V2(m) => m.fill_stats(),
             };
             ptrace(&format!(
                 "sort merge pump done: fill {:.2}s send-block {:.2}s rows={n_rows} batches={sent} \
-                 fill split: advance {adv_s:.2}s runbytes={run_bytes}",
+                 fill split: advance {adv_s:.2}s runbytes={run_bytes} compbytes={comp_bytes}",
                 t_fill.as_secs_f64(),
                 t_send.as_secs_f64(),
             ));
