@@ -1071,10 +1071,10 @@ pub fn AlterSubscription<'mcx>(
             xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION ... REFRESH")?;
 
             // unported: AlterSubscription_refresh (walrcv connect)
-                return Err(err(
-                    "ALTER SUBSCRIPTION with refresh is not supported yet",
-                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
-                ));
+            return Err(err(
+                "ALTER SUBSCRIPTION with refresh is not supported yet",
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
 
         ALTER_SUBSCRIPTION_SKIP => {
