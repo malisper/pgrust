@@ -11655,7 +11655,9 @@ fn expr_location_list(l: &NodeList<'_>) -> i32 {
 }
 
 // exprLocation (nodeFuncs.c), the raw-node arms this grammar can produce;
-// anything else is a loud gap, not a silent -1.
+// C's default arm returns -1 ("just unknown"), and so does this — the only
+// caller builds error cursor positions, where a panic on an exotic ORDER BY
+// expression (e.g. CASE) would out-crash the real error.
 fn expr_location(n: Node<'_>) -> i32 {
     if let Some(sb) = n.as_sort_by() {
         expr_location_opt(sb.node)
@@ -11679,8 +11681,26 @@ fn expr_location(n: Node<'_>) -> i32 {
         leftmost_loc(loc, tc.location)
     } else if let Some(t) = n.as_type_name() {
         t.location
+    } else if let Some(ce) = n.as_case_expr() {
+        ce.location
+    } else if let Some(ce) = n.as_coalesce_expr() {
+        ce.location
+    } else if let Some(mm) = n.as_min_max_expr() {
+        mm.location
+    } else if let Some(sv) = n.as_sql_value_function() {
+        sv.location
+    } else if let Some(re) = n.as_row_expr() {
+        re.location
+    } else if let Some(ae) = n.as_a_array_expr() {
+        ae.location
+    } else if let Some(sl) = n.as_sub_link() {
+        leftmost_loc(expr_location_opt(sl.testexpr), sl.location)
+    } else if let Some(bt) = n.as_boolean_test() {
+        leftmost_loc(bt.location, expr_location_opt(bt.arg))
+    } else if let Some(cc) = n.as_collate_clause() {
+        expr_location_opt(cc.arg)
     } else {
-        panic!("gram_core: exprLocation arm unported for tag {:?}", n.node_tag())
+        -1
     }
 }
 
