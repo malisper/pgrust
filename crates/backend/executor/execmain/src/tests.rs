@@ -3952,3 +3952,356 @@ fn correlated_subplan_nested_initplan_null_and_refill_transitions() {
     assert_eq!(rows, vec![(10, None), (20, Some(20)), (30, None)]);
     scanfix::quiesced();
 }
+
+// =============================================================================
+// Row-mode facility A/B corpus (lanev2/rowmode.rs, PGRUST_LANE_V2_ROWMODE):
+// the ProjectSet <- childless Result shape (SELECT generate_series(...)
+// no-FROM) driven knob OFF (the unchanged exec_project_set body) vs knob ON
+// (the row-mode ResultRowSource -> ProjectSetOp pipeline) in one process —
+// same rows, same NULL padding, same errors at the same row, same rescan
+// behavior. Plus the childless-Result seam corpus (lane_result_childless_next
+// is the select1 hot path's moved body). Two-server byte-compare over psql
+// output = scripts/lane-rowmode-e2e.sh.
+// =============================================================================
+mod rowmode_ab {
+    use std::sync::Mutex;
+
+    use super::*;
+    use ::types_nodes::plannodes::ProjectSet as ProjectSetPlan;
+    use ::types_nodes::primnodes::FuncExpr;
+
+    const F_GENERATE_SERIES_INT4: u32 = 1067;
+    const F_GENERATE_SERIES_STEP_INT4: u32 = 1066;
+
+    /// The knob is process-global; every test that flips it holds this lock
+    /// and restores OFF (the default) before releasing.
+    static KNOB: Mutex<()> = Mutex::new(());
+
+    fn install_rowmode_seams() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // pg_proc rows for generate_series(int4,int4[,int4]) — the two
+            // canonical fmgr builtins the SRF corpus invokes.
+            syscache_seams::lookup_pg_proc_shape::set(|funcid| {
+                Ok(match funcid {
+                    F_GENERATE_SERIES_INT4 | F_GENERATE_SERIES_STEP_INT4 => {
+                        Some(syscache_seams::PgProcShape {
+                            pronamespace: 11,
+                            prorettype: INT4OID,
+                            provariadic: 0,
+                            prosupport: 0,
+                            prolang: 12,
+                            pronargs: if funcid == F_GENERATE_SERIES_INT4 { 2 } else { 3 },
+                            prokind: b'f' as i8,
+                            provolatile: b'i' as i8,
+                            proparallel: b's' as i8,
+                            proretset: true,
+                            proisstrict: true,
+                            proleakproof: false,
+                            prosecdef: false,
+                            proconfig_isnull: true,
+                        })
+                    }
+                    _ => None,
+                })
+            });
+            // get_type_func_class(INT4) -> Scalar for the SRF result type.
+            syscache_seams::pg_type_typtype::set(|typid| {
+                Ok((typid == INT4OID).then_some(b'b' as i8))
+            });
+        });
+    }
+
+    fn mk_null_int4_const(mcx: ::mcx::Mcx<'_>) -> Node<'_> {
+        Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::null(), true, true).unwrap()
+    }
+
+    fn mk_srf<'mcx>(mcx: ::mcx::Mcx<'mcx>, funcid: u32, args: NodeList<'mcx>) -> Node<'mcx> {
+        let mut fe = Node::build::<FuncExpr>(mcx).unwrap();
+        fe.funcid = funcid;
+        fe.funcresulttype = INT4OID;
+        fe.funcretset = true;
+        fe.args = args;
+        fe.seal()
+    }
+
+    fn mk_gs<'mcx>(mcx: ::mcx::Mcx<'mcx>, lo: i32, hi: i32) -> Node<'mcx> {
+        mk_srf(
+            mcx,
+            F_GENERATE_SERIES_INT4,
+            NodeList::make2(mcx, mk_int4_const(mcx, lo), mk_int4_const(mcx, hi)).unwrap(),
+        )
+    }
+
+    /// `SELECT <exprs...>` (no FROM, SRF in tlist): ProjectSet over the
+    /// childless Result — exactly the plan shape the planner emits and the
+    /// only one increment-1 admits.
+    fn mk_ps_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        exprs: &[Node<'mcx>],
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let rtle =
+            Node::mk_target_entry(mcx, mk_int4_const(mcx, 1), 1, Some("?column?"), false)
+                .unwrap();
+        let mut result = Node::build::<ResultPlan>(mcx).unwrap();
+        result.plan.targetlist = NodeList::make1(mcx, rtle).unwrap();
+
+        let mut tles: Vec<Node<'mcx>> = Vec::new();
+        for (i, e) in exprs.iter().enumerate() {
+            tles.push(
+                Node::mk_target_entry(mcx, *e, (i + 1) as i16, Some("?column?"), false)
+                    .unwrap(),
+            );
+        }
+        let mut tlist = NodeList::make1(mcx, tles[0]).unwrap();
+        for tle in &tles[1..] {
+            tlist.lappend(mcx, *tle).unwrap();
+        }
+        let mut pset = Node::build::<ProjectSetPlan>(mcx).unwrap();
+        pset.plan.targetlist = tlist;
+        pset.plan.lefttree = Some(result.seal());
+        let plan_node = pset.seal();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(plan_node);
+        pstmt.seal_ref()
+    }
+
+    /// Drive the plan to completion (or error), collecting per-row datum
+    /// columns; `rescan_after` re-scans once after that many fetched rows
+    /// and keeps collecting (the mid-expansion rescan probe).
+    fn run_ps(
+        pstmt: &'static PlannedStmt<'static>,
+        ncols: usize,
+        rescan_after: Option<usize>,
+    ) -> (Vec<Vec<Option<Datum>>>, Option<String>) {
+        with_exec_data(pstmt, |data, pstmt| {
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            let mut rows: Vec<Vec<Option<Datum>>> = Vec::new();
+            let mut rescan = rescan_after;
+            loop {
+                if rescan == Some(rows.len()) {
+                    rescan = None;
+                    exec_re_scan(&mut ps, &mut data.estate).unwrap();
+                }
+                match exec_proc_node(&mut ps, &mut data.estate) {
+                    Ok(Some(slot_id)) => {
+                        let base = data.estate.slot(slot_id).base();
+                        let row = (0..ncols)
+                            .map(|c| (!base.tts_isnull[c]).then(|| base.tts_values[c]))
+                            .collect();
+                        rows.push(row);
+                    }
+                    Ok(None) => return (rows, None),
+                    Err(e) => return (rows, Some(e.to_string())),
+                }
+            }
+        })
+    }
+
+    fn d(v: i32) -> Option<Datum> {
+        Some(Datum::from_i32(v))
+    }
+
+    /// One A/B round: build the SAME plan twice (fresh state per arm), run
+    /// knob OFF then knob ON, demand identical (rows, error) — and that the
+    /// ON arm actually engaged the row-mode drive.
+    fn ab(
+        mk: impl Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        ncols: usize,
+        rescan_after: Option<usize>,
+    ) -> (Vec<Vec<Option<Datum>>>, Option<String>) {
+        install_seams();
+        install_rowmode_seams();
+        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        crate::lanev2::rowmode_set_for_tests(false);
+        let off = run_ps(mk(leaked_mcx()), ncols, rescan_after);
+        crate::lanev2::rowmode_set_for_tests(true);
+        let owned_before =
+            crate::lanev2::ROWMODE_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        let on = run_ps(mk(leaked_mcx()), ncols, rescan_after);
+        let owned_after =
+            crate::lanev2::ROWMODE_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert!(owned_after > owned_before, "ON arm never engaged the row-mode drive");
+        off
+    }
+
+    #[test]
+    fn ab_generate_series_basic() {
+        let (rows, err) = ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3)]), 1, None);
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![vec![d(1)], vec![d(2)], vec![d(3)]]);
+    }
+
+    #[test]
+    fn ab_generate_series_empty_set() {
+        let (rows, err) = ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 0)]), 1, None);
+        assert_eq!(err, None);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn ab_two_srfs_null_padding() {
+        // Different lengths: the exhausted SRF pads with NULLs (C's
+        // ExecProjectSRF continuing arm).
+        let (rows, err) =
+            ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3), mk_gs(mcx, 10, 11)]), 2, None);
+        assert_eq!(err, None);
+        assert_eq!(
+            rows,
+            vec![vec![d(1), d(10)], vec![d(2), d(11)], vec![d(3), None]]
+        );
+    }
+
+    #[test]
+    fn ab_scalar_and_srf_mix() {
+        let (rows, err) = ab(
+            |mcx| mk_ps_pstmt(mcx, &[mk_int4_const(mcx, 42), mk_gs(mcx, 1, 2)]),
+            2,
+            None,
+        );
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![vec![d(42), d(1)], vec![d(42), d(2)]]);
+    }
+
+    #[test]
+    fn ab_strict_null_arg_empty_set() {
+        // generate_series is strict: a NULL arg yields the empty set (the
+        // ExecMakeFunctionResultSet strict arm), not a NULL row.
+        let (rows, err) = ab(
+            |mcx| {
+                let args =
+                    NodeList::make2(mcx, mk_null_int4_const(mcx), mk_int4_const(mcx, 3))
+                        .unwrap();
+                mk_ps_pstmt(mcx, &[mk_srf(mcx, F_GENERATE_SERIES_INT4, args)])
+            },
+            1,
+            None,
+        );
+        assert_eq!(err, None);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn ab_erroring_srf_same_error_same_row() {
+        // step=0 raises "step size cannot equal zero" on the first
+        // expansion call — zero rows out, identical error, both arms.
+        let (rows, err) = ab(
+            |mcx| {
+                let args = NodeList::make3(
+                    mcx,
+                    mk_int4_const(mcx, 1),
+                    mk_int4_const(mcx, 5),
+                    mk_int4_const(mcx, 0),
+                )
+                .unwrap();
+                mk_ps_pstmt(mcx, &[mk_srf(mcx, F_GENERATE_SERIES_STEP_INT4, args)])
+            },
+            1,
+            None,
+        );
+        assert!(rows.is_empty());
+        assert!(
+            err.as_deref().is_some_and(|e| e.contains("step size cannot equal zero")),
+            "expected the zero-step SRF error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ab_rescan_mid_expansion() {
+        // Rescan after one emitted row of a 3-row expansion: the SRF state
+        // (pending_srf_tuples, args_valid, fn_extra, elemdone) resets and
+        // the stream restarts from 1 — identical in both drives.
+        let (rows, err) = ab(|mcx| mk_ps_pstmt(mcx, &[mk_gs(mcx, 1, 3)]), 1, Some(1));
+        assert_eq!(err, None);
+        assert_eq!(
+            rows,
+            vec![vec![d(1)], vec![d(1)], vec![d(2)], vec![d(3)]]
+        );
+    }
+
+    #[test]
+    fn ab_early_stop_mid_expansion_teardown() {
+        // The LIMIT shape: stop pulling mid-expansion and tear down — no
+        // panic, no error, both arms (SRF cross-call state is node-owned;
+        // nothing in the lane needs unwinding).
+        install_seams();
+        install_rowmode_seams();
+        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        for on in [false, true] {
+            crate::lanev2::rowmode_set_for_tests(on);
+            let pstmt = mk_ps_pstmt(leaked_mcx(), &[mk_gs(leaked_mcx(), 1, 1000)]);
+            with_exec_data(pstmt, |data, pstmt| {
+                let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                    .unwrap()
+                    .unwrap();
+                let slot = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+                assert_eq!(data.estate.slot(slot).base().tts_values[0], Datum::from_i32(1));
+                // Walk away mid-expansion (pending_srf_tuples = true).
+            });
+        }
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+    }
+
+    /// The childless-Result seam corpus (lane_result_childless_next): the
+    /// rowmode knob does not gate Result, so this pins the CODE MOVE — the
+    /// moved body must behave exactly as the inline arm did on the shapes
+    /// the select1 hot path exercises (one row, drained tail, one-time
+    /// filter, rescan) with the knob in BOTH positions.
+    #[test]
+    fn childless_result_seam_knob_positions() {
+        install_seams();
+        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        for on in [false, true] {
+            crate::lanev2::rowmode_set_for_tests(on);
+            let mcx = leaked_mcx();
+            // SELECT 1: one row, value 1, drained, rescan re-emits.
+            let pstmt = mk_select1_pstmt(mcx, None);
+            with_exec_data(pstmt, |data, pstmt| {
+                let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                    .unwrap()
+                    .unwrap();
+                let slot_id = exec_proc_node(&mut ps, &mut data.estate).unwrap().unwrap();
+                assert_eq!(data.estate.slot(slot_id).base().tts_values[0], Datum::from_i32(1));
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+                exec_re_scan(&mut ps, &mut data.estate).unwrap();
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_some());
+            });
+            // One-time filter false: zero rows, stays drained.
+            let qual =
+                Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, false)).unwrap())
+                    .unwrap();
+            let pstmt = mk_select1_pstmt(mcx, Some(qual));
+            with_exec_data(pstmt, |data, pstmt| {
+                let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                    .unwrap()
+                    .unwrap();
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+            });
+            // One-time filter true: exactly one row.
+            let qual =
+                Node::mk_list(mcx, NodeList::make1(mcx, mk_bool_const(mcx, true)).unwrap())
+                    .unwrap();
+            let pstmt = mk_select1_pstmt(mcx, Some(qual));
+            with_exec_data(pstmt, |data, pstmt| {
+                let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                    .unwrap()
+                    .unwrap();
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_some());
+                assert!(exec_proc_node(&mut ps, &mut data.estate).unwrap().is_none());
+            });
+        }
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+    }
+}

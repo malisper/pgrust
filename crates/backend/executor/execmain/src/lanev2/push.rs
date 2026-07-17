@@ -594,6 +594,95 @@ where
     }
 }
 
+/// A row-mode leaf: produces at most one tuple per step (a singleton batch)
+/// — the row-mode mirror of `Source`, and the missing LEAF half of the
+/// row-mode operator contract `TupleOp` ratifies (see
+/// docs/design/rowmode-operators.md). Per-row cross-call state (done flags,
+/// probe cursors) is node-resident, and every implementation reuses its
+/// node's ported per-row body (code moves, not rewrites), so error unwind
+/// and interrupt cadence are the Volcano body's own.
+pub(super) trait RowSource<'mcx> {
+    type Node;
+    /// Produce the next tuple; `None` = exhausted. Replays the wrapped
+    /// Volcano body's own entry-CFI cadence (one per produced row).
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>>;
+}
+
+/// One PG pull over a row-mode pipeline: `RowSource` → `TupleOp` →
+/// `RootAdapter`. `pull_step_chain` minus the batch-staging layer — the
+/// source row IS the batch: resume a pending expansion BEFORE producing (the
+/// expansion's remainder exists only in the op's node-resident cursor), then
+/// produce → accept rounds until the capacity-one root pauses the pipeline
+/// or the source is exhausted (then `top.source_exhausted` → `root.finish`).
+/// Same `OpStatus` arms, same Paused-then-Finished rule, same debug_asserts
+/// as `pull_step_chain`.
+pub(super) fn pull_step_rows<'mcx, S>(
+    node: &mut S::Node,
+    src: &mut S,
+    top: &mut dyn TupleOp<'mcx>,
+    root: &mut RootAdapter,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>>
+where
+    S: RowSource<'mcx>,
+{
+    debug_assert!(root.buffered.is_none());
+    loop {
+        if top.pending() {
+            match top.resume(root, estate)? {
+                OpStatus::Paused => {
+                    let t = root.take();
+                    debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                    return Ok(t);
+                }
+                OpStatus::NeedInput => {}
+                OpStatus::Finished => {
+                    debug_assert!(root.buffered.is_none(), "Finished with a buffered tuple");
+                    root.finish(estate)?;
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(row) = src.next_row(node, estate)? else {
+            // The Finished-vs-more-phases seam, exactly as in
+            // `pull_step_chain`: a TupleOp with a post-exhaustion phase keeps
+            // producing into the root here.
+            match top.source_exhausted(root, estate)? {
+                OpStatus::Paused => {
+                    let t = root.take();
+                    debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                    return Ok(t);
+                }
+                _ => {
+                    debug_assert!(
+                        root.buffered.is_none(),
+                        "post-exhaustion phase done with a buffered tuple"
+                    );
+                    root.finish(estate)?;
+                    return Ok(None);
+                }
+            }
+        };
+        match top.accept(row, root, estate)? {
+            OpStatus::Paused => {
+                let t = root.take();
+                debug_assert!(t.is_some(), "TupleOp paused on a non-full root");
+                return Ok(t);
+            }
+            OpStatus::NeedInput => {}
+            OpStatus::Finished => {
+                debug_assert!(root.buffered.is_none(), "Finished with a buffered tuple");
+                root.finish(estate)?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
 /// `drain_pipeline` over a two-operator chain: run the whole feed (scan →
 /// upstream operator → `TupleOp` → breaker sink) to exhaustion, then
 /// `finish()` the sink. Breaker sinks never fill, so neither op ever pauses.
@@ -693,4 +782,229 @@ where
     }
     sink.combine(estate)?;
     sink.finish(estate)
+}
+
+// =============================================================================
+// Row-mode driver mechanics (pull_step_rows over stub source/op): the driver
+// contract itself — resume-before-produce ordering, Paused-then-Finished,
+// the source_exhausted seam, error propagation, and no-pull-past-exhaustion.
+// Byte-identity of the REAL faces (ResultRowSource / ProjectSetOp) is proven
+// by the A/B corpus in `crate::tests` and scripts/lane-rowmode-e2e.sh.
+// =============================================================================
+#[cfg(test)]
+mod rows_tests {
+    use super::*;
+
+    fn with_estate<R>(f: impl for<'m> FnOnce(&mut EStateData<'m>) -> R) -> R {
+        let mut exec = ::mcx::McxOwned::<crate::querydesc::ExecTy>::try_new(
+            ::mcx::MemoryContext::new_bump("push-rows-test"),
+            |mcx| {
+                Ok(crate::querydesc::ExecData {
+                    estate: EStateData::new_in(mcx),
+                    planstate: None,
+                })
+            },
+        )
+        .unwrap();
+        let r = exec.with_mut(|d| f(&mut d.estate));
+        exec.with_mut(|d| d.estate.teardown());
+        r
+    }
+
+    /// Node-resident stub state: the scripted rows + a produce-call counter.
+    struct StubNode {
+        rows: Vec<u32>,
+        next: usize,
+        produce_calls: usize,
+        error_at: Option<usize>,
+    }
+
+    struct StubSource;
+
+    impl<'mcx> RowSource<'mcx> for StubSource {
+        type Node = StubNode;
+        fn next_row(
+            &mut self,
+            node: &mut StubNode,
+            _estate: &mut EStateData<'mcx>,
+        ) -> PgResult<Option<ExecSlotId>> {
+            node.produce_calls += 1;
+            if node.error_at == Some(node.next) {
+                return Err(Box::new(::types_error::PgError::error(
+                    "stub row source error".to_string(),
+                )));
+            }
+            let Some(&id) = node.rows.get(node.next) else {
+                return Ok(None);
+            };
+            node.next += 1;
+            Ok(Some(ExecSlotId(id)))
+        }
+    }
+
+    /// Expanding stub: each accepted tuple emits `expand` copies; cross-call
+    /// remainder lives in `left` (the node-resident cursor stand-in), plus an
+    /// optional single-tuple post-exhaustion tail.
+    struct StubOp {
+        expand: usize,
+        left: usize,
+        cur: Option<ExecSlotId>,
+        tail: Option<ExecSlotId>,
+        tail_done: bool,
+    }
+
+    impl StubOp {
+        fn passthrough() -> StubOp {
+            StubOp { expand: 1, left: 0, cur: None, tail: None, tail_done: false }
+        }
+
+        fn emit_one<'mcx>(
+            &mut self,
+            out: &mut dyn Sink<'mcx>,
+            estate: &mut EStateData<'mcx>,
+        ) -> PgResult<OpStatus> {
+            self.left -= 1;
+            Ok(match out.accept(self.cur.expect("expansion tuple"), estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            })
+        }
+    }
+
+    impl<'mcx> TupleOp<'mcx> for StubOp {
+        fn pending(&self) -> bool {
+            self.left > 0
+        }
+
+        fn accept(
+            &mut self,
+            tuple: ExecSlotId,
+            out: &mut dyn Sink<'mcx>,
+            estate: &mut EStateData<'mcx>,
+        ) -> PgResult<OpStatus> {
+            assert_eq!(self.left, 0, "accept while an expansion pends");
+            self.cur = Some(tuple);
+            self.left = self.expand;
+            if self.left == 0 {
+                return Ok(OpStatus::NeedInput);
+            }
+            self.emit_one(out, estate)
+        }
+
+        fn resume(
+            &mut self,
+            out: &mut dyn Sink<'mcx>,
+            estate: &mut EStateData<'mcx>,
+        ) -> PgResult<OpStatus> {
+            assert!(self.left > 0, "resume without a pending expansion");
+            self.emit_one(out, estate)
+        }
+
+        fn source_exhausted(
+            &mut self,
+            out: &mut dyn Sink<'mcx>,
+            estate: &mut EStateData<'mcx>,
+        ) -> PgResult<OpStatus> {
+            match self.tail {
+                Some(t) if !self.tail_done => {
+                    self.tail_done = true;
+                    Ok(match out.accept(t, estate)? {
+                        SinkFeed::Full => OpStatus::Paused,
+                        SinkFeed::NeedMore => OpStatus::NeedInput,
+                    })
+                }
+                _ => Ok(OpStatus::Finished),
+            }
+        }
+    }
+
+    fn pull<'mcx>(
+        node: &mut StubNode,
+        op: &mut StubOp,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let mut root = RootAdapter::new(None);
+        pull_step_rows(node, &mut StubSource, op, &mut root, estate)
+    }
+
+    #[test]
+    fn rows_driver_delivers_each_row_then_exhausts() {
+        with_estate(|estate| {
+            let mut node =
+                StubNode { rows: vec![7, 8], next: 0, produce_calls: 0, error_at: None };
+            let mut op = StubOp::passthrough();
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(7)));
+            assert_eq!(node.produce_calls, 1, "capacity-one root: one produce per pull");
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(8)));
+            assert_eq!(node.produce_calls, 2);
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), None);
+            assert_eq!(node.produce_calls, 3, "EOF pull sees exhaustion exactly once");
+        });
+    }
+
+    #[test]
+    fn rows_driver_resumes_pending_expansion_before_producing() {
+        with_estate(|estate| {
+            let mut node =
+                StubNode { rows: vec![1, 2], next: 0, produce_calls: 0, error_at: None };
+            let mut op = StubOp { expand: 2, left: 0, cur: None, tail: None, tail_done: false };
+            // Pull 1: produce row 1, eat expansion tuple 1 of 2 (Paused).
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(1)));
+            assert_eq!(node.produce_calls, 1);
+            assert!(op.pending());
+            // Pull 2: the pending expansion resumes WITHOUT touching the
+            // source (its remainder exists only in the op's cursor).
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(1)));
+            assert_eq!(node.produce_calls, 1, "resume must not produce");
+            assert!(!op.pending());
+            // Pulls 3-4: row 2's expansion; pull 5: EOF.
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(2)));
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(2)));
+            assert_eq!(node.produce_calls, 2);
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn rows_driver_skips_empty_expansions() {
+        with_estate(|estate| {
+            // expand=0: every accepted tuple is filtered (NeedInput), so one
+            // pull walks the whole source to EOF.
+            let mut node =
+                StubNode { rows: vec![1, 2, 3], next: 0, produce_calls: 0, error_at: None };
+            let mut op = StubOp { expand: 0, left: 0, cur: None, tail: None, tail_done: false };
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), None);
+            assert_eq!(node.produce_calls, 4);
+        });
+    }
+
+    #[test]
+    fn rows_driver_source_exhausted_tail_obeys_paused_then_finished() {
+        with_estate(|estate| {
+            let mut node = StubNode { rows: vec![], next: 0, produce_calls: 0, error_at: None };
+            let mut op = StubOp {
+                expand: 1,
+                left: 0,
+                cur: None,
+                tail: Some(ExecSlotId(99)),
+                tail_done: false,
+            };
+            // The tail tuple is delivered via Paused; only the NEXT pull's
+            // (idempotent) seam call reports Finished.
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(99)));
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn rows_driver_propagates_source_errors() {
+        with_estate(|estate| {
+            let mut node =
+                StubNode { rows: vec![5, 6], next: 0, produce_calls: 0, error_at: Some(1) };
+            let mut op = StubOp::passthrough();
+            assert_eq!(pull(&mut node, &mut op, estate).unwrap(), Some(ExecSlotId(5)));
+            let err = pull(&mut node, &mut op, estate).unwrap_err();
+            assert!(err.to_string().contains("stub row source error"));
+        });
+    }
 }
