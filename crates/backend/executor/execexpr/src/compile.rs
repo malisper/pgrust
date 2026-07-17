@@ -88,6 +88,18 @@ fn unported(what: &str) -> ! {
     panic!("execexpr: {what} not ported")
 }
 
+// unported: user-reachable unported-feature legs raise a clean
+// ERRCODE_FEATURE_NOT_SUPPORTED error instead of panicking; invariant breaks
+// keep the loud `unported` panic above.
+#[cold]
+#[inline(never)]
+fn feature_unported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{what} is not yet implemented"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 // C ExprEvalPushStep's growth shape: 16 steps up front (new_in), doubling.
 #[inline(always)]
 pub(crate) fn push_step(state: &mut ExprState<'_>, mcx: Mcx<'_>, step: Step) -> PgResult<()> {
@@ -569,15 +581,20 @@ pub fn exec_build_agg_trans_plain_masked<'mcx>(
 }
 
 // The tag proves the FmNodePtr is an AggStateNode (WindowAgg passes None).
-fn agg_state_node(agg_node: FmNodePtr) -> NonNull<::types_fmgr::AggStateNode> {
-    let p = agg_node
-        .unwrap_or_else(|| unported("by-ref transtype without an AggState (nodeWindowAgg lane)"));
+fn agg_state_node(agg_node: FmNodePtr) -> PgResult<NonNull<::types_fmgr::AggStateNode>> {
+    let Some(p) = agg_node else {
+        // unported: by-ref transtype without an AggState (nodeWindowAgg lane).
+        return Err(feature_unported(
+            "aggregate with a by-reference transition type outside an Agg node \
+             (nodeWindowAgg lane)",
+        ));
+    };
     // SAFETY: build-time read of the caller's live node header.
     assert!(
         unsafe { p.as_ref().tag } == ::types_fmgr::T_AGG_STATE,
         "build_agg_trans: by-ref trans context is not an AggStateNode"
     );
-    p.cast()
+    Ok(p.cast())
 }
 
 fn build_agg_trans<'mcx>(
@@ -765,6 +782,13 @@ fn build_agg_trans_masked<'mcx>(
             bailout = Some(state.steps.len());
             push_step(&mut state, mcx, step)?;
         }
+        // By-ref trans steps (and AggSetCurrent) need the AggState; resolve it
+        // once up front so the unported nodeWindowAgg lane errors cleanly.
+        let byref_agg = if !spec.transtype_byval || spec.cur_agg.is_some() {
+            Some(agg_state_node(agg_node)?)
+        } else {
+            None
+        };
         // One fixed-pergroup step (byval or by-ref) — Fixed and per-set modes.
         let fixed_step = |pergroup: NonNull<AggPerGroup>| -> Step {
             if spec.transtype_byval {
@@ -775,7 +799,7 @@ fn build_agg_trans_masked<'mcx>(
                 }
             } else {
                 let byref = crate::steps::AggByRef {
-                    agg: agg_state_node(agg_node),
+                    agg: byref_agg.expect("by-ref transtype resolved the AggState above"),
                     translen: spec.transtype_len,
                 };
                 match (fn_strict, spec.init_value_is_null) {
@@ -804,7 +828,7 @@ fn build_agg_trans_masked<'mcx>(
                 }
             } else {
                 let byref = crate::steps::AggByRef {
-                    agg: agg_state_node(agg_node),
+                    agg: byref_agg.expect("by-ref transtype resolved the AggState above"),
                     translen: spec.transtype_len,
                 };
                 let transno = transno as u16;
@@ -823,7 +847,11 @@ fn build_agg_trans_masked<'mcx>(
             push_step(
                 &mut state,
                 mcx,
-                Step::AggSetCurrent { agg: agg_state_node(agg_node), aggref, shared },
+                Step::AggSetCurrent {
+                    agg: byref_agg.expect("cur_agg resolved the AggState above"),
+                    aggref,
+                    shared,
+                },
             )?;
         }
         match &mode {
@@ -2135,10 +2163,12 @@ pub(crate) fn init_expr_rec<'mcx>(
                 };
                 push_step(state, mcx, Step::CaseTestVal { slot, out })
             }
-            None => unported(
-                "EEOP_CASE_TESTVAL_EXT (externally supplied econtext caseValue — \
-                 domain checks / ArrayCoerceExpr)",
-            ),
+            // unported: EEOP_CASE_TESTVAL_EXT (externally supplied econtext
+            // caseValue — domain checks / ArrayCoerceExpr).
+            None => Err(feature_unported(
+                "CaseTestExpr with an externally supplied test value \
+                 (domain checks over ArrayCoerceExpr)",
+            )),
         },
         NodeTag::T_NullTest => {
             use ::types_nodes::primnodes::NullTestType;
@@ -2321,9 +2351,11 @@ pub(crate) fn init_expr_rec<'mcx>(
         NodeTag::T_CoerceToDomain => init_coerce_to_domain(node, state, mcx, out, agg, params, sub),
         NodeTag::T_CoerceToDomainValue => match state.innermost_domain {
             Some(src) => push_step(state, mcx, Step::DomainTestval { src, out }),
-            None => unported(
-                "EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside a domain-check compile)",
-            ),
+            // unported: EEOP_DOMAIN_TESTVAL_EXT (CoerceToDomainValue outside
+            // a domain-check compile).
+            None => Err(feature_unported(
+                "VALUE reference outside a domain check constraint",
+            )),
         },
         // Each arg evaluates into the result slot; a non-null short-circuits.
         NodeTag::T_CoalesceExpr => {
@@ -2472,7 +2504,8 @@ fn init_array_expr<'mcx>(
     sub: Option<SubplanCompileEnv>,
 ) -> PgResult<Step> {
     if arr.multidims {
-        unported("EEOP_ARRAYEXPR multidimensional leg");
+        // unported: EEOP_ARRAYEXPR multidimensional leg.
+        return Err(feature_unported("multidimensional ARRAY[] expressions"));
     }
     let nelems = arr.elements.len();
     let (elmlen, elmbyval, elmalign) = lsyscache::get_typlenbyvalalign(arr.element_typeid)?;
@@ -2701,9 +2734,12 @@ fn init_subscripting_ref<'mcx>(
             Some("hstore_subscript_handler") => {
                 return init_hstore_subscripting_ref(node, state, mcx, out, agg, params, sub)
             }
-            _ => unported(&format!(
-                "SubscriptingRef handler {typsubscript} (ExecInitSubscriptingRef)"
-            )),
+            // unported: non-core SubscriptingRef handler (ExecInitSubscriptingRef).
+            _ => {
+                return Err(feature_unported(&format!(
+                    "subscripting via handler function {typsubscript}"
+                )))
+            }
         }
     }
     let is_assignment = sbsref.refassgnexpr.is_some();
@@ -2889,7 +2925,10 @@ fn init_jsonb_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            unported("jsonb_subscript_fetch_old (EEOP_SBSREF_OLD, jsonbsubs.c)");
+            // unported: jsonb_subscript_fetch_old (EEOP_SBSREF_OLD, jsonbsubs.c).
+            return Err(feature_unported(
+                "jsonb subscripted assignment referencing the old element",
+            ));
         }
         let replace_slot = unsafe {
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))
@@ -2956,7 +2995,10 @@ fn init_hstore_subscripting_ref<'mcx>(
     if is_assignment {
         let assgn = sbsref.refassgnexpr.unwrap();
         if assgn_needs_old(assgn) {
-            unported("hstore subscripted assignment referencing the old element (no sbs_fetch_old, hstore_subs.c)");
+            // unported: no sbs_fetch_old (EEOP_SBSREF_OLD, hstore_subs.c).
+            return Err(feature_unported(
+                "hstore subscripted assignment referencing the old element",
+            ));
         }
         let replace_slot = unsafe {
             NonNull::new_unchecked(core::ptr::addr_of_mut!((*stp.as_ptr()).replace))

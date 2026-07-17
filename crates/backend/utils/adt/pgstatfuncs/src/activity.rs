@@ -1,6 +1,6 @@
 use ::datum::Datum;
 use ::types_core::{BackendType, Oid, ProcNumber, INVALID_PROC_NUMBER};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use backend_status_seams::BackendState;
@@ -34,6 +34,17 @@ pub(crate) fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::stora
     procs
         .iter()
         .find(|p| p.pid.load(core::sync::atomic::Ordering::Relaxed) == pid && pid != 0)
+}
+
+#[cold]
+#[inline(never)]
+fn inet_datum_unported(func: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "{func}: reporting an inet client address is not yet implemented"
+        ))
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 pub fn fc_pg_stat_get_activity(
@@ -181,10 +192,10 @@ pub fn fc_pg_stat_get_activity(
                 nulls[14] = true;
             } else {
                 match ss_family(&be.st_clientaddr.addr) {
-                    f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => panic!(
-                        "pg_stat_get_activity (pgstatfuncs.c): inet client_addr \
-                         datum unported — adt network lane"
-                    ),
+                    // unported: inet client_addr datum — adt network lane.
+                    f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => {
+                        return Err(inet_datum_unported("pg_stat_get_activity"))
+                    }
                     f if f == libc::AF_UNIX as i32 => {
                         nulls[12] = true;
                         nulls[13] = true;
@@ -241,10 +252,14 @@ pub fn fc_pg_stat_get_activity(
             }
 
             if be.st_gss {
-                panic!(
-                    "pg_stat_get_activity (pgstatfuncs.c): PgBackendGSSStatus \
-                     unported — gssapi lane"
-                );
+                // unported: PgBackendGSSStatus — gssapi lane.
+                return Err(Box::new(
+                    PgError::error(
+                        "pg_stat_get_activity over a GSSAPI-authenticated backend \
+                         is not yet implemented",
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
             }
             values[25] = Datum::from_bool(false);
             nulls[26] = true;

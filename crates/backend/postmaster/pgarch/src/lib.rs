@@ -163,10 +163,22 @@ fn load_archive_library() -> PgResult<ArchiveModule> {
         both_archive_params_error("LoadArchiveLibrary")?;
     }
     if !lib.is_empty() {
-        panic!(
-            "archive_library \"{lib}\": loadable archive modules not ported \
-             (backend-postmaster-pgarch shell arm only)"
-        );
+        // Loadable archive modules are unported; only the shell
+        // archive_command arm exists. This must be an ERROR-channel FATAL,
+        // not a Rust panic: the caller fatal_exits (status 1), which the
+        // reaper accepts as a normal archiver exit (C CleanupBackend treats
+        // 0 and 1 alike for the archiver) — matching C, where a bad
+        // archive_library FATALs the archiver and the postmaster relaunches
+        // it. A panic here instead maps to WTERMSIG(SIGABRT) at the thread
+        // boundary and HandleChildCrash cycles the whole cluster, re-fired
+        // on every relaunch (crash loop).
+        ereport(FATAL)
+            .errmsg(format!(
+                "archive_library \"{lib}\": loadable archive modules not ported \
+                 (backend-postmaster-pgarch shell arm only)"
+            ))
+            .errdetail("Unset \"archive_library\" or use \"archive_command\" instead.")
+            .finish(loc("LoadArchiveLibrary"))?;
     }
     ipc::before_shmem_exit(pgarch_call_module_shutdown_cb, datum::Datum::null())?;
     Ok(ArchiveModule::Shell)

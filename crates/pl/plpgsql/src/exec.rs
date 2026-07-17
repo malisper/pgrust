@@ -133,6 +133,12 @@ struct PlanEntry {
     // the ensure_plan probe first, so revalidation only ever sees the tables
     // of the in-flight execution.
     hooks: std::rc::Rc<HookSnapshot>,
+    // C PLpgSQL_expr's expr_simple_* fields (pl_exec.c): the compiled
+    // simple-expression fast path, FUNCTION lifetime like C's (C stores it
+    // in the function's AST; the side table keeps the shared AST immutable).
+    // Dropped with the entry (re-prepare, free_function_plans), so a Ready
+    // state implies its SPI plan and plansource are live.
+    simple: SimpleState,
 }
 
 struct HookSnapshot {
@@ -206,14 +212,22 @@ std::thread_local! {
 }
 
 pub fn free_function_plans(expr_ids: &[u32]) {
-    EXPR_PLANS.with(|t| {
+    // Entries drop outside the borrow: SimpleExpr::drop releases plan pins
+    // and fn_extra memos (arbitrary drop code must not run under the map's
+    // RefCell borrow).
+    let entries: Vec<PlanEntry> = EXPR_PLANS.with(|t| {
         let mut t = t.borrow_mut();
-        for id in expr_ids {
-            if let Some(e) = t.remove(id) {
-                spi::SPI_freeplan(e.plan);
-            }
-        }
+        expr_ids.iter().filter_map(|id| t.remove(id)).collect()
     });
+    for e in entries {
+        let PlanEntry { plan, simple, .. } = e;
+        // Release the simple-expr plan pin before its plansource goes away
+        // with the SPI plan (the reverse order is still safe — plancache
+        // tombstones a dropped source while refcounted plans survive — but
+        // this keeps the common path off the tombstone lane).
+        drop(simple);
+        spi::SPI_freeplan(plan);
+    }
     CALL_TARGETS.with(|t| {
         let mut t = t.borrow_mut();
         for id in expr_ids {
@@ -222,12 +236,184 @@ pub fn free_function_plans(expr_ids: &[u32]) {
     });
 }
 
+// C PLpgSQL_expr expr_simple_expr/expr_simple_state lifecycle states.
+enum SimpleState {
+    /// Simplicity not yet determined (C: exec_simple_check_plan not run;
+    /// here the check is deferred to the first evaluation, as before).
+    Unknown,
+    /// Determined not simple (C: expr_simple_expr left NULL, permanently —
+    /// pl_exec.c:6036 returns false without ever rechecking).
+    NotSimple,
+    /// Compiled and idle, ready to evaluate.
+    Ready(Box<SimpleExpr>),
+    /// Taken out by an in-flight evaluation or (re)build (C
+    /// expr_simple_in_use, pl_exec.c:6042): a re-entrant evaluation of the
+    /// same expression — recursion via a function called inside it — takes
+    /// the SPI path instead. C also uses the flag to quarantine a tree whose
+    /// evaluation was aborted by an error until the next transaction
+    /// (pl_exec.c:6004-6008); here an error unwind simply never puts the
+    /// taken state back, and the next use rebuilds from the plan.
+    InUse,
+}
+
+// The compiled simple-expression fast path for one expression (C
+// PLpgSQL_expr.expr_simple_state + expr_simple_plan/plansource + the type
+// fields exec_save_simple_expr stashes, pl_exec.c:8336-8350).
+//
+// Lifetime: FUNCTION-scoped, revalidated per evaluation. C re-pins the plan
+// per transaction (expr_simple_plan_lxid + the resowner arm of
+// CachedPlanIsSimplyValid, pl_exec.c:6060-6070) because its pins live in a
+// transaction-lifetime resowner, and rebuilds the ExprState per transaction
+// (expr_simple_lxid, pl_exec.c:6172) because its memory home — the shared
+// simple_eval_estate — dies at transaction end (plpgsql_xact_cb,
+// pl_exec.c:8701). Neither constraint exists here: the plan pin is a manual
+// refcount and the program owns its memory (`ctx`), so both survive until
+// CachedPlanIsSimplyValid fails. That check runs before EVERY evaluation
+// (pl_exec.c:6060) and covers everything the compile bakes in: source and
+// plan validity reflect relcache invals plus PROCOID/TYPEOID invalItems
+// (inlined-function redefinition, ALTER DOMAIN constraint changes — see
+// plancache "CoerceToDomain a TYPEOID" dependency note), and the
+// search_path match is checked exactly as C does.
 struct SimpleExpr {
+    // Identity of the SPI plan this was built from; put_simple() refuses to
+    // reinstall a state whose plan entry was re-prepared mid-evaluation.
+    plan: SpiPlanPtr,
     state: mcx::PgBox<'static, execexpr::ExprState<'static>>,
     cplan: types_portal::CachedPlanHandle,
     psrc: plancache::CachedPlanSourceHandle,
     rettype: Oid,
     rettypmod: i32,
+    // C expr_simple_mutable (exec_save_simple_expr, pl_exec.c:8349): only
+    // expressions containing mutable functions need the CCI + fresh-snapshot
+    // ceremony per evaluation (pl_exec.c:6198-6204).
+    mutable: bool,
+    // Datum sources for the compiled program, replayed before each eval.
+    paramnos: Vec<Dno>,
+    // Stable param image whose slot addresses are baked into the compiled
+    // ParamExtern steps (C instead reads params at eval time through the
+    // per-estate econtext, pl_exec.c:6154-6164; a per-expression image is
+    // equivalent because the InUse gate serializes evaluations of this
+    // program, and every evaluation rewrites its paramnos first).
+    param_buf: Box<[ParamExternData]>,
+    // Owns every allocation `state` points into; declared last so it drops
+    // after `state` (C: the state dies with simple_eval_estate's context).
+    ctx: Ctx,
+}
+
+impl Drop for SimpleExpr {
+    fn drop(&mut self) {
+        // fn_extra memos are real heap boxes released only here — arena
+        // teardown never runs them (FuncFrame::new_in's contract; the
+        // memleak4 estate-reset lesson).
+        self.state.release_frames();
+        // A FATAL mid-evaluation unwinds a stack-held (taken-out) state
+        // AFTER proc_exit's callbacks force-cleared the plancache
+        // (ReleaseAllCachedPlansAtExit); releasing then would be a
+        // stale-handle panic INSIDE the unwind (abort). The thread is
+        // exiting — the pin bookkeeping is already gone with the cache.
+        if !elog::config::proc_exit_inprogress() {
+            plancache::ReleaseCachedPlan(self.cplan);
+        }
+    }
+}
+
+std::thread_local! {
+    // One-shot registration flag for the backend-exit release below.
+    static SIMPLE_EXIT_RELEASE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+// Backend-exit release of every compiled simple expression's plan pin.
+// Registered when the first Ready state is created, i.e. strictly AFTER
+// plancache's InitPlanCache registered ReleaseAllCachedPlansAtExit; the
+// on_proc_exit list drains LIFO, so this runs FIRST — before the plancache
+// force-clears its slots. Without it, EXPR_PLANS' thread-local destructor
+// would ReleaseCachedPlan into an already-cleared plancache (stale-handle
+// panic; TLS destructor order across crates is not a lifecycle).
+fn release_simple_states_at_exit(_code: i32, _arg: usize) {
+    let orphans: Vec<SimpleState> = EXPR_PLANS.with(|t| {
+        let mut t = t.borrow_mut();
+        t.values_mut()
+            .map(|e| core::mem::replace(&mut e.simple, SimpleState::Unknown))
+            .collect()
+    });
+    // Drops (plan pins, fn_extra) run outside the map borrow, plancache
+    // still intact.
+    drop(orphans);
+}
+
+fn register_simple_exit_release() {
+    SIMPLE_EXIT_RELEASE.with(|c| {
+        if !c.get() {
+            // installed() guard: unit-test rigs run without ipc.
+            if ipc_seams::on_proc_exit::is_installed() {
+                ipc_seams::on_proc_exit::call(release_simple_states_at_exit, 0);
+            }
+            c.set(true);
+        }
+    });
+}
+
+// Take the expression's simple state for evaluation, leaving InUse behind
+// (C expr_simple_in_use = true). `take_unknown` gates whether an
+// undetermined expression may proceed to a build: only the post-ensure_plan
+// caller may build (the plan probe there refreshes stale hook tables first).
+enum SimpleTake {
+    /// Not eligible right now: no entry, not simple, or already in use.
+    Skip,
+    Ready(Box<SimpleExpr>),
+    /// Undetermined; caller owns the build. Carries what the build needs so
+    /// no second map borrow is required.
+    Build { plan: SpiPlanPtr, paramnos: Vec<Dno>, argtypes: Vec<Oid> },
+}
+
+fn take_simple(expr_id: u32, take_unknown: bool) -> SimpleTake {
+    EXPR_PLANS.with(|t| {
+        let mut t = t.borrow_mut();
+        let Some(e) = t.get_mut(&expr_id) else {
+            return SimpleTake::Skip;
+        };
+        match e.simple {
+            SimpleState::NotSimple | SimpleState::InUse => SimpleTake::Skip,
+            SimpleState::Ready(_) => {
+                let SimpleState::Ready(se) =
+                    core::mem::replace(&mut e.simple, SimpleState::InUse)
+                else {
+                    unreachable!()
+                };
+                SimpleTake::Ready(se)
+            }
+            SimpleState::Unknown => {
+                if !take_unknown {
+                    return SimpleTake::Skip;
+                }
+                e.simple = SimpleState::InUse;
+                SimpleTake::Build {
+                    plan: e.plan,
+                    paramnos: e.paramnos.clone(),
+                    argtypes: e.argtypes.clone(),
+                }
+            }
+        }
+    })
+}
+
+// Put a taken state back (C expr_simple_in_use = false). If the entry was
+// re-prepared or freed while the evaluation ran (a nested SPI evaluation of
+// the same expression can do both), the taken state is orphaned: dropping it
+// releases its pin, and the new entry redetermines from scratch.
+fn put_simple(expr_id: u32, plan: SpiPlanPtr, state: SimpleState) {
+    let orphan = EXPR_PLANS.with(|t| {
+        let mut t = t.borrow_mut();
+        if let Some(e) = t.get_mut(&expr_id) {
+            if e.plan == plan && matches!(e.simple, SimpleState::InUse) {
+                e.simple = state;
+                return None;
+            }
+        }
+        Some(state)
+    });
+    // Foreign drop code (plan pins, fn_extra) runs outside the map borrow.
+    drop(orphan);
 }
 
 struct CastEntry {
@@ -266,10 +452,6 @@ pub struct Estate<'a> {
     pub exitlabel: Option<String>,
     pub readonly_func: bool,
     pub atomic: bool,
-    // Stable param image for compiled expressions (address baked into
-    // cached ExprStates; the Box never moves while cached states live).
-    param_buf: Box<[ParamExternData]>,
-    simple_cache: FxHashMap<u32, Option<SimpleExpr>>,
     cast_cache: FxHashMap<(Oid, i32, Oid, i32), CastEntry>,
     // Invocation-lifetime var values (C's "procedure" context).
     datum_ctx: Ctx,
@@ -417,31 +599,31 @@ pub(crate) fn exec_err(code: SqlState, msg: String) -> Box<PgError> {
     Box::new(elog::ereport(ERROR).errcode(code).errmsg(msg).into_error())
 }
 
-impl Drop for Estate<'_> {
-    fn drop(&mut self) {
-        for (_, e) in self.simple_cache.drain() {
-            if let Some(se) = e {
-                plancache::ReleaseCachedPlan(se.cplan);
-            }
-        }
-    }
+// The compiled-param safety check's report (plpgsql_param_eval_recfield /
+// plpgsql_param_eval_generic, pl_exec.c:6798-6803): paramid is dno+1.
+#[cold]
+fn param_type_mismatch(dno: Dno, current: Oid, planned: Oid) -> Box<PgError> {
+    let cur = format_type::format_type_be(current)
+        .unwrap_or_else(|_| format!("type {current}"));
+    let plan = format_type::format_type_be(planned)
+        .unwrap_or_else(|_| format!("type {planned}"));
+    exec_err(
+        types_error::ERRCODE_DATATYPE_MISMATCH,
+        format!(
+            "type of parameter {} ({cur}) does not match that when preparing the plan ({plan})",
+            dno + 1
+        ),
+    )
 }
 
 impl<'a> Estate<'a> {
     pub fn new(func: &'a PlFunction, readonly_func: bool, atomic: bool) -> Estate<'a> {
         let mut datums = Vec::with_capacity(func.datums.len());
-        let mut param_buf = Vec::with_capacity(func.datums.len());
         for d in &func.datums {
             datums.push(match d {
                 PlDatum::Var(_) => DatumVal::Var { value: Datum::null(), isnull: true },
                 PlDatum::Rec(_) => DatumVal::Rec(None),
                 _ => DatumVal::None,
-            });
-            param_buf.push(ParamExternData {
-                value: Datum::null(),
-                isnull: true,
-                pflags: 0,
-                ptype: types_core::InvalidOid,
             });
         }
         Estate {
@@ -460,8 +642,6 @@ impl<'a> Estate<'a> {
             exitlabel: None,
             readonly_func,
             atomic,
-            param_buf: param_buf.into_boxed_slice(),
-            simple_cache: FxHashMap::default(),
             cast_cache: FxHashMap::default(),
             datum_ctx: Ctx::new("PLpgSQL per-invocation values"),
             eval_ctx: Ctx::new("PLpgSQL eval scratch"),
@@ -585,17 +765,18 @@ impl<'a> Estate<'a> {
             // invalidation landing after the probe (lock-time sinval) is
             // covered by the installed reanalyze_plpgsql_expr hook instead.
             Some(true) => {
-                // Release this estate's simple-expr pin before the source is
-                // dropped (handles are generation-checked; a stale probe
-                // panics). Other in-flight estates of the same function would
-                // still hold stale pins — loud, not silent, if ever hit.
-                if let Some(Some(se)) = self.simple_cache.remove(&expr.expr_id) {
-                    plancache::ReleaseCachedPlan(se.cplan);
-                }
+                // Re-prepare: the whole entry goes, including any compiled
+                // simple expression riding it — its pin is on the source
+                // being dropped (handles are generation-checked; the entry
+                // invariant is "a Ready state implies its entry is live").
+                // An in-flight evaluation of this expression (InUse) keeps
+                // its own pin and put_simple() orphan-drops it on return.
                 if let Some(e) =
                     EXPR_PLANS.with(|t| t.borrow_mut().remove(&expr.expr_id))
                 {
-                    let _ = spi::SPI_freeplan(e.plan);
+                    let PlanEntry { plan, simple, .. } = e;
+                    drop(simple);
+                    let _ = spi::SPI_freeplan(plan);
                 }
             }
             None => {}
@@ -657,9 +838,14 @@ impl<'a> Estate<'a> {
             valueless,
             resolve_option,
         });
-        EXPR_PLANS.with(|t| {
-            t.borrow_mut().insert(expr.expr_id, PlanEntry { plan, paramnos, argtypes, hooks })
+        let old = EXPR_PLANS.with(|t| {
+            t.borrow_mut().insert(
+                expr.expr_id,
+                PlanEntry { plan, paramnos, argtypes, hooks, simple: SimpleState::Unknown },
+            )
         });
+        debug_assert!(old.is_none(), "ensure_plan: stale path removed the old entry");
+        drop(old);
         Ok(())
     }
 
@@ -916,30 +1102,42 @@ impl<'a> Estate<'a> {
         Ok(None)
     }
 
-    // setup_param_list: write current datum values for the plan's paramnos
-    // into the stable buffer, returning (values, nulls) views for SPI.
+    // setup_param_list: current datum values for the plan's paramnos as
+    // (values, nulls) views for SPI. (The compiled simple-expression path
+    // keeps its own stable param image instead — SimpleExpr::param_buf.)
     fn setup_params(&mut self, entry_paramnos: &[Dno], argtypes: &[Oid]) -> PgResult<(Vec<Datum>, Vec<bool>)> {
         let n = argtypes.len();
         let mut values = vec![Datum::null(); n];
         let mut nulls = vec![true; n];
         for &dno in entry_paramnos {
-            let (v, isnull) = self.datum_as_param(dno)?;
+            let (v, isnull) = self.datum_as_param(dno, Some(argtypes[dno as usize]))?;
             values[dno as usize] = v;
             nulls[dno as usize] = isnull;
-            let slot = &mut self.param_buf[dno as usize];
-            slot.value = v;
-            slot.isnull = isnull;
-            slot.ptype = argtypes[dno as usize];
-            slot.pflags = types_portal::params::PARAM_FLAG_CONST;
         }
         Ok((values, nulls))
     }
 
-    fn datum_as_param(&mut self, dno: Dno) -> PgResult<(Datum, bool)> {
+    // `planned` = the Param's type as of plan preparation. C's compiled
+    // param steps re-check the datum's CURRENT type on every evaluation for
+    // record and record-field datums — they can change type under a cached
+    // plan (ALTER TABLE beneath %ROWTYPE) — and error rather than misread
+    // the datum (plpgsql_param_eval_recfield / _generic "safety check",
+    // pl_exec.c:6797/6838). Plain Vars take C's unchecked fast path
+    // (plpgsql_param_eval_var). None = caller is not a plan-param seam.
+    fn datum_as_param(&mut self, dno: Dno, planned: Option<Oid>) -> PgResult<(Datum, bool)> {
         let func = self.func;
         match &func.datums[dno as usize] {
             PlDatum::Var(_) => Ok(self.get_var(dno)),
-            PlDatum::Rec(_) => self.rec_as_composite_datum(dno),
+            PlDatum::Rec(r) => {
+                if let Some(planned) = planned {
+                    // C exec_eval_datum's REC arm reports rec->rectypeid.
+                    let current = self.rec_meta(r.dno).rectypeid;
+                    if current != planned {
+                        return Err(param_type_mismatch(dno, current, planned));
+                    }
+                }
+                self.rec_as_composite_datum(dno)
+            }
             PlDatum::RecField(f) => {
                 if matches!(&self.datums[f.recparentno as usize], DatumVal::Rec(None))
                     && self.rec_meta(f.recparentno).rectypeid != RECORDOID
@@ -950,6 +1148,14 @@ impl<'a> Estate<'a> {
                     let want = f.fieldname.to_ascii_lowercase();
                     for (i, n) in rv.desc.names.iter().enumerate() {
                         if !rv.desc.dropped[i] && *n == want {
+                            if let Some(planned) = planned {
+                                // plpgsql_param_eval_recfield's per-eval
+                                // safety check (pl_exec.c:6797).
+                                let current = rv.desc.types[i];
+                                if current != planned {
+                                    return Err(param_type_mismatch(dno, current, planned));
+                                }
+                            }
                             return Ok((rv.values[i], rv.nulls[i]));
                         }
                     }
@@ -981,6 +1187,18 @@ impl<'a> Estate<'a> {
     // exec_eval_expr: returns (value, isnull, rettype, rettypmod). Caller
     // must exec_eval_cleanup when done with a by-ref result.
     pub fn exec_eval_expr(&mut self, expr: &PlExpr) -> PgResult<(Datum, bool, Oid, i32)> {
+        // Steady state first, before any plan-cache traffic: C's
+        // exec_eval_expr (pl_exec.c:5673) prepares the plan once per
+        // function lifetime and exec_eval_simple_expr revalidates with
+        // CachedPlanIsSimplyValid alone — no GetCachedPlan, no
+        // RevalidateCachedQuery, no reanalysis probe. The probe below runs
+        // only when this misses (first use, invalidation, search_path
+        // change, recursion, not-simple), which is also when its hook-table
+        // refresh is actually needed.
+        if let Some(r) = self.exec_eval_simple_fast(expr)? {
+            return Ok(r);
+        }
+
         self.ensure_plan(expr, CURSOR_OPT_PARALLEL_OK)?;
 
         if let Some(r) = self.exec_eval_simple_expr(expr)? {
@@ -1036,143 +1254,261 @@ impl<'a> Estate<'a> {
         Ok((v, isnull, rettype, rettypmod))
     }
 
+    // Steady-state arm of exec_eval_simple_expr: evaluate through an
+    // existing Ready state, touching no plan-cache machinery beyond the
+    // per-eval CachedPlanIsSimplyValid gate (C pl_exec.c:6060). Ok(None) =
+    // fall to the slow path (which starts with the ensure_plan probe).
+    fn exec_eval_simple_fast(
+        &mut self,
+        expr: &PlExpr,
+    ) -> PgResult<Option<(Datum, bool, Oid, i32)>> {
+        let se = match take_simple(expr.expr_id, false) {
+            SimpleTake::Ready(se) => se,
+            SimpleTake::Skip | SimpleTake::Build { .. } => return Ok(None),
+        };
+        // Every exit below must restore the InUse slot (an error leaving it
+        // InUse would silently demote this expression to SPI forever).
+        match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
+            Ok(true) => self.eval_simple_taken(expr, se).map(Some),
+            // C's replan arm resets to "not simple" and rebuilds in place
+            // (pl_exec.c:6072-6142); here the slow path redetermines after
+            // the ensure_plan probe has had its chance to re-prepare with
+            // fresh hook tables.
+            Ok(false) => {
+                let plan = se.plan;
+                drop(se);
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                Ok(None)
+            }
+            Err(e) => {
+                let plan = se.plan;
+                drop(se);
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                Err(e)
+            }
+        }
+    }
+
     // exec_eval_simple_expr; Ok(None) = not simple, take the SPI path.
+    // Caller ran ensure_plan.
     fn exec_eval_simple_expr(
         &mut self,
         expr: &PlExpr,
     ) -> PgResult<Option<(Datum, bool, Oid, i32)>> {
-        let (psrc, paramnos, argtypes) = EXPR_PLANS.with(|t| {
-            let t = t.borrow();
-            let e = t.get(&expr.expr_id).expect("plan ensured");
-            (spi::SPI_plan_single_source(e.plan), e.paramnos.clone(), e.argtypes.clone())
-        });
-        let Some((psrc, _)) = psrc else {
-            self.simple_cache.insert(expr.expr_id, None);
-            return Ok(None);
-        };
-
-        // Per-eval revalidation (C CachedPlanIsSimplyValid): source valid,
-        // plan is the source's current gplan, plan valid, search_path match.
-        if let Some(entry) = self.simple_cache.get(&expr.expr_id) {
-            match entry {
-                None => return Ok(None),
-                Some(se) => {
-                    if !plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan)? {
-                        if let Some(Some(se)) = self.simple_cache.remove(&expr.expr_id) {
-                            plancache::ReleaseCachedPlan(se.cplan);
-                        }
+        // After the take, the slot reads InUse; every exit below goes
+        // through put_simple.
+        let build = match take_simple(expr.expr_id, true) {
+            // NotSimple (C expr_simple_expr == NULL, pl_exec.c:6036) or
+            // recursion/error quarantine (expr_simple_in_use, :6042).
+            SimpleTake::Skip => return Ok(None),
+            SimpleTake::Ready(se) => {
+                match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
+                    Ok(true) => return self.eval_simple_taken(expr, se).map(Some),
+                    Ok(false) => {}
+                    Err(e) => {
+                        // Restore the slot (an error leaving InUse would
+                        // demote this expression to SPI forever).
+                        let plan = se.plan;
+                        drop(se);
+                        put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                        return Err(e);
                     }
                 }
+                // Invalidated since the fast path last saw it (or the fast
+                // path just parked it): release and redetermine — C's
+                // replan arm (pl_exec.c:6072-6142) folded into the shared
+                // build below, which also re-runs exec_is_simple_query as
+                // C does (:6119).
+                drop(se);
+                EXPR_PLANS.with(|t| {
+                    let t = t.borrow();
+                    let e = t.get(&expr.expr_id).expect("plan ensured");
+                    (e.plan, e.paramnos.clone(), e.argtypes.clone())
+                })
             }
-        }
+            SimpleTake::Build { plan, paramnos, argtypes } => (plan, paramnos, argtypes),
+        };
+        let (plan, paramnos, argtypes) = build;
+        let se = match self.build_simple_expr(expr, plan, paramnos, argtypes) {
+            Ok(se) => se,
+            Err(e) => {
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                return Err(e);
+            }
+        };
+        let Some(se) = se else {
+            put_simple(expr.expr_id, plan, SimpleState::NotSimple);
+            return Ok(None);
+        };
+        self.eval_simple_taken(expr, se).map(Some)
+    }
 
-        if !self.simple_cache.contains_key(&expr.expr_id) {
-            // Write param types BEFORE compile: exec_init_expr reads the
-            // slot types and bakes slot addresses.
-            // Planning errors (const-fold, etc.) carry the parse-mode context
-            // line: C wraps GetCachedPlan in _SPI_error_callback
-            // (spi.c SPI_plan_get_cached_plan).
-            let cplan = plancache::GetCachedPlan(
+    // exec_simple_check_plan (pl_exec.c:8133) + exec_save_simple_expr
+    // (pl_exec.c:8271), deferred to the first evaluation as before.
+    // Ok(None) = not simple. The caller owns the InUse slot.
+    fn build_simple_expr(
+        &mut self,
+        expr: &PlExpr,
+        plan: SpiPlanPtr,
+        paramnos: Vec<Dno>,
+        argtypes: Vec<Oid>,
+    ) -> PgResult<Option<Box<SimpleExpr>>> {
+        let Some((psrc, _)) = spi::SPI_plan_single_source(plan) else {
+            return Ok(None);
+        };
+        // Planning errors (const-fold, etc.) carry the parse-mode context
+        // line: C wraps GetCachedPlan in _SPI_error_callback
+        // (spi.c SPI_plan_get_cached_plan).
+        let cplan = plancache::GetCachedPlan(
+            psrc,
+            types_portal::ParamListHandle::NULL,
+            None,
+            types_portal::QueryEnvHandle::NULL,
+        )
+        .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
+        let built = (|| -> PgResult<Option<Box<SimpleExpr>>> {
+            // exec_is_simple_query (pl_exec.c): decided on the analyzed
+            // querytree, not just the plan shape — an embedded SubPlan
+            // (hasSubLinks) survives the bare-Result test below, and C
+            // routes every such query through SPI.
+            let queries = plancache::SourceQueryList(psrc);
+            if queries.len() != 1 || !exec_is_simple_query(&queries[0]) {
+                return Ok(None);
+            }
+            let stmts = plancache::CachedPlanStmtList(cplan);
+            if stmts.len() != 1 {
+                return Ok(None);
+            }
+            let stmt = &stmts[0];
+            if stmt.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT
+                || stmt.utilityStmt.is_some()
+                || !stmt.rowMarks.is_nil()
+            {
+                return Ok(None);
+            }
+            let Some(plan_expr) = simple_result_expr(stmt) else {
+                return Ok(None);
+            };
+            // Stable per-expression param image, sized to the highest
+            // referenced dno; slot types written BEFORE compile
+            // (exec_init_expr reads them and bakes slot addresses).
+            let nslots = paramnos.iter().map(|&d| d as usize + 1).max().unwrap_or(0);
+            let mut param_buf: Box<[ParamExternData]> = (0..nslots)
+                .map(|_| ParamExternData {
+                    value: Datum::null(),
+                    isnull: true,
+                    pflags: 0,
+                    ptype: types_core::InvalidOid,
+                })
+                .collect();
+            for &dno in &paramnos {
+                let slot = &mut param_buf[dno as usize];
+                slot.ptype = argtypes[dno as usize];
+                slot.pflags = types_portal::params::PARAM_FLAG_CONST;
+            }
+            let bind = types_portal::params::ParamBind {
+                extern_params: Some(
+                    // SAFETY: param_buf is a stable Box'd slice owned by the
+                    // SimpleExpr alongside the compiled state; the Box move
+                    // into the struct below does not move the heap image.
+                    unsafe {
+                        core::slice::from_raw_parts(param_buf.as_ptr(), param_buf.len())
+                    },
+                ),
+                exec_vals: None,
+                n_exec: 0,
+            };
+            // Function-lifetime memory home for the compiled program (C
+            // compiles into simple_eval_estate->es_query_cxt and rebuilds
+            // per transaction, pl_exec.c:6172-6180; see SimpleExpr's
+            // lifetime note for why no rebuild is needed here).
+            let ctx = Ctx::new("PLpgSQL simple expression");
+            let Some(state) = execexpr::exec_init_expr(ctx.mcx(), Some(plan_expr.0), bind)?
+            else {
+                return Ok(None);
+            };
+            // C exec_save_simple_expr (pl_exec.c:8349): immutable
+            // expressions skip the per-eval CCI + snapshot ceremony.
+            let mutable = clauses::contain_mutable_functions(plan_expr.0)?;
+            Ok(Some(Box::new(SimpleExpr {
+                plan,
+                state,
+                cplan,
                 psrc,
-                types_portal::ParamListHandle::NULL,
-                None,
-                types_portal::QueryEnvHandle::NULL,
-            )
-            .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
-            let built = (|| -> PgResult<Option<SimpleExpr>> {
-                // exec_is_simple_query (pl_exec.c): decided on the analyzed
-                // querytree, not just the plan shape — an embedded SubPlan
-                // (hasSubLinks) survives the bare-Result test below, and C
-                // routes every such query through SPI.
-                let queries = plancache::SourceQueryList(psrc);
-                if queries.len() != 1 || !exec_is_simple_query(&queries[0]) {
-                    return Ok(None);
-                }
-                let stmts = plancache::CachedPlanStmtList(cplan);
-                if stmts.len() != 1 {
-                    return Ok(None);
-                }
-                let stmt = &stmts[0];
-                if stmt.commandType != types_nodes::nodes_enums::CmdType::CMD_SELECT
-                    || stmt.utilityStmt.is_some()
-                    || !stmt.rowMarks.is_nil()
-                {
-                    return Ok(None);
-                }
-                let Some(plan) = simple_result_expr(stmt) else {
-                    return Ok(None);
-                };
-                for &dno in &paramnos {
-                    let slot = &mut self.param_buf[dno as usize];
-                    slot.ptype = argtypes[dno as usize];
-                    slot.pflags = types_portal::params::PARAM_FLAG_CONST;
-                }
-                let bind = types_portal::params::ParamBind {
-                    extern_params: Some(
-                        // SAFETY: param_buf is a stable Box'd slice living as
-                        // long as the cached state (both die with the estate).
-                        unsafe {
-                            core::slice::from_raw_parts(
-                                self.param_buf.as_ptr(),
-                                self.param_buf.len(),
-                            )
-                        },
-                    ),
-                    exec_vals: None,
-                    n_exec: 0,
-                };
-                // Compile into the invocation context (survives per-eval
-                // resets); results land in the eval scratch.
-                let mcx = self.datum_ctx.mcx();
-                let Some(mut state) = execexpr::exec_init_expr(mcx, Some(plan.0), bind)? else {
-                    return Ok(None);
-                };
-                state.arm_result_mcx(self.eval_ctx.mcx());
-                Ok(Some(SimpleExpr {
-                    state,
-                    cplan,
-                    psrc,
-                    rettype: plan.1,
-                    rettypmod: plan.2,
-                }))
-            })();
-            match built {
-                Ok(Some(se)) => {
-                    self.simple_cache.insert(expr.expr_id, Some(se));
-                }
-                Ok(None) => {
-                    plancache::ReleaseCachedPlan(cplan);
-                    self.simple_cache.insert(expr.expr_id, None);
-                    return Ok(None);
-                }
-                Err(e) => {
-                    plancache::ReleaseCachedPlan(cplan);
-                    return Err(e);
-                }
+                rettype: plan_expr.1,
+                rettypmod: plan_expr.2,
+                mutable,
+                paramnos,
+                param_buf,
+                ctx,
+            })))
+        })();
+        match built {
+            Ok(Some(se)) => {
+                // First Ready state of this backend: arrange orderly pin
+                // release at proc_exit (see release_simple_states_at_exit).
+                register_simple_exit_release();
+                Ok(Some(se))
+            }
+            Ok(None) => {
+                plancache::ReleaseCachedPlan(cplan);
+                Ok(None)
+            }
+            Err(e) => {
+                plancache::ReleaseCachedPlan(cplan);
+                Err(e)
             }
         }
+    }
 
-        // Write current param values into the stable buffer.
-        for &dno in &paramnos {
-            let (v, isnull) = self.datum_as_param(dno)?;
-            let slot = &mut self.param_buf[dno as usize];
+    // The evaluation proper (pl_exec.c:6146-6241): write params, arm the
+    // result context, snapshot ceremony if needed, run the program. The
+    // taken state goes back Ready on success; an error drops it (C
+    // quarantines via expr_simple_in_use instead — see SimpleState::InUse).
+    fn eval_simple_taken(
+        &mut self,
+        expr: &PlExpr,
+        mut se: Box<SimpleExpr>,
+    ) -> PgResult<(Datum, bool, Oid, i32)> {
+        let result = self.eval_simple_body(&mut se);
+        let plan = se.plan;
+        match result {
+            Ok(r) => {
+                put_simple(expr.expr_id, plan, SimpleState::Ready(se));
+                Ok(r)
+            }
+            Err(e) => {
+                drop(se);
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                Err(e)
+            }
+        }
+    }
+
+    fn eval_simple_body(&mut self, se: &mut SimpleExpr) -> PgResult<(Datum, bool, Oid, i32)> {
+        // Current param values into the stable image the program reads.
+        for &dno in &se.paramnos {
+            let planned = se.param_buf[dno as usize].ptype;
+            let (v, isnull) = self.datum_as_param(dno, Some(planned))?;
+            let slot = &mut se.param_buf[dno as usize];
             slot.value = v;
             slot.isnull = isnull;
         }
-
+        // By-ref results land in THIS invocation's eval scratch: the state
+        // is shared across estates now, so it re-arms per evaluation (C
+        // evaluates under get_eval_mcontext, pl_exec.c:6197).
+        se.state.arm_result_mcx(self.eval_ctx.mcx());
+        // C pl_exec.c:6198-6204: stable/volatile functions must see our own
+        // updates — CCI + fresh snapshot — but immutable-only expressions
+        // and read-only functions skip the ceremony.
         let mut pushed = false;
-        if !self.readonly_func {
+        if se.mutable && !self.readonly_func {
             xact::CommandCounterIncrement()?;
             let snap = snapmgr::GetTransactionSnapshot()?;
             snapmgr::PushActiveSnapshot(&snap)?;
             pushed = true;
         }
         let result = (|| {
-            let se = self
-                .simple_cache
-                .get_mut(&expr.expr_id)
-                .and_then(|e| e.as_mut())
-                .expect("inserted above");
             let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
             let r = execexpr::exec_eval_expr(&mut se.state, &mut slots)?;
             Ok((r.value, r.isnull, se.rettype, se.rettypmod))
@@ -1183,7 +1519,7 @@ impl<'a> Estate<'a> {
                 popped?;
             }
         }
-        result.map(Some)
+        result
     }
 
     // exec_run_select (portal-less arm): SPI_execute_plan.
@@ -1430,7 +1766,7 @@ impl<'a> Estate<'a> {
             };
             out.push_str(&refname);
             out.push_str(" = ");
-            let (v, isnull) = self.datum_as_param(dno)?;
+            let (v, isnull) = self.datum_as_param(dno, None)?;
             if isnull {
                 out.push_str("NULL");
             } else {
@@ -2683,7 +3019,7 @@ impl<'a> Estate<'a> {
                 typmod,
                 0,
             )?;
-            let (v, isnull) = self.datum_as_param(dno)?;
+            let (v, isnull) = self.datum_as_param(dno, None)?;
             values.push(v);
             nulls.push(isnull);
         }
@@ -3208,7 +3544,12 @@ impl<'a> Estate<'a> {
             (e.plan, e.paramnos.clone(), e.argtypes.clone())
         });
         // C Assert(!expr->expr_simple_expr): a CALL/DO is never simple.
-        debug_assert!(!matches!(self.simple_cache.get(&expr.expr_id), Some(Some(_))));
+        debug_assert!(EXPR_PLANS.with(|t| {
+            !matches!(
+                t.borrow().get(&expr.expr_id).map(|e| &e.simple),
+                Some(SimpleState::Ready(_))
+            )
+        }));
 
         let target = if is_call {
             Some(self.make_callstmt_target(expr, plan)?)
@@ -3281,15 +3622,17 @@ impl<'a> Estate<'a> {
     }
 
     // C's post-xact-end econtext rebuild (simple_eval_estate = NULL +
-    // plpgsql_create_econtext): compiled states and pins here are
-    // estate-owned, so dropping the caches and rebuilding lazily is the
-    // whole rebuild. Cast states follow C's cast_lxid revalidation.
+    // plpgsql_create_econtext, pl_exec.c:4967/2256): C must rebuild because
+    // the compiled states lived in the transaction's simple_eval_estate and
+    // their pins in the transaction's resowner (plpgsql_xact_cb,
+    // pl_exec.c:8701). The function-lifetime SimpleExpr entries here own
+    // their memory and hold manual plan refcounts, and every use starts
+    // with CachedPlanIsSimplyValid — so they survive the transaction
+    // boundary intact, which is exactly the amortization C gets from its
+    // re-pin arm (CachedPlanIsSimplyValid + expr_simple_plan_lxid,
+    // pl_exec.c:6060-6070) without the per-transaction recompile. Cast
+    // states stay estate-owned and follow C's cast_lxid revalidation.
     fn rebuild_simple_exprs(&mut self) {
-        for (_, e) in self.simple_cache.drain() {
-            if let Some(se) = e {
-                plancache::ReleaseCachedPlan(se.cplan);
-            }
-        }
         self.cast_cache.clear();
     }
 

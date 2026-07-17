@@ -4,9 +4,9 @@
 
 extern crate alloc;
 
-use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState, INDEX_VAR};
+use ::execexpr::{ExprState, INDEX_VAR};
 use ::execscan::{ScanNode, ScanState};
-use ::executils::{EStateData, ExecSlotId};
+use ::executils::{exec_recheck_qual_and_reset, EStateData, ExecSlotId};
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_fetch_heap, index_getnext_tid,
     index_markpos, index_rescan, index_restrpos, IndexScanDescData,
@@ -157,18 +157,15 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
             };
 
             // Lossy index: recheck the index quals (ExecQualAndReset shape).
-            // Btree never sets xs_recheck.
+            // Btree never sets xs_recheck. SubPlan-carrying quals route
+            // through the executils subplan driver inside the helper.
             if scandesc.xs_recheck {
-                estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
-                let passes = {
-                    let mut slots = EvalSlots {
-                        scan: Some(estate.slot_mut(slot_id)),
-                        inner: None,
-                        outer: None,
-                    };
-                    exec_qual(recheckqual.as_deref_mut(), &mut slots)?
-                };
-                estate.ecxt_mut(ecxt).reset();
+                let passes = exec_recheck_qual_and_reset(
+                    recheckqual.as_deref_mut(),
+                    estate,
+                    ecxt,
+                    slot_id,
+                )?;
                 if !passes {
                     continue;
                 }
