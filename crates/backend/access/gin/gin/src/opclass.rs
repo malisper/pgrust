@@ -623,7 +623,13 @@ pub fn gincost_extract_query(
             match name.as_deref() {
                 Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
                 Some("gin_extract_hstore_query") => (GinOpclass::HstoreOps, false),
-                _ => crate::unported(&format!("GIN opclass with extractQuery proc {other}")),
+                // unported: opclasses beyond the closed set (user-reachable
+                // via planning a scan over a custom-opclass GIN index).
+                _ => {
+                    return Err(crate::unsupported(format!(
+                        "GIN operator class with extractQuery support function {other} is not supported"
+                    )))
+                }
             }
         }
     };
