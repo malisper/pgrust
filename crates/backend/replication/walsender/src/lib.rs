@@ -6,7 +6,8 @@
 #![allow(non_snake_case)]
 
 pub mod replies;
-pub mod streaming;
+pub mod logical_stream;
+mod streaming;
 pub mod wakeup;
 
 use std::cell::{Cell, RefCell};
@@ -124,7 +125,17 @@ pub struct WalSndCtlData {
     pub wal_flush_cv: ConditionVariable,
     pub wal_replay_cv: ConditionVariable,
     pub wal_confirm_rcv_cv: ConditionVariable,
+    // SyncRep state (walsender_private.h). All [SyncRepLock] except
+    // sync_standbys_status, which is read lock-free (see SyncRepWaitForLSN)
+    // and written under the lock.
+    pub sync_rep_queue: [types_storage::storage::SyncCell<types_storage::storage::proclist_head>;
+        NUM_SYNC_REP_WAIT_MODE],
+    pub sync_rep_lsn: [std::sync::atomic::AtomicU64; NUM_SYNC_REP_WAIT_MODE],
+    pub sync_standbys_status: std::sync::atomic::AtomicU32,
 }
+
+// syncrep.h wait-mode slots in WalSndCtl.lsn[] / SyncRepQueue[].
+pub const NUM_SYNC_REP_WAIT_MODE: usize = 3;
 
 static WAL_SND_CTL: OnceLock<WalSndCtlData> = OnceLock::new();
 
@@ -138,8 +149,25 @@ pub fn WalSndCtl() -> &'static WalSndCtlData {
             wal_flush_cv: ConditionVariable::new(),
             wal_replay_cv: ConditionVariable::new(),
             wal_confirm_rcv_cv: ConditionVariable::new(),
+            sync_rep_queue: std::array::from_fn(|_| {
+                types_storage::storage::SyncCell::new(
+                    types_storage::storage::proclist_head::default(),
+                )
+            }),
+            sync_rep_lsn: Default::default(),
+            sync_standbys_status: std::sync::atomic::AtomicU32::new(0),
         }
     })
+}
+
+/// am_cascading_walsender (walsender.c global); syncrep's priority gate.
+pub fn am_cascading_walsender_now() -> bool {
+    AM_CASCADING_WALSENDER.get()
+}
+
+/// MyWalSnd's index into WalSndCtl().walsnds; -1 = NULL (syncrep's is_me test).
+pub fn my_walsnd_index() -> i32 {
+    MY_WAL_SND.get()
 }
 
 pub(crate) fn my_walsnd() -> &'static Mutex<WalSnd> {
@@ -206,6 +234,114 @@ fn WalSndKill(_code: i32, _arg: usize) {
     }
     MY_WAL_SND.set(-1);
     WalSndCtl().walsnds[i as usize].lock().expect("walsnd mutex").pid = 0;
+}
+
+// HandleWalSndInitStopping (walsender.c:3560): if replication has not yet
+// started, die like SIGTERM; if active, flag the main loop — it sends any
+// outstanding WAL, waits for the ack, and exits gracefully (the logical
+// walsender self-arms got_SIGUSR2 when caught up; see XLogSendLogical).
+pub fn HandleWalSndInitStopping() {
+    debug_assert!(walsender_seams::am_walsender());
+    if !REPLICATION_ACTIVE.get() {
+        let _ = procsignal::SendThreadSignal(init_small::globals::MyProcPid(), libc::SIGTERM);
+    } else {
+        GOT_STOPPING.set(true);
+    }
+}
+
+// WalSndInitStopping (walsender.c:3796): checkpointer tells every walsender
+// to move to the stopping state before the shutdown checkpoint.
+pub fn WalSndInitStopping() {
+    for slot in WalSndCtl().walsnds.iter() {
+        let pid = slot.lock().expect("walsnd mutex").pid;
+        if pid == 0 {
+            continue;
+        }
+        let _ = procsignal::SendProcSignal(
+            pid,
+            types_storage::storage::ProcSignalReason::PROCSIG_WALSND_INIT_STOPPING,
+            types_core::INVALID_PROC_NUMBER,
+        );
+    }
+}
+
+// WalSndWaitStopping (walsender.c:3822): wait until every walsender has quit
+// or reached the stopping state, so the shutdown checkpoint can proceed.
+pub fn WalSndWaitStopping() {
+    loop {
+        let mut all_stopped = true;
+        for slot in WalSndCtl().walsnds.iter() {
+            let w = slot.lock().expect("walsnd mutex");
+            if w.pid == 0 {
+                continue;
+            }
+            if w.state != WalSndState::Stopping {
+                all_stopped = false;
+                break;
+            }
+        }
+        if all_stopped {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+// WalSndGetStateString (walsender.c:3888).
+pub fn WalSndGetStateString(state: WalSndState) -> &'static str {
+    match state {
+        WalSndState::Startup => "startup",
+        WalSndState::Backup => "backup",
+        WalSndState::Catchup => "catchup",
+        WalSndState::Streaming => "streaming",
+        WalSndState::Stopping => "stopping",
+    }
+}
+
+// pg_stat_get_wal_senders' shared-memory scan half (walsender.c:3914); the SQL
+// function body lives in pgstatfuncs. The sync-standby classification comes
+// from syncrep's SyncRepGetCandidateStandbys via seam (empty when syncrep is
+// not linked or synchronous_standby_names is unset — C-identical).
+fn pg_stat_wal_senders_snapshot() -> Vec<walsender_seams::WalSndStatRow> {
+    let ctl = WalSndCtl();
+    let candidates: Vec<(i32, i32)> =
+        if syncrep_seams::sync_rep_candidate_indexes::is_installed() {
+            syncrep_seams::sync_rep_candidate_indexes::call().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    let method_is_priority = if syncrep_seams::sync_rep_method_is_priority::is_installed() {
+        syncrep_seams::sync_rep_method_is_priority::call()
+    } else {
+        true
+    };
+    let mut rows = Vec::new();
+    for (i, slot) in ctl.walsnds.iter().enumerate() {
+        let w = slot.lock().expect("walsnd mutex");
+        if w.pid == 0 {
+            continue;
+        }
+        // Stale-data protection: match both walsnd_index and pid (C comment).
+        let is_sync_standby = candidates
+            .iter()
+            .any(|&(idx, pid)| idx == i as i32 && pid == w.pid);
+        rows.push(walsender_seams::WalSndStatRow {
+            pid: w.pid,
+            state: WalSndGetStateString(w.state),
+            sent_ptr: w.sentPtr,
+            write: w.write,
+            flush: w.flush,
+            apply: w.apply,
+            write_lag: w.writeLag,
+            flush_lag: w.flushLag,
+            apply_lag: w.applyLag,
+            sync_priority: w.sync_standby_priority,
+            is_sync_standby,
+            syncrep_method_is_priority: method_is_priority,
+            reply_time: w.replyTime,
+        });
+    }
+    rows
 }
 
 // WalSndSetState (walsender.c:3858).
@@ -404,16 +540,18 @@ pub fn exec_replication_command(cmd_string: &str) -> PgResult<bool> {
             tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
         ReplCommand::StartReplication(c) => {
-            // C dispatches physical/logical here, both closing with
-            // EndReplicationCommand("START_STREAMING").
+            // Physical closes with its own "START_STREAMING" completion
+            // (walsender.c:1029), logical with "COPY 0"; the dispatch then
+            // sends this "START_REPLICATION" completion — C's deliberate
+            // dupe ("necessary per libpqrcv_endstreaming", walsender.c:2182).
+            let cmdtag = "START_REPLICATION";
+            ps_status_seams::set_ps_display::call(cmdtag);
             if c.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
-                let cmdtag = "START_REPLICATION";
-                ps_status_seams::set_ps_display::call(cmdtag);
                 streaming::StartReplication(mcx, &c)?;
             } else {
-                unported("START_REPLICATION ... LOGICAL", 6);
+                logical_stream::StartLogicalReplication(&c)?;
             }
-            tcop_dest::EndReplicationCommand(b"START_STREAMING")?;
+            tcop_dest::EndReplicationCommand(cmdtag.as_bytes())?;
         }
         ReplCommand::BaseBackup(c) => {
             let cmdtag = "BASE_BACKUP";
@@ -436,6 +574,51 @@ fn unported(cmdtag: &str, increment: u32) -> ! {
     panic!("walsender: {cmdtag} unported (replication-p1 increment {increment})");
 }
 
+// GetStandbyFlushRecPtr (xlog.c:6653): what a cascading standby may send —
+// everything replayed, plus anything the walreceiver streamed on the replay
+// timeline. Hosted here while transam_xlog is frozen (recovery-standby lanes);
+// reads through the installed seams, exactly the two C callees.
+pub(crate) fn GetStandbyFlushRecPtr() -> (types_core::XLogRecPtr, TimeLineID) {
+    let (receive_ptr, _latest_chunk_start, receive_tli) =
+        if walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::is_installed() {
+            walreceiverfuncs_seams::get_wal_rcv_flush_rec_ptr::call()
+        } else {
+            (0, 0, 0)
+        };
+    let (replay_ptr, replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
+    let mut result = replay_ptr;
+    if receive_tli == replay_tli && receive_ptr > replay_ptr {
+        result = receive_ptr;
+    }
+    (result, replay_tli)
+}
+
+// StartReplication's historic-timeline epilogue (walsender.c:990): a
+// single-row (next_tli int8, next_tli_startpos text) result set.
+pub(crate) fn send_next_timeline_result_set(mcx: mcx::Mcx<'_>) -> PgResult<()> {
+    let valid_upto = SEND_TIME_LINE_VALID_UPTO.with(|c| c.get());
+    let next_tli = SEND_TIME_LINE_NEXT_TLI.with(|c| c.get());
+    let startpos_str = format!("{:X}/{:X}", (valid_upto >> 32) as u32, valid_upto as u32);
+
+    let mut dest = tcop_dest::CreateDestReceiver(types_dest::CommandDest::RemoteSimple);
+
+    // int8 for next_tli: int4 is not wide enough (TimeLineID is unsigned).
+    let mut tupdesc = tupdesc::CreateTemplateTupleDesc(mcx, 2)?;
+    tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 1, "next_tli", INT8OID, -1, 0)?;
+    tupdesc::TupleDescInitBuiltinEntry(&mut tupdesc, 2, "next_tli_startpos", TEXTOID, -1, 0)?;
+
+    let mut tstate = exectuples_output::begin_tup_output_tupdesc(mcx, &mut dest, Rc::new(tupdesc))?;
+
+    let mut values = [Datum::null(); 2];
+    let nulls = [false; 2];
+    values[0] = Datum::from_i64(next_tli as i64);
+    let pos_v = varlena::cstring_to_text(mcx, startpos_str.as_bytes())?;
+    values[1] = Datum::from_usize(pos_v.as_bytes().as_ptr() as usize);
+
+    exectuples_output::do_tup_output(&mut tstate, mcx, &values, &nulls)?;
+    exectuples_output::end_tup_output(tstate)
+}
+
 // IdentifySystem (walsender.c:395).
 fn IdentifySystem(mcx: mcx::Mcx<'_>) -> PgResult<()> {
     let sysid = format!("{}", transam_xlog::GetSystemIdentifier());
@@ -445,7 +628,9 @@ fn IdentifySystem(mcx: mcx::Mcx<'_>) -> PgResult<()> {
 
     let mut curr_tli: TimeLineID = 0;
     let logptr = if am_cascading {
-        panic!("IdentifySystem: GetStandbyFlushRecPtr unported (replication-p1 increment 3)");
+        let (ptr, tli) = GetStandbyFlushRecPtr();
+        curr_tli = tli;
+        ptr
     } else {
         transam_xlog::GetFlushRecPtr(Some(&mut curr_tli))
     };
@@ -614,12 +799,56 @@ fn def_get_boolean(name: &str, arg: &Option<ReplOptionArg>, func: &'static str) 
     }
 }
 
-// parseCreateReplSlotOptions (walsender.c:1114). Returns reserve_wal. The
-// logical-only options (snapshot/two_phase/failover) are recognized so that
-// supplying them on a PHYSICAL slot raises C's "conflicting or redundant
-// options" error; their values are consumed by the (unported) logical path.
-fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bool> {
-    let mut reserve_wal = false;
+// defGetString (define.c), the arms replication options use.
+fn def_get_string(
+    name: &str,
+    arg: &Option<ReplOptionArg>,
+    func: &'static str,
+) -> PgResult<String> {
+    match arg {
+        Some(ReplOptionArg::Str(s)) => Ok(s.clone()),
+        Some(ReplOptionArg::Int(i)) => Ok(i.to_string()),
+        Some(ReplOptionArg::Bool(b)) => Ok(if *b { "true" } else { "false" }.to_string()),
+        None => {
+            ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("{name} requires a parameter"))
+                .finish(loc(0, func))?;
+            unreachable!()
+        }
+    }
+}
+
+// parseCreateReplSlotOptions (walsender.c:1114).
+// CRSSnapshotAction (walsender.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CrsSnapshotAction {
+    ExportSnapshot,
+    NoExportSnapshot,
+    UseSnapshot,
+}
+
+pub(crate) struct CreateReplSlotOptions {
+    pub reserve_wal: bool,
+    pub snapshot_action: CrsSnapshotAction,
+    pub two_phase: bool,
+    pub failover: bool,
+}
+
+fn parse_create_repl_slot_options(
+    cmd: &CreateReplicationSlotCmd,
+) -> PgResult<CreateReplSlotOptions> {
+    let mut opts = CreateReplSlotOptions {
+        reserve_wal: false,
+        // Default when no SNAPSHOT option is given (walsender.c:1147).
+        snapshot_action: if cmd.kind == ReplicationKind::REPLICATION_KIND_LOGICAL {
+            CrsSnapshotAction::ExportSnapshot
+        } else {
+            CrsSnapshotAction::NoExportSnapshot
+        },
+        two_phase: false,
+        failover: false,
+    };
     let mut reserve_wal_given = false;
     let mut snapshot_action_given = false;
     let mut two_phase_given = false;
@@ -631,26 +860,40 @@ fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bo
                 if snapshot_action_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1136)?;
                 }
+                let action = def_get_string("snapshot", &defel.arg, "parseCreateReplSlotOptions")?;
                 snapshot_action_given = true;
+                opts.snapshot_action = match action.as_str() {
+                    "export" => CrsSnapshotAction::ExportSnapshot,
+                    "nothing" => CrsSnapshotAction::NoExportSnapshot,
+                    "use" => CrsSnapshotAction::UseSnapshot,
+                    other => {
+                        ereport(ERROR)
+                            .errmsg(format!("unrecognized value for CREATE_REPLICATION_SLOT option \"snapshot\": \"{other}\""))
+                            .finish(loc(1152, "parseCreateReplSlotOptions"))?;
+                        unreachable!()
+                    }
+                };
             }
             "reserve_wal" => {
                 if reserve_wal_given || cmd.kind != ReplicationKind::REPLICATION_KIND_PHYSICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1158)?;
                 }
                 reserve_wal_given = true;
-                reserve_wal = def_get_boolean("reserve_wal", &defel.arg, "parseCreateReplSlotOptions")?;
+                opts.reserve_wal = def_get_boolean("reserve_wal", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             "two_phase" => {
                 if two_phase_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1168)?;
                 }
                 two_phase_given = true;
+                opts.two_phase = def_get_boolean("two_phase", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             "failover" => {
                 if failover_given || cmd.kind != ReplicationKind::REPLICATION_KIND_LOGICAL {
                     conflicting_or_redundant("parseCreateReplSlotOptions", 1177)?;
                 }
                 failover_given = true;
+                opts.failover = def_get_boolean("failover", &defel.arg, "parseCreateReplSlotOptions")?;
             }
             other => {
                 ereport(ERROR)
@@ -661,21 +904,23 @@ fn parse_create_repl_slot_options(cmd: &CreateReplicationSlotCmd) -> PgResult<bo
         }
     }
 
-    Ok(reserve_wal)
+    Ok(opts)
 }
 
 // CreateReplicationSlot (walsender.c:1191). Physical path fully ported (this is
-// pg_basebackup / pg_receivewal --create-slot). Logical path — decoding-context
-// + snapshot builder — is a contained panic tagged increment 6.
+// pg_basebackup / pg_receivewal --create-slot). Logical path: SNAPSHOT
+// 'nothing' (pg_recvlogical) and USE_SNAPSHOT-less flows are ported; snapshot
+// export/use remain contained refusals (snapbuild export unported).
 fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> PgResult<()> {
-    let reserve_wal = parse_create_repl_slot_options(&cmd)?;
+    let opts = parse_create_repl_slot_options(&cmd)?;
     let slotname = cmd.slotname.as_deref().unwrap_or("");
+    let mut snapshot_name: Option<String> = None;
 
     if cmd.kind == ReplicationKind::REPLICATION_KIND_PHYSICAL {
         let persistency = if cmd.temporary { slot::RS_TEMPORARY } else { slot::RS_PERSISTENT };
         slot::ReplicationSlotCreate(slotname, false, persistency, false, false, false)?;
 
-        if reserve_wal {
+        if opts.reserve_wal {
             slot::ReplicationSlotReserveWal()?;
             slot::ReplicationSlotMarkDirty();
             // Write this slot to disk if it's a permanent one.
@@ -684,10 +929,90 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
             }
         }
     } else {
-        panic!(
-            "walsender: CREATE_REPLICATION_SLOT ... LOGICAL unported \
-             (CreateInitDecodingContext; replication-p1 increment 6)"
-        );
+        logical::CheckLogicalDecodingRequirements()?;
+
+        match opts.snapshot_action {
+            CrsSnapshotAction::UseSnapshot => {
+                // walsender.c:1262: USE_SNAPSHOT preconditions.
+                if !xact::IsTransactionBlock() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called inside a transaction")
+                        .finish(loc(1266, "CreateReplicationSlot"));
+                }
+                if xact::XactIsoLevel() != guc_tables::consts::XACT_REPEATABLE_READ {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called in REPEATABLE READ isolation mode transaction")
+                        .finish(loc(1271, "CreateReplicationSlot"));
+                }
+                if !xact::XactReadOnly() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called in a read-only transaction")
+                        .finish(loc(1276, "CreateReplicationSlot"));
+                }
+                if snapmgr::FirstSnapshotSet() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must be called before any query")
+                        .finish(loc(1281, "CreateReplicationSlot"));
+                }
+                if xact::IsSubTransaction() {
+                    return ereport(ERROR)
+                        .errmsg("CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') must not be called in a subtransaction")
+                        .finish(loc(1286, "CreateReplicationSlot"));
+                }
+            }
+            CrsSnapshotAction::ExportSnapshot => {
+                panic!(
+                    "walsender: CREATE_REPLICATION_SLOT ... LOGICAL EXPORT_SNAPSHOT unported \
+                     (SnapBuildExportSnapshot; use SNAPSHOT 'nothing')"
+                );
+            }
+            CrsSnapshotAction::NoExportSnapshot => {}
+        }
+
+        slot::ReplicationSlotCreate(
+            slotname,
+            true,
+            if cmd.temporary { slot::RS_TEMPORARY } else { slot::RS_EPHEMERAL },
+            opts.two_phase,
+            opts.failover,
+            false,
+        )?;
+
+        // Build the initial decoding context and find the decoding start
+        // point (the reported consistent_point). No output writer: nothing is
+        // sent to the client during slot creation (walsender.c:1285 passes
+        // WalSndPrepareWrite/WriteData, but FindStartpoint runs fast_forward
+        // -- the SQL path (slotfuncs.c) passes NULLs the same way here).
+        // USE_SNAPSHOT (and EXPORT) build a full snapshot (walsender.c:1310).
+        let need_full_snapshot = opts.snapshot_action == CrsSnapshotAction::UseSnapshot;
+        let mut ctx = logical::CreateInitDecodingContext(
+            cmd.plugin.as_deref().unwrap_or(""),
+            Vec::new(),
+            need_full_snapshot,
+            types_core::InvalidXLogRecPtr,
+            None,
+            None,
+            None,
+        )?;
+
+        logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
+
+        if opts.snapshot_action == CrsSnapshotAction::UseSnapshot {
+            // Make the initial snapshot the surrounding transaction's
+            // snapshot (walsender.c:1326: SnapBuildInitialSnapshot +
+            // RestoreTransactionSnapshot against our own proc).
+            let snap = ctx.snapshot_builder.initial_snapshot()?;
+            let my_procno =
+                lmgr_proc::MyProc().expect("walsender has a PGPROC");
+            snapmgr::RestoreTransactionSnapshot(&snap, my_procno)?;
+        }
+
+        ctx.free()?;
+
+        if !cmd.temporary {
+            slot::ReplicationSlotPersist()?;
+        }
+        let _ = &mut snapshot_name; // stays None for SNAPSHOT 'nothing'
     }
 
     let slot_ref = slot::MyReplicationSlot().expect("CreateReplicationSlot: no slot acquired");
@@ -712,10 +1037,20 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
     let mut nulls = [false; 4];
     values[0] = Datum::from_usize(name_v.as_bytes().as_ptr() as usize);
     values[1] = Datum::from_usize(xloc_v.as_bytes().as_ptr() as usize);
-    // snapshot_name — always NULL on the physical path (no exported snapshot).
-    nulls[2] = true;
-    // output_plugin — always NULL on the physical path (cmd.plugin is None).
-    nulls[3] = true;
+    let snap_v;
+    if let Some(sn) = snapshot_name.as_deref() {
+        snap_v = varlena::cstring_to_text(mcx, sn.as_bytes())?;
+        values[2] = Datum::from_usize(snap_v.as_bytes().as_ptr() as usize);
+    } else {
+        nulls[2] = true;
+    }
+    let plugin_v;
+    if let Some(pl) = cmd.plugin.as_deref() {
+        plugin_v = varlena::cstring_to_text(mcx, pl.as_bytes())?;
+        values[3] = Datum::from_usize(plugin_v.as_bytes().as_ptr() as usize);
+    } else {
+        nulls[3] = true;
+    }
 
     exectuples_output::do_tup_output(&mut tstate, mcx, &values, &nulls)?;
     exectuples_output::end_tup_output(tstate)?;
@@ -829,7 +1164,62 @@ fn SendTimeLineHistory(mcx: mcx::Mcx<'_>, cmd: TimeLineHistoryCmd) -> PgResult<(
     Ok(())
 }
 
+// WaitForStandbyConfirmation's wait loop (slot.c:2843, hosted here because
+// WalSndCtl->wal_confirm_rcv_cv lives in this crate; slot.c's early exits run
+// in the slot crate before the seam call).
+// wait_event_names.txt Client section index 6 (see logical_stream.rs).
+pub(crate) const WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION: u32 = 0x0600_0000 | 6;
+
+fn wait_for_standby_confirmation_loop(wait_for_lsn: types_core::XLogRecPtr) -> PgResult<()> {
+
+    condition_variable::ConditionVariablePrepareToSleep(&WalSndCtl().wal_confirm_rcv_cv);
+
+    loop {
+        postgres_seams::check_for_interrupts::call()?;
+
+        if interrupt::ConfigReloadPending() {
+            interrupt::SetConfigReloadPending(false);
+            guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+        }
+
+        // Exit if done waiting for every slot.
+        if slot::StandbySlotsHaveCaughtup(wait_for_lsn, types_error::WARNING)? {
+            break;
+        }
+
+        // 1s timeout so a changed synchronized_standby_slots is noticed.
+        condition_variable::ConditionVariableTimedSleep(
+            &WalSndCtl().wal_confirm_rcv_cv,
+            1000,
+            WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION,
+        )?;
+    }
+
+    condition_variable::ConditionVariableCancelSleep();
+    Ok(())
+}
+
+/// PhysicalWakeupLogicalWalSnd (walsender.c:1728): wake logical walsenders
+/// with failover slots when the acquired physical slot is listed in
+/// synchronized_standby_slots.
+pub(crate) fn PhysicalWakeupLogicalWalSnd() {
+    let s = slot::MyReplicationSlot().expect("PhysicalWakeupLogicalWalSnd: no slot");
+    debug_assert!(slot::SlotIsPhysical(s));
+
+    // On a standby there are no walsenders waiting for standbys (no syncing
+    // to cascading standbys).
+    if transam_xlog::RecoveryInProgress() {
+        return;
+    }
+
+    let name = String::from_utf8_lossy(s.data.get().name.name_str()).into_owned();
+    if slot::SlotExistsInSyncStandbySlots(&name) {
+        condition_variable::ConditionVariableBroadcast(&WalSndCtl().wal_confirm_rcv_cv);
+    }
+}
+
 pub fn init_seams() {
+    walsender_seams::wait_for_standby_confirmation::set(wait_for_standby_confirmation_loop);
     guc_tables::vars::log_replication_commands.install(guc_tables::GucVarAccessors {
         get: || LOG_REPLICATION_COMMANDS.get(),
         set: |v| LOG_REPLICATION_COMMANDS.set(v),
@@ -842,4 +1232,13 @@ pub fn init_seams() {
     walsender_seams::init_wal_sender::set(InitWalSender);
     walsender_seams::wal_snd_error_cleanup::set(WalSndErrorCleanup);
     walsender_seams::wal_snd_wakeup::set(wakeup::WalSndWakeup);
+    // WalSndLastCycleHandler (walsender.c:3475).
+    walsender_seams::handle_walsnd_init_stopping::set(HandleWalSndInitStopping);
+    walsender_seams::wal_snd_init_stopping::set(WalSndInitStopping);
+    walsender_seams::wal_snd_wait_stopping::set(WalSndWaitStopping);
+    walsender_seams::wal_snd_last_cycle_handler::set(|| {
+        GOT_SIGUSR2.set(true);
+        latch_seams::set_latch_my_latch::call();
+    });
+    walsender_seams::pg_stat_wal_senders_snapshot::set(pg_stat_wal_senders_snapshot);
 }

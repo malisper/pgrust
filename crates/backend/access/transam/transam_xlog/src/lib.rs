@@ -22,7 +22,7 @@ pub mod guc_vars;
 pub mod insert;
 pub mod redo;
 pub(crate) mod removal;
-pub use removal::{CheckXLogRemoved, XLogGetOldestSegno};
+pub use removal::{CheckXLogRemoved, RemoveNonParentXlogFiles, XLogGetOldestSegno};
 pub mod startup;
 pub mod write;
 
@@ -30,7 +30,8 @@ pub mod write;
 mod tests;
 
 pub use control_file::{
-    CheckPoint, ControlFileData, DataChecksumsEnabled, GetDefaultCharSignedness,
+    CheckPoint, ControlFileData, DataChecksumsEnabled, GetActiveWalLevelOnStandby,
+    GetDefaultCharSignedness,
     control_file_mark_read_for_tests, GetMockAuthenticationNonce, GetSystemIdentifier,
     LocalProcessControlFile, ReadControlFile,
     UpdateControlFile,
@@ -40,7 +41,11 @@ pub use insert::{
     GetFullPageWriteInfo, GetInsertRecPtr, GetLastImportantRecPtr, GetRedoRecPtr, GetXLogInsertRecPtr,
     RecoveryInProgress, XLogInsertAllowed, XLogInsertRecord,
 };
-pub use startup::{CreateCheckPoint, ShutdownXLOG, StartupXLOG, UpdateFullPageWrites};
+pub use startup::{
+    CreateCheckPoint, CreateRestartPoint, ReachedEndOfBackup, ResetInstallXLogFileSegmentActive,
+    SetInstallXLogFileSegmentActive, ShutdownXLOG, StartupXLOG, SwitchIntoArchiveRecovery,
+    UpdateFullPageWrites,
+};
 pub use write::{
     stamp_wal_sync_method, wal_flush_pacing_decide, GetFlushRecPtr, GetLastSegSwitchData,
     GetXLogWriteRecPtr, SetWalWriterSleeping, WalFlushPacing, XLogBackgroundFlush, XLogFileInit,
@@ -470,6 +475,7 @@ pub fn init_seams() {
     s::xact_last_rec_end::set(XactLastRecEnd);
     s::set_xact_last_rec_end::set(|lsn| XACT_LAST_REC_END.set(lsn));
     s::set_xact_last_commit_end::set(|lsn| XACT_LAST_COMMIT_END.set(lsn));
+    s::xact_last_commit_end::set(|| XACT_LAST_COMMIT_END.get());
     s::xlog_set_async_xact_lsn::set(write::XLogSetAsyncXactLSN);
     s::startup_xlog::set(startup::StartupXLOG);
     s::shutdown_xlog::set(startup::shutdown_xlog_seam);

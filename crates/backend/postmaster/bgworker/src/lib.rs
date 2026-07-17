@@ -2,9 +2,12 @@
 //! bgw_library_name/bgw_function_name collapse to a direct `bgw_main` fn
 //! pointer (one address space, no cross-process symbol lookup); C's lockless
 //! postmaster/backend slot protocol (read/write barriers, in_use handoff)
-//! collapses into one std Mutex (cold supervisor path, like pmchild); static
-//! RegisterBackgroundWorker and restart scheduling (bgw_restart_time >= 0)
-//! are loud panics this phase.
+//! collapses into one std Mutex (cold supervisor path, like pmchild). Static
+//! RegisterBackgroundWorker registers into a pending list drained by
+//! BackgroundWorkerShmemInit (C's BackgroundWorkerList); crash-restart
+//! scheduling lives in the postmaster (maybe_start_bgworkers /
+//! DetermineSleepTime), as in C. Dynamic registration still refuses
+//! bgw_restart_time >= 0 (no in-core user).
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -129,6 +132,18 @@ pub fn BackgroundWorkerShmemInit() {
     let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     let total_slots = g::max_worker_processes() as usize;
     let mut registered = guard.take().map(|r| r.registered).unwrap_or_default();
+    // First init: adopt the static registrations (C copies BackgroundWorkerList
+    // entries into slots here; on crash re-init the surviving `registered`
+    // entries are re-slotted instead and the pending list is already empty).
+    for worker in STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        registered.push(Some(RegisteredBgWorker {
+            worker,
+            pid: 0,
+            crashed_at: 0,
+            shmem_slot: -1,
+            terminate: false,
+        }));
+    }
     let mut slots: Vec<BackgroundWorkerSlot> = (0..total_slots)
         .map(|_| BackgroundWorkerSlot {
             in_use: false,
@@ -439,8 +454,71 @@ fn bgw_truncate(s: &str) -> String {
     s[..end].to_string()
 }
 
-pub fn RegisterBackgroundWorker(_worker: &BackgroundWorker) {
-    panic!("RegisterBackgroundWorker: static bgworker registration unported (shared_preload_libraries path, including its \"too many background workers\" error)");
+// Static registrations made before BackgroundWorkerShmemInit (C's
+// postmaster-local BackgroundWorkerList).
+static STATIC_PENDING: Mutex<Vec<BackgroundWorker>> = Mutex::new(Vec::new());
+
+pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) {
+    let mut worker = worker.clone();
+
+    // Static background workers can only be registered in the postmaster.
+    if g::IsUnderPostmaster() {
+        let _ = ereport(LOG)
+            .errmsg(format!(
+                "background worker \"{}\": must be registered in \"shared_preload_libraries\"",
+                worker.bgw_name
+            ))
+            .finish(loc(989, "RegisterBackgroundWorker"));
+        return;
+    }
+
+    // Cannot register static background workers after shmem init.
+    if REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        panic!(
+            "cannot register background worker \"{}\" after shmem init",
+            worker.bgw_name
+        );
+    }
+
+    let _ = report(
+        DEBUG1,
+        format!("registering background worker \"{}\"", worker.bgw_name),
+    );
+
+    worker.bgw_name = bgw_truncate(&worker.bgw_name);
+    worker.bgw_type = bgw_truncate(&worker.bgw_type);
+    // C runs the sanity checks at LOG elevel here: reject the registration
+    // but keep the postmaster going.
+    if let Err(e) = SanityCheckBackgroundWorker(&mut worker) {
+        let _ = ereport(LOG).errmsg(e.message().to_string()).finish(loc(0, "RegisterBackgroundWorker"));
+        return;
+    }
+
+    if worker.bgw_notify_pid != 0 {
+        let _ = ereport(LOG)
+            .errmsg(format!(
+                "background worker \"{}\": only dynamic background workers can request notification",
+                worker.bgw_name
+            ))
+            .finish(loc(1014, "RegisterBackgroundWorker"));
+        return;
+    }
+
+    let mut pending = STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.len() as i32 + 1 > g::max_worker_processes() {
+        let _ = ereport(LOG)
+            .errmsg("too many background workers")
+            .errdetail(format!(
+                "Up to {} background workers can be registered with the current settings.",
+                g::max_worker_processes()
+            ))
+            .errhint(
+                "Consider increasing the configuration parameter \"max_worker_processes\".",
+            )
+            .finish(loc(1028, "RegisterBackgroundWorker"));
+        return;
+    }
+    pending.push(worker);
 }
 
 pub fn RegisterDynamicBackgroundWorker(
