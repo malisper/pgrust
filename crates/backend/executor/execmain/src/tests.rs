@@ -9901,6 +9901,83 @@ mod epq_seams_w5 {
         let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
         crate::epq::check_epq_plan(agg);
     }
+
+    /// `PGRUST_LANE_V2_EPQ` knob A/B (contract §6.3 + §0.6): OFF ticks
+    /// NOTHING through the recheck admission walk; ON refuses the recheck
+    /// shape via the existing `epq` carrier and the recheck outcome is
+    /// byte-identical on both arms (zero ownership, zero behavior delta).
+    #[test]
+    fn epq_w5_knob_off_ticks_nothing_on_refuses_everything() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 79003;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (2, 20)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        let probe = || {
+            crate::lanev2::EPQ_ADMISSION_REFUSED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+            };
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+            let test = estate.exec_init_extra_tuple_slot(
+                Some(desc),
+                ::types_slot::TupleSlotKind::Virtual,
+            );
+            subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+
+            // OFF arm: no admission-walk tick, recheck proceeds Volcano.
+            crate::lanev2::epq_lane_set_for_tests(false);
+            let p0 = probe();
+            epq_store_test_tuple(estate, test, 1, 99);
+            let off = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let off_vals = epq_slot_vals(estate, off);
+            assert_eq!(probe(), p0, "knob OFF must tick NOTHING (contract §0.6)");
+
+            // ON arm: the admission walk refuses via the epq carrier; the
+            // recheck outcome is IDENTICAL (refuse-all = zero behavior).
+            crate::lanev2::epq_lane_set_for_tests(true);
+            epq_store_test_tuple(estate, test, 1, 99);
+            let on = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let on_vals = epq_slot_vals(estate, on);
+            crate::lanev2::epq_lane_set_for_tests(false);
+            assert!(probe() > p0, "ON arm never ran the refuse-all admission walk");
+            assert_eq!(on_vals, off_vals, "knob arms must behave identically");
+
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
 }
 // --- end WS-U wave-5 ----------------------------------------------------------
 

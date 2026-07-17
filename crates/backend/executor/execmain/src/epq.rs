@@ -35,6 +35,15 @@ pub fn eval_plan_qual<'mcx>(
     estate: &mut EStateData<'mcx>,
     inputslot: ExecSlotId,
 ) -> PgResult<Option<ExecSlotId>> {
+    // WS-U wave-5 (contract §6.3): inc-5's admission chokepoint, structure
+    // first. `PGRUST_LANE_V2_EPQ` default-OFF; ON runs the admission walk,
+    // which refuses every recheck shape through the existing `epq` carrier
+    // and the drive below stays Volcano either way — zero ownership, zero
+    // behavior delta this wave. The OFF arm is one relaxed byte load at
+    // recheck INITIATION only (never per-row/per-batch; §0.6 idiom).
+    if crate::lanev2::epq_lane_enabled() {
+        crate::lanev2::epq_recheck_refuse_all(epq.plan);
+    }
     ::executils::ensure_epq_subs(subs, estate.es_query_cxt, estate.epq_rtsize(), epq.result_rti);
     let saved_subs = core::mem::replace(&mut estate.es_epq, subs.take());
     let saved_active = estate.es_epq_active;
