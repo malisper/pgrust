@@ -61,8 +61,12 @@ use super::push::{
 };
 use super::stats::{self, RefuseReason, ShapeClass};
 
-/// `PGRUST_LANE_V2_ROWMODE` (default ON since wave-4 FLIP-1 — flip-ladder
-/// rung 1; explicit `=0`/`off` is the permanent kill switch): the Phase-0
+/// `PGRUST_LANE_V2_ROWMODE` (default OFF — wave-4 FLIP-1 made it default-ON;
+/// UN-FLIPPED per the SE4-GATES verdict, 2026-07-17: the board letters
+/// failed flat-or-better on the flip's own shape corpora (tail-1 +6.89%
+/// instr), the CB serial guard (+2.4% two-take) and the m4 batch letter — a
+/// PERF call, not correctness; see notes/se-wave4-flips.md. The knob and
+/// the lane host stay; explicit `=1`/`on` is the lane arm): the Phase-0
 /// row-mode facility gate. 0 = unresolved (read env on first use), 1 = OFF,
 /// 2 = ON. An AtomicU8 rather than the OnceLock idiom so the seams unit
 /// tests can A/B both paths in one process (`rowmode_set_for_tests`);
@@ -90,20 +94,25 @@ pub(super) fn rowmode_enabled() -> bool {
 #[cold]
 #[inline(never)]
 fn rowmode_resolve() -> bool {
-    // WAVE-4 FLIP-1 (flip-ladder rung 1; wave4-flip-manifest A1): default ON.
-    // The flip changes ONLY this default read — the explicit-OFF spelling
-    // (`=0`/`off`) is permanent and restores today's bytes AND ticks (G4);
-    // the knob itself never dies (flips never delete knobs).
-    let on = !matches!(
+    // UN-FLIP (SE4-GATES, 2026-07-17): wave-4 FLIP-1 flipped this default
+    // read to opt-out; the gate battery's per-shape letters + CB serial
+    // guard failed flat-or-better, so the default read returns to opt-in
+    // (pre-flip semantics). Only the default read moves — the lane host,
+    // floors machinery and manifest rows stay. Re-flip precondition: the
+    // delegation-tax lane closes the tail-1/mj gaps, then SE4 legs 5+9
+    // re-earn green (notes/se-wave4-flips.md).
+    let on = matches!(
         std::env::var("PGRUST_LANE_V2_ROWMODE").as_deref(),
-        Ok("0") | Ok("off")
+        Ok("1") | Ok("on")
     );
     ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
     on
 }
 
-/// `PGRUST_LANE_V2_MERGEJOIN` (default ON since wave-4 FLIP-2 — flip-ladder
-/// rung 2; explicit `=0`/`off` is the permanent kill switch): the wave-2
+/// `PGRUST_LANE_V2_MERGEJOIN` (default OFF — wave-4 FLIP-2 made it
+/// default-ON; UN-FLIPPED per the SE4-GATES verdict, 2026-07-17: the
+/// mergejoin corpus letter read +3.21% instr / +4.01% wall ON-vs-OFF — same
+/// treatment and re-flip precondition as `ROWMODE` above): the wave-2
 /// knob-split gate for the WS-G MergeJoin row-mode hosting (contract §2 —
 /// facility-level knob, granted; same AtomicU8 idiom as `ROWMODE` for the
 /// same test-lever reason).
@@ -121,12 +130,13 @@ fn mergejoin_enabled() -> bool {
 #[cold]
 #[inline(never)]
 fn mergejoin_resolve() -> bool {
-    // WAVE-4 FLIP-2 (flip-ladder rung 2; wave4-flip-manifest A2): default ON.
-    // Only the default read changes; `=0`/`off` stays the permanent kill
-    // switch (G4 restores today's bytes and ticks).
-    let on = !matches!(
+    // UN-FLIP (SE4-GATES, 2026-07-17): wave-4 FLIP-2's opt-out default read
+    // returns to opt-in (pre-flip semantics) — see the ROWMODE resolver
+    // comment; the FLIP-2 letters failed on the mergejoin corpus (incl. the
+    // mark/restore-over-Material legs).
+    let on = matches!(
         std::env::var("PGRUST_LANE_V2_MERGEJOIN").as_deref(),
-        Ok("0") | Ok("off")
+        Ok("1") | Ok("on")
     );
     MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
     on
