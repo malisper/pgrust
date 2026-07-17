@@ -911,7 +911,7 @@ pub fn restriction_selectivity<'mcx>(
     varrelid: i32,
 ) -> PgResult<f64> {
     const F_EQSEL: Oid = 101;
-    let oprrest = lsyscache::get_oprrest(operatorid)?;
+    let oprrest = crate::syscache_memo::get_oprrest(run, operatorid)?;
     if oprrest == 0 {
         return Ok(0.5);
     }
