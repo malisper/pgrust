@@ -36,6 +36,7 @@
 
 mod batch_source;
 pub mod coverage;
+mod express;
 mod exprkey;
 mod router;
 mod runtime_agg;
@@ -55,6 +56,8 @@ pub use exprkey::ExprKeyState;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_project_set;
+#[cfg(test)]
+pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
 pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_OWNED_FOR_TESTS};
 
@@ -1142,6 +1145,12 @@ pub fn try_own_index_scan<'mcx>(
     is: &mut ::nodeindexscan::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // WS-J express-lane point experiment (default OFF behind
+    // PGRUST_LANE_V2_EXPRESS; rowmode-operators.md §5): Some = express drove
+    // this pull; None = off/refused — fall through UNCHANGED.
+    if let Some(owned) = express::try_own_index_scan_express(is, estate)? {
+        return Ok(Some(owned));
+    }
     // Standalone scan ownership: refused, see STANDALONE_SCAN_NO_UPSIDE.
     // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
     if STANDALONE_SCAN_NO_UPSIDE {

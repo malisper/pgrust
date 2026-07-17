@@ -784,6 +784,66 @@ where
     sink.finish(estate)
 }
 
+/// Canonical never-pending pass-through `TupleOp` for hosting bare leaves
+/// (Phase-1 integration contract §2b: ONE definition, this spelling;
+/// consumed by WS-G's merge-join hosting and WS-J's express mode 2).
+/// `accept` forwards the tuple and maps the sink's backpressure verbatim
+/// (`Full` → `Paused`, `NeedMore` → `NeedInput` — the Paused-then-Finished
+/// rule per the `OpStatus` docs); `pending()` is always false, so `resume`
+/// is unreachable by the driver contract — it fails LOUDLY as a `PgError`
+/// (panicfix discipline: never `unreachable!()` on a plausible-path arm)
+/// plus a debug assert. `source_exhausted`: the default (`Finished`).
+pub(super) struct PassthroughOp;
+
+impl<'mcx> TupleOp<'mcx> for PassthroughOp {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        Ok(match out.accept(tuple, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(false, "PassthroughOp::resume: pending() is always false");
+        Err(Box::new(::types_error::PgError::error(
+            "lane-v2 PassthroughOp resumed with no pending expansion (driver contract violation)"
+                .to_string(),
+        )))
+    }
+}
+
+/// §5's express driver (rowmode-operators.md): a SOURCE-ONLY row pipeline.
+/// NO `TupleOp`, NO `RootAdapter`, no capacity-one buffer — `src.next_row`
+/// is returned directly (the buffer exists only to backpressure multi-row
+/// operators; a bare row source needs none). This degenerate driver is HOW
+/// instruction parity with the fused per-tuple path is reachable: the pull
+/// is the same per-row call chain as Volcano with only the admission verdict
+/// on top.
+///
+/// SCOPE-LOCKED (integration contract §2b) to WS-J's point experiment until
+/// the fleet G1–G4 verdict; no other workstream may call it in Phase 1.
+#[inline(always)]
+pub(super) fn pull_step_point<'mcx, S: RowSource<'mcx>>(
+    node: &mut S::Node,
+    src: &mut S,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    src.next_row(node, estate)
+}
+
 // =============================================================================
 // Row-mode driver mechanics (pull_step_rows over stub source/op): the driver
 // contract itself — resume-before-produce ordering, Paused-then-Finished,
