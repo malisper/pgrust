@@ -2580,6 +2580,16 @@ fn modify_table_arm<'mcx>(
     mps: &mut PgBox<'mcx, ModifyTablePlanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 WS-N inc-1: INSERT-no-triggers
+    // hosting behind PGRUST_LANE_V2_DML — a delegation over the SAME mt_*
+    // seams the fallback below drives): falls through to the UNCHANGED
+    // exec_modify_table on refuse. Lane logic + refuse-set live in
+    // `lanev2::dml` (the merge_join_arm pattern).
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_modify_table(mps, estate)? {
+            return Ok(r);
+        }
+    }
     let mps = &mut **mps;
     let subplan = &mut mps.subplan;
     let epq = &mut mps.epq;
