@@ -7681,6 +7681,7 @@ dependencies = [
  "bgwriter",
  "checkpointer",
  "elog",
+ "fd",
  "guc",
  "guc_tables",
  "init_small",
