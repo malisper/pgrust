@@ -171,7 +171,7 @@ pub(super) struct SourceCaps {
 /// errors on parallel-scan descriptors and the columnar AM debug-asserts
 /// its adaptive drive is unarmed; both refuse ranges that cross a hard
 /// boundary (`GranuleMap::segments` upholds that above the seam).
-#[allow(dead_code)] // read faces (next_batch/end_claim/capabilities) wire in inc-2
+#[allow(dead_code)] // granule_map/lane_sel: consumers arrive with WS-F / later drains
 pub(super) trait BatchGranuleSource<'mcx> {
     /// OPEN + GRANULES: open the underlying scan exactly as the drive
     /// would (the same `ensure_scandesc` open the geometry probes perform
@@ -195,8 +195,8 @@ pub(super) trait BatchGranuleSource<'mcx> {
 
     /// READ (staging half): stage the next batch of the positioned
     /// segment; 0 = segment drained. The staged batch is claim-scoped
-    /// (ABI R1) and readable through the node seam (inc-1) / the trait's
-    /// read face (inc-2) until the next call on this source.
+    /// (ABI R1) and readable through the trait's read face below until the
+    /// next `&mut` call on this source.
     fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
 
     /// Release end-of-claim resources (heap: the scan slot's page pin —
