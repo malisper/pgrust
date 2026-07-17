@@ -418,6 +418,29 @@ pub fn heap_set_block_range(
     Ok(())
 }
 
+/// End-of-claim pin release (single-executor wave 2, WS-O inc-2 —
+/// append-only seam; the R3 "zero pins at claim settle" tightening the
+/// Phase-1 contract deferred at WS-K Q3): reset the scan to the drained
+/// (un-inited) state, releasing the current page pin. A claim that ended
+/// EARLY (error mid-batch, abort between segments, shed) may still hold
+/// `rs_cbuf`; a normally-drained claim is already in this state and every
+/// store below is idempotent. The body mirrors `heap_set_block_range`'s
+/// reset half exactly (deliberately duplicated, not extracted — the
+/// positioning path's code shape is untouched); the next
+/// `heap_set_block_range` positions the following claim as before.
+pub fn heap_end_claim_release(scan: &mut HeapScanDescData<'_>) {
+    scan.rs_ctup = None;
+    scan.rs_cpage = core::ptr::null_mut();
+    if let Some(pin) = scan.rs_cbuf.take() {
+        pin.release();
+    }
+    scan.rs_cblock = InvalidBlockNumber;
+    scan.rs_prefetch_block = InvalidBlockNumber;
+    scan.rs_inited = false;
+    scan.rs_ntuples = 0;
+    scan.rs_cindex = 0;
+}
+
 // Const generics stand in for C's four constant-folded call sites.
 //
 // # Safety

@@ -643,6 +643,15 @@ impl Runtime {
         self.sched.worker_local(worker)
     }
 
+    /// WS-O inc-2 DEBUG-ONLY accessor (contract-approved "pin-board
+    /// assert"): `local`'s pin-board entry is settled. For post-drive
+    /// `debug_assert!`s — a participant that returned from its drive must
+    /// hold no pin (a violation = a stranded finalization obligation that
+    /// would wedge the protocol). Never branch production behavior on it.
+    pub fn debug_pin_settled(&self, local: &WorkerLocal) -> bool {
+        self.sched.pin_settled(local.worker_id())
+    }
+
     /// One scheduling decision + at most one task execution. Drivers: the
     /// pool worker loop, and the loom models. See the pool loop for the
     /// required epoch-capture/park discipline around `Step::Idle`.

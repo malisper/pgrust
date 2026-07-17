@@ -857,6 +857,12 @@ impl Scheduler {
         }
     }
 
+    /// WS-O inc-2 debug accessor: worker `worker`'s pin-board entry is
+    /// settled (see PinBoard::is_settled — asserts/diagnostics only).
+    pub(crate) fn pin_settled(&self, worker: usize) -> bool {
+        self.pins.is_settled(worker)
+    }
+
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
     pub(crate) fn clock_now_ns(&self) -> u64 {
         self.clock.now_ns()
