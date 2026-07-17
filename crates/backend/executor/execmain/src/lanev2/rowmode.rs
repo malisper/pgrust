@@ -234,23 +234,35 @@ pub fn try_own_project_set<'mcx>(
     ps: &mut ::mcx::PgBox<'mcx, crate::nodeprojectset::ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Wave-4 pre-flip G7 capture (flip-ladder §2): record the verdict at
+    // this chokepoint under `estate.engine_capture()` only (the emission-
+    // gate law — zero records on any default path; dedup first-wins keeps
+    // the per-pull cadence honest).
+    let capture_id =
+        if estate.engine_capture() { Some(ps.ps.plan.plan_node_id) } else { None };
+    let refuse = |estate: &mut EStateData<'mcx>, r: RefuseReason| {
+        stats::tick_refused(ShapeClass::ProjectSet, r);
+        if let Some(id) = capture_id {
+            super::engine_record_verdict(estate, id, ShapeClass::ProjectSet, Some(r));
+        }
+    };
     if !rowmode_enabled() {
         // Knob OFF: the documented wholesale refuse (lanev2.rs ProjectSet
         // section), tick-for-tick as before the rowmode facility landed.
-        stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::SrfSetExpansion);
+        refuse(estate, RefuseReason::SrfSetExpansion);
         return Ok(None);
     }
     // Dynamic per-call gates (the try_own_result cadence).
     if estate.es_epq_active {
-        stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::Epq);
+        refuse(estate, RefuseReason::Epq);
         return Ok(None);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::Backward);
+        refuse(estate, RefuseReason::Backward);
         return Ok(None);
     }
     if !estate.es_instrumentation.is_empty() {
-        stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::Instrumented);
+        refuse(estate, RefuseReason::Instrumented);
         return Ok(None);
     }
     let ps = &mut **ps;
@@ -259,15 +271,18 @@ pub fn try_own_project_set<'mcx>(
     // stays on the Volcano body (ledger: ProjectSet-over-Sort).
     {
         let crate::procnode::PlanStateNode::Result(r) = &mut *ps.outer else {
-            stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::ChildNotLaneOwned);
+            refuse(estate, RefuseReason::ChildNotLaneOwned);
             return Ok(None);
         };
         if r.outer.is_some() {
-            stats::tick_refused(ShapeClass::ProjectSet, RefuseReason::ChildNotLaneOwned);
+            refuse(estate, RefuseReason::ChildNotLaneOwned);
             return Ok(None);
         }
     }
     stats::tick_owned(ShapeClass::ProjectSet);
+    if let Some(id) = capture_id {
+        super::engine_record_verdict(estate, id, ShapeClass::ProjectSet, None);
+    }
     #[cfg(test)]
     ROWMODE_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
     // exec_project_set's per-call prologue: entry CFI + entry per-tuple
@@ -339,20 +354,34 @@ pub fn try_own_merge_join<'mcx>(
     if !mergejoin_enabled() {
         return Ok(None);
     }
+    // Wave-4 pre-flip G7 capture (flip-ladder §2 rung-2 gate): the MJ ENGINE
+    // capture at THE verdict chokepoint — `estate.engine_capture()` gated
+    // (emission-gate law, zero records on default paths), dedup first-wins.
+    let capture_id =
+        if estate.engine_capture() { Some(mj.state.plan.join.plan.plan_node_id) } else { None };
+    let refuse = |estate: &mut EStateData<'mcx>, r: RefuseReason| {
+        stats::tick_refused(ShapeClass::MergeJoin, r);
+        if let Some(id) = capture_id {
+            super::engine_record_verdict(estate, id, ShapeClass::MergeJoin, Some(r));
+        }
+    };
     // Dynamic per-call gates (the try_own_result cadence).
     if estate.es_epq_active {
-        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Epq);
+        refuse(estate, RefuseReason::Epq);
         return Ok(None);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Backward);
+        refuse(estate, RefuseReason::Backward);
         return Ok(None);
     }
     if !estate.es_instrumentation.is_empty() {
-        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Instrumented);
+        refuse(estate, RefuseReason::Instrumented);
         return Ok(None);
     }
     stats::tick_owned(ShapeClass::MergeJoin);
+    if let Some(id) = capture_id {
+        super::engine_record_verdict(estate, id, ShapeClass::MergeJoin, None);
+    }
     super::lane_trace("mergejoin: row-mode drive owned");
     #[cfg(test)]
     ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
