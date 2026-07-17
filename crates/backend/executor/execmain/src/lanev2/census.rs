@@ -737,6 +737,17 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::MergeJoin,
         &[RefuseReason::Epq, RefuseReason::Backward, RefuseReason::Instrumented],
     ),
+    // --- FLIP-3: windows-w1 (rung 3) ---------------------------------------
+    (
+        ShapeClass::WindowAgg,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ChildNotLaneOwned,
+            RefuseReason::ShapeQualProj,
+        ],
+    ),
 ];
 
 /// The Layer-A tail `stats::tick_refused` calls (the one WS-P stats.rs
