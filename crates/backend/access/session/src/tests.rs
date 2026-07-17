@@ -381,7 +381,18 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      argument as slot 15 (vacuumlazy morsels.rs WORKER_CX): full-
     //      identity parallel helpers, no cross-thread access, no retained
     //      session state.
-    assert_eq!(count_tree(crates), 478, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 479, WS-B grant-donation thread_local (single-executor merge):
+    //   20. executor/runtime/src/sched.rs LEDGER_GRANT — per-worker
+    //      admission bookkeeping holding (scheduler, slot) while the thread
+    //      is inside a ledger-JOINED run_task (set by run_task_admitted,
+    //      cleared by GrantCtx drop — unwind-safe). Consulted by declared-
+    //      blocking-section entry points (io.rs permit seams, blocking.rs
+    //      facade) so the width grant is donated and retaken alongside the
+    //      execution permit. Deliberately non-session TLS: empty on non-
+    //      worker threads and knob-OFF, plain per-thread state owned by the
+    //      pool-loop worker (same pattern as blocking.rs's PERMIT_SEM /
+    //      slot 13).
+    assert_eq!(count_tree(crates), 479, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
