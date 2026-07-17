@@ -120,6 +120,17 @@ pub fn exec_re_scan<'mcx>(
             if let Some(d) = w.lane.as_mut() {
                 ::nodewindowagg::lane::lane_window_reset(d);
             }
+            // --- WS-R T2-B (wave-3): forget the framed drive's phase (the
+            // node-side machine was reset by exec_rescan_window_agg above,
+            // except more_partitions — lane_framed_reset clears it; the
+            // memoized framed verdict stands). ---
+            {
+                let w = &mut **w;
+                if let Some(d) = w.lane_framed.as_mut() {
+                    ::nodewindowagg::lane::lane_framed_reset(&mut w.state, d);
+                }
+            }
+            // --- end WS-R T2-B ---
             exec_re_scan(&mut w.outer, estate)
         }
         PlanStateNode::Material(m) => {
@@ -490,6 +501,16 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
             if let Some(d) = w.lane.as_mut() {
                 ::nodewindowagg::lane::lane_window_reset(d);
             }
+            // --- WS-R T2-B (wave-3): forget the framed drive's phase (see
+            // the chgParam-free arm; lane_framed_reset also clears the
+            // node's more_partitions). ---
+            {
+                let w = &mut **w;
+                if let Some(d) = w.lane_framed.as_mut() {
+                    ::nodewindowagg::lane::lane_framed_reset(&mut w.state, d);
+                }
+            }
+            // --- end WS-R T2-B ---
             exec_re_scan_with_chg(&mut w.outer, base.lefttree.expect("WindowAgg outer plan"), estate, chg)?;
         }
         PlanStateNode::Material(m) => {

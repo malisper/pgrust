@@ -201,6 +201,15 @@ pub struct WindowAggNode<'mcx> {
     /// `Some` = STICKY lane ownership for the node's whole (re)scan life —
     /// the buffered partition machine cannot hand back mid-stream.
     pub lane: Option<::nodewindowagg::lane::LaneWindowDrive>,
+    // --- WS-R T2-B (wave-3) ---
+    /// T2-B framed-drive structural admission verdict, memoized like
+    /// `lane_admit` (an independent census: W1 and T2-B admit different
+    /// shape sets over the same child gates).
+    pub lane_framed_admit: Option<bool>,
+    /// T2-B sealed framed drive (lanev2/windows.rs behind
+    /// PGRUST_LANE_V2_WINDOWS_T2B). `Some` = STICKY, exactly `lane`'s law.
+    pub lane_framed: Option<::nodewindowagg::lane::LaneFramedDrive>,
+    // --- end WS-R T2-B ---
 }
 
 pub struct MaterialNode<'mcx> {
@@ -918,7 +927,14 @@ pub fn exec_init_node<'mcx>(
             )?;
             PlanStateNode::WindowAgg(::mcx::alloc_in(
                 mcx,
-                WindowAggNode { state, outer, lane_admit: None, lane: None },
+                WindowAggNode {
+                    state,
+                    outer,
+                    lane_admit: None,
+                    lane: None,
+                    lane_framed_admit: None,
+                    lane_framed: None,
+                },
             )?)
         }
         NodeTag::T_NestLoop => {
@@ -2292,16 +2308,23 @@ fn window_agg_arm<'mcx>(
     w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hooks (both default-OFF; on refuse each
+    // Lane-executor-v2 dispatch hooks (all default-OFF; on refuse each
     // falls through — ultimately to the UNCHANGED path below). First the
     // Phase-1 W1 batch lane (PGRUST_LANE_V2_WINDOWS, sticky owner of its
-    // admitted shapes), then the wave-2 WS-M second hook: T2-A row-mode
-    // delegation (PGRUST_LANE_V2_WINDOWS_T2, per-pull, hosts everything W1
-    // refused). Lane logic + refuse-sets live in `lanev2::windows`.
+    // admitted shapes), then the wave-3 WS-R T2-B framed batch drive
+    // (PGRUST_LANE_V2_WINDOWS_T2B, sticky, hosts the framed remainder over
+    // admitted sort feeds), then the wave-2 WS-M T2-A row-mode delegation
+    // (PGRUST_LANE_V2_WINDOWS_T2, per-pull, hosts everything both batch
+    // lanes refused). Lane logic + refuse-sets live in `lanev2::windows`.
     if crate::lanev2::enabled() {
         if let Some(r) = crate::lanev2::try_own_window_agg(w, estate)? {
             return Ok(r);
         }
+        // --- WS-R T2-B (wave-3) ---
+        if let Some(r) = crate::lanev2::try_own_window_agg_t2b(w, estate)? {
+            return Ok(r);
+        }
+        // --- end WS-R T2-B ---
         if let Some(r) = crate::lanev2::try_own_window_agg_t2(w, estate)? {
             return Ok(r);
         }
@@ -4010,7 +4033,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
     AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot; lane_exprkey },
-    WindowAggNode<'_> { state, outer, lane_admit; lane },
+    WindowAggNode<'_> { state, outer, lane_admit, lane_framed_admit, lane_framed; lane },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },

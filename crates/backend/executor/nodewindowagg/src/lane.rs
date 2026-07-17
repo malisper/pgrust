@@ -53,7 +53,10 @@ use ::execexpr::{exec_eval_expr, exec_project, exec_qual, EvalSlots};
 use ::executils::{EStateData, ExecSlotId};
 use ::tuplestore::Tuplestore;
 use ::types_error::{PgError, PgResult};
-use ::types_nodes::rawnodes::FRAMEOPTION_DEFAULTS;
+use ::types_nodes::rawnodes::{
+    FRAMEOPTION_DEFAULTS, FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES,
+    FRAMEOPTION_GROUPS,
+};
 
 use crate::{WaStatus, WfKind, WindowAggStateData};
 
@@ -523,9 +526,353 @@ fn transition_first_part_row<'mcx>(
     Ok(())
 }
 
+// ===========================================================================
+// T2-B (wave-3 WS-R): the sealed FRAMED drive — explicit-frame WindowAgg
+// shapes as a lane batch operator, generalizing the W1 peer-group machine.
+//
+// Mechanism: unlike W1 (which re-implements the default-frame cadence
+// group-at-a-time), T2-B drives the NODE'S OWN framed machinery —
+// `begin_partition` / the `spool_tuples` per-row body / `eval_windowfunction`
+// / `eval_windowaggregates_{default,framed}` / the node projection — over a
+// push-fed partition: the lane spools each accepted row into the node's own
+// `buffer` tuplestore (the multi-read-pointer window-buffer configuration the
+// tuplestore spill opener unit pins, incl. the TSS_WRITEFILE arms), and only
+// after the partition is COMPLETE (a partition-boundary row arrived, or the
+// source exhausted) does it run the per-output-row evaluation loop — a
+// verbatim transcription of `exec_window_agg`'s loop body with the spooling
+// arms proven unreachable (`partition_spooled` short-circuits every fetch
+// path: spool_tuples / gettupleslot_at / update_frame*pos / row_is_in_frame /
+// win_get_func_arg_*). The eager-spool schedule executes the identical
+// per-row statements (part_eq compare + puttupleslot) the Volcano arm's lazy
+// spool executes — just earlier — and since tuplestore_trim is unported on
+// this node, peak buffer footprint is identical too. All frame semantics
+// (ROWS/RANGE/GROUPS bounds, EXCLUDE, inverse transitions, value functions,
+// rank family, ntile/percent_rank/cume_dist) are the node's own code — the
+// lane owns only control flow (the W1 contract).
+//
+// SEALED admission (lane_framed_shape_admissible): no runCondition and no
+// qual — those arms carry the pass-through state machine (WaStatus::
+// PassThrough*), whose mid-stream consume-without-emit posture does not fit
+// the sticky batch drive; they stay on T2-A delegation. Everything else the
+// node runs, T2-B hosts — including FRAMEOPTION_DEFAULTS shapes W1's
+// function census refuses (lead/lag/ntile/percent_rank/cume_dist/FILTER).
+//
+// STICKY ownership, exactly W1's law: the fully-buffered partition is
+// cross-call state `exec_window_agg` cannot resume, so ownership is
+// all-or-nothing per (re)scan and a dynamic-gate flip mid-stream is a LOUD
+// tripwire (structurally unreachable via the row-marks admission gate).
+// ===========================================================================
+
+/// Lane-private cross-call drive state for the framed (T2-B) machine. All
+/// partition/emission bookkeeping lives on the NODE (`WindowAggStateData` —
+/// currentpos, spooled_rows, partition_spooled, more_partitions,
+/// first_part_valid, next_partition, status); the drive only remembers which
+/// phase the push-side is in.
+pub struct LaneFramedDrive {
+    /// Emission phase: positions `[currentpos, spooled_rows)` of the open
+    /// partition are being served (accept is illegal until drained).
+    emitting: bool,
+    /// The next emit call must advance `currentpos` first (false exactly for
+    /// a fresh partition's first served position — begin_partition set 0).
+    advance: bool,
+}
+
+impl LaneFramedDrive {
+    pub fn new() -> Self {
+        LaneFramedDrive { emitting: false, advance: false }
+    }
+}
+
+impl Default for LaneFramedDrive {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn framed_fetch_tripwire() -> Box<PgError> {
+    Box::new(PgError::error(
+        "lane-v2 windows T2-B: node fetch path reached on a fully-spooled \
+         partition (framed-drive invariant broken)"
+            .to_string(),
+    ))
+}
+
+/// The never-called fetch closure: every node fetch path short-circuits on
+/// `partition_spooled` before pulling (module section doc); reaching this is
+/// a loud invariant failure, never a silent wrong result.
+fn framed_no_fetch<'mcx>(
+) -> impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
+    |_| Err(framed_fetch_tripwire())
+}
+
+/// Structural (init-stable, memoizable) admission census for the T2-B framed
+/// class: any frame, any window functions — the machine is the node's own —
+/// but no runCondition and no qual (the pass-through family; section doc).
+pub fn lane_framed_shape_admissible(state: &WindowAggStateData<'_>) -> bool {
+    state.runcondition.is_none() && state.qual.is_none()
+}
+
+pub enum LaneFramedAccept {
+    /// Row absorbed into the open partition; feed the next one.
+    NeedMore,
+    /// A partition boundary: the open partition is fully spooled (its rows
+    /// await emission) and the incoming row is parked as the next
+    /// partition's first row.
+    PartitionReady,
+}
+
+/// One sorted input row, push-fed. Replays the node's own cadences: the
+/// parked-row `begin_partition` convention (first_part_slot) and
+/// `spool_tuples`' per-row body (part_eq compare + tmpcontext reset +
+/// puttupleslot) — identical statements to the Volcano arm's lazy spool.
+pub fn lane_framed_accept<'mcx>(
+    state: &mut WindowAggStateData<'mcx>,
+    drive: &mut LaneFramedDrive,
+    estate: &mut EStateData<'mcx>,
+    tuple: ExecSlotId,
+) -> PgResult<LaneFramedAccept> {
+    debug_assert!(!drive.emitting, "accept while rows pend emission");
+    let mcx = estate.es_query_cxt;
+    if state.next_partition {
+        if !state.first_part_valid {
+            // First row of the stream: park it, then begin the partition
+            // from the parked row (the node's own first_part_slot
+            // convention; fetch is unreachable — first_part_valid is set).
+            let outer_slot = estate.slot_mut(tuple);
+            exectuples::exec_copy_slot(&mut state.first_part_slot, outer_slot, mcx, mcx)?;
+            state.first_part_valid = true;
+            let mut fetch = framed_no_fetch();
+            state.begin_partition(estate, &mut fetch)?;
+            return Ok(LaneFramedAccept::NeedMore);
+        }
+        // The parked boundary row heads the new partition; the incoming
+        // tuple joins (or bounds) it below.
+        let mut fetch = framed_no_fetch();
+        state.begin_partition(estate, &mut fetch)?;
+    }
+    // spool_tuples' per-row body (boundary compare against the partition's
+    // first row, its reset cadence, then the buffer append).
+    if state.plan.partNumCols > 0 {
+        let same = {
+            let WindowAggStateData { ref mut part_eq, ref mut first_part_slot, .. } = *state;
+            let outer_slot = estate.slot_mut(tuple);
+            let mut slots =
+                EvalSlots { scan: None, inner: Some(first_part_slot), outer: Some(outer_slot) };
+            exec_qual(part_eq.as_deref_mut(), &mut slots)?
+        };
+        estate.reset_expr_context(state.tmpcontext);
+        if !same {
+            // Park the next partition's first row; the open partition is
+            // complete — switch to emission.
+            {
+                let outer_slot = estate.slot_mut(tuple);
+                exectuples::exec_copy_slot(&mut state.first_part_slot, outer_slot, mcx, mcx)?;
+            }
+            state.partition_spooled = true;
+            state.more_partitions = true;
+            drive.emitting = true;
+            drive.advance = false;
+            return Ok(LaneFramedAccept::PartitionReady);
+        }
+    }
+    {
+        let outer_slot = estate.slot_mut(tuple);
+        state.buffer.as_mut().expect("open partition implies a buffer").puttupleslot(
+            outer_slot, mcx,
+        )?;
+    }
+    state.spooled_rows += 1;
+    Ok(LaneFramedAccept::NeedMore)
+}
+
+/// Source exhausted. Closes the open partition for emission, or (once the
+/// previous partition drained) begins the parked final partition, if any.
+/// Returns whether rows await emission; `false` = fully drained (the node is
+/// marked Done — drained stays drained, idempotent).
+pub fn lane_framed_input_done<'mcx>(
+    state: &mut WindowAggStateData<'mcx>,
+    drive: &mut LaneFramedDrive,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if drive.emitting {
+        return Ok(true);
+    }
+    if !state.next_partition {
+        // Open partition mid-spool: the stream ended — close it (the
+        // spool_tuples end-of-stream arm) and emit.
+        state.partition_spooled = true;
+        state.more_partitions = false;
+        drive.emitting = true;
+        drive.advance = false;
+        return Ok(true);
+    }
+    if state.more_partitions {
+        // The parked boundary row is a final one-row partition (no rows
+        // followed it before the stream ended).
+        debug_assert!(state.first_part_valid, "parked partition without a parked row");
+        let mut fetch = framed_no_fetch();
+        state.begin_partition(estate, &mut fetch)?;
+        state.partition_spooled = true;
+        state.more_partitions = false;
+        drive.emitting = true;
+        drive.advance = false;
+        return Ok(true);
+    }
+    // Empty stream, or everything released: Done (idempotent).
+    state.status = WaStatus::Done;
+    Ok(false)
+}
+
+pub fn lane_framed_emit_pending(drive: &LaneFramedDrive) -> bool {
+    drive.emitting
+}
+
+/// Next output row of the fully-spooled partition: a verbatim transcription
+/// of `exec_window_agg`'s loop body (position advance, the GROUPS/EXCLUDE
+/// currentgroup tracking over read pointer 0, `eval_windowfunction` per
+/// non-agg wfunc, the default/framed aggregate evaluation, the node's own
+/// projection incl. the subplan arm) — minus the spooling arms (unreachable:
+/// partition_spooled) and minus the runCondition/qual tail (sealed out of
+/// admission; status stays Run for the node's whole owned life).
+///
+/// `None` = the partition is drained: the node's `release_partition` ran
+/// (the Volcano loop-top timing — one pull AFTER the last row was returned,
+/// preserving returned-slot lifetime) and the machine returns to the spool
+/// phase (or, at end of input, `lane_framed_input_done` marks Done).
+pub fn lane_framed_emit_next<'mcx>(
+    state: &mut WindowAggStateData<'mcx>,
+    drive: &mut LaneFramedDrive,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    if !drive.emitting {
+        return Ok(None);
+    }
+    debug_assert!(state.partition_spooled, "framed emission over an unspooled partition");
+    debug_assert!(state.status == WaStatus::Run, "sealed admission: no pass-through states");
+    if drive.advance {
+        state.currentpos += 1;
+        state.framehead_valid = false;
+        state.frametail_valid = false;
+    } else {
+        drive.advance = true;
+    }
+    if state.currentpos >= state.spooled_rows {
+        // Partition fully emitted (this is a LATER pull than the one that
+        // returned its last row — the capacity-one root pauses per row, so
+        // the buffer clear preserves the Volcano returned-slot contract).
+        state.release_partition(estate);
+        drive.emitting = false;
+        drive.advance = false;
+        return Ok(None);
+    }
+    let mut fetch = framed_no_fetch();
+    if !state.deps_hoisted {
+        state.hoist_pending_initplans(estate)?;
+        state.deps_hoisted = true;
+    }
+    estate.reset_expr_context(state.ps_ExprContext);
+    {
+        let mcx = estate.es_query_cxt;
+        if state.frameOptions
+            & (FRAMEOPTION_GROUPS | FRAMEOPTION_EXCLUDE_GROUP | FRAMEOPTION_EXCLUDE_TIES)
+            != 0
+            && state.currentpos > 0
+        {
+            {
+                let WindowAggStateData { ref mut temp_slot_2, ref mut scan_slot, .. } = *state;
+                exectuples::exec_copy_slot(temp_slot_2, scan_slot, mcx, mcx)?;
+            }
+            {
+                let buffer = state.buffer.as_mut().unwrap();
+                buffer.select_read_pointer(0)?;
+                if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+                    panic!("unexpected end of tuplestore");
+                }
+            }
+            let peers = {
+                let WindowAggStateData {
+                    ref mut temp_slot_2,
+                    ref mut scan_slot,
+                    ref mut ord_eq,
+                    tmpcontext,
+                    ..
+                } = *state;
+                WindowAggStateData::are_peers(
+                    estate,
+                    ord_eq.as_deref_mut(),
+                    tmpcontext,
+                    temp_slot_2,
+                    scan_slot,
+                )?
+            };
+            if !peers {
+                state.currentgroup += 1;
+                state.groupheadpos = state.currentpos;
+                state.grouptail_valid = false;
+            }
+            exectuples::exec_clear_tuple(&mut state.temp_slot_2, mcx);
+        } else {
+            let buffer = state.buffer.as_mut().unwrap();
+            buffer.select_read_pointer(0)?;
+            if !buffer.gettupleslot(true, false, &mut state.scan_slot, mcx)? {
+                panic!("unexpected end of tuplestore");
+            }
+        }
+    }
+    for i in 0..state.perfunc.len() {
+        if !matches!(state.perfunc[i].kind, WfKind::PlainAgg { .. }) {
+            state.eval_windowfunction(estate, &mut fetch, i)?;
+        }
+    }
+    if state.numaggs > 0 {
+        if state.frameOptions == FRAMEOPTION_DEFAULTS {
+            state.eval_windowaggregates_default(estate, &mut fetch)?;
+        } else {
+            state.eval_windowaggregates_framed(estate, &mut fetch)?;
+        }
+    }
+    if state.proj.has_subplan() {
+        let ecxt = state.ps_ExprContext;
+        let result = state.ps_ResultTupleSlot;
+        let WindowAggStateData { ref mut proj, ref mut scan_slot, .. } = *state;
+        ::executils::exec_project_with_subplans_outer(proj, scan_slot, estate, ecxt, result)?;
+    } else {
+        let mcx = estate.es_query_cxt;
+        let result_slot = estate.slot_mut(state.ps_ResultTupleSlot);
+        let mut slots = EvalSlots { scan: None, inner: None, outer: Some(&mut state.scan_slot) };
+        exec_project(&mut state.proj, &mut slots, result_slot, mcx)?;
+    }
+    Ok(Some(state.ps_ResultTupleSlot))
+}
+
+/// Rescan hook: forget the phase; the node-side machine is reset by
+/// `exec_rescan_window_agg` (release_partition + first_part invalidation),
+/// which the execami arms already run before this.
+///
+/// One node-side flag is the LANE's to reset: `more_partitions`.
+/// `exec_rescan_window_agg` never touches it because the Volcano arm always
+/// overwrites it (begin_partition's fetch-None arm / spool_tuples) before
+/// its one read — but `lane_framed_input_done`'s parked-partition branch
+/// reads it FIRST, so a stale `true` from a drive abandoned mid-partition
+/// with a parked boundary row (e.g. under LIMIT/LATERAL) would resurrect
+/// that branch after the rescan cleared `first_part_valid`: a debug_assert
+/// panic in debug, the framed-fetch tripwire PgError in release, where
+/// Volcano returns zero rows on an empty re-feed. Clearing it here restores
+/// Volcano's empty-rescan behavior exactly (wave-3 review finding 1).
+pub fn lane_framed_reset(state: &mut WindowAggStateData<'_>, drive: &mut LaneFramedDrive) {
+    state.more_partitions = false;
+    drive.emitting = false;
+    drive.advance = false;
+}
+
 // The drive owns a Tuplestore (fd-guard Drop on the spill arm) — droppy.
 mcx::forget_safe_struct!(
     LaneWindowDrive { work_mem_kb, spooled, emit_pos, emit_end, emit_rank,
         emit_dense, group_start, group_ord, partition_open, partition_done,
         boundary_saved; store },
 );
+
+// T2-B framed drive: phase bookkeeping only (the buffer is the NODE's).
+mcx::forget_safe_struct!(LaneFramedDrive { emitting, advance },);
