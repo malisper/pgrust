@@ -73,7 +73,7 @@ pub fn get_relation_statistics<'mcx>(
             for e in list.iter() {
                 let e = clauses::eval_const_expressions(mcx, e)?;
                 if varno != 1 {
-                    crate::plancat::change_var_nodes(e, varno);
+                    crate::plancat::change_var_nodes(e, varno)?;
                 }
                 exprs.push(run.intern_expr(e));
             }
