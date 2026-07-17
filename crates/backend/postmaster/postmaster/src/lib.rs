@@ -196,16 +196,6 @@ pub fn with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> R {
     PM.with(|pm| f(&mut pm.borrow_mut()))
 }
 
-// C reads/writes its PM-equivalent globals with no aliasing check, so a
-// FATAL raised while a `with_pm` borrow is live (e.g. from deep inside
-// listen_server_port's lock-file reclaim) and drained synchronously by
-// proc_exit's on_proc_exit callbacks can re-enter here on the same thread.
-// try_borrow_mut degrades to a no-op in that case instead of panicking the
-// exit callback (the process is exiting anyway; the OS reclaims the fds).
-pub fn try_with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> Option<R> {
-    PM.with(|pm| pm.try_borrow_mut().ok().map(|mut guard| f(&mut guard)))
-}
-
 // C `volatile sig_atomic_t` pending flags: real signal handlers run on an
 // arbitrary thread under the thread model, so these are process statics.
 pub static PENDING_PM_SHUTDOWN_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -443,22 +433,6 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         statemachine::PostmasterStateMachine()?;
     }
 
-    // pg_ctl promote: forward SIGUSR2 to the startup process while it is
-    // still recovering (postmaster.c:3883-3895); startup unlinks the file.
-    if with_pm(|pm| {
-        pm.startup.is_some()
-            && matches!(
-                pm.pm_state,
-                PMState::PM_STARTUP | PMState::PM_RECOVERY | PMState::PM_HOT_STANDBY
-            )
-    }) && xlogrecovery_seams::check_promote_signal::is_installed()
-        && xlogrecovery_seams::check_promote_signal::call()
-    {
-        if let Some(startup) = with_pm(|pm| pm.startup) {
-            statemachine::signal_child(&startup, libc::SIGUSR2);
-        }
-    }
-
     Ok(())
 }
 
@@ -648,17 +622,6 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
-        // C treats walreceiver exit status 0 or 1 as normal (FATAL exit = 1):
-        // the startup process re-requests one when it still wants streaming.
-        if with_pm(|pm| pm.walreceiver.map(|c| c.pid)) == Some(pid) {
-            let wr = with_pm(|pm| pm.walreceiver.take()).expect("checked");
-            pmchild_seams::release_postmaster_child_slot::call(wr.child_slot);
-            if !(status0 || status1) {
-                handle_child_crash("WAL receiver process", pid, exitstatus)?;
-            }
-            continue;
-        }
-
         // C treats archiver exit status 0 or 1 as normal (FATAL exit = 1):
         // the main loop relaunches it to retry archiving remaining files.
         if with_pm(|pm| pm.pgarch.map(|c| c.pid)) == Some(pid) {
@@ -666,18 +629,6 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             pmchild_seams::release_postmaster_child_slot::call(pgarch_child.child_slot);
             if !(status0 || status1) {
                 handle_child_crash("archiver process", pid, exitstatus)?;
-            }
-            continue;
-        }
-
-        // C process_pm_child_exit slot sync worker arm: status 0/1 is a
-        // normal stop (config change, promotion); the main loop relaunches
-        // it after SLOTSYNC_RESTART_INTERVAL_SEC when still applicable.
-        if with_pm(|pm| pm.slotsync_worker.map(|c| c.pid)) == Some(pid) {
-            let ss = with_pm(|pm| pm.slotsync_worker.take()).expect("checked");
-            pmchild_seams::release_postmaster_child_slot::call(ss.child_slot);
-            if !(status0 || status1) {
-                handle_child_crash("slot sync worker process", pid, exitstatus)?;
             }
             continue;
         }
@@ -697,16 +648,13 @@ pub fn process_pm_child_exit() -> PgResult<()> {
 
         match pmchild_seams::find_postmaster_child_by_pid::call(pid) {
             // C's CleanupBackend also owns autovacuum workers (B_AUTOVAC_WORKER
-            // rides the backend list) and walsenders (B_WAL_SENDER — a backend
-            // that switched type at START_REPLICATION; CleanupBackend treats it
-            // exactly like a plain backend).
+            // rides the backend list).
             Some((child_slot, btype))
                 if matches!(
                     btype,
                     BackendType::Backend
                         | BackendType::DeadEndBackend
                         | BackendType::AutovacWorker
-                        | BackendType::WalSender
                 ) =>
             {
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);

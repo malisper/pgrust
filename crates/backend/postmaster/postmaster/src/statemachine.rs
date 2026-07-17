@@ -343,9 +343,6 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
         // C reset_shared() re-runs BackgroundWorkerShmemInit: counts zeroed,
         // surviving registrations recopied into slots.
         bgworker::BackgroundWorkerShmemInit();
-        if launcher_seams::apply_launcher_shmem_init::is_installed() {
-            launcher_seams::apply_launcher_shmem_init::call();
-        }
 
         UpdatePMState(PMState::PM_STARTUP);
 
@@ -523,14 +520,7 @@ pub fn maybe_start_bgworkers() {
                 }
                 continue;
             }
-            // Not yet time to restart this worker: remember to check again
-            // later (postmaster.c maybe_start_bgworkers, restart-interval arm).
-            let now = timestamp_seams::get_current_timestamp::call();
-            let restart_usecs = (bgworker::rw_restart_time(idx) as i64) * 1000 * 1000;
-            if now - bgworker::rw_crashed_at(idx) < restart_usecs {
-                with_pm(|pm| pm.have_crashed_worker = true);
-                continue;
-            }
+            panic!("maybe_start_bgworkers: bgworker restart scheduling unported (bgw_restart_time >= 0)");
         }
 
         if bgworker_should_start_now(bgworker::rw_start_time(idx)) {

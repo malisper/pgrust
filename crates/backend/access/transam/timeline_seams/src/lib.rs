@@ -47,8 +47,3 @@ seam_core::seam!(
         reason: &'a str,
     ) -> PgResult<()>
 );
-
-seam_core::seam!(
-    // existsTimeLineHistory(probeTLI) (timeline.c).
-    pub fn exists_timeline_history(probe_tli: TimeLineID) -> PgResult<bool>
-);

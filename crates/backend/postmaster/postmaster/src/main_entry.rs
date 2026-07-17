@@ -7,7 +7,7 @@ use types_guc::{GucContext, GucSource};
 
 use crate::statemachine::{ExitPostmaster, StartChildProcess, StartSysLogger, UpdatePMState};
 use crate::{
-    loc, report, try_with_pm, with_pm, PMState, LOCK_FILE_LINE_LISTEN_ADDR, LOCK_FILE_LINE_PM_STATUS,
+    loc, report, with_pm, PMState, LOCK_FILE_LINE_LISTEN_ADDR, LOCK_FILE_LINE_PM_STATUS,
     LOCK_FILE_LINE_SOCKET_DIR, MAXLISTEN, PM_STATUS_STARTING,
 };
 
@@ -350,9 +350,6 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
     // slot-pool init (plain statics, no shmem placement here).
     bgworker::BackgroundWorkerShmemInit();
-    if launcher_seams::apply_launcher_shmem_init::is_installed() {
-        launcher_seams::apply_launcher_shmem_init::call();
-    }
 
     let fastpath_groups = postinit::InitializeFastPathLocks();
 
@@ -568,13 +565,7 @@ pub fn pg_start_time() -> i64 {
 }
 
 fn close_server_ports_cb(_code: i32, _arg: usize) {
-    // try_with_pm, not with_pm: this on_proc_exit callback can run while a
-    // with_pm borrow is still on the stack (a FATAL raised from inside
-    // listen_server_port, itself called under with_pm, drains callbacks
-    // synchronously before unwinding). C has no aliasing check here and
-    // just closes the fds; skip silently on the reentrant case instead of
-    // panicking — the process is exiting, so the OS closes the fds anyway.
-    let _ = try_with_pm(|pm| {
+    with_pm(|pm| {
         for fd in pm.listen_sockets.drain(..) {
             // SAFETY: closing listen fds owned by the postmaster.
             unsafe {

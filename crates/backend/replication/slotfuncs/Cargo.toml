@@ -32,4 +32,3 @@ inval = { path = "../../utils/cache/inval" }
 xlogreader = { path = "../../access/transam/xlogreader" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 xlogrecovery = { path = "../../access/transam/xlogrecovery" }
-slotsync = { path = "../slotsync" }
