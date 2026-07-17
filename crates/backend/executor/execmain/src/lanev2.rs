@@ -113,6 +113,27 @@ pub fn enabled() -> bool {
     ::guc_tables::backing::pgrust_lane_executor()
 }
 
+/// Combined gate for the wave-2 row-mode TAIL dispatch hooks in procnode
+/// (se2-cost-fix): the process-static, default-OFF `PGRUST_LANE_V2_ROWMODE`
+/// knob FIRST — one relaxed byte load + compare that short-circuits at
+/// default config before the lane-executor GUC read — then `enabled()`.
+/// The order is semantics-free (both are pure reads and the tail try_own_*
+/// bodies re-check the knob before any tick), but it is the difference
+/// between ~2 and ~8 instructions per PULL on the per-row tail arms
+/// (values_scan on a 100-row multi-VALUES INSERT was the se2-dmlcost batch
+/// letter: +39 instr/row at knob-OFF).
+#[inline]
+pub(crate) fn rowmode_tail_active() -> bool {
+    rowmode::rowmode_enabled() && enabled()
+}
+
+/// Combined gate for the WS-N modify_table dispatch hook — same shape and
+/// rationale as `rowmode_tail_active` (per statement rather than per pull).
+#[inline]
+pub(crate) fn dml_active() -> bool {
+    dml::dml_enabled() && enabled()
+}
+
 /// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`
 /// logs lane engagement events to stderr. Resolved once per process.
 fn lane_trace(event: &str) {

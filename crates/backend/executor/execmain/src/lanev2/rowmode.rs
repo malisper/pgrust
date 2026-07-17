@@ -71,19 +71,30 @@ static ROWMODE: AtomicU8 = AtomicU8::new(0);
 
 /// `pub(super)` per the wave-2 contract §3.4 (visibility change owned by
 /// WS-L): rowmode_tail.rs gates its 16 delegation shapes on the same knob.
+///
+/// se2-cost-fix: `#[inline]` + `#[cold]`-outlined resolve — the tail arms
+/// call this once per PULL (values_scan_arm on a 100-row multi-VALUES
+/// INSERT calls it 100x per statement), and the outlined call was +13
+/// instr/row of the se2-dmlcost batch regression on the m4 pair. The fast
+/// path must fold into the arm as one relaxed byte load + compare.
+#[inline]
 pub(super) fn rowmode_enabled() -> bool {
     match ROWMODE.load(Relaxed) {
         1 => false,
         2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_ROWMODE").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
-            on
-        }
+        _ => rowmode_resolve(),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn rowmode_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_ROWMODE").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
+    on
 }
 
 /// `PGRUST_LANE_V2_MERGEJOIN` (default OFF): the wave-2 knob-split gate for
@@ -92,19 +103,24 @@ pub(super) fn rowmode_enabled() -> bool {
 /// reason).
 static MERGEJOIN: AtomicU8 = AtomicU8::new(0);
 
+#[inline] // per-pull gate on the merge_join arm — same shape as rowmode_enabled
 fn mergejoin_enabled() -> bool {
     match MERGEJOIN.load(Relaxed) {
         1 => false,
         2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_MERGEJOIN").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
-            on
-        }
+        _ => mergejoin_resolve(),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn mergejoin_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_MERGEJOIN").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
+    on
 }
 
 /// Same-process A/B lever for the unit corpus (`crate::tests`).
