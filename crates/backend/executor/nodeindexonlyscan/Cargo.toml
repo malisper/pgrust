@@ -19,6 +19,8 @@ tableam = { path = "../../access/table/tableam" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 visibilitymap = { path = "../../access/heap/visibilitymap" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
+# Lane index-source leaf estimate (single-executor WS-F): the nblocks seam.
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 nodeindexscan = { path = "../nodeindexscan" }
 execscan = { path = "../execscan" }
 execexpr = { path = "../execexpr" }
@@ -33,7 +35,6 @@ types_fmgr = { path = "../../../_support/types/fmgr" }
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_storage = { path = "../../../_support/types/types_storage" }
-bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 smgr_seams = { path = "../../storage/smgr/smgr_seams" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
