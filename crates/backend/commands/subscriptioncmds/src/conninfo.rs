@@ -199,44 +199,9 @@ pub(crate) fn walrcv_check_conninfo(
     Ok(())
 }
 
-// libpq connectOptions2 port validation is the only connect failure reachable
-// without networking; anything that would open a socket is unported.
-pub(crate) fn walrcv_connect(mcx: Mcx<'_>, conninfo: &str) -> Result<(), String> {
-    let opts = match conninfo_parse(mcx, conninfo) {
-        Ok(opts) => opts,
-        Err(_) => {
-            panic!("walrcv_connect on conninfo that failed walrcv_check_conninfo: {conninfo:?}")
-        }
-    };
-    let port_idx = KNOWN_OPTIONS.iter().position(|k| *k == "port").unwrap();
-    if let Some((_, port)) = opts.iter().find(|(i, _)| *i == port_idx) {
-        let port = port.as_str();
-        if !port.is_empty() {
-            if port.contains(',') {
-                // unported: multi-host conninfo port list
-                return Err("connecting to multiple hosts is not supported yet".to_string());
-            }
-            match parse_int_param(port) {
-                None => {
-                    return Err(format!(
-                        "invalid integer value \"{port}\" for connection option \"port\"\ninvalid port number: \"{port}\""
-                    ));
-                }
-                Some(n) if !(1..=65535).contains(&n) => {
-                    return Err(format!("invalid port number: \"{port}\""));
-                }
-                Some(_) => {}
-            }
-        }
-    }
-    // unported: libpqwalreceiver real connect
-    Err("connections to a publisher are not supported yet".to_string())
-}
-
-fn parse_int_param(value: &str) -> Option<i32> {
-    let t = value.trim_matches(|c: char| c.is_ascii_whitespace());
-    if t.is_empty() {
-        return None;
-    }
-    t.parse::<i32>().ok()
-}
+// The pre-connect validation arm that used to live here (walrcv_connect
+// stub: libpq port-range checks without networking) moved to its C-parity
+// location — walreceiver::client::connect_extended validates the port option
+// (PQconnectPoll's try-next-host arm) before any socket is opened, so
+// 'port=-1' fails "invalid port number" without a connection attempt on the
+// real connect path all subscription commands now use.
