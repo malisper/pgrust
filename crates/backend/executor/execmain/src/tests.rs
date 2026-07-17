@@ -4224,8 +4224,10 @@ mod rowmode_ab {
     const F_GENERATE_SERIES_STEP_INT4: u32 = 1066;
 
     /// The knob is process-global; every test that flips it holds this lock
-    /// and restores OFF (the default) before releasing.
-    static KNOB: Mutex<()> = Mutex::new(());
+    /// and restores OFF (the default) before releasing. `pub(super)` so the
+    /// mergejoin row-mode corpus (same knob) serializes against the same
+    /// lock — two locks over one global knob would race in parallel runs.
+    pub(super) static KNOB: Mutex<()> = Mutex::new(());
 
     fn install_rowmode_seams() {
         static ONCE: Once = Once::new();
@@ -4978,6 +4980,519 @@ mod express_ab {
             estate.exec_close_range_table_relations().unwrap();
         });
         crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_OFF);
+        scanfix::quiesced();
+    }
+}
+
+// =============================================================================
+// MergeJoin row-mode A/B corpus (lanev2/rowmode.rs try_own_merge_join, WS-G
+// Phase 1, PGRUST_LANE_V2_ROWMODE): hand-built MergeJoin plans over the
+// fake-heap fixture driven knob OFF (the unchanged exec_merge_join Volcano
+// drive) vs knob ON (MergeJoinRowSource -> PassthroughOp -> RootAdapter under
+// pull_step_rows) in one process — same rows, same NULL padding, same rescan
+// behavior, and the ON arm must actually engage. Duplicate-key outers force
+// the EXEC_MJ_TESTOUTER inner restore; a Material inner covers the ExtraMarks
+// mark cadence, a Sort inner the tuplesort mark/restore leg. The SQL-level
+// three-arm byte parity proof is scripts/lane-rowmode-mj-e2e.sh; plan breadth
+// (all 7 join types, cross-type clauses, SubPlans, LIMIT, ...) is
+// scripts/dualexec/corpus-mergejoin.sql.
+// =============================================================================
+mod mergejoin_rowmode_ab {
+    use super::*;
+
+    /// pg_amop row for int4eq in the integer btree opfamily — what
+    /// MJExamineQuals' get_op_opfamily_properties probes (strategy 3 =
+    /// BTEqualStrategyNumber / COMPARE_EQ). install_seams covers the rest
+    /// (btsortsupport via lookup_pg_amproc, operator shape, type shapes).
+    fn install_mj_seams() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
+                Ok((opno == INT4_EQ && purpose == b's' && opfamily == INTEGER_BTREE_FAM)
+                    .then_some(syscache_seams::PgAmopShape {
+                        amopstrategy: 3,
+                        amopsortfamily: 0,
+                        amoplefttype: INT4OID,
+                        amoprighttype: INT4OID,
+                    }))
+            });
+        });
+    }
+
+    /// Which mark/restore-capable wrapper shields the inner scan.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Inner {
+        /// Material over the inner seqscan (order-preserving; exercises the
+        /// mj_ExtraMarks cadence — ExecInitMergeJoin sets it for a Material
+        /// inner without REWIND).
+        Material,
+        /// Sort over the inner seqscan (the planner's usual inner shield;
+        /// exercises tuplesort mark/restore under EXEC_FLAG_MARK).
+        Sort,
+    }
+
+    /// MergeJoin(mergeclause: outer.c1 = inner.c1) over two fake-heap
+    /// seqscans, the inner behind a mark/restore-capable wrapper — the plan
+    /// shape the planner emits for a merge join with a pre-sorted outer.
+    fn mk_mergejoin_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        outer_relid: u32,
+        inner_relid: u32,
+        jointype: ::types_nodes::JoinType,
+        inner: Inner,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{
+            Join, Material, MergeJoin, Plan, Scan, SeqScan, Sort,
+        };
+        use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
+
+        let scan_tlist = |varno: i32| {
+            let a = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let mk_scan = |scanrelid: u32, varno: i32| {
+            Node::mk(
+                mcx,
+                SeqScan {
+                    cb_scan_cols: None,
+                    scan: Scan {
+                        plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                        scanrelid,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        // The wrapper projects its child's two columns through OUTER_VAR.
+        let wrapper_tlist = || {
+            let a = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let inner_tree = match inner {
+            Inner::Material => {
+                let mut mat = Node::build::<Material>(mcx).unwrap();
+                mat.plan.targetlist = wrapper_tlist();
+                mat.plan.lefttree = Some(mk_scan(2, 2));
+                mat.seal()
+            }
+            Inner::Sort => {
+                let mut sort = Node::build::<Sort>(mcx).unwrap();
+                sort.plan.targetlist = wrapper_tlist();
+                sort.plan.lefttree = Some(mk_scan(2, 2));
+                sort.numCols = 1;
+                sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+                sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+                sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+                sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+                sort.seal()
+            }
+        };
+
+        // SEMI/ANTI project only the outer side, as the planner emits.
+        let tl_cols: &[(i32, i16)] = if matches!(
+            jointype,
+            ::types_nodes::JoinType::JOIN_SEMI | ::types_nodes::JoinType::JOIN_ANTI
+        ) {
+            &[(OUTER_VAR, 1), (OUTER_VAR, 2)]
+        } else {
+            &[(OUTER_VAR, 1), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)]
+        };
+        let mut join_tlist = NodeList::nil();
+        for (i, &(varno, attno)) in tl_cols.iter().enumerate() {
+            let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
+            join_tlist
+                .lappend(
+                    mcx,
+                    Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap(),
+                )
+                .unwrap();
+        }
+        let mergeclause = {
+            let l = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, INNER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::OpExpr {
+                    opno: INT4_EQ,
+                    opfuncid: 65, // pg_proc int4eq
+                    opresulttype: BOOLOID,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+
+        let mut mj = Node::build::<MergeJoin>(mcx).unwrap();
+        mj.join = Join {
+            plan: Plan {
+                targetlist: join_tlist,
+                lefttree: Some(mk_scan(1, 1)),
+                righttree: Some(inner_tree),
+                ..Default::default()
+            },
+            jointype,
+            inner_unique: false,
+            joinqual: NodeList::nil(),
+        };
+        mj.skip_mark_restore = false;
+        mj.mergeclauses = NodeList::make1(mcx, mergeclause).unwrap();
+        mj.mergeFamilies = ::mcx::slice_borrow_in(mcx, &[INTEGER_BTREE_FAM]).unwrap();
+        mj.mergeCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        mj.mergeReversals = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+        mj.mergeNullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+        let mk_rte = |relid: u32, perminfoindex: u32| {
+            Node::mk(
+                mcx,
+                RangeTblEntry {
+                    rtekind: RTEKind::RTE_RELATION,
+                    relid,
+                    relkind: ::types_rel::RELKIND_RELATION,
+                    rellockmode: ::types_rel::AccessShareLock,
+                    perminfoindex,
+                    inFromCl: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let mk_perm = |relid: u32| {
+            Node::mk(
+                mcx,
+                RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            )
+            .unwrap()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte(outer_relid, 1)).unwrap();
+        rtable.lappend(mcx, mk_rte(inner_relid, 2)).unwrap();
+        let mut perms = NodeList::make1(mcx, mk_perm(outer_relid)).unwrap();
+        perms.lappend(mcx, mk_perm(inner_relid)).unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+        unpruned.add_member(mcx, 2).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mj.seal());
+        pstmt.rtable = rtable;
+        pstmt.permInfos = perms;
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// One A/B round: build the SAME plan twice (fresh state per arm), run
+    /// knob OFF then knob ON (both with `passes` drains, pass 2+ = rescan),
+    /// demand identical rows — and that the ON arm engaged the MergeJoin
+    /// row-mode drive specifically.
+    fn ab_mj(
+        mk: impl Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        natts: usize,
+        passes: usize,
+    ) -> Vec<Vec<Vec<Option<i32>>>> {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        crate::lanev2::rowmode_set_for_tests(false);
+        let off = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
+        crate::lanev2::rowmode_set_for_tests(true);
+        let owned_before = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let on = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
+        let owned_after = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
+            .load(std::sync::atomic::Ordering::Relaxed);
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert!(
+            owned_after > owned_before,
+            "ON arm never engaged the MergeJoin row-mode drive"
+        );
+        off
+    }
+
+    fn row(vals: &[i32]) -> Vec<Option<i32>> {
+        vals.iter().map(|&v| Some(v)).collect()
+    }
+
+    // Duplicate-key OUTER over a Material inner: every second same-key outer
+    // forces EXEC_MJ_TESTOUTER to restore the inner to the marked group
+    // start (with the ExtraMarks cadence), and the inner group itself has
+    // two rows — the full mark/restore replay, knob OFF vs ON, plus a
+    // rescan pass through exec_rescan_merge_join under the hook.
+    #[test]
+    fn mj_ab_inner_join_dup_outer_material_inner_mark_restore() {
+        let outer: u32 = 71001;
+        let inner: u32 = 71002;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (2, 21), (4, 40)]]);
+        scanfix::register_table_2col(inner, &[&[(2, 200), (2, 201), (3, 300), (5, 500)]]);
+        let expected = vec![
+            row(&[2, 20, 2, 200]),
+            row(&[2, 20, 2, 201]),
+            row(&[2, 21, 2, 200]), // <- replay after restore
+            row(&[2, 21, 2, 201]),
+        ];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_INNER,
+                    Inner::Material,
+                )
+            },
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![expected.clone(), expected]);
+        scanfix::quiesced();
+    }
+
+    // The same duplicate-outer replay against a Sort inner (unsorted
+    // registration order, unique keys): tuplesort mark/restore under
+    // EXEC_FLAG_MARK, both knob positions.
+    #[test]
+    fn mj_ab_inner_join_dup_outer_sort_inner() {
+        let outer: u32 = 71003;
+        let inner: u32 = 71004;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (3, 30), (3, 31)]]);
+        scanfix::register_table_2col(inner, &[&[(5, 500), (3, 300), (1, 100)]]);
+        let expected = vec![
+            row(&[1, 10, 1, 100]),
+            row(&[3, 30, 3, 300]),
+            row(&[3, 31, 3, 300]),
+        ];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_INNER,
+                    Inner::Sort,
+                )
+            },
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![expected.clone(), expected]);
+        scanfix::quiesced();
+    }
+
+    // FULL join: null extension on BOTH sides (fill-outer for unmatched
+    // outers, ENDOUTER/ENDINNER fill-inner for unmatched inners), the
+    // merge-only-plannable shape the hosting exists for.
+    #[test]
+    fn mj_ab_full_join_fills_both_sides() {
+        let outer: u32 = 71005;
+        let inner: u32 = 71006;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (6, 60)]]);
+        scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300)]]);
+        let n = || None::<i32>;
+        let expected = vec![
+            vec![Some(1), Some(10), n(), n()],
+            vec![Some(2), Some(20), Some(2), Some(200)],
+            vec![n(), n(), Some(3), Some(300)],
+            vec![Some(6), Some(60), n(), n()],
+        ];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_FULL,
+                    Inner::Material,
+                )
+            },
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![expected.clone(), expected]);
+        scanfix::quiesced();
+    }
+
+    // LEFT (fill-outer only), SEMI (single-match advance), ANTI
+    // (never-matched outers) over the same tables, one rescan pass each.
+    #[test]
+    fn mj_ab_left_semi_anti_joins() {
+        let outer: u32 = 71007;
+        let inner: u32 = 71008;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+        scanfix::register_table_2col(inner, &[&[(2, 200), (2, 201), (4, 400)]]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = || None::<i32>;
+        let left = vec![
+            vec![Some(1), Some(10), n(), n()],
+            vec![Some(2), Some(20), Some(2), Some(200)],
+            vec![Some(2), Some(20), Some(2), Some(201)],
+            vec![Some(3), Some(30), n(), n()],
+        ];
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_LEFT,
+                    Inner::Material,
+                )
+            },
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![left.clone(), left]);
+
+        let semi = vec![row(&[2, 20])];
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_SEMI,
+                    Inner::Material,
+                )
+            },
+            2,
+            2,
+        );
+        assert_eq!(runs, vec![semi.clone(), semi]);
+
+        let anti = vec![row(&[1, 10]), row(&[3, 30])];
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_ANTI,
+                    Inner::Material,
+                )
+            },
+            2,
+            2,
+        );
+        assert_eq!(runs, vec![anti.clone(), anti]);
+        scanfix::quiesced();
+    }
+
+    // Empty inner: LEFT null-extends every outer; INNER emits nothing.
+    #[test]
+    fn mj_ab_empty_inner() {
+        let outer: u32 = 71009;
+        let inner: u32 = 71010;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
+        scanfix::register_table_2col(inner, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = || None::<i32>;
+        let left = vec![
+            vec![Some(1), Some(10), n(), n()],
+            vec![Some(2), Some(20), n(), n()],
+        ];
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_LEFT,
+                    Inner::Material,
+                )
+            },
+            4,
+            1,
+        );
+        assert_eq!(runs, vec![left]);
+        let runs = ab_mj(
+            move |mcx| {
+                mk_mergejoin_pstmt(
+                    mcx,
+                    outer,
+                    inner,
+                    ::types_nodes::JoinType::JOIN_INNER,
+                    Inner::Material,
+                )
+            },
+            4,
+            1,
+        );
+        assert_eq!(runs, vec![Vec::<Vec<Option<i32>>>::new()]);
+        scanfix::quiesced();
+    }
+
+    // Early stop: pull exactly one row knob-ON, then tear down mid-join (the
+    // LIMIT shape) — no panic, no error; all cross-call state is the FSM's
+    // own, so abandoning the drive is byte-safe.
+    #[test]
+    fn mj_ab_early_stop_teardown() {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let outer: u32 = 71011;
+        let inner: u32 = 71012;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
+        scanfix::register_table_2col(inner, &[&[(1, 100), (2, 200), (3, 300)]]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        for on in [false, true] {
+            crate::lanev2::rowmode_set_for_tests(on);
+            let pstmt = mk_mergejoin_pstmt(
+                leaked_mcx(),
+                outer,
+                inner,
+                ::types_nodes::JoinType::JOIN_INNER,
+                Inner::Material,
+            );
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let ps = planstate.as_mut().unwrap();
+                let slot = exec_proc_node(ps, estate).unwrap().unwrap();
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot), 1, &mut isnull);
+                assert!(!isnull);
+                assert_eq!(v.as_i32(), 1);
+                // Walk away mid-join.
+                crate::exec_end_node(ps, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+        }
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
         scanfix::quiesced();
     }
 }

@@ -29,13 +29,26 @@
 //! config is unchanged — and `exec_project_set` runs as today. No floor file
 //! moves while the knob is OFF; a default flip must reseed the ProjectSet /
 //! Result floors (see notes/ws-e-rowmode-ledger.md).
+//!
+//! Phase 1 (WS-G) adds the second hosted shape: MergeJoin as a bare row-mode
+//! LEAF (`MergeJoinRowSource` → `PassthroughOp` → `RootAdapter` under
+//! `pull_step_rows`) — a pure delegation to the ported
+//! `::nodemergejoin::exec_merge_join` FSM with both children Volcano-driven
+//! inside it, behind the SAME knob (integration contract §1: no new knob in
+//! inc-1; a per-shape sub-gate is a ledgered flip-blocker — see
+//! docs/design/mergejoin-decision.md and notes/se-ws-g-mergejoin.md). Unlike
+//! ProjectSet, MergeJoin has no pre-existing wholesale refuse, so the
+//! knob-OFF path here ticks NOTHING (default accounting byte-identical by
+//! construction, `mergejoin` class silent at default config per §2d).
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use super::push::{pull_step_rows, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, TupleOp};
+use super::push::{
+    pull_step_rows, OpStatus, PassthroughOp, RootAdapter, RowSource, Sink, SinkFeed, TupleOp,
+};
 use super::stats::{self, RefuseReason, ShapeClass};
 
 /// `PGRUST_LANE_V2_ROWMODE` (default OFF): the Phase-0 row-mode facility
@@ -72,6 +85,14 @@ pub(crate) fn rowmode_set_for_tests(on: bool) {
 /// the process-global `PGRUST_LANE_V2_STATS` env, unusable per-test).
 #[cfg(test)]
 pub(crate) static ROWMODE_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only engagement probe for the MergeJoin row-mode hosting (WS-G):
+/// owned drives, per pull. Separate from `ROWMODE_OWNED_FOR_TESTS` so the
+/// mergejoin A/B corpus proves ITS shape engaged (not some other row-mode
+/// hook on the same knob).
+#[cfg(test)]
+pub(crate) static ROWMODE_MJ_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// The childless Result plan as a row-mode source: delegates to
@@ -210,4 +231,77 @@ pub fn try_own_project_set<'mcx>(
     // clearing the result slot.
     let mut root = RootAdapter::new(None);
     pull_step_rows(rs, &mut ResultRowSource, &mut op, &mut root, estate).map(Some)
+}
+
+/// MergeJoin as a row-mode LEAF (Phase-1 WS-G): one joined row per step;
+/// both children stay Volcano-driven INSIDE the ported FSM — `next_row` runs
+/// the identical statements `merge_join_arm`'s fallback runs (a pure
+/// delegation to `::nodemergejoin::exec_merge_join`, zero changes to that
+/// crate). All cross-call state is the FSM's own node-resident
+/// `mj_JoinState`/slots (nodemergejoin lib.rs), including the mark/restore
+/// protocol on the inner child (EXEC_MJ_SKIP_TEST marks, EXEC_MJ_TESTOUTER
+/// restores — delegated to the child's `mark_pos`/`restr_pos` exactly as the
+/// Volcano drive does), so a Volcano fallback at ANY pull boundary is
+/// byte-safe by construction.
+struct MergeJoinRowSource;
+
+impl<'mcx> RowSource<'mcx> for MergeJoinRowSource {
+    type Node = crate::procnode::MergeJoinNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::MergeJoinNode { state, outer, inner } = node;
+        ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
+    }
+}
+
+/// Try to let the row-mode lane host a MergeJoin (both children Volcano).
+/// `None` = refused; the caller runs the unchanged `exec_merge_join`.
+///
+/// Gates, in the `try_own_project_set` order: the rowmode knob FIRST — and
+/// unlike ProjectSet, knob-OFF ticks NOTHING (there is no pre-existing
+/// MergeJoin wholesale refuse, so default-config accounting stays
+/// byte-identical trivially; integration contract §2d) — then the dynamic
+/// per-call EPQ / backward / instrumented gates. No shape gate: increment-1
+/// admits every plan the FSM itself admits (the hosting is jointype-agnostic
+/// delegation). No extra prologue either: `exec_merge_join` runs its own
+/// entry CFI + per-tuple reset as the FSM body's first statements, so the
+/// wrapper adds no calls the Volcano drive would not make.
+///
+/// OWNED tick cadence: once per drive start (each owned PG pull starts one
+/// `pull_step_rows` drive over the per-call-reassembled pipeline; the
+/// stats.rs class doc restates this).
+#[inline]
+pub fn try_own_merge_join<'mcx>(
+    mj: &mut crate::procnode::MergeJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !rowmode_enabled() {
+        return Ok(None);
+    }
+    // Dynamic per-call gates (the try_own_result cadence).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !estate.es_instrumentation.is_empty() {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Instrumented);
+        return Ok(None);
+    }
+    stats::tick_owned(ShapeClass::MergeJoin);
+    super::lane_trace("mergejoin: row-mode drive owned");
+    #[cfg(test)]
+    ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
+    // No clear-on-finish: exec_merge_join returns end-of-join without
+    // clearing the result slot.
+    let mut op = PassthroughOp;
+    let mut root = RootAdapter::new(None);
+    pull_step_rows(mj, &mut MergeJoinRowSource, &mut op, &mut root, estate).map(Some)
 }
