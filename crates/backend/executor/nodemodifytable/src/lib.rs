@@ -1312,7 +1312,7 @@ pub fn exec_modify_table<'mcx>(
 /// restores the loop-body inlining `exec_modify_table` had when this code
 /// was its literal loop body; `#[inline]` on the per-statement seams keeps
 /// their call overhead out of the per-statement floor (±4).
-#[inline]
+#[inline(always)]
 pub fn mt_begin<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1695,7 +1695,9 @@ pub fn mt_accept_row<'mcx>(
 /// code move): the pgrcolumnar statement-end flush, AFTER STATEMENT
 /// triggers, and the `mt_done` latch. Runs exactly once per statement — the
 /// latch makes every later `mt_begin` report done.
-#[inline] // per-statement seam — see mt_begin's se2-cost-fix note
+// inline(always): the plain hint did not take (round-2 dist-prof callgrind
+// still shows both codegen copies outlined, +55/stmt) — se2-cost-fix round 3.
+#[inline(always)]
 pub fn mt_source_exhausted<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1922,7 +1924,7 @@ fn execute_attr_map_cols<'mcx>(
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
 // DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
 // first); MERGE fires per present subcommand.
-#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+40/stmt outlined)
 fn fire_bs_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1944,7 +1946,7 @@ fn fire_bs_triggers<'mcx>(
     Ok(())
 }
 
-#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
+#[inline(always)] // se2-cost-fix round 3: rides mt_source_exhausted's always-inline chain
 fn fire_as_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3282,7 +3284,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
 // columns on this lane (loud below), so need_projection is always false and
 // ri_newTupleSlot only exists for slot-type coercion.
-#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+139/stmt outlined)
 fn exec_init_insert_projection<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
