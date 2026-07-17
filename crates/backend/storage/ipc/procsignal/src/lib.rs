@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{
-    fence, AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize,
+    fence, AtomicBool, AtomicI32, AtomicU32, AtomicU64,
     Ordering::{Acquire, Relaxed, Release, SeqCst},
 };
 use std::sync::OnceLock;
@@ -31,13 +31,6 @@ pub struct ProcSignalSlot {
     pss_pendingThreadSignals: AtomicU32,
     // Owner's leaked InterruptPending flag: CFI-visible pend delivery.
     pss_interruptFlag: std::sync::atomic::AtomicPtr<AtomicBool>,
-    // Extra latch a delivered thread signal must set, beyond the procLatch:
-    // renders the wakeup a C signal handler performs itself at delivery time
-    // (e.g. the startup process's handlers all call WakeupRecovery(), so a
-    // signal interrupts a sleep on recoveryWakeupLatch, not just MyLatch).
-    // LatchHandle::as_usize value; valid only while pss_hasExtraWakeLatch.
-    pss_extraWakeLatch: AtomicUsize,
-    pss_hasExtraWakeLatch: AtomicBool,
     pss_mutex: Spinlock,
 
     pss_barrierGeneration: AtomicU64,
@@ -57,8 +50,6 @@ impl ProcSignalSlot {
             pss_signalFlags: std::array::from_fn(|_| AtomicBool::new(false)),
             pss_pendingThreadSignals: AtomicU32::new(0),
             pss_interruptFlag: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-            pss_extraWakeLatch: AtomicUsize::new(0),
-            pss_hasExtraWakeLatch: AtomicBool::new(false),
             pss_mutex: Spinlock::new(),
             pss_barrierGeneration: AtomicU64::new(u64::MAX),
             pss_barrierCheckMask: AtomicU32::new(0),
@@ -141,7 +132,6 @@ pub fn ProcSignalShmemResetAfterCrash() {
         }
         slot.pss_pendingThreadSignals.store(0, Relaxed);
         slot.pss_interruptFlag.store(std::ptr::null_mut(), Relaxed);
-        slot.pss_hasExtraWakeLatch.store(false, Relaxed);
         slot.pss_mutex.unlock();
         slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
         slot.pss_barrierCheckMask.store(0, Relaxed);
@@ -193,7 +183,6 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
     }
     // Brand-new process: adopt the latest generation, discard stale bits.
     slot.pss_pendingThreadSignals.store(0, Relaxed);
-    slot.pss_hasExtraWakeLatch.store(false, Relaxed);
     slot.pss_interruptFlag.store(
         g::interrupt_pending_flag() as *const _ as *mut AtomicBool,
         Relaxed,
@@ -332,37 +321,13 @@ pub fn pqsignal_thread(signo: i32, handler: ThreadSignalHandler) {
 // wake its procLatch; the target's next drain point runs its registered
 // disposition. Contract kept: 0 on match, -1 + errno=ESRCH otherwise.
 pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
-    if signo == libc::SIGKILL {
-        // The postmaster's ServerLoop SIGKILL escalation (and TerminateChildren
-        // during immediate shutdown). No thread can be force-killed; deliver
-        // the crash-test kill-9 bit instead — threads with the kill9
-        // disposition (backends under postmaster) exit as if killed, matching
-        // C's "terminated by signal 9" reap. A thread wedged past its drain
-        // points stays wedged, which is the honest single-process limit.
-        return SendThreadKill(pid);
-    }
-    if signo == libc::SIGSTOP {
-        panic!("SendThreadSignal: SIGSTOP has no thread rendering");
+    if signo == libc::SIGKILL || signo == libc::SIGSTOP {
+        panic!(
+            "SendThreadSignal: signal {signo} has no thread rendering \
+             (postmaster SIGKILL-escalation redesign)"
+        );
     }
     deliver_thread_signal(pid, thread_signal_bit(signo))
-}
-
-/// Register (or clear) an extra latch that any thread signal delivered to the
-/// CURRENT thread must set in addition to its procLatch. Renders the latch
-/// wakeups C signal handlers perform at delivery time; the startup process
-/// registers recoveryWakeupLatch for the span it can sleep on it.
-pub fn SetThreadSignalExtraWakeLatch(latch: Option<types_storage::latch::LatchHandle>) {
-    let Some(index) = MY_PROC_SIGNAL_SLOT.get() else {
-        return;
-    };
-    let slot = &proc_signal().psh_slot[index];
-    match latch {
-        Some(h) => {
-            slot.pss_extraWakeLatch.store(h.as_usize(), Relaxed);
-            slot.pss_hasExtraWakeLatch.store(true, Release);
-        }
-        None => slot.pss_hasExtraWakeLatch.store(false, Release),
-    }
 }
 
 // SIGKILL's crash-test rendering: pend the bit past SendThreadSignal's
@@ -393,16 +358,6 @@ fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
                 }
                 slot.pss_mutex.unlock();
                 latch::set_latch(&lmgr_proc::GetPGProcByNumber(i as ProcNumber).procLatch);
-                // C's handler runs at delivery and may set further latches
-                // itself (startup: WakeupRecovery()); the target's registered
-                // extra wake latch is that handler-side wakeup, without which
-                // a thread sleeping on a non-proc latch never reaches a drain
-                // point (048 reload; 030/032/033 shutdown wedges).
-                if slot.pss_hasExtraWakeLatch.load(Acquire) {
-                    latch::SetLatch(types_storage::latch::LatchHandle::from_raw(
-                        slot.pss_extraWakeLatch.load(Relaxed),
-                    ));
-                }
                 return 0;
             }
             slot.pss_mutex.unlock();
@@ -477,7 +432,6 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
     slot.pss_pid.store(0, Relaxed);
     slot.pss_cancel_key_len.set(0);
     slot.pss_interruptFlag.store(std::ptr::null_mut(), Relaxed);
-    slot.pss_hasExtraWakeLatch.store(false, Relaxed);
     // Look absorbed-of-everything so no barrier wait blocks on this slot.
     slot.pss_barrierGeneration.store(u64::MAX, Relaxed);
     slot.pss_mutex.unlock();
@@ -723,11 +677,7 @@ pub fn procsignal_sigusr1_handler() {
         parallel_seams::handle_parallel_message_interrupt::call();
     }
     if CheckProcSignal(PROCSIG_WALSND_INIT_STOPPING) {
-        if walsender_seams::handle_walsnd_init_stopping::is_installed() {
-            walsender_seams::handle_walsnd_init_stopping::call();
-        } else {
-            unported_handler("HandleWalSndInitStopping (replication/walsender.c)");
-        }
+        unported_handler("HandleWalSndInitStopping (replication/walsender.c)");
     }
     if CheckProcSignal(PROCSIG_BARRIER) {
         HandleProcSignalBarrierInterrupt();
@@ -748,11 +698,7 @@ pub fn procsignal_sigusr1_handler() {
         PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
     ] {
         if CheckProcSignal(conflict) {
-            if postgres_seams::handle_recovery_conflict_interrupt::is_installed() {
-                postgres_seams::handle_recovery_conflict_interrupt::call(conflict as u32);
-            } else {
-                unported_handler("HandleRecoveryConflictInterrupt (tcop/postgres.c)");
-            }
+            unported_handler("HandleRecoveryConflictInterrupt (tcop/postgres.c)");
         }
     }
 
@@ -877,10 +823,6 @@ pub fn init_seams() {
     procsignal_seams::process_proc_signal_barrier::set(ProcessProcSignalBarrier);
     procsignal_seams::drain_thread_signals::set(DrainThreadSignals);
     procsignal_seams::send_thread_signal::set(send_thread_signal_errno);
-    procsignal_seams::set_thread_signal_extra_wake_latch::set(|raw| {
-        SetThreadSignalExtraWakeLatch(raw.map(types_storage::latch::LatchHandle::from_raw))
-    });
-    procsignal_seams::send_proc_signal::set(SendProcSignal);
 }
 
 #[cfg(test)]

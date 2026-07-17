@@ -157,36 +157,10 @@ scalar_global! {
     FILE_COPY_METHOD, file_copy_method, set_file_copy_method, i32, 0;
     IO_DIRECT_FLAGS, io_direct_flags, set_io_direct_flags, i32, 0;
     NUM_EXTERNAL_FDS, num_external_fds, set_num_external_fds, i32, 0;
-}
-
-// file_perm.c globals (unported common unit); fd.c is their only backend
-// reader, so the storage lives here until that unit lands.
-//
-// PROCESS-GLOBAL, not thread-local: C sets these once in checkDataDir()
-// (postmaster startup, before any children exist) and every child inherits
-// them by fork. Here children are threads — a thread-local would leave every
-// backend at the 0600/0700 defaults after the postmaster enabled group access
-// (thread-model hazard class 1; caught by pg_basebackup/010 group-permission
-// leg: runtime-created tablespace/WAL files came out 0600 on a 0750 cluster).
-static PG_FILE_CREATE_MODE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0o600);
-static PG_DIR_CREATE_MODE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0o700);
-
-pub fn pg_file_create_mode() -> u32 {
-    PG_FILE_CREATE_MODE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn set_pg_file_create_mode(mode: u32) {
-    PG_FILE_CREATE_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn pg_dir_create_mode() -> u32 {
-    PG_DIR_CREATE_MODE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn set_pg_dir_create_mode(mode: u32) {
-    PG_DIR_CREATE_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+    // file_perm.c globals (unported common unit); fd.c is their only backend
+    // reader, so the storage lives here until that unit lands.
+    PG_FILE_CREATE_MODE, pg_file_create_mode, set_pg_file_create_mode, u32, 0o600;
+    PG_DIR_CREATE_MODE, pg_dir_create_mode, set_pg_dir_create_mode, u32, 0o700;
 }
 
 // temp_tablespaces backing store; C home is tablespace.c (see lib.rs install).

@@ -70,12 +70,9 @@ fn S_ISLNK(m: u32) -> bool { m & S_IFMT == S_IFLNK }
 
 const O_RDONLY: i32 = 0;
 
-// basebackup.c file-statics: backup_started_in_recovery, noverify_checksums,
-// total_checksum_failures.
+// static bool backup_started_in_recovery (basebackup.c file-static).
 thread_local! {
     static BACKUP_STARTED_IN_RECOVERY: Cell<bool> = const { Cell::new(false) };
-    static NOVERIFY_CHECKSUMS: Cell<bool> = const { Cell::new(false) };
-    static TOTAL_CHECKSUM_FAILURES: Cell<i64> = const { Cell::new(0) };
 }
 
 // excludeDirContents[] — contents excluded, empty dir kept.
@@ -288,7 +285,6 @@ struct BasebackupOptions {
     maxrate: u32,
     sendtblspcmapfile: bool,
     send_to_client: bool,
-    target_handle: Option<basebackup_target::BaseBackupTargetHandle>,
     manifest: BackupManifestOption,
     manifest_checksum_type: PgChecksumType,
 }
@@ -305,7 +301,6 @@ impl Default for BasebackupOptions {
             maxrate: 0,
             sendtblspcmapfile: false,
             send_to_client: false,
-            target_handle: None,
             manifest: BackupManifestOption::No,
             manifest_checksum_type: CHECKSUM_TYPE_CRC32C,
         }
@@ -392,18 +387,11 @@ fn refuse(feature: &str) -> PgResult<()> {
 
 fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOptions> {
     let mut opt = BasebackupOptions::default();
-    NOVERIFY_CHECKSUMS.with(|c| c.set(false));
-
     let (mut o_label, mut o_progress, mut o_checkpoint, mut o_nowait) = (false, false, false, false);
     let (mut o_wal, mut o_incremental, mut o_maxrate, mut o_tsmap) = (false, false, false, false);
     let (mut o_noverify, mut o_manifest, mut o_manifest_cksums) = (false, false, false);
     let mut o_target = false;
-    let mut o_target_detail = false;
-    let mut o_compression = false;
-    let mut o_compression_detail = false;
     let mut target_str: Option<String> = None;
-    let mut target_detail_str: Option<String> = None;
-    let mut compression_detail_str: Option<String> = None;
 
     for o in options {
         let name = o.name.as_str();
@@ -468,8 +456,7 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             }
             "verify_checksums" => {
                 if o_noverify { dup_err(name)?; }
-                let verify = opt_bool(o)?;
-                NOVERIFY_CHECKSUMS.with(|c| c.set(!verify));
+                let _ = opt_bool(o)?; // backup-time checksum verification deferred
                 o_noverify = true;
             }
             "manifest" => {
@@ -505,32 +492,8 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
                 target_str = Some(opt_string(o)?.to_string());
                 o_target = true;
             }
-            "target_detail" => {
-                if o_target_detail { dup_err(name)?; }
-                target_detail_str = Some(opt_string(o)?.to_string());
-                o_target_detail = true;
-            }
-            "compression" => {
-                if o_compression { dup_err(name)?; }
-                let v = opt_string(o)?.to_string();
-                // parse_compress_algorithm subset: only "none" runs without a
-                // compression sink; real algorithms stay a loud refusal.
-                if strcasecmp(&v, "none") {
-                    // PG_COMPRESSION_NONE: no compression sink layer.
-                } else if strcasecmp(&v, "gzip") || strcasecmp(&v, "lz4") || strcasecmp(&v, "zstd")
-                {
-                    refuse("server-side compression")?;
-                } else {
-                    ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-                        .errmsg(format!("unrecognized compression algorithm: \"{v}\""))
-                        .finish(loc("parse_basebackup_options"))?;
-                }
-                o_compression = true;
-            }
-            "compression_detail" => {
-                if o_compression_detail { dup_err(name)?; }
-                compression_detail_str = Some(opt_string(o)?.to_string());
-                o_compression_detail = true;
+            "compression" | "compression_detail" => {
+                refuse("server-side compression")?;
             }
             _ => {
                 ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
@@ -553,43 +516,8 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
     }
 
     match target_str.as_deref() {
-        None => {
-            if target_detail_str.is_some() {
-                ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-                    .errmsg("target detail cannot be used without target")
-                    .finish(loc("parse_basebackup_options"))?;
-            }
-            opt.send_to_client = true;
-        }
-        Some("client") => {
-            if target_detail_str.is_some() {
-                ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-                    .errmsg("target \"client\" does not accept a target detail")
-                    .finish(loc("parse_basebackup_options"))?;
-            }
-            opt.send_to_client = true;
-        }
-        Some(target) => {
-            opt.target_handle = Some(basebackup_target::BaseBackupGetTargetHandle(
-                target,
-                target_detail_str.as_deref(),
-            )?);
-        }
-    }
-
-    if o_compression_detail && !o_compression {
-        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg("compression detail cannot be specified unless compression is enabled")
-            .finish(loc("parse_basebackup_options"))?;
-    }
-    if o_compression_detail {
-        // Only "none" reaches here; none accepts no detail options
-        // (validate_compress_specification wording).
-        let detail = compression_detail_str.as_deref().unwrap_or("");
-        ereport(ERROR).errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!("invalid compression specification: compression algorithm \"none\" does not accept a compression level"))
-            .errdetail(format!("Compression detail was \"{detail}\"."))
-            .finish(loc("parse_basebackup_options"))?;
+        None | Some("client") => opt.send_to_client = true,
+        Some(_) => refuse("non-client BASE_BACKUP target")?,
     }
 
     if opt.incremental {
@@ -598,6 +526,10 @@ fn parse_basebackup_options(options: &[ReplOption]) -> PgResult<BasebackupOption
             .errmsg("must UPLOAD_MANIFEST before performing an incremental BASE_BACKUP")
             .finish(loc("parse_basebackup_options"))?;
     }
+    if opt.includewal {
+        refuse("BASE_BACKUP WAL inclusion (use -X stream)")?;
+    }
+
     Ok(opt)
 }
 
@@ -613,7 +545,7 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
             .finish(loc("SendBaseBackup"));
     }
 
-    let mut opt = parse_basebackup_options(&cmd.options)?;
+    let opt = parse_basebackup_options(&cmd.options)?;
 
     walsender::WalSndSetState(WalSndState::Backup);
 
@@ -625,21 +557,12 @@ pub fn SendBaseBackup<'mcx>(mcx: Mcx<'mcx>, cmd: &BaseBackupCmd) -> PgResult<()>
         ps_status_seams::set_ps_display::call(msg.as_str());
     }
 
-    // Client copy sink; if the target is not 'client' the backup data goes
-    // wherever BaseBackupGetSink routes it instead. Server-side compression
-    // is refused in parse, so no compression sink layers.
+    // Client copy sink (+ optional throttle). Server targets and compression are
+    // refused in parse, so no other sink layers.
     let mut sink: Box<Bbsink<'mcx>> = backup_copy::bbsink_copystream_new(mcx, opt.send_to_client);
-    if let Some(handle) = opt.target_handle.take() {
-        sink = basebackup_target::BaseBackupGetSink(mcx, handle, sink)?;
-    }
     if opt.maxrate > 0 {
         sink = throttle::bbsink_throttle_new(mcx, sink, opt.maxrate);
     }
-
-    // Set up progress reporting (basebackup.c:1051). Always wrapped, as in C;
-    // opt.progress only controls the (unported, inc-5 refusal-free) size
-    // estimate, so bytes_total stays invalid — equivalent to --no-estimate-size.
-    sink = sink_support::bbsink_progress_new(mcx, sink, opt.progress);
 
     let mut state = BbsinkState::default();
     // The DestRemoteSimple bridge needs the command mcx during the synchronous
@@ -679,7 +602,6 @@ fn perform_base_backup<'mcx>(
     state.bytes_total_is_valid = false;
 
     BACKUP_STARTED_IN_RECOVERY.with(|c| c.set(transam_xlog::RecoveryInProgress()));
-    TOTAL_CHECKSUM_FAILURES.with(|c| c.set(0));
 
     let mut manifest = BackupManifestInfo::zeroed();
     InitializeBackupManifest(mcx, &mut manifest, opt.manifest, opt.manifest_checksum_type)?;
@@ -689,7 +611,6 @@ fn perform_base_backup<'mcx>(
     transam_xlog::register_persistent_abort_backup_handler()?;
     let mut backup_state = xlogbackup::BackupState::default();
     let mut tablespace_map: Vec<u8> = Vec::new();
-    sink_support::basebackup_progress_wait_checkpoint();
     transam_xlog::do_pg_backup_start(
         &opt.label,
         opt.fastcheckpoint,
@@ -749,30 +670,20 @@ fn perform_base_backup<'mcx>(
                             .finish(loc("perform_base_backup"));
                     }
                 };
-                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, INVALID_OID, None, &mut manifest)?;
+                sendFile(sink, state, XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &statbuf, false, &mut manifest)?;
             } else {
                 let archive_name = format!("{oid}.tar");
                 bbsink_begin_archive(sink, state, &archive_name)?;
                 sendTablespace(sink, state, path.as_deref().unwrap(), oid, &mut manifest)?;
             }
 
-            // If we're including WAL, and this is the main data directory,
-            // don't treat this as the end of the tablespace: the xlog files
-            // are appended below and the archive terminated afterwards. Safe
-            // because the main data directory is always sent last.
-            if opt.includewal && is_pgdata {
-                debug_assert!(i == n - 1);
-            } else {
-                // Terminate the tarfile.
-                zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
-                bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
-                // tablespace_num is advanced by the progress sink's end_archive
-                // (basebackup_progress.c:139), which is always in the chain.
-                bbsink_end_archive(sink, state)?;
-            }
+            // Terminate the tarfile (includewal is refused, so always here).
+            zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
+            bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
+            bbsink_end_archive(sink, state)?;
+            state.tablespace_num += 1;
         }
 
-        sink_support::basebackup_progress_wait_wal_archive(state);
         transam_xlog::do_pg_backup_stop(&mut backup_state, !opt.nowait)?;
         endptr = backup_state.stoppoint;
         endtli = backup_state.stoptli;
@@ -786,176 +697,6 @@ fn perform_base_backup<'mcx>(
             let _ = transam_xlog::do_pg_abort_backup(false);
             return Err(e);
         }
-    }
-
-    if opt.includewal {
-        // We've left the last tar file "open", so we can now append the
-        // required WAL files to it (basebackup.c:409). Scan pg_wal and
-        // include all WAL files in the range between startptr and endptr,
-        // regardless of the timeline the file is stamped with.
-        sink_support::basebackup_progress_transfer_wal();
-
-        let wal_segsz = transam_xlog::wal_segment_size();
-        let startsegno = state.startptr / wal_segsz as u64; // XLByteToSeg
-        let firstoff = xlog_file_name(state.starttli, startsegno, wal_segsz);
-        let endsegno = (endptr - 1) / wal_segsz as u64; // XLByteToPrevSeg
-        let lastoff = xlog_file_name(endtli, endsegno, wal_segsz);
-
-        let mut wal_file_list: Vec<String> = Vec::new();
-        let mut history_file_list: Vec<String> = Vec::new();
-        for name in read_dir_names("pg_wal")? {
-            if is_xlog_file_name(&name)
-                && name[8..] >= firstoff[8..]
-                && name[8..] <= lastoff[8..]
-            {
-                wal_file_list.push(name);
-            } else if transam_xlog::IsTLHistoryFileName(&name) {
-                history_file_list.push(name);
-            }
-        }
-
-        // Check that none of the WAL segments we need were removed.
-        transam_xlog::CheckXLogRemoved(startsegno, state.starttli)?;
-
-        // Oldest to newest, to reduce the chance of recycling mid-send.
-        wal_file_list.sort_by(|a, b| a[8..].cmp(&b[8..]));
-
-        if wal_file_list.is_empty() {
-            return ereport(ERROR)
-                .errmsg("could not find any WAL files")
-                .finish(loc("perform_base_backup"));
-        }
-
-        // Sanity check: first and last segments cover startptr and endptr,
-        // with no gaps in between.
-        let (_, mut segno) = xlog_from_file_name(&wal_file_list[0], wal_segsz);
-        if segno != startsegno {
-            let startfname = xlog_file_name(state.starttli, startsegno, wal_segsz);
-            return ereport(ERROR)
-                .errmsg(format!("could not find WAL file \"{startfname}\""))
-                .finish(loc("perform_base_backup"));
-        }
-        for wal_file_name in &wal_file_list {
-            let currsegno = segno;
-            let nextsegno = segno + 1;
-            let (tli, s) = xlog_from_file_name(wal_file_name, wal_segsz);
-            segno = s;
-            if !(nextsegno == segno || currsegno == segno) {
-                let nextfname = xlog_file_name(tli, nextsegno, wal_segsz);
-                return ereport(ERROR)
-                    .errmsg(format!("could not find WAL file \"{nextfname}\""))
-                    .finish(loc("perform_base_backup"));
-            }
-        }
-        if segno != endsegno {
-            let endfname = xlog_file_name(endtli, endsegno, wal_segsz);
-            return ereport(ERROR)
-                .errmsg(format!("could not find WAL file \"{endfname}\""))
-                .finish(loc("perform_base_backup"));
-        }
-
-        // Ok, we have everything we need. Send the WAL files.
-        for wal_file_name in &wal_file_list {
-            let pathbuf = format!("pg_wal/{wal_file_name}");
-            let (tli, segno) = xlog_from_file_name(wal_file_name, wal_segsz);
-
-            let fd = match fd::OpenTransientFile(&pathbuf, O_RDONLY) {
-                Ok(fd) if fd >= 0 => fd,
-                _ => {
-                    // Most likely the file was already removed by a
-                    // checkpoint; check for a better error message.
-                    let e = std::io::Error::last_os_error();
-                    transam_xlog::CheckXLogRemoved(segno, tli)?;
-                    return ereport(ERROR)
-                        .errcode_for_file_access()
-                        .errmsg(format!("could not open file \"{pathbuf}\": {e}"))
-                        .finish(loc("perform_base_backup"));
-                }
-            };
-            let statbuf = fstat_fd(fd, &pathbuf)?;
-            if statbuf.size != wal_segsz as i64 {
-                fd::CloseTransientFile(fd);
-                transam_xlog::CheckXLogRemoved(segno, tli)?;
-                return ereport(ERROR)
-                    .errcode_for_file_access()
-                    .errmsg(format!("unexpected WAL file size \"{wal_file_name}\""))
-                    .finish(loc("perform_base_backup"));
-            }
-
-            // Send the WAL file itself. WAL segments are deliberately not
-            // added to the manifest (AddWALInfoToBackupManifest records the
-            // range instead).
-            _tarWriteHeader(sink, state, &pathbuf, None, &statbuf)?;
-
-            let mut len: i64 = 0;
-            loop {
-                let want = sink.buffer_length().min((wal_segsz as i64 - len) as usize);
-                // SAFETY: buf is a live writable slice; fd is an open file.
-                let cnt = {
-                    let buf = sink.buffer_slice_mut(want);
-                    unsafe {
-                        libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), len as libc::off_t)
-                    }
-                };
-                if cnt < 0 {
-                    fd::CloseTransientFile(fd);
-                    return ereport(ERROR)
-                        .errcode_for_file_access()
-                        .errmsg(format!("could not read file \"{pathbuf}\""))
-                        .finish(loc("perform_base_backup"));
-                }
-                if cnt == 0 {
-                    break;
-                }
-                transam_xlog::CheckXLogRemoved(segno, tli)?;
-                bbsink_archive_contents(sink, state, cnt as usize)?;
-                len += cnt as i64;
-                if len == wal_segsz as i64 {
-                    break;
-                }
-            }
-            if len != wal_segsz as i64 {
-                transam_xlog::CheckXLogRemoved(segno, tli)?;
-                fd::CloseTransientFile(fd);
-                return ereport(ERROR)
-                    .errcode_for_file_access()
-                    .errmsg(format!("unexpected WAL file size \"{wal_file_name}\""))
-                    .finish(loc("perform_base_backup"));
-            }
-
-            // wal_segment_size is a multiple of TAR_BLOCK_SIZE: no padding.
-            fd::CloseTransientFile(fd);
-
-            // Mark file as archived, otherwise files can get archived again
-            // after promotion of a new node.
-            let done_path = transam_xlog::StatusFilePath(wal_file_name, ".done");
-            sendFileWithContent(sink, state, &done_path, b"", &mut manifest)?;
-        }
-
-        // Send timeline history files too — small and highly useful for
-        // debugging, so include them all, always.
-        for fname in &history_file_list {
-            let pathbuf = format!("pg_wal/{fname}");
-            let statbuf = match lstat_file(&pathbuf)? {
-                Some(s) => s,
-                None => {
-                    return ereport(ERROR)
-                        .errcode_for_file_access()
-                        .errmsg(format!("could not stat file \"{pathbuf}\""))
-                        .finish(loc("perform_base_backup"));
-                }
-            };
-            sendFile(sink, state, &pathbuf, &pathbuf, &statbuf, false, INVALID_OID, None, &mut manifest)?;
-
-            // Unconditionally mark file as archived.
-            let done_path = transam_xlog::StatusFilePath(fname, ".done");
-            sendFileWithContent(sink, state, &done_path, b"", &mut manifest)?;
-        }
-
-        // Properly terminate the tar file.
-        zero_buffer(sink, 2 * TAR_BLOCK_SIZE);
-        bbsink_archive_contents(sink, state, 2 * TAR_BLOCK_SIZE)?;
-        bbsink_end_archive(sink, state)?;
     }
 
     AddWALInfoToBackupManifest(mcx, &mut manifest, state.startptr, state.starttli, endptr, endtli)?;
@@ -974,143 +715,11 @@ fn perform_base_backup<'mcx>(
     bbsink_end_backup(sink, state, endptr, endtli)?;
 
     FreeBackupManifest(&mut manifest);
-
-    let total_checksum_failures = TOTAL_CHECKSUM_FAILURES.with(Cell::get);
-    if total_checksum_failures != 0 {
-        if total_checksum_failures > 1 {
-            let _ = ereport(WARNING)
-                .errmsg_plural(
-                    format!("{total_checksum_failures} total checksum verification failure"),
-                    format!("{total_checksum_failures} total checksum verification failures"),
-                    total_checksum_failures as u64,
-                )
-                .finish(loc("perform_base_backup"));
-        }
-        return ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
-            .errmsg("checksum verification failure during base backup")
-            .finish(loc("perform_base_backup"));
-    }
-
-    sink_support::basebackup_progress_done();
     Ok(())
 }
 
 fn zero_buffer(sink: &mut Bbsink<'_>, len: usize) {
     sink.buffer_slice_mut(len).fill(0);
-}
-
-// ---------------------------------------------------------------------------
-// WAL filename helpers (xlog_internal.h macros, inlined for the includewal
-// section; the transam_xlog copies are pub(crate)).
-// ---------------------------------------------------------------------------
-
-// IsXLogFileName: 24 upper-case hex characters.
-fn is_xlog_file_name(fname: &str) -> bool {
-    fname.len() == 24
-        && fname
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(&c))
-}
-
-// XLogFileName.
-fn xlog_file_name(tli: TimeLineID, seg_no: u64, wal_segsz: i32) -> String {
-    let per_id = 0x1_0000_0000u64 / wal_segsz as u64;
-    format!("{:08X}{:08X}{:08X}", tli, seg_no / per_id, seg_no % per_id)
-}
-
-// XLogFromFileName.
-fn xlog_from_file_name(fname: &str, wal_segsz: i32) -> (TimeLineID, u64) {
-    let per_id = 0x1_0000_0000u64 / wal_segsz as u64;
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap_or(0);
-    let log = u64::from_str_radix(&fname[8..16], 16).unwrap_or(0);
-    let seg = u64::from_str_radix(&fname[16..24], 16).unwrap_or(0);
-    (tli, log * per_id + seg)
-}
-
-// verify_page_checksum (basebackup.c:104): None = page OK (new page, page
-// newer than the backup start, or checksum matches); Some(calculated) on a
-// mismatch.
-fn verify_page_checksum(page: &[u8], start_lsn: XLogRecPtr, blkno: u32) -> Option<u16> {
-    // PageIsNew: pd_upper == 0.
-    let pd_upper = u16::from_ne_bytes([page[14], page[15]]);
-    // PageGetLSN: pd_lsn = { xlogid u32, xrecoff u32 }.
-    let lsn = ((u32::from_ne_bytes(page[0..4].try_into().unwrap()) as u64) << 32)
-        | u32::from_ne_bytes(page[4..8].try_into().unwrap()) as u64;
-    if pd_upper == 0 || lsn >= start_lsn {
-        return None;
-    }
-    let checksum = pg_checksum_page(page, blkno);
-    let pd_checksum = u16::from_ne_bytes([page[8], page[9]]);
-    if pd_checksum == checksum {
-        None
-    } else {
-        Some(checksum)
-    }
-}
-
-// pg_checksum_page (storage/checksum_impl.h): FNV-1a-derived block checksum
-// computed with pd_checksum treated as zero (same algorithm as bufmgr's
-// PageSetChecksumInplace).
-fn pg_checksum_page(page: &[u8], blkno: u32) -> u16 {
-    const N_SUMS: usize = 32;
-    const FNV_PRIME: u32 = 16777619;
-    const CHECKSUM_BASE_OFFSETS: [u32; N_SUMS] = [
-        0x5B1F36E9, 0xB8525960, 0x02AB50AA, 0x1DE66D2A, 0x79FF467A, 0x9BB9F8A3, 0x217E7CD2,
-        0x83E13D2C, 0xF8D4474F, 0xE39EB970, 0x42C6AE16, 0x993216FA, 0x7B093B5D, 0x98DAFF3C,
-        0xF718902A, 0x0B1C9CDB, 0xE58F764B, 0x187636BC, 0x5D7B3BB1, 0xE73DE7DE, 0x92BEC979,
-        0xCCA6C0B2, 0x304A0979, 0x85AA43D4, 0x783125BB, 0x6CA8EAA2, 0xE407EAC6, 0x4B5CFC3E,
-        0x9FBF8C76, 0x15CA20BE, 0xF2CA9FD3, 0x959BD756,
-    ];
-    #[inline(always)]
-    fn comp(sum: &mut u32, value: u32) {
-        let tmp = *sum ^ value;
-        *sum = tmp.wrapping_mul(FNV_PRIME) ^ (tmp >> 17);
-    }
-    let blcksz = types_core::BLCKSZ;
-    debug_assert_eq!(page.len(), blcksz);
-    let mut sums = CHECKSUM_BASE_OFFSETS;
-    let rows = blcksz / (4 * N_SUMS);
-    for row in 0..rows {
-        for (lane, sum) in sums.iter_mut().enumerate() {
-            let off = (row * N_SUMS + lane) * 4;
-            // pd_checksum (bytes 8..10) is computed as zero.
-            let v = if off == 8 {
-                u32::from_ne_bytes([0, 0, page[10], page[11]])
-            } else {
-                u32::from_ne_bytes(page[off..off + 4].try_into().unwrap())
-            };
-            comp(sum, v);
-        }
-    }
-    for _ in 0..2 {
-        for sum in sums.iter_mut() {
-            comp(sum, 0);
-        }
-    }
-    let mut checksum: u32 = sums.into_iter().fold(0, |a, s| a ^ s);
-    checksum ^= blkno;
-    (checksum % 65535 + 1) as u16
-}
-
-fn fstat_fd(fd: i32, path: &str) -> PgResult<LstatInfo> {
-    // SAFETY: zeroed stat is POD; fd is an open file descriptor.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstat(fd, &mut st) };
-    if rc != 0 {
-        return ereport(ERROR)
-            .errcode_for_file_access()
-            .errmsg(format!("could not stat file \"{path}\""))
-            .finish(loc("fstat_fd"))
-            .map(|()| unreachable!());
-    }
-    Ok(LstatInfo {
-        size: st.st_size,
-        mode: st.st_mode as u32,
-        uid: st.st_uid,
-        gid: st.st_gid,
-        mtime: st.st_mtime,
-    })
 }
 
 // ===========================================================================
@@ -1187,25 +796,8 @@ fn sendDir_spc(
     manifest: &mut BackupManifestInfo,
     spcoid: Oid,
 ) -> PgResult<i64> {
+    let _ = spcoid;
     let mut size: i64 = 0;
-
-    // Determine if the current path is a database directory that can contain
-    // relations (basebackup.c sendDir head): last path component all digits
-    // with parent "./base" or a tablespace version path, or "./global".
-    let (is_relation_dir, dboid): (bool, u32) = match path.rfind('/') {
-        Some(idx)
-            if idx + 1 < path.len()
-                && path[idx + 1..].bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            let parent = &path[..idx];
-            if parent == "./base" || parent.ends_with(TABLESPACE_VERSION_DIRECTORY) {
-                (true, path[idx + 1..].parse::<u32>().unwrap_or(0))
-            } else {
-                (false, 0)
-            }
-        }
-        _ => (path == "./global", 0),
-    };
 
     for d_name in read_dir_names(path)? {
         if d_name == "." || d_name == ".." || d_name == ".DS_Store" {
@@ -1232,37 +824,6 @@ fn sendDir_spc(
             }
         }
         if excluded {
-            continue;
-        }
-
-        // If there could be non-temporary relation files in this directory,
-        // try to parse the filename.
-        let mut is_relation_file = false;
-        let mut relfilenumber: u32 = 0;
-        let mut segno_of: u32 = 0;
-        let mut rel_fork = types_core::ForkNumber::MAIN_FORKNUM;
-        if is_relation_dir {
-            if let Some((num, fork, segno)) =
-                fd::reinit::parse_filename_for_nontemp_relation(&d_name)
-            {
-                is_relation_file = true;
-                relfilenumber = num;
-                segno_of = segno;
-                rel_fork = fork;
-            }
-        }
-
-        // Exclude all forks for unlogged tables except the init fork: any
-        // other fork with a matching _init fork present is skipped.
-        if is_relation_file && rel_fork != types_core::ForkNumber::INIT_FORKNUM {
-            let init_fork_file = format!("{path}/{relfilenumber}_init");
-            if lstat_file(&init_fork_file)?.is_some() {
-                continue;
-            }
-        }
-
-        // Exclude temporary relations.
-        if dboid != 0 && fd::looks_like_temp_rel_name(&d_name) {
             continue;
         }
 
@@ -1326,12 +887,7 @@ fn sendDir_spc(
             }
         } else if S_ISREG(statbuf.mode) {
             let tarfilename = &pathbuf[basepathlen as usize + 1..];
-            let relfile = if is_relation_file {
-                Some((relfilenumber, segno_of))
-            } else {
-                None
-            };
-            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, spcoid, relfile, manifest)?;
+            let sent = sendFile(sink, state, &pathbuf, tarfilename, &statbuf, true, manifest)?;
             if sent {
                 size += statbuf.size;
                 size += tar_padding_bytes_required(statbuf.size as usize) as i64;
@@ -1354,10 +910,6 @@ fn sendFile(
     tarfilename: &str,
     statbuf: &LstatInfo,
     missing_ok: bool,
-    spcoid: Oid,
-    // Some((relfilenumber, segno)) when the caller parsed a relation
-    // filename in a relation directory (checksum verification surface).
-    relfile: Option<(u32, u32)>,
     manifest: &mut BackupManifestInfo,
 ) -> PgResult<bool> {
     let mut ctx = checksum_init(manifest.checksum_type(), readfilename)?;
@@ -1376,17 +928,6 @@ fn sendFile(
 
     _tarWriteHeader(sink, state, tarfilename, None, statbuf)?;
 
-    // If we weren't told not to verify checksums, and checksums are enabled
-    // for this cluster, and this is a relation file, verify per-block.
-    let mut verify_checksum = !NOVERIFY_CHECKSUMS.with(Cell::get)
-        && transam_xlog::DataChecksumsEnabled()
-        && relfile.is_some();
-    let segno = relfile.map(|(_, s)| s).unwrap_or(0);
-    let mut checksum_failures: i32 = 0;
-    let mut blkno: u32 = 0;
-    const BLCKSZ: usize = types_core::BLCKSZ;
-    const RELSEG_SIZE: u32 = (1024 * 1024 * 1024) / BLCKSZ as u32;
-
     let mut bytes_done: i64 = 0;
     loop {
         if bytes_done >= statbuf.size {
@@ -1394,7 +935,7 @@ fn sendFile(
         }
         let want = sink.buffer_length().min((statbuf.size - bytes_done) as usize);
         // SAFETY: buf is a live writable slice; fd is an open regular file.
-        let mut cnt = {
+        let cnt = {
             let buf = sink.buffer_slice_mut(want);
             unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), bytes_done as libc::off_t) }
         };
@@ -1404,83 +945,9 @@ fn sendFile(
                 .errmsg(format!("could not read file \"{readfilename}\""))
                 .finish(loc("sendFile")).map(|()| false);
         }
-
-        // read_file_data_into_buffer's per-block verification (basebackup.c).
-        if verify_checksum && cnt > 0 && (cnt as usize % BLCKSZ) == 0 {
-            let nblocks = cnt as usize / BLCKSZ;
-            let abs_base = blkno + segno * RELSEG_SIZE;
-            for i in 0..nblocks {
-                let expected = {
-                    let buf = sink.buffer_slice(cnt as usize);
-                    verify_page_checksum(
-                        &buf[i * BLCKSZ..(i + 1) * BLCKSZ],
-                        state.startptr,
-                        abs_base + i as u32,
-                    )
-                };
-                let Some(_) = expected else { continue };
-
-                // Retry the block once: a torn concurrent write may finish
-                // and update the page LSN so we then skip it.
-                let reread_cnt = {
-                    let buf = sink.buffer_slice_mut(cnt as usize);
-                    unsafe {
-                        libc::pread(
-                            fd,
-                            buf[i * BLCKSZ..].as_mut_ptr().cast(),
-                            BLCKSZ,
-                            bytes_done as libc::off_t + (i * BLCKSZ) as libc::off_t,
-                        )
-                    }
-                };
-                if reread_cnt == 0 {
-                    // Concurrent truncation: keep only the processed blocks.
-                    cnt = (BLCKSZ * i) as isize;
-                    break;
-                }
-                let (expected, actual) = {
-                    let buf = sink.buffer_slice(cnt as usize);
-                    let page = &buf[i * BLCKSZ..(i + 1) * BLCKSZ];
-                    (
-                        verify_page_checksum(page, state.startptr, abs_base + i as u32),
-                        u16::from_ne_bytes([page[8], page[9]]),
-                    )
-                };
-                let Some(expected) = expected else { continue };
-
-                checksum_failures += 1;
-                if checksum_failures <= 5 {
-                    let _ = ereport(WARNING)
-                        .errmsg(format!(
-                            "checksum verification failed in file \"{readfilename}\", block {}: calculated {:X} but expected {:X}",
-                            abs_base + i as u32, expected, actual
-                        ))
-                        .finish(loc("sendFile"));
-                }
-                if checksum_failures == 5 {
-                    let _ = ereport(WARNING)
-                        .errmsg(format!(
-                            "further checksum verification failures in file \"{readfilename}\" will not be reported"
-                        ))
-                        .finish(loc("sendFile"));
-                }
-            }
-        }
-
-        // Block-level checksums can't be verified on a partial read.
-        if verify_checksum && cnt > 0 && (cnt as usize % BLCKSZ) != 0 {
-            let _ = ereport(WARNING)
-                .errmsg(format!(
-                    "could not verify checksum in file \"{readfilename}\", block {blkno}: read buffer size {cnt} and page size {BLCKSZ} differ"
-                ))
-                .finish(loc("sendFile"));
-            verify_checksum = false;
-        }
-
         if cnt == 0 {
             break; // concurrent truncation
         }
-        blkno += (cnt as usize / BLCKSZ) as u32;
         let chunk = sink.buffer_slice(cnt as usize).to_vec();
         checksum_update(&mut ctx, &chunk)?;
         bbsink_archive_contents(sink, state, cnt as usize)?;
@@ -1500,23 +967,7 @@ fn sendFile(
     _tarWritePadding(sink, state, bytes_done as usize)?;
     fd::CloseTransientFile(fd);
 
-    if checksum_failures > 1 {
-        // pgstat checksum-failure reporting is monitoring-only and deferred.
-        let _ = ereport(WARNING)
-            .errmsg_plural(
-                format!(
-                    "file \"{readfilename}\" has a total of {checksum_failures} checksum verification failure"
-                ),
-                format!(
-                    "file \"{readfilename}\" has a total of {checksum_failures} checksum verification failures"
-                ),
-                checksum_failures as u64,
-            )
-            .finish(loc("sendFile"));
-    }
-    TOTAL_CHECKSUM_FAILURES.with(|c| c.set(c.get() + checksum_failures as i64));
-
-    AddFileToBackupManifest(manifest, spcoid, tarfilename.as_bytes(), statbuf.size, statbuf.mtime, &mut ctx)?;
+    AddFileToBackupManifest(manifest, INVALID_OID, tarfilename.as_bytes(), statbuf.size, statbuf.mtime, &mut ctx)?;
     Ok(true)
 }
 
@@ -1612,17 +1063,12 @@ fn strncmp(a: &str, b: &str, n: usize) -> i32 {
     0
 }
 
-// File-permission globals for injected files (backup_label, tablespace_map,
-// .done markers) and symlink-to-directory conversions: read fd's file_perm
-// globals — the exact values the server's own file creation uses. (The
-// init_small data_directory_mode copy read stale 0700 in walsender threads;
-// pg_basebackup extracts these members with the TAR HEADER modes, so a stale
-// header broke the group-permission leg of pg_basebackup/010 subtest 83.)
+// File-permission / identity globals (basebackup uses these for injected files).
 fn pg_file_create_mode() -> u32 {
-    fd::vfd::pg_file_create_mode()
+    init_small::globals::data_directory_mode() as u32 & 0o666
 }
 fn pg_dir_create_mode() -> u32 {
-    fd::vfd::pg_dir_create_mode()
+    init_small::globals::data_directory_mode() as u32
 }
 fn geteuid() -> u32 {
     // SAFETY: geteuid never fails.
