@@ -797,6 +797,19 @@ pub struct EStateData<'mcx> {
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
     pub es_epq_active: bool,
+    /// se-delegtax SH-F: the row-mode LEAF fast-admit byte — true iff the
+    /// lane master GUC is on AND no per-execution diagnostics are armed
+    /// (es_epq_active false, es_instrument == 0, no ENGINE capture, lane
+    /// stats/trace disarmed). Maintained by lanev2::refresh_lane_leaf_fast
+    /// at ExecutorStart-end and the EPQ toggle sites; every input except
+    /// EPQ is per-execution static (instr growth sites are all gated on
+    /// es_instrument != 0, set before InitPlan). When true, a leaf pull
+    /// verdict admits with ONE byte load + the inline direction check —
+    /// every tick/capture-asserting channel has diagnostics armed and
+    /// therefore runs the full slow path, so accounting fidelity is
+    /// structurally unaffected. Default false (EPQ/worker estates stay on
+    /// the slow path).
+    pub es_lane_leaf_fast: bool,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -1041,6 +1054,7 @@ impl<'mcx> EStateData<'mcx> {
             es_total_processed: 0,
             es_top_eflags: 0,
             es_instrument: 0,
+            es_lane_leaf_fast: false,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
@@ -1541,7 +1555,7 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_rowmarks;
+        es_epq_active, es_lane_leaf_fast, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,

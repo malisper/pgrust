@@ -144,7 +144,12 @@ pub fn enabled() -> bool {
 /// letter: +39 instr/row at knob-OFF).
 #[inline]
 pub(crate) fn rowmode_tail_active() -> bool {
-    rowmode::rowmode_enabled() && enabled()
+    // se-delegtax SH-F: knob-only since the verdict form — the lane-executor
+    // GUC gate rides the per-execution es_lane_leaf_fast byte (fast path)
+    // and verdict_slow's enabled() head (slow path), so the knob-ON per-pull
+    // path no longer pays the GUC TLS read. Knob-OFF stays one relaxed byte
+    // load + compare (the se2-cost law this gate exists for).
+    rowmode::rowmode_enabled()
 }
 
 /// WS-Q wave-3: dispatch-arm gate for the T3 source form
@@ -276,6 +281,25 @@ pub(self) fn leaf_diag_mask() -> u8 {
     } else {
         leaf_diag_resolve()
     }
+}
+
+/// se-delegtax SH-F: (re)compute the row-mode LEAF fast-admit byte
+/// (`EStateData::es_lane_leaf_fast`). Called ONCE per execution at
+/// standard_executor_start's InitPlan-end — every input is per-execution
+/// static from that point: the lane master GUC (documented semantic:
+/// SET takes effect on the NEXT query), es_instrument (set before
+/// InitPlan; every es_instrumentation growth site is gated on it),
+/// ENGINE capture (es_top_eflags, stored at entry), and the process-static
+/// diag mask. The per-pull-dynamic gates (EPQ, scan direction) are checked
+/// INLINE by the fast path itself, so the byte needs NO mid-query
+/// maintenance. byte==true ⇒ the full verdict would admit and would tick
+/// nothing (accounting disarmed) — every tick/capture-asserting channel
+/// has diagnostics armed and therefore takes the slow path unchanged.
+pub(crate) fn refresh_lane_leaf_fast(estate: &mut ::executils::EStateData<'_>) {
+    estate.es_lane_leaf_fast = enabled()
+        && estate.es_instrument == 0
+        && !estate.engine_capture()
+        && leaf_diag_mask() == 0;
 }
 
 #[cold]

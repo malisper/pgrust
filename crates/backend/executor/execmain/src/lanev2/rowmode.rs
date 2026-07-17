@@ -341,6 +341,31 @@ pub fn merge_join_pull_verdict<'mcx>(
     if !mergejoin_enabled() {
         return;
     }
+    // SH-F fast path (see rowmode_tail::verdict): the per-execution-static
+    // byte + the two per-pull-dynamic gates inline; byte==true means the
+    // slow path would admit and tick nothing.
+    if estate.es_lane_leaf_fast
+        && !estate.es_epq_active
+        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        #[cfg(test)]
+        ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    mj_verdict_slow(mj, estate);
+}
+
+/// The full MJ verdict (outlined; diagnostics/EPQ/backward/instrumented/
+/// GUC-off pulls): the exact pre-SH-F body with the lane master GUC gate
+/// at its head (it rode merge_join_arm's `enabled()` gate before SH-F).
+#[inline(never)]
+fn mj_verdict_slow<'mcx>(
+    mj: &crate::procnode::MergeJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    if !super::enabled() {
+        return;
+    }
     // Dynamic per-call gates (the try_own_result cadence), OR-folded.
     if estate.es_epq_active
         || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
