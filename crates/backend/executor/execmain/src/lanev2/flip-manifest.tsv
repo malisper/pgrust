@@ -42,3 +42,4 @@ setop	epq,backward,instrumented,scroll-mark
 mergeappend	epq,backward,instrumented,scroll-mark
 unique	epq,backward,instrumented,scroll-mark
 lockrows	epq,backward,instrumented,scroll-mark
+mergejoin	epq,backward,instrumented

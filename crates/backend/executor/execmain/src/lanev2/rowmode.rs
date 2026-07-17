@@ -102,10 +102,11 @@ fn rowmode_resolve() -> bool {
     on
 }
 
-/// `PGRUST_LANE_V2_MERGEJOIN` (default OFF): the wave-2 knob-split gate for
-/// the WS-G MergeJoin row-mode hosting (contract §2 — facility-level knob,
-/// granted; same AtomicU8 idiom as `ROWMODE` for the same test-lever
-/// reason).
+/// `PGRUST_LANE_V2_MERGEJOIN` (default ON since wave-4 FLIP-2 — flip-ladder
+/// rung 2; explicit `=0`/`off` is the permanent kill switch): the wave-2
+/// knob-split gate for the WS-G MergeJoin row-mode hosting (contract §2 —
+/// facility-level knob, granted; same AtomicU8 idiom as `ROWMODE` for the
+/// same test-lever reason).
 static MERGEJOIN: AtomicU8 = AtomicU8::new(0);
 
 #[inline] // per-pull gate on the merge_join arm — same shape as rowmode_enabled
@@ -120,9 +121,12 @@ fn mergejoin_enabled() -> bool {
 #[cold]
 #[inline(never)]
 fn mergejoin_resolve() -> bool {
-    let on = matches!(
+    // WAVE-4 FLIP-2 (flip-ladder rung 2; wave4-flip-manifest A2): default ON.
+    // Only the default read changes; `=0`/`off` stays the permanent kill
+    // switch (G4 restores today's bytes and ticks).
+    let on = !matches!(
         std::env::var("PGRUST_LANE_V2_MERGEJOIN").as_deref(),
-        Ok("1") | Ok("on")
+        Ok("0") | Ok("off")
     );
     MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
     on
