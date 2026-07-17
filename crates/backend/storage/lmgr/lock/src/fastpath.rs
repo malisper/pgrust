@@ -491,15 +491,57 @@ fn max_prepared_xacts() -> i32 {
     hdr.allProcs.len() as i32 - hdr.allProcCount as i32
 }
 
+// XactLockForVirtualXact (lock.c:4661): wait (or check) for the given XID —
+// or, with an invalid xid, every prepared XID that was known as `vxid` before
+// its PREPARE TRANSACTION.
 fn XactLockForVirtualXact(
-    _vxid: VirtualTransactionId,
-    _xid: TransactionId,
-    _wait: bool,
+    vxid: VirtualTransactionId,
+    xid: TransactionId,
+    wait: bool,
 ) -> PgResult<bool> {
+    // No point waiting for 2PCs if you have no 2PCs.
     if max_prepared_xacts() == 0 {
         return Ok(true);
     }
-    panic!("XactLockForVirtualXact with prepared transactions: twophase.c not ported (phase 2)")
+
+    let mut xid = xid;
+    let mut more = false;
+    loop {
+        // Clear state from previous iterations.
+        if more {
+            xid = InvalidTransactionId;
+            more = false;
+        }
+
+        // If we have no xid, try to find one.
+        if xid == InvalidTransactionId {
+            if twophase_seams::two_phase_get_xid_by_virtual_xid::is_installed() {
+                let (found, have_more) = twophase_seams::two_phase_get_xid_by_virtual_xid::call(
+                    vxid.procNumber,
+                    vxid.localTransactionId,
+                )?;
+                xid = found;
+                more = have_more;
+            }
+        }
+        if xid == InvalidTransactionId {
+            debug_assert!(!more);
+            return Ok(true);
+        }
+
+        // Check or wait for XID completion.
+        let tag = LOCKTAG::transaction(xid);
+        if crate::acquire::LockAcquire(&tag, ShareLock, false, !wait)?
+            == ::types_storage::lock::LOCKACQUIRE_NOT_AVAIL
+        {
+            return Ok(false);
+        }
+        crate::acquire::LockRelease(&tag, ShareLock, false)?;
+
+        if !more {
+            return Ok(true);
+        }
+    }
 }
 
 pub fn VirtualXactLock(vxid: VirtualTransactionId, wait: bool) -> PgResult<bool> {

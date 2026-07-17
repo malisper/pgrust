@@ -1,0 +1,23 @@
+[package]
+name = "logicalproto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "logicalproto"
+path = "src/lib.rs"
+
+[dependencies]
+types_core = { path = "../../../../_support/types/types_core" }
+types_error = { path = "../../../../_support/types/types_error" }
+types_tuple = { path = "../../../../_support/types/types_tuple" }
+types_rel = { path = "../../../../_support/types/rel" }
+types_fmgr = { path = "../../../../_support/types/fmgr" }
+datum = { path = "../../../../_support/types/datum" }
+mcx = { path = "../../../../_support/mcx" }
+elog = { path = "../../../utils/error/elog" }
+lsyscache = { path = "../../../utils/cache/lsyscache" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+detoast = { path = "../../../access/common/detoast" }
+relcache_seams = { path = "../../../utils/cache/relcache_seams" }

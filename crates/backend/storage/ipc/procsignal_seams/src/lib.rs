@@ -20,3 +20,23 @@ seam_core::seam!(
     // errno on failure (ESRCH when no such backend, as C's kill()).
     pub fn send_thread_signal(pid: i32, signo: i32) -> i32
 );
+
+seam_core::seam!(
+    // SetThreadSignalExtraWakeLatch — register (or clear) an extra latch a
+    // delivered thread signal must set for the CURRENT thread, rendering the
+    // latch wakeups C's handlers perform at delivery (startup process:
+    // WakeupRecovery()). Raw = LatchHandle::as_usize; None clears.
+    pub fn set_thread_signal_extra_wake_latch(raw_latch: Option<usize>) -> ()
+);
+
+seam_core::seam!(
+    // SendProcSignal (procsignal.c) for seams-only callers (slot.c's
+    // InvalidatePossiblyObsoleteSlot signaling the startup's logical-slot
+    // conflict). proc_number = INVALID_PROC_NUMBER for the pid-scan path.
+    // Returns 0 on success, -1 (ESRCH) otherwise.
+    pub fn send_proc_signal(
+        pid: i32,
+        reason: types_storage::storage::ProcSignalReason,
+        proc_number: i32,
+    ) -> i32
+);

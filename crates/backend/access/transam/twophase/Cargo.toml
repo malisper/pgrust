@@ -9,6 +9,7 @@ name = "twophase"
 path = "src/lib.rs"
 
 [dependencies]
+typcache_seams = { path = "../../../utils/cache/typcache_seams" }
 libc = "0.2"
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
@@ -44,6 +45,7 @@ varsup = { path = "../varsup" }
 subtrans = { path = "../subtrans" }
 xact = { path = "../xact" }
 xlogreader = { path = "../xlogreader" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
 xlogutils = { path = "../xlogutils" }
 xloginsert_seams = { path = "../xloginsert_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }

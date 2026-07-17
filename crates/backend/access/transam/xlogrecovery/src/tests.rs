@@ -89,7 +89,12 @@ fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ck
 
 fn install_timeline_seams() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(timeline::init_seams);
+    ONCE.call_once(|| {
+        timeline::init_seams();
+        if !timestamp_seams::get_current_timestamp::is_installed() {
+            timestamp_seams::get_current_timestamp::set(|| 0);
+        }
+    });
 }
 
 #[test]
