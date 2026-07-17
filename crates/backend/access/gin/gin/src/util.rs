@@ -61,7 +61,13 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             match name.as_deref() {
                 Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
                 Some("gin_extract_hstore") => GinOpclass::HstoreOps,
-                _ => unported(&format!("GIN opclass with extractValue proc {other}")),
+                // unported: opclasses beyond the closed set (user-reachable
+                // via CREATE INDEX ... USING gin with a custom opclass).
+                _ => {
+                    return Err(crate::unsupported(format!(
+                        "GIN operator class with extractValue support function {other} is not supported"
+                    )))
+                }
             }
         }
     };
@@ -75,9 +81,13 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             ::types_core::INT8OID => GinElemCmp::Int8,
             ::types_core::OIDOID => GinElemCmp::Oid,
             ::types_core::TEXTOID | ::types_core::VARCHAROID => GinElemCmp::Text,
-            other => unported(&format!(
-                "GIN array_ops element type {other} btree comparator (typcache cmp lane)"
-            )),
+            // unported: typcache btree-comparator fallback (user-reachable
+            // via CREATE INDEX USING gin on e.g. a numeric[] column).
+            other => {
+                return Err(crate::unsupported(format!(
+                    "GIN array_ops over element type {other} is not supported (typcache comparator lane unported)"
+                )))
+            }
         }
     } else {
         GinElemCmp::None
@@ -102,7 +112,13 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let can_partial_match = match partial {
         InvalidOid => false,
         opclass::F_GIN_CMP_PREFIX if opclass == GinOpclass::TsvectorOps => true,
-        other => unported(&format!("GIN comparePartialFn {other}")),
+        // unported: comparePartial support beyond tsvector's prefix compare
+        // (user-reachable via a custom opclass registering proc 5).
+        other => {
+            return Err(crate::unsupported(format!(
+                "GIN operator class with comparePartial support function {other} is not supported"
+            )))
+        }
     };
 
     let attr = rel.rd_att.compact_attr(i);

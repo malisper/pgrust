@@ -40,12 +40,6 @@ pub(crate) const RM_HASH: u8 = ::types_core::primitive::RmgrIds::RM_HASH_ID as u
 
 #[cold]
 #[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: hash {what}")
-}
-
-#[cold]
-#[inline(never)]
 fn non_hash_opaque() -> ! {
     panic!("hash entry point reached with a non-hash scan opaque")
 }
