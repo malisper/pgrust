@@ -61,7 +61,7 @@ pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
-pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_material, try_own_memoize, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
+pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_lock_rows, try_own_material, try_own_memoize, try_own_merge_append, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_set_op, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
 pub(crate) use windows::try_own_window_agg;
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
@@ -12467,6 +12467,20 @@ pub fn try_own_limit<'mcx>(
 /// `None` = refused; `exec_unique` drives the same UniqueState byte-safely.
 #[inline]
 pub fn try_own_unique<'mcx>(
+    u: &mut crate::procnode::UniqueNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = try_own_unique_streaming(u, estate)? {
+        return Ok(Some(r));
+    }
+    // Wave-2 row-mode tail fallback (knob-gated; runs its own §3.2 gates —
+    // the streaming glue above keeps priority per the composition rule).
+    rowmode_tail::try_own_unique_tail(u, estate)
+}
+
+/// The Phase-2 streaming unique over the sort breaker. `None` = refused.
+#[inline]
+fn try_own_unique_streaming<'mcx>(
     u: &mut crate::procnode::UniqueNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {

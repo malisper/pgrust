@@ -2513,6 +2513,16 @@ fn lockrows_arm<'mcx>(
     l: &mut PgBox<'mcx, LockRowsNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; LockRows-without-EPQ — es_epq_active refuses
+    // inside; the RowSource closure boundary is the pinned WS-N inc-2b seam,
+    // docs/design/rowmode-tail.md §4): falls through to the UNCHANGED
+    // per-tuple path on refuse.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_lock_rows(l, estate)? {
+            return Ok(r);
+        }
+    }
     let LockRowsNode { state, outer, epq } = &mut **l;
     ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
         crate::epq::eval_plan_qual(epq, subs, e, inputslot)
@@ -2609,6 +2619,14 @@ fn merge_append_arm<'mcx>(
     m: &mut PgBox<'mcx, MergeAppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_merge_append(m, estate)? {
+            return Ok(r);
+        }
+    }
     let MergeAppendNode { state, substates, subplan_origin: _ } = &mut **m;
     ::nodemergeappend::exec_merge_append(state, estate, |e, i| {
         exec_proc_node(&mut substates[i], e)
@@ -2636,6 +2654,14 @@ fn set_op_arm<'mcx>(
     s: &mut PgBox<'mcx, SetOpNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_set_op(s, estate)? {
+            return Ok(r);
+        }
+    }
     let SetOpNode { state, outer, inner } = &mut **s;
     ::nodesetop::exec_set_op(
         state,
