@@ -683,6 +683,48 @@ where
     }
 }
 
+/// Canonical never-pending pass-through `TupleOp` for hosting bare row-mode
+/// LEAVES under `pull_step_rows` (Phase-1 integration contract §2b: ONE
+/// definition, this spelling; consumed by the mergejoin row-mode hosting
+/// [WS-G] and the express-lane structured mode [WS-J]). `accept` forwards the
+/// tuple straight to the sink — `Full` → `Paused`, `NeedMore` → `NeedInput` —
+/// so the driver performs exactly one `next_row` per PG pull against the
+/// capacity-one root. `resume` is a loud fail-closed `PgError` (panicfix
+/// discipline — NOT `unreachable!()`): the op never reports `pending()`, so
+/// reaching it means a broken driver/pending contract, and unwinding as a
+/// query error beats aborting the backend. `source_exhausted`: default
+/// (`Finished`) — a bare leaf has no post-exhaustion phase.
+pub(super) struct PassthroughOp;
+
+impl<'mcx> TupleOp<'mcx> for PassthroughOp {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        Ok(match out.accept(tuple, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(false, "PassthroughOp::resume: a passthrough never pends");
+        Err(Box::new(::types_error::PgError::error(
+            "lane-v2 PassthroughOp resumed (a passthrough never pends)".to_string(),
+        )))
+    }
+}
+
 /// `drain_pipeline` over a two-operator chain: run the whole feed (scan →
 /// upstream operator → `TupleOp` → breaker sink) to exhaustion, then
 /// `finish()` the sink. Breaker sinks never fill, so neither op ever pauses.

@@ -2788,7 +2788,17 @@ fn merge_join_arm<'mcx>(
     mj: &mut PgBox<'mcx, MergeJoinNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let MergeJoinNode { state, outer, inner } = &mut **mj;
+    let mj = &mut **mj;
+    // Lane-executor-v2 dispatch hook (Phase-1 row-mode LEAF hosting behind
+    // PGRUST_LANE_V2_ROWMODE; both children stay Volcano inside the ported
+    // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
+    // logic + refuse-set live in `lanev2` (the nest_loop_arm pattern).
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_merge_join(mj, estate)? {
+            return Ok(r);
+        }
+    }
+    let MergeJoinNode { state, outer, inner } = mj;
     ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
 }
 
