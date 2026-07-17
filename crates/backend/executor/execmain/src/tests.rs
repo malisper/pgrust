@@ -10555,9 +10555,262 @@ mod scans_t3_am_ab {
 }
 // --- end WS-V wave-5 sub-region -------------------------------------------------
 
-// --- WS-W wave-5 sub-region (DML inc-4 OC; band 81001+) -----------------------
-// (reserved; WS-W appends here)
-// --- end WS-W wave-5 sub-region -------------------------------------------------
+// --- WS-W (wave-5): dml inc-4 OC admission ------------------------------------
+// A/B unit corpus for the PGRUST_LANE_V2_DML_OC nested knob (wave-5 contract
+// §8.3): admission + engagement + nested-knob law + MERGE-stays-refused.
+// Serialization: every test holds scanfix::TEST_LOCK for its full span (the
+// wave-2 precedent-3 discipline; the shared DML knob atomics never race
+// across modules). Fake oids: the WS-W band is 81001+ (contract §4).
+//
+// SCOPE HONESTY (the wave-2 dml_ab header law, verbatim posture): these
+// fixtures are READ-ONLY fake heaps with NO indexes — an arbiter-less ON
+// CONFLICT DO NOTHING plan proves the HOST (admission verdict, gate order,
+// knob-OFF silence, engagement, refusal accounting) while `exec_insert`
+// skips the oc_* ceremony (onconflict != 0 && num_indices == 0) and the
+// empty source means no write path runs on either engine. The ceremony
+// itself (arbiter pre-check, speculative token, DO UPDATE dispatch, EPQ
+// interplay) proves on a real server: the isolation battery's
+// insert-conflict family + scripts/dualexec/corpus-dml-oc.sql +
+// scripts/lane-dml-oc-e2e.sh (post-mutation content SELECTs + command-tag
+// legs per the lane-dml-epq.md §10 proof channel).
+mod dml_ab_wave5 {
+    use super::*;
+
+    /// Drive a plan to completion (exec_proc_node until None — the
+    /// ExecutePlan cadence) and return es_processed (the dml_ab_wave3
+    /// run_stmt shape, module-local per the append-region discipline).
+    fn run_stmt(pstmt: &'static PlannedStmt<'static>, op: CmdType) -> u64 {
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, op, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            while exec_proc_node(ps, estate).unwrap().is_some() {}
+            let processed = estate.es_processed;
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            processed
+        })
+    }
+
+    fn probes() -> (u64, u64) {
+        (
+            crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// `MERGE INTO target USING ... ` skeleton: ModifyTable(CMD_MERGE) over
+    /// a SeqScan of the target with the junk "ctid" row-id column
+    /// (init_result_rel's rowid_attno lookup, the mk_update_delete_pstmt
+    /// stand-in idiom) and one empty per-rel cell in mergeJoinConditions /
+    /// mergeActionLists (nil join condition, zero WHEN actions). The empty
+    /// source means no action ever dispatches — the unit exercises ONLY the
+    /// admission verdict (`merge` must refuse even under DML+OC).
+    fn mk_merge_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, target: u32) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{ModifyTable, Plan, Scan, SeqScan};
+
+        let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+        let scan_tlist = NodeList::make2(
+            mcx,
+            Node::mk_target_entry(mcx, Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap(), 1, Some("c1"), false)
+                .unwrap(),
+            Node::mk_target_entry(mcx, junk, 2, Some("ctid"), true).unwrap(),
+        )
+        .unwrap();
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        let mut mt = Node::build::<ModifyTable>(mcx).unwrap();
+        mt.plan.lefttree = Some(scan);
+        mt.operation = CmdType::CMD_MERGE;
+        mt.canSetTag = true;
+        mt.nominalRelation = 1;
+        mt.resultRelations = ::types_nodes::IntList::make1(mcx, 1).unwrap();
+        mt.mergeJoinConditions =
+            NodeList::make1(mcx, Node::mk_list(mcx, NodeList::nil()).unwrap()).unwrap();
+        mt.mergeActionLists =
+            NodeList::make1(mcx, Node::mk_list(mcx, NodeList::nil()).unwrap()).unwrap();
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: target,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::RowExclusiveLock,
+                perminfoindex: 1,
+                inFromCl: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perm = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid: target,
+                requiredPerms: ::types_nodes::parsenodes::ACL_UPDATE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_MERGE;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mt.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perm).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// The OC admission arm: the arbiter-less ON CONFLICT DO NOTHING
+    /// INSERT..SELECT (the exact wave-2 refusal fixture) is OWNED under
+    /// DML+OC — owned ticks, DmlShape stays flat, behavior identical to the
+    /// all-off Volcano oracle arm.
+    #[test]
+    fn dml_w5_oc_nothing_owned_with_oc() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 81001;
+        let source: u32 = 81002;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_oc_set_for_tests(false);
+        let off = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, true),
+            CmdType::CMD_INSERT,
+        );
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_oc_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let on = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, true),
+            CmdType::CMD_INSERT,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_oc_set_for_tests(false);
+        assert_eq!(on, off, "knob arms must behave identically");
+        assert!(owned1 > owned0, "OC arm never engaged on the admitted ON CONFLICT shape");
+        assert_eq!(refused1, refused0, "the admitted OC shape must not tick DmlShape");
+
+        scanfix::quiesced();
+    }
+
+    /// Nested-knob law, refusal arm: with the host knob on and _OC off the
+    /// SAME shape still refuses as DmlShape ('on-conflict' detail) — the
+    /// allowlist row stands unshrunk (wave-5 rider).
+    #[test]
+    fn dml_w5_oc_refused_without_oc() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 81003;
+        let source: u32 = 81004;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_oc_set_for_tests(false);
+        let (owned0, refused0) = probes();
+        let n = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, true),
+            CmdType::CMD_INSERT,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "ON CONFLICT must not be owned with _OC off");
+        assert!(refused1 > refused0, "ON CONFLICT at _OC-off must tick DmlShape");
+
+        scanfix::quiesced();
+    }
+
+    /// Nested-knob law, other arm: `_OC` alone flips NOTHING — with the DML
+    /// host knob off the arm gate short-circuits and no wave-5 code runs.
+    #[test]
+    fn dml_w5_oc_alone_flips_nothing() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 81005;
+        let source: u32 = 81006;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_oc_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let n = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, true),
+            CmdType::CMD_INSERT,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_oc_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "_OC alone must not own");
+        assert_eq!(refused1, refused0, "_OC alone must tick NOTHING");
+
+        scanfix::quiesced();
+    }
+
+    /// MERGE stays refused EVEN under DML+OC (contract §8.2: the C-side
+    /// trace pin is outstanding; the probe's `merge` arm is unconditional).
+    #[test]
+    fn dml_w5_merge_refused_even_oc_on() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 81007;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_oc_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let n = run_stmt(mk_merge_pstmt(leaked_mcx(), target), CmdType::CMD_MERGE);
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_oc_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "MERGE must never be owned (trace pin outstanding)");
+        assert!(refused1 > refused0, "MERGE under DML+OC must tick DmlShape");
+
+        scanfix::quiesced();
+    }
+}
+// --- end WS-W (wave-5) ----------------------------------------------------------
 
 // --- WS-X wave-5 sub-region (cursors/SPI design; band 82001+, expected unused) --
 // (reserved; WS-X appends here)
