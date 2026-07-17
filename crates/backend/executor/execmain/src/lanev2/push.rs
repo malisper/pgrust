@@ -610,6 +610,19 @@ pub(super) trait RowSource<'mcx> {
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>>;
+
+    /// Reachable Plan node id for the wave-4 G7 EngineEvent capture at the
+    /// hosting chokepoint. Consulted ONLY under `estate.engine_capture()`
+    /// (the emission-gate law) — never on a default-path pull, so the id's
+    /// pointer chase costs the per-pull drive zero instructions (se-delegtax
+    /// SH-C; the eager `plan_node_id: Option<i32>` drive parameter was 3
+    /// dependent loads per owned pull on the Some-id shapes). Default `None`
+    /// = the node state carries no reachable Plan pointer (the
+    /// ScanState-shaped leaves; the named G7 residual — see rowmode_tail.rs
+    /// `drive`).
+    fn plan_node_id(_node: &Self::Node) -> Option<i32> {
+        None
+    }
 }
 
 /// One PG pull over a row-mode pipeline: `RowSource` → `TupleOp` →
@@ -833,8 +846,20 @@ impl<'mcx> TupleOp<'mcx> for PassthroughOp {
 /// is the same per-row call chain as Volcano with only the admission verdict
 /// on top.
 ///
-/// SCOPE-LOCKED (integration contract §2b) to WS-J's point experiment until
-/// the fleet G1–G4 verdict; no other workstream may call it in Phase 1.
+/// SCOPE RATIFICATION (se-delegtax, 2026-07-17; supersedes the Phase-1
+/// integration-contract §2b lock, which held "until the fleet G1–G4
+/// verdict" — that verdict exists: se-express-adm §3). This is THE shared
+/// driver for every PURE DELEGATION LEAF: any pipeline of the exact shape
+/// `RowSource → PassthroughOp → RootAdapter::new(None)` is
+/// statement-identical to a bare `src.next_row` call BY CONSTRUCTION —
+/// `PassthroughOp::pending()` is constantly false (resume unreachable);
+/// `Some(row)` maps accept→buffer→Full→Paused→take back to `Some(row)`;
+/// `None` maps source_exhausted→Finished→finish(no clear)→`None`; errors
+/// propagate untouched on both drivers. The full `pull_step_rows` stays the
+/// driver for real `TupleOp` chains (ProjectSet). SE4-GATES measured the
+/// pipeline round trip (2 dyn calls + the capacity-one buffer protocol per
+/// pull) as the dominant share of the FLIP-1/FLIP-2 lane tax; this driver
+/// is the deletion.
 #[inline(always)]
 pub(super) fn pull_step_point<'mcx, S: RowSource<'mcx>>(
     node: &mut S::Node,

@@ -5,8 +5,10 @@
 //! template (contract §3.2): each shape is a pure DELEGATION LEAF — a
 //! `RowSource` whose `next_row` runs the identical statements the node's
 //! `procnode` arm fallback runs (a call into the ported per-node exec body,
-//! children driven Volcano inside it), stepped by `pull_step_rows` through
-//! `PassthroughOp` into a `RootAdapter`. The WS-G MergeJoin hosting is the
+//! children driven Volcano inside it), stepped by the ratified degenerate
+//! leaf driver `pull_step_point` (se-delegtax SH-A — statement-identical by
+//! construction to the displaced `pull_step_rows` over `PassthroughOp` +
+//! `RootAdapter::new(None)`; proof in push.rs). The WS-G MergeJoin hosting is the
 //! template's precedent; docs/design/rowmode-tail.md restates the argument
 //! for why delegation is byte-identical BY CONSTRUCTION (one `next_row` per
 //! owned pull ≡ one Volcano call per pull; zero lane-held cross-call state;
@@ -33,8 +35,11 @@
 //! Gate order (contract §3.2, exactly WS-G): knob (OFF = `Ok(None)`, ticks
 //! nothing) → `es_epq_active` → Epq → `!forward` → Backward → instrumented →
 //! Instrumented → shape gates (none: delegation is shape-agnostic) →
-//! `tick_owned` ONCE → `pull_step_rows`. OWNED cadence = once per drive
-//! start = once per owned PG pull (§3.3; pull ≡ drive for row-mode).
+//! `tick_owned` ONCE → `pull_step_point`. OWNED cadence = once per drive
+//! start = once per owned PG pull (§3.3; pull ≡ drive for row-mode). The
+//! dynamic gates are OR-folded with the reason re-derived on a `#[cold]`
+//! tail in the same priority order (se-delegtax SH-D) — set + cadence
+//! identical.
 //!
 //! Shared-slot law (contract §3.8, binding here): no `RowSource` below
 //! caches a shared-slot handle or read position across `next_row` calls.
@@ -59,7 +64,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use super::push::{pull_step_rows, PassthroughOp, RootAdapter, RowSource};
+use super::push::{pull_step_point, RowSource};
 use super::rowmode::rowmode_enabled;
 use super::stats::{self, RefuseReason, ShapeClass};
 
@@ -89,43 +94,79 @@ pub(crate) fn tail_owned_probe_for_tests(name: &str) -> u64 {
 /// nothing). `None` = admitted; `Some(reason)` = refused (already ticked —
 /// the reason is returned so the wave-4 G7 capture below can record the
 /// verdict without re-deriving it).
+///
+/// se-delegtax SH-D (the express-adm INC-1 shape): the hot path is one
+/// OR-combined test; the reason derivation + refused tick live on a
+/// `#[cold]` outlined tail that re-derives the FIRST failing gate in the
+/// original §3.2 priority order — refusal set and tick cadence identical.
 #[inline]
 fn tail_gates(class: ShapeClass, estate: &EStateData<'_>) -> Option<RefuseReason> {
-    let reason = if estate.es_epq_active {
-        Some(RefuseReason::Epq)
-    } else if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        Some(RefuseReason::Backward)
-    } else if !estate.es_instrumentation.is_empty() {
-        Some(RefuseReason::Instrumented)
-    } else {
-        None
-    };
-    if let Some(r) = reason {
-        stats::tick_refused(class, r);
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !estate.es_instrumentation.is_empty()
+    {
+        return Some(tail_gate_refused(class, estate));
     }
-    reason
+    None
+}
+
+/// Cold refuse tail: re-derive the first failing gate in §3.2 priority
+/// order (EPQ → backward → instrumented), tick it, return it. Reached only
+/// when `tail_gates`'s OR-fold fired, so one of the three holds.
+#[cold]
+#[inline(never)]
+fn tail_gate_refused(class: ShapeClass, estate: &EStateData<'_>) -> RefuseReason {
+    let r = if estate.es_epq_active {
+        RefuseReason::Epq
+    } else if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        RefuseReason::Backward
+    } else {
+        RefuseReason::Instrumented
+    };
+    stats::tick_refused(class, r);
+    r
+}
+
+/// Cold owned-path diagnostics tail (se-delegtax SH-B): reached only when
+/// `super::leaf_diag_mask()` is nonzero (accounting or trace armed — never
+/// at default config). Tick cadence unchanged: OWNED once per drive start.
+#[cold]
+#[inline(never)]
+fn tail_diag_owned(class: ShapeClass, diag: u8) {
+    if diag & 1 != 0 {
+        stats::tick_owned(class);
+    }
+    if diag & 2 != 0 {
+        super::lane_trace(&format!("rowmode-tail: {} drive owned", class.name()));
+    }
 }
 
 /// The host-template drive, shared by every tail shape: gates (in the §3.2
-/// order), OWNED tick ONCE, then one `pull_step_rows` step over the
-/// per-call-reassembled `RowSource → PassthroughOp → RootAdapter` pipeline.
-/// `RootAdapter::new(None)` for all tail shapes: every delegated exec body
-/// runs its own end-of-stream slot handling (`exec_scan_impl`'s projected
-/// clear included), so the wrapper adds no clear the Volcano arm would not
-/// perform.
+/// order), OWNED tick ONCE (behind the SH-B diag mask), then ONE
+/// `pull_step_point` step — the ratified degenerate driver for pure
+/// delegation leaves (se-delegtax SH-A; push.rs doc carries the
+/// statement-identity proof: a `RowSource → PassthroughOp →
+/// RootAdapter::new(None)` pipeline IS a bare `next_row` call by
+/// construction, and every tail shape used exactly that pipeline —
+/// `RootAdapter::new(None)` because every delegated exec body runs its own
+/// end-of-stream slot handling, `exec_scan_impl`'s projected clear
+/// included, so the wrapper added no clear the Volcano arm would not
+/// perform). SE4-GATES leg 5 measured the displaced pipeline round trip
+/// (2 dyn calls + the capacity-one buffer protocol per pull) as the
+/// dominant share of the FLIP-1 lane tax on the tail corpora.
 ///
-/// `plan_node_id` (wave-4 pre-flip G7, flip-ladder §2): `Some(id)` arms the
-/// per-node EngineEvent capture at this verdict chokepoint — cold, gated on
-/// `estate.engine_capture()` (the emission-gate law: no records on any
-/// default path), dedup first-wins per (node, class) so the per-pull cadence
-/// records the first verdict only. `None` = the shape's node state carries
-/// no reachable Plan pointer (the ScanState-shaped leaves); the class stays
+/// G7 capture (wave-4 pre-flip, flip-ladder §2): the per-node EngineEvent
+/// record at this verdict chokepoint is armed on `estate.engine_capture()`
+/// ONLY (the emission-gate law: no records on any default path); the Plan
+/// id now comes from `S::plan_node_id` (se-delegtax SH-C — consulted only
+/// under capture, so the Some-id shapes' 3-load pointer chase left the
+/// per-pull path). `None` = the shape's node state carries no reachable
+/// Plan pointer (the ScanState-shaped leaves); the class stays
 /// census-"none" — a NAMED G7 residual on the WS-C D3 ledger
 /// (notes/se-wave4-tierA.md), not a silent hole.
 #[inline]
 fn drive<'mcx, S>(
     class: ShapeClass,
-    plan_node_id: Option<i32>,
     node: &mut S::Node,
     src: &mut S,
     estate: &mut EStateData<'mcx>,
@@ -138,22 +179,20 @@ where
     }
     let refuse = tail_gates(class, estate);
     if estate.engine_capture() {
-        if let Some(id) = plan_node_id {
+        if let Some(id) = S::plan_node_id(node) {
             super::engine_record_verdict(estate, id, class, refuse);
         }
     }
     if refuse.is_some() {
         return Ok(None);
     }
-    stats::tick_owned(class);
-    if super::lane_trace_enabled() {
-        super::lane_trace(&format!("rowmode-tail: {} drive owned", class.name()));
+    let diag = super::leaf_diag_mask();
+    if diag != 0 {
+        tail_diag_owned(class, diag);
     }
     #[cfg(test)]
     ROWMODE_TAIL_OWNED_FOR_TESTS[class as usize].fetch_add(1, Relaxed);
-    let mut op = PassthroughOp;
-    let mut root = RootAdapter::new(None);
-    pull_step_rows(node, src, &mut op, &mut root, estate).map(Some)
+    pull_step_point(node, src, estate).map(Some)
 }
 
 // ===========================================================================
@@ -187,7 +226,7 @@ pub(super) fn try_own_subquery_scan_tail<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::SubqueryScan, None, s, &mut SubqueryScanTailSource, estate)
+    drive(ShapeClass::SubqueryScan, s, &mut SubqueryScanTailSource, estate)
 }
 
 /// FunctionScan as a delegation leaf: `exec_function_scan` (SRF
@@ -220,7 +259,7 @@ pub fn try_own_function_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::FunctionScan, None, &mut **fs, &mut FunctionScanSource, estate)
+    drive(ShapeClass::FunctionScan, &mut **fs, &mut FunctionScanSource, estate)
 }
 
 /// TableFuncScan (XMLTABLE/JSON_TABLE) as a delegation leaf.
@@ -247,7 +286,7 @@ pub fn try_own_table_func_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::TableFuncScan, None, &mut **ts, &mut TableFuncScanSource, estate)
+    drive(ShapeClass::TableFuncScan, &mut **ts, &mut TableFuncScanSource, estate)
 }
 
 /// ValuesScan as a delegation leaf (per-row expression-list evaluation in
@@ -272,7 +311,7 @@ pub fn try_own_values_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::ValuesScan, None, &mut **vs, &mut ValuesScanSource, estate)
+    drive(ShapeClass::ValuesScan, &mut **vs, &mut ValuesScanSource, estate)
 }
 
 /// SampleScan as a delegation leaf (TSM method calls stay inside the ported
@@ -301,7 +340,7 @@ pub fn try_own_sample_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::SampleScan, None, &mut **ss, &mut SampleScanSource, estate)
+    drive(ShapeClass::SampleScan, &mut **ss, &mut SampleScanSource, estate)
 }
 
 /// TidScan as a delegation leaf (`WHERE ctid = ...` / `= ANY(...)` /
@@ -329,7 +368,7 @@ pub fn try_own_tid_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::TidScan, None, ts, &mut TidScanSource, estate)
+    drive(ShapeClass::TidScan, ts, &mut TidScanSource, estate)
 }
 
 /// TidRangeScan as a delegation leaf (ctid range bounds inside the body).
@@ -356,7 +395,7 @@ pub fn try_own_tid_range_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::TidRangeScan, None, ts, &mut TidRangeScanSource, estate)
+    drive(ShapeClass::TidRangeScan, ts, &mut TidRangeScanSource, estate)
 }
 
 /// NamedTuplestoreScan (AFTER-trigger transition tables) as a delegation
@@ -386,7 +425,7 @@ pub fn try_own_named_tuplestore_scan<'mcx>(
         return Ok(Some(r));
     }
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::NamedTuplestoreScan, None, &mut **nts, &mut NamedTuplestoreScanSource, estate)
+    drive(ShapeClass::NamedTuplestoreScan, &mut **nts, &mut NamedTuplestoreScanSource, estate)
 }
 
 /// Material as a delegation leaf: `next_row` runs the arm fallback's exact
@@ -408,6 +447,11 @@ impl<'mcx> RowSource<'mcx> for MaterialSource {
     ) -> PgResult<Option<ExecSlotId>> {
         ::nodematerial::exec_material(&mut node.state, &mut *node.outer, estate)
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -415,8 +459,7 @@ pub fn try_own_material<'mcx>(
     m: &mut ::mcx::PgBox<'mcx, crate::procnode::MaterialNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = m.state.plan.plan.plan_node_id;
-    drive(ShapeClass::Material, Some(id), &mut **m, &mut MaterialSource, estate)
+    drive(ShapeClass::Material, &mut **m, &mut MaterialSource, estate)
 }
 
 // ===========================================================================
@@ -447,7 +490,7 @@ pub fn try_own_cte_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::CteScan, None, &mut **cs, &mut CteScanSource, estate)
+    drive(ShapeClass::CteScan, &mut **cs, &mut CteScanSource, estate)
 }
 
 /// RecursiveUnion as a delegation leaf. The whole iteration protocol —
@@ -470,6 +513,11 @@ impl<'mcx> RowSource<'mcx> for RecursiveUnionSource {
         let crate::procnode::RecursiveUnionNode { state, outer, inner } = node;
         ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -477,8 +525,7 @@ pub fn try_own_recursive_union<'mcx>(
     ru: &mut ::mcx::PgBox<'mcx, crate::procnode::RecursiveUnionNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = ru.state.plan.plan.plan_node_id;
-    drive(ShapeClass::RecursiveUnion, Some(id), &mut **ru, &mut RecursiveUnionSource, estate)
+    drive(ShapeClass::RecursiveUnion, &mut **ru, &mut RecursiveUnionSource, estate)
 }
 
 /// WorkTableScan as a delegation leaf: `exec_work_table_scan` resolves its
@@ -504,7 +551,7 @@ pub fn try_own_work_table_scan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // No reachable Plan id (ScanState-shaped; G7 residual — see `drive`).
-    drive(ShapeClass::WorkTableScan, None, &mut **wts, &mut WorkTableScanSource, estate)
+    drive(ShapeClass::WorkTableScan, &mut **wts, &mut WorkTableScanSource, estate)
 }
 
 /// Memoize as a delegation leaf (the WS-L OQ ruling: the delegation leaf
@@ -530,6 +577,11 @@ impl<'mcx> RowSource<'mcx> for MemoizeSource {
         };
         ::nodememoize::exec_memoize(&mut node.state, &mut outer, estate)
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -537,8 +589,7 @@ pub fn try_own_memoize<'mcx>(
     m: &mut ::mcx::PgBox<'mcx, crate::procnode::MemoizeNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = m.state.plan.plan.plan_node_id;
-    drive(ShapeClass::Memoize, Some(id), &mut **m, &mut MemoizeSource, estate)
+    drive(ShapeClass::Memoize, &mut **m, &mut MemoizeSource, estate)
 }
 
 // ===========================================================================
@@ -568,6 +619,11 @@ impl<'mcx> RowSource<'mcx> for SetOpSource {
             |e| crate::procnode::exec_proc_node(inner, e),
         )
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -575,8 +631,7 @@ pub fn try_own_set_op<'mcx>(
     s: &mut ::mcx::PgBox<'mcx, crate::procnode::SetOpNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = s.state.plan.plan.plan_node_id;
-    drive(ShapeClass::SetOp, Some(id), &mut **s, &mut SetOpSource, estate)
+    drive(ShapeClass::SetOp, &mut **s, &mut SetOpSource, estate)
 }
 
 /// MergeAppend as a delegation leaf: the binary-heap merge over the
@@ -597,6 +652,11 @@ impl<'mcx> RowSource<'mcx> for MergeAppendSource {
             crate::procnode::exec_proc_node(&mut substates[i], e)
         })
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -604,8 +664,7 @@ pub fn try_own_merge_append<'mcx>(
     m: &mut ::mcx::PgBox<'mcx, crate::procnode::MergeAppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = m.state.plan.plan.plan_node_id;
-    drive(ShapeClass::MergeAppend, Some(id), &mut **m, &mut MergeAppendSource, estate)
+    drive(ShapeClass::MergeAppend, &mut **m, &mut MergeAppendSource, estate)
 }
 
 /// Unique as a delegation leaf: the previous-tuple compare state stays in
@@ -627,6 +686,11 @@ impl<'mcx> RowSource<'mcx> for UniqueTailSource {
             crate::procnode::exec_proc_node(outer, e)
         })
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 /// Tail fallback for `try_own_unique` (lanev2.rs) — called ONLY after the
@@ -636,8 +700,7 @@ pub(super) fn try_own_unique_tail<'mcx>(
     u: &mut crate::procnode::UniqueNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = u.state.plan.plan.plan_node_id;
-    drive(ShapeClass::Unique, Some(id), u, &mut UniqueTailSource, estate)
+    drive(ShapeClass::Unique, u, &mut UniqueTailSource, estate)
 }
 
 /// LockRows as a delegation leaf, hosted ONLY outside an active EPQ recheck
@@ -664,6 +727,11 @@ impl<'mcx> RowSource<'mcx> for LockRowsSource {
             crate::epq::eval_plan_qual(epq, subs, e, inputslot)
         })
     }
+
+    /// SH-C lazy G7 id: consulted only under engine_capture().
+    fn plan_node_id(node: &Self::Node) -> Option<i32> {
+        Some(node.state.plan.plan.plan_node_id)
+    }
 }
 
 #[inline]
@@ -671,6 +739,5 @@ pub fn try_own_lock_rows<'mcx>(
     l: &mut ::mcx::PgBox<'mcx, crate::procnode::LockRowsNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let id = l.state.plan.plan.plan_node_id;
-    drive(ShapeClass::LockRows, Some(id), &mut **l, &mut LockRowsSource, estate)
+    drive(ShapeClass::LockRows, &mut **l, &mut LockRowsSource, estate)
 }

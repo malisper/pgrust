@@ -57,7 +57,7 @@ use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
 use super::push::{
-    pull_step_rows, OpStatus, PassthroughOp, RootAdapter, RowSource, Sink, SinkFeed, TupleOp,
+    pull_step_point, pull_step_rows, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, TupleOp,
 };
 use super::stats::{self, RefuseReason, ShapeClass};
 
@@ -356,15 +356,23 @@ impl<'mcx> RowSource<'mcx> for MergeJoinRowSource {
 /// knob-OFF ticks NOTHING (there is no pre-existing MergeJoin wholesale
 /// refuse, so default-config accounting stays byte-identical trivially;
 /// integration contract §2d) — then the dynamic per-call EPQ / backward /
-/// instrumented gates. No shape gate: increment-1 admits every plan the FSM
-/// itself admits (the hosting is jointype-agnostic delegation). No extra
-/// prologue either: `exec_merge_join` runs its own entry CFI + per-tuple
-/// reset as the FSM body's first statements, so the wrapper adds no calls
-/// the Volcano drive would not make.
+/// instrumented gates, OR-folded with the reason re-derived on the `#[cold]`
+/// refuse tail (se-delegtax SH-D; refusal set + tick cadence identical to
+/// the pre-fold priority walk). No shape gate: increment-1 admits every plan
+/// the FSM itself admits (the hosting is jointype-agnostic delegation). No
+/// extra prologue either: `exec_merge_join` runs its own entry CFI +
+/// per-tuple reset as the FSM body's first statements, so the wrapper adds
+/// no calls the Volcano drive would not make.
 ///
-/// OWNED tick cadence: once per drive start (each owned PG pull starts one
-/// `pull_step_rows` drive over the per-call-reassembled pipeline; the
-/// stats.rs class doc restates this).
+/// OWNED tick cadence: once per drive start = once per owned PG pull (the
+/// stats.rs class doc restates this), now behind the SH-B diag mask (one
+/// process-static byte load at default config). The drive itself is the
+/// ratified degenerate leaf driver `pull_step_point` (se-delegtax SH-A —
+/// push.rs carries the statement-identity proof vs the displaced
+/// `PassthroughOp → RootAdapter::new(None)` pipeline; SE4-GATES leg 5
+/// measured that round trip as the FLIP-2 mergejoin lane tax). No
+/// clear-on-finish either way: exec_merge_join returns end-of-join without
+/// clearing the result slot.
 #[inline]
 pub fn try_own_merge_join<'mcx>(
     mj: &mut crate::procnode::MergeJoinNode<'mcx>,
@@ -373,40 +381,63 @@ pub fn try_own_merge_join<'mcx>(
     if !mergejoin_enabled() {
         return Ok(None);
     }
+    // Dynamic per-call gates (the try_own_result cadence), OR-folded.
+    if estate.es_epq_active
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+        || !estate.es_instrumentation.is_empty()
+    {
+        mj_gate_refused(mj, estate);
+        return Ok(None);
+    }
     // Wave-4 pre-flip G7 capture (flip-ladder §2 rung-2 gate): the MJ ENGINE
     // capture at THE verdict chokepoint — `estate.engine_capture()` gated
     // (emission-gate law, zero records on default paths), dedup first-wins.
-    let capture_id =
-        if estate.engine_capture() { Some(mj.state.plan.join.plan.plan_node_id) } else { None };
-    let refuse = |estate: &mut EStateData<'mcx>, r: RefuseReason| {
-        stats::tick_refused(ShapeClass::MergeJoin, r);
-        if let Some(id) = capture_id {
-            super::engine_record_verdict(estate, id, ShapeClass::MergeJoin, Some(r));
-        }
-    };
-    // Dynamic per-call gates (the try_own_result cadence).
-    if estate.es_epq_active {
-        refuse(estate, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        refuse(estate, RefuseReason::Backward);
-        return Ok(None);
-    }
-    if !estate.es_instrumentation.is_empty() {
-        refuse(estate, RefuseReason::Instrumented);
-        return Ok(None);
-    }
-    stats::tick_owned(ShapeClass::MergeJoin);
-    if let Some(id) = capture_id {
+    if estate.engine_capture() {
+        let id = mj.state.plan.join.plan.plan_node_id;
         super::engine_record_verdict(estate, id, ShapeClass::MergeJoin, None);
     }
-    super::lane_trace("mergejoin: row-mode drive owned");
+    let diag = super::leaf_diag_mask();
+    if diag != 0 {
+        mj_diag_owned(diag);
+    }
     #[cfg(test)]
     ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
-    // No clear-on-finish: exec_merge_join returns end-of-join without
-    // clearing the result slot.
-    let mut op = PassthroughOp;
-    let mut root = RootAdapter::new(None);
-    pull_step_rows(mj, &mut MergeJoinRowSource, &mut op, &mut root, estate).map(Some)
+    pull_step_point(mj, &mut MergeJoinRowSource, estate).map(Some)
+}
+
+/// Cold refuse tail (SH-D): re-derive the first failing gate in the
+/// original priority order (EPQ → backward → instrumented), tick it, and
+/// record the G7 verdict under capture. Reached only when the OR-fold
+/// fired, so one of the three holds.
+#[cold]
+#[inline(never)]
+fn mj_gate_refused<'mcx>(
+    mj: &crate::procnode::MergeJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    let r = if estate.es_epq_active {
+        RefuseReason::Epq
+    } else if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        RefuseReason::Backward
+    } else {
+        RefuseReason::Instrumented
+    };
+    stats::tick_refused(ShapeClass::MergeJoin, r);
+    if estate.engine_capture() {
+        let id = mj.state.plan.join.plan.plan_node_id;
+        super::engine_record_verdict(estate, id, ShapeClass::MergeJoin, Some(r));
+    }
+}
+
+/// Cold owned-path diagnostics tail (SH-B): reached only when the diag mask
+/// is nonzero (accounting or trace armed — never at default config).
+#[cold]
+#[inline(never)]
+fn mj_diag_owned(diag: u8) {
+    if diag & 1 != 0 {
+        stats::tick_owned(ShapeClass::MergeJoin);
+    }
+    if diag & 2 != 0 {
+        super::lane_trace("mergejoin: row-mode drive owned");
+    }
 }
