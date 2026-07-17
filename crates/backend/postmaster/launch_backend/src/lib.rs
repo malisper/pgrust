@@ -199,12 +199,22 @@ macro_rules! inherited {
     ($($field:ident : $ty:ty = $get:ident / $set:ident;)+) => {
         struct Inherited {
             data_dir: Option<&'static str>,
+            // fd.c's max_safe_fds: a process static in C, computed once by
+            // PostmasterMain's set_max_safe_fds() pre-fork and inherited by
+            // every child via fork. Without this snapshot a backend thread
+            // boots at the FD_MINFREE (48) default, freezing
+            // maxAllocatedDescs at FD_MINFREE/3 = 16 ("exceeded
+            // maxAllocatedDescs (16)" on pg_subtrans SLRU opens under
+            // high-VU OLTP) and LRU-thrashing the VFD cache at 48 fds
+            // instead of ~max_files_per_process.
+            max_safe_fds: i32,
             $($field: $ty,)+
         }
         impl Inherited {
             fn capture() -> Self {
                 Self {
                     data_dir: init_small::globals::DataDir(),
+                    max_safe_fds: fd::max_safe_fds(),
                     $($field: init_small::globals::$get(),)+
                 }
             }
@@ -212,6 +222,7 @@ macro_rules! inherited {
                 if let Some(dd) = self.data_dir {
                     init_small::globals::SetDataDir(dd);
                 }
+                fd::vfd::set_max_safe_fds_value(self.max_safe_fds);
                 $(init_small::globals::$set(self.$field);)+
             }
         }

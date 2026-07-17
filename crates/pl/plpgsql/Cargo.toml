@@ -12,6 +12,7 @@ path = "src/lib.rs"
 array = { package = "types_array", path = "../../_support/types/array" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+clauses = { path = "../../backend/optimizer/util/clauses" }
 rel_vocab = { path = "../../_support/types/rel_vocab" }
 syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
 types_rel = { path = "../../_support/types/rel" }
@@ -31,6 +32,7 @@ lmgr_proc = { path = "../../backend/storage/lmgr/lmgr_proc" }
 guc = { path = "../../backend/utils/misc/guc" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+ipc_seams = { path = "../../backend/storage/ipc/ipc_seams" }
 lsyscache = { path = "../../backend/utils/cache/lsyscache" }
 mcx = { path = "../../_support/mcx" }
 rustc-hash = { version = "2", default-features = false }

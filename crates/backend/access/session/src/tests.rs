@@ -381,7 +381,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      argument as slot 15 (vacuumlazy morsels.rs WORKER_CX): full-
     //      identity parallel helpers, no cross-thread access, no retained
     //      session state.
-    assert_eq!(count_tree(crates), 478, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 479, simplecache lane (fix/plpgsql-simple-cache):
+    //   20. pl/plpgsql/src/exec.rs SIMPLE_EXIT_RELEASE — one-shot Cell<bool>
+    //      recording that this backend thread registered its on_proc_exit
+    //      release of function-lifetime simple-expression plan pins
+    //      (release_simple_states_at_exit; the TLS-destructor-order law).
+    //      Pure per-thread registration bookkeeping: no session identity,
+    //      no state movement, never reset — the registered callback (and
+    //      the flag's meaning) live exactly as long as the backend thread,
+    //      same class as the router DUMP guard (slot 18).
+    assert_eq!(count_tree(crates), 479, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -297,6 +297,27 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     Ok(parked)
 }
 
+// Retained-executor arena cap (see the growth-bound comment below): generous
+// vs a healthy parkable estate (Result/Limit/scan trees measure <100KB), so
+// only pathological per-execution growth trips it. 256KiB caps worst-case
+// retention at PARKED_PORTAL_MAX+1 shells per backend while keeping the
+// rebuild amortization negligible (a 600B/exec grower rebuilds every ~400
+// executions).
+const SKELETON_RETAIN_MAX_BYTES: usize = 256 * 1024;
+
+// replanfix increment-1 kill switch: PGRUST_EXEC_SKELETON_CUSTOM_GATE=0
+// restores the pre-gate behavior (custom plans pay skeleton-candidate
+// ceremony at executor start). Latched once per process.
+fn skeleton_custom_gate_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_EXEC_SKELETON_CUSTOM_GATE").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 // Park-side disarm on the QueryDesc's own executor: the eligibility gates and
 // per-run-state release of standard_executor_end's TLS-park branch, in place.
 #[inline(never)]
@@ -317,6 +338,19 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
         return Ok(None);
     }
     let Some(exec) = qd.exec.as_mut() else { return Ok(None) };
+    // Retention growth bound: a parked estate's bump arena is never reset
+    // while the skeleton lives (the planstate is allocated in it), so any
+    // per-execution allocation routed through es_query_cxt accumulates
+    // across reuses. C frees the ExecutorState on every execution; retention
+    // is only sound if the arena stays at its post-first-execution size.
+    // Statements whose executions grow the arena (e.g. PL/pgSQL function
+    // calls: SELECT f(...) under a generic plan — the TPROC-C P1 leak,
+    // notes/memleak-tpcc-lane.md) get their executor torn down on the normal
+    // reset/recycle path once the arena crosses the cap; non-growing
+    // statements (point selects) park forever and pay only this load+cmp.
+    if exec.context().used() > SKELETON_RETAIN_MAX_BYTES {
+        return Ok(None);
+    }
     exec.with_mut(|data| -> PgResult<Option<i32>> {
         let ExecData { estate, planstate } = data;
         let eligible = planstate.is_some()
@@ -699,6 +733,21 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
     let instrument = qd.instrument_options;
     let operation = qd.operation;
     let params = qd.params;
+    // One-shot CUSTOM plans can never hit the skeleton slot (reuse keys on
+    // the exact CachedPlan; BuildCachedPlan mints a fresh handle per replan)
+    // and the park side already refuses them (skeleton_disarm_in_place /
+    // try_park) — so don't pay the estate-owned param_stable_install copy on
+    // their behalf. Checked HERE, on the build-fresh path only, so a generic
+    // skeleton HIT (the prepared-statement hot loop, already returned above)
+    // pays nothing new; the seam call lands once per generic build/displace
+    // and once per custom execution, where it buys back the param copy.
+    // Same predicate the park gate trusts; is_installed: test fixtures shim
+    // only the seams they use. Kill switch PGRUST_EXEC_SKELETON_CUSTOM_GATE=0
+    // restores pre-gate behavior (customs pay the stable-copy again).
+    let skeleton_stable_params = skeleton_candidate
+        && (skeleton_custom_gate_disabled()
+            || (plancache_portal_seams::is_source_generic_plan::is_installed()
+                && plancache_portal_seams::is_source_generic_plan::call(qd.cplan)));
 
     let ctx = exec_ctx_pool::take()
         .unwrap_or_else(|| Box::new(MemoryContext::new_bump("ExecutorState")));
@@ -728,9 +777,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             None
         } else {
             let src = unsafe { types_portal::params::resolve(params) };
-            if skeleton_candidate {
-                // Skeleton candidates compile ParamExtern steps against an
+            if skeleton_stable_params {
+                // Parkable candidates compile ParamExtern steps against an
                 // estate-owned copy, not the portal's per-EXECUTE array.
+                // One-shot customs (never parked) reference the portal array
+                // directly, like non-candidates.
                 Some(es.param_stable_install(src)?)
             } else {
                 Some(src)

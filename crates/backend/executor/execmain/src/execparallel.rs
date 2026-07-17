@@ -18,7 +18,7 @@ use ::types_core::instrument::{
     Instrumentation, TuplesortInstrumentation, WalUsage,
 };
 use ::types_dest::CommandDest;
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_nodes::bitmapset::Bitmapset;
 use ::types_nodes::list::NodeList;
 use ::types_nodes::node_tree::Node;
@@ -268,10 +268,16 @@ fn for_each_parallel_scan<'mcx>(
                 for_each_parallel_scan(sub, f)?;
             }
         }
-        N::ForeignScan(fs) => assert!(
-            !fs.plan.scan.plan.parallel_aware,
-            "ExecParallel (execParallel.c): parallel-aware ForeignScan unported"
-        ),
+        N::ForeignScan(fs) => {
+            if fs.plan.scan.plan.parallel_aware {
+                // unported: ExecParallel (execParallel.c) parallel-aware
+                // ForeignScan lane.
+                return Err(Box::new(
+                    PgError::error("parallel-aware foreign scans are not yet implemented")
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
+            }
+        }
         N::SampleScan(_)
         | N::FunctionScan(_)
         | N::ValuesScan(_)
