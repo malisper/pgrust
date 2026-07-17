@@ -491,10 +491,12 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
     check_encoding_locale_matches(encoding, &dbcollate_s, &dbctype_s)?;
 
     if dblocprovider != COLLPROVIDER_LIBC {
-        panic!(
-            "createdb: locale provider {} unported (builtin/icu validation lane)",
-            dblocprovider as char
-        );
+        // unported: createdb builtin/icu locale-provider validation lane
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("locale providers other than libc are not supported yet".to_string())
+            .into_error()
+            .into());
     }
     if builtinlocale_el.is_some() {
         return Err(ereport(ERROR)
