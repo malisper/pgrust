@@ -2303,6 +2303,175 @@ fn merge_join_qual_passes<'mcx>(
     }
 }
 
+// =============================================================================
+// MERGE action-dispatch seams — wave-5 WS-W §8.2.
+//
+// PURE CODE MOVES: the WHEN-qual action selection blocks of
+// `exec_merge_matched_scan` / `exec_merge_not_matched` and the NOT MATCHED
+// INSERT-action projection, relocated verbatim behind named seams so the
+// MERGE dispatch has the same reviewable joints as the OC ceremony above.
+// The action walk itself (list order, first-pass-wins, the per-action
+// TM_Result arms) is UNTOUCHED. MERGE stays REFUSAL-ONLY in the lane even
+// knob-ON (contract §8.2: the inc-3 C-side trace pin is outstanding);
+// these seams serve the Volcano arm today and give the eventual MERGE
+// increment its admission joints.
+// =============================================================================
+
+/// MERGE seam — WHEN [MATCHED | NOT MATCHED BY SOURCE] AND qual over one
+/// action of the caller-selected list (`by_source` = the sticky
+/// actionStates choice): scan = old target tuple, inner = plan row.
+/// Returns the action's command type and whether its qual passed.
+#[inline]
+fn merge_when_qual_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    by_source: bool,
+    plan_slot: ExecSlotId,
+    old_id: ExecSlotId,
+) -> PgResult<(CmdType, bool)> {
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        let action = if by_source {
+            &merge.not_matched_by_source_actions[ai]
+        } else {
+            &merge.matched_actions[ai]
+        };
+        pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = if by_source {
+        &mut merge.not_matched_by_source_actions[ai]
+    } else {
+        &mut merge.matched_actions[ai]
+    };
+    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = Some(old_id);
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        Ok((
+            action.command_type,
+            executils::exec_qual_with_subplans(
+                action.when_qual.as_deref_mut(),
+                estate,
+                ec,
+            )?,
+        ))
+    } else {
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+        assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+        let mut slots =
+            EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+        Ok((
+            action.command_type,
+            execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+        ))
+    }
+}
+
+/// MERGE seam — WHEN NOT MATCHED [BY TARGET] AND qual over one action of
+/// the not_matched list: no old tuple (scan = None), inner = plan row.
+/// Returns the action's command type and whether its qual passed.
+#[inline]
+fn merge_when_qual_not_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    plan_slot: ExecSlotId,
+) -> PgResult<(CmdType, bool)> {
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = &mut merge.not_matched_actions[ai];
+    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = None;
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        Ok((
+            action.command_type,
+            executils::exec_qual_with_subplans(
+                action.when_qual.as_deref_mut(),
+                estate,
+                ec,
+            )?,
+        ))
+    } else {
+        let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
+        let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
+        Ok((
+            action.command_type,
+            execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+        ))
+    }
+}
+
+/// MERGE seam — the NOT MATCHED INSERT action's merge-action projection
+/// (the matched-side counterpart is the pre-existing
+/// `merge_project_update`): project the plan row through the action's
+/// projection into `new_id` (the root-format new slot when the target is
+/// inherited/partitioned).
+#[inline]
+fn merge_project_not_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    plan_slot: ExecSlotId,
+    new_id: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = &mut merge.not_matched_actions[ai];
+    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = None;
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        let proj =
+            action.proj.as_deref_mut().expect("INSERT action projection");
+        executils::exec_project_with_subplans(proj, estate, ec, new_id)?;
+    } else {
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
+        assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (plan, new_slot) =
+            unsafe { (&mut *base.add(p), &mut *base.add(n)) };
+        let mut slots =
+            EvalSlots { scan: None, inner: Some(plan), outer: None };
+        let proj = action.proj.as_deref_mut().expect("INSERT action projection");
+        execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
+    }
+    Ok(())
+}
+
 // One pass over the MATCHED (or NOT MATCHED BY SOURCE) action list — the
 // lmerge_matched body. `use_by_source` is the caller-held actionStates
 // choice; the concurrent-update recheck leg may flip it to BY SOURCE.
@@ -2336,55 +2505,8 @@ fn exec_merge_matched_scan<'mcx>(
     };
     for ai in 0..n_actions {
         // WHEN [MATCHED] AND qual: scan = old target tuple, inner = plan row.
-        let (command_type, pass) = {
-            let node_ecxt = mt.node_ecxt;
-            {
-                let merge = mt.rel().merge.as_ref().expect("merge state");
-                let action = if by_source {
-                    &merge.not_matched_by_source_actions[ai]
-                } else {
-                    &merge.matched_actions[ai]
-                };
-                pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
-            }
-            let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = if by_source {
-                &mut merge.not_matched_by_source_actions[ai]
-            } else {
-                &mut merge.matched_actions[ai]
-            };
-            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
-                let ec = node_ecxt.expect("node ecxt created with MERGE");
-                estate.reset_expr_context(ec);
-                {
-                    let e = estate.ecxt_mut(ec);
-                    e.ecxt_scantuple = Some(old_id);
-                    e.ecxt_innertuple = Some(plan_slot);
-                    e.ecxt_outertuple = None;
-                }
-                (
-                    action.command_type,
-                    executils::exec_qual_with_subplans(
-                        action.when_qual.as_deref_mut(),
-                        estate,
-                        ec,
-                    )?,
-                )
-            } else {
-                let EStateData { es_tupleTable, .. } = &mut *estate;
-                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
-                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
-                let base = es_tupleTable.as_mut_ptr();
-                // SAFETY: distinct in-bounds indices of one live slice.
-                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
-                let mut slots =
-                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
-                (
-                    action.command_type,
-                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-                )
-            }
-        };
+        let (command_type, pass) =
+            merge_when_qual_matched(mt, estate, ai, by_source, plan_slot, old_id)?;
         if !pass {
             continue;
         }
@@ -3079,7 +3201,6 @@ fn exec_merge_not_matched<'mcx>(
         u32,
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
-    let mcx = estate.es_query_cxt;
     // INSERT actions project into and insert via the root relation when the
     // target is inherited/partitioned (C rootRelInfo).
     let new_id = if mt.root.is_some() {
@@ -3089,79 +3210,14 @@ fn exec_merge_not_matched<'mcx>(
     };
     let n_actions = mt.rel().merge.as_ref().expect("merge state").not_matched_actions.len();
     for ai in 0..n_actions {
-        let (command_type, pass) = {
-            let node_ecxt = mt.node_ecxt;
-            {
-                let merge = mt.rel().merge.as_ref().expect("merge state");
-                pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
-            }
-            let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = &mut merge.not_matched_actions[ai];
-            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
-                let ec = node_ecxt.expect("node ecxt created with MERGE");
-                estate.reset_expr_context(ec);
-                {
-                    let e = estate.ecxt_mut(ec);
-                    e.ecxt_scantuple = None;
-                    e.ecxt_innertuple = Some(plan_slot);
-                    e.ecxt_outertuple = None;
-                }
-                (
-                    action.command_type,
-                    executils::exec_qual_with_subplans(
-                        action.when_qual.as_deref_mut(),
-                        estate,
-                        ec,
-                    )?,
-                )
-            } else {
-                let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
-                let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
-                (
-                    action.command_type,
-                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-                )
-            }
-        };
+        // WHEN NOT MATCHED AND qual: no old tuple, inner = plan row.
+        let (command_type, pass) = merge_when_qual_not_matched(mt, estate, ai, plan_slot)?;
         if !pass {
             continue;
         }
         match command_type {
             CmdType::CMD_INSERT => {
-                {
-                    let node_ecxt = mt.node_ecxt;
-                    {
-                        let merge = mt.rel().merge.as_ref().expect("merge state");
-                        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
-                    }
-                    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-                    let action = &mut merge.not_matched_actions[ai];
-                    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
-                        let ec = node_ecxt.expect("node ecxt created with MERGE");
-                        estate.reset_expr_context(ec);
-                        {
-                            let e = estate.ecxt_mut(ec);
-                            e.ecxt_scantuple = None;
-                            e.ecxt_innertuple = Some(plan_slot);
-                            e.ecxt_outertuple = None;
-                        }
-                        let proj =
-                            action.proj.as_deref_mut().expect("INSERT action projection");
-                        executils::exec_project_with_subplans(proj, estate, ec, new_id)?;
-                    } else {
-                        let EStateData { es_tupleTable, .. } = &mut *estate;
-                        let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
-                        assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
-                        let base = es_tupleTable.as_mut_ptr();
-                        // SAFETY: distinct in-bounds indices of one live slice.
-                        let (plan, new_slot) =
-                            unsafe { (&mut *base.add(p), &mut *base.add(n)) };
-                        let mut slots =
-                            EvalSlots { scan: None, inner: Some(plan), outer: None };
-                        let proj = action.proj.as_deref_mut().expect("INSERT action projection");
-                        execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
-                    }
-                }
+                merge_project_not_matched(mt, estate, ai, plan_slot, new_id)?;
                 mt.merge_active_cmd = Some(CmdType::CMD_INSERT);
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
