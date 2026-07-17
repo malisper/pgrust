@@ -126,7 +126,9 @@ pub fn ExecuteTruncate<'mcx>(mcx: Mcx<'mcx>, stmt: &TruncateStmt<'mcx>) -> PgRes
     Ok(())
 }
 
-fn ExecuteTruncateGuts<'mcx>(
+// pub: C exports it in tablecmds.h for logical apply's apply_handle_truncate
+// (worker.c) — same linkage here.
+pub fn ExecuteTruncateGuts<'mcx>(
     mcx: Mcx<'mcx>,
     rels: &mut Vec<Relation<'mcx>>,
     relids: &mut Vec<Oid>,

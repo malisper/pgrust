@@ -19,6 +19,7 @@ crc32c = { path = "../../../../port/crc32c" }
 elog = { path = "../../../utils/error/elog" }
 fd = { path = "../../../storage/file/fd" }
 init_small = { path = "../../../utils/init/init_small" }
+procarray = { path = "../../../storage/ipc/procarray" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 xact = { path = "../../../access/transam/xact" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }

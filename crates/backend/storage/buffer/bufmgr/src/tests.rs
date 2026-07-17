@@ -18,7 +18,10 @@ static READV_SIZES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::ne
 // Widens the BM_IO_IN_PROGRESS window so a second reader lands in WaitIO.
 const SLOW_READ_REL: u32 = 9400;
 
-const TEST_NBUFFERS: i32 = 64;
+// Large enough that the batched-read pin cap (GetAdditionalPinLimit ~
+// NBuffers/(MaxBackends+aux) - REFCOUNT_ARRAY_ENTRIES) still allows the full
+// io_combine_limit run: 2048/79 - 8 = 17 extra pins >= 16.
+const TEST_NBUFFERS: i32 = 2048;
 const TEST_MAX_CONNECTIONS: i32 = 32;
 
 fn test_max_backends() -> i32 {

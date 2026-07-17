@@ -74,6 +74,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PrescanPreparedTransactions(&xids, &nxids) (twophase.c): oldestActiveXid
+    // plus the valid prepared-xact XIDs, for the hot-standby fake running-xacts
+    // snapshot (StartupXLOG / xlog_redo shutdown-checkpoint arms).
+    pub fn prescan_prepared_transactions_xids() -> PgResult<(TransactionId, Vec<TransactionId>)>
+);
+
+seam_core::seam!(
+    // StandbyRecoverPreparedTransactions() (twophase.c): pg_subtrans entries
+    // for prepared transactions during hot-standby init.
+    pub fn standby_recover_prepared_transactions() -> PgResult<()>
+);
+
+seam_core::seam!(
     // RecoverPreparedTransactions() (twophase.c).
     pub fn recover_prepared_transactions() -> PgResult<()>
 );
@@ -104,4 +117,14 @@ seam_core::seam!(
     // StandbyReleaseOldLocks is the cyclic caller (twophase -> xlogreader ->
     // rmgr -> rmgrdesc -> standby).
     pub fn standby_transaction_id_is_prepared(xid: TransactionId) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    // TwoPhaseGetXidByVirtualXID(vxid, &have_more) (twophase.c:852): the XID
+    // of a valid prepared xact whose backend-time vxid matches, plus C's
+    // have_more (a second match exists). Args are (procNumber, lxid).
+    pub fn two_phase_get_xid_by_virtual_xid(
+        proc_number: ProcNumber,
+        lxid: u32,
+    ) -> PgResult<(TransactionId, bool)>
 );

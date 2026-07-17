@@ -112,7 +112,7 @@ fn get_sync_bit(method: i32) -> i32 {
     }
 }
 
-pub(crate) fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
+pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
     let method = wal_sync_method();
     if !init_small::globals::enableFsync()
         || method == WAL_SYNC_METHOD_OPEN
@@ -281,6 +281,109 @@ pub fn XLogFileInit(logsegno: XLogSegNo, logtli: TimeLineID) -> PgResult<i32> {
             .map(|_| -1);
     }
     Ok(f)
+}
+
+pub(crate) fn set_update_min_recovery_point(v: bool) {
+    UPDATE_MIN_RECOVERY_POINT.set(v);
+}
+
+pub(crate) fn XLogFileCopy(
+    dest_tli: TimeLineID,
+    destsegno: XLogSegNo,
+    src_tli: TimeLineID,
+    srcsegno: XLogSegNo,
+    upto: i32,
+) -> PgResult<()> {
+    let wal_segsz = wal_segment_size();
+    let path = XLogFilePath(src_tli, srcsegno, wal_segsz);
+    let srcfd = fd::OpenTransientFile(&path, libc::O_RDONLY)?;
+    if srcfd < 0 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not open file \"{path}\""))
+            .finish(loc("XLogFileCopy"));
+    }
+
+    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", std::process::id());
+    let _ = std::fs::remove_file(&tmppath);
+
+    // No get_sync_bit(): fsync only once at end of fill.
+    let f = fd::OpenTransientFile(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
+    if f < 0 {
+        fd::CloseTransientFile(srcfd);
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not create file \"{tmppath}\""))
+            .finish(loc("XLogFileCopy"));
+    }
+
+    let mut buffer = vec![0u8; XLOG_BLCKSZ];
+    let mut nbytes: i32 = 0;
+    while nbytes < wal_segsz {
+        let mut nread = upto - nbytes;
+        if nread < XLOG_BLCKSZ as i32 {
+            buffer.fill(0);
+        }
+        if nread > 0 {
+            if nread > XLOG_BLCKSZ as i32 {
+                nread = XLOG_BLCKSZ as i32;
+            }
+            // SAFETY: srcfd open; buffer holds >= nread bytes.
+            let r = unsafe { libc::read(srcfd, buffer.as_mut_ptr().cast(), nread as usize) };
+            if r != nread as isize {
+                let builder = ereport(ERROR);
+                let builder = if r < 0 {
+                    builder
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not read file \"{path}\""))
+                } else {
+                    builder.errmsg(format!(
+                        "could not read file \"{path}\": read {r} of {nread}"
+                    ))
+                };
+                return builder.finish(loc("XLogFileCopy"));
+            }
+        }
+        // SAFETY: f open; buffer is XLOG_BLCKSZ bytes.
+        let w = unsafe { libc::write(f, buffer.as_ptr().cast(), XLOG_BLCKSZ) };
+        if w != XLOG_BLCKSZ as isize {
+            let e = std::io::Error::last_os_error();
+            let _ = std::fs::remove_file(&tmppath);
+            return ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(format!("could not write to file \"{tmppath}\": {e}"))
+                .finish(loc("XLogFileCopy"));
+        }
+        nbytes += XLOG_BLCKSZ as i32;
+    }
+
+    if fd::pg_fsync(f) != 0 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{tmppath}\""))
+            .finish(loc("XLogFileCopy"));
+    }
+    if fd::CloseTransientFile(f) != 0 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{tmppath}\""))
+            .finish(loc("XLogFileCopy"));
+    }
+    if fd::CloseTransientFile(srcfd) != 0 {
+        return ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not close file \"{path}\""))
+            .finish(loc("XLogFileCopy"));
+    }
+
+    let mut installed_segno = destsegno;
+    if !InstallXLogFileSegment(&mut installed_segno, &tmppath, false, 0, dest_tli)? {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "InstallXLogFileSegment should not have failed",
+        )));
+    }
+    Ok(())
 }
 
 pub fn XLogFileOpen(segno: XLogSegNo, tli: TimeLineID) -> PgResult<i32> {
@@ -488,8 +591,12 @@ pub(crate) fn XLogWrite(write_rqst: (XLogRecPtr, XLogRecPtr), tli: TimeLineID, f
                 fd::ReserveExternalFD()?;
             }
             issue_xlog_fsync(OPEN_LOG_FILE.get(), OPEN_LOG_SEG_NO.get(), tli)?;
-            WalSndWakeupRequest();
         }
+        // C signals the walsender wakeup OUTSIDE the sync-method guard
+        // (xlog.c:2553): with wal_sync_method=open/open_dsync the flush
+        // advances without an explicit fsync and walsenders must still be
+        // woken, or sync-rep/catchup waits stall until the next write.
+        WalSndWakeupRequest();
         LOGWRT_RESULT.set((lw_write, lw_write));
     }
 
