@@ -255,6 +255,19 @@ struct SimpleHashIndex {
     sizemask: u32,
     members: u64,
     grow_threshold: u64,
+    // q18fin diagnostics (PGRUST_GROUPING_PROBE_STATS): bucket inspections,
+    // grows, and restart-grows, reported by TupleHashTable::lookup. Cell so
+    // the &self find() path can count.
+    stat_probes: core::cell::Cell<u64>,
+    stat_grows: u64,
+    stat_restarts: u64,
+}
+
+/// One env probe: report per-table probe/grow counters through the server
+/// log every 2^20 lookups (q18fin leader-stall forensics).
+fn probe_stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PGRUST_GROUPING_PROBE_STATS").is_some())
 }
 
 impl SimpleHashIndex {
@@ -271,6 +284,9 @@ impl SimpleHashIndex {
             sizemask: (size - 1) as u32,
             members: 0,
             grow_threshold: 0,
+            stat_probes: core::cell::Cell::new(0),
+            stat_grows: 0,
+            stat_restarts: 0,
         };
         t.update_grow_threshold();
         t
@@ -304,6 +320,7 @@ impl SimpleHashIndex {
     }
 
     fn grow(&mut self, newsize: u64, entry_hash: impl Fn(u32) -> u32) {
+        self.stat_grows += 1;
         let oldsize = self.size() as u32;
         let old = core::mem::replace(
             &mut self.buckets,
@@ -360,6 +377,7 @@ impl SimpleHashIndex {
             let startelem = self.initial_bucket(hash);
             let mut curelem = startelem;
             loop {
+                self.stat_probes.set(self.stat_probes.get() + 1);
                 let occupant = self.buckets[curelem as usize];
                 if occupant == SH_EMPTY {
                     self.members += 1;
@@ -386,6 +404,7 @@ impl SimpleHashIndex {
                             && (self.members as f64 / self.size() as f64)
                                 >= SH_GROW_MIN_FILLFACTOR
                         {
+                            self.stat_restarts += 1;
                             self.grow_threshold = 0;
                             continue 'restart;
                         }
@@ -405,6 +424,7 @@ impl SimpleHashIndex {
                 if insertdist > SH_GROW_MAX_DIB
                     && (self.members as f64 / self.size() as f64) >= SH_GROW_MIN_FILLFACTOR
                 {
+                    self.stat_restarts += 1;
                     self.grow_threshold = 0;
                     continue 'restart;
                 }
@@ -422,6 +442,7 @@ impl SimpleHashIndex {
         let startelem = self.initial_bucket(hash);
         let mut curelem = startelem;
         loop {
+            self.stat_probes.set(self.stat_probes.get() + 1);
             let occupant = self.buckets[curelem as usize];
             if occupant == SH_EMPTY {
                 return Ok(None);
@@ -472,6 +493,8 @@ impl SimpleHashIndex {
 pub struct TupleHashTable<'mcx> {
     entries: PgVec<'mcx, TupleHashEntryData>,
     hashtab: SimpleHashIndex,
+    // q18fin diagnostics: lookup calls, for the probe-stats trace cadence.
+    stat_calls: u64,
     additionalsize: usize,
     kernel: ProbeKernel,
     /// Per-key-column multi-key classification (build-time, input order).
@@ -540,6 +563,7 @@ pub fn build_tuple_hash_table<'mcx>(
         // MaxAllocHugeSize bounds it.
         entries: ::mcx::vec_with_capacity_huge_in(metacxt, nbuckets)?,
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
+        stat_calls: 0,
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
         key_cols: key_col_idx
@@ -639,6 +663,22 @@ impl<'mcx> TupleHashTable<'mcx> {
         table_mcx: Option<Mcx<'_>>,
         slot_mcx: Mcx<'mcx>,
     ) -> PgResult<(Option<u32>, bool)> {
+        if probe_stats_enabled() {
+            self.stat_calls += 1;
+            if self.stat_calls & ((1 << 20) - 1) == 0 {
+                eprintln!(
+                    "grouping-probe-stats: table={:p} calls={} entries={} probes={} grows={} restarts={} buckets={} members={}",
+                    &raw const *self,
+                    self.stat_calls,
+                    self.entries.len(),
+                    self.hashtab.stat_probes.get(),
+                    self.hashtab.stat_grows,
+                    self.hashtab.stat_restarts,
+                    self.hashtab.buckets.len(),
+                    self.hashtab.members,
+                );
+            }
+        }
         let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, .. } = self;
         let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;

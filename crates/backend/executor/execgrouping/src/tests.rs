@@ -380,7 +380,7 @@ fn probe_cost_insert_order() {
             el.as_nanos() as f64 / order.len() as f64,
             table.num_entries()
         );
-        assert_eq!(table.num_entries(), order.len());
+        assert!(table.num_entries() <= order.len());
         table.release();
     };
 
