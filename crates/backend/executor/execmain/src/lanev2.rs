@@ -14105,3 +14105,18 @@ fn test_helper_vanish(arm: &str) -> bool {
     })
 }
 // --- end WS-S wave-3 ---
+
+// ===== WAVE-5 APPEND REGION — do not edit above =====
+// Labeled per-WS sub-regions in contract order U, V, W, X (wave-5 contract
+// §2; first WS to touch the file adds the marker and all four labels).
+// --- WS-U (wave-5) ---
+// --- end WS-U (wave-5) ---
+// --- WS-V (wave-5) ---
+// --- end WS-V (wave-5) ---
+// --- WS-W (wave-5): OC admission test lever (the admission entry itself is
+// dml.rs-local per §2's preference; this is the unit-corpus re-export only).
+#[cfg(test)]
+pub(crate) use dml::dml_oc_set_for_tests;
+// --- end WS-W (wave-5) ---
+// --- WS-X (wave-5) ---
+// --- end WS-X (wave-5) ---
