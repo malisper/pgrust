@@ -34,7 +34,7 @@ pub use execmain::{
     tap_executor_finish_leave, tap_executor_run, tap_executor_run_leave, tap_executor_start,
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
-pub use lanev2::coverage::{LANEV2_BUILTINS, PGRUST_FOID_RANGE};
+pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;
