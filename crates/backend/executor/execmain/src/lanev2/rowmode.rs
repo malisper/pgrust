@@ -67,6 +67,13 @@ pub(crate) fn rowmode_set_for_tests(on: bool) {
     ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
 }
 
+/// Test-only engagement probe: owned row-mode drives, per pull (the unit
+/// corpus asserts the ON arm actually engaged — stats.rs ticks arm only via
+/// the process-global `PGRUST_LANE_V2_STATS` env, unusable per-test).
+#[cfg(test)]
+pub(crate) static ROWMODE_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// The childless Result plan as a row-mode source: delegates to
 /// `noderesult::lane_result_childless_next` — one statement stream, two
 /// faces (`try_own_result`'s inline arm is the other caller).
@@ -183,6 +190,8 @@ pub fn try_own_project_set<'mcx>(
         }
     }
     stats::tick_owned(ShapeClass::ProjectSet);
+    #[cfg(test)]
+    ROWMODE_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
     // exec_project_set's per-call prologue: entry CFI + entry per-tuple
     // reset. The reset frees the PREVIOUS pull's emitted-row by-ref datums
     // (the parent consumed them before pulling again) and doubles as C's
