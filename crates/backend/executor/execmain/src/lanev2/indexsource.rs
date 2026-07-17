@@ -245,11 +245,19 @@ impl<'mcx> BatchGranuleSource<'mcx> for IndexOnlyScanSource<'_, 'mcx> {
     }
 
     fn capabilities(&self) -> SourceCaps {
-        // `index_leaf: true` arrives with WS-K's SourceCaps growth (contract
-        // §2a ships the field on WS-F's behalf; WS-K merges first) — the
-        // missing-field compile error at that rebase is the deliberate
-        // fail-closed reminder to flip it here.
-        SourceCaps { columnar: false, heap_pages: false }
+        // WS-K's full Phase-1 SourceCaps (contract §2a shipped `index_leaf`
+        // on WS-F's behalf; flipped true here at integration exactly as the
+        // fail-closed reminder in the pre-merge draft demanded). Granule =
+        // one index leaf page, positional posture; everything else is a
+        // heap/columnar capability this source does not have.
+        SourceCaps {
+            columnar: false,
+            heap_pages: false,
+            dict_codes: false,
+            zone_maps: false,
+            all_visible_batches: false,
+            index_leaf: true,
+        }
     }
 }
 
