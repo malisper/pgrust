@@ -66,6 +66,16 @@ fn install_seams() {
                     typstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
                     typcollation: 0,
                 }),
+                // _int8 (int8[]): sum(int4)'s aggMTRANSTYPE (pg_type.dat 1016)
+                // — the windows_t2_ab moving-frame units resolve it through
+                // initialize_peragg_framed's get_typlenbyval.
+                1016 => Some(PgTypeShape {
+                    typlen: -1,
+                    typbyval: false,
+                    typalign: ::types_tuple::TYPALIGN_DOUBLE,
+                    typstorage: ::types_tuple::TYPSTORAGE_EXTENDED,
+                    typcollation: 0,
+                }),
                 _ => None,
             })
         });
@@ -109,6 +119,17 @@ fn install_seams() {
                     aggmtranstype: 0,
                     aggtransspace: 0,
                 }),
+                // sum(int4): moving-aggregate columns filled from the REAL
+                // pg_aggregate.dat row (verified against PostgreSQL 18.3:
+                // aggmtransfn int4_avg_accum 1963, aggminvtransfn
+                // int4_avg_accum_inv 3571, aggmfinalfn int2int4_sum 3572,
+                // aggmtranstype _int8 1016) so the windows_t2_ab moving-frame
+                // units exercise the framed lane's MovingIntSum INVERSE
+                // kernel exactly as production does. Additive fixture fill
+                // (fields were stubbed 0); UNBOUNDED-PRECEDING-start frames —
+                // every pre-wave-2 consumer — keep the plain-transition path
+                // (initialize_peragg's use_ma_code gate), so no existing test
+                // changes code path or results.
                 2108 => Some(::syscache_seams::PgAggregateShape {
                     aggkind: b'n' as i8,
                     aggnumdirectargs: 0,
@@ -121,12 +142,12 @@ fn install_seams() {
                     aggfinalmodify: b'r' as i8,
                     aggsortop: 0,
                     aggtranstype: INT8OID,
-                    aggmtransfn: 0,
-                    aggminvtransfn: 0,
-                    aggmfinalfn: 0,
+                    aggmtransfn: 1963,
+                    aggminvtransfn: 3571,
+                    aggmfinalfn: 3572,
                     aggmfinalextra: false,
                     aggmfinalmodify: b'r' as i8,
-                    aggmtranstype: 0,
+                    aggmtranstype: 1016,
                     aggtransspace: 0,
                 }),
                 _ => None,
@@ -136,6 +157,15 @@ fn install_seams() {
             Ok(match aggfnoid {
                 2803 => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
                 2108 => Some(None),
+                _ => None,
+            })
+        });
+        // aggminitval mirror (real catalog values; consumed only by
+        // moving-frame window aggs — the windows_t2_ab units).
+        syscache_seams::pg_aggregate_aggminitval::set(|mcx, aggfnoid| {
+            Ok(match aggfnoid {
+                2803 => Some(Some(::mcx::PgString::from_str_in("0", mcx).unwrap())),
+                2108 => Some(Some(::mcx::PgString::from_str_in("{0,0}", mcx).unwrap())),
                 _ => None,
             })
         });
@@ -4435,11 +4465,21 @@ mod rowmode_ab {
     /// lock — two locks over one global knob would race in parallel runs.
     pub(super) static KNOB: Mutex<()> = Mutex::new(());
 
-    fn install_rowmode_seams() {
+    /// `pub(super)` because seams are SET-ONCE process globals
+    /// (seam_core's "installed twice" panic): the windows_t2_ab corpus
+    /// shares this one `lookup_pg_proc_shape` install (its rows are a
+    /// superset — generate_series for the SRF corpus, sum(int4)+int4lt for
+    /// the moving-frame volatility probe), the same sharing discipline as
+    /// the KNOB lock above.
+    pub(super) fn install_rowmode_seams() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            // pg_proc rows for generate_series(int4,int4[,int4]) — the two
-            // canonical fmgr builtins the SRF corpus invokes.
+            // pg_proc rows: generate_series(int4,int4[,int4]) — the two
+            // canonical fmgr builtins the SRF corpus invokes — plus
+            // sum(int4) 2108 and int4lt 66 for the windows_t2_ab corpus
+            // (initialize_peragg's use_ma_code gate runs
+            // contain_volatile_functions over the WindowFunc; values from
+            // PostgreSQL 18.3 pg_proc).
             syscache_seams::lookup_pg_proc_shape::set(|funcid| {
                 Ok(match funcid {
                     F_GENERATE_SERIES_INT4 | F_GENERATE_SERIES_STEP_INT4 => {
@@ -4460,6 +4500,40 @@ mod rowmode_ab {
                             proconfig_isnull: true,
                         })
                     }
+                    // sum(int4) — windows_t2_ab.
+                    2108 => Some(syscache_seams::PgProcShape {
+                        pronamespace: 11,
+                        prorettype: INT8OID,
+                        provariadic: 0,
+                        prosupport: 0,
+                        prolang: 12,
+                        pronargs: 1,
+                        prokind: b'a' as i8,
+                        provolatile: b'i' as i8,
+                        proparallel: b's' as i8,
+                        proretset: false,
+                        proisstrict: false,
+                        proleakproof: false,
+                        prosecdef: false,
+                        proconfig_isnull: true,
+                    }),
+                    // int4lt — windows_t2_ab FILTER exprs.
+                    66 => Some(syscache_seams::PgProcShape {
+                        pronamespace: 11,
+                        prorettype: BOOLOID,
+                        provariadic: 0,
+                        prosupport: 0,
+                        prolang: 12,
+                        pronargs: 2,
+                        prokind: b'f' as i8,
+                        provolatile: b'i' as i8,
+                        proparallel: b's' as i8,
+                        proretset: false,
+                        proisstrict: true,
+                        proleakproof: true,
+                        prosecdef: false,
+                        proconfig_isnull: true,
+                    }),
                     _ => None,
                 })
             });
@@ -5996,6 +6070,964 @@ mod mergejoin_rowmode_ab {
         }
         crate::lanev2::mergejoin_set_for_tests(false);
         drop(guard);
+        scanfix::quiesced();
+    }
+}
+
+// ============================================================================
+// windows_t2_ab — the wave-2 WS-M T2-A A/B unit corpus (contract §6 WS-M).
+//
+// Every test runs the SAME plan knob-OFF (the row engine) then knob-ON
+// (PGRUST_LANE_V2_WINDOWS_T2 — the T2-A row-mode delegation host) and
+// demands byte-identical rows plus lane engagement (or non-engagement for
+// the interplay shapes). The `want` vectors are C-VERIFIED: each fixture
+// was executed against PostgreSQL 18.3 (scratch script t2-fixtures.sql,
+// results transcribed verbatim; the OFF arm re-proves them against the
+// ported row engine on every run). Frame classes covered: ROWS offset
+// PRECEDING/FOLLOWING pairs (the MovingIntSum INVERSE-transition kernel),
+// ROWS CURRENT ROW..UNBOUNDED FOLLOWING, ROWS n..m PRECEDING (empty
+// frames -> strict-sum NULLs), RANGE offsets (in_range 4128), GROUPS
+// offsets, EXCLUDE CURRENT ROW / GROUP / TIES, lead/lag (with offset +
+// default), first/last/nth_value, FILTER (the W8-retirement gate,
+// contract WS-M amendment 5), ntile, stacked WindowAgg nodes (multiple
+// window defs), W1-interplay (hook order), rescan replay, empty input.
+// ============================================================================
+mod windows_t2_ab {
+    use super::*;
+    use ::types_nodes::rawnodes::{
+        FRAMEOPTION_BETWEEN, FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_CURRENT_ROW,
+        FRAMEOPTION_END_OFFSET_FOLLOWING, FRAMEOPTION_END_OFFSET_PRECEDING,
+        FRAMEOPTION_END_UNBOUNDED_FOLLOWING, FRAMEOPTION_EXCLUDE_CURRENT_ROW,
+        FRAMEOPTION_EXCLUDE_GROUP, FRAMEOPTION_EXCLUDE_TIES, FRAMEOPTION_GROUPS,
+        FRAMEOPTION_NONDEFAULT, FRAMEOPTION_RANGE, FRAMEOPTION_ROWS,
+        FRAMEOPTION_START_CURRENT_ROW, FRAMEOPTION_START_OFFSET_PRECEDING,
+        FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+    };
+
+    /// The shared unit relation: (g, a) registered UNSORTED (the Sort under
+    /// the WindowAgg orders by (g, a)). Sorted view:
+    /// (1,10) (1,10) (1,20) (1,30) | (2,5) (2,6) | (3,7).
+    const T2_ROWS: &[(i32, i32)] =
+        &[(2, 5), (1, 10), (3, 7), (1, 20), (2, 6), (1, 10), (1, 30)];
+
+    /// Window-function argument shapes for the plan builder.
+    #[derive(Clone, Copy)]
+    enum T2Args {
+        /// No arguments (row_number when winagg=false).
+        None,
+        /// (a) — the partition's second column.
+        A,
+        /// (a, Const int4) — lead/lag offset, nth_value n.
+        AOff(i32),
+        /// (a, Const int4, Const int4) — lead/lag offset + default.
+        AOffDef(i32, i32),
+        /// (Const int4) — ntile buckets.
+        N(i32),
+    }
+
+    /// One window function column in the built tlist.
+    #[derive(Clone, Copy)]
+    struct T2Fn {
+        fnoid: u32,
+        wintype: u32,
+        winagg: bool,
+        args: T2Args,
+        /// FILTER (WHERE a < k) on a window aggregate.
+        filter_a_lt: Option<i32>,
+    }
+
+    const SUM_A: &[T2Fn] = &[T2Fn {
+        fnoid: 2108,
+        wintype: INT8OID,
+        winagg: true,
+        args: T2Args::A,
+        filter_a_lt: None,
+    }];
+
+    /// Frame + window-clause spec for the built WindowAgg node.
+    struct T2Spec {
+        frame_options: i32,
+        /// ROWS/GROUPS offsets are int8 Consts (the planner's type).
+        start_off_i64: Option<i64>,
+        end_off_i64: Option<i64>,
+        /// RANGE offsets for the int4 ORDER BY column: int4 Consts +
+        /// in_range(int4,int4,int4) = fmgr 4128 as start/endInRangeFunc.
+        range_off_i32: Option<(i32, i32)>,
+        order_by: bool,
+        fns: &'static [T2Fn],
+    }
+
+    impl T2Spec {
+        const fn framed(frame_options: i32) -> Self {
+            T2Spec {
+                frame_options,
+                start_off_i64: None,
+                end_off_i64: None,
+                range_off_i32: None,
+                order_by: true,
+                fns: SUM_A,
+            }
+        }
+    }
+
+    /// Output cell/type spec for the drain (lead/lag emit NULLs; sums are
+    /// int8, value functions int4).
+    #[derive(Clone, Copy)]
+    enum Ty {
+        I32,
+        I64,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Cell {
+        Null,
+        I(i64),
+    }
+    use Cell::{I, Null};
+
+    /// Build WindowAgg(spec) over Sort(g,a) over SeqScan(relid) — the
+    /// windows_t2 mirror of `mk_windowagg_pstmt_ex`, generalized to explicit
+    /// frames, offsets, EXCLUDE bits, argument-carrying window functions and
+    /// FILTER. tlist = (g, a, <one column per spec.fns entry>).
+    fn mk_t2_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        relid: u32,
+        spec: &T2Spec,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Sort, WindowAgg};
+        use ::types_nodes::primnodes::{WindowFunc, OUTER_VAR};
+
+        let mk_tlist = |varno: i32| {
+            let g = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+            let a = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, g, 1, Some("g"), false).unwrap(),
+                Node::mk_target_entry(mcx, a, 2, Some("a"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let i4 = |v: i32| {
+            Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
+        };
+        let i8c = |v: i64| {
+            Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(v), false, true).unwrap()
+        };
+
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: mk_tlist(1), ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.targetlist = mk_tlist(OUTER_VAR);
+        sort.plan.lefttree = Some(scan);
+        sort.numCols = 2;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
+
+        let mut tlist = mk_tlist(OUTER_VAR);
+        let a_var = || Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+        for (i, f) in spec.fns.iter().enumerate() {
+            let mut w = Node::build::<WindowFunc>(mcx).unwrap();
+            w.winfnoid = f.fnoid;
+            w.wintype = f.wintype;
+            w.winref = 1;
+            w.winagg = f.winagg;
+            w.args = match f.args {
+                T2Args::None => NodeList::nil(),
+                T2Args::A => NodeList::make1(mcx, a_var()).unwrap(),
+                T2Args::AOff(k) => NodeList::make2(mcx, a_var(), i4(k)).unwrap(),
+                T2Args::AOffDef(k, d) => {
+                    NodeList::make3(mcx, a_var(), i4(k), i4(d)).unwrap()
+                }
+                T2Args::N(n) => NodeList::make1(mcx, i4(n)).unwrap(),
+            };
+            if let Some(k) = f.filter_a_lt {
+                w.aggfilter = Some(
+                    Node::mk(
+                        mcx,
+                        ::types_nodes::OpExpr {
+                            opno: INT4_LT,
+                            opfuncid: 66, // pg_proc int4lt
+                            opresulttype: BOOLOID,
+                            opretset: false,
+                            opcollid: 0,
+                            inputcollid: 0,
+                            args: NodeList::make2(mcx, a_var(), i4(k)).unwrap(),
+                            location: -1,
+                        },
+                    )
+                    .unwrap(),
+                );
+            }
+            tlist
+                .lappend(
+                    mcx,
+                    Node::mk_target_entry(mcx, w.seal(), (3 + i) as i16, Some("w"), false)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+
+        let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
+        wa.plan.targetlist = tlist;
+        wa.plan.lefttree = Some(sort.seal());
+        wa.frameOptions = spec.frame_options;
+        if let Some(v) = spec.start_off_i64 {
+            wa.startOffset = Some(i8c(v));
+        }
+        if let Some(v) = spec.end_off_i64 {
+            wa.endOffset = Some(i8c(v));
+        }
+        if let Some((s, e)) = spec.range_off_i32 {
+            wa.startOffset = Some(i4(s));
+            wa.endOffset = Some(i4(e));
+            wa.startInRangeFunc = 4128; // in_range(int4,int4,int4)
+            wa.endInRangeFunc = 4128;
+            wa.inRangeAsc = true;
+        }
+        wa.winref = 1;
+        wa.partNumCols = 1;
+        wa.partColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        wa.partOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        wa.partCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        if spec.order_by {
+            wa.ordNumCols = 1;
+            wa.ordColIdx = ::mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+            wa.ordOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+            wa.ordCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        }
+        wa.topWindow = true;
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perminfo = Node::mk(
+            mcx,
+            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(wa.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Stacked-windows plan (multiple window defs): WindowAgg(winref 2,
+    /// ORDER BY g, default frame, sum(a)) over WindowAgg(winref 1,
+    /// PARTITION BY g ORDER BY a, row_number) over Sort(g,a) over SeqScan.
+    /// tlist = (g, a, rn, s2).
+    fn mk_t2_stacked_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Sort, WindowAgg};
+        use ::types_nodes::primnodes::{WindowFunc, OUTER_VAR};
+
+        let mk_ga = |varno: i32| {
+            let g = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+            let a = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, g, 1, Some("g"), false).unwrap(),
+                Node::mk_target_entry(mcx, a, 2, Some("a"), false).unwrap(),
+            )
+            .unwrap()
+        };
+
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: mk_ga(1), ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.targetlist = mk_ga(OUTER_VAR);
+        sort.plan.lefttree = Some(scan);
+        sort.numCols = 2;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
+
+        // Bottom WindowAgg: winref 1, PARTITION BY g ORDER BY a, row_number.
+        let mut rn = Node::build::<WindowFunc>(mcx).unwrap();
+        rn.winfnoid = 3100;
+        rn.wintype = INT8OID;
+        rn.winref = 1;
+        let mut bot_tlist = mk_ga(OUTER_VAR);
+        bot_tlist
+            .lappend(mcx, Node::mk_target_entry(mcx, rn.seal(), 3, Some("rn"), false).unwrap())
+            .unwrap();
+        let mut bot = Node::build::<WindowAgg>(mcx).unwrap();
+        bot.plan.targetlist = bot_tlist;
+        bot.plan.lefttree = Some(sort.seal());
+        bot.winref = 1;
+        bot.partNumCols = 1;
+        bot.partColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        bot.partOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        bot.partCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        bot.ordNumCols = 1;
+        bot.ordColIdx = ::mcx::slice_borrow_in(mcx, &[2i16]).unwrap();
+        bot.ordOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        bot.ordCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+
+        // Top WindowAgg: winref 2, ORDER BY g (no partition), default frame,
+        // sum(a) — peer-group stepping over the g groups.
+        let mut sum = Node::build::<WindowFunc>(mcx).unwrap();
+        sum.winfnoid = 2108;
+        sum.wintype = INT8OID;
+        sum.winref = 2;
+        sum.winagg = true;
+        sum.args =
+            NodeList::make1(mcx, Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap())
+                .unwrap();
+        let mut top_tlist = mk_ga(OUTER_VAR);
+        top_tlist
+            .lappend(
+                mcx,
+                Node::mk_target_entry(
+                    mcx,
+                    Node::mk_var(mcx, OUTER_VAR, 3, INT8OID, -1, 0, 0).unwrap(),
+                    3,
+                    Some("rn"),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        top_tlist
+            .lappend(mcx, Node::mk_target_entry(mcx, sum.seal(), 4, Some("s2"), false).unwrap())
+            .unwrap();
+        let mut top = Node::build::<WindowAgg>(mcx).unwrap();
+        top.plan.targetlist = top_tlist;
+        top.plan.lefttree = Some(bot.seal());
+        top.winref = 2;
+        top.ordNumCols = 1;
+        top.ordColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        top.ordOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+        top.ordCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        top.topWindow = true;
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perminfo = Node::mk(
+            mcx,
+            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(top.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Drain a typed row set: (g, a) then one `Cell` per extra column.
+    fn drain_cells<'mcx>(
+        ps: &mut crate::procnode::PlanStateNode<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        tys: &[Ty],
+    ) -> Vec<(i32, i32, Vec<Cell>)> {
+        let mut got = Vec::new();
+        while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+            let base = estate.slot_mut(slot_id).base();
+            assert!(!base.tts_isnull[0] && !base.tts_isnull[1]);
+            let mut cells = Vec::new();
+            for (i, ty) in tys.iter().enumerate() {
+                let col = 2 + i;
+                cells.push(if base.tts_isnull[col] {
+                    Cell::Null
+                } else {
+                    match ty {
+                        Ty::I32 => Cell::I(base.tts_values[col].as_i32() as i64),
+                        Ty::I64 => Cell::I(base.tts_values[col].as_i64()),
+                    }
+                });
+            }
+            got.push((base.tts_values[0].as_i32(), base.tts_values[1].as_i32(), cells));
+        }
+        got
+    }
+
+    fn run_t2(
+        mk: &dyn Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        tys: &[Ty],
+        rescan: bool,
+    ) -> Vec<Vec<(i32, i32, Vec<Cell>)>> {
+        let pstmt = mk(leaked_mcx());
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            let mut runs = vec![drain_cells(ps, estate, tys)];
+            if rescan {
+                crate::execami::exec_re_scan(ps, estate).unwrap();
+                runs.push(drain_cells(ps, estate, tys));
+            }
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            runs
+        })
+    }
+
+    /// The T2 A/B round: knob OFF (row engine) vs ON (T2-A delegation),
+    /// identical rows demanded; the ON arm must tick the T2 probe and must
+    /// NOT tick the W1 probe (the W1 knob stays OFF here — the interplay
+    /// test drives both). Caller holds the scanfix TEST_LOCK.
+    fn ab_t2(
+        mk: impl Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        tys: &[Ty],
+        rescan: bool,
+    ) -> Vec<Vec<(i32, i32, Vec<Cell>)>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Seams are set-once process globals: the pg_proc rows the
+        // moving-frame volatility probe needs live in the SHARED
+        // rowmode_ab installer (superset closure; see its doc).
+        super::rowmode_ab::install_rowmode_seams();
+        crate::lanev2::windows_set_for_tests(false);
+        crate::lanev2::windows_t2_set_for_tests(false);
+        let off = run_t2(&mk, tys, rescan);
+        crate::lanev2::windows_t2_set_for_tests(true);
+        let t2_before = crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed);
+        let w1_before = crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed);
+        let on = run_t2(&mk, tys, rescan);
+        let t2_after = crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed);
+        let w1_after = crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed);
+        crate::lanev2::windows_t2_set_for_tests(false);
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert!(t2_after > t2_before, "ON arm never engaged the T2 windows lane");
+        assert_eq!(w1_after, w1_before, "T2 arm ticked the W1 probe (W1 knob is OFF)");
+        off
+    }
+
+    /// Sorted-view rows zipped with per-row cells: the shared fixture shape.
+    fn want(cells: &[&[Cell]]) -> Vec<(i32, i32, Vec<Cell>)> {
+        let sorted: &[(i32, i32)] =
+            &[(1, 10), (1, 10), (1, 20), (1, 30), (2, 5), (2, 6), (3, 7)];
+        sorted
+            .iter()
+            .zip(cells.iter())
+            .map(|(&(g, a), &c)| (g, a, c.to_vec()))
+            .collect()
+    }
+
+    const ROWS_SLIDING: i32 = FRAMEOPTION_NONDEFAULT
+        | FRAMEOPTION_ROWS
+        | FRAMEOPTION_BETWEEN
+        | FRAMEOPTION_START_OFFSET_PRECEDING
+        | FRAMEOPTION_END_OFFSET_FOLLOWING;
+
+    /// ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING sum(a): the moving frame
+    /// head drives the MovingIntSum INVERSE kernel (fixture-verified vs
+    /// PostgreSQL 18.3).
+    #[test]
+    fn windows_t2_ab_rows_sliding_inverse() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70160;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(ROWS_SLIDING);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(20)], &[I(40)], &[I(60)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING sum(a).
+    #[test]
+    fn windows_t2_ab_rows_current_to_unbounded_following() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70161;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_ROWS
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_CURRENT_ROW
+                | FRAMEOPTION_END_UNBOUNDED_FOLLOWING,
+        );
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(70)], &[I(60)], &[I(50)], &[I(30)], &[I(11)], &[I(6)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING: empty head frames — the
+    /// strict sum yields NULL on each partition's first row.
+    #[test]
+    fn windows_t2_ab_rows_offset_preceding_pair() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70162;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_ROWS
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_OFFSET_PRECEDING
+                | FRAMEOPTION_END_OFFSET_PRECEDING,
+        );
+        spec.start_off_i64 = Some(3);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[Null], &[I(10)], &[I(20)], &[I(40)], &[Null], &[I(5)], &[Null]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING (in_range(int4,int4,int4)
+    /// = 4128 on the int4 ORDER BY column).
+    #[test]
+    fn windows_t2_ab_range_offset() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70163;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_RANGE
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_OFFSET_PRECEDING
+                | FRAMEOPTION_END_OFFSET_FOLLOWING,
+        );
+        spec.range_off_i32 = Some((2, 2));
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(30)], &[I(11)], &[I(11)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING (peer-group grain).
+    #[test]
+    fn windows_t2_ab_groups_offset() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70164;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_GROUPS
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_OFFSET_PRECEDING
+                | FRAMEOPTION_END_OFFSET_FOLLOWING,
+        );
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(40)], &[I(40)], &[I(70)], &[I(50)], &[I(11)], &[I(11)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW
+    /// (single-row partition -> empty frame -> NULL).
+    #[test]
+    fn windows_t2_ab_exclude_current_row() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70165;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(ROWS_SLIDING | FRAMEOPTION_EXCLUDE_CURRENT_ROW);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(10)], &[I(30)], &[I(40)], &[I(20)], &[I(6)], &[I(5)], &[Null]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE
+    /// GROUP (whole-partition frame minus the current peer group).
+    #[test]
+    fn windows_t2_ab_exclude_group() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70166;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_ROWS
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_UNBOUNDED_PRECEDING
+                | FRAMEOPTION_END_UNBOUNDED_FOLLOWING
+                | FRAMEOPTION_EXCLUDE_GROUP,
+        );
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(50)], &[I(50)], &[I(50)], &[I(40)], &[I(6)], &[I(5)], &[Null]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE TIES (the
+    /// default-frame extent with the current row's peers excluded, current
+    /// row kept).
+    #[test]
+    fn windows_t2_ab_exclude_ties() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70167;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_RANGE
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_UNBOUNDED_PRECEDING
+                | FRAMEOPTION_END_CURRENT_ROW
+                | FRAMEOPTION_EXCLUDE_TIES,
+        );
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(10)], &[I(10)], &[I(40)], &[I(70)], &[I(5)], &[I(11)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// lag(a) + lead(a, 1, -1) under the DEFAULT frame: a W1
+    /// shape-census refusal (LeadLag is not in the W1 set) that T2-A hosts —
+    /// with head NULLs from lag and the lead default at partition tails.
+    #[test]
+    fn windows_t2_ab_lead_lag() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70168;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec {
+            frame_options: FRAMEOPTION_DEFAULTS,
+            start_off_i64: None,
+            end_off_i64: None,
+            range_off_i32: None,
+            order_by: true,
+            fns: &[
+                T2Fn {
+                    fnoid: 3106,
+                    wintype: INT4OID,
+                    winagg: false,
+                    args: T2Args::A,
+                    filter_a_lt: None,
+                },
+                T2Fn {
+                    fnoid: 3111,
+                    wintype: INT4OID,
+                    winagg: false,
+                    args: T2Args::AOffDef(1, -1),
+                    filter_a_lt: None,
+                },
+            ],
+        };
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32], false);
+        let w = want(&[
+            &[Null, I(10)],
+            &[I(10), I(20)],
+            &[I(10), I(30)],
+            &[I(20), I(-1)],
+            &[Null, I(6)],
+            &[I(5), I(-1)],
+            &[Null, I(-1)],
+        ]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// first_value/last_value/nth_value(a, 2) over ROWS BETWEEN 1 PRECEDING
+    /// AND 1 FOLLOWING (nth NULL where the frame has fewer than 2 rows).
+    #[test]
+    fn windows_t2_ab_first_last_nth() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70169;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(ROWS_SLIDING);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        spec.fns = &[
+            T2Fn {
+                fnoid: 3112,
+                wintype: INT4OID,
+                winagg: false,
+                args: T2Args::A,
+                filter_a_lt: None,
+            },
+            T2Fn {
+                fnoid: 3113,
+                wintype: INT4OID,
+                winagg: false,
+                args: T2Args::A,
+                filter_a_lt: None,
+            },
+            T2Fn {
+                fnoid: 3114,
+                wintype: INT4OID,
+                winagg: false,
+                args: T2Args::AOff(2),
+                filter_a_lt: None,
+            },
+        ];
+        let runs =
+            ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32, Ty::I32, Ty::I32], false);
+        let w = want(&[
+            &[I(10), I(10), I(10)],
+            &[I(10), I(20), I(10)],
+            &[I(10), I(30), I(20)],
+            &[I(20), I(30), I(30)],
+            &[I(5), I(6), I(6)],
+            &[I(5), I(6), I(6)],
+            &[I(7), I(7), Null],
+        ]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// THE W8-RETIREMENT GATE (contract §6 WS-M amendment 5): sum(a) FILTER
+    /// (WHERE a < 15) under the default frame, A/B-identical and
+    /// lane-hosted. The stale "FILTER is a loud panic at init" note dies
+    /// with this test (nodewindowagg lib.rs:5 fixed in the same commit).
+    #[test]
+    fn windows_t2_ab_filter() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70170;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec {
+            frame_options: FRAMEOPTION_DEFAULTS,
+            start_off_i64: None,
+            end_off_i64: None,
+            range_off_i32: None,
+            order_by: true,
+            fns: &[T2Fn {
+                fnoid: 2108,
+                wintype: INT8OID,
+                winagg: true,
+                args: T2Args::A,
+                filter_a_lt: Some(15),
+            }],
+        };
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        let w = want(&[&[I(20)], &[I(20)], &[I(20)], &[I(20)], &[I(5)], &[I(11)], &[I(7)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// ntile(2) under the default frame (W2 family, whole-partition count).
+    #[test]
+    fn windows_t2_ab_ntile() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70171;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let spec = T2Spec {
+            frame_options: FRAMEOPTION_DEFAULTS,
+            start_off_i64: None,
+            end_off_i64: None,
+            range_off_i32: None,
+            order_by: true,
+            fns: &[T2Fn {
+                fnoid: 3105,
+                wintype: INT4OID,
+                winagg: false,
+                args: T2Args::N(2),
+                filter_a_lt: None,
+            }],
+        };
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I32], false);
+        let w = want(&[&[I(1)], &[I(1)], &[I(2)], &[I(2)], &[I(1)], &[I(2)], &[I(1)]]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// Stacked WindowAgg nodes (multiple window defs): T2 hosts BOTH nodes
+    /// per pull — the top drive's child pull recurses into the bottom
+    /// node's own T2-owned arm.
+    #[test]
+    fn windows_t2_ab_stacked_windows() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70172;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let runs = ab_t2(|mcx| mk_t2_stacked_pstmt(mcx, relid), &[Ty::I64, Ty::I64], false);
+        let w = want(&[
+            &[I(1), I(70)],
+            &[I(2), I(70)],
+            &[I(3), I(70)],
+            &[I(4), I(70)],
+            &[I(1), I(81)],
+            &[I(2), I(81)],
+            &[I(1), I(88)],
+        ]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// Rescan replay under T2 (per-pull ownership; ExecReScanWindowAgg
+    /// resets the node's own state — the delegation holds none).
+    #[test]
+    fn windows_t2_ab_rescan_replays() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70173;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let mut spec = T2Spec::framed(ROWS_SLIDING);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], true);
+        assert_eq!(runs[0], runs[1], "rescan must replay the first run exactly");
+        scanfix::quiesced();
+    }
+
+    /// Empty input under a framed shape: zero rows, both arms.
+    #[test]
+    fn windows_t2_ab_empty_input() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70174;
+        scanfix::register_table_2col(relid, &[]);
+        let mut spec = T2Spec::framed(ROWS_SLIDING);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        let runs = ab_t2(|mcx| mk_t2_pstmt(mcx, relid, &spec), &[Ty::I64], false);
+        assert_eq!(runs, vec![Vec::new()]);
+        scanfix::quiesced();
+    }
+
+    /// HOOK-ORDER INTERPLAY: a W1-admissible default-frame shape.
+    /// (a) both knobs ON: the sticky W1 batch drive wins — the W1 probe
+    ///     ticks, the T2 probe must NOT (T2 never hijacks W1's shapes);
+    /// (b) W1 OFF + T2 ON: the delegation hosts the same shape;
+    /// all arms byte-identical to knob-OFF.
+    #[test]
+    fn windows_t2_ab_w1_owns_first() {
+        use std::sync::atomic::Ordering::Relaxed;
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70175;
+        scanfix::register_table_2col(relid, &[T2_ROWS]);
+        let run = || {
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let pstmt = mk_windowagg_pstmt(leaked_mcx(), relid, true);
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let ps = planstate.as_mut().unwrap();
+                let rows = drain_window_rows(ps, estate);
+                crate::exec_end_node(ps, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+                rows
+            })
+        };
+        crate::lanev2::windows_set_for_tests(false);
+        crate::lanev2::windows_t2_set_for_tests(false);
+        let off = run();
+        // (a) Both ON: W1 wins, T2 silent.
+        crate::lanev2::windows_set_for_tests(true);
+        crate::lanev2::windows_t2_set_for_tests(true);
+        let t2_before = crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed);
+        let w1_before = crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed);
+        let both = run();
+        assert!(
+            crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(Relaxed) > w1_before,
+            "W1 must own its admitted shape with both knobs on"
+        );
+        assert_eq!(
+            crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed),
+            t2_before,
+            "T2 hijacked a W1-owned shape (hook order broken)"
+        );
+        // (b) W1 OFF, T2 ON: the delegation hosts it.
+        crate::lanev2::windows_set_for_tests(false);
+        let t2_before = crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed);
+        let t2_only = run();
+        assert!(
+            crate::lanev2::WINDOWS_T2_OWNED_FOR_TESTS.load(Relaxed) > t2_before,
+            "T2 must host the shape once W1 is off"
+        );
+        crate::lanev2::windows_t2_set_for_tests(false);
+        assert_eq!(off, both, "both-knobs arm diverged");
+        assert_eq!(off, t2_only, "T2-only arm diverged");
         scanfix::quiesced();
     }
 }
