@@ -69,11 +69,12 @@ fn add_target_updates_in_place() {
 }
 
 #[test]
-#[should_panic(expected = "[inc-5] server")]
-fn server_get_sink_panics_unported() {
-    let ctx = MemoryContext::new("target test");
-    let mcx = ctx.mcx();
+fn server_target_detail_contract() {
+    // server requires a target detail (basebackup_target.c server_check_detail);
+    // get_sink itself needs a live transaction + role infrastructure (the
+    // pg_write_server_files check), so only handle resolution is unit-testable.
+    assert!(BaseBackupGetTargetHandle("server", None).is_err());
     let handle = BaseBackupGetTargetHandle("server", Some("/backups")).unwrap();
-    let leaf = Box::new(Bbsink::new(mcx, Box::new(NoopLeaf), None));
-    let _ = BaseBackupGetSink(mcx, handle, leaf);
+    assert_eq!(handle.type_name, "server");
+    assert!(matches!(handle.detail_arg, TargetDetail::Server(ref p) if p == "/backups"));
 }

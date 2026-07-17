@@ -1,7 +1,10 @@
 //! Port of `basebackup_target.c`: the base-backup target-type registry
-//! (thread_local, single-threaded backend). server get_sink is unported (inc-5).
+//! (thread_local, single-threaded backend). The 'server' target's sink lives
+//! in [`server`] (basebackup_server.c).
 
 #![allow(non_snake_case)]
+
+mod server;
 
 use std::cell::RefCell;
 
@@ -164,15 +167,18 @@ impl BaseBackupTarget for ServerTarget {
 
     fn get_sink<'mcx>(
         &self,
-        _mcx: Mcx<'mcx>,
-        _next_sink: Box<Bbsink<'mcx>>,
-        _detail_arg: TargetDetail,
+        mcx: Mcx<'mcx>,
+        next_sink: Box<Bbsink<'mcx>>,
+        detail_arg: TargetDetail,
     ) -> PgResult<Box<Bbsink<'mcx>>> {
-        panic!("[inc-5] server base-backup target (bbsink_server_new) not ported");
+        let TargetDetail::Server(pathname) = detail_arg else {
+            panic!("server target requires a server detail argument");
+        };
+        server::bbsink_server_new(mcx, next_sink, &pathname)
     }
 }
 
-fn loc(func: &'static str) -> ErrorLocation {
+pub(crate) fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("basebackup_target.c", 0, func)
 }
 

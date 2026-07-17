@@ -127,12 +127,18 @@ pub fn init_all() {
     launcher::init_seams();
     walsender_config::init_seams();
     walsender::init_seams();
+    syncrep::init_seams();
+    walreceiverfuncs::init_seams();
+    walreceiver::init_seams();
     basebackup::init_seams();
     slot::init_seams();
     reorderbuffer::init_seams();
     snapbuild::init_seams();
     logical::init_seams();
+    origin::init_seams();
+    logicalworker::init_seams();
     test_decoding::init_seams();
+    pgoutput::init_seams();
     adt_formatting::init_seams();
     citext::init_seams();
     uuid_ossp::init_seams();
@@ -235,6 +241,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(adt_tsvector_stat::TS_STAT_BUILTINS);
     fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
+    slotfuncs::init_seams();
+    slotsync::init_seams();
     fmgr_core::register_late_builtins(waitevent::funcs::WAITEVENT_BUILTINS);
     fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
@@ -280,7 +288,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(pg_config::PG_CONFIG_BUILTINS);
     fmgr_core::register_late_builtins(shmem::SHMEM_BUILTINS);
     fmgr_core::register_late_builtins(aio_funcs::AIO_FUNCS_BUILTINS);
-    fmgr_core::register_late_builtins(subscriptioncmds::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(origin::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(logicalrelation::LOGICALRELATION_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();
