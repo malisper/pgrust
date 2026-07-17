@@ -676,6 +676,23 @@ fn caller_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_CALLER_C2` (wave-3 R-KNOBS registry, WS-S; default
+/// OFF): rollout stage C2 — the design-note-gated escalations of the C1
+/// caller (docs/design/caller-c2.md): all-stopped bounded-drain + loud
+/// error (inc-2), latch-integrated idle parks (inc-3), caller WFIN
+/// emission (inc-4). NESTED under `PGRUST_RUNTIME_CALLER`: only read on
+/// the caller path, which `caller_enabled` already gates — `_C2` alone
+/// flips nothing, and at `CALLER=1, _C2 unset` the C1 drive is byte- and
+/// trace-identical to the wave-2 base. Engagement cadence, read once
+/// (the C1 idiom). Leader LEDGER counting is NOT here — it waits on the
+/// inc-1 ruling.
+fn caller_c2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CALLER_C2").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 enum CallerDrive {
     /// The caller drove the RG to an outcome (finish_outcome decides).
     Outcome(runtime::RgOutcome),
@@ -729,29 +746,43 @@ fn caller_drive_launched(
     payload.started.fetch_add(1, Ordering::SeqCst);
     lane_trace("runtime-scan: caller-drive engaged");
 
-    let mut duty = || -> Result<(), Box<PgError>> {
-        ::postgres_seams::check_for_interrupts::call()?;
-        parallel::ProcessParallelMessages()?;
-        Ok(())
+    let drove = if caller_c2_enabled() {
+        caller_c2_drive(rt, payload, pcxt, rg, &mut cw)
+    } else {
+        let mut duty = || -> Result<(), Box<PgError>> {
+            ::postgres_seams::check_for_interrupts::call()?;
+            parallel::ProcessParallelMessages()?;
+            Ok(())
+        };
+        let mut boundary = 0u32;
+        let mut all_stopped_traced = false;
+        let mut claim_duty = || -> bool {
+            if payload.failed.load(Ordering::SeqCst) {
+                // Shed at the boundary; the step loop observes the abort.
+                return false;
+            }
+            boundary = boundary.wrapping_add(1);
+            if boundary % 64 == 0
+                && !all_stopped_traced
+                && parallel::parallel_workers_all_stopped(pcxt)
+            {
+                all_stopped_traced = true;
+                lane_trace(
+                    "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+                );
+            }
+            true
+        };
+        cw.drive_with_duties(rt, rg, &mut duty, &mut claim_duty)
     };
-    let mut boundary = 0u32;
-    let mut all_stopped_traced = false;
-    let mut claim_duty = || -> bool {
-        if payload.failed.load(Ordering::SeqCst) {
-            // Shed at the boundary; the step loop observes the abort.
-            return false;
-        }
-        boundary = boundary.wrapping_add(1);
-        if boundary % 64 == 0
-            && !all_stopped_traced
-            && parallel::parallel_workers_all_stopped(pcxt)
-        {
-            all_stopped_traced = true;
-            lane_trace("runtime-scan: caller-drive sees all helpers stopped (continuing alone)");
-        }
-        true
-    };
-    let drove = cw.drive_with_duties(rt, rg, &mut duty, &mut claim_duty);
+
+    // C2 inc-4 WFIN parity: emitted BEFORE teardown (worker_cb_counters
+    // reads the qd the teardown releases), from the caller's own local —
+    // exactly the helper drive frames' shape. C1 stays silent (the
+    // trace-identity law).
+    if caller_c2_enabled() {
+        emit_wfin("caller", cw.lane_ordinal(), cw.worker_local(), rg);
+    }
 
     // Leader executor teardown, ALWAYS (the helper discipline: clean
     // finish on success, release when this executor may be mid-batch).
@@ -763,6 +794,120 @@ fn caller_drive_launched(
         (Ok(_), Err(te)) => CallerDrive::Error(te),
         (Err(e), _) => CallerDrive::Error(e),
     }
+}
+
+/// WS-S wave-3 C2 gang-death classifier (pure; unit corpus in
+/// execmain/src/tests.rs `caller_c2_ab`). Precondition: every launched
+/// helper's bgworker task has ENDED (`parallel_workers_all_stopped`).
+/// `exited < launched` ⇒ some helper vanished WITHOUT its ExitBump — the
+/// pre-hook death class (init-path panic-to-ERROR, post-Terminate death:
+/// no channel message, no refusal count) that the knob-OFF park loop
+/// surfaces as an ERROR. `exited >= launched` ⇒ every helper accounted
+/// for itself (refused / drove / errored-with-payload.fail), which is the
+/// C1 continue-alone posture (all-refused fail-closed non-participation
+/// is legitimate, never an error).
+pub(crate) fn c2_gang_death(exited: usize, launched: i32) -> bool {
+    exited < launched.max(0) as usize
+}
+
+/// The C2 loud error (inc-2). `#[cold]`: built only on the escalation
+/// path, never on a live drive.
+#[cold]
+#[inline(never)]
+fn c2_gang_death_error() -> Box<PgError> {
+    Box::new(PgError::new(
+        ERROR,
+        "runtime scan helpers died before completing the scan (caller-drive C2: aborting)",
+    ))
+}
+
+/// WS-S wave-3 C2 (PGRUST_RUNTIME_CALLER_C2): the escalated caller drive —
+/// the design-note-gated increments of docs/design/caller-c2.md §3, over
+/// the same CallerWorker machinery as C1:
+///   - inc-2 LIVENESS: the bounded (1-in-64) claim-boundary all-stopped
+///     probe CLASSIFIES via [`c2_gang_death`]: vanish class ⇒ shed at the
+///     boundary, the step duty raises the loud error, and the CallerWorker
+///     abort discipline drains the RG (bounded by the protocol — aborted
+///     generations refuse joins and claims); accounted class ⇒ C1's
+///     continue-alone, traced once. A duty-cadence (1-in-16) backstop
+///     covers the stranded/parked case where claim boundaries stop firing
+///     (a dead helper's unfinished work leaves the caller Idle) — inc-3's
+///     bounded park is what guarantees that cadence keeps running.
+///   - inc-3 LATCH PARKS: parked-at-Idle rides
+///     `wait_parallel_finish_quantum` (the latch/WaitEventSet wait of the
+///     submit-and-park loop; surfaces raised cancel dispositions), so
+///     duties pump while stragglers finish and cancel latency moves from
+///     next-publish-wake to the latch.
+///   - inc-4 WFIN is emitted by the caller frame (see
+///     [`caller_drive_launched`]), not here.
+fn caller_c2_drive(
+    rt: &Arc<runtime::Runtime>,
+    payload: &Arc<RuntimeScanShared>,
+    pcxt: parallel::ParallelContextId,
+    rg: &runtime::RgHandle,
+    cw: &mut runtime::CallerWorker,
+) -> Result<runtime::RgOutcome, Box<PgError>> {
+    let launched = parallel::nworkers_launched(pcxt);
+    let gang_dead = std::cell::Cell::new(false);
+    let mut duty_calls = 0u32;
+    let duty_gang = &gang_dead;
+    let mut duty = || -> Result<(), Box<PgError>> {
+        if duty_gang.get() {
+            // Set by the claim-boundary probe (which sheds, then this
+            // step-cadence duty surfaces): the loud half of inc-2.
+            return Err(c2_gang_death_error());
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        parallel::ProcessParallelMessages()?;
+        duty_calls = duty_calls.wrapping_add(1);
+        if duty_calls % 16 == 0
+            && parallel::parallel_workers_all_stopped(pcxt)
+            && c2_gang_death(payload.exited.load(Ordering::SeqCst), launched)
+        {
+            duty_gang.set(true);
+            lane_trace("runtime-scan: caller-drive C2 gang death (duty probe) — escalating");
+            return Err(c2_gang_death_error());
+        }
+        Ok(())
+    };
+    let mut boundary = 0u32;
+    let mut benign_traced = false;
+    let claim_gang = &gang_dead;
+    let mut claim_duty = || -> bool {
+        if payload.failed.load(Ordering::SeqCst) {
+            // Shed at the boundary; the step loop observes the abort.
+            return false;
+        }
+        boundary = boundary.wrapping_add(1);
+        if boundary % 64 == 0
+            && !claim_gang.get()
+            && parallel::parallel_workers_all_stopped(pcxt)
+        {
+            if c2_gang_death(payload.exited.load(Ordering::SeqCst), launched) {
+                claim_gang.set(true);
+                lane_trace(
+                    "runtime-scan: caller-drive C2 gang death (claim probe) — escalating",
+                );
+                // Shed; the step duty raises the loud error and the
+                // CallerWorker drain discipline bounds the abort.
+                return false;
+            }
+            if !benign_traced {
+                benign_traced = true;
+                lane_trace(
+                    "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+                );
+            }
+        }
+        true
+    };
+    let mut idle_park = || -> Result<(), Box<PgError>> {
+        // inc-3: bounded latch quantum — helper-exit SetLatch and raised
+        // cancel dispositions wake it early; runtime-internal wakes are
+        // bounded by the quantum plus the drive loop's epoch pre-check.
+        parallel::wait_parallel_finish_quantum()
+    };
+    cw.drive_with_duties_parked(rt, rg, &mut duty, &mut claim_duty, &mut idle_park)
 }
 
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker

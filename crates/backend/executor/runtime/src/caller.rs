@@ -54,6 +54,14 @@ impl CallerWorker {
         self.lane.ordinal()
     }
 
+    /// Read-only view of this caller's scheduling bookkeeping (C2 inc-4,
+    /// WS-S wave 3: WFIN observability parity — execmain's emit_wfin
+    /// reads the drive accumulators off the participant's WorkerLocal
+    /// after the drive, exactly as the helper drive frames do).
+    pub fn worker_local(&self) -> &WorkerLocal {
+        &self.local
+    }
+
     /// C1 (wave 2, WS-O): [`CallerWorker::drive_with_duty`] plus a LIGHT
     /// claim-boundary duty installed for the drive's extent (sched.rs
     /// CALLER_DUTY): `claim_duty` runs at EVERY claim boundary of tasks
@@ -86,6 +94,47 @@ impl CallerWorker {
         self.drive_with_duty(rt, rg, duty)
     }
 
+    /// C2 (wave 3, WS-S inc-3): [`CallerWorker::drive_with_duties`] with a
+    /// caller-supplied IDLE PARK replacing the runtime eventcount park.
+    /// While the caller would otherwise block on the ParkLot (C1's honest
+    /// limit: parked-at-Idle duties do not pump), `idle_park` runs a
+    /// BOUNDED caller-owned wait (production: the latch/WaitEventSet
+    /// quantum the submit-and-park loop uses, cancel-disposition-carrying)
+    /// and control returns to the step loop, where the full `duty` pumps.
+    /// Cancel latency in the Idle window moves from next-publish-wake to
+    /// the caller's own wait primitive; runtime-internal wakes are bounded
+    /// by the park's quantum plus an epoch pre-check (zero when a publish
+    /// already landed between the failed step and the park).
+    ///
+    /// Error discipline: an `idle_park` error is a duty error — abort,
+    /// drain through the ordinary protocol, surface. During the drain a
+    /// repeat park error is IGNORED (the first error already aborted; the
+    /// bounded park still paces the drain instead of busy-spinning).
+    ///
+    /// Caller contract (upheld by the production wiring): `idle_park`
+    /// must be BOUNDED — an unbounded wait here re-creates the C1 park
+    /// without the eventcount's lost-wakeup guarantee.
+    pub fn drive_with_duties_parked(
+        &mut self,
+        rt: &Runtime,
+        rg: &RgHandle,
+        duty: &mut dyn FnMut() -> Result<(), Box<PgError>>,
+        claim_duty: &mut dyn FnMut() -> bool,
+        idle_park: &mut dyn FnMut() -> Result<(), Box<PgError>>,
+    ) -> Result<RgOutcome, Box<PgError>> {
+        // SAFETY: identical to drive_with_duties — the erased-lifetime
+        // pointer is consumed only by run_task on THIS thread while the
+        // RAII guard lives, and the guard drops before this frame returns.
+        let duty_ptr: *mut (dyn FnMut() -> bool + 'static) = unsafe {
+            core::mem::transmute::<
+                *mut (dyn FnMut() -> bool + '_),
+                *mut (dyn FnMut() -> bool + 'static),
+            >(claim_duty as *mut _)
+        };
+        let _duty_ctx = crate::sched::CallerDutyCtx::set(duty_ptr);
+        self.drive_loop(rt, rg, duty, Some(idle_park))
+    }
+
     /// Drive the caller's own RG on the session thread, running `duty` at
     /// every step boundary and Idle transition. Err from duty aborts the
     /// RG and DRAINS it before returning (the drain_rg discipline: the
@@ -102,6 +151,19 @@ impl CallerWorker {
         rt: &Runtime,
         rg: &RgHandle,
         duty: &mut dyn FnMut() -> Result<(), Box<PgError>>,
+    ) -> Result<RgOutcome, Box<PgError>> {
+        self.drive_loop(rt, rg, duty, None)
+    }
+
+    /// The one caller step loop (C1 == `idle_park: None`, byte-for-byte
+    /// the WS-O drive; C2 == `Some`, the inc-3 latch-bridged park). Kept
+    /// private so the two public faces stay the knob arms.
+    fn drive_loop(
+        &mut self,
+        rt: &Runtime,
+        rg: &RgHandle,
+        duty: &mut dyn FnMut() -> Result<(), Box<PgError>>,
+        mut idle_park: Option<&mut dyn FnMut() -> Result<(), Box<PgError>>>,
     ) -> Result<RgOutcome, Box<PgError>> {
         let mut failed: Option<Box<PgError>> = None;
         let outcome = loop {
@@ -130,10 +192,31 @@ impl CallerWorker {
                     if rg.try_outcome().is_some() {
                         continue;
                     }
-                    // Epoch captured before the step: a publish/completion/
-                    // ledger wake between the failed pick and this park is
-                    // never lost.
-                    rt.park(epoch);
+                    match idle_park.as_deref_mut() {
+                        // C1: epoch captured before the step — a publish/
+                        // completion/ledger wake between the failed pick
+                        // and this park is never lost.
+                        None => rt.park(epoch),
+                        // C2 inc-3: bounded caller-owned park. The epoch
+                        // pre-check skips the wait when a wake already
+                        // landed; otherwise the park's own bound (latch
+                        // quantum) caps the lost-wakeup window that the
+                        // eventcount would have closed exactly.
+                        Some(park) => {
+                            if rt.park_epoch() == epoch {
+                                let parked = park();
+                                if failed.is_none() {
+                                    if let Err(e) = parked {
+                                        // Park failure == duty failure
+                                        // (cancel raised at the latch):
+                                        // abort, then drain below.
+                                        rg.abort();
+                                        failed = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Step::Stop => unreachable!("pinned steps do not observe stop"),
             }
