@@ -1529,10 +1529,12 @@ fn sample_scan_arm<'mcx>(
     ss: &mut PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_sample_scan(ss, estate)? {
             return Ok(r);
         }
@@ -1545,10 +1547,12 @@ fn function_scan_arm<'mcx>(
     fs: &mut PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_function_scan(fs, estate)? {
             return Ok(r);
         }
@@ -1561,10 +1565,12 @@ fn table_func_scan_arm<'mcx>(
     ts: &mut PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_table_func_scan(ts, estate)? {
             return Ok(r);
         }
@@ -1632,10 +1638,12 @@ fn tid_scan_arm<'mcx>(
     ts: &mut ::nodetidscan::TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_tid_scan(ts, estate)? {
             return Ok(r);
         }
@@ -1648,10 +1656,12 @@ fn tid_range_scan_arm<'mcx>(
     ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_tid_range_scan(ts, estate)? {
             return Ok(r);
         }
@@ -2727,10 +2737,12 @@ fn named_tuplestore_scan_arm<'mcx>(
     nts: &mut PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
-    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
-    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::rowmode_tail_active() {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
         if let Some(r) = crate::lanev2::try_own_named_tuplestore_scan(nts, estate)? {
             return Ok(r);
         }
