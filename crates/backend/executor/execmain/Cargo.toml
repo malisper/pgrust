@@ -194,3 +194,7 @@ heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
 procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+# WS-J express-lane A/B corpus (tests::express_ab): fake btree pages + the
+# xlog-active probe the nbtree read path consults.
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
