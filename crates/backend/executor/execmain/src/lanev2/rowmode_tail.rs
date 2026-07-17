@@ -172,6 +172,36 @@ fn verdict<F: FnOnce() -> Option<i32>>(
     capture_id: F,
     estate: &mut EStateData<'_>,
 ) -> bool {
+    // SH-F fast path: the per-execution-static byte (GUC on, no
+    // instrumentation, no capture, diag disarmed) + the two
+    // per-pull-dynamic gates inline (es_epq_active shares the byte's cache
+    // line). byte==true means the slow path below would admit AND tick
+    // nothing, so the fast admit is decision- and accounting-identical.
+    if estate.es_lane_leaf_fast
+        && !estate.es_epq_active
+        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        #[cfg(test)]
+        ROWMODE_TAIL_OWNED_FOR_TESTS[class as usize].fetch_add(1, Relaxed);
+        return true;
+    }
+    verdict_slow(class, capture_id, estate)
+}
+
+/// The full verdict (outlined): every diagnostics-armed, instrumented,
+/// EPQ, backward, or GUC-off pull lands here — the exact pre-SH-F body,
+/// with the lane-executor GUC gate at its head (it rode the arms'
+/// `rowmode_tail_active` before SH-F made that knob-only). GUC-off admits
+/// nothing and ticks nothing, matching the retired arm-gate short-circuit.
+#[inline(never)]
+fn verdict_slow<F: FnOnce() -> Option<i32>>(
+    class: ShapeClass,
+    capture_id: F,
+    estate: &mut EStateData<'_>,
+) -> bool {
+    if !super::enabled() {
+        return false;
+    }
     let refuse = tail_gates(class, estate);
     if estate.engine_capture() {
         if let Some(id) = capture_id() {
@@ -529,5 +559,9 @@ pub fn lock_rows_pull_verdict<'mcx>(
     l: &crate::procnode::LockRowsNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> bool {
-    verdict(ShapeClass::LockRows, || Some(l.state.plan.plan.plan_node_id), estate)
+    // SH-F exemption: LockRows admission gates REAL behavior (the DML
+    // TupleOp hook is offered only on non-admit), so it never rides the
+    // fast-admit byte — the full-gate slow path is its permanent spelling
+    // (defensive: a stale byte must never flip hook priority).
+    verdict_slow(ShapeClass::LockRows, || Some(l.state.plan.plan.plan_node_id), estate)
 }

@@ -3112,11 +3112,11 @@ fn merge_join_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE; both children stay Volcano inside the ported
     // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
     // logic + refuse-set live in `lanev2` (the nest_loop_arm pattern).
-    if crate::lanev2::enabled() {
-        // SH-E ownership verdict: accounting only — the call below IS the
-        // delegated body (tail-call shape preserved on both knob arms).
-        crate::lanev2::merge_join_pull_verdict(mj, estate);
-    }
+    // SH-E ownership verdict: accounting only — the call below IS the
+    // delegated body (tail-call shape preserved on both knob arms). SH-F:
+    // no arm-level enabled() gate — the MERGEJOIN knob heads the verdict,
+    // the GUC rides the fast-admit byte / slow-path head.
+    crate::lanev2::merge_join_pull_verdict(mj, estate);
     let MergeJoinNode { state, outer, inner } = mj;
     ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
 }

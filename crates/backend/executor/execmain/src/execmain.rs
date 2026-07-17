@@ -784,7 +784,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // the session collector onto the estate (C's es_jit JitContext).
         // Below the cost gate (jitFlags == 0) the window stays closed: the
         // select1/point compile path pays only this branch.
-        if pstmt.jitFlags == 0 {
+        let r = if pstmt.jitFlags == 0 {
             init_plan(data, pstmt, operation, eflags)
         } else {
             ::execexpr::jit::session_begin(pstmt.jitFlags);
@@ -793,7 +793,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             data.estate.es_jit_blocks = jc.blocks;
             data.estate.es_jit_instr = jc.instr;
             r
-        }
+        };
+        // se-delegtax SH-F: the row-mode LEAF fast-admit byte — computed
+        // once here (all inputs per-execution static; see the refresh doc).
+        crate::lanev2::refresh_lane_leaf_fast(&mut data.estate);
+        r
     })?;
     qd.tup_desc = Some(tup_desc);
     qd.exec = Some(Box::new(exec));
