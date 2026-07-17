@@ -255,6 +255,43 @@ fn lane_trace_enabled() -> bool {
     })
 }
 
+/// Process-static diagnostics mask for the row-mode LEAF drives' owned path
+/// (se-delegtax SH-B): bit 0 = lane accounting armed (`stats::armed()` —
+/// PGRUST_LANE_V2_STATS / PGRUST_LANE_V2_COVERAGE), bit 1 = engagement trace
+/// armed (PGRUST_LANE_V2_TRACE). Both inputs are process-static envs; ONE
+/// relaxed byte load + zero-test replaces two OnceLock fast paths per owned
+/// pull. Load deletion, not branch reshaping — the se-express-adm INC-1
+/// lesson: dist fat-LTO codegen already fuses branches but cannot fold two
+/// distinct atomic loads into one. 0xFF = unresolved sentinel (the ROWMODE
+/// AtomicU8 idiom); the resolved mask is 0..=3. Semantics are unchanged by
+/// construction: mask==0 skips exactly the calls that would no-op anyway
+/// (`tick_owned` under `!armed()`, `lane_trace` under `!enabled`).
+static LEAF_DIAG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0xFF);
+
+#[inline]
+pub(self) fn leaf_diag_mask() -> u8 {
+    let v = LEAF_DIAG.load(std::sync::atomic::Ordering::Relaxed);
+    if v != 0xFF {
+        v
+    } else {
+        leaf_diag_resolve()
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn leaf_diag_resolve() -> u8 {
+    let mut m = 0u8;
+    if stats::armed() {
+        m |= 1;
+    }
+    if lane_trace_enabled() {
+        m |= 2;
+    }
+    LEAF_DIAG.store(m, std::sync::atomic::Ordering::Relaxed);
+    m
+}
+
 /// M5-2 liveness-battery fault injection (test-only, default-off — dead
 /// unless the env var is set at server start): `PGRUST_TEST_HELPER_PANIC=
 /// <arm>[,<arm>...]` (or `all`; arms: scan/agg/distinct/hashjoin/sort)
