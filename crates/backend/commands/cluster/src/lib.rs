@@ -45,12 +45,6 @@ fn oid_key(attno: usize, oid: Oid) -> ScanKeyData {
     key
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: cluster {what}")
-}
-
 pub fn make_new_heap<'mcx>(
     mcx: Mcx<'mcx>,
     old_heap_oid: Oid,

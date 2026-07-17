@@ -58,12 +58,6 @@ const F_ENUM_OUT: Oid = 3507;
 const F_ENUM_RECV: Oid = 3532;
 const F_ENUM_SEND: Oid = 3533;
 
-#[cold]
-#[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("{what} unported — unit backend-commands-typecmds")
-}
-
 struct BaseTypeRow {
     typlen: i16,
     typbyval: bool,
@@ -236,7 +230,13 @@ pub fn DefineDomain<'mcx>(
     }
 
     if base.has_default {
-        unported("DefineDomain (typecmds.c): inherited base-type typdefault");
+        // unported: DefineDomain inherited base-type typdefault
+        return Err(Box::new(
+            types_error::PgError::error(
+                "CREATE DOMAIN over a type with a default value is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let mut typ_not_null = false;
