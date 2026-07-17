@@ -494,8 +494,8 @@ pub(super) fn coverage_armed() -> bool {
     })
 }
 
-/// Record an OWNED decision for `class`. One cached load + branch (per arm
-/// switch) when accounting is disarmed.
+/// Record an OWNED decision for `class`. One cached load + branch when
+/// accounting is disarmed (`armed()` memoizes the arm-switch disjunction).
 #[inline]
 pub(super) fn tick_owned(class: ShapeClass) {
     if !armed() {
@@ -518,9 +518,17 @@ pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
 /// Accounting armed (either the TSV dump dir or the coverage-view env)?
 /// Callers may gate row-counting work (a per-batch popcount) on this before
 /// calling `tick_topkcut_rows`.
+///
+/// MEMOIZED disjunction (se-entrycost): both arming sources are
+/// process-static envs, and `tick_owned` sits on the select1/prepared hot
+/// path (`try_own_result` ticks once per execution). Testing the two
+/// OnceLocks separately here cost the entry-cost pair measurable
+/// instructions per query; one cached bool restores the pre-coverage cost
+/// (exactly one OnceLock fast path + branch).
 #[inline]
 pub(super) fn armed() -> bool {
-    stats_dir().is_some() || coverage_armed()
+    static ARMED: OnceLock<bool> = OnceLock::new();
+    *ARMED.get_or_init(|| stats_dir().is_some() || coverage_armed())
 }
 
 // ---------------------------------------------------------------------------
