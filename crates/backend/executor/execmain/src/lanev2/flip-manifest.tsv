@@ -1,0 +1,18 @@
+# lane-v2 flip manifest — WS-P flip machinery (docs/design/flip-ladder.md §4).
+# Schema v1. One data row per DEFAULT-FLIPPED ShapeClass:
+#   class <TAB> allowed_reasons
+#     class           = stats.rs ShapeClass::name() (the lane vocabulary)
+#     allowed_reasons = comma-list of RefuseReason::name() values that stay
+#                       LEGAL for the class after its flip (the dynamic gates:
+#                       epq, backward, instrumented, ...); "-" = none.
+#
+# EMPTY BY DESIGN until the first default flip. A flip commit adds its row
+# here AND in the compiled-in ASSERT_MANIFEST (lanev2/census.rs) AND reseeds
+# the class's lane-gates floors — all in the SAME commit, both gate profiles
+# (the WS-P floors law; the census.rs `manifest_mirror_in_sync` unit pins
+# this file to the compiled manifest).
+#
+# Layer-A assert mode (PGRUST_LANE_V2_ASSERT_COVERED=1, dualexec/e2e channels
+# only) raises `volcano-unreachable:` (PgError XX000) when a class listed
+# here refuses with a reason outside its allowed_reasons list.
+class	allowed_reasons

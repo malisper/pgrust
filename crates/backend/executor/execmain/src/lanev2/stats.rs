@@ -533,6 +533,15 @@ pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
     }
     REFUSED[class as usize][reason as usize].fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
+    // Layer-A assert-mode cold tail (WS-P inc-2; wave-2 contract §4: WS-P's
+    // ONLY stats.rs edit). Reads the (class, reason) vocabulary, never adds
+    // to it. Default config never reaches this line (the `armed()` early
+    // return above fires first — refusal-path cost byte-identical); with
+    // accounting armed it is one memoized-bool load + branch unless
+    // PGRUST_LANE_V2_ASSERT_COVERED is set (diagnostics channels only), in
+    // which case a manifest-covered class refusing an unallowed reason
+    // raises `volcano-unreachable:` (census.rs module doc, OQ10).
+    super::census::assert_covered_tail(class, reason);
 }
 
 /// Accounting armed (either the TSV dump dir or the coverage-view env)?
