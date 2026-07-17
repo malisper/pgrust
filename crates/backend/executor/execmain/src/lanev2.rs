@@ -55,6 +55,7 @@ mod push;
 mod rowmode;
 mod rowmode_tail;
 mod stats;
+mod tail_source; // WS-Q wave-3: T3 source-form tail hosts (contract §3.1)
 mod windows;
 
 pub use exprkey::ExprKeyState;
@@ -78,6 +79,11 @@ pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TE
 pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use rowmode_tail::tail_owned_probe_for_tests;
+#[cfg(test)]
+pub(crate) use tail_source::{
+    scans_t3_set_for_tests, scans_t3_shape_set_for_tests, t3_owned_probe_for_tests,
+    t3_sort_child_probe_for_tests,
+};
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
 #[cfg(test)]
@@ -125,6 +131,16 @@ pub fn enabled() -> bool {
 #[inline]
 pub(crate) fn rowmode_tail_active() -> bool {
     rowmode::rowmode_enabled() && enabled()
+}
+
+/// WS-Q wave-3: dispatch-arm gate for the T3 source form
+/// (`PGRUST_LANE_V2_SCANS_T3`), consulted ONLY by the six T3 shapes'
+/// procnode arms (never the VALUES/Material/... arms — the m4 letter paths
+/// stay byte-identical). Knob-OFF cost on those six arms: one relaxed byte
+/// load + branch after `rowmode_tail_active()`'s short-circuit.
+#[inline]
+pub(crate) fn scans_t3_active() -> bool {
+    tail_source::scans_t3_enabled() && enabled()
 }
 
 /// Combined gate for the WS-N modify_table dispatch hook — same shape and
@@ -5934,6 +5950,58 @@ fn sort_feed_if_needed<'mcx>(
                 TieMode::Off,
             )?
         }
+        // --- WS-Q wave-3 (contract §6.Q inc-final): T3 source-form feed
+        // arms — the batch-size-1 pipeline over the delegated exec body,
+        // drained into the breaker sink by the shared `sort_feed` (the
+        // IndexScan-arm posture: no staging, no topk cut, no tie modes).
+        crate::procnode::PlanStateNode::FunctionScan(fs) => tail_source::t3_sort_feed(
+            state,
+            &mut **fs,
+            rowmode_tail::FunctionScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
+        crate::procnode::PlanStateNode::TableFuncScan(ts) => tail_source::t3_sort_feed(
+            state,
+            &mut **ts,
+            rowmode_tail::TableFuncScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
+        crate::procnode::PlanStateNode::SampleScan(ss) => tail_source::t3_sort_feed(
+            state,
+            &mut **ss,
+            rowmode_tail::SampleScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
+        crate::procnode::PlanStateNode::TidScan(ts) => tail_source::t3_sort_feed(
+            state,
+            ts,
+            rowmode_tail::TidScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
+        crate::procnode::PlanStateNode::TidRangeScan(ts) => tail_source::t3_sort_feed(
+            state,
+            ts,
+            rowmode_tail::TidRangeScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
+        crate::procnode::PlanStateNode::NamedTuplestoreScan(nts) => tail_source::t3_sort_feed(
+            state,
+            &mut **nts,
+            rowmode_tail::NamedTuplestoreScanSource,
+            outer_desc,
+            narrow,
+            estate,
+        )?,
         _ => unreachable!("memoized sort verdict admitted a non-scan child"),
     }
     Ok(true)
@@ -6030,6 +6098,19 @@ fn sort_refuse_reason<'mcx>(
         } else {
             Some(RefuseReason::ChildNotLaneOwned)
         });
+    }
+    // --- WS-Q wave-3 (contract §6.Q inc-final): T3 source-form children.
+    // The six tail leaf shapes admit as sort children when
+    // `PGRUST_LANE_V2_SCANS_T3` arms them (init-stable: node type +
+    // process-static knobs, so the caller's memo is sound; the child's
+    // OWNED tick fires inside the admit at this verdict chokepoint).
+    // Because every host composing over the sort breaker consumes THIS
+    // memoized verdict (bare Sort, Limit/Unique-over-sort, the wave-4
+    // Group/Result/SubqueryScan glue), this one arm retires their
+    // `child-not-lane-owned` cascades for T3 shapes knob-ON. Knob-OFF: one
+    // cached byte load, then the unchanged `scan_child_fusible` verdict.
+    if tail_source::t3_sort_child_admit(&s.outer) {
+        return Ok(None);
     }
     scan_child_fusible(&mut s.outer, estate)
 }
