@@ -84,12 +84,6 @@ pub fn IsPolymorphicType(typid: Oid) -> bool {
     )
 }
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("{what} unported — unit backend-parser-coerce")
-}
-
 // ISCOMPLEX (parse_type.h): typeOrDomainTypeRelid drills through domains.
 fn is_complex(typid: Oid) -> PgResult<bool> {
     Ok(OidIsValid(lsyscache::get_typ_typrelid(lsyscache::getBaseType(typid)?)?))
@@ -525,10 +519,11 @@ fn string_type_datum<'mcx>(
     let mut flinfo = FmgrInfo::unresolved();
     fmgr_core::fmgr_info_into(io.typinput, &mut flinfo)?;
     if isnull {
-        if flinfo.fn_strict {
-            return Ok(Datum::null());
-        }
-        unported("stringTypeDatum (parse_type.c): non-strict typinput with NULL input");
+        // C's InputFunctionCall: strict typinput short-circuits to a NULL
+        // datum; a non-strict one (the pseudo-type *_in family) is invoked
+        // with a NULL cstring and raises its own error (e.g. internal_in's
+        // "cannot accept a value of type internal") — SELECT NULL::internal.
+        return fmgr_core::input_function_call(&mut flinfo, None, typioparam, typmod, mcx);
     }
     let d = fmgr_core::function_call3_coll_in(
         &mut flinfo,
@@ -1892,12 +1887,6 @@ pub fn coerce_null_to_domain<'mcx>(
         );
     }
     Ok(result)
-}
-
-#[cold]
-#[inline(never)]
-fn unported_node(what: &str, tag: NodeTag) -> ! {
-    panic!("{what}: arm for {tag:?} unported — unit backend-parser-coerce")
 }
 
 /// Divergences from C: caller passes exprType(expr) (the nodeFuncs slice

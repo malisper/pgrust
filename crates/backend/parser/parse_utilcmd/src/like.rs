@@ -239,7 +239,7 @@ pub(crate) fn transformTableLikeClause<'mcx>(
             && attribute.attcompression != 0
             && !cxt.is_foreign
         {
-            unported("LIKE INCLUDING COMPRESSION (GetCompressionMethodName)");
+            def.compression = Some(compression_method_name(attribute.attcompression as u8));
         }
         let def_node = Node::mk(mcx, def)?;
         // Copy identity if requested (parse_utilcmd.c:1214-1235): recreate
@@ -564,6 +564,27 @@ fn whole_row_error(detail: String) -> Box<PgError> {
     )
 }
 
+// GetCompressionMethodName (toast_compression.c); any other byte is a
+// corrupted attcompression (C elogs), so the panic is an invariant guard.
+fn compression_method_name(c: u8) -> &'static str {
+    match c {
+        b'p' => "pglz",
+        b'l' => "lz4",
+        _ => panic!("invalid compression method {c}"),
+    }
+}
+
+// Clean 0A000 for unported generateClonedIndexStmt lanes (user-reachable
+// via CREATE TABLE (LIKE ... INCLUDING INDEXES)).
+#[cold]
+#[inline(never)]
+fn cloned_index_unported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::new(ERROR, format!("{what} is not supported yet"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 pub fn generateClonedIndexStmt<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: Option<&'mcx RangeVar<'mcx>>,
@@ -596,15 +617,23 @@ pub fn generateClonedIndexStmt<'mcx>(
         None
     };
     if source_idx.rd_options.is_some() {
-        unported("generateClonedIndexStmt: index reloptions (untransformRelOptions)");
+        // unported: C clones index storage parameters (untransformRelOptions);
+        // clean 0A000 until that lane is ported (dropping them would silently
+        // build a different index).
+        return Err(cloned_index_unported(
+            "LIKE INCLUDING INDEXES on an index with storage parameters",
+        ));
     }
     // Temporal (WITHOUT OVERLAPS) unique/PK indexes are indisexclusion.
     let iswithoutoverlaps =
         (idxrec.indisprimary || idxrec.indisunique) && idxrec.indisexclusion;
-    // C copies per-column opclass options (untransformRelOptions of
-    // attoptions); dropping them would silently build a different index.
+    // unported: C copies per-column opclass options (untransformRelOptions of
+    // attoptions); dropping them would silently build a different index, so
+    // raise a clean 0A000 until that lane is ported.
     if index_has_attoptions(mcx, source_idx.rd_id, idxrec.indnkeyatts as usize)? {
-        unported("generateClonedIndexStmt: per-column opclass options (attoptions)");
+        return Err(cloned_index_unported(
+            "LIKE INCLUDING INDEXES on an index with per-column opclass options",
+        ));
     }
 
     let mut stmt = IndexStmt {
