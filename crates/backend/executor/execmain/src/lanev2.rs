@@ -34,6 +34,7 @@
 //! `PGRUST_JIT_DEFORM` switch and is byte-identity-safe (no `pg_settings` /
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
+pub mod coverage;
 mod exprkey;
 mod router;
 mod runtime_agg;
