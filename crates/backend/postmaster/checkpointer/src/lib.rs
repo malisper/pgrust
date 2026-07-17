@@ -461,7 +461,27 @@ fn checkpointer_main_loop() -> PgResult<()> {
             let ckpt_performed = if !do_restartpoint {
                 transam_xlog::CreateCheckPoint(flags)?
             } else {
-                panic!("CreateRestartPoint unported (transam_xlog; needs the replay path)");
+                // CreateRestartPoint is unported (needs the replay-side
+                // checkpoint bookkeeping). Restartpoints are an optimization
+                // — they only bound how much WAL is re-replayed after a
+                // crash DURING recovery, never a correctness requirement;
+                // C itself skips them whenever no new checkpoint record has
+                // been replayed. Report not-performed instead of panicking:
+                // this cycle fires on any timed/requested checkpoint while
+                // RecoveryInProgress(), and a panic here maps to
+                // WTERMSIG(SIGABRT) -> HandleChildCrash, i.e. it crashes
+                // the cluster in the middle of the recovery it was trying
+                // to finish (crash loop). The !ckpt_performed arm below
+                // keeps C's retry-in-15s pacing, and ckpt_done is advanced
+                // either way so CHECKPOINT_WAIT requesters are released
+                // exactly as in C's skip path.
+                ereport(LOG)
+                    .errmsg(
+                        "restartpoint skipped: CreateRestartPoint unported \
+                         (transam_xlog; needs the replay path)",
+                    )
+                    .finish(loc("CheckpointerMain"))?;
+                false
             };
 
             smgr::smgrdestroyall()?;
