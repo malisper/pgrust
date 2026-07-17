@@ -175,15 +175,17 @@ where
                     let xwait = tuple.t_data().xmin();
                     if !xact::TransactionIdIsCurrentTransactionId(xwait) {
                         if !is_system_catalog {
-                            unported(
-                                "heapam_index_build_range_scan: concurrent insert in progress \
-                                 (XactLockTableWait lane)",
-                            );
+                            // unported: XactLockTableWait lane
+                            // (heapam_index_build_range_scan).
+                            return Err(unported(
+                                "index build over a concurrent in-progress insert",
+                            ));
                         }
                         if checking_uniqueness {
-                            unported(
-                                "heapam_index_build_range_scan: XactLockTableWait recheck lane",
-                            );
+                            // unported: XactLockTableWait recheck lane.
+                            return Err(unported(
+                                "unique-index build over a concurrent in-progress insert",
+                            ));
                         }
                     } else {
                         reltuples += 1.0;
@@ -201,10 +203,11 @@ where
                     if !xact::TransactionIdIsCurrentTransactionId(xwait) {
                         if !is_system_catalog || checking_uniqueness || tuple.t_data().is_hot_updated()
                         {
-                            unported(
-                                "heapam_index_build_range_scan: concurrent delete in progress \
-                                 (XactLockTableWait lane)",
-                            );
+                            // unported: XactLockTableWait lane
+                            // (heapam_index_build_range_scan).
+                            return Err(unported(
+                                "index build over a concurrent in-progress delete",
+                            ));
                         }
                         index_it = true;
                         reltuples += 1.0;
