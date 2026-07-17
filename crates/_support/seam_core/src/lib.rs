@@ -224,13 +224,17 @@ mod tests {
     }
 
     crate::tap!(pub fn counter(x: i32));
+    crate::tap!(pub fn counter_empty(x: i32));
     crate::tap!(pub fn install_twice_tap(x: i32));
 
     #[test]
     fn tap_default_empty_and_call_if_skips() {
-        assert!(!counter::is_installed());
+        // Own tap: tap_install_and_call_if_fires installs `counter` in the
+        // same process, so sharing it made this assert a thread-order race
+        // (fleet flake, panicfix-planner CONFIRM take-1 units).
+        assert!(!counter_empty::is_installed());
         let mut seen = None;
-        counter::call_if(|f| {
+        counter_empty::call_if(|f| {
             seen = Some(());
             f(1);
         });
