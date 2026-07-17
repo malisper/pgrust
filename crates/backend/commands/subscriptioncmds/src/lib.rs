@@ -672,7 +672,7 @@ pub fn CreateSubscription<'mcx>(
                     ERRCODE_CONNECTION_FAILURE,
                 ));
             }
-            Ok(()) => unreachable!("walrcv_connect panics on any connectable conninfo"),
+            Ok(()) => unreachable!("walrcv_connect never reaches a publisher"),
         }
     } else {
         elog::ereport(WARNING)
@@ -973,7 +973,11 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                // unported: AlterSubscription_refresh (walrcv connect)
+                return Err(err(
+                    "ALTER SUBSCRIPTION with refresh is not supported yet",
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
             }
         }
 
@@ -1032,7 +1036,11 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                // unported: AlterSubscription_refresh (walrcv connect)
+                return Err(err(
+                    "ALTER SUBSCRIPTION with refresh is not supported yet",
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ));
             }
         }
 
@@ -1062,7 +1070,11 @@ pub fn AlterSubscription<'mcx>(
 
             xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION ... REFRESH")?;
 
-            panic!("unported: AlterSubscription_refresh (walrcv connect)");
+            // unported: AlterSubscription_refresh (walrcv connect)
+            return Err(err(
+                "ALTER SUBSCRIPTION with refresh is not supported yet",
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
 
         ALTER_SUBSCRIPTION_SKIP => {
@@ -1099,7 +1111,12 @@ pub fn AlterSubscription<'mcx>(
     drop(pub_img_keepalive);
 
     if update_failover || update_two_phase {
-        panic!("unported: walrcv_alter_slot (ALTER SUBSCRIPTION failover/two_phase slot update)");
+        // unported: walrcv_alter_slot (ALTER SUBSCRIPTION failover/two_phase
+        // slot update)
+        return Err(err(
+            "altering the failover or two_phase option of a subscription is not supported yet",
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
 
     rel.close(RowExclusiveLock)?;
@@ -1180,7 +1197,14 @@ pub fn DropSubscription<'mcx>(
         return rel.close(NoLock);
     }
 
-    panic!("unported: libpqwalreceiver connect (DROP SUBSCRIPTION replication slot drop)");
+    // unported: libpqwalreceiver connect (DROP SUBSCRIPTION replication slot
+    // drop)
+    Err((*err(
+        "DROP SUBSCRIPTION with an associated replication slot is not supported yet",
+        types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+    ))
+    .with_hint("Use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate the subscription from the slot.")
+    .into())
 }
 
 fn AlterSubscriptionOwner_internal<'mcx>(
