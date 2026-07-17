@@ -193,6 +193,14 @@ pub struct AggPlanState<'mcx> {
 pub struct WindowAggNode<'mcx> {
     pub state: ::nodewindowagg::WindowAggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
+    /// Lane-executor-v2 structural admission verdict, memoized at the first
+    /// offered pull (the SortNode::lane_fusible precedent); the dynamic
+    /// EPQ/direction gates stay per-call in `lanev2::windows`.
+    pub lane_admit: Option<bool>,
+    /// Lane-v2 window drive (lanev2/windows.rs behind PGRUST_LANE_V2_WINDOWS).
+    /// `Some` = STICKY lane ownership for the node's whole (re)scan life —
+    /// the buffered partition machine cannot hand back mid-stream.
+    pub lane: Option<::nodewindowagg::lane::LaneWindowDrive>,
 }
 
 pub struct MaterialNode<'mcx> {
@@ -908,7 +916,10 @@ pub fn exec_init_node<'mcx>(
                 &outer_desc,
                 result_desc,
             )?;
-            PlanStateNode::WindowAgg(::mcx::alloc_in(mcx, WindowAggNode { state, outer })?)
+            PlanStateNode::WindowAgg(::mcx::alloc_in(
+                mcx,
+                WindowAggNode { state, outer, lane_admit: None, lane: None },
+            )?)
         }
         NodeTag::T_NestLoop => {
             let mcx = estate.es_query_cxt;
@@ -2205,6 +2216,14 @@ fn window_agg_arm<'mcx>(
     w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (Phase-1 windows lane, default-OFF
+    // PGRUST_LANE_V2_WINDOWS). On refuse this falls through to the UNCHANGED
+    // path below; lane logic + refuse-sets live in `lanev2::windows`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_window_agg(w, estate)? {
+            return Ok(r);
+        }
+    }
     let w = &mut **w;
     let outer = &mut w.outer;
     ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
@@ -3315,6 +3334,9 @@ fn exec_end_node_inner<'mcx>(
             exec_end_node(&mut aps.outer, estate)
         }
         PlanStateNode::WindowAgg(w) => {
+            // Release the lane drive's Tuplestore (fd guard on the spill
+            // arm) before the forget path reclaims the bundle.
+            w.lane = None;
             ::nodewindowagg::exec_end_window_agg(&mut w.state);
             exec_end_node(&mut w.outer, estate)
         }
@@ -3812,7 +3834,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
     AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot; lane_exprkey },
-    WindowAggNode<'_> { state, outer },
+    WindowAggNode<'_> { state, outer, lane_admit; lane },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },
