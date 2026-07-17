@@ -1041,6 +1041,10 @@ mcx::forget_safe_struct!(
     PgStatisticBundle<'_> { stanullfrac, stawidth, stadistinct, slots },
 );
 
+// The planner's per-cycle syscache memos (syscache-memo lane) arena-leak
+// these Copy PODs the same way; !needs_drop is the whole proof.
+mcx::forget_safe_nodrop!(PgOperatorShape, PgAmopShape);
+
 seam_core::seam!(
     // SearchSysCache3(STATRELATTINH) + full slot decode (the planner's
     // examine_variable keeps the C statsTuple pinned; here the decode-once

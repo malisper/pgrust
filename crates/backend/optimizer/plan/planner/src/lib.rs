@@ -34,6 +34,7 @@ pub mod network_selfuncs;
 pub mod array_selfuncs;
 pub mod rangetypes_selfuncs;
 pub mod selfuncs;
+pub(crate) mod syscache_memo;
 pub mod ts_selfuncs;
 pub mod planmain;
 pub mod prep;
