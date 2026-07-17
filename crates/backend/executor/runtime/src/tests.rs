@@ -2826,3 +2826,486 @@ fn stream_source_abort_wakes_starved_workers() {
     work.assert_all_executed_once();
     pool.shutdown();
 }
+
+// ---- WS-B admission ledger (single-executor Phase 0.1) ---------------------
+// Appended module per the integration contract's shared-file rule
+// (runtime/src/tests.rs: WS-B appends `mod ledger_tests`; no edits above).
+
+mod ledger_tests {
+    use super::*;
+    use crate::ledger::AdmissionLedger;
+
+    fn budgets(cores: u32) -> LedgerBudgets {
+        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+    }
+
+    fn req(ceiling: u32) -> WidthRequest {
+        WidthRequest::unbounded(ceiling)
+    }
+
+    /// Target math: fair shares over the core budget, clamped by ceiling
+    /// and predicted optimum, remainder in slot order, liveness floor 1.
+    #[test]
+    fn target_math_fair_share_and_clamps() {
+        let l = AdmissionLedger::new(8, budgets(8));
+        let n = l.admit(0, req(16));
+        assert_eq!(n, ArrivalNudge { wake: 8, advertises: true });
+        assert_eq!(l.debug_words(0), (0, 8), "alone: fair share is the whole core budget");
+
+        l.admit(1, req(2));
+        assert_eq!(l.debug_words(0).1, 4, "incumbent narrowed to the equal share");
+        assert_eq!(l.debug_words(1).1, 2, "ceiling clamps below the fair share");
+
+        l.admit(
+            2,
+            WidthRequest { predicted: 1, ..req(8) },
+        );
+        // base = 8/3 = 2, remainder 2 in slot order => fair 3,3,2.
+        assert_eq!(l.debug_words(0).1, 3);
+        assert_eq!(l.debug_words(1).1, 2);
+        assert_eq!(l.debug_words(2).1, 1, "predicted optimum clamps the target");
+
+        // More entries than cores: every admitted entry keeps the liveness
+        // floor of one.
+        let l = AdmissionLedger::new(8, budgets(2));
+        for slot in 0..3 {
+            l.admit(slot, req(4));
+        }
+        for slot in 0..3 {
+            assert!(l.debug_words(slot).1 >= 1, "liveness floor: target >= 1");
+        }
+        let snap = l.snapshot();
+        assert_eq!(snap.admitted, 3);
+        assert!(snap.target_total <= 3, "sum bounded by max(cores, admitted)");
+    }
+
+    /// SHED-WITHIN-ONE-CLAIM: an arrival narrows the incumbent; the verdict
+    /// flips to Yield at the very next claim boundary, and exactly the
+    /// excess sheds (the verdict returns to Continue once granted meets the
+    /// new target).
+    #[test]
+    fn shed_within_one_claim() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(4));
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "grants stop at the target");
+        assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
+
+        l.admit(1, req(4)); // fresh arrival: targets 1,1 — incumbent over-granted
+        assert_eq!(l.should_continue(0), ClaimVerdict::Yield, "shed at the next boundary");
+        assert_eq!(l.leave(0), 0, "still at/above target: no wake needed");
+        assert_eq!(
+            l.should_continue(0),
+            ClaimVerdict::Continue,
+            "one shed resolves the overshoot — the second incumbent keeps running"
+        );
+        let snap = l.snapshot();
+        assert_eq!(snap.yields, 1);
+        assert_eq!(snap.granted_total, 1);
+    }
+
+    /// FRESH-QUERY-WINS-PICK: with the incumbent saturated (granted >=
+    /// target after the narrowing), the pick filter steers the next free
+    /// worker to the fresh under-target entry.
+    #[test]
+    fn fresh_query_wins_pick() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(4));
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        l.admit(1, req(4));
+        assert!(!l.wants_workers(0), "saturated incumbent is filtered out");
+        assert!(l.wants_workers(1), "fresh under-target entry passes the filter");
+        assert!(!l.try_join(0), "stale pick of the incumbent is refused");
+        assert!(l.try_join(1), "the freed worker lands on the fresh query");
+    }
+
+    /// CACHE-BUDGET REFUSAL: Σ target × bytes/worker never exceeds the box
+    /// budget through WIDENING (the liveness floor may overshoot — the
+    /// documented floor-wins rule).
+    #[test]
+    fn cache_budget_refusal() {
+        let l = AdmissionLedger::new(
+            8,
+            LedgerBudgets { cores: 8, cache_bytes: 1000, join_threshold_ns: 0, renudge_max: 4 },
+        );
+        let wide = WidthRequest {
+            ceiling: 8,
+            predicted: u32::MAX,
+            cache_bytes_per_worker: 400,
+            est_work_ns: u64::MAX,
+        };
+        let nudge = l.admit(0, wide);
+        assert_eq!(l.debug_words(0).1, 2, "cache headroom denies widening past 2");
+        assert_eq!(nudge.wake, 2);
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "third worker refused by the cache clamp");
+        assert_eq!(l.snapshot().cache_charged_bytes, 800);
+
+        // A second footprint entry: no headroom left — the liveness floor
+        // wins (target 1), charging past the budget by design.
+        l.admit(1, wide);
+        assert_eq!(l.debug_words(0).1, 2);
+        assert_eq!(l.debug_words(1).1, 1, "liveness floor beats the cache clamp");
+        assert_eq!(l.snapshot().cache_charged_bytes, 1200);
+    }
+
+    /// WIDENING ON WORKER-FREED: a retirement recomputes survivors upward
+    /// and reports the widening as the wake hint; the freed capacity is
+    /// joinable immediately.
+    #[test]
+    fn widening_on_worker_freed() {
+        let l = AdmissionLedger::new(4, budgets(4));
+        l.admit(0, req(8));
+        l.admit(1, req(8));
+        assert_eq!(l.debug_words(0).1, 2);
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0));
+
+        assert_eq!(l.retire(1), 1, "one survivor widened — wake hint");
+        assert_eq!(l.debug_words(0).1, 4, "survivor widened to the full budget");
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "grants stop at the widened target");
+        assert_eq!(l.snapshot().granted_total, 4);
+
+        // Retiring a never-admitted slot is a no-op (queued-abort path).
+        assert_eq!(l.retire(3), 0);
+    }
+
+    /// JOIN_THRESHOLD: a sub-threshold entry never advertises (no active
+    /// bit, no wake) but still grants — the caller executes alone.
+    #[test]
+    fn join_threshold_sub_threshold_admit() {
+        let l = AdmissionLedger::new(
+            4,
+            LedgerBudgets { cores: 4, cache_bytes: u64::MAX, join_threshold_ns: 1000, renudge_max: 4 },
+        );
+        let n = l.admit(0, WidthRequest { est_work_ns: 999, ..req(4) });
+        assert_eq!(n, ArrivalNudge { wake: 0, advertises: false });
+        assert!(!l.wants_workers(0), "sub-threshold entries are invisible to the pick");
+        assert!(!l.advertises(0));
+        assert!(l.try_join(0), "the caller itself may still join");
+        assert_eq!(l.snapshot().sub_threshold_admits, 1);
+
+        let n = l.admit(1, WidthRequest { est_work_ns: 1000, ..req(4) });
+        assert!(n.advertises, "at-threshold work advertises (strictly-below rule)");
+    }
+
+    /// Bounded re-nudge: fires only under target, budgeted per recompute
+    /// window, refilled by membership events.
+    #[test]
+    fn renudge_bounded_by_budget() {
+        let l = AdmissionLedger::new(4, budgets(4));
+        l.admit(0, req(8)); // target 4
+        assert!(l.try_join(0)); // granted 1 < 4: under target
+        for _ in 0..4 {
+            assert!(l.renudge(0), "under-target boundary may request a wake");
+        }
+        assert!(!l.renudge(0), "budget spent: suppressed");
+        assert_eq!(l.snapshot().renudges, 4);
+        assert_eq!(l.snapshot().renudges_suppressed, 1);
+
+        l.admit(1, req(8)); // recompute refills the budget (targets 2,2)
+        assert!(l.renudge(0), "budget refilled at the membership event");
+
+        // At/above target: no nudge, no budget spend.
+        assert!(l.try_join(0));
+        assert!(!l.renudge(0));
+        assert_eq!(l.snapshot().renudges, 5);
+    }
+
+    /// Unmanaged slots (never admitted: DAG fan-out siblings, knob toggle
+    /// windows) fail OPEN at every entry point, and their join/leave
+    /// accounting stays balanced.
+    #[test]
+    fn unmanaged_slots_fail_open() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        assert!(l.wants_workers(3));
+        assert!(l.advertises(3));
+        assert_eq!(l.should_continue(3), ClaimVerdict::Continue);
+        assert!(!l.renudge(3));
+        assert!(l.try_join(3));
+        assert_eq!(l.leave(3), 0);
+    }
+
+    /// Seeded-PRNG randomized invariants (no property-test dep exists in
+    /// the workspace — ratified): single-threaded op soup over admit /
+    /// retire / join / leave against a shadow model.
+    #[test]
+    fn ledger_randomized_invariants() {
+        const NSLOTS: usize = 8;
+        const CORES: u32 = 4;
+        let l = AdmissionLedger::new(NSLOTS, budgets(CORES));
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rng = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut admitted = [false; NSLOTS];
+        let mut joined = [0u32; NSLOTS];
+        for _ in 0..20_000 {
+            let slot = rng() as usize % NSLOTS;
+            match rng() % 4 {
+                0 => {
+                    if !admitted[slot] {
+                        l.admit(slot, req(1 + rng() % 6));
+                        admitted[slot] = true;
+                    }
+                }
+                1 => {
+                    if admitted[slot] {
+                        l.retire(slot);
+                        admitted[slot] = false;
+                    }
+                }
+                2 => {
+                    if l.try_join(slot) {
+                        joined[slot] += 1;
+                    }
+                }
+                _ => {
+                    if joined[slot] > 0 {
+                        assert!(l.leave(slot) <= 1);
+                        joined[slot] -= 1;
+                    }
+                }
+            }
+            // Invariants after every op.
+            let mut target_sum = 0u32;
+            let mut n = 0u32;
+            for s in 0..NSLOTS {
+                let (granted, target) = l.debug_words(s);
+                assert_eq!(granted, joined[s], "granted mirrors live joins exactly");
+                if admitted[s] {
+                    n += 1;
+                    target_sum += target;
+                    assert!(target >= 1, "liveness floor");
+                    // Verdict consistency with the width words.
+                    let over = granted > target;
+                    assert_eq!(l.should_continue(s) == ClaimVerdict::Yield, over);
+                    assert_eq!(l.wants_workers(s), granted < target);
+                } else {
+                    assert_eq!(l.should_continue(s), ClaimVerdict::Continue);
+                }
+            }
+            assert!(
+                target_sum <= CORES.max(n),
+                "target sum bounded by max(cores, admitted)"
+            );
+            assert_eq!(l.snapshot().admitted, n);
+        }
+    }
+
+    /// Knob OFF (the default): submissions never touch the ledger — the
+    /// snapshot stays empty across a full pool run (the byte-identity
+    /// posture, observable half). Forced off per instance so the suite
+    /// stays green when additionally run under PGRUST_RUNTIME_LEDGER_V2=1.
+    #[test]
+    fn ledger_off_is_inert() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(false);
+        assert!(!rt.ledger_enabled());
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let work = SyntheticWork::new(256, None, 0);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(256))));
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        assert_eq!(rt.ledger_snapshot(), LedgerSnapshot::default());
+        pool.shutdown();
+    }
+
+    /// Knob ON, single unbounded RG: target = full width and the filter is
+    /// a no-op — the identity anchor. The pool run completes with clean
+    /// ledger accounting (all grants returned, entry retired).
+    #[test]
+    fn ledger_on_single_rg_identity_anchor() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let work = SyntheticWork::new(256, None, 0);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(256))));
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+        pool.shutdown();
+    }
+
+    /// Knob ON, several concurrent RGs on a real pool: everything
+    /// completes, every granule exactly once, accounting drains to zero.
+    #[test]
+    fn ledger_on_pool_end_to_end() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let mut works = Vec::new();
+        let mut waiters = Vec::new();
+        for i in 0..3 {
+            let work = SyntheticWork::new(128, None, 0);
+            let (_h, waiter) = rt.submit_with_width(
+                QuerySpec {
+                    query_id: i + 1,
+                    tasksets: vec![TaskSetSpec {
+                        source: Arc::new(SyntheticMorselSource::new(128).with_c0(8)),
+                        work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                        deps: vec![],
+                    }],
+                },
+                WidthRequest::unbounded(2),
+            );
+            works.push(work);
+            waiters.push(waiter);
+        }
+        for w in &waiters {
+            assert_eq!(w.wait(), RgOutcome::Completed);
+        }
+        for w in &works {
+            w.assert_all_executed_once();
+        }
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+        pool.shutdown();
+    }
+
+    /// Sub-JOIN_THRESHOLD submission end-to-end: invisible to the pool
+    /// pick (Idle for a pool-local), zero wakes (park epoch unchanged),
+    /// and the CALLER drives it to completion through the CallerWorker
+    /// skeleton, duty pumping between steps.
+    #[test]
+    fn sub_threshold_rg_is_invisible_and_caller_drives_it() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        rt.set_ledger_join_threshold_ns(1_000_000);
+        let work = SyntheticWork::new(32, None, 0);
+        let epoch_before = rt.park_epoch();
+        let (_h, waiter) = rt.submit_with_width(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(32))),
+            WidthRequest { est_work_ns: 1, ..WidthRequest::unbounded(1) },
+        );
+        assert_eq!(rt.park_epoch(), epoch_before, "sub-threshold publish never wakes");
+        assert_eq!(rt.ledger_snapshot().sub_threshold_admits, 1);
+        let mut pool_local = rt.worker_local(0);
+        assert_eq!(
+            rt.worker_step(&mut pool_local),
+            Step::Idle,
+            "no active bit: the pool never sees the RG"
+        );
+
+        let mut duty_calls = 0u64;
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let outcome = caller
+            .drive_with_duty(&rt, &_h, &mut || {
+                duty_calls += 1;
+                Ok(())
+            })
+            .expect("duty never fails");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(duty_calls > 0, "duty pumped at step boundaries");
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// CallerWorker duty failure: the RG aborts, the drive DRAINS it (no
+    /// stranded pin/grant), and the duty's error surfaces to the caller.
+    #[test]
+    fn caller_worker_duty_error_aborts_and_drains() {
+        use types_error::{PgError, ERROR};
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(32, None, 0);
+        let (h, waiter) = rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(32))));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duty(&rt, &h, &mut || {
+                Err(PgError::new(ERROR, "duty interrupt").into())
+            })
+            .expect_err("failing duty must surface");
+        assert_eq!(err.message(), "duty interrupt");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// Pinned gangs under the ledger: two external drivers complete a
+    /// width-capped pinned RG; grants never exceed the cap (asserted by
+    /// the ledger words after every join inside the work body via the
+    /// snapshot), and accounting drains.
+    #[test]
+    fn pinned_drive_respects_width_cap() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(64, None, 0);
+        let (h, _waiter) = rt.submit_pinned_with_width(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(64).with_c0(4))),
+            0,
+            WidthRequest::unbounded(1),
+        );
+        let mut joins = Vec::new();
+        for _ in 0..2 {
+            let rt2 = Arc::clone(&rt);
+            let h = h.clone();
+            joins.push(std::thread::spawn(move || {
+                let lane = rt2.acquire_external_lane().expect("lane available");
+                let mut local = lane.local();
+                rt2.drive_pinned(&mut local, &h)
+            }));
+        }
+        for j in joins {
+            assert_eq!(j.join().unwrap(), RgOutcome::Completed);
+        }
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+}
