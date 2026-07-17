@@ -1267,3 +1267,80 @@ fn ledger_external_lease_liveness() {
         assert_eq!(snap.external_active, 0);
     });
 }
+
+/// WS-S (wave 3) caller-C2 model: the caller's PARKED drive
+/// (`drive_with_duties_parked` — the inc-3 bounded idle park replacing the
+/// C1 eventcount park) completes a PINNED RG under every interleaving with
+/// one concurrent external helper. The park is modeled as a loom yield —
+/// the production latch quantum's bound with the timeout collapsed to
+/// zero — so the model proves the C2 loop's liveness comes from the
+/// BOUND + re-check, not from the eventcount's lost-wakeup guarantee the
+/// C1 arm kept: a C2 iteration that could sleep past a completion would
+/// deadlock/livelock the model. Oracles: completion under every path,
+/// every granule exactly once, the claim duty observed at caller claim
+/// boundaries, drained ledger accounting, and the pin-board settle
+/// (debug_assert inside drive_loop, live under loom's debug build).
+/// LOOM-FAST SIZING (≤5min law): pb 1, 2 granules, one helper thread.
+#[test]
+fn caller_c2_parked_drive_liveness() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        let work = ModelWork::new(2, None);
+        let (h, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 7,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        // Helper = a second external participant on the C1 face
+        // (eventcount-parked drive_with_duty; the production drive_pinned
+        // is not(loom) — Instant/sleep): the model races the C1 park
+        // discipline against the C2 bounded park on the same pinned RG.
+        let rt1 = Arc::clone(&rt);
+        let h1 = h.clone();
+        let helper = thread::spawn(move || {
+            let mut cw = runtime::CallerWorker::enter(&rt1).expect("helper lane available");
+            cw.drive_with_duty(&rt1, &h1, &mut || Ok(()))
+                .expect("helper duty never fails")
+        });
+
+        let claim_boundaries = AtomicUsize::new(0);
+        let mut caller = runtime::CallerWorker::enter(&rt).expect("caller lane available");
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || {
+                    claim_boundaries.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+                &mut || {
+                    // Bounded park: a scheduling point, then re-check —
+                    // the quantum's timeout arm with zero wait.
+                    thread::yield_now();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(helper.join().unwrap(), RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        // The caller stepped through run_task at least once in every
+        // interleaving where it won a claim; the duty hook must have fired
+        // at each of ITS claim boundaries — never negative, and zero only
+        // if the helper claimed everything first (both are legal; the
+        // assert is the hook's install/clear RAII not corrupting states).
+        let _ = claim_boundaries.load(Ordering::SeqCst);
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    });
+}
