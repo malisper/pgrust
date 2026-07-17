@@ -2508,3 +2508,91 @@ fn alter_system_shapes() {
     let n = only_stmt(&list).stmt.unwrap().as_alter_system_stmt().expect("AlterSystemStmt");
     assert_eq!(n.setstmt.kind, VariableSetKind::VAR_SET_DEFAULT);
 }
+
+#[test]
+fn create_function_transform_option() {
+    use types_nodes::rawnodes::TypeName;
+    // Rules 1197 (createfunc_opt_item TRANSFORM) + 1210/1211
+    // (transform_type_list); execution-side coverage lives with the
+    // functioncmds lane (panicfix-commands).
+    let list = parse(
+        "CREATE FUNCTION tf(i int) RETURNS int TRANSFORM FOR TYPE int, FOR TYPE text \
+         LANGUAGE sql AS 'select $1';",
+    );
+    let rs = only_stmt(&list);
+    let n = rs.stmt.expect("stmt").as_create_function_stmt().expect("CreateFunctionStmt");
+    let tr = n.options.nth(0).as_def_elem().expect("DefElem");
+    assert_eq!(tr.defname, Some("transform"));
+    let types = tr.arg.expect("arg").as_list().expect("List");
+    assert_eq!(types.len(), 2);
+    let t0 = types.nth(0).as_variant::<TypeName>().expect("TypeName");
+    assert_eq!(t0.names.nth(t0.names.len() - 1).as_string().expect("t").sval, "int4");
+    let t1 = types.nth(1).as_variant::<TypeName>().expect("TypeName");
+    assert_eq!(t1.names.nth(t1.names.len() - 1).as_string().expect("t").sval, "text");
+}
+
+#[test]
+fn alter_extension_contents_forms() {
+    use types_nodes::parsenodes::ObjectType;
+    use types_nodes::rawnodes::{AlterExtensionContentsStmt, TypeName};
+
+    // Rule 708: ADD TRANSFORM FOR Typename LANGUAGE name —
+    // object = [TypeName, String(lang)] (C list_make2($7, makeString($9))).
+    let list = parse("ALTER EXTENSION ext ADD TRANSFORM FOR int LANGUAGE sql;");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterExtensionContentsStmt>()
+        .expect("AlterExtensionContentsStmt");
+    assert_eq!(n.extname, Some("ext"));
+    assert_eq!(n.action, 1);
+    assert_eq!(n.objtype, ObjectType::OBJECT_TRANSFORM);
+    let pair = n.object.expect("object").as_list().expect("List");
+    assert_eq!(pair.len(), 2);
+    assert!(pair.nth(0).as_variant::<TypeName>().is_some());
+    assert_eq!(pair.nth(1).as_string().expect("lang").sval, "sql");
+
+    // Rule 700: DROP CAST '(' Typename AS Typename ')' — action -1,
+    // object = [TypeName, TypeName].
+    let list = parse("ALTER EXTENSION ext DROP CAST (int AS text);");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterExtensionContentsStmt>()
+        .expect("AlterExtensionContentsStmt");
+    assert_eq!(n.action, -1);
+    assert_eq!(n.objtype, ObjectType::OBJECT_CAST);
+    let pair = n.object.expect("object").as_list().expect("List");
+    assert_eq!(pair.len(), 2);
+    assert!(pair.nth(0).as_variant::<TypeName>().is_some());
+    assert!(pair.nth(1).as_variant::<TypeName>().is_some());
+
+    // Rule 704: ADD OPERATOR CLASS any_name USING name —
+    // object = lcons(makeString($9), $7) = [String(am), name parts...].
+    let list = parse("ALTER EXTENSION ext ADD OPERATOR CLASS myops USING btree;");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterExtensionContentsStmt>()
+        .expect("AlterExtensionContentsStmt");
+    assert_eq!(n.action, 1);
+    assert_eq!(n.objtype, ObjectType::OBJECT_OPCLASS);
+    let names = n.object.expect("object").as_list().expect("List");
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.nth(0).as_string().expect("am").sval, "btree");
+    assert_eq!(names.nth(1).as_string().expect("name").sval, "myops");
+
+    // Rules 699/701/703/709: object is the $6 node directly.
+    let list = parse("ALTER EXTENSION ext ADD TYPE int;");
+    let rs = only_stmt(&list);
+    let n = rs
+        .stmt
+        .expect("stmt")
+        .as_variant::<AlterExtensionContentsStmt>()
+        .expect("AlterExtensionContentsStmt");
+    assert_eq!(n.objtype, ObjectType::OBJECT_TYPE);
+    assert!(n.object.expect("object").as_variant::<TypeName>().is_some());
+}

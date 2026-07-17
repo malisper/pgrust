@@ -19,7 +19,7 @@ use crate::create::{conflicting_def_elem, get_required_extension};
 use crate::graph::identify_update_path;
 use crate::script::execute_extension_script;
 use crate::{
-    check_valid_version_name, get_extension_schema, unported, Anum_pg_extension_extname,
+    check_valid_version_name, get_extension_schema, Anum_pg_extension_extname,
     Anum_pg_extension_extnamespace, Anum_pg_extension_extrelocatable,
     Anum_pg_extension_extversion, Anum_pg_extension_oid, ExtensionNameIndexId,
     ExtensionOidIndexId, Natts_pg_extension,
@@ -93,7 +93,13 @@ pub fn ExecAlterExtensionStmt<'mcx>(
     // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
     // the aclchk lane.
     if !superuser::superuser()? {
-        unported("ExecAlterExtensionStmt: object_ownercheck for non-superusers");
+        // unported: ExecAlterExtensionStmt object_ownercheck for non-superusers
+        return Err(Box::new(
+            types_error::PgError::error(
+                "ALTER EXTENSION as a non-superuser is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let control = read_extension_control_file(extname)?;

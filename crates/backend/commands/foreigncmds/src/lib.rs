@@ -1136,7 +1136,13 @@ pub fn ImportForeignSchema<'mcx>(
             .into_error()
             .into());
     }
-    unported("ImportForeignSchema handler invocation (GetFdwRoutine; dfmgr/LANGUAGE C)");
+    // unported: ImportForeignSchema handler invocation
+    // (GetFdwRoutine; dfmgr/LANGUAGE C)
+    Err(::elog::ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg("IMPORT FOREIGN SCHEMA is not supported yet".to_string())
+        .into_error()
+        .into())
 }
 
 pub fn init_seams() {
