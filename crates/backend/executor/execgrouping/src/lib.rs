@@ -1102,6 +1102,15 @@ impl<'mcx> TupleHashTable<'mcx> {
         debug_assert_eq!(keys.len(), isnull.len());
         out.clear();
         out.reserve(keys.len());
+        // Fold the variable hash IV exactly as hash_slot's word kernels do
+        // (`rot(hash_iv,1) ^ hash`; no-op when the IV is 0). Missing this
+        // fold was the t26 merge-1 revert: parallel-planned PARTIAL aggs
+        // (leader included — worker -1 hashes to a nonzero IV) build their
+        // tables with use_variable_hash_iv, so an IV-less staged hash
+        // mismatches every per-row/table hash — dev builds die on the
+        // staged-parity assert (nodeagg agg_hash_probe_staged), release
+        // builds silently duplicate groups.
+        let iv_rot = self.hash_iv_rot;
         match self.kernel {
             ProbeKernel::Int2 { .. } => {
                 for (&k, &n) in keys.iter().zip(isnull) {
@@ -1110,26 +1119,26 @@ impl<'mcx> TupleHashTable<'mcx> {
                     } else {
                         ::hashfn::hash_bytes_uint32(k.as_i16() as i32 as u32)
                     };
-                    out.push(::hashfn::murmurhash32(h));
+                    out.push(::hashfn::murmurhash32(iv_rot ^ h));
                 }
             }
             ProbeKernel::Int4 { .. } => {
                 for (&k, &n) in keys.iter().zip(isnull) {
                     let h = if n { 0 } else { ::hashfn::hash_bytes_uint32(k.as_u32()) };
-                    out.push(::hashfn::murmurhash32(h));
+                    out.push(::hashfn::murmurhash32(iv_rot ^ h));
                 }
             }
             ProbeKernel::Int8 { .. } => {
                 for (&k, &n) in keys.iter().zip(isnull) {
                     let h = if n { 0 } else { ::hashfn::hash_bytes_uint32(hashint8_fold(k)) };
-                    out.push(::hashfn::murmurhash32(h));
+                    out.push(::hashfn::murmurhash32(iv_rot ^ h));
                 }
             }
             ProbeKernel::Text { .. } => {
                 let mcx = *self.entries.allocator();
                 for (&k, &n) in keys.iter().zip(isnull) {
                     let h = if n { 0 } else { text_kernel_hash(k, mcx)? };
-                    out.push(::hashfn::murmurhash32(h));
+                    out.push(::hashfn::murmurhash32(iv_rot ^ h));
                 }
             }
             ProbeKernel::Expr => unreachable!("staged hashing requires a probe kernel"),
