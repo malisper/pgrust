@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -24,10 +25,15 @@ use ::types_tuple::{
 
 use crate::deform::{slot_getallattrs, slot_getmissingattrs, TupleImage};
 
+// unported: EOH_flatten_into (the expandeddatum unit owns it); clean
+// feature error rather than a panic if an expanded datum ever lands here.
 #[cold]
 #[inline(never)]
-fn expanded_datum_unported() -> ! {
-    panic!("EOH_flatten_into not ported; expandeddatum unit owns it")
+fn expanded_datum_unported() -> Box<PgError> {
+    Box::new(
+        PgError::error("materializing an expanded datum is not yet implemented")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 #[cold]
@@ -473,7 +479,7 @@ fn virtual_materialize<'mcx>(v: &mut VirtualTupleTableSlot<'mcx>, mcx: Mcx<'mcx>
         // SAFETY: a non-null by-ref column datum points at a live field image.
         unsafe {
             if att.attlen == -1 && varatt_is_external_expanded(val.as_usize() as *const u8) {
-                expanded_datum_unported();
+                return Err(expanded_datum_unported());
             }
             sz = att_nominal_alignby(sz, att.attalignby);
             sz = att_addlength_datum(sz, att.attlen as i32, val);

@@ -3,7 +3,7 @@ use alloc::format;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::Allocator;
-use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
+use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_slot::SlotData;
 
 use crate::steps::{
@@ -2614,7 +2614,13 @@ fn eval_field_select(
     let p = value.as_usize() as *const u8;
     // SAFETY: non-null composite datum per the FieldSelect contract.
     if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
-        panic!("ExecEvalFieldSelect (execExprInterp.c): expanded-record fastpath unported");
+        // unported: ExecEvalFieldSelect (execExprInterp.c) expanded-record
+        // fastpath (the expandeddatum unit is not ported).
+        return Err(PgError::error(
+            "field selection from an expanded record is not yet implemented",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into());
     }
     // SAFETY: a live varlena-headed composite image.
     let total = unsafe { ::types_tuple::varatt::varsize_any(p) };

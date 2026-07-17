@@ -6,7 +6,8 @@
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use ::execexpr::{exec_init_qual, exec_qual, EvalSlots, ExprState};
+use ::execexpr::ExprState;
+use ::executils::exec_recheck_qual_and_reset;
 use ::execscan::{ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
@@ -85,22 +86,7 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
         slot: ExecSlotId,
     ) -> PgResult<bool> {
         let ecxt = self.ss.ps_ExprContext;
-        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
-        let passes = {
-            let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-            if let Some(q) = self.bitmapqualorig.as_deref_mut() {
-                // SAFETY: reset-only context, outlives the plan.
-                unsafe { q.arm_result_mcx_raw(per_tuple) };
-            }
-            let mut slots = EvalSlots {
-                scan: Some(estate.slot_mut(slot)),
-                inner: None,
-                outer: None,
-            };
-            exec_qual(self.bitmapqualorig.as_deref_mut(), &mut slots)?
-        };
-        estate.ecxt_mut(ecxt).reset();
-        Ok(passes)
+        exec_recheck_qual_and_reset(self.bitmapqualorig.as_deref_mut(), estate, ecxt, slot)
     }
 
     /// `BitmapHeapNext` minus setup (the dispatcher ran MultiExec first).
@@ -138,23 +124,12 @@ impl<'mcx> ScanNode<'mcx> for BitmapHeapScanState<'mcx> {
             // against the heap tuple (ExecQualAndReset shape).
             if self.recheck {
                 let ecxt = self.ss.ps_ExprContext;
-                estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
-                let passes = {
-                    // Per-tuple result mcx for arg-detoasting rechecks
-                    // (jsonb @> ...); the ecxt reset below frees it.
-                    let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-                    if let Some(q) = self.bitmapqualorig.as_deref_mut() {
-                        // SAFETY: reset-only context, outlives the plan.
-                        unsafe { q.arm_result_mcx_raw(per_tuple) };
-                    }
-                    let mut slots = EvalSlots {
-                        scan: Some(estate.slot_mut(slot_id)),
-                        inner: None,
-                        outer: None,
-                    };
-                    exec_qual(self.bitmapqualorig.as_deref_mut(), &mut slots)?
-                };
-                estate.ecxt_mut(ecxt).reset();
+                let passes = exec_recheck_qual_and_reset(
+                    self.bitmapqualorig.as_deref_mut(),
+                    estate,
+                    ecxt,
+                    slot_id,
+                )?;
                 if !passes {
                     if let Some(idx) = self.ss.instr_idx {
                         estate.es_instrumentation[idx as usize].nfiltered2 += 1.0;
@@ -214,21 +189,8 @@ pub fn bitmap_scan_batch_fetch<'mcx>(
         return Ok(true);
     }
     let ecxt = node.ss.ps_ExprContext;
-    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
-    let passes = {
-        let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();
-        if let Some(q) = node.bitmapqualorig.as_deref_mut() {
-            // SAFETY: reset-only context, outlives the plan.
-            unsafe { q.arm_result_mcx_raw(per_tuple) };
-        }
-        let mut slots = EvalSlots {
-            scan: Some(estate.slot_mut(slot_id)),
-            inner: None,
-            outer: None,
-        };
-        exec_qual(node.bitmapqualorig.as_deref_mut(), &mut slots)?
-    };
-    estate.ecxt_mut(ecxt).reset();
+    let passes =
+        exec_recheck_qual_and_reset(node.bitmapqualorig.as_deref_mut(), estate, ecxt, slot_id)?;
     if !passes {
         exectuples::exec_clear_tuple(estate.slot_mut(slot_id), mcx);
         return Ok(false);
@@ -473,10 +435,17 @@ pub fn exec_init_bitmap_heap_scan_rel<'mcx>(
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
-    ss.qual = ::executils::with_subplan_compile_env(estate, |env| {
-        ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)
-    })?;
-    let bitmapqualorig = exec_init_qual(mcx, &node.bitmapqualorig, params)?;
+    // bitmapqualorig carries the original index quals — including any SubPlan
+    // a runtime key pushed into the Index Cond — so it compiles under the
+    // subplan env exactly like ss.qual (C ExecInitQual under the planstate).
+    let (qual, bitmapqualorig) =
+        ::executils::with_subplan_compile_env(estate, |env| -> ::types_error::PgResult<_> {
+            let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
+            let bitmapqualorig =
+                ::execexpr::exec_init_qual_subplans(mcx, &node.bitmapqualorig, params, env)?;
+            Ok((qual, bitmapqualorig))
+        })?;
+    ss.qual = qual;
 
     Ok(BitmapHeapScanState {
         ss,

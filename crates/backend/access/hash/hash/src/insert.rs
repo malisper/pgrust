@@ -2,7 +2,7 @@
 
 use ::bufmgr_seams as bm;
 use ::types_core::{Buffer, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_hash::*;
 use ::types_rel::Relation;
 use ::types_storage::bufpage::SizeOfPageHeaderData;
@@ -241,12 +241,15 @@ fn _hash_vacuum_one_page(
     }
 
     if ndeletable > 0 {
-        // index_compute_xid_horizon_for_tuples: unported repo-wide (genam
-        // stub panics the same way); loud rather than a wrong horizon.
+        // unported: index_compute_xid_horizon_for_tuples (needs heapam
+        // heap_index_delete_tuples). Clean 0A000 in place of the old panic:
+        // nothing has been mutated yet (the page edit, meta update and WAL
+        // record all happen below), so failing the INSERT here is
+        // unwind-safe. A wrong horizon (e.g. InvalidTransactionId) would
+        // silently break hot-standby conflict detection for C replayers, so
+        // the deletion body below stays gated until the callee lands.
         let _ = hrel;
-        let snapshot_conflict_horizon: ::types_core::TransactionId = crate::unported(
-            "index_compute_xid_horizon_for_tuples (LP_DEAD reuse during insert; needs heapam heap_index_delete_tuples)",
-        );
+        let snapshot_conflict_horizon: ::types_core::TransactionId = unported_xid_horizon()?;
 
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_EXCLUSIVE)?;
 
@@ -292,4 +295,17 @@ fn _hash_vacuum_one_page(
         bm::lock_buffer::call(metabuf, bm::BUFFER_LOCK_UNLOCK)?;
     }
     Ok(())
+}
+
+// unported: shared 0A000 for the missing xid-horizon callee (see
+// _hash_vacuum_one_page); mirrors genam::index_compute_xid_horizon_for_tuples.
+#[cold]
+#[inline(never)]
+fn unported_xid_horizon() -> PgResult<::types_core::TransactionId> {
+    Err(Box::new(
+        PgError::error(
+            "reuse of dead index entries is not supported (index_compute_xid_horizon_for_tuples unported)",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
