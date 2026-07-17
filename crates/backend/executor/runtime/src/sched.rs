@@ -150,7 +150,7 @@ impl CallerDutyCtx {
     /// returned guard, the guard must not escape the caller's drive frame,
     /// and the pointer is dereferenced only from THIS thread inside
     /// run_task's claim loop while the guard lives.
-    pub(crate) fn set(duty: *mut (dyn FnMut() -> bool)) -> CallerDutyCtx {
+    pub(crate) fn set(duty: *mut dyn FnMut() -> bool) -> CallerDutyCtx {
         CALLER_DUTY.with(|c| c.set(Some(duty)));
         CallerDutyCtx
     }
