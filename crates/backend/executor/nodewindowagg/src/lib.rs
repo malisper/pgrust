@@ -1318,8 +1318,13 @@ impl<'mcx> WindowAggStateData<'mcx> {
         Ok(())
     }
 
-    // spool_tuples: pos == -1 spools the whole partition (the spilled-store
-    // pos=-1 arm is unreachable: spill is a loud panic).
+    // spool_tuples: pos == -1 spools the whole partition. (STALE-NOTE FIX,
+    // wave-3 WS-R: an older comment here claimed "spill is a loud panic" —
+    // it is not. The buffer tuplestore spills transparently through the
+    // ported TSS_WRITEFILE/READFILE arms; the exact window-buffer
+    // configuration — five read pointers, BACKWARD agg/per-func pointers,
+    // mid-file backward steps — is pinned spilled by
+    // tuplestore::tests::spill::spill_window_buffer_multi_pointer_backward_config.)
     fn spool_tuples<F>(
         &mut self,
         estate: &mut EStateData<'mcx>,
@@ -1411,8 +1416,11 @@ impl<'mcx> WindowAggStateData<'mcx> {
     }
 
     // window_gettupleslot over (readptr, seekpos): borrowed fetches
-    // (copy=false) are sound because the store never spills or trims within
-    // a partition (C copies to survive both).
+    // (copy=false) are sound because tuplestore_trim is unported (in-mem
+    // tuples live until clear/end) and the spilled arm ALWAYS returns fresh
+    // copies (gettupleslot's StoreTuple::File arm — C copies to survive
+    // both). (STALE-NOTE FIX, wave-3 WS-R: the old "the store never spills"
+    // claim was wrong; spill works — see the spool_tuples note above.)
     fn gettupleslot_at<F>(
         &mut self,
         estate: &mut EStateData<'mcx>,
