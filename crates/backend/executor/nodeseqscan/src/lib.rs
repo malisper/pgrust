@@ -42,6 +42,10 @@ pub struct SeqScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     variant: SeqScanVariant,
     plan_node_id: i32,
+    // The planner's output-row estimate for this scan (Plan.plan_rows,
+    // retained at init like plan_node_id): plan-time admission floors read
+    // it without a plan-tree walk (K1 heap grouped small-N floor).
+    plan_rows: f64,
     parallel_aware: bool,
     // Keeps the scan desc's NonNull target alive for the scan's lifetime.
     parallel: Option<std::sync::Arc<ParallelTableScanDescShared>>,
@@ -382,6 +386,12 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn plan_node_id(&self) -> i32 {
         self.plan_node_id
+    }
+
+    /// The planner's output-row estimate for this scan (Plan.plan_rows —
+    /// an ESTIMATE, only ever an admission-floor input, never semantics).
+    pub fn plan_rows(&self) -> f64 {
+        self.plan_rows
     }
 
     pub fn parallel_aware(&self) -> bool {
@@ -3383,6 +3393,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         ss,
         variant,
         plan_node_id: node.scan.plan.plan_node_id,
+        plan_rows: node.scan.plan.plan_rows,
         parallel_aware: node.scan.plan.parallel_aware,
         parallel: None,
         batch_soa: None,
@@ -3959,7 +3970,7 @@ mcx::forget_safe_nodrop!(ScanBatchMode);
 // bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
-        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
+        ss, variant, plan_node_id, plan_rows, parallel_aware, batch_soa, scan_batch, batch_allowed,
         lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny;
         bloom, parallel, cb_scan
     },
