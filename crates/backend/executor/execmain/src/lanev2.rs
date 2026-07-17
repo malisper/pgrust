@@ -61,6 +61,7 @@ pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
 pub(crate) use windows::try_own_window_agg;
+pub(crate) use windows::try_own_window_agg_t2;
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
@@ -69,6 +70,8 @@ pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TE
 pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
+#[cfg(test)]
+pub(crate) use windows::{windows_t2_set_for_tests, WINDOWS_T2_OWNED_FOR_TESTS};
 
 use std::sync::OnceLock;
 
