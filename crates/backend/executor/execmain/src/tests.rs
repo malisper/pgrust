@@ -99,6 +99,17 @@ fn install_seams() {
         // pg_aggregate.dat rows for count() 2803 / sum(int4) 2108.
         syscache_seams::lookup_pg_aggregate_shape::set(|aggfnoid| {
             Ok(match aggfnoid {
+                // count(*): moving-aggregate columns filled from the REAL
+                // pg_aggregate.dat row (PostgreSQL 18.3: aggmtransfn int8inc
+                // 1219, aggminvtransfn int8dec 3546 — both present in the
+                // fmgr canonical table — aggmtranstype int8), the WS-M TODO-7
+                // un-stub, landed by WS-R wave-3 so the windows_t2b_ab moving
+                // count(*) units exercise the framed lane's MovingByVal
+                // INVERSE kernel exactly as production does (the SQL corpus
+                // already covered it end-to-end on the real catalog).
+                // Additive fixture fill, same argument as the 2108 row below:
+                // UNBOUNDED-PRECEDING starts keep use_ma_code=false, so no
+                // pre-existing consumer changes code path or results.
                 2803 => Some(::syscache_seams::PgAggregateShape {
                     aggkind: b'n' as i8,
                     aggnumdirectargs: 0,
@@ -111,12 +122,12 @@ fn install_seams() {
                     aggfinalmodify: b'r' as i8,
                     aggsortop: 0,
                     aggtranstype: INT8OID,
-                    aggmtransfn: 0,
-                    aggminvtransfn: 0,
+                    aggmtransfn: 1219,
+                    aggminvtransfn: 3546,
                     aggmfinalfn: 0,
                     aggmfinalextra: false,
                     aggmfinalmodify: b'r' as i8,
-                    aggmtranstype: 0,
+                    aggmtranstype: INT8OID,
                     aggtransspace: 0,
                 }),
                 // sum(int4): moving-aggregate columns filled from the REAL
@@ -4517,6 +4528,26 @@ mod rowmode_ab {
                         prosecdef: false,
                         proconfig_isnull: true,
                     }),
+                    // count(*) — windows_t2b_ab moving count(*) units
+                    // (WS-R wave-3, the same set-once superset discipline
+                    // as the 2108 row above; the use_ma_code volatility
+                    // probe walks the WindowFunc). PostgreSQL 18.3 pg_proc.
+                    2803 => Some(syscache_seams::PgProcShape {
+                        pronamespace: 11,
+                        prorettype: INT8OID,
+                        provariadic: 0,
+                        prosupport: 0,
+                        prolang: 12,
+                        pronargs: 0,
+                        prokind: b'a' as i8,
+                        provolatile: b'i' as i8,
+                        proparallel: b's' as i8,
+                        proretset: false,
+                        proisstrict: false,
+                        proleakproof: false,
+                        prosecdef: false,
+                        proconfig_isnull: true,
+                    }),
                     // int4lt — windows_t2_ab FILTER exprs.
                     66 => Some(syscache_seams::PgProcShape {
                         pronamespace: 11,
@@ -7784,6 +7815,8 @@ mod windows_t2b_ab {
 
     #[derive(Clone, Copy)]
     enum BArgs {
+        /// No arguments (count(*)).
+        NoArgs,
         A,
         AOff(i32),
         AOffDef(i32, i32),
@@ -7902,6 +7935,7 @@ mod windows_t2b_ab {
             w.winref = 1;
             w.winagg = f.winagg;
             w.args = match f.args {
+                BArgs::NoArgs => NodeList::nil(),
                 BArgs::A => NodeList::make1(mcx, a_var()).unwrap(),
                 BArgs::AOff(k) => NodeList::make2(mcx, a_var(), i4(k)).unwrap(),
                 BArgs::AOffDef(k, d) => {
@@ -8491,6 +8525,99 @@ mod windows_t2b_ab {
         spec.end_off_i64 = Some(1);
         let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64], false);
         assert_eq!(runs, vec![Vec::new()]);
+        scanfix::quiesced();
+    }
+
+    /// Moving count(*) + sum(a) over ROWS BETWEEN 1 PRECEDING AND 1
+    /// FOLLOWING: the un-stubbed count(*) moving-agg fixture columns
+    /// (int8inc 1219 / int8dec 3546 — the WS-M TODO-7 item, contract §6.R
+    /// inc-3) drive the MovingByVal INVERSE kernel beside MovingIntSum.
+    #[test]
+    fn windows_t2b_ab_moving_count_star() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 77018;
+        scanfix::register_table_2col(relid, &[B_ROWS]);
+        let mut spec = BSpec::framed(ROWS_SLIDING);
+        spec.start_off_i64 = Some(1);
+        spec.end_off_i64 = Some(1);
+        spec.fns = &[
+            BFn {
+                fnoid: 2803,
+                wintype: INT8OID,
+                winagg: true,
+                args: BArgs::NoArgs,
+                filter_a_lt: None,
+            },
+            BFn {
+                fnoid: 2108,
+                wintype: INT8OID,
+                winagg: true,
+                args: BArgs::A,
+                filter_a_lt: None,
+            },
+        ];
+        let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64, Ty::I64], false);
+        let w = want(&[
+            &[I(2), I(20)],
+            &[I(3), I(40)],
+            &[I(3), I(60)],
+            &[I(2), I(50)],
+            &[I(2), I(11)],
+            &[I(2), I(11)],
+            &[I(1), I(7)],
+        ]);
+        assert_eq!(runs, vec![w]);
+        scanfix::quiesced();
+    }
+
+    /// Moving count(*) vs strict sum over EMPTY frames (ROWS BETWEEN 3
+    /// PRECEDING AND 1 PRECEDING): count answers 0 on an empty frame (its
+    /// moving initval), the strict sum answers NULL.
+    #[test]
+    fn windows_t2b_ab_moving_count_empty_frames() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 77019;
+        scanfix::register_table_2col(relid, &[B_ROWS]);
+        let mut spec = BSpec::framed(
+            FRAMEOPTION_NONDEFAULT
+                | FRAMEOPTION_ROWS
+                | FRAMEOPTION_BETWEEN
+                | FRAMEOPTION_START_OFFSET_PRECEDING
+                | FRAMEOPTION_END_OFFSET_PRECEDING,
+        );
+        spec.start_off_i64 = Some(3);
+        spec.end_off_i64 = Some(1);
+        spec.fns = &[
+            BFn {
+                fnoid: 2803,
+                wintype: INT8OID,
+                winagg: true,
+                args: BArgs::NoArgs,
+                filter_a_lt: None,
+            },
+            BFn {
+                fnoid: 2108,
+                wintype: INT8OID,
+                winagg: true,
+                args: BArgs::A,
+                filter_a_lt: None,
+            },
+        ];
+        let runs = ab_t2b(|mcx| mk_t2b_pstmt(mcx, relid, &spec), &[Ty::I64, Ty::I64], false);
+        let w = want(&[
+            &[I(0), Null],
+            &[I(1), I(10)],
+            &[I(2), I(20)],
+            &[I(3), I(40)],
+            &[I(0), Null],
+            &[I(1), I(5)],
+            &[I(0), Null],
+        ]);
+        assert_eq!(runs, vec![w]);
         scanfix::quiesced();
     }
 
