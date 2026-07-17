@@ -16,3 +16,4 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 nodes_core = { path = "../../../nodes/nodes_core" }
 copyfuncs = { path = "../../../nodes/copyfuncs" }
 var_seams = { path = "../var_seams" }
+rewrite_manip = { path = "../../../rewrite/rewrite_manip" }
