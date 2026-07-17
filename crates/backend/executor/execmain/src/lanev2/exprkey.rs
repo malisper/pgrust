@@ -1690,17 +1690,38 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         m.mks.epoch = None;
         m.mks.code_ids.clear();
     }
-    loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
-        if n == 0 {
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
-            break;
+    // K1 inc-1 source selection (the hashed feed's exact pattern, incl. the
+    // grouped small-N floor): knob-ON heap scans over the floor ride
+    // HeapBatchSource; everything else — and the whole knob-OFF world —
+    // constructs SeqScanSource (same monomorphized drain, same machine
+    // code). Knob-ON the serial scan is ONE claim: end_claim settles after
+    // the drain on success AND error (zero-pins-at-settle; the drain error
+    // wins the report), before the histogram flush / phase flip.
+    use super::batch_source::BatchGranuleSource as _;
+    if super::batch_source::heapfeed_v2_enabled() {
+        if super::batch_source::heap_gagg_admits(ss) {
+            let mut src = super::batch_source::HeapBatchSource::new(ss);
+            let drove = exprkey_fold_drain(
+                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
+                &mut idxs, &mut groups, &mut mm, &mut ch, estate,
+            );
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
+        } else {
+            let mut src = super::batch_source::SeqScanSource::new(ss);
+            let drove = exprkey_fold_drain(
+                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
+                &mut idxs, &mut groups, &mut mm, &mut ch, estate,
+            );
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
         }
-        ::postgres_seams::check_for_interrupts::call()?;
-        exprkey_batch(
+    } else {
+        exprkey_fold_drain(
             agg,
-            ss,
+            &mut super::batch_source::SeqScanSource::new(ss),
             xk,
             stage_slot,
             compact,
@@ -1710,13 +1731,67 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             &mut groups,
             &mut mm,
             &mut ch,
-            n,
             estate,
         )?;
     }
     // Pending histogram counts flush at feed end (before the phase flip).
     ch_flush(agg, xk, &mut ch, &mut mm.scratch)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// The expr-key feed's drain half (K1 inc-1; the hashed drain's exact
+/// pattern): generic over the storage seam's batch source — the staging
+/// loop only; the per-batch machinery (`exprkey_batch`) reaches the hosted
+/// scan through the transitional `seq_scan_bridge` (WS-A inc-2 deletes
+/// it). Both instantiations monomorphize to #[inline] delegation — the
+/// SeqScanSource instantiation is the pre-split machine code.
+#[allow(clippy::too_many_arguments)]
+fn exprkey_fold_drain<'mcx, S: super::batch_source::BatchGranuleSource<'mcx>>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    src: &mut S,
+    xk: &mut ExprKeyState,
+    stage_slot: &mut Option<ExecSlotId>,
+    compact: bool,
+    coded: &mut bool,
+    mk_shape: Option<&::nodeagg::MkShape>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    mm: &mut MmState,
+    ch: &mut Option<CodeHistState>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // End-of-scan clear ownership is process-static (trait-doc single-owner
+    // rules): knob-OFF the drain clears inline exactly as before; knob-ON
+    // the feed wrapper's end_claim owns it.
+    let clear_inline = !super::batch_source::heapfeed_v2_enabled();
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            if clear_inline {
+                let ss = super::batch_source::require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        exprkey_batch(
+            agg,
+            super::batch_source::require_bridge(src)?,
+            xk,
+            stage_slot,
+            compact,
+            coded,
+            mk_shape,
+            idxs,
+            groups,
+            mm,
+            ch,
+            n,
+            estate,
+        )?;
+    }
+    Ok(())
 }
 
 /// `PGRUST_LANE_V2_CODEHIST=0|off` kill switch (default ON inside the lane).
