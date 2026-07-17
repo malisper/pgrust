@@ -7753,3 +7753,51 @@ mod dml_ab {
         scanfix::quiesced();
     }
 }
+
+// ---------------------------------------------------------------------------
+// WS-S wave-3 — caller C2 A/B unit corpus (append-only region per the
+// shared-file rule; nothing above is edited). The C2 drive machinery's
+// engagement-level A/B lives runtime-side (runtime/src/tests.rs
+// caller_c2_tests: parked-drive parity vs the C1 face, park pumping, the
+// abort+drain discipline) because CallerWorker needs a live Runtime; the
+// execmain-side corpus pins the one execmain-owned PURE decision — the
+// inc-2 gang-death classifier the loud/benign escalation splits on — over
+// the full posture table, both boundary directions.
+// ---------------------------------------------------------------------------
+mod caller_c2_ab {
+    use crate::lanev2::caller_c2_gang_death_for_tests as gang_death;
+
+    /// The posture table from docs/design/caller-c2.md §3 (inc-2 row):
+    /// vanish class (`exited < launched`) escalates; accounted class
+    /// (refusals / clean exits / errored-with-payload.fail, i.e.
+    /// `exited >= launched`) stays C1 continue-alone.
+    #[test]
+    fn c2_gang_death_classifier_posture_table() {
+        // (exited, launched, escalate?)
+        let table: &[(usize, i32, bool)] = &[
+            // Vanish class: some helper died before its ExitBump.
+            (0, 1, true),
+            (0, 4, true),
+            (3, 4, true),
+            // Accounted: every launched helper bumped (refused or exited).
+            (1, 1, false),
+            (4, 4, false),
+            // Over-count never escalates (stale standing bumps are reset
+            // upstream; the classifier itself must not invert on >=).
+            (5, 4, false),
+            // Degenerates: zero/negative launched can never be a gang
+            // death (nothing was launched to die) — the caller path is
+            // unreachable there anyway (launched <= 0 falls back), but
+            // the classifier must stay total.
+            (0, 0, false),
+            (0, -1, false),
+        ];
+        for &(exited, launched, want) in table {
+            assert_eq!(
+                gang_death(exited, launched),
+                want,
+                "exited={exited} launched={launched}"
+            );
+        }
+    }
+}

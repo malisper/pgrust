@@ -3758,3 +3758,158 @@ mod ledger_external_tests {
         assert_eq!(rt.ledger_snapshot().external_admitted, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// WS-S wave-3 — caller-as-worker stage C2 (append-only module per the
+// shared-file rule; nothing above is edited). Units for the C2 drive face
+// (`drive_with_duties_parked` / `drive_loop`): the C1 face is untouched by
+// construction (it IS `drive_loop(.., None)`); these pin the C2 arm's
+// bounded-idle-park pumping, the park-error abort+drain discipline, the
+// A/B outcome parity against the C1 face, and the inc-4 accessor.
+// ---------------------------------------------------------------------------
+mod caller_c2_tests {
+    use super::*;
+    use types_error::{PgError, ERROR};
+
+    fn rt4() -> Arc<Runtime> {
+        Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        })
+    }
+
+    /// inc-3: a pinned RG over an OPEN starved stream forces Step::Idle;
+    /// the C1 eventcount park would block until an external wake, but the
+    /// C2 bounded idle park runs INSTEAD — here it is the producer (it
+    /// publishes+closes on its first call), proving (a) the park runs at
+    /// Idle, (b) control returns to the step loop, which then drives the
+    /// published work to completion. Deterministic: no threads, no sleeps.
+    #[test]
+    fn caller_parked_drive_pumps_idle_park_and_completes() {
+        let rt = rt4();
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let mut duty_calls = 0u64;
+        let mut parks = 0u64;
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || {
+                    duty_calls += 1;
+                    Ok(())
+                },
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    // The bounded park doubles as the producer: publish
+                    // everything and close, then wake (the documented
+                    // publish-then-wake order).
+                    source.publish(8);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(parks >= 1, "starved stream must reach the bounded idle park");
+        assert!(duty_calls > parks, "duties pump around the parked window");
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    }
+
+    /// inc-3 error discipline: an idle-park failure (a cancel raised at
+    /// the latch) aborts the RG and the drive DRAINS it before surfacing —
+    /// the exact duty-error discipline, from the park seam.
+    #[test]
+    fn caller_parked_drive_park_error_aborts_and_drains() {
+        let rt = rt4();
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || Err(PgError::new(ERROR, "latch cancel").into()),
+            )
+            .expect_err("failing park must surface");
+        assert_eq!(err.message(), "latch cancel");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// A/B parity: the C1 face and the C2 face drive identical READY work
+    /// (no Idle window) to the same outcome with every granule exactly
+    /// once — the C2 park seam is pure Idle-arm behavior, invisible when
+    /// work is claimable.
+    #[test]
+    fn caller_parked_drive_matches_c1_on_ready_work() {
+        for c2 in [false, true] {
+            let rt = rt4();
+            let work = SyntheticWork::new(32, None, 0);
+            let (h, waiter) =
+                rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(32))));
+            let mut caller = CallerWorker::enter(&rt).expect("lane available");
+            let outcome = if c2 {
+                let mut parks = 0u64;
+                let o = caller
+                    .drive_with_duties_parked(
+                        &rt,
+                        &h,
+                        &mut || Ok(()),
+                        &mut || true,
+                        &mut || {
+                            parks += 1;
+                            Ok(())
+                        },
+                    )
+                    .expect("no failures");
+                assert_eq!(parks, 0, "ready work never reaches the idle park");
+                o
+            } else {
+                caller
+                    .drive_with_duties(&rt, &h, &mut || Ok(()), &mut || true)
+                    .expect("no failures")
+            };
+            assert_eq!(outcome, RgOutcome::Completed, "arm c2={c2}");
+            assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+            work.assert_all_executed_once();
+            assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// inc-4 data source: the caller's WorkerLocal is readable after a
+    /// drive and carries the drive accumulators emit_wfin consumes.
+    #[test]
+    fn caller_worker_local_exposes_drive_stats() {
+        let rt = rt4();
+        let work = SyntheticWork::new(16, None, 0);
+        let (h, _waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(16))));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let ordinal = caller.lane_ordinal();
+        caller
+            .drive_with_duties_parked(&rt, &h, &mut || Ok(()), &mut || true, &mut || Ok(()))
+            .expect("no failures");
+        let local = caller.worker_local();
+        assert!(local.drive.tasks > 0, "the caller executed tasks");
+        assert!(local.drive.granules >= 16, "all granules ran through the caller");
+        assert_eq!(caller.lane_ordinal(), ordinal, "lane identity stable across the drive");
+    }
+}

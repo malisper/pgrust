@@ -88,6 +88,10 @@ pub(crate) use census::{
     census_rows_for_tests,
     planstate_kind_name_for_tests as census_planstate_kind_name_for_tests,
 };
+// --- WS-S wave-3 (caller C2) — append-only region ---
+#[cfg(test)]
+pub(crate) use runtime_scan::c2_gang_death as caller_c2_gang_death_for_tests;
+// --- end WS-S wave-3 ---
 
 use std::sync::OnceLock;
 
