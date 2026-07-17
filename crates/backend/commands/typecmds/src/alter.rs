@@ -22,7 +22,7 @@ use types_rel::{
 use pg_type::TypeOidIndexId;
 
 use crate::{
-    domainAddCheckConstraint, domainAddNotNullConstraint, type_name_to_string, unported,
+    domainAddCheckConstraint, domainAddNotNullConstraint, type_name_to_string,
     TYPTYPE_COMPOSITE, TYPTYPE_MULTIRANGE, TYPTYPE_RANGE,
 };
 use pg_type::TYPTYPE_DOMAIN;
@@ -864,7 +864,11 @@ pub fn RenameType<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt<'mcx>) -> PgResult<()>
         return Err(not_a_domain(type_oid)?);
     }
     if row.typtype == TYPTYPE_COMPOSITE {
-        unported("RenameType: composite type (RenameRelationInternal chase)");
+        // unported: RenameType composite types (RenameRelationInternal chase)
+        return Err(Box::new(
+            PgError::error("renaming a composite type is not supported yet")
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     if row.typelem != InvalidOid && row.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER {
         return Err(cannot_alter_array_type(type_oid, row.typelem)?);
@@ -917,7 +921,14 @@ pub fn AlterTypeOwner<'mcx>(
 
     if row.typowner != new_owner_id {
         if !superuser::superuser_arg(miscinit::GetUserId())? {
-            unported("AlterTypeOwner: non-superuser (check_can_set_role/ACL_CREATE)");
+            // unported: AlterTypeOwner non-superuser checks
+            // (check_can_set_role/ACL_CREATE)
+            return Err(Box::new(
+                PgError::error(
+                    "changing the owner of a type as a non-superuser is not supported yet",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
         }
         AlterTypeOwner_oid(mcx, type_oid, new_owner_id, true)?;
     }

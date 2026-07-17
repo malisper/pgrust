@@ -251,7 +251,13 @@ fn compute_function_attributes<'mcx>(
         let slot: &mut Option<&'mcx DefElem<'mcx>> = match name {
             "as" => &mut as_item,
             "language" => &mut language_item,
-            "transform" => unported("TRANSFORM option"),
+            // unported: TRANSFORM option (pg_transform lane)
+            "transform" => {
+                return Err(err(
+                    "CREATE FUNCTION ... TRANSFORM is not supported yet".to_string(),
+                    types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ))
+            }
             "window" => &mut windowfunc_item,
             "volatility" => &mut volatility_item,
             "strict" => &mut strict_item,
@@ -352,15 +358,11 @@ fn resolve_type_oid<'mcx, 'a>(mcx: Mcx<'mcx>, tn: &TypeName<'a>) -> PgResult<(Oi
         unported("pre-resolved TypeName.typeOid");
     }
 
-    let mut names: [&str; 4] = [""; 4];
-    let nnames = tn.names.len();
-    if nnames == 0 || nnames > 3 {
-        unported("improper TypeName names length");
-    }
-    for (i, n) in tn.names.iter().enumerate() {
-        names[i] = n.as_string().expect("TypeName names").sval;
-    }
-    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+    // C DeconstructQualifiedName's default arm raises the improper-qualified-name
+    // error itself for 0 or >3 parts; collect every part so it can.
+    let names: Vec<&str> =
+        tn.names.iter().map(|n| n.as_string().expect("TypeName names").sval).collect();
+    let (schemaname, typname) = catalog_namespace::DeconstructQualifiedName(&names)?;
 
     let typoid = match schemaname {
         Some(schemaname) => {
@@ -957,15 +959,11 @@ fn qualified_name_get_creation_namespace<'mcx>(
     mcx: Mcx<'mcx>,
     funcname: &types_nodes::NodeList<'mcx>,
 ) -> PgResult<(Oid, &'mcx str)> {
-    let mut names: [&str; 4] = [""; 4];
-    let nnames = funcname.len();
-    if nnames == 0 || nnames > 3 {
-        unported("improper qualified function name");
-    }
-    for (i, n) in funcname.iter().enumerate() {
-        names[i] = n.as_string().expect("func_name holds Strings").sval;
-    }
-    let (schemaname, objname) = catalog_namespace::DeconstructQualifiedName(&names[..nnames])?;
+    // C DeconstructQualifiedName's default arm raises the improper-qualified-name
+    // error itself for 0 or >3 parts; collect every part so it can.
+    let names: Vec<&str> =
+        funcname.iter().map(|n| n.as_string().expect("func_name holds Strings").sval).collect();
+    let (schemaname, objname) = catalog_namespace::DeconstructQualifiedName(&names)?;
     let rv = rel_vocab::RangeVar {
         catalogname: None,
         schemaname,
@@ -1049,7 +1047,11 @@ pub fn CreateFunction<'mcx>(
     if languageOid != SQLlanguageId && languageOid != INTERNALlanguageId
         && languageOid != ClanguageId && language != "plpgsql"
     {
-        unported("languages beyond sql, internal, c and plpgsql");
+        // unported: languages beyond sql, internal, c and plpgsql
+        return Err(err(
+            format!("language \"{language}\" is not supported yet"),
+            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+        ));
     }
 
     if lanpltrusted {
