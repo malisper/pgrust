@@ -1724,28 +1724,40 @@ pub fn mt_source_exhausted<'mcx>(
 
 /// Lane-admission shape probe (lanev2/dml.rs, behind `PGRUST_LANE_V2_DML`;
 /// wave-2 WS-N inc-1 authored it as `mt_lane_insert_refusal`, wave-3 WS-T
-/// inc-3a renamed + WIDENED it per docs/design/lane-dml-epq.md §6):
+/// inc-3a renamed + WIDENED it per docs/design/lane-dml-epq.md §6, wave-5
+/// WS-W widened the ON CONFLICT arm per the wave-5 contract §8.3):
 /// `None` = a shape the DML lane hosts — a single-result-relation
-/// plain-table mutation with no triggers, no ON CONFLICT, no partition
-/// routing / inherited root, and at most trivial (no OLD/NEW alias)
-/// RETURNING, where the operation is INSERT always, and UPDATE/DELETE only
-/// when the caller passes `admit_ud` (the nested `PGRUST_LANE_V2_DML_UD`
-/// stretch knob, read by the lane AFTER the host knob — never here).
+/// plain-table mutation with no triggers, no partition routing / inherited
+/// root, and at most trivial (no OLD/NEW alias) RETURNING, where the
+/// operation is INSERT always, UPDATE/DELETE only when the caller passes
+/// `admit_ud` (the nested `PGRUST_LANE_V2_DML_UD` stretch knob, read by
+/// the lane AFTER the host knob — never here), and INSERT .. ON CONFLICT
+/// (DO NOTHING and DO UPDATE, the ladder-named OC arms — the four oc_*
+/// seams above compose the whole ceremony inside `exec_insert`, which
+/// both engines share) only when the caller passes `admit_oc` (the nested
+/// `PGRUST_LANE_V2_DML_OC` knob, same read discipline).
 /// `Some(detail)` = the `DmlShape` refusal with its mechanism-attribution
 /// detail string (integration contract §1: attribution rides the detail
-/// string, never a second class). MERGE stays refused (blocked on the
-/// C-side trace pin); partition routing and triggers have no scheduled
-/// increment; the structural gates below are operation-agnostic, so a
-/// UD-admitted shape passes exactly the inc-1 INSERT gates (in particular
-/// `target-not-plain-table` keeps the VIEW/ir-trigger arms of
-/// `mt_accept_row` out of the admitted set).
+/// string, never a second class). MERGE stays refused EVEN under both
+/// nested knobs (blocked on the C-side trace pin); partition routing and
+/// triggers have no scheduled increment; the structural gates below are
+/// operation-agnostic, so a UD- or OC-admitted shape passes exactly the
+/// inc-1 INSERT gates (in particular `target-not-plain-table` keeps the
+/// VIEW/ir-trigger arms of `mt_accept_row` out of the admitted set, and
+/// `partition-routing` keeps the leaf-arbiter/leaf-on-conflict legs of the
+/// oc_* seams out of the OC-admitted set).
 ///
 /// Lives here (not in the lane) because the verdict reads private node
 /// state; it is a read-only probe — calling it changes nothing, so a refusal
 /// falls through to the unchanged Volcano arm byte-safely. The admitted set
 /// widens in later increments (docs/design/lane-dml-epq.md ladder); every
-/// widening deletes a `Some` arm here and its allowlist row together.
-pub fn mt_lane_shape_refusal(mt: &ModifyTableState<'_>, admit_ud: bool) -> Option<&'static str> {
+/// widening deletes (or knob-gates) a `Some` arm here and re-justifies its
+/// allowlist row together.
+pub fn mt_lane_shape_refusal(
+    mt: &ModifyTableState<'_>,
+    admit_ud: bool,
+    admit_oc: bool,
+) -> Option<&'static str> {
     match mt.operation {
         CmdType::CMD_INSERT => {}
         CmdType::CMD_UPDATE if admit_ud => {}
@@ -1757,6 +1769,7 @@ pub fn mt_lane_shape_refusal(mt: &ModifyTableState<'_>, admit_ud: bool) -> Optio
     }
     if mt.plan.onConflictAction
         != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+        && !admit_oc
     {
         return Some("on-conflict");
     }

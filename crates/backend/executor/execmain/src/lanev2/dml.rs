@@ -405,10 +405,14 @@ pub fn try_own_modify_table<'mcx>(
     }
     let node = &mut **mps;
     // Shape gate: inc-1's admitted INSERT set, widened to UPDATE/DELETE by
-    // the inc-3a stretch when the nested UD knob is on (the probe's detail
-    // string carries mechanism attribution, contract §1).
+    // the inc-3a stretch when the nested UD knob is on, and to the
+    // ladder-named ON CONFLICT arms by wave-5 WS-W when the nested OC knob
+    // is on (the OC admission entry, wave-5 contract §8.3 — dml.rs-local
+    // per §2's preference; knob machinery in the wave-5 append region
+    // below). The probe's detail string carries mechanism attribution
+    // (contract §1).
     if let Some(detail) =
-        ::nodemodifytable::mt_lane_shape_refusal(&node.mt, dml_ud_enabled())
+        ::nodemodifytable::mt_lane_shape_refusal(&node.mt, dml_ud_enabled(), dml_oc_enabled())
     {
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::DmlShape);
         if super::lane_trace_enabled() {
@@ -571,3 +575,80 @@ pub fn try_own_lock_rows_dml<'mcx>(
     let mut root = RootAdapter::new(None);
     pull_step_rows(&mut **outer, &mut LockRowsChildSource, &mut op, &mut root, estate).map(Some)
 }
+
+// ===== WAVE-5 APPEND REGION — do not edit above =====
+// --- WS-W (wave-5): ON CONFLICT host-arm admission -------------------------
+//
+// Knob `PGRUST_LANE_V2_DML_OC` (wave-5 contract §3 registry row; default
+// OFF, NEVER default during migration): the nested OC admission knob.
+// Read ONLY from `try_own_modify_table`'s shape-gate line, after
+// `dml_enabled()` has already passed (the `_UD` nested-knob law verbatim)
+// — `_OC` alone flips nothing, and at default config this byte is never
+// loaded at all (§0.6 OFF-first: the resolve is a one-shot #[cold]
+// memoized read; the OFF arm adds zero branches to any hot path because
+// the only reader sits behind the already-non-default DML host knob).
+//
+// ON semantics THIS wave (§8.3): admits ONLY the ladder-named ON CONFLICT
+// host arms — INSERT .. ON CONFLICT DO NOTHING and DO UPDATE on the
+// already-admitted structural set (single result rel, plain table, no
+// triggers, no partition routing, trivial RETURNING). The widening is
+// VERDICT-ONLY (the inc-3a `admit_ud` precedent): `mt_step` already
+// routes every operation through `mt_accept_row` → `exec_insert`, whose
+// four oc_* seams compose the whole speculative-insert ceremony
+// identically on both engines — no new machinery, routing stays
+// `RefuseReason::DmlShape` (vocab mint: ZERO). MERGE arms refuse even
+// knob-ON (the probe's `merge` arm is unconditional; C-side trace pin
+// outstanding). EPQ LAW unchanged: `es_epq_active` refuses ALL DML
+// ownership BEFORE the shape gate, so OC arms refuse inside rechecks; a
+// recheck INITIATED by an owned OC drive (exec_on_conflict_update's
+// epq_eval use) goes through the ONE pinned closure `mt_accept_row`
+// already carries.
+//
+// Isolation mapping (contract §8.4, declared here + notes/se-ws-w-dml-oc
+// .md): WS-W battery = insert-conflict-do-nothing,
+// insert-conflict-do-update{,-2,-3}, insert-conflict-specconflict,
+// merge-match-recheck, merge-insert-update, merge-delete, merge-update,
+// merge-join — refusal-invariant multi-arm legs this wave (byte-identical
+// across knob arms where refusal holds; dualexec-proved where OC arms
+// engage: scripts/dualexec/corpus-dml-oc.sql). partition-key-update-1..4
+// asserted STAYING REFUSED (partition-routing is still DmlShape).
+//
+// Capacity-one-sink checkpoint (§8.5): NO wave-5 OC arm composes a
+// breaker sink — the OC drive is the existing `DmlInsertOp` +
+// `RootAdapter::new(None)` composition, and OC never sets
+// `mt_merge_pending_not_matched`, so `resume`'s deferred-emit leg stays
+// MERGE-only-unreachable. The debug_assert'd capacity-one assumption in
+// `DmlInsertOp::resume` therefore stands UNRESTRUCTURED and
+// still-outstanding (recorded in the worklog note; the restructure is
+// owed before MERGE admission or any breaker-sink composition).
+
+/// `PGRUST_LANE_V2_DML_OC` (default OFF): the wave-5 WS-W nested OC
+/// admission knob. Same AtomicU8 memoized-resolve idiom as `DML`/`DML_UD`.
+static DML_OC: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn dml_oc_enabled() -> bool {
+    match DML_OC.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => dml_oc_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dml_oc_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_DML_OC").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    DML_OC.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the wave-5 OC admission units.
+#[cfg(test)]
+pub(crate) fn dml_oc_set_for_tests(on: bool) {
+    DML_OC.store(if on { 2 } else { 1 }, Relaxed);
+}
+// --- end WS-W (wave-5) ------------------------------------------------------
