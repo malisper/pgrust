@@ -610,19 +610,6 @@ pub(super) trait RowSource<'mcx> {
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>>;
-
-    /// Reachable Plan node id for the wave-4 G7 EngineEvent capture at the
-    /// hosting chokepoint. Consulted ONLY under `estate.engine_capture()`
-    /// (the emission-gate law) — never on a default-path pull, so the id's
-    /// pointer chase costs the per-pull drive zero instructions (se-delegtax
-    /// SH-C; the eager `plan_node_id: Option<i32>` drive parameter was 3
-    /// dependent loads per owned pull on the Some-id shapes). Default `None`
-    /// = the node state carries no reachable Plan pointer (the
-    /// ScanState-shaped leaves; the named G7 residual — see rowmode_tail.rs
-    /// `drive`).
-    fn plan_node_id(_node: &Self::Node) -> Option<i32> {
-        None
-    }
 }
 
 /// One PG pull over a row-mode pipeline: `RowSource` → `TupleOp` →

@@ -56,9 +56,7 @@ use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::PgResult;
 
-use super::push::{
-    pull_step_point, pull_step_rows, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, TupleOp,
-};
+use super::push::{pull_step_rows, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, TupleOp};
 use super::stats::{self, RefuseReason, ShapeClass};
 
 /// `PGRUST_LANE_V2_ROWMODE` (default OFF — wave-4 FLIP-1 made it default-ON;
@@ -322,64 +320,26 @@ pub fn try_own_project_set<'mcx>(
     pull_step_rows(rs, &mut ResultRowSource, &mut op, &mut root, estate).map(Some)
 }
 
-/// MergeJoin as a row-mode LEAF (Phase-1 WS-G): one joined row per step;
-/// both children stay Volcano-driven INSIDE the ported FSM — `next_row` runs
-/// the identical statements `merge_join_arm`'s fallback runs (a pure
-/// delegation to `::nodemergejoin::exec_merge_join`, zero changes to that
-/// crate). All cross-call state is the FSM's own node-resident
-/// `mj_JoinState`/slots (nodemergejoin lib.rs), including the mark/restore
-/// protocol on the inner child (EXEC_MJ_SKIP_TEST marks, EXEC_MJ_TESTOUTER
-/// restores — delegated to the child's `mark_pos`/`restr_pos` exactly as the
-/// Volcano drive does), so a Volcano fallback at ANY pull boundary is
-/// byte-safe by construction.
-struct MergeJoinRowSource;
-
-impl<'mcx> RowSource<'mcx> for MergeJoinRowSource {
-    type Node = crate::procnode::MergeJoinNode<'mcx>;
-
-    fn next_row(
-        &mut self,
-        node: &mut Self::Node,
-        estate: &mut EStateData<'mcx>,
-    ) -> PgResult<Option<ExecSlotId>> {
-        let crate::procnode::MergeJoinNode { state, outer, inner } = node;
-        ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
-    }
-}
-
-/// Try to let the row-mode lane host a MergeJoin (both children Volcano).
-/// `None` = refused; the caller runs the unchanged `exec_merge_join`.
+/// MergeJoin per-pull ownership VERDICT (se-delegtax SH-E; supersedes the
+/// SH-A hosted drive, which was already statement-identical to the arm's
+/// own fallback — `exec_merge_join` over the same FSM, both children
+/// Volcano inside it, all cross-call state node-resident). Ownership of a
+/// pure delegation leaf is an ACCOUNTING fact: the arm runs its single
+/// fallback body either way (original Volcano tail-call shape, no
+/// `Option<Option<..>>` sret round trip), and this function contributes the
+/// decision side effects only — the dynamic gates (OR-folded, reason
+/// re-derived on the cold tail; refusal set + cadence identical), the G7
+/// EngineEvent capture, and the OWNED tick (once per pull, SH-B diag mask).
 ///
-/// Gates, in the `try_own_project_set` order: the `PGRUST_LANE_V2_MERGEJOIN`
-/// knob FIRST (the wave-2 knob-split — see the module doc; before the split
-/// this read the facility-wide rowmode knob) — and unlike ProjectSet,
-/// knob-OFF ticks NOTHING (there is no pre-existing MergeJoin wholesale
-/// refuse, so default-config accounting stays byte-identical trivially;
-/// integration contract §2d) — then the dynamic per-call EPQ / backward /
-/// instrumented gates, OR-folded with the reason re-derived on the `#[cold]`
-/// refuse tail (se-delegtax SH-D; refusal set + tick cadence identical to
-/// the pre-fold priority walk). No shape gate: increment-1 admits every plan
-/// the FSM itself admits (the hosting is jointype-agnostic delegation). No
-/// extra prologue either: `exec_merge_join` runs its own entry CFI +
-/// per-tuple reset as the FSM body's first statements, so the wrapper adds
-/// no calls the Volcano drive would not make.
-///
-/// OWNED tick cadence: once per drive start = once per owned PG pull (the
-/// stats.rs class doc restates this), now behind the SH-B diag mask (one
-/// process-static byte load at default config). The drive itself is the
-/// ratified degenerate leaf driver `pull_step_point` (se-delegtax SH-A —
-/// push.rs carries the statement-identity proof vs the displaced
-/// `PassthroughOp → RootAdapter::new(None)` pipeline; SE4-GATES leg 5
-/// measured that round trip as the FLIP-2 mergejoin lane tax). No
-/// clear-on-finish either way: exec_merge_join returns end-of-join without
-/// clearing the result slot.
+/// Knob order unchanged: `PGRUST_LANE_V2_MERGEJOIN` FIRST — knob-OFF ticks
+/// NOTHING (no pre-existing MergeJoin wholesale refuse; contract §2d).
 #[inline]
-pub fn try_own_merge_join<'mcx>(
-    mj: &mut crate::procnode::MergeJoinNode<'mcx>,
+pub fn merge_join_pull_verdict<'mcx>(
+    mj: &crate::procnode::MergeJoinNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<Option<ExecSlotId>>> {
+) {
     if !mergejoin_enabled() {
-        return Ok(None);
+        return;
     }
     // Dynamic per-call gates (the try_own_result cadence), OR-folded.
     if estate.es_epq_active
@@ -387,7 +347,7 @@ pub fn try_own_merge_join<'mcx>(
         || !estate.es_instrumentation.is_empty()
     {
         mj_gate_refused(mj, estate);
-        return Ok(None);
+        return;
     }
     // Wave-4 pre-flip G7 capture (flip-ladder §2 rung-2 gate): the MJ ENGINE
     // capture at THE verdict chokepoint — `estate.engine_capture()` gated
@@ -401,8 +361,7 @@ pub fn try_own_merge_join<'mcx>(
         mj_diag_owned(diag);
     }
     #[cfg(test)]
-    ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
-    pull_step_point(mj, &mut MergeJoinRowSource, estate).map(Some)
+    ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Cold refuse tail (SH-D): re-derive the first failing gate in the
