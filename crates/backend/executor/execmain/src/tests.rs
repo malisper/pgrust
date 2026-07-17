@@ -165,6 +165,8 @@ fn install_seams() {
             Ok(match (opfamily, left, right, procnum) {
                 (INTEGER_BTREE_FAM, INT4OID, INT4OID, 2) => F_BTINT4SORTSUPPORT,
                 (INTEGER_HASH_FAM, INT4OID, INT4OID, 1) => F_HASHINT4,
+                // btree ORDER proc for the express_ab fake-index corpus.
+                (INTEGER_BTREE_FAM, INT4OID, INT4OID, 1) => F_BTINT4CMP,
                 other => panic!("unexpected amproc probe {other:?}"),
             })
         });
@@ -196,6 +198,7 @@ const INTEGER_HASH_FAM: u32 = 1977;
 const HASH_AM: u32 = 405;
 const F_HASHINT4: u32 = 450;
 const F_INT4EQ: u32 = 65;
+const F_BTINT4CMP: u32 = 351;
 
 fn mk_int4_const(mcx: ::mcx::Mcx<'_>, v: i32) -> Node<'_> {
     Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
@@ -523,6 +526,10 @@ mod scanfix {
         pages: Vec<usize>,
         pins: Vec<i32>,
         two_col: std::collections::HashSet<Oid>,
+        // WS-J express_ab: fake btree indexes (index oid -> indexed heap
+        // oid); fake_relation_open serves these as RELKIND_INDEX btree
+        // relations over a 1-col int4 key.
+        indexes: HashMap<Oid, Oid>,
     }
 
     static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
@@ -534,6 +541,7 @@ mod scanfix {
             pages: Vec::new(),
             pins: Vec::new(),
             two_col: std::collections::HashSet::new(),
+            indexes: HashMap::new(),
         }))
     }
 
@@ -582,6 +590,23 @@ mod scanfix {
             with_fake(|f| f.pins[(buf - 1) as usize] += 1);
         });
         bufmgr_seams::lock_buffer::set(|_buf, _mode| Ok(()));
+        // WS-J express_ab: the btree read path's extra seams (the
+        // nodeindexscan test-fixture set, verbatim semantics).
+        bufmgr_seams::release_and_read_buffer::set(|buf, rel, blkno| {
+            if buf != ::types_core::InvalidBuffer {
+                let same =
+                    with_fake(|f| f.tables[&rel.rd_id].get(blkno as usize) == Some(&buf));
+                if same {
+                    return Ok(buf);
+                }
+                bufmgr_seams::release_buffer::call(buf)?;
+            }
+            bufmgr_seams::read_buffer::call(rel, blkno)
+        });
+        bufmgr_seams::mark_buffer_dirty_hint::set(|_buf, _std| Ok(()));
+        bufmgr_seams::buffer_get_lsn_atomic::set(|_buf| 0x1234);
+        transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        predicate_seams::predicate_lock_page::set(|_rel, _blkno, _snap| Ok(()));
         bufmgr_seams::get_access_strategy::set(|_| None);
         bufmgr_seams::free_access_strategy::set(|_| {});
         bufmgr_seams::relation_get_number_of_blocks_in_fork::set(|rel, _fork| {
@@ -685,6 +710,130 @@ mod scanfix {
         });
     }
 
+    // ---- WS-J express_ab: fake single-leaf btree over a 2-col heap -------
+    // Page shapes lifted from nodeindexscan/src/tests.rs (the canonical fake
+    // btree fixture): a BTP_META metapage pointing at one BTP_LEAF|BTP_ROOT
+    // leaf whose 16-byte int4 index tuples TID-point into heap page 0.
+
+    fn put_u16(p: &mut TestPage, off: usize, v: u16) {
+        p.0[off..off + 2].copy_from_slice(&v.to_ne_bytes());
+    }
+
+    fn new_bt_page(special_flags: u16, level: u32) -> Box<TestPage> {
+        use ::types_nbtree::{BTPageOpaqueData, P_NONE};
+        let mut p = Box::new(TestPage([0u8; BLCKSZ]));
+        let special = BLCKSZ - core::mem::size_of::<BTPageOpaqueData>();
+        put_u16(&mut p, 12, SizeOfPageHeaderData as u16); // pd_lower
+        put_u16(&mut p, 14, special as u16); // pd_upper
+        put_u16(&mut p, 16, special as u16); // pd_special
+        let opaque = BTPageOpaqueData {
+            btpo_prev: P_NONE,
+            btpo_next: P_NONE,
+            btpo_level: level,
+            btpo_flags: special_flags,
+            btpo_cycleid: 0,
+        };
+        // SAFETY: in-bounds, aligned special area write on an owned page.
+        unsafe {
+            p.0.as_mut_ptr()
+                .add(special)
+                .cast::<::types_nbtree::BTPageOpaqueData>()
+                .write(opaque)
+        };
+        p
+    }
+
+    fn bt_meta_page(root: u32, level: u32) -> Box<TestPage> {
+        use ::types_nbtree::{BTMetaPageData, BTP_META, BTREE_MAGIC, BTREE_VERSION};
+        let mut p = new_bt_page(BTP_META, 0);
+        let metad = BTMetaPageData {
+            btm_magic: BTREE_MAGIC,
+            btm_version: BTREE_VERSION,
+            btm_root: root,
+            btm_level: level,
+            btm_fastroot: root,
+            btm_fastlevel: level,
+            btm_last_cleanup_num_delpages: 0,
+            btm_last_cleanup_num_heap_tuples: -1.0,
+            btm_allequalimage: true,
+        };
+        // SAFETY: metapage contents at +SizeOfPageHeaderData on an owned page.
+        unsafe {
+            p.0.as_mut_ptr()
+                .add(SizeOfPageHeaderData)
+                .cast::<::types_nbtree::BTMetaPageData>()
+                .write(metad)
+        };
+        p
+    }
+
+    // One 16-byte int4 index tuple (t_info alt-TID bits unset).
+    fn add_index_tuple(
+        p: &mut TestPage,
+        tid: ::types_tuple::itemptr::ItemPointerData,
+        value: i32,
+    ) {
+        let itupsz = 16usize;
+        let pd_lower = u16::from_ne_bytes([p.0[12], p.0[13]]) as usize;
+        let pd_upper = u16::from_ne_bytes([p.0[14], p.0[15]]) as usize;
+        let off = pd_upper - itupsz;
+        // SAFETY: owned page bytes; ItemPointerData is a 6B POD.
+        unsafe {
+            p.0.as_mut_ptr()
+                .add(off)
+                .cast::<::types_tuple::itemptr::ItemPointerData>()
+                .write_unaligned(tid);
+        }
+        p.0[off + 6..off + 8].copy_from_slice(&(itupsz as u16).to_ne_bytes());
+        p.0[off + 8..off + 12].copy_from_slice(&value.to_ne_bytes());
+        let mut iid = ItemIdData::new(0, 0, 0);
+        iid.set_normal(off as u16, itupsz as u16);
+        // SAFETY: line-pointer slot in the owned page.
+        unsafe {
+            p.0.as_mut_ptr()
+                .add(pd_lower)
+                .cast::<ItemIdData>()
+                .write(iid)
+        };
+        put_u16(p, 12, (pd_lower + 4) as u16);
+        put_u16(p, 14, off as u16);
+    }
+
+    /// The express_ab kv fixture: a 2-col `(k int4, v int4)` heap page plus a
+    /// single-leaf btree over column 1. Heap row `i` (0-based) sits at
+    /// offset `i+1` on page 0; the leaf indexes keys in ascending order.
+    pub fn register_indexed_table_2col(heap_oid: Oid, index_oid: Oid, rows: &[(i32, i32)]) {
+        register_table_2col(heap_oid, &[rows]);
+        let mut keyed: Vec<(i32, u16)> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, &(k, _))| (k, (i + 1) as u16))
+            .collect();
+        keyed.sort_unstable();
+        let mut leaf = new_bt_page(
+            ::types_nbtree::BTP_LEAF | ::types_nbtree::BTP_ROOT,
+            0,
+        );
+        for (k, off) in keyed {
+            add_index_tuple(
+                &mut leaf,
+                ::types_tuple::itemptr::ItemPointerData::new(0, off),
+                k,
+            );
+        }
+        with_fake(|f| {
+            let mut bufs = Vec::new();
+            for p in [bt_meta_page(1, 0), leaf] {
+                let addr = Box::leak(p).0.as_mut_ptr() as usize;
+                f.pages.push(addr);
+                f.pins.push(0);
+                bufs.push(f.pages.len() as Buffer);
+            }
+            f.tables.insert(index_oid, bufs);
+            f.indexes.insert(index_oid, heap_oid);
+        });
+    }
+
     pub fn quiesced() {
         with_fake(|f| {
             assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
@@ -729,6 +878,9 @@ mod scanfix {
         relid: Oid,
         _lockmode: LOCKMODE,
     ) -> ::types_error::PgResult<Relation<'mcx>> {
+        if let Some(heap_oid) = with_fake(|f| f.indexes.get(&relid).copied()) {
+            return Ok(fake_index_relation(mcx, relid, heap_oid));
+        }
         let mut relname = NameData::default();
         relname.namestrcpy("t");
         let rd_rel = FormData_pg_class {
@@ -790,6 +942,104 @@ mod scanfix {
             rd_hastriggers: false, rd_hasrules: false,
         };
         Ok(Relation::open(data, Some(record_close)))
+    }
+
+    /// WS-J express_ab: the fake btree index relation over `heap_oid`'s
+    /// column 1 (int4), served by `fake_relation_open` for oids registered
+    /// via `register_indexed_table_2col` (shape: nodeindexscan tests'
+    /// `index_relation`).
+    fn fake_index_relation<'mcx>(mcx: Mcx<'mcx>, relid: Oid, heap_oid: Oid) -> Relation<'mcx> {
+        const INT4_BTREE_OPFAMILY: Oid = 1976;
+        let mut relname = NameData::default();
+        relname.namestrcpy("t_idx");
+        let one_oid = |v: Oid| {
+            let mut vec = PgVec::new_in(mcx);
+            vec.push(v);
+            vec
+        };
+        let mut indkey = PgVec::new_in(mcx);
+        indkey.push(1);
+        let mut indoption = PgVec::new_in(mcx);
+        indoption.push(0i16);
+        let data = RelationData {
+            rd_locator: Default::default(),
+            rd_smgr: Default::default(),
+            rd_id: relid,
+            rd_backend: INVALID_PROC_NUMBER,
+            rd_islocaltemp: false,
+            rd_isvalid: std::cell::Cell::new(true),
+            rd_createSubid: std::cell::Cell::new(0),
+            rd_newRelfilelocatorSubid: std::cell::Cell::new(0),
+            rd_firstRelfilelocatorSubid: std::cell::Cell::new(0),
+            rd_droppedSubid: std::cell::Cell::new(0),
+            rd_lockInfo: LockInfoData {
+                lockRelId: LockRelId {
+                    relId: relid,
+                    dbId: 5,
+                },
+            },
+            rd_rel: FormData_pg_class {
+                relname,
+                relnamespace: 2200,
+                reltype: 0,
+                relowner: 10,
+                relam: ::types_core::BTREE_AM_OID,
+                relfilenode: relid,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: -1.0,
+                relallvisible: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relisshared: false,
+                relpersistence: RELPERSISTENCE_PERMANENT,
+                relkind: ::types_rel::RELKIND_INDEX,
+                relhassubclass: false,
+                relrowsecurity: false,
+                relispopulated: true,
+                relreplident: b'd',
+                relispartition: false,
+                relfrozenxid: 3,
+                relminmxid: 1,
+            },
+            rd_att: int4_tupdesc(mcx, 1),
+            rd_index: Some(::types_rel::FormData_pg_index {
+                indexrelid: relid,
+                indrelid: heap_oid,
+                indnatts: 1,
+                indnkeyatts: 1,
+                indisunique: true,
+                indnullsnotdistinct: false,
+                indisprimary: true,
+                indisexclusion: false,
+                indimmediate: true,
+                indisvalid: true,
+                indisready: true,
+                indkey,
+                has_indpred: false,
+                indexprs_src: None,
+                indpred_src: None,
+            }),
+            rd_opcintype: one_oid(23),
+            rd_opfamily: one_oid(INT4_BTREE_OPFAMILY),
+            rd_indoption: indoption,
+            rd_indcollation: one_oid(0),
+            rd_options: None,
+            pgstat_enabled: std::cell::Cell::new(false),
+            pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
+            rd_amcache: Default::default(),
+            rd_amcache_hash: Default::default(),
+            rd_amcache_gin: Default::default(),
+            rd_amcache_spgist: Default::default(),
+            rd_support: PgVec::new_in(mcx),
+            rd_supportinfo: Default::default(),
+            rd_opcoptions: Default::default(),
+            rd_indexlist: Default::default(),
+            rd_trigdesc: Default::default(),
+            rd_hastriggers: false,
+            rd_hasrules: false,
+        };
+        Relation::open(data, Some(record_close))
     }
 }
 
@@ -4255,7 +4505,8 @@ mod rowmode_ab {
     /// rowmode knob does not gate Result, so this pins the CODE MOVE — the
     /// moved body must behave exactly as the inline arm did on the shapes
     /// the select1 hot path exercises (one row, drained tail, one-time
-    /// filter, rescan) with the knob in BOTH positions.
+    /// filter, rescan) with the knob in BOTH positions (see express_ab
+    /// below for the WS-J point-path A/B corpus).
     #[test]
     fn childless_result_seam_knob_positions() {
         install_seams();
@@ -4303,5 +4554,430 @@ mod rowmode_ab {
         }
         crate::lanev2::rowmode_set_for_tests(false);
         drop(guard);
+    }
+}
+
+// ============================================================================
+// WS-J express-lane A/B corpus (lanev2/express.rs; single-executor Phase 1,
+// docs/design/rowmode-operators.md §5–§6): the point-path IndexScan shape
+// driven through the REAL dispatch (init_plan → procnode → try_own_index_scan
+// → express hook) over the scanfix fake btree, with the knob in all three
+// positions. Byte-identity is asserted OFF vs EXPRESS vs STRUCTURED per
+// shape; engagement via EXPRESS_OWNED_FOR_TESTS; refusal shapes must leave
+// the counter untouched while still returning the incumbent's rows.
+// ============================================================================
+mod express_ab {
+    use super::*;
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{IndexScan, Plan, Scan};
+    use ::types_nodes::primnodes::{OpExpr, Param, ParamKind};
+
+    const OP_INT4GT: u32 = 521;
+    const F_INT4GT: u32 = 147;
+
+    fn install_express_seams() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // Scan-key strategy lookup for the fake int4 btree opfamily
+            // (nodeindexscan tests' seam, verbatim).
+            syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
+                assert_eq!(purpose, b's');
+                assert_eq!(opfamily, 1976);
+                let strategy = match opno {
+                    INT4_EQ => 3,
+                    OP_INT4GT => 5,
+                    _ => return Ok(None),
+                };
+                Ok(Some(syscache_seams::PgAmopShape {
+                    amopstrategy: strategy,
+                    amopsortfamily: 0,
+                    amoplefttype: INT4OID,
+                    amoprighttype: INT4OID,
+                }))
+            });
+        });
+    }
+
+    /// The point key's right-hand side: a Const (the `k = 20` literal probe)
+    /// or a PARAM_EXEC runtime key (the prepared/nestloop probe — express's
+    /// defining admitted shape), or a `>` range probe (NOT pksel: the static
+    /// shape refusal arm).
+    #[derive(Clone, Copy)]
+    enum PointKey {
+        ConstEq(i32),
+        ExecParamEq,
+        ConstGt(i32),
+    }
+
+    fn mk_key_qual<'mcx>(mcx: ::mcx::Mcx<'mcx>, varno: i32, key: PointKey) -> NodeList<'mcx> {
+        let var = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+        let (opno, opfuncid, rhs) = match key {
+            PointKey::ConstEq(k) => (INT4_EQ, F_INT4EQ, mk_int4_const(mcx, k)),
+            PointKey::ConstGt(k) => (OP_INT4GT, F_INT4GT, mk_int4_const(mcx, k)),
+            PointKey::ExecParamEq => (
+                INT4_EQ,
+                F_INT4EQ,
+                Node::mk(
+                    mcx,
+                    Param {
+                        paramkind: ParamKind::PARAM_EXEC,
+                        paramid: 0,
+                        paramtype: INT4OID,
+                        paramtypmod: -1,
+                        paramcollid: 0,
+                        location: -1,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let op = Node::mk(
+            mcx,
+            OpExpr {
+                opno,
+                opfuncid,
+                opresulttype: BOOLOID,
+                opretset: false,
+                opcollid: 0,
+                inputcollid: 0,
+                args: NodeList::make2(mcx, var, rhs).unwrap(),
+                location: -1,
+            },
+        )
+        .unwrap();
+        NodeList::make1(mcx, op).unwrap()
+    }
+
+    /// `SELECT v FROM kv WHERE k <op> <key>` as an IndexScan PlannedStmt —
+    /// the stmt-attrib point corpus's plan shape (projection Some: the tlist
+    /// selects column 2 over the 2-col scan tuple).
+    fn mk_point_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        relid: u32,
+        index_oid: u32,
+        key: PointKey,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let var = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("v"), false).unwrap();
+        let scan_node = Node::mk(
+            mcx,
+            IndexScan {
+                scan: Scan {
+                    plan: Plan {
+                        targetlist: NodeList::make1(mcx, tle).unwrap(),
+                        ..Default::default()
+                    },
+                    scanrelid: 1,
+                },
+                indexid: index_oid,
+                indexqual: mk_key_qual(mcx, ::execexpr::INDEX_VAR, key),
+                indexqualorig: mk_key_qual(mcx, 1, key),
+                indexorderby: NodeList::nil(),
+                indexorderbyorig: NodeList::nil(),
+                indexorderbyops: Default::default(),
+                indexorderdir: 1,
+            },
+        )
+        .unwrap();
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perminfo = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1, // ACL_SELECT
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(scan_node);
+        if matches!(key, PointKey::ExecParamEq) {
+            pstmt.paramExecTypes = ::types_nodes::list::OidList::make1(mcx, INT4OID).unwrap();
+        }
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// One execution: init the plan, run the scripted step list, tear down.
+    /// Steps: `SetParam(v)` writes exec param 0 (None = NULL), `Rescan`
+    /// replays the nestloop cadence, `Drain` pulls to end-of-scan collecting
+    /// column 1, `PullOne` pulls a single row (the LIMIT-1 / early-teardown
+    /// shape). Returns collected values or the first error string.
+    #[derive(Clone, Copy)]
+    enum Step {
+        SetParam(Option<i32>),
+        Rescan,
+        Drain,
+        PullOne,
+    }
+
+    fn run_point(
+        pstmt: &'static PlannedStmt<'static>,
+        steps: &[Step],
+    ) -> (Vec<i32>, Option<String>) {
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            {
+                let n = pstmt.paramExecTypes.len();
+                let es = &mut data.estate;
+                es.es_param_exec_vals.extend(core::iter::repeat_n(
+                    ::types_portal::params::ParamExecData::EMPTY,
+                    n,
+                ));
+                es.es_param_subplans.extend(core::iter::repeat_n(None, n));
+            }
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            let mut out = Vec::new();
+            let mut run_err = None;
+            'steps: for step in steps {
+                match *step {
+                    Step::SetParam(v) => {
+                        estate.es_param_exec_vals[0] =
+                            ::types_portal::params::ParamExecData {
+                                value: v.map_or(Datum::null(), Datum::from_i32),
+                                isnull: v.is_none(),
+                                exec_plan: false,
+                            };
+                    }
+                    Step::Rescan => exec_re_scan(ps, estate).unwrap(),
+                    Step::Drain | Step::PullOne => loop {
+                        match exec_proc_node(ps, estate) {
+                            Ok(Some(slot_id)) => {
+                                let mut isnull = false;
+                                let v = exectuples::slot_getattr(
+                                    estate.slot_mut(slot_id),
+                                    1,
+                                    &mut isnull,
+                                );
+                                assert!(!isnull);
+                                out.push(v.as_i32());
+                                if matches!(step, Step::PullOne) {
+                                    continue 'steps;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                run_err = Some(e.to_string());
+                                break 'steps;
+                            }
+                        }
+                    },
+                }
+            }
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            scanfix::quiesced();
+            (out, run_err)
+        })
+    }
+
+    /// One A/B/B round over the same logical run: knob OFF, then EXPRESS
+    /// (mode 1), then STRUCTURED (mode 2) — fresh plan/table per arm, all
+    /// three (rows, error) results byte-identical; both ON arms must have
+    /// ENGAGED (`expect_owned`) or must NOT have (refusal shapes).
+    fn ab(
+        key: PointKey,
+        rows: &[(i32, i32)],
+        steps: &[Step],
+        expect_owned: bool,
+    ) -> (Vec<i32>, Option<String>) {
+        install_seams();
+        scanfix::install();
+        install_express_seams();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut results = Vec::new();
+        for mode in [
+            crate::lanev2::EXPRESS_OFF,
+            crate::lanev2::EXPRESS_POINT,
+            crate::lanev2::EXPRESS_STRUCTURED,
+        ] {
+            crate::lanev2::express_set_for_tests(mode);
+            let mcx = leaked_mcx();
+            let relid = 71000 + NEXT_EXPRESS_OID.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+            let index_oid = relid + 1;
+            scanfix::register_indexed_table_2col(relid, index_oid, rows);
+            let pstmt = mk_point_pstmt(mcx, relid, index_oid, key);
+            let owned_before = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let r = run_point(pstmt, steps);
+            let owned_after = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let engaged = owned_after > owned_before;
+            match mode {
+                crate::lanev2::EXPRESS_OFF => {
+                    assert!(!engaged, "knob OFF must never own a pull")
+                }
+                _ => assert_eq!(
+                    engaged, expect_owned,
+                    "mode {mode}: engagement mismatch (expected {expect_owned})"
+                ),
+            }
+            results.push(r);
+        }
+        crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_OFF);
+        assert_eq!(results[0], results[1], "OFF vs EXPRESS must be identical");
+        assert_eq!(results[0], results[2], "OFF vs STRUCTURED must be identical");
+        results.pop().unwrap()
+    }
+
+    static NEXT_EXPRESS_OID: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    const KV: &[(i32, i32)] = &[(30, 300), (10, 100), (20, 200)];
+
+    #[test]
+    fn ab_point_hit_const() {
+        let (rows, err) = ab(PointKey::ConstEq(20), KV, &[Step::Drain], true);
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![200]);
+    }
+
+    #[test]
+    fn ab_point_miss_const() {
+        let (rows, err) = ab(PointKey::ConstEq(99), KV, &[Step::Drain], true);
+        assert_eq!(err, None);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn ab_point_early_stop_pull_one() {
+        // The LIMIT-1 cadence: one pull, then straight to teardown with the
+        // scan mid-flight — no panic, no leaked pins, all arms.
+        let (rows, err) = ab(PointKey::ConstEq(10), KV, &[Step::PullOne], true);
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![100]);
+    }
+
+    #[test]
+    fn ab_runtime_key_rescan_cadence() {
+        // The prepared/nestloop shape express exists for: PARAM_EXEC runtime
+        // key, evaluated on the first pull's !ready arm, then re-evaluated
+        // per rescan with a new binding — including a NULL binding (strict
+        // eq: empty result), then a live one again.
+        let (rows, err) = ab(
+            PointKey::ExecParamEq,
+            KV,
+            &[
+                Step::SetParam(Some(20)),
+                Step::Drain,
+                Step::SetParam(Some(30)),
+                Step::Rescan,
+                Step::Drain,
+                Step::SetParam(None),
+                Step::Rescan,
+                Step::Drain,
+                Step::SetParam(Some(10)),
+                Step::Rescan,
+                Step::Drain,
+            ],
+            true,
+        );
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![200, 300, 100]);
+    }
+
+    #[test]
+    fn ab_range_probe_refused_not_pksel() {
+        // `k > 10` — a forward btree probe but NOT the pksel shape: express
+        // must refuse (engagement counter untouched) while the rows flow
+        // through the incumbent identically in every knob position.
+        let (rows, err) = ab(PointKey::ConstGt(10), KV, &[Step::Drain], false);
+        assert_eq!(err, None);
+        assert_eq!(rows, vec![200, 300]);
+    }
+
+    #[test]
+    fn express_epq_pull_refused_dynamically() {
+        // es_epq_active is a per-pull gate: with the knob ON, an EPQ-flagged
+        // estate must fall through to the incumbent (no engagement), same
+        // rows.
+        install_seams();
+        scanfix::install();
+        install_express_seams();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_POINT);
+        let mcx = leaked_mcx();
+        let relid = 72000 + NEXT_EXPRESS_OID.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        let index_oid = relid + 1;
+        scanfix::register_indexed_table_2col(relid, index_oid, KV);
+        let pstmt = mk_point_pstmt(mcx, relid, index_oid, PointKey::ConstEq(20));
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            // EPQ-flagged estate: probe the dispatch hook directly (the
+            // incumbent EPQ scan variant is unported in this harness, so a
+            // full EPQ pull can't run here) — express must refuse (None,
+            // counter untouched) BEFORE any scan work happens.
+            estate.es_epq_active = true;
+            let owned_before = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            {
+                let crate::procnode::PlanStateNode::IndexScan(is) = &mut *ps else {
+                    panic!("point plan did not init an IndexScan node")
+                };
+                let r = crate::lanev2::try_own_index_scan(is, estate).unwrap();
+                assert!(r.is_none(), "EPQ pull must be refused to the incumbent");
+            }
+            let owned_after = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(owned_before, owned_after, "EPQ pull must not be express-owned");
+            // The gate is per-pull: dropping the flag re-admits, and the
+            // node state is untouched — the same node drains correctly.
+            estate.es_epq_active = false;
+            let mut vals = Vec::new();
+            while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                vals.push(v.as_i32());
+            }
+            assert_eq!(vals, vec![200]);
+            let owned_end = crate::lanev2::EXPRESS_OWNED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(owned_end > owned_after, "post-EPQ pulls must re-engage express");
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        crate::lanev2::express_set_for_tests(crate::lanev2::EXPRESS_OFF);
+        scanfix::quiesced();
     }
 }
