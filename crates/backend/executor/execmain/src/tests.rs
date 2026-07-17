@@ -9724,3 +9724,594 @@ mod dml_ab_wave3 {
     }
 }
 // --- end WS-T wave-3 ----------------------------------------------------------
+
+// ===========================================================================
+// ===== WAVE-5 APPEND REGION — do not edit above =====
+// Wave-5 contract §2: ONE marker, labeled per-WS sub-regions in fixed order
+// U, V, W, X. A WS writes ONLY inside its own sub-region; never above the
+// marker or inside another WS's sub-region. Fake-oid bands per contract §4:
+// U 79001+, V 80001+ (EXCEPT the 5 deferred AM-backed per-shape units,
+// which honor the 76xxx band reserved for them by the B1 flip commit
+// 6b776d09e), W 81001+, X 82001+ (expected unused).
+// ===========================================================================
+
+// --- WS-U wave-5 sub-region (EPQ inc-1; band 79001+) -------------------------
+// (reserved; WS-U appends here)
+// --- end WS-U wave-5 sub-region -----------------------------------------------
+
+// --- WS-V wave-5 sub-region (B1 flip preconditions; band 76xxx reserved) -----
+// The 5 deferred AM-backed per-shape T3 units (B1 flip commit 6b776d09e's
+// outstanding list; WS-Q review finding #4 residual): TableFuncScan,
+// SampleScan, TidScan, NamedTuplestoreScan, TidRangeScan — the five T3
+// shapes the boarded scans_t3_ab corpus could not reach with FunctionScan
+// fixtures. Same A/B contract as scans_t3_ab: knob OFF = the Volcano
+// oracle; knob ON = the batch-size-1 T3 source drive owns every pull,
+// byte-identical rows, and the delegation tail's probe does NOT move
+// (mechanism attribution). This module also carries the TidScan ctid-fetch
+// (scanfix) fixture that never existed in this harness: hand-built TidScan
+// plans whose tidquals are `ctid = 'const tid'` OpExprs over the scanfix
+// fake-heap pages — AM tid-validity (out-of-range block silently dropped),
+// sort+dedupe, and heap_fetch through the fake buffer seams are all
+// exercised. Zero scanfix-internal edits: the fixture is plan-builders +
+// registered pages only (the §1 file-table grant).
+// Relids consumed: 76001 (TidScan), 76003 (TidRangeScan), 76004
+// (SampleScan). 76002 is intentionally unconsumed — only three of the five
+// shapes carry a relation RTE (NamedTuplestoreScan and TableFuncScan
+// consume zero relids); the 76xxx band is reserved wholesale, so the gap
+// is harmless and stays (wave-5 WS-V review finding 4, cosmetic).
+mod scans_t3_am_ab {
+    use super::*;
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{
+        RTEKind, RTEPermissionInfo, RangeTblEntry, TableSampleClause,
+    };
+    use ::types_nodes::plannodes::{
+        NamedTuplestoreScan as NtsPlan, SampleScan as SampleScanPlan,
+        TableFuncScan as TableFuncScanPlan, TidRangeScan as TidRangeScanPlan,
+        TidScan as TidScanPlan,
+    };
+    use ::types_nodes::primnodes::{OpExpr, TableFunc};
+    use ::types_tuple::itemptr::ItemPointerData;
+
+    const TIDOID: u32 = 27;
+    const TEXTOID: u32 = 25;
+    const FLOAT4OID: u32 = 700;
+    const FLOAT8OID: u32 = 701;
+    /// pg_operator: `=(tid,tid)` 387; `<=(tid,tid)` 2801 (nodeTidrangescan.c
+    /// TIDLessEqOperator).
+    const TID_EQ_OP: u32 = 387;
+    const TID_LE_OP: u32 = 2801;
+    /// pg_proc: tsm_system_handler (tablesample crate F_TSM_SYSTEM_HANDLER).
+    const TSM_SYSTEM_HANDLER: u32 = 3314;
+
+    fn mk_tid_const(mcx: ::mcx::Mcx<'_>, block: u32, off: u16) -> Node<'_> {
+        let tid: &'static ItemPointerData =
+            Box::leak(Box::new(ItemPointerData::new(block, off)));
+        Node::mk_const(
+            mcx,
+            TIDOID,
+            -1,
+            0,
+            6,
+            Datum::from_usize(tid as *const ItemPointerData as usize),
+            false,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn mk_ctid_var(mcx: ::mcx::Mcx<'_>) -> Node<'_> {
+        // varattno -1 = SelfItemPointerAttributeNumber.
+        Node::mk_var(mcx, 1, -1, TIDOID, -1, 0, 0).unwrap()
+    }
+
+    fn mk_tid_op(mcx: ::mcx::Mcx<'_>, opno: u32, block: u32, off: u16) -> Node<'_> {
+        let mut op = Node::build::<OpExpr>(mcx).unwrap();
+        op.opno = opno;
+        op.opresulttype = BOOLOID;
+        op.args =
+            NodeList::make2(mcx, mk_ctid_var(mcx), mk_tid_const(mcx, block, off)).unwrap();
+        op.seal()
+    }
+
+    /// A leaked 4B-header text varlena Const (consttype is uninspected by
+    /// the exec paths these units drive; XMLTABLE consumes the payload via
+    /// varlena_payload).
+    fn mk_text_const<'mcx>(mcx: ::mcx::Mcx<'mcx>, s: &str) -> Node<'mcx> {
+        let total = s.len() + 4;
+        let mut img = vec![0u8; total];
+        img[0..4].copy_from_slice(
+            &::types_tuple::varatt::set_varsize_4b_word(total as u32).to_ne_bytes(),
+        );
+        img[4..].copy_from_slice(s.as_bytes());
+        let leaked: &'static mut [u8] = Vec::leak(img);
+        Node::mk_const(
+            mcx,
+            TEXTOID,
+            -1,
+            0,
+            -1,
+            Datum::from_usize(leaked.as_ptr() as usize),
+            false,
+            false,
+        )
+        .unwrap()
+    }
+
+    /// One-col int4 scan tlist (the mk_seqscan_pstmt shape).
+    fn mk_scan_tlist<'mcx>(mcx: ::mcx::Mcx<'mcx>, vartype: u32) -> NodeList<'mcx> {
+        let var = Node::mk_var(mcx, 1, 1, vartype, -1, 0, 0).unwrap();
+        let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+        NodeList::make1(mcx, tle).unwrap()
+    }
+
+    /// Relation-RTE PlannedStmt around an arbitrary scan node (the
+    /// mk_seqscan_pstmt RTE + ACL_SELECT + unprunable shape, generalized).
+    fn mk_rel_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        relid: u32,
+        scan_node: Node<'mcx>,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perminfo = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid,
+                requiredPerms: 1 << 1, // ACL_SELECT
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(scan_node);
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Drain a relation-RTE plan through the REAL init path (init_plan →
+    /// ExecInitRangeTable → relation open) collecting column-1 int4s;
+    /// `rescan_after` fires one mid-stream `exec_re_scan` (the delegation-
+    /// cadence replay probe). The seqscan_end_to_end teardown shape.
+    fn drain_rel(
+        pstmt: &'static PlannedStmt<'static>,
+        rescan_after: Option<usize>,
+    ) -> Vec<i32> {
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            let mut out = Vec::new();
+            let mut rescan = rescan_after;
+            loop {
+                if rescan == Some(out.len()) {
+                    rescan = None;
+                    crate::exec_re_scan(ps, estate).unwrap();
+                }
+                match exec_proc_node(ps, estate).unwrap() {
+                    Some(slot_id) => {
+                        let mut isnull = false;
+                        let v = exectuples::slot_getattr(
+                            estate.slot_mut(slot_id),
+                            1,
+                            &mut isnull,
+                        );
+                        assert!(!isnull);
+                        out.push(v.as_i32());
+                    }
+                    None => break,
+                }
+            }
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            out
+        })
+    }
+
+    /// Drain a relation-free plan (NamedTuplestoreScan / TableFuncScan)
+    /// via exec_init_node, collecting column-1 as i64 (covers int4 + int8
+    /// projections); optional QueryEnvironment for the ENR shapes.
+    fn drain_free(
+        pstmt: &'static PlannedStmt<'static>,
+        env: Option<&'static ::queryenvironment::QueryEnvironment<'static>>,
+        rescan_after: Option<usize>,
+        as_i64: bool,
+    ) -> Vec<i64> {
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_queryEnv = env;
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            let mut out = Vec::new();
+            let mut rescan = rescan_after;
+            loop {
+                if rescan == Some(out.len()) {
+                    rescan = None;
+                    exec_re_scan(&mut ps, &mut data.estate).unwrap();
+                }
+                match exec_proc_node(&mut ps, &mut data.estate).unwrap() {
+                    Some(slot_id) => {
+                        let mut isnull = false;
+                        let v = exectuples::slot_getattr(
+                            data.estate.slot_mut(slot_id),
+                            1,
+                            &mut isnull,
+                        );
+                        assert!(!isnull);
+                        out.push(if as_i64 { v.as_i64() } else { v.as_i32() as i64 });
+                    }
+                    None => break,
+                }
+            }
+            crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+            out
+        })
+    }
+
+    fn t3_probe(name: &str) -> u64 {
+        crate::lanev2::t3_owned_probe_for_tests(name)
+    }
+
+    fn tail_probe(name: &str) -> u64 {
+        crate::lanev2::tail_owned_probe_for_tests(name)
+    }
+
+    /// The shared A/B skeleton: OFF drain (Volcano oracle, probes frozen) →
+    /// ON drain (T3 source drive owns; tail probe frozen) → byte-compare.
+    fn ab_case(class: &str, want: &[i64], mut drain: impl FnMut() -> Vec<i64>) {
+        crate::lanev2::rowmode_set_for_tests(false);
+        crate::lanev2::scans_t3_set_for_tests(false);
+        let t3_off0 = t3_probe(class);
+        let off = drain();
+        assert_eq!(
+            t3_probe(class),
+            t3_off0,
+            "knob OFF must never engage the T3 source form ({class})"
+        );
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        let t3_on0 = t3_probe(class);
+        let tail_on0 = tail_probe(class);
+        let on = drain();
+        let t3_on1 = t3_probe(class);
+        let tail_on1 = tail_probe(class);
+        crate::lanev2::scans_t3_set_for_tests(false);
+
+        assert_eq!(off, on, "knob OFF vs ON must be identical ({class})");
+        assert_eq!(off, want, "oracle rows mismatch ({class})");
+        assert!(t3_on1 > t3_on0, "ON arm never engaged the T3 source drive ({class})");
+        assert_eq!(
+            tail_on1, tail_on0,
+            "the delegation tail must not tick when the source form owns ({class})"
+        );
+    }
+
+    /// TidScan over the scanfix fake heap — the ctid-fetch fixture that
+    /// never existed (WS-Q review finding #4 residual; 76xxx band honored).
+    /// tidquals = three `ctid = 'const'` OpExprs (implicit OR) + one
+    /// AM-INVALID tid (block past rs_nblocks) that table_tuple_tid_valid
+    /// must silently drop (C contract); TidListEval must sort+dedupe to
+    /// heap order; heap_fetch rides the fake buffer seams. Mid-stream
+    /// rescan replays the re-evaluated TID list from the top.
+    #[test]
+    fn tidscan_am_ab_ctid_fetch_with_rescan() {
+        install_seams();
+        scanfix::install();
+        rowmode_ab::install_rowmode_seams();
+        let relid: u32 = 76001;
+        scanfix::register_table(relid, &[&[10, 20, 30], &[40, 50]]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        let mk = || {
+            let mcx = leaked_mcx();
+            let mut plan = Node::build::<TidScanPlan>(mcx).unwrap();
+            plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT4OID);
+            plan.scan.scanrelid = 1;
+            plan.tidquals = NodeList::from_slice(
+                mcx,
+                &[
+                    mk_tid_op(mcx, TID_EQ_OP, 1, 2),  // (1,2) = 50
+                    mk_tid_op(mcx, TID_EQ_OP, 0, 1),  // (0,1) = 10
+                    mk_tid_op(mcx, TID_EQ_OP, 0, 3),  // (0,3) = 30
+                    mk_tid_op(mcx, TID_EQ_OP, 7, 1),  // AM-invalid: dropped
+                ],
+            )
+            .unwrap();
+            mk_rel_pstmt(mcx, relid, plan.seal())
+        };
+
+        // Rescan after row 1: TidListEval re-runs, replay from the top.
+        ab_case("tidscan", &[10, 10, 30, 50], || {
+            drain_rel(mk(), Some(1)).into_iter().map(i64::from).collect()
+        });
+
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// TidRangeScan upper bound: `ctid <= '(1,1)'` (inclusive) walks the
+    /// fake heap through block 1 offset 1 via the AM tidrange scan.
+    #[test]
+    fn tidrangescan_am_ab_upper_bound_with_rescan() {
+        install_seams();
+        scanfix::install();
+        rowmode_ab::install_rowmode_seams();
+        let relid: u32 = 76003;
+        scanfix::register_table(relid, &[&[10, 20, 30], &[40, 50]]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        let mk = || {
+            let mcx = leaked_mcx();
+            let mut plan = Node::build::<TidRangeScanPlan>(mcx).unwrap();
+            plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT4OID);
+            plan.scan.scanrelid = 1;
+            plan.tidrangequals =
+                NodeList::make1(mcx, mk_tid_op(mcx, TID_LE_OP, 1, 1)).unwrap();
+            mk_rel_pstmt(mcx, relid, plan.seal())
+        };
+
+        ab_case("tidrangescan", &[10, 20, 10, 20, 30, 40], || {
+            drain_rel(mk(), Some(2)).into_iter().map(i64::from).collect()
+        });
+
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// SampleScan TABLESAMPLE SYSTEM (100) REPEATABLE (0): deterministic
+    /// (hashfloat8-seeded) full sample over the fake heap in block order —
+    /// a 100% system sample must return every row on both arms.
+    #[test]
+    fn samplescan_am_ab_system_full_with_rescan() {
+        install_seams();
+        scanfix::install();
+        rowmode_ab::install_rowmode_seams();
+        let relid: u32 = 76004;
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        let mk = || {
+            let mcx = leaked_mcx();
+            let percent = Node::mk_const(
+                mcx,
+                FLOAT4OID,
+                -1,
+                0,
+                4,
+                Datum::from_f32(100.0),
+                false,
+                true,
+            )
+            .unwrap();
+            let repeatable = Node::mk_const(
+                mcx,
+                FLOAT8OID,
+                -1,
+                0,
+                8,
+                Datum::from_f64(0.0),
+                false,
+                true,
+            )
+            .unwrap();
+            let tsc = Node::mk(
+                mcx,
+                TableSampleClause {
+                    tsmhandler: TSM_SYSTEM_HANDLER,
+                    args: NodeList::make1(mcx, percent).unwrap(),
+                    repeatable: Some(repeatable),
+                },
+            )
+            .unwrap();
+            let mut plan = Node::build::<SampleScanPlan>(mcx).unwrap();
+            plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT4OID);
+            plan.scan.scanrelid = 1;
+            plan.tablesample = Some(tsc);
+            mk_rel_pstmt(mcx, relid, plan.seal())
+        };
+
+        ab_case("samplescan", &[1, 2, 1, 2, 3, 4, 5], || {
+            drain_rel(mk(), Some(2)).into_iter().map(i64::from).collect()
+        });
+
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// NamedTuplestoreScan over a registered ENR: the estate's
+    /// QueryEnvironment carries the tuplestore (the trigger transition-
+    /// table shape); the scan's private read pointer replays on rescan.
+    /// No relation RTE — zero 76xxx oids consumed (the WS-Q honesty note's
+    /// pattern).
+    #[test]
+    fn namedtuplestorescan_am_ab_enr_with_rescan() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        let env_mcx = leaked_mcx();
+        // 1-col int4 descriptor (the scanfix int4_tupdesc shape, module-local
+        // per the shared-append law).
+        let tupdesc = {
+            let att = ::types_tuple::FormData_pg_attribute {
+                attnum: 1,
+                atttypid: INT4OID,
+                atttypmod: -1,
+                attlen: 4,
+                attbyval: true,
+                attalign: TYPALIGN_INT,
+                attstorage: TYPSTORAGE_PLAIN,
+                ..Default::default()
+            };
+            let mut attrs = ::mcx::PgVec::new_in(env_mcx);
+            let mut compact = ::mcx::PgVec::new_in(env_mcx);
+            compact.push(::types_tuple::CompactAttribute::populate_from(&att));
+            attrs.push(att);
+            std::rc::Rc::new(::types_tuple::TupleDescData {
+                natts: 1,
+                tdtypeid: 0,
+                tdtypmod: -1,
+                tdrefcount: -1,
+                constr: None,
+                compact_attrs: compact,
+                attrs,
+            })
+        };
+        let store = ::tuplestore::Tuplestore::begin_heap(false, false, 1024);
+        let handle = ::tuplestore::hold::register(store);
+        for v in [7, 8, 9] {
+            ::tuplestore::hold::putvalues(
+                handle,
+                &tupdesc,
+                &[Datum::from_i32(v)],
+                &[false],
+            )
+            .unwrap();
+        }
+        let env: &'static mut ::queryenvironment::QueryEnvironment<'static> =
+            Box::leak(Box::new(::queryenvironment::create_queryEnv(env_mcx)));
+        ::queryenvironment::register_ENR(
+            env,
+            ::queryenvironment::EphemeralNamedRelationData {
+                md: ::queryenvironment::EphemeralNamedRelationMetadataData {
+                    name: ::mcx::PgString::from_str_in("t3_enr_v", env_mcx).unwrap(),
+                    reliddesc: 0,
+                    tupdesc: Some(tupdesc.clone()),
+                    enrtype: ::queryenvironment::ENR_NAMED_TUPLESTORE,
+                    enrtuples: 3.0,
+                },
+                reldata: handle,
+            },
+        )
+        .unwrap();
+        let env: &'static ::queryenvironment::QueryEnvironment<'static> = env;
+
+        let mk = || {
+            let mcx = leaked_mcx();
+            let mut plan = Node::build::<NtsPlan>(mcx).unwrap();
+            plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT4OID);
+            plan.scan.scanrelid = 1;
+            plan.enrname = Some("t3_enr_v");
+            let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+            pstmt.commandType = CmdType::CMD_SELECT;
+            pstmt.canSetTag = true;
+            pstmt.planTree = Some(plan.seal());
+            pstmt.seal_ref()
+        };
+
+        ab_case("namedtuplestorescan", &[7, 7, 8, 9], || {
+            drain_free(mk(), Some(env), Some(1), false)
+        });
+
+        drop(guard);
+        ::tuplestore::hold::end(handle);
+    }
+
+    /// TableFuncScan XMLTABLE over an inline document: libxml row/column
+    /// paths feed int8 columns through the real input-function path
+    /// (int8in via the pg_type_io_shape fixture row — the one io shape the
+    /// shared seam serves). No relation RTE — zero 76xxx oids consumed.
+    /// SET-ONCE process-global (seam_core "installed twice" panic): the one
+    /// `pg_type_category` install in this test binary — XMLTABLE's
+    /// get_value consults it per column (xmltable.rs:212). pg_type.dat
+    /// values: int8 'N', text 'S', bool 'B', xml 'U'; none preferred.
+    fn install_type_category_seam() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            syscache_seams::pg_type_category::set(|typid| {
+                Ok(match typid {
+                    INT8OID => Some((b'N' as i8, false)),
+                    TEXTOID => Some((b'S' as i8, false)),
+                    BOOLOID => Some((b'B' as i8, false)),
+                    142 => Some((b'U' as i8, false)), // xml
+                    _ => None,
+                })
+            });
+        });
+    }
+
+    #[test]
+    fn tablefuncscan_am_ab_xmltable_with_rescan() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        install_type_category_seam();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        let mk = || {
+            let mcx = leaked_mcx();
+            let mut tf = Node::build::<TableFunc>(mcx).unwrap();
+            tf.docexpr = Some(mk_text_const(mcx, "<r><e>7</e><e>8</e><e>9</e></r>"));
+            tf.rowexpr = Some(mk_text_const(mcx, "/r/e"));
+            tf.colnames =
+                NodeList::make1(mcx, Node::mk_string(mcx, "v").unwrap()).unwrap();
+            tf.coltypes = ::types_nodes::list::OidList::make1(mcx, INT8OID).unwrap();
+            tf.coltypmods = ::types_nodes::list::IntList::make1(mcx, -1).unwrap();
+            tf.colcollations = ::types_nodes::list::OidList::make1(mcx, 0).unwrap();
+            tf.colexprs = ::types_nodes::list::OptNodeList::make1(
+                mcx,
+                Some(mk_text_const(mcx, ".")),
+            )
+            .unwrap();
+            tf.coldefexprs =
+                ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
+            tf.colvalexprs =
+                ::types_nodes::list::OptNodeList::make1(mcx, None).unwrap();
+            tf.ordinalitycol = -1;
+
+            let mut plan = Node::build::<TableFuncScanPlan>(mcx).unwrap();
+            plan.scan.plan.targetlist = mk_scan_tlist(mcx, INT8OID);
+            plan.scan.scanrelid = 1;
+            plan.tablefunc = Some(tf.seal());
+            let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+            pstmt.commandType = CmdType::CMD_SELECT;
+            pstmt.canSetTag = true;
+            pstmt.planTree = Some(plan.seal());
+            pstmt.seal_ref()
+        };
+
+        ab_case("tablefuncscan", &[7, 7, 8, 9], || {
+            drain_free(mk(), None, Some(1), true)
+        });
+
+        drop(guard);
+    }
+}
+// --- end WS-V wave-5 sub-region -------------------------------------------------
+
+// --- WS-W wave-5 sub-region (DML inc-4 OC; band 81001+) -----------------------
+// (reserved; WS-W appends here)
+// --- end WS-W wave-5 sub-region -------------------------------------------------
+
+// --- WS-X wave-5 sub-region (cursors/SPI design; band 82001+, expected unused) --
+// (reserved; WS-X appends here)
+// --- end WS-X wave-5 sub-region -------------------------------------------------
