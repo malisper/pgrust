@@ -169,7 +169,13 @@ fn alter_contents_recurse<'mcx>(
     }
 
     if object.classId == TYPE_RELATION_ID {
-        unported("ALTER EXTENSION ADD/DROP TYPE dependent-object recursion");
+        // unported: ALTER EXTENSION ADD/DROP TYPE dependent-object recursion
+        return Err(Box::new(
+            types_error::PgError::error(
+                "ALTER EXTENSION ... ADD/DROP TYPE is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     Ok(())
 }

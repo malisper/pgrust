@@ -160,6 +160,28 @@ pub struct PlannerRun<'mcx> {
     /// never suppresses subquery levels) and only under
     /// pgrust.parallel_engine=runtime, so legacy planning never writes it.
     pub m5_suppress_gather: Option<bool>,
+    /// Per-planning-cycle attribute-statistics memo (replanfix2 T1):
+    /// (relid, attnum, inh) -> arena-leaked decoded pg_statistic bundle
+    /// (None = row absent, negative-memoized). Values are planner-crate
+    /// pointers (`selfuncs::get_att_stats` owns both sides), kept OPAQUE
+    /// here so this _support crate takes no backend dependency. RefCell
+    /// because the selfuncs read paths hold `&PlannerRun` alongside subroot
+    /// borrows (planning is single-threaded). COST ONLY: same lookups, same
+    /// values, freed with the run's arena — bounded per cycle, never
+    /// cross-query state.
+    pub att_stats_memo:
+        core::cell::RefCell<PgVec<'mcx, ((u32, i16, bool), Option<core::ptr::NonNull<()>>)>>,
+    /// Per-planning-cycle syscache memos (syscache-memo lane; the replanfix2
+    /// close-out's residual bucket: operator-shape 16x, ACL mask 8x, amop
+    /// probes 14x per replan). Same discipline as att_stats_memo: COST ONLY —
+    /// identical seam calls and values, arena-scoped, dies with the run,
+    /// never cross-query. ONE opaque pointer to a lazily arena-allocated
+    /// memo block (`planner::syscache_memo` owns the block type and the
+    /// only cast pair; this _support crate takes no backend dependency).
+    /// Lazy + single-word so planning cycles that never repeat a catalog
+    /// lookup (SELECT 1: the instr guard) pay one None store — the guard
+    /// stays EXACTLY flat (a 4-field eager form measured +19 instr/q).
+    pub syscache_memos: core::cell::Cell<Option<core::ptr::NonNull<()>>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -181,7 +203,8 @@ mcx::forget_safe_struct!(
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
-        swapped_parent_subroot, m5_suppress_gather },
+        swapped_parent_subroot, m5_suppress_gather, att_stats_memo,
+        syscache_memos },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -206,6 +229,8 @@ impl<'mcx> PlannerRun<'mcx> {
             cte_subpath_infos: PgVec::new_in(mcx),
             swapped_parent_subroot: None,
             m5_suppress_gather: None,
+            att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            syscache_memos: core::cell::Cell::new(None),
         }
     }
 
