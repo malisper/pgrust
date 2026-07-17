@@ -34,6 +34,39 @@
 //! OFF path runs ZERO lane code and ticks NOTHING (no pre-existing WindowAgg
 //! wholesale refuse exists, so default-config lane-gates accounting is
 //! byte-identical by construction; floor seeding is flip-time work).
+//!
+//! WAVE 2 (WS-M): tier-2 windows behind the separate `PGRUST_LANE_V2_
+//! WINDOWS_T2` knob (wave-2 contract §2 — a distinct flip rung from W1 with
+//! independent gates). Increment-1 is **T2-A**: the WindowAgg node as a
+//! row-mode delegation LEAF (`WindowAggRowSource` → `PassthroughOp` →
+//! `RootAdapter` under `pull_step_rows` — the WS-G MergeJoin template),
+//! `next_row` a pure delegation to the ported `exec_window_agg` with the
+//! child Volcano-driven inside it. T2-A therefore admits EVERY WindowAgg
+//! shape the row engine itself runs — explicit ROWS/RANGE/GROUPS frames
+//! with all bound types, EXCLUDE, lead/lag/first/last/nth_value, FILTER,
+//! runCondition/pass-through, multiple window defs (stacked WindowAgg
+//! nodes host independently), inverse transitions — and inherits the row
+//! engine's posture BY CONSTRUCTION (contract §6 WS-M amendment 3): all
+//! cross-call state is the node's own `WindowAggStateData`, the lane holds
+//! ZERO shadow state, so a Volcano fallback at ANY pull boundary (EPQ /
+//! backward / instrumented per-pull gates) resumes byte-identically.
+//! Unlike W1 there is NO sticky ownership and NO structural admission —
+//! ownership is decided per pull (pull ≡ drive for row-mode hosts).
+//!
+//! T2 tick cadence (contract §3.3, adjudicating WS-M OQ5): the row-mode
+//! law — OWNED once per owned PULL (the WS-G cadence). W1 keeps its sticky
+//! batch-drive cadence — once per drive start. Both mechanisms REUSE
+//! `ShapeClass::WindowAgg` (= 20; wave-2 vocab commit) — mechanism
+//! attribution lives in the EngineEvent detail string ("w1-batch" vs
+//! "t2-rowmode"), never a second class (contract §1). Corollary,
+//! documented for the gate harnesses: with BOTH knobs ON, a pull refused
+//! by both hooks (EPQ/backward) ticks the shared class ONCE PER HOOK; at
+//! default config both knobs are OFF and the class stays silent.
+//!
+//! Hook order in `procnode::window_agg_arm`: W1 first (sticky owner wins
+//! its admitted shapes), T2-A second on W1 refuse — so with both knobs ON,
+//! W1 drives the default-frame batch lane and T2 hosts the refused
+//! remainder; with only T2 ON the delegation hosts everything.
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
@@ -41,7 +74,10 @@ use ::executils::{EStateData, ExecSlotId};
 use ::nodewindowagg::lane as wlane;
 use ::types_error::{PgError, PgResult};
 
-use super::push::{pull_step_chain, OpStatus, RootAdapter, Sink, SinkFeed, TupleOp};
+use super::push::{
+    pull_step_chain, pull_step_rows, OpStatus, PassthroughOp, RootAdapter, RowSource, Sink,
+    SinkFeed, TupleOp,
+};
 use super::stats::{self, RefuseReason, ShapeClass};
 
 /// `PGRUST_LANE_V2_WINDOWS` (default OFF): 0 = unresolved (read env on first
@@ -75,6 +111,42 @@ pub(crate) fn windows_set_for_tests(on: bool) {
 /// via the process-global `PGRUST_LANE_V2_STATS` env, unusable per-test).
 #[cfg(test)]
 pub(crate) static WINDOWS_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `PGRUST_LANE_V2_WINDOWS_T2` (default OFF): the wave-2 tier-2 windows
+/// gate (contract §2 — WS-M's granted facility knob, independent flip rung
+/// from W1). Same AtomicU8 + set_for_tests idiom for the same test-lever
+/// reason; env-var, not GUC, per the standing `pg_settings` byte-identity
+/// discipline.
+static WINDOWS_T2: AtomicU8 = AtomicU8::new(0);
+
+fn windows_t2_enabled() -> bool {
+    match WINDOWS_T2.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_WINDOWS_T2").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            WINDOWS_T2.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the T2 unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn windows_t2_set_for_tests(on: bool) {
+    WINDOWS_T2.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Test-only engagement probe for T2-A: owned row-mode window drives, per
+/// pull. Separate from `WINDOWS_OWNED_FOR_TESTS` so the T2 corpus proves
+/// ITS mechanism engaged (and the W1 corpus proves T2 did NOT hijack
+/// W1-admitted shapes).
+#[cfg(test)]
+pub(crate) static WINDOWS_T2_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 #[cold]
@@ -169,6 +241,17 @@ impl<'mcx> TupleOp<'mcx> for WindowOp<'_, 'mcx> {
 /// report the production verdict (the E4 sort mirror for the child + the
 /// init-stable window shape census). Touches neither the memo nor the stat
 /// counters.
+///
+/// Wave-2 mechanism attribution (contract §6 WS-M amendment 2): the window
+/// class is SHARED by the W1 batch drive and the T2-A row-mode delegation,
+/// so the Lane verdict carries a detail string — "w1-batch" when W1's
+/// production admission holds; "t2-rowmode" when W1 refuses but the T2 knob
+/// is ON (T2-A admits every shape, so a W1 production refuse + T2-enabled ⇒
+/// the lane still owns the node, via delegation). A refuse reason records
+/// only when NO enabled window mechanism owns in production. Both hooks'
+/// records dedup per (node, class), first wins — this composed chokepoint
+/// runs first (W1 before T2 in the arm), so the composed verdict is the one
+/// displayed.
 #[cold]
 fn engine_capture_window_verdict<'mcx>(
     w: &mut crate::procnode::WindowAggNode<'mcx>,
@@ -195,8 +278,29 @@ fn engine_capture_window_verdict<'mcx>(
         }
         other => other,
     };
-    super::engine_record_verdict(estate, id, ShapeClass::WindowAgg, production);
+    match production {
+        None => estate.engine_record(
+            id,
+            ::executils::EngineKind::Lane,
+            ShapeClass::WindowAgg.name(),
+            "w1-batch",
+        ),
+        Some(_) if windows_t2_enabled() => engine_record_t2_owned(estate, id),
+        Some(r) => super::engine_record_verdict(estate, id, ShapeClass::WindowAgg, Some(r)),
+    }
     Ok(())
+}
+
+/// The T2-A Lane record with its mechanism detail (shared by the composed
+/// W1 chokepoint above and the T2 hook's own instrumented-refuse mirror).
+#[cold]
+fn engine_record_t2_owned(estate: &mut EStateData<'_>, plan_node_id: i32) {
+    estate.engine_record(
+        plan_node_id,
+        ::executils::EngineKind::Lane,
+        ShapeClass::WindowAgg.name(),
+        "t2-rowmode",
+    );
 }
 
 /// Try to let the lane own a `WindowAgg` over the sort breaker. `Some` = the
@@ -411,4 +515,100 @@ fn drive<'mcx>(
         &mut root,
         estate,
     )
+}
+
+// ===========================================================================
+// Tier-2 (wave-2 WS-M inc-1): T2-A — WindowAgg as a row-mode delegation
+// LEAF behind PGRUST_LANE_V2_WINDOWS_T2 (module doc).
+// ===========================================================================
+
+/// WindowAgg as a row-mode LEAF (the WS-G MergeJoin template): one window
+/// output row per step; the child stays Volcano-driven INSIDE the ported
+/// node body — `next_row` runs the identical statements `window_agg_arm`'s
+/// fallback runs (a pure delegation to `::nodewindowagg::exec_window_agg`,
+/// zero changes to that crate). ALL cross-call state — spool position,
+/// partition buffer tuplestore, per-agg carriers, frame heads/tails,
+/// runCondition pass-through modes — is the node's own
+/// `WindowAggStateData`, so a Volcano fallback at ANY pull boundary is
+/// byte-safe by construction.
+struct WindowAggRowSource;
+
+impl<'mcx> RowSource<'mcx> for WindowAggRowSource {
+    type Node = crate::procnode::WindowAggNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::WindowAggNode { state, outer, .. } = node;
+        ::nodewindowagg::exec_window_agg(state, estate, |e| {
+            crate::procnode::exec_proc_node(outer, e)
+        })
+    }
+}
+
+/// Try to let the T2-A row-mode lane host a WindowAgg (child Volcano).
+/// `None` = refused; the caller falls through (to the unchanged
+/// `exec_window_agg` — `window_agg_arm` runs this hook SECOND, after W1, so
+/// a W1-owned pull never reaches here).
+///
+/// Gates, exactly the wave-2 row-mode host template (contract §3.2, the
+/// try_own_merge_join order): the `PGRUST_LANE_V2_WINDOWS_T2` knob FIRST —
+/// knob-OFF runs zero lane code and ticks NOTHING (no pre-existing
+/// wholesale refuse; default accounting byte-identical by construction,
+/// §2d) — then the dynamic per-call EPQ / backward / instrumented gates.
+/// NO shape gate: T2-A admits every plan the ported node body itself
+/// admits (the hosting is frame-shape-agnostic delegation — that is the
+/// tier-2 coverage claim), and NO stickiness: the delegation holds zero
+/// shadow state, so refusal on one pull and ownership on the next compose
+/// byte-identically. No extra prologue either: `exec_window_agg` runs its
+/// own entry CFI + Done-guard as its first statements, so the wrapper adds
+/// no calls the Volcano drive would not make.
+///
+/// OWNED tick cadence: once per owned pull (§3.3 row-mode law — pull ≡
+/// drive; each owned PG pull starts one `pull_step_rows` drive over the
+/// per-call-reassembled pipeline).
+#[inline]
+pub fn try_own_window_agg_t2<'mcx>(
+    w: &mut ::mcx::PgBox<'mcx, crate::procnode::WindowAggNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !windows_t2_enabled() {
+        return Ok(None);
+    }
+    // Dynamic per-call gates (the row-mode template order). NB: with the W1
+    // knob ALSO on, W1's hook has already ticked these reasons this pull —
+    // the shared class counts once per HOOK by design (module doc; the
+    // detail-string law keeps mechanism attribution out of the counters).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !estate.es_instrumentation.is_empty() {
+        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Instrumented);
+        // EXPLAIN (ENGINE) mirror (E4): ENGINE requires ANALYZE, so every
+        // capture-run pull lands on this arm; with ONLY the instrument gate
+        // vacated T2-A owns unconditionally — record the production Lane
+        // verdict. Dedup (first record wins) defers to the composed W1
+        // chokepoint when that knob is also on.
+        if estate.engine_capture() {
+            let id = wlane::lane_plan_node_id(&w.state);
+            engine_record_t2_owned(estate, id);
+        }
+        return Ok(None);
+    }
+    stats::tick_owned(ShapeClass::WindowAgg);
+    super::lane_trace("windows-t2 row-mode drive owned (T2-A delegation)");
+    #[cfg(test)]
+    WINDOWS_T2_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
+    // No clear-on-finish: exec_window_agg returns end-of-set without
+    // clearing the result slot.
+    let mut op = PassthroughOp;
+    let mut root = RootAdapter::new(None);
+    pull_step_rows(&mut **w, &mut WindowAggRowSource, &mut op, &mut root, estate).map(Some)
 }

@@ -65,6 +65,7 @@ pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
 pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_lock_rows, try_own_material, try_own_memoize, try_own_merge_append, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_set_op, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
 pub(crate) use windows::try_own_window_agg;
+pub(crate) use windows::try_own_window_agg_t2;
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
@@ -75,6 +76,8 @@ pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE
 pub(crate) use rowmode_tail::tail_owned_probe_for_tests;
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
+#[cfg(test)]
+pub(crate) use windows::{windows_t2_set_for_tests, WINDOWS_T2_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use census::{
     attribution_for_tests as census_attribution_for_tests,

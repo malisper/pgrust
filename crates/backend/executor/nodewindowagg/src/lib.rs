@@ -2,7 +2,10 @@
 // pinned) + C-exact framed lane (ROWS/RANGE/GROUPS offsets, EXCLUDE seeks,
 // per-agg carriers, inverse transitions, runCondition pass-through modes).
 // Window functions are enum-dispatched (C: fmgr + WindowObject; the set is
-// closed here). FILTER is a loud panic at init.
+// closed here). FILTER is supported on both lanes (default-frame via the
+// compiled evaltrans' aggfilter step, framed via the per-agg filterstate) —
+// the old "loud panic at init" note was stale; the wave-2 contract's W8
+// A/B unit (execmain windows_t2_ab_filter) pins it (WS-M amendment 5).
 #![allow(non_snake_case)]
 
 use std::ptr::NonNull;
