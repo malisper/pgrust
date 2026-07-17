@@ -1300,6 +1300,16 @@ pub fn exec_modify_table<'mcx>(
 /// already ran to completion (the caller returns end-of-set without touching
 /// anything else). Idempotent across pulls: `fireBSTriggers` flips off after
 /// the first call, `mt_done` short-circuits post-completion calls.
+///
+/// inline attributes on the mt_* seams (se2-cost-fix): the seam
+/// decomposition must not cost the knob-OFF Volcano arm its pre-seam
+/// codegen — the m4 fleet pair measured the outlined seams at +123
+/// instr/INSERT-statement and +55-60 instr/row (batch) against the
+/// knob-OFF==baseline letter. `#[inline(always)]` on the per-row seams
+/// restores the loop-body inlining `exec_modify_table` had when this code
+/// was its literal loop body; `#[inline]` on the per-statement seams keeps
+/// their call overhead out of the per-statement floor (±4).
+#[inline]
 pub fn mt_begin<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1324,6 +1334,7 @@ pub fn mt_begin<'mcx>(
 /// the next child row is fetched (the fetched slot's datums could live
 /// there). In the lane hosting the placement is structural: `MtChildSource::
 /// next_row` (lanev2/dml.rs) calls this before pulling, never `accept`.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
 pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
     estate.reset_per_tuple_expr_context();
     mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
@@ -1333,6 +1344,7 @@ pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStat
 /// previous source row is queued (wave-2 WS-N seam `mt_pending`, contract
 /// §3.7). Only `exec_merge_matched_scan`'s concurrent-flip leg sets it; a
 /// plain INSERT/UPDATE/DELETE node never reports pending.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
 pub fn mt_pending(mt: &ModifyTableState<'_>) -> bool {
     mt.mt_merge_pending_not_matched.is_some()
 }
@@ -1368,6 +1380,7 @@ pub fn mt_resume<'mcx>(
 /// drive this exact function — `exec_modify_table` (the Volcano arm) above,
 /// and the lane host's `MtChildSource` delegation (lanev2/dml.rs) — so the
 /// statement stream is identical by construction.
+#[inline(always)] // loop composition — see mt_begin's se2-cost-fix note
 pub fn mt_step<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1405,6 +1418,7 @@ pub fn mt_step<'mcx>(
 /// EvalPlanQualSetSlot mirror through the operation dispatch, as a pure code
 /// move). `Some` = a RETURNING row to hand to the caller; `None` = the row
 /// was consumed without producing output (the caller pulls the next one).
+#[inline(always)] // per-row seam (the former loop body) — see mt_begin's note
 pub fn mt_accept_row<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1678,6 +1692,7 @@ pub fn mt_accept_row<'mcx>(
 /// code move): the pgrcolumnar statement-end flush, AFTER STATEMENT
 /// triggers, and the `mt_done` latch. Runs exactly once per statement — the
 /// latch makes every later `mt_begin` report done.
+#[inline] // per-statement seam — see mt_begin's se2-cost-fix note
 pub fn mt_source_exhausted<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
