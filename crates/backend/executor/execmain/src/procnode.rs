@@ -1601,6 +1601,14 @@ fn cte_scan_arm<'mcx>(
     cs: &mut PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_cte_scan(cs, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodectescan::exec_cte_scan(cs, estate)
 }
 
@@ -2414,16 +2422,27 @@ fn memoize_arm<'mcx>(
     m: &mut PgBox<'mcx, MemoizeNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; delegation leaf per the WS-L OQ ruling —
+    // lane-owned-child composition is a ledgered later increment): falls
+    // through to the UNCHANGED per-tuple path on refuse.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_memoize(m, estate)? {
+            return Ok(r);
+        }
+    }
     let m = &mut **m;
     let plan = m.state.plan.plan.lefttree.expect("Memoize outer plan");
     let mut outer = MemoizeOuter { node: &mut m.outer, plan, chg: &mut m.outer_chg };
     ::nodememoize::exec_memoize(&mut m.state, &mut outer, estate)
 }
 
-struct MemoizeOuter<'a, 'mcx> {
-    node: &'a mut PlanStateNode<'mcx>,
-    plan: Node<'mcx>,
-    chg: &'a mut ::types_nodes::bitmapset::Bitmapset<'mcx>,
+// pub(crate) fields: the lanev2 rowmode_tail Memoize delegation leaf
+// rebuilds this exact view per pull (memoize-arm-scoped infrastructure).
+pub(crate) struct MemoizeOuter<'a, 'mcx> {
+    pub(crate) node: &'a mut PlanStateNode<'mcx>,
+    pub(crate) plan: Node<'mcx>,
+    pub(crate) chg: &'a mut ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'a, 'mcx> ::nodememoize::MemoizeChild<'mcx> for MemoizeOuter<'a, 'mcx> {
@@ -2631,6 +2650,15 @@ fn recursive_union_arm<'mcx>(
     ru: &mut PgBox<'mcx, RecursiveUnionNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; the iteration protocol stays inside the ported
+    // body — docs/design/rowmode-tail.md §3): falls through to the UNCHANGED
+    // per-tuple path on refuse.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_recursive_union(ru, estate)? {
+            return Ok(r);
+        }
+    }
     let RecursiveUnionNode { state, outer, inner } = &mut **ru;
     ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
 }
@@ -2640,6 +2668,15 @@ fn work_table_scan_arm<'mcx>(
     wts: &mut PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; shared-slot law — the body resolves rustate
+    // from the estate per call): falls through to the UNCHANGED per-tuple
+    // path on refuse.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_work_table_scan(wts, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodeworktablescan::exec_work_table_scan(wts, estate)
 }
 
