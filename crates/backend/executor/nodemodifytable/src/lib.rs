@@ -6194,124 +6194,36 @@ fn exec_insert<'mcx>(
         None => mt.rel_mut().indexes.as_ref().map_or(0, |x| x.num_indices()),
     };
     if onconflict != 0 && num_indices > 0 {
-        // ExecInitPartitionInfo: a routed leaf arbitrates through its own
-        // index children of the root arbiter indexes.
-        if let Some(idx) = leaf_idx {
-            if mt.leaf_arbiters[idx].is_none() {
-                let mapped = resolve_leaf_arbiters(mt, mcx, idx)?;
-                mt.leaf_arbiters[idx] = Some(mapped);
-            }
-        }
+        // The speculative-insert (ON CONFLICT) ceremony, composed from the
+        // four named OC seams (wave-5 WS-W §8.1 — pure code moves of the
+        // former inline blocks; the statement stream is exec_insert's own,
+        // unchanged): arbiter selection → the vlock retry loop of
+        // [arbiter pre-check → committed-conflict dispatch |
+        // speculative token insert/confirm/abort].
+        oc_resolve_arbiters(mt, mcx, leaf_idx)?;
         let existing_id = resolve_existing_slot(mt, estate, leaf_idx);
         // vlock:
         loop {
             let mut conflict_tid = ItemPointerData::default();
             ItemPointerSetInvalid(&mut conflict_tid);
-            let mut invalid_tid = ItemPointerData::default();
-            ItemPointerSetInvalid(&mut invalid_tid);
 
-            let pre_ok = {
-                let ModifyTableState {
-                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
-                } = &mut *mt;
-                let oc = on_conflict.as_ref().expect("on_conflict state");
-                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
-                    Some(idx) => (
-                        router.as_ref().unwrap().leaf_rel(idx),
-                        leaf_indexes[idx].as_mut().expect("indexes opened"),
-                        leaf_arbiters[idx].as_deref().expect("just resolved"),
-                    ),
-                    None => (
-                        es_relations[(rels[*cur].rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened"),
-                        rels[*cur].indexes.as_mut().expect("indexes opened"),
-                        &oc.arbiters,
-                    ),
-                };
-                let (s, e) = (work_slot.0 as usize, existing_id.0 as usize);
-                assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
-                let base = es_tupleTable.as_mut_ptr();
-                // SAFETY: distinct in-bounds indices of one live slice.
-                let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
-                execindexing::ExecCheckIndexConstraints(
-                    mcx,
-                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
-                    indexes,
-                    rel,
-                    slot,
-                    existing,
-                    &invalid_tid,
-                    arbiters,
-                    &mut conflict_tid,
-                )?
-            };
+            let pre_ok = oc_check_arbiter_indexes(
+                mt, estate, work_slot, existing_id, leaf_idx, &mut conflict_tid,
+            )?;
 
             if !pre_ok {
                 // Committed conflict tuple found.
-                if onconflict == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
-                    match exec_on_conflict_update(
-                        mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval,
-                    )? {
-                        OnConflictOutcome::Done(rslot) => return Ok(rslot),
-                        OnConflictOutcome::Retry => continue,
-                    }
+                match oc_conflict_dispatch(
+                    mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval,
+                )? {
+                    OnConflictOutcome::Done(rslot) => return Ok(rslot),
+                    OnConflictOutcome::Retry => continue,
                 }
-                exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
-                return Ok(None);
             }
 
-            let xid = xact::GetCurrentTransactionId()?;
-            let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
-            let mut spec_conflict = false;
-            {
-                let ModifyTableState {
-                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
-                } = &mut *mt;
-                let oc = on_conflict.as_ref().expect("on_conflict state");
-                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
-                    Some(idx) => (
-                        router.as_ref().unwrap().leaf_rel(idx),
-                        leaf_indexes[idx].as_mut().expect("indexes opened"),
-                        leaf_arbiters[idx].as_deref().expect("just resolved"),
-                    ),
-                    None => (
-                        es_relations[(rels[*cur].rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened"),
-                        rels[*cur].indexes.as_mut().expect("indexes opened"),
-                        &oc.arbiters,
-                    ),
-                };
-                let slot = &mut es_tupleTable[work_slot.0 as usize];
-                tableam::table_tuple_insert_speculative(
-                    mcx, rel, slot, output_cid, 0, None, spec_token,
-                )?;
-                recheck_indexes = execindexing::ExecInsertIndexTuples(
-                    mcx,
-                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
-                    indexes,
-                    rel,
-                    slot,
-                    true,
-                    Some(&mut spec_conflict),
-                    arbiters,
-                    false,
-                )?;
-                tableam::table_tuple_complete_speculative(
-                    mcx,
-                    rel,
-                    slot,
-                    spec_token,
-                    !spec_conflict,
-                )?;
-            }
-            // Wake up anyone waiting for our verdict.
-            lmgr::SpeculativeInsertionLockRelease(xid)?;
-
-            if spec_conflict {
+            if oc_speculative_insert(mt, estate, work_slot, leaf_idx, &mut recheck_indexes)? {
+                // Speculative conflict: another inserter won the race; redo
+                // from vlock (the former inline `if spec_conflict { continue }`).
                 continue;
             }
             break;
@@ -6411,6 +6323,193 @@ fn exec_insert<'mcx>(
         estate.es_processed += 1;
     }
     Ok(Some(slot_id))
+}
+
+// =============================================================================
+// ON CONFLICT (speculative insertion) seams — wave-5 WS-W §8.1.
+//
+// PURE CODE MOVES out of `exec_insert`'s former inline vlock loop; every
+// statement below is the loop's own, relocated behind a named seam so the
+// ceremony has reviewable joints (the wave-2 mt_* seam discipline). The
+// composition in `exec_insert` replays the original control flow exactly:
+// `Done` = the former `return`, `Retry`/spec-conflict = the former
+// `continue`, pre_ok fall-through = the former loop `break`. No seam is
+// lane-aware: BOTH engines (the Volcano arm and the knob-gated DML lane
+// host, lanev2/dml.rs) reach these through the SAME `mt_accept_row` →
+// `exec_insert` chain, so the statement stream is identical by
+// construction.
+// =============================================================================
+
+/// OC seam 1/4 — arbiter index selection (C ExecInitPartitionInfo's
+/// ri_onConflictArbiterIndexes leg): a routed leaf arbitrates through its
+/// own index children of the root arbiter indexes, resolved once per leaf
+/// and cached in `leaf_arbiters`. The unrouted (root) case reads
+/// `on_conflict.arbiters` directly in the pre-check seam and needs no
+/// resolution here.
+#[inline]
+fn oc_resolve_arbiters<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    leaf_idx: Option<usize>,
+) -> PgResult<()> {
+    // ExecInitPartitionInfo: a routed leaf arbitrates through its own
+    // index children of the root arbiter indexes.
+    if let Some(idx) = leaf_idx {
+        if mt.leaf_arbiters[idx].is_none() {
+            let mapped = resolve_leaf_arbiters(mt, mcx, idx)?;
+            mt.leaf_arbiters[idx] = Some(mapped);
+        }
+    }
+    Ok(())
+}
+
+/// OC seam 2/4 — the arbiter pre-check (C ExecCheckIndexConstraints call in
+/// ExecInsert's ON CONFLICT arm): probe the arbiter indexes for a committed
+/// conflicting tuple BEFORE inserting. `Ok(true)` = no conflict, proceed to
+/// the speculative insertion; `Ok(false)` = committed conflict found,
+/// `conflict_tid` names it (the caller dispatches DO NOTHING / DO UPDATE).
+#[inline]
+fn oc_check_arbiter_indexes<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    work_slot: ExecSlotId,
+    existing_id: ExecSlotId,
+    leaf_idx: Option<usize>,
+    conflict_tid: &mut ItemPointerData,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let mut invalid_tid = ItemPointerData::default();
+    ItemPointerSetInvalid(&mut invalid_tid);
+
+    let ModifyTableState {
+        rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+    } = &mut *mt;
+    let oc = on_conflict.as_ref().expect("on_conflict state");
+    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+    let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+        Some(idx) => (
+            router.as_ref().unwrap().leaf_rel(idx),
+            leaf_indexes[idx].as_mut().expect("indexes opened"),
+            leaf_arbiters[idx].as_deref().expect("just resolved"),
+        ),
+        None => (
+            es_relations[(rels[*cur].rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+            rels[*cur].indexes.as_mut().expect("indexes opened"),
+            &oc.arbiters,
+        ),
+    };
+    let (s, e) = (work_slot.0 as usize, existing_id.0 as usize);
+    assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
+    let base = es_tupleTable.as_mut_ptr();
+    // SAFETY: distinct in-bounds indices of one live slice.
+    let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
+    execindexing::ExecCheckIndexConstraints(
+        mcx,
+        index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+        indexes,
+        rel,
+        slot,
+        existing,
+        &invalid_tid,
+        arbiters,
+        conflict_tid,
+    )
+}
+
+/// OC seam 3/4 — DO NOTHING vs DO UPDATE dispatch over a committed conflict
+/// tuple (the former `!pre_ok` arm): DO UPDATE delegates to
+/// `exec_on_conflict_update` (whose `Retry` = redo from vlock); DO NOTHING
+/// runs the C ExecCheckTIDVisible serialization-visibility check and
+/// consumes the row (`Done(None)` ≡ the former `return Ok(None)`).
+#[inline]
+fn oc_conflict_dispatch<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    conflict_tid: ItemPointerData,
+    work_slot: ExecSlotId,
+    leaf_idx: Option<usize>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<OnConflictOutcome> {
+    if mt.plan.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
+        return exec_on_conflict_update(mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval);
+    }
+    exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
+    Ok(OnConflictOutcome::Done(None))
+}
+
+/// OC seam 4/4 — the speculative token insert/confirm/abort ceremony (C
+/// table_tuple_insert_speculative .. table_tuple_complete_speculative under
+/// the SpeculativeInsertionLock): insert the tuple speculatively, insert
+/// index tuples with the arbiters in deferred-check mode, then confirm
+/// (`!spec_conflict`) or kill (`spec_conflict`) the speculative tuple and
+/// wake waiters. `Ok(true)` = a concurrent inserter won the race (the
+/// caller redoes from vlock); `Ok(false)` = the insertion stands.
+#[inline]
+fn oc_speculative_insert<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    work_slot: ExecSlotId,
+    leaf_idx: Option<usize>,
+    recheck_indexes: &mut mcx::PgVec<'mcx, Oid>,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let xid = xact::GetCurrentTransactionId()?;
+    let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
+    let mut spec_conflict = false;
+    {
+        let ModifyTableState {
+            rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+        } = &mut *mt;
+        let oc = on_conflict.as_ref().expect("on_conflict state");
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+            Some(idx) => (
+                router.as_ref().unwrap().leaf_rel(idx),
+                leaf_indexes[idx].as_mut().expect("indexes opened"),
+                leaf_arbiters[idx].as_deref().expect("just resolved"),
+            ),
+            None => (
+                es_relations[(rels[*cur].rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened"),
+                rels[*cur].indexes.as_mut().expect("indexes opened"),
+                &oc.arbiters,
+            ),
+        };
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
+        tableam::table_tuple_insert_speculative(
+            mcx, rel, slot, output_cid, 0, None, spec_token,
+        )?;
+        *recheck_indexes = execindexing::ExecInsertIndexTuples(
+            mcx,
+            index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+            indexes,
+            rel,
+            slot,
+            true,
+            Some(&mut spec_conflict),
+            arbiters,
+            false,
+        )?;
+        tableam::table_tuple_complete_speculative(
+            mcx,
+            rel,
+            slot,
+            spec_token,
+            !spec_conflict,
+        )?;
+    }
+    // Wake up anyone waiting for our verdict.
+    lmgr::SpeculativeInsertionLockRelease(xid)?;
+    Ok(spec_conflict)
 }
 
 // ExecUpdateLockMode (execMain.c): the conflicting row takes the weaker
