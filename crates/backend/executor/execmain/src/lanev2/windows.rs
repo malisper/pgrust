@@ -2,8 +2,11 @@
 //! WS-H inc-1 (contract §2c/§5; design worklog notes/se-ws-h-windows.md).
 //!
 //! Increment-1 admits the W1 class only: `WindowAgg(frameOptions ==
-//! FRAMEOPTION_DEFAULTS)` over `Sort` over a lane-fusible child (the shared
-//! `sort_lane_fusible_memo` verdict), every window function in {row_number,
+//! FRAMEOPTION_DEFAULTS)` over `Sort` over a lane-fusible SCAN child (the
+//! shared `sort_lane_fusible_memo` verdict, further restricted to scan
+//! feeds — Agg-fed sorts refuse structurally because their feed carries
+//! the lane's ONE dynamic feed-time refuse, which sticky ownership cannot
+//! host; see `window_refuse_reason`), every window function in {row_number,
 //! rank, dense_rank, plain default-frame aggregates on the node's compiled
 //! evaltrans}, no runCondition, no qual, non-EPQ, forward, no row marks,
 //! first-pull-fresh node. Everything else refuses to the byte-identical
@@ -256,9 +259,10 @@ pub fn try_own_window_agg<'mcx>(
     if !admit {
         return Ok(None);
     }
-    // Feed-time dynamic refuse (the agg-over-join multi-batch spill arm of
-    // `sort_feed_if_needed`) happens inside drive() BEFORE the drive is
-    // created — see there.
+    // No feed-time dynamic refuse can follow: the admitted feeds are scan
+    // feeds only (the dynamically-refusing agg-over-join family refuses
+    // structurally above). drive_first still guards the refuse arm — and
+    // flips the memo — as defense-in-depth; see there.
     drive_first(w, estate)
 }
 
@@ -280,6 +284,25 @@ fn window_refuse_reason<'mcx>(
         // (EXPLAIN ANALYZE wraps every node) land here, like the Group hook.
         return Ok(Some(RefuseReason::ChildNotLaneOwned));
     };
+    // SCAN-FED SORTS ONLY (inc-1): an Agg-fed sort (the hash-agg breaker
+    // composing under the sort) is the ONE feed family whose
+    // `sort_feed_if_needed` can refuse DYNAMICALLY (the agg-over-join
+    // multi-batch spill arm — and a chgParam rescan can flip a rebuilt
+    // join's nbatch 1→N mid-life). Sticky ownership cannot host a dynamic
+    // feed verdict: a feed-time refuse after admission would either strand
+    // the memoized admit (the fixed inc-1 blocker: the next pull re-entered
+    // drive_first over a row-engine-fed sort) or fire the rescan tripwire
+    // on a query that succeeds knob-OFF. Refuse the whole family
+    // structurally (plan-shape, init-stable ⇒ memoizable); every admitted
+    // feed below is a scan feed, whose sort_feed_if_needed has NO refuse
+    // arm — making the feed-refuse paths unreachable by construction.
+    // Re-admission is ledgered (notes/se-ws-h-windows.md TODO 16). The
+    // inner sort/agg lanes still engage on their own under the refused
+    // window via the row engine's child pulls — nothing is forfeited but
+    // the window computation itself.
+    if matches!(&*s.outer, crate::procnode::PlanStateNode::Agg(_)) {
+        return Ok(Some(RefuseReason::ChildNotLaneOwned));
+    }
     if !super::sort_lane_fusible_memo(s, estate)? {
         return Ok(Some(RefuseReason::ChildNotLaneOwned));
     }
@@ -316,6 +339,17 @@ fn drive_first<'mcx>(
         if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
             // Feed-time refuse before any lane tuple: the Volcano fallback
             // resumes byte-identically (sort_feed_if_needed's contract).
+            // UNREACHABLE for the inc-1 admission (scan-fed sorts only —
+            // no scan feed refuses; the dynamically-refusing agg-over-join
+            // family is refused structurally in window_refuse_reason), but
+            // kept live as defense-in-depth for future feed admissions:
+            // the refusal MUST also flip the memo — a stranded admit=true
+            // would re-enter this function on the next pull, over a sort
+            // the row engine has by then fed, and hijack the mid-stream
+            // WindowAgg (the fixed inc-1 blocker). Either verdict is final
+            // (module doc): once the row engine drives, it drives for the
+            // node's whole (re)scan life.
+            w.lane_admit = Some(false);
             return Ok(None);
         }
     }
@@ -350,10 +384,15 @@ fn drive<'mcx>(
     let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
     if !sstate.sort_done() {
         // Post-rescan re-feed. A feed-time refuse here would strand the
-        // sticky drive — but the refuse arm is the agg-over-join spill,
-        // whose completed build the fallback cannot resume EITHER; fail
-        // loud (it cannot fire: the feed refused or succeeded identically
-        // on the first pull, and spill multiplicity is input-determined).
+        // sticky drive; it is unreachable BY CONSTRUCTION because inc-1
+        // admission is scan-fed sorts only (window_refuse_reason refuses
+        // the agg-fed family structurally) and no scan feed has a refuse
+        // arm in sort_feed_if_needed. The one dynamic refuse — the
+        // agg-over-join multi-batch spill, which a chgParam rescan CAN
+        // flip 1→N on a rebuilt join — can therefore never reach a
+        // lane-owned window. The loud tripwire stays as defense-in-depth
+        // (a future feed admission that reintroduces a dynamic refuse must
+        // ship a byte-safe rescan fallback design first).
         if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
             return Err(sticky_tripwire("sort feed verdict"));
         }
