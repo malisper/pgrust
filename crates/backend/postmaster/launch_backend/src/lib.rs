@@ -68,7 +68,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     ChildProcessKind { name: "wal sender", main_fn: Main::None, shmem_attach: true },
     ChildProcessKind {
         name: "slot sync worker",
-        main_fn: Main::Unported("ReplSlotSyncWorkerMain (backend-replication-slotsync)"),
+        main_fn: Main::Ported(slotsync::ReplSlotSyncWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind { name: "standalone backend", main_fn: Main::None, shmem_attach: false },
@@ -99,7 +99,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "wal_receiver",
-        main_fn: Main::Unported("WalReceiverMain (backend-replication-walreceiver)"),
+        main_fn: Main::Ported(walreceiver::WalReceiverMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -222,7 +222,9 @@ inherited! {
     is_postmaster_environment: bool = IsPostmasterEnvironment / SetIsPostmasterEnvironment;
     is_binary_upgrade: bool = IsBinaryUpgrade / SetIsBinaryUpgrade;
     postmaster_pid: pid_t = PostmasterPid / SetPostmasterPid;
-    data_directory_mode: i32 = data_directory_mode / set_data_directory_mode;
+    // data_directory_mode is process-global (set once by checkDataDir); it is
+    // deliberately NOT in this list — a stale captured copy applied by a
+    // pooled standby thread would reset the fixed value.
     output_file_name: [u8; types_core::MAXPGPATH] = OutputFileName / SetOutputFileName;
     my_exec_path: [u8; types_core::MAXPGPATH] = my_exec_path / set_my_exec_path;
     pkglib_path: [u8; types_core::MAXPGPATH] = pkglib_path / set_pkglib_path;

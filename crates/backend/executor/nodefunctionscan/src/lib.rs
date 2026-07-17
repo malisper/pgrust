@@ -459,6 +459,9 @@ fn exec_make_table_function_result<'mcx>(
         2 => run_value_per_call::<2>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
         3 => run_value_per_call::<3>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
         4 => run_value_per_call::<4>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
+        // pg_create_logical_replication_slot(name, plugin, temporary,
+        // twophase, failover) — pg_createsubscriber's slot creation.
+        5 => run_value_per_call::<5>(setexpr, expected_desc, random_access, estate, ecxt, arg_mcx),
         // pg_restore_attribute_stats over pg_stats rows is a 36-arg
         // variadic-"any" SRF call (stats_import).
         36 => {

@@ -314,6 +314,12 @@ pub fn FlushOneBuffer(buffer: Buffer) -> PgResult<()> {
 
 /// FlushDatabaseBuffers (bufmgr.c): write out all dirty buffers of a database.
 pub fn FlushDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
+    // Uncollected uring prefetch reads hold thread-owned pins (the startup's
+    // recovery prefetcher during dbase_redo -> FlushDatabaseBuffers most of
+    // all); PinBuffer_Locked requires no pre-existing private ref. Same
+    // drain as DropDatabaseBuffers (032 stall: debug asserts, release
+    // corrupts the pin accounting and wedges replay).
+    crate::uring::drain_own();
     for i in 0..crate::buf_hdr::NBuffersInited() {
         let desc = GetBufferDescriptor(i);
         // Unlocked precheck, safe as in DropRelationBuffers (C comment).
@@ -343,6 +349,9 @@ pub fn FlushRelationsAllBuffers(rels: &[RelFileLocatorBackend]) -> PgResult<()> 
     if rels.is_empty() {
         return Ok(());
     }
+    // See FlushDatabaseBuffers: no pre-existing private refs on the swept
+    // buffers (uring prefetch pins).
+    crate::uring::drain_own();
     for r in rels {
         assert!(
             r.backend == INVALID_PROC_NUMBER,

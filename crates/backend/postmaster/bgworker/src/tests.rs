@@ -216,3 +216,37 @@ fn get_background_worker_type_by_pid() {
     assert_eq!(GetBackgroundWorkerTypeByPid(4242).as_deref(), Some("test worker"));
     assert_eq!(GetBackgroundWorkerTypeByPid(4243), None);
 }
+
+#[test]
+fn static_registration_takes_slot_at_shmem_init() {
+    let _g = bringup();
+    // Static registration happens in the postmaster, before shmem init.
+    *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    STATIC_PENDING.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    g::SetIsUnderPostmaster(false);
+    let mut w = mk_worker("static launcher", BGWORKER_SHMEM_ACCESS);
+    w.bgw_restart_time = 5;
+    RegisterBackgroundWorker(&w);
+    // Too many: silently rejected at LOG (max_worker_processes = 4).
+    for i in 0..5 {
+        RegisterBackgroundWorker(&mk_worker(&format!("s{i}"), BGWORKER_SHMEM_ACCESS));
+    }
+    BackgroundWorkerShmemInit();
+    g::SetIsUnderPostmaster(true);
+
+    with_registry(|reg| {
+        let n_used = reg.slots.iter().filter(|s| s.in_use).count();
+        assert_eq!(n_used, 4, "4 slots (cap), 5th static registration rejected");
+        let s0 = &reg.slots[0];
+        assert_eq!(s0.worker.as_ref().unwrap().bgw_name, "static launcher");
+        assert_eq!(s0.pid, InvalidPid);
+        let idx = find_rw_by_slot(reg, 0).expect("registered entry");
+        assert_eq!(rw_ref(reg, idx).worker.bgw_restart_time, 5);
+    });
+
+    // Registration after shmem init in a backend is refused at LOG, not panic.
+    RegisterBackgroundWorker(&mk_worker("late", BGWORKER_SHMEM_ACCESS));
+    with_registry(|reg| {
+        assert_eq!(reg.slots.iter().filter(|s| s.in_use).count(), 4);
+    });
+}
