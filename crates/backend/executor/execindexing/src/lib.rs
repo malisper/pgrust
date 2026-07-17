@@ -23,10 +23,16 @@ pub use build_scan::{table_index_build_range_scan, table_index_build_scan};
 mod validate_scan;
 pub use validate_scan::{table_index_validate_scan, ValidateIndexState};
 
+// unported: user-reachable unported-feature lanes raise a clean
+// ERRCODE_FEATURE_NOT_SUPPORTED error (sites sit at arm entry; the
+// transaction aborts and unwinds normally).
 #[cold]
 #[inline(never)]
-pub(crate) fn unported(what: &str) -> ! {
-    panic!("unported: execIndexing {what}")
+pub(crate) fn unported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{what} is not yet implemented"))
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 // IndexInfo (nodes/execnodes.h) trimmed to the insert/build lanes' fields.
@@ -332,7 +338,7 @@ pub fn BuildIndexInfo<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'_>) -> PgResult<In
 pub fn BuildSpeculativeIndexInfo(index: &Relation<'_>, ii: &mut IndexInfo) -> PgResult<()> {
     debug_assert!(ii.ii_Unique);
     if index.rd_rel.relam != ::types_core::catalog::BTREE_AM_OID {
-        unported("BuildSpeculativeIndexInfo over a non-btree AM");
+        return Err(unported("ON CONFLICT arbiter over a non-btree unique index"));
     }
     let indnkeyatts = ii.ii_NumIndexKeyAttrs as usize;
     for i in 0..indnkeyatts {
@@ -460,7 +466,8 @@ pub fn FormIndexDatum<'mcx>(
     for i in 0..indexInfo.ii_NumIndexAttrs as usize {
         let keycol = indexInfo.ii_IndexAttrNumbers[i];
         if keycol < 0 {
-            unported("system-attribute index columns (slot_getsysattr)");
+            // unported: slot_getsysattr lane.
+            return Err(unported("system-attribute index columns"));
         }
         if keycol != 0 {
             let mut null = false;
