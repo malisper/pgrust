@@ -14225,8 +14225,11 @@ fn epq_recheck_shape_class(plan: ::types_nodes::Node<'_>) -> Option<ShapeClass> 
 // --- WS-V wave-5 sub-region (reserved) ----------------------------------------
 // --- end WS-V wave-5 ----------------------------------------------------------
 
-// --- WS-W wave-5 sub-region (OC admission entry fallback, if not dml.rs-local) -
-// --- end WS-W wave-5 ----------------------------------------------------------
+// --- WS-W (wave-5): OC admission test lever (the admission entry itself is
+// dml.rs-local per §2's preference; this is the unit-corpus re-export only).
+#[cfg(test)]
+pub(crate) use dml::dml_oc_set_for_tests;
+// --- end WS-W (wave-5) ---
 
 // --- WS-X wave-5 sub-region (reserved) ----------------------------------------
 // --- end WS-X wave-5 ----------------------------------------------------------
