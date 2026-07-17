@@ -221,6 +221,26 @@ pub fn murmurhash32(mut h: u32) -> u32 {
     h
 }
 
+/// Inverse permutation of [`murmurhash32`]. The murmur3 32-bit finalizer is a
+/// bijection on u32 (xorshift-by->=width/2 steps are involutions composed
+/// with themselves; the multiplications are by odd constants, invertible mod
+/// 2^32), so any value it produced can be mapped back to its input exactly.
+/// Consumer: the agg table-handoff export rebases stored entry hashes from a
+/// participant's variable-IV mapping onto the leader's IV=0 mapping
+/// (`TupleHashTable::hash_to_iv0`) — the IV enters every kernel hash linearly
+/// BEFORE this finalizer, so un-finalize / strip IV / re-finalize is exact.
+pub fn murmurhash32_inverse(mut h: u32) -> u32 {
+    // Undo, in reverse order: ^= >>16 (self-inverse), *= 0xc2b2ae35
+    // (multiply by its inverse mod 2^32), ^= >>13 (undone by two shifts),
+    // *= 0x85ebca6b, ^= >>16.
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7ed1_b41d); // modular inverse of 0xc2b2_ae35
+    h ^= (h >> 13) ^ (h >> 26);
+    h = h.wrapping_mul(0xa5cb_9243); // modular inverse of 0x85eb_ca6b
+    h ^= h >> 16;
+    h
+}
+
 pub fn murmurhash64(mut h: u64) -> u64 {
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -252,6 +272,23 @@ mod tests {
         for len in 0..=40 {
             let k = &buf[..len];
             assert_eq!(hash_bytes_extended(k, 0) as u32, hash_bytes(k));
+        }
+    }
+
+    #[test]
+    fn murmurhash32_inverse_roundtrips() {
+        fn check(v: u32) {
+            assert_eq!(murmurhash32_inverse(murmurhash32(v)), v);
+            assert_eq!(murmurhash32(murmurhash32_inverse(v)), v);
+        }
+        for v in [0u32, 1, 2, 42, 0x1234_5678, u32::MAX, u32::MAX - 1] {
+            check(v);
+        }
+        // Deterministic LCG spread across the space.
+        let mut x = 0x9e37_79b9u32;
+        for _ in 0..100_000 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            check(x);
         }
     }
 
