@@ -6081,8 +6081,11 @@ mod mergejoin_rowmode_ab {
 // ---------------------------------------------------------------------------
 // WS-P node census (wave-2 flip machinery; lanev2/census.rs). Fixture oid
 // band: 74001+ (fixture bands are a shared namespace — phase-1 integration
-// precedent: 70xxx shared/windows, 71xxx/72xxx express, 73001-73012
-// mergejoin).
+// precedent; wave-2 integrated map: 70xxx shared/windows incl. T2, 71xxx/
+// 72xxx express, 73xxx mergejoin + rowmode-tail fixture reuse, 74xxx census,
+// 75xxx dml — dml_ab was moved off 74001+ at wave-2 integration because
+// register_table_2col's two_col membership is process-global and permanent,
+// which poisoned census's 1-col 74002 registration when dml ran first).
 // ---------------------------------------------------------------------------
 mod census_tests {
     use super::*;
@@ -7501,7 +7504,7 @@ mod windows_t2_ab {
 
 // ===========================================================================
 // Wave-2 WS-N inc-1: DML lane A/B corpus (lanev2/dml.rs try_own_modify_table
-// behind PGRUST_LANE_V2_DML). Fake-oid band 74001+ (this module's claim per
+// behind PGRUST_LANE_V2_DML). Fake-oid band 75001+ (this module's claim per
 // the Phase-1 integration precedent — fixture oid bands are a shared
 // namespace).
 //
@@ -7694,8 +7697,8 @@ mod dml_ab {
         install_seams();
         scanfix::install();
         install_replica_identity_seam();
-        let target: u32 = 74001;
-        let source: u32 = 74002;
+        let target: u32 = 75001;
+        let source: u32 = 75002;
         scanfix::register_table_2col(target, &[]);
         scanfix::register_table_2col(source, &[]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -7730,8 +7733,8 @@ mod dml_ab {
         install_seams();
         scanfix::install();
         install_replica_identity_seam();
-        let target: u32 = 74003;
-        let source: u32 = 74004;
+        let target: u32 = 75003;
+        let source: u32 = 75004;
         scanfix::register_table_2col(target, &[]);
         scanfix::register_table_2col(source, &[]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
