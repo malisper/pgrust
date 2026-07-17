@@ -1626,10 +1626,23 @@ fn sgc_query_news<'mcx>(
         if sgc_mutate_opt(ctx, wc.startOffset)?.is_some()
             || sgc_mutate_opt(ctx, wc.endOffset)?.is_some()
         {
-            panic!(
-                "substitute_grouped_columns (parse_agg.c): grouped outer Var inside \
-                 a window frame offset (WindowClause rebuild unported)"
-            );
+            // unported: C rebuilds the WindowClause when a grouped outer Var
+            // sits inside a window frame offset (obscure but reachable from
+            // SQL); raise a clean 0A000 until that rebuild is ported.
+            return Err(Box::new(
+                ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(
+                        "grouped outer column references inside a window frame offset \
+                         are not supported yet",
+                    )
+                    .into_error()
+                    .with_error_location(ErrorLocation::new(
+                        "parse_agg.c",
+                        0,
+                        "substitute_grouped_columns",
+                    )),
+            ));
         }
     }
     let new_jointree = match q.jointree {
