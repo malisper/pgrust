@@ -9,19 +9,24 @@
 //! C pays a cheap hash probe per re-search; the port's seam + projection +
 //! release ceremony is ~300-500 Ir per call, so repeats are pure tax.
 //!
-//! Pattern of record (= T1 att_stats_memo, selfuncs::get_att_stats):
-//! PlannerRun-scoped keyed vecs (plan arena, die at planner exit — bounded,
-//! zero cross-query state), struct values arena-leaked via forget_box_in
-//! and stored OPAQUE (NonNull) in types_pathnodes so the _support crate
-//! takes no backend dep; this module owns both sides of every cast. Linear
-//! scan on the key vec: per-cycle key populations are single digits.
+//! Pattern of record (= T1 att_stats_memo, selfuncs::get_att_stats), with
+//! one refinement: the four keyed vecs live in a single MemoBlock that is
+//! arena-allocated LAZILY on the first memo consultation, and PlannerRun
+//! carries one opaque `Cell<Option<NonNull<()>>>` to it. Planning cycles
+//! that never repeat a catalog lookup (SELECT 1 — the instr guard) pay a
+//! single None store; the eager 4-field form measured +19 instr/q on the
+//! select1 guard. This module owns the block type and the only cast pair.
+//! Values are small Copy PODs stored inline (no per-miss arena leak).
+//! Linear scan on the key vecs: per-cycle key populations are single
+//! digits.
 //!
 //! COST ONLY / divergence note: the memos issue the same seam calls with
 //! the same arguments and return the same values; plancache invalidation
-//! policy is untouched (a relcache/syscache inval still discards the plan).
-//! The only divergence class is a concurrent mid-planning-cycle catalog
-//! change (ALTER OPERATOR / GRANT / REVOKE committing while we plan) that
-//! C's per-call re-searches could observe on a later call within the same
+//! policy is untouched (a relcache/syscache inval still discards the plan,
+//! and a fresh planning cycle starts with an empty block). The only
+//! divergence class is a concurrent mid-planning-cycle catalog change
+//! (ALTER OPERATOR / GRANT / REVOKE committing while we plan) that C's
+//! per-call re-searches could observe on a later call within the same
 //! cycle — nondeterministic interleaving in C, estimates-only here: the
 //! ACL memo feeds vardata.acl_ok (whether stats are CONSULTED, never
 //! whether access is ALLOWED — ExecCheckPermissions runs unmemoized at
@@ -33,6 +38,7 @@
 //!   PGRUST_PLANNER_OPSHAPE_MEMO=0 | PGRUST_PLANNER_ACLMASK_MEMO=0 |
 //!   PGRUST_PLANNER_AMOP_MEMO=0
 
+use mcx::PgVec;
 use syscache_seams::{PgAmopShape, PgOperatorShape};
 use types_core::{InvalidOid, Oid, RegProcedure};
 use types_error::PgResult;
@@ -58,34 +64,63 @@ fn amop_memo_disabled() -> bool {
     *DISABLED.get_or_init(|| env_disabled("PGRUST_PLANNER_AMOP_MEMO"))
 }
 
+struct MemoBlock<'mcx> {
+    /// opno -> pg_operator shape (None = operator absent).
+    op_shape: core::cell::RefCell<PgVec<'mcx, (Oid, Option<PgOperatorShape>)>>,
+    /// (relid, roleid, mask, how_all) -> pg_class_aclmask result.
+    aclmask: core::cell::RefCell<PgVec<'mcx, ((Oid, Oid, u64, bool), u64)>>,
+    /// (opno, amop purpose, opfamily) -> pg_amop shape (None = not a member).
+    amop_by_op: core::cell::RefCell<PgVec<'mcx, ((Oid, u8, Oid), Option<PgAmopShape>)>>,
+    /// (opfamily, lefttype, righttype, strategy) -> member operator oid.
+    amop_member: core::cell::RefCell<PgVec<'mcx, ((Oid, Oid, Oid, i16), Oid)>>,
+}
+
+// Arena-leaked via forget_box_in: drop glue never runs; every member is
+// arena-backed or Copy, so the run's arena reset reclaims everything.
+mcx::forget_safe_struct!(
+    MemoBlock<'_> { op_shape, aclmask, amop_by_op, amop_member },
+);
+
+/// The only cast pair for PlannerRun.syscache_memos.
+fn memos<'mcx>(run: &PlannerRun<'mcx>) -> PgResult<&'mcx MemoBlock<'mcx>> {
+    if let Some(p) = run.syscache_memos.get() {
+        // SAFETY: the pointer was created below from &'mcx MemoBlock<'mcx>
+        // leaked into run.mcx (this function is the only writer); the arena
+        // outlives the run, and planning is single-threaded.
+        return Ok(unsafe { p.cast::<MemoBlock<'mcx>>().as_ref() });
+    }
+    let block = &*mcx::forget_box_in(
+        run.mcx,
+        MemoBlock {
+            op_shape: core::cell::RefCell::new(PgVec::new_in(run.mcx)),
+            aclmask: core::cell::RefCell::new(PgVec::new_in(run.mcx)),
+            amop_by_op: core::cell::RefCell::new(PgVec::new_in(run.mcx)),
+            amop_member: core::cell::RefCell::new(PgVec::new_in(run.mcx)),
+        },
+    )?;
+    run.syscache_memos
+        .set(Some(core::ptr::NonNull::from(block).cast()));
+    Ok(block)
+}
+
 // ---------------------------------------------------------------------------
-// Operator shape: opno -> &'mcx PgOperatorShape (per-cycle)
+// Operator shape: opno -> PgOperatorShape (per-cycle)
 // ---------------------------------------------------------------------------
 
 // Memo-only (callers gate on the kill switch and take the exact incumbent
-// lsyscache path when disabled — no memo read/write, no arena leak).
-fn operator_shape<'mcx>(
-    run: &PlannerRun<'mcx>,
-    opno: Oid,
-) -> PgResult<Option<&'mcx PgOperatorShape>> {
-    let hit = run
-        .op_shape_memo
+// lsyscache path when disabled — no memo read/write, no block allocation).
+fn operator_shape(run: &PlannerRun<'_>, opno: Oid) -> PgResult<Option<PgOperatorShape>> {
+    let block = memos(run)?;
+    let hit = block
+        .op_shape
         .borrow()
         .iter()
         .find_map(|(k, v)| (*k == opno).then_some(*v));
     if let Some(v) = hit {
-        // SAFETY: the pointer was created below from &'mcx PgOperatorShape
-        // leaked into run.mcx (this function is the only writer); the arena
-        // outlives the run, and planning is single-threaded.
-        return Ok(v.map(|p| unsafe { p.cast::<PgOperatorShape>().as_ref() }));
+        return Ok(v);
     }
-    let fetched = match syscache_seams::lookup_pg_operator_shape::call(opno)? {
-        Some(shape) => Some(&*mcx::forget_box_in(run.mcx, shape)?),
-        None => None,
-    };
-    run.op_shape_memo
-        .borrow_mut()
-        .push((opno, fetched.map(|r| core::ptr::NonNull::from(r).cast())));
+    let fetched = syscache_seams::lookup_pg_operator_shape::call(opno)?;
+    block.op_shape.borrow_mut().push((opno, fetched));
     Ok(fetched)
 }
 
@@ -158,9 +193,10 @@ pub(crate) fn class_aclmask(
     if aclmask_memo_disabled() {
         return aclchk_seams::pg_class_aclmask::call(table_oid, roleid, mask, how_all);
     }
+    let block = memos(run)?;
     let key = (table_oid, roleid, mask, how_all);
-    let hit = run
-        .aclmask_memo
+    let hit = block
+        .aclmask
         .borrow()
         .iter()
         .find_map(|(k, v)| (*k == key).then_some(*v));
@@ -168,7 +204,7 @@ pub(crate) fn class_aclmask(
         return Ok(v);
     }
     let fetched = aclchk_seams::pg_class_aclmask::call(table_oid, roleid, mask, how_all)?;
-    run.aclmask_memo.borrow_mut().push((key, fetched));
+    block.aclmask.borrow_mut().push((key, fetched));
     Ok(fetched)
 }
 
@@ -177,31 +213,24 @@ pub(crate) fn class_aclmask(
 // ---------------------------------------------------------------------------
 
 // Memo-only; callers gate on the kill switch (exact incumbent when off).
-fn amop_by_operator<'mcx>(
-    run: &PlannerRun<'mcx>,
+fn amop_by_operator(
+    run: &PlannerRun<'_>,
     opno: Oid,
     purpose: u8,
     opfamily: Oid,
-) -> PgResult<Option<&'mcx PgAmopShape>> {
+) -> PgResult<Option<PgAmopShape>> {
+    let block = memos(run)?;
     let key = (opno, purpose, opfamily);
-    let hit = run
-        .amop_by_op_memo
+    let hit = block
+        .amop_by_op
         .borrow()
         .iter()
         .find_map(|(k, v)| (*k == key).then_some(*v));
     if let Some(v) = hit {
-        // SAFETY: created below from &'mcx PgAmopShape leaked into run.mcx
-        // (this function is the only writer); arena outlives the run;
-        // planning is single-threaded.
-        return Ok(v.map(|p| unsafe { p.cast::<PgAmopShape>().as_ref() }));
+        return Ok(v);
     }
-    let fetched = match syscache_seams::lookup_pg_amop_by_operator::call(opno, purpose, opfamily)? {
-        Some(shape) => Some(&*mcx::forget_box_in(run.mcx, shape)?),
-        None => None,
-    };
-    run.amop_by_op_memo
-        .borrow_mut()
-        .push((key, fetched.map(|r| core::ptr::NonNull::from(r).cast())));
+    let fetched = syscache_seams::lookup_pg_amop_by_operator::call(opno, purpose, opfamily)?;
+    block.amop_by_op.borrow_mut().push((key, fetched));
     Ok(fetched)
 }
 
@@ -233,9 +262,10 @@ pub(crate) fn get_opfamily_member(
             opfamily, lefttype, righttype, strategy,
         );
     }
+    let block = memos(run)?;
     let key = (opfamily, lefttype, righttype, strategy);
-    let hit = run
-        .amop_member_memo
+    let hit = block
+        .amop_member
         .borrow()
         .iter()
         .find_map(|(k, v)| (*k == key).then_some(*v));
@@ -244,6 +274,6 @@ pub(crate) fn get_opfamily_member(
     }
     let fetched =
         syscache_seams::lookup_pg_amop_by_strategy::call(opfamily, lefttype, righttype, strategy)?;
-    run.amop_member_memo.borrow_mut().push((key, fetched));
+    block.amop_member.borrow_mut().push((key, fetched));
     Ok(fetched)
 }
