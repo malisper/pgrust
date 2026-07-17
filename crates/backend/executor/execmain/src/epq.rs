@@ -4,6 +4,17 @@
 // (C EPQState.relsubs_*), swapped into estate.es_epq only while its recheck
 // runs, so nested EPQ (a LockRows inside a recheck) never clobbers the outer
 // run's per-rel state.
+//
+// WS-U wave-5 inc-1 (docs/design/lane-epq.md): the module is factored into
+// named seam functions mapped 1:1 onto C's EvalPlanQual* entry points —
+// `eval_plan_qual` (EvalPlanQual), `eval_plan_qual_begin` (EvalPlanQualBegin),
+// `eval_plan_qual_start` (EvalPlanQualStart), `eval_plan_qual_slot`
+// (EvalPlanQualSlot), `eval_plan_qual_next` (EvalPlanQualNext),
+// `eval_plan_qual_end` (EvalPlanQualEnd). Pure code moves; the rowmark arm
+// (EvalPlanQualFetchRowMark) lives with the scan dispatch in execscan
+// (`epq_fetch`/`epq_fetch_row_mark`), where C's ExecScanFetch calls it.
+// Inc-5 (EPQ capture) hangs its admission chokepoint here without moving
+// these seams again.
 
 use crate::procnode::{exec_end_node, exec_init_node, exec_proc_node, PlanStateNode};
 use ::executils::{EStateData, EpqSubs, ExecSlotId};
@@ -43,32 +54,21 @@ fn eval_plan_qual_guts<'mcx>(
     eval_plan_qual_begin(epq, estate)?;
 
     let idx = (epq.result_rti - 1) as usize;
-    // C EvalPlanQualSlot: make the rel's test slot on first use (the trigger
-    // path reaches here without a parked slot; DML paths park the input).
-    if estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx].is_none() {
-        let (kind, desc) = {
-            let rel = estate.es_relations[idx].as_ref().expect("EPQ relation opened");
-            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
-        };
-        let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
-        let id = ExecSlotId(estate.es_tupleTable.len() as u32);
-        estate.es_tupleTable.push(slot);
-        estate.es_epq.as_mut().expect("EPQ state installed").relsubs_slot[idx] = Some(id);
-    }
-    let testslot = estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx]
-        .expect("just ensured");
+    let testslot = eval_plan_qual_slot(epq, estate)?;
     if testslot != inputslot {
         let (dst, src) = slot_pair_mut(estate, testslot, inputslot);
         exectuples::exec_copy_slot(dst, src, mcx, mcx)?;
     }
 
+    // C EvalPlanQual: mark that an EPQ tuple is available for this relation
+    // (other result relations remain marked as having no tuple available).
     {
         let subs = estate.es_epq.as_mut().expect("EPQ state installed");
         subs.relsubs_done[idx] = false;
         subs.relsubs_blocked[idx] = false;
     }
 
-    let slot = exec_proc_node(epq.recheck.as_mut().expect("begun"), estate)?;
+    let slot = eval_plan_qual_next(epq, estate)?;
 
     if let Some(s) = slot {
         // A projection-less recheck would hand back the test slot, which the
@@ -83,7 +83,43 @@ fn eval_plan_qual_guts<'mcx>(
     Ok(slot)
 }
 
-fn eval_plan_qual_begin<'mcx>(
+/// `EvalPlanQualSlot` (execMain.c): the rel's per-rti test slot, made on
+/// first use. The trigger path reaches here without a parked slot; DML
+/// paths park the input via the owner-held relsubs before the recheck.
+pub(crate) fn eval_plan_qual_slot<'mcx>(
+    epq: &mut EpqState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<ExecSlotId> {
+    let mcx = estate.es_query_cxt;
+    let idx = (epq.result_rti - 1) as usize;
+    if estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx].is_none() {
+        let (kind, desc) = {
+            let rel = estate.es_relations[idx].as_ref().expect("EPQ relation opened");
+            (tableam::table_slot_callbacks(rel), rel.rd_att.clone())
+        };
+        let slot = exectuples::make_tuple_table_slot(mcx, kind, Some(desc));
+        let id = ExecSlotId(estate.es_tupleTable.len() as u32);
+        estate.es_tupleTable.push(slot);
+        estate.es_epq.as_mut().expect("EPQ state installed").relsubs_slot[idx] = Some(id);
+    }
+    Ok(estate.es_epq.as_ref().expect("EPQ state installed").relsubs_slot[idx]
+        .expect("just ensured"))
+}
+
+/// `EvalPlanQualNext` (execMain.c): one pull of the recheck tree — the EPQ
+/// query returns at most one tuple (every scan under it substitutes its
+/// test slot exactly once via the relsubs_done latch).
+pub(crate) fn eval_plan_qual_next<'mcx>(
+    epq: &mut EpqState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    exec_proc_node(epq.recheck.as_mut().expect("begun"), estate)
+}
+
+/// `EvalPlanQualBegin` (execMain.c): reset+rescan an already-built recheck
+/// tree (relsubs_done reloaded from relsubs_blocked, so result rels with no
+/// parked tuple stay blocked), or fall to the first-run Start arm.
+pub(crate) fn eval_plan_qual_begin<'mcx>(
     epq: &mut EpqState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -94,7 +130,18 @@ fn eval_plan_qual_begin<'mcx>(
         }
         return crate::execami::exec_re_scan(recheck, estate);
     }
+    eval_plan_qual_start(epq, estate)
+}
 
+/// `EvalPlanQualStart` (execMain.c): first-run initialization of the
+/// recheck plan tree. Divergence from C is deliberate and pinned: C builds
+/// a child EState here (parentestate/recheckestate split); pgrust inits the
+/// tree against the parent estate under the swapped-in `EpqSubs`
+/// (docs/design/lane-epq.md §3 — the capture-model decision).
+pub(crate) fn eval_plan_qual_start<'mcx>(
+    epq: &mut EpqState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     let plan = epq.plan.expect("ModifyTable has a subplan");
     check_epq_plan(plan);
     debug_assert!(estate.es_epq.is_some(), "EvalPlanQualSlot precedes EvalPlanQual");
@@ -111,7 +158,16 @@ fn eval_plan_qual_begin<'mcx>(
 // The recheck tree re-runs against the parent estate; every node in it must
 // have exercised EPQ rescan semantics. Scans substitute the test tuple via
 // ExecScanFetch; joins/sorts/materials rescan their children.
-fn check_epq_plan(plan: Node<'_>) {
+//
+// WS-U wave-5 (contract §6.2c): this whitelist is the FUTURE LOUD ADMISSION
+// LIST for inc-5 (EPQ capture, LAST in the program). Before the
+// `es_epq_active` refusal is lifted, every shape admitted here must be
+// census-green on WS-P's read-side coverage census — a recheck plan can
+// contain any read shape, and a mid-recheck refusal would mean a
+// mixed-engine recheck. It admits nothing new this wave; additions are the
+// documented loud-admission-list deliverable, one reviewed act per shape
+// (docs/design/lane-epq.md §5).
+pub(crate) fn check_epq_plan(plan: Node<'_>) {
     let ok = matches!(
         plan.node_tag(),
         NodeTag::T_Append

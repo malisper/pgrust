@@ -9724,3 +9724,191 @@ mod dml_ab_wave3 {
     }
 }
 // --- end WS-T wave-3 ----------------------------------------------------------
+
+// ===== WAVE-5 APPEND REGION — do not edit above =====
+// Sub-regions in fixed order U, V, W, X (wave-5 contract §2); a WS writes
+// only inside its own sub-region. Fixture oid bands (§4): U 79001+,
+// V 80001+ (the 5 deferred AM-backed per-shape units keep the reserved
+// 76xxx band), W 81001+, X 82001+ (reserved, expected unused).
+
+// --- WS-U wave-5 (EPQ inc-1: seam moves + refuse-all knob) --------------------
+// A/B move-equivalence corpus for the epq.rs seam extraction (wave-5
+// contract §6.2a — pure code moves, zero behavior delta) and the
+// PGRUST_LANE_V2_EPQ refuse-all knob (§6.3). Serialization: every test
+// holds scanfix::TEST_LOCK for its full span (the wave-2 precedent-3
+// discipline). Fake oids: WS-U band 79001+.
+mod epq_seams_w5 {
+    use super::*;
+
+    /// Move-equivalence arm A vs arm B (contract §6.2a): the public
+    /// `eval_plan_qual` entry (which now composes the extracted seams) vs
+    /// a manual composition of those seams in C's EvalPlanQual order
+    /// (Begin -> Slot -> availability reset -> Next -> clear/block). Same
+    /// 79001 fixture, byte-identical projected values on the pass arm and
+    /// the same skip verdict on the qual-fail arm.
+    #[test]
+    fn epq_w5_seam_composition_matches_entry() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 79001;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (2, 20)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+            };
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+            let test = estate.exec_init_extra_tuple_slot(
+                Some(desc),
+                ::types_slot::TupleSlotKind::Virtual,
+            );
+            subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+
+            // Arm A: the public entry (routes through the moved seams).
+            epq_store_test_tuple(estate, test, 1, 99);
+            let a = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let a_vals = epq_slot_vals(estate, a);
+            assert_eq!(a_vals, (1, 99));
+
+            // Arm B: manual seam composition, C entry-point order. The
+            // es_epq swap + active flag mirror the entry's wrapper lines.
+            epq_store_test_tuple(estate, test, 1, 99);
+            estate.es_epq = subs.take();
+            let saved_active = estate.es_epq_active;
+            estate.es_epq_active = true;
+            crate::epq::eval_plan_qual_begin(&mut epq, estate).unwrap();
+            let slot_id = crate::epq::eval_plan_qual_slot(&mut epq, estate).unwrap();
+            assert_eq!(slot_id, test, "parked test slot is THE EvalPlanQualSlot");
+            {
+                let s = estate.es_epq.as_mut().unwrap();
+                s.relsubs_done[0] = false;
+                s.relsubs_blocked[0] = false;
+            }
+            let b = crate::epq::eval_plan_qual_next(&mut epq, estate)
+                .unwrap()
+                .expect("qual passes");
+            let b_vals = epq_slot_vals(estate, b);
+            let qcx = estate.es_query_cxt;
+            exectuples::exec_clear_tuple(estate.slot_mut(test), qcx);
+            estate.es_epq.as_mut().unwrap().relsubs_blocked[0] = true;
+            estate.es_epq_active = saved_active;
+            subs = estate.es_epq.take();
+
+            assert_eq!(b_vals, a_vals, "seam composition == entry (move equivalence)");
+
+            // Skip verdict identical through the entry as before the move.
+            epq_store_test_tuple(estate, test, 2, 99);
+            assert!(crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .is_none());
+
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            assert!(epq.recheck.is_none());
+
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+
+    /// `eval_plan_qual_slot` (C EvalPlanQualSlot): made on first use, then
+    /// idempotent — the second call returns the same slot id and appends
+    /// nothing to the tuple table.
+    #[test]
+    fn epq_w5_slot_seam_idempotent() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 79002;
+        scanfix::register_table_2col(relid, &[&[(1, 10)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+            };
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            // No parked slot: the seam must make one on first use.
+            estate.es_epq = subs.take();
+            let n0 = estate.es_tupleTable.len();
+            let first = crate::epq::eval_plan_qual_slot(&mut epq, estate).unwrap();
+            let n1 = estate.es_tupleTable.len();
+            assert_eq!(n1, n0 + 1, "first use makes exactly one slot");
+            let second = crate::epq::eval_plan_qual_slot(&mut epq, estate).unwrap();
+            assert_eq!(second, first, "idempotent per rti");
+            assert_eq!(estate.es_tupleTable.len(), n1, "second call appends nothing");
+            subs = estate.es_epq.take();
+
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+
+    /// `check_epq_plan` is the FUTURE LOUD ADMISSION LIST (contract §6.2c):
+    /// listed shapes pass silently; an unexercised shape panics LOUDLY. It
+    /// admits nothing new this wave — Agg stays outside the list.
+    #[test]
+    #[should_panic(expected = "recheck plan")]
+    fn epq_w5_check_epq_plan_is_the_loud_admission_list() {
+        let mcx = leaked_mcx();
+        // Positive arm first: a whitelist shape passes without panic.
+        let seq = Node::build::<::types_nodes::plannodes::SeqScan>(mcx).unwrap().seal();
+        crate::epq::check_epq_plan(seq);
+        // Negative arm: Agg is not exercised for EPQ rescan — LOUD refuse.
+        let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
+        crate::epq::check_epq_plan(agg);
+    }
+}
+// --- end WS-U wave-5 ----------------------------------------------------------
+
+// --- WS-V wave-5 sub-region (reserved; 80001+ / reserved 76xxx) ---------------
+// --- end WS-V wave-5 ----------------------------------------------------------
+
+// --- WS-W wave-5 sub-region (reserved; 81001+) --------------------------------
+// --- end WS-W wave-5 ----------------------------------------------------------
+
+// --- WS-X wave-5 sub-region (reserved; 82001+, expected unused) ---------------
+// --- end WS-X wave-5 ----------------------------------------------------------
