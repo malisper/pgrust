@@ -7563,7 +7563,10 @@ mod dml_ab {
     /// the fixture has no publications, so every command is valid. Shared
     /// set-once installer (integration-record precedent: any module needing
     /// this seam MUST come through here).
-    fn install_replica_identity_seam() {
+    /// [pub(super): visibility-only WS-T wave-3 edit so the dml_ab_wave3
+    /// region comes through THIS installer instead of double-setting the
+    /// seam — flagged to the reconciler in notes/se-ws-t-dml-inc2.md.]
+    pub(super) fn install_replica_identity_seam() {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             execreplication_seams::check_cmd_replica_identity::set(|_mcx, _rel, _cmd| Ok(()));
@@ -7579,7 +7582,10 @@ mod dml_ab {
     /// (AccessShareLock, SELECT perms)]. `on_conflict_nothing` decorates the
     /// same plan with ONCONFLICT_NOTHING (arbiter-less DO NOTHING) for the
     /// DmlShape refusal leg.
-    fn mk_insert_select_pstmt<'mcx>(
+    /// [pub(super): visibility-only WS-T wave-3 edit — the dml_ab_wave3
+    /// region reuses this exact fixture for the lane-fed feed A/B; flagged
+    /// to the reconciler in notes/se-ws-t-dml-inc2.md.]
+    pub(super) fn mk_insert_select_pstmt<'mcx>(
         mcx: ::mcx::Mcx<'mcx>,
         target: u32,
         source: u32,
@@ -9281,3 +9287,433 @@ mod caller_c2_ab {
         }
     }
 }
+
+// --- WS-T wave-3 (dml inc-2 / inc-2b / inc-3a) --------------------------------
+// A/B unit corpus for the TupleOp decomposition (DmlInsertOp over bare child
+// rows), the lane-fed SeqScan feed, the LockRows TupleOp host, and the
+// UPDATE/DELETE verdict widening behind the nested PGRUST_LANE_V2_DML_UD
+// knob. Serialization: every test holds scanfix::TEST_LOCK for its full
+// span (the wave-2 precedent-3 discipline — dml_ab's tests hold the same
+// lock, so the shared DML knob atomics never race across modules). Fake
+// oids: the WS-T band continues dml at 75005+ (wave-3 contract §3.3).
+mod dml_ab_wave3 {
+    use super::*;
+
+    /// `UPDATE target SET c1 = 42` / `DELETE FROM target` — the planner's
+    /// plain single-rel shapes: `ModifyTable(op)` over a SeqScan of the
+    /// target itself; UPDATE subplan tlist = [new c1 value, junk ctid],
+    /// updateColnosLists = [[1]]; DELETE subplan tlist = [junk ctid].
+    /// Fixture note: the junk "ctid" entry is FOUND BY NAME at init
+    /// (init_result_rel's rowid_attno lookup) and its datum is only read
+    /// per fetched row — the source is empty, so a plain int4 Var stands in
+    /// for the TID system column (the test seams carry no TID type shape).
+    fn mk_update_delete_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        target: u32,
+        op: CmdType,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{ModifyTable, Plan, Scan, SeqScan};
+
+        let scan_tlist = if op == CmdType::CMD_UPDATE {
+            let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, mk_int4_const(mcx, 42), 1, Some("c1"), false)
+                    .unwrap(),
+                Node::mk_target_entry(mcx, junk, 2, Some("ctid"), true).unwrap(),
+            )
+            .unwrap()
+        } else {
+            let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make1(
+                mcx,
+                Node::mk_target_entry(mcx, junk, 1, Some("ctid"), true).unwrap(),
+            )
+            .unwrap()
+        };
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        let mut mt = Node::build::<ModifyTable>(mcx).unwrap();
+        mt.plan.lefttree = Some(scan);
+        mt.operation = op;
+        mt.canSetTag = true;
+        mt.nominalRelation = 1;
+        mt.resultRelations = ::types_nodes::IntList::make1(mcx, 1).unwrap();
+        if op == CmdType::CMD_UPDATE {
+            let colnos = ::types_nodes::IntList::make1(mcx, 1).unwrap();
+            mt.updateColnosLists =
+                NodeList::make1(mcx, Node::mk_int_list(mcx, colnos).unwrap()).unwrap();
+        }
+
+        let required = if op == CmdType::CMD_UPDATE {
+            ::types_nodes::parsenodes::ACL_UPDATE
+        } else {
+            ::types_nodes::parsenodes::ACL_DELETE
+        };
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: target,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::RowExclusiveLock,
+                perminfoindex: 1,
+                inFromCl: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perm = Node::mk(
+            mcx,
+            RTEPermissionInfo { relid: target, requiredPerms: required, ..Default::default() },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = op;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mt.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perm).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// `SELECT c1, c2 FROM target FOR UPDATE` — LockRows over a SeqScan
+    /// with the rowmark's junk "ctid1" column (found by name at
+    /// exec_init_lock_rows; the same empty-source int4 stand-in as above).
+    fn mk_lockrows_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, target: u32) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{LockRows, Plan, PlanRowMark, Scan, SeqScan};
+
+        let scan_tlist = {
+            let a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+            let junk = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+            let mut tl = NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap();
+            tl.lappend(mcx, Node::mk_target_entry(mcx, junk, 3, Some("ctid1"), true).unwrap())
+                .unwrap();
+            tl
+        };
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        // ROW_MARK_EXCLUSIVE is RowMarkType's default; prti == rti (no
+        // inheritance), so no tableoid junk is looked up.
+        let rowmark = Node::mk(
+            mcx,
+            PlanRowMark { rti: 1, prti: 1, rowmarkId: 1, ..Default::default() },
+        )
+        .unwrap();
+        let rowmarks = NodeList::make1(mcx, rowmark).unwrap();
+
+        let mut lr = Node::build::<LockRows>(mcx).unwrap();
+        lr.plan.lefttree = Some(scan);
+        lr.rowMarks = rowmarks.clone_in(mcx).unwrap();
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: target,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::RowShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perm = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid: target,
+                requiredPerms: ::types_nodes::parsenodes::ACL_SELECT,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(lr.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perm).unwrap();
+        pstmt.rowMarks = rowmarks;
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Drive a plan to completion (exec_proc_node until None — the
+    /// ExecutePlan cadence) and return es_processed. Both knob arms run
+    /// these identical statements. The generalized form of dml_ab's
+    /// run_insert (operation-parameterized).
+    fn run_stmt(pstmt: &'static PlannedStmt<'static>, op: CmdType) -> u64 {
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, op, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            while exec_proc_node(ps, estate).unwrap().is_some() {}
+            let processed = estate.es_processed;
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            processed
+        })
+    }
+
+    fn probes() -> (u64, u64) {
+        (
+            crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn lanefed_probe() -> u64 {
+        crate::lanev2::DML_LANEFED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn lockrows_probe() -> u64 {
+        crate::lanev2::DML_LOCKROWS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// inc-2: the op-form drive over the admitted INSERT..SELECT shape with
+    /// a SeqScan child — knob OFF ticks NOTHING and owns nothing; knob ON
+    /// engages the DmlInsertOp drive AND selects the lane-fed (dispatch-
+    /// hoisted) SeqScan feed; behavior identical on both arms.
+    #[test]
+    fn dml_w3_insert_select_op_form_lanefed() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75005;
+        let source: u32 = 75006;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        let (owned0, refused0) = probes();
+        let fed0 = lanefed_probe();
+        let off = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, false),
+            CmdType::CMD_INSERT,
+        );
+        let (owned1, refused1) = probes();
+        assert_eq!(off, 0);
+        assert_eq!(owned1, owned0, "knob OFF must not own");
+        assert_eq!(refused1, refused0, "knob OFF must tick NOTHING (contract §2.2)");
+        assert_eq!(lanefed_probe(), fed0, "knob OFF must not select a lane feed");
+
+        crate::lanev2::dml_set_for_tests(true);
+        let on = run_stmt(
+            dml_ab::mk_insert_select_pstmt(leaked_mcx(), target, source, false),
+            CmdType::CMD_INSERT,
+        );
+        let (owned2, refused2) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(on, off, "knob OFF vs ON must behave identically");
+        assert!(owned2 > owned1, "ON arm never engaged the DML drive");
+        assert_eq!(refused2, refused1, "the admitted shape must not tick DmlShape");
+        assert!(lanefed_probe() > fed0, "SeqScan child must take the lane-fed feed");
+
+        scanfix::quiesced();
+    }
+
+    /// inc-3a nested-knob law: UPDATE refuses (detail `update`) while the
+    /// UD stretch knob is off, even with the DML host knob on.
+    #[test]
+    fn dml_w3_update_refused_without_ud() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75007;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_ud_set_for_tests(false);
+        let (owned0, refused0) = probes();
+        let n = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_UPDATE),
+            CmdType::CMD_UPDATE,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "UPDATE must not be owned with _UD off");
+        assert!(refused1 > refused0, "UPDATE at _UD-off must tick DmlShape");
+
+        scanfix::quiesced();
+    }
+
+    /// inc-3a nested-knob law, other arm: `_UD` alone flips NOTHING — with
+    /// the DML host knob off the arm gate short-circuits and no wave-3 code
+    /// runs (no ticks, no ownership).
+    #[test]
+    fn dml_w3_ud_alone_flips_nothing() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75008;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_ud_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let n = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_UPDATE),
+            CmdType::CMD_UPDATE,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_ud_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "_UD alone must not own");
+        assert_eq!(refused1, refused0, "_UD alone must tick NOTHING");
+
+        scanfix::quiesced();
+    }
+
+    /// inc-3a: plain single-rel no-trigger UPDATE is owned under DML+UD —
+    /// the widened verdict routes it through the SAME DmlInsertOp/
+    /// mt_accept_row machinery (empty source: admission + drive + the
+    /// mt_source_exhausted epilogue, identical on both arms).
+    #[test]
+    fn dml_w3_update_owned_with_ud() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75009;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Volcano oracle arm first (both knobs off).
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_ud_set_for_tests(false);
+        let off = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_UPDATE),
+            CmdType::CMD_UPDATE,
+        );
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_ud_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let on = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_UPDATE),
+            CmdType::CMD_UPDATE,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_ud_set_for_tests(false);
+        assert_eq!(on, off, "knob arms must behave identically");
+        assert!(owned1 > owned0, "UD arm never engaged on the admitted UPDATE");
+        assert_eq!(refused1, refused0, "the admitted UPDATE must not tick DmlShape");
+
+        scanfix::quiesced();
+    }
+
+    /// inc-3a: same for DELETE.
+    #[test]
+    fn dml_w3_delete_owned_with_ud() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75010;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_ud_set_for_tests(false);
+        let off = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_DELETE),
+            CmdType::CMD_DELETE,
+        );
+
+        crate::lanev2::dml_set_for_tests(true);
+        crate::lanev2::dml_ud_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let on = run_stmt(
+            mk_update_delete_pstmt(leaked_mcx(), target, CmdType::CMD_DELETE),
+            CmdType::CMD_DELETE,
+        );
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        crate::lanev2::dml_ud_set_for_tests(false);
+        assert_eq!(on, off, "knob arms must behave identically");
+        assert!(owned1 > owned0, "UD arm never engaged on the admitted DELETE");
+        assert_eq!(refused1, refused0, "the admitted DELETE must not tick DmlShape");
+
+        scanfix::quiesced();
+    }
+
+    /// inc-2b: the LockRows TupleOp host engages under the DML knob (the
+    /// rowmode-tail delegation hook declines when ROWMODE is off, so the
+    /// arm falls to the WS-T hook), owns the pull, and drives the empty
+    /// child to the identical end-of-set. Knob OFF: silent.
+    #[test]
+    fn dml_w3_lockrows_tupleop_owned() {
+        install_seams();
+        scanfix::install();
+        dml_ab::install_replica_identity_seam();
+        let target: u32 = 75011;
+        scanfix::register_table_2col(target, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        let lr0 = lockrows_probe();
+        let off = run_stmt(mk_lockrows_pstmt(leaked_mcx(), target), CmdType::CMD_SELECT);
+        assert_eq!(off, 0);
+        assert_eq!(lockrows_probe(), lr0, "knob OFF must not own LockRows");
+
+        crate::lanev2::dml_set_for_tests(true);
+        let on = run_stmt(mk_lockrows_pstmt(leaked_mcx(), target), CmdType::CMD_SELECT);
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(on, off, "knob arms must behave identically");
+        assert!(lockrows_probe() > lr0, "ON arm never engaged the LockRows TupleOp");
+
+        scanfix::quiesced();
+    }
+}
+// --- end WS-T wave-3 ----------------------------------------------------------

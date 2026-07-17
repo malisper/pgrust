@@ -1,66 +1,73 @@
-//! DML lane hosting — wave-2 WS-N increment 1 (the wave-2 integration
-//! contract §2/§3.7/§6-WS-N; full design + increments 2-5 ladder in
-//! docs/design/lane-dml-epq.md).
+//! DML lane hosting — wave-2 WS-N inc-1 shipped the seam delegation; wave-3
+//! WS-T ships increments 2/2b and the inc-3a stretch on top of the SAME
+//! seams (wave-3 contract §6.T; full design + ladder in
+//! docs/design/lane-dml-epq.md):
 //!
-//! Increment 1 hosts exactly ONE mutation shape: the single-result-relation
-//! plain-table **INSERT without triggers** (INSERT .. VALUES / INSERT ..
-//! SELECT, defaults, GENERATED columns, identity — everything the planner
-//! folds into that plan shape), with at most trivial RETURNING (admitted per
-//! contract §6-WS-N(1); the OLD/NEW-alias form is the non-trivial carve-out).
-//! Everything else — triggers, ON CONFLICT, partition routing / inherited
-//! targets, UPDATE / DELETE / MERGE, non-table targets — refuses LOUDLY with
-//! `RefuseReason::DmlShape` and the mechanism-attribution detail string from
-//! `nodemodifytable::mt_lane_insert_refusal` (contract §1: attribution rides
-//! the detail string, never a second class).
+//! * **inc-2 (TupleOp decomposition)**: `MtChildSource` now produces BARE
+//!   child rows; `DmlInsertOp: TupleOp` composes the mt_* seams under the
+//!   shared `pull_step_rows` driver — `accept = mt_accept_row`, `resume =
+//!   mt_row_prologue + the mt_pending/mt_resume deferred-MERGE arm`,
+//!   `source_exhausted = mt_source_exhausted`. THE LAW (`mt_row_prologue`
+//!   runs BEFORE the child pull, never inside an accept body) is placed
+//!   structurally: the driver's resume hook is its only pre-pull
+//!   chokepoint, so the op arms `loop_top_owed` at construction and after
+//!   every accepted row, and the driver cannot reach `next_row` without
+//!   running the loop-top seam composition first. The borrow blocker the
+//!   design doc names (`exec_insert` uses `index_eval_cx`, which a
+//!   source-held prologue piece would also need) is DISSOLVED rather than
+//!   bridged: the prologue piece never leaves the op — `DmlInsertOp` holds
+//!   `&mut ModifyTableState` whole (disjoint from the driver-held subplan
+//!   field of `ModifyTablePlanState`), so no `MtRowCtx` turn-passing and no
+//!   re-borrow token are needed (and no RefCell, no raw pointers — the
+//!   FORBIDDEN list). Statement-stream identity with `mt_step` is argued
+//!   arm by arm on the impl below.
+//! * **inc-2 (lane-fed INSERT..SELECT)**: a SELECT side whose top is a
+//!   shape the lane arm dispatch owns stops being Volcano-pulled through
+//!   the `exec_proc_node` match and becomes a direct feed
+//!   (`MtLaneFedSeqScanSource`) into `DmlInsertOp` — a pure feed-shape
+//!   change (the per-row dispatch match is hoisted; the statements are the
+//!   seq_scan_arm's own). Admission unchanged.
+//! * **inc-2b (LockRows TupleOp)**: `LockRowsOp` re-expresses lock-then-
+//!   emit as `accept` over bare child rows via the `nodelockrows::
+//!   lr_accept_row` seam, consuming WS-L's PINNED epq_eval-closure shape
+//!   (docs/design/rowmode-tail.md §4 — changing it is a reconciler
+//!   amendment, wave-3 contract §4.2). `ShapeClass::LockRows = 36` is
+//!   SHARED with WS-L's delegation host: this hook ticks at its OWN
+//!   verdict chokepoint with mechanism attribution in the trace detail
+//!   (`dml-tupleop`), and the procnode arm reaches it only after the
+//!   rowmode-tail hook declined (WS-L's knob behavior is unchanged at both
+//!   of its arms).
+//! * **inc-3a (stretch)**: UPDATE/DELETE admission behind the NESTED
+//!   `PGRUST_LANE_V2_DML_UD` knob — verdict-widening ONLY
+//!   (`nodemodifytable::mt_lane_shape_refusal`, the renamed+widened probe);
+//!   `mt_step`/`DmlInsertOp` already route every operation through
+//!   `mt_accept_row`, so there is NO new machinery. TM_Updated rechecks
+//!   inside the delegated `exec_update`/`exec_delete` go through the ONE
+//!   `epq_eval` closure (§4.2). `RefuseReason::DmlShape = 35` unchanged;
+//!   detail strings differentiate.
 //!
-//! Hosting shape: the WS-G delegation-leaf template over the contract §3.7
-//! seams. `MtChildSource` is the chartered Phase-2 shipping of the
-//! VolcanoRowSource concept **specialized with structural prologue
-//! placement** (rowmode-operators.md §7 amendment, contract §6-WS-N(3)): its
-//! `next_row` delegates `nodemodifytable::mt_step`, the seam composition
-//! whose loop runs `mt_row_prologue` BEFORE every child pull — the
-//! prologue-before-pull contract LAW lives structurally inside the seam
-//! driver, never in an `accept` body — then the `mt_pending`/`mt_resume`
-//! deferred-MERGE arm (structurally present, unreachable for the inc-1
-//! INSERT shape), the Volcano child pull, and `mt_accept_row`;
-//! `mt_source_exhausted` (columnar flush + AS triggers + the `mt_done`
-//! latch) runs on child exhaustion inside the same seam driver. BOTH engines
-//! therefore drive the IDENTICAL statement stream (`exec_modify_table` ==
-//! `mt_begin` + `mt_step`): byte-identity — rows written, WAL, command tag,
-//! RETURNING bytes, trigger side effects (none in the admitted shape) — is
-//! by construction, and a Volcano fallback at ANY pull boundary resumes
-//! byte-safely because every cross-call state (`mt_done`, `fireBSTriggers`,
-//! dispatch cache, EPQ origslot) is node-resident.
+//! Knobs: `PGRUST_LANE_V2_DML` (the inc-1..3 family knob, default OFF;
+//! knob-OFF ticks NOTHING — §2.2) and `PGRUST_LANE_V2_DML_UD` (default OFF;
+//! readable ONLY after the DML host knob has already passed — `_UD` alone
+//! flips nothing). `PGRUST_LANE_V2_DML_BATCH` is inc-4's and is NOT read
+//! here (out of wave-3 scope, contract §0.3).
 //!
-//! A genuine TupleOp decomposition (`DmlInsertOp::accept` = `mt_accept_row`
-//! with `MtChildSource` producing bare child rows) is increment-2's step —
-//! it needs the split-view borrow work (`LaneProjectSet` precedent) so the
-//! op and the source can hold disjoint `ModifyTableState` pieces; the seams
-//! are already shaped for it (see the design doc §3). Nothing about THIS
-//! increment's admitted set changes at that step.
-//!
-//! Knob: `PGRUST_LANE_V2_DML` (default OFF; contract §2 — the inc-1..3
-//! family knob; `PGRUST_LANE_V2_DML_BATCH` is inc-4's and is NOT read here).
-//! Knob-OFF ticks NOTHING: ModifyTable has no pre-existing wholesale refuse,
-//! so default-config accounting stays byte-identical by construction (§2d).
-//!
-//! Gate order (contract §3.2, exactly WS-G): knob (OFF = `Ok(None)`, ticks
-//! nothing) → `es_epq_active` → Epq (the EPQ LAW §3.5: EPQ refuses ALL dml
-//! ownership until WS-N inc-5, which is gated on 100% read-side coverage) →
-//! `!forward` → Backward → instrumented → Instrumented → the DmlShape probe
-//! → `tick_owned` ONCE → `mt_begin` + `pull_step_rows`. OWNED cadence = once
-//! per drive start = once per owned PG pull (§3.3).
+//! Gate order (contract §4.4, exactly the wave-2 template): knob (OFF =
+//! `Ok(None)`, ticks nothing) → `es_epq_active` (EPQ LAW §4.2: an active
+//! recheck refuses ALL dml ownership until inc-5) → backward →
+//! instrumented → shape probe → `tick_owned` ONCE at the verdict
+//! chokepoint → the host drive.
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
 use ::executils::{EStateData, ExecSlotId};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult};
 
-use super::push::{pull_step_rows, PassthroughOp, RootAdapter, RowSource};
+use super::push::{pull_step_rows, OpStatus, RootAdapter, RowSource, Sink, SinkFeed, TupleOp};
 use super::stats::{self, RefuseReason, ShapeClass};
 
-/// `PGRUST_LANE_V2_DML` (default OFF): the wave-2 WS-N family knob for DML
-/// hosting increments 1-3 (contract §2). Same AtomicU8 idiom as
+/// `PGRUST_LANE_V2_DML` (default OFF): the WS-N family knob for DML hosting
+/// increments 1-3 (wave-2 contract §2). Same AtomicU8 idiom as
 /// `rowmode.rs`'s knobs for the same same-process A/B test-lever reason.
 static DML: AtomicU8 = AtomicU8::new(0);
 
@@ -88,10 +95,44 @@ fn dml_resolve() -> bool {
     on
 }
 
+/// `PGRUST_LANE_V2_DML_UD` (default OFF; wave-3 contract §2.1): the inc-3a
+/// UPDATE/DELETE admission stretch. NESTED knob law: this cell is read
+/// ONLY from inside `try_own_modify_table`, after `dml_enabled()` has
+/// already passed (and after the arm's `dml_active()` combined gate) —
+/// `_UD` alone flips nothing, and at default config this byte is never
+/// loaded at all (OFF-first, §2.2).
+static DML_UD: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn dml_ud_enabled() -> bool {
+    match DML_UD.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => dml_ud_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dml_ud_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_DML_UD").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    DML_UD.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
 /// Same-process A/B lever for the unit corpus (`crate::tests`).
 #[cfg(test)]
 pub(crate) fn dml_set_for_tests(on: bool) {
     DML.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Same-process A/B lever for the inc-3a UD stretch units.
+#[cfg(test)]
+pub(crate) fn dml_ud_set_for_tests(on: bool) {
+    DML_UD.store(if on { 2 } else { 1 }, Relaxed);
 }
 
 /// Test-only engagement probe: owned DML drives, per pull.
@@ -105,41 +146,228 @@ pub(crate) static DML_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
 pub(crate) static DML_SHAPE_REFUSED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// The ModifyTable node as a row-mode delegation leaf over the contract
-/// §3.7 seams — the chartered VolcanoRowSource specialization (module doc).
-/// `next_row` runs the identical statements `modify_table_arm`'s fallback
-/// runs after its own `mt_begin` (which `try_own_modify_table` already
-/// replayed): one `mt_step` — prologue-before-pull structurally inside,
-/// RETURNING rows surface one per call, and the terminal `None` has already
-/// run `mt_source_exhausted`. Zero lane-held cross-call state (the
-/// shared-slot law §3.8 is moot: no shared slots on this path).
+/// Test-only feed-shape probe: owned drives that selected the lane-fed
+/// (direct, dispatch-hoisted) child feed rather than the Volcano
+/// `exec_proc_node` feed.
+#[cfg(test)]
+pub(crate) static DML_LANEFED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only engagement probe for the inc-2b LockRows TupleOp host, per
+/// owned pull (the LockRows CLASS counter is shared with WS-L's delegation
+/// host — this probe is the mechanism-attributed one).
+#[cfg(test)]
+pub(crate) static DML_LOCKROWS_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+// =============================================================================
+// inc-2: the TupleOp decomposition.
+// =============================================================================
+
+/// The BARE child feed (inc-2 form of `MtChildSource`, design doc §4): one
+/// Volcano pull of the ModifyTable subplan per `next_row`, NO mt statements
+/// — the loop-top seams moved into `DmlInsertOp`'s resume face and the row
+/// processing into its accept face. `Node` is the `subplan` FIELD of
+/// `ModifyTablePlanState` (disjoint from the `mt`/`epq` fields the op
+/// borrows — the `LaneProjectSet` disjoint-borrow precedent).
 struct MtChildSource;
 
 impl<'mcx> RowSource<'mcx> for MtChildSource {
-    type Node = crate::procnode::ModifyTablePlanState<'mcx>;
+    type Node = crate::procnode::PlanStateNode<'mcx>;
 
     fn next_row(
         &mut self,
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<ExecSlotId>> {
-        let crate::procnode::ModifyTablePlanState { mt, subplan, epq } = node;
-        ::nodemodifytable::mt_step(
-            mt,
-            estate,
-            &mut |e| crate::procnode::exec_proc_node(subplan, e),
-            // The ONE epq_eval recheck-driver closure (contract §3.5),
+        crate::procnode::exec_proc_node(node, estate)
+    }
+}
+
+/// The lane-fed INSERT..SELECT feed (inc-2, design doc §4 item 2): the
+/// SELECT side's top is a SeqScan, so the per-row `exec_proc_node` match
+/// dispatch is hoisted and the feed calls the arm's statements DIRECTLY —
+/// the lane hook first (when the read lane owns the scan, the child rows
+/// come off the lane's own batch pipeline), then the unchanged
+/// `exec_seq_scan` fall-through. MUST stay statement-identical to
+/// procnode's `seq_scan_arm` body (the ResultRowSource inline-duplicate
+/// precedent, se-entrycost); admission is UNCHANGED — this is a pure
+/// feed-shape change selected AFTER the ownership verdict.
+struct MtLaneFedSeqScanSource;
+
+impl<'mcx> RowSource<'mcx> for MtLaneFedSeqScanSource {
+    type Node = ::nodeseqscan::SeqScanState<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        // seq_scan_arm's exact statements (dispatch match hoisted): the
+        // lane-v2 hook, then the UNCHANGED per-tuple path on refuse.
+        if super::enabled() {
+            if let Some(r) = super::try_own_seq_scan(node, estate)? {
+                return Ok(r);
+            }
+        }
+        ::nodeseqscan::exec_seq_scan(node, estate)
+    }
+}
+
+/// The ModifyTable row processor as a mid-pipeline `TupleOp` over the
+/// contract §3.7 seams (inc-2; the doc's `DmlInsertOp`, serving every
+/// operation `mt_accept_row` routes — inc-3a widens the ADMISSION verdict
+/// only, no change here). Holds the `mt`/`epq` fields of
+/// `ModifyTablePlanState`; the driver holds the disjoint `subplan` field.
+///
+/// Statement-stream identity with `nodemodifytable::mt_step`, arm by arm
+/// (`P` = `mt_row_prologue`, the loop-top seam pair):
+///
+/// * drive start: `loop_top_owed` is true ⇒ the driver's FIRST action is
+///   `resume` = P → pending check — exactly mt_step's first loop
+///   iteration's head. `resume` then reports `NeedInput`, the driver pulls
+///   the child, `accept` runs `mt_accept_row`: P → pull → accept ≡ mt_step.
+/// * consumed row (accept → None): `accept` re-arms `loop_top_owed` and
+///   reports `NeedInput`; the driver's next round starts at `resume` = P
+///   again ≡ mt_step's loop-bottom `continue` → loop-top P.
+/// * emitted row (accept → Some): pushed to the capacity-one root ⇒
+///   `Paused`, the drive returns the row ≡ mt_step's `return Ok(Some)`.
+///   The NEXT owned pull constructs a fresh op with `loop_top_owed` armed ≡
+///   the next `exec_modify_table` call entering the loop at P.
+/// * deferred MERGE (structurally live, unreachable in the admitted set —
+///   no MERGE admission, contract §6.T hard exclusion): `resume` loops
+///   P → `mt_pending` → `mt_resume`, re-running P after a non-emitting
+///   resume ≡ mt_step's `continue`. `mt_pending`/`mt_resume` are WIRED by
+///   this op form but MUST NOT go live for MERGE shapes (the C-side trace
+///   pin blocks MERGE admission — §6.T.5).
+/// * child exhaustion: driver calls `source_exhausted` =
+///   `mt_source_exhausted` (after `resume` already ran P this round) ≡
+///   mt_step's P → pull(None) → mt_source_exhausted. Idempotence guard: the
+///   `mt_done` latch check mirrors `mt_begin`'s own.
+struct DmlInsertOp<'a, 'mcx> {
+    mt: &'a mut ::nodemodifytable::ModifyTableState<'mcx>,
+    epq: &'a mut crate::epq::EpqState<'mcx>,
+    /// The loop-top seam composition (P + the pending arm) is owed before
+    /// the next child pull. Armed at construction and after every accepted
+    /// row; cleared only by `resume` — the LAW's structural placement (the
+    /// prologue can never run inside `accept`, and the driver cannot pull
+    /// while this is set without running `resume` first).
+    loop_top_owed: bool,
+}
+
+impl<'mcx> DmlInsertOp<'_, 'mcx> {
+    /// One emitted row into the downstream sink (shared by the accept and
+    /// deferred-resume arms).
+    #[inline(always)]
+    fn push(
+        out: &mut dyn Sink<'mcx>,
+        row: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        Ok(match out.accept(row, estate)? {
+            SinkFeed::Full => OpStatus::Paused,
+            SinkFeed::NeedMore => OpStatus::NeedInput,
+        })
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for DmlInsertOp<'_, 'mcx> {
+    #[inline(always)]
+    fn pending(&self) -> bool {
+        self.loop_top_owed
+    }
+
+    /// The mt_step loop top as the pre-pull resume face: `mt_row_prologue`
+    /// FIRST (the LAW), then the `mt_pending`/`mt_resume` deferred-MERGE
+    /// arm. `NeedInput` = loop-top work done, pull the child.
+    fn resume(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(self.loop_top_owed);
+        let Self { mt, epq, loop_top_owed } = self;
+        loop {
+            ::nodemodifytable::mt_row_prologue(mt, estate);
+            if !::nodemodifytable::mt_pending(mt) {
+                *loop_top_owed = false;
+                return Ok(OpStatus::NeedInput);
+            }
+            // The ONE epq_eval recheck-driver closure (contract §4.2),
             // spelled exactly as modify_table_arm's fallback spells it.
-            // Structurally live for the seam signature; unreachable in the
-            // admitted inc-1 shape (no ON CONFLICT, no UPDATE/DELETE/MERGE
-            // arms, and es_epq_active refused ownership above).
-            &mut |subs, e, inputslot, rti| {
-                // EvalPlanQualSlot keys by the dispatch-current result
-                // relation.
+            let rslot = ::nodemodifytable::mt_resume(mt, estate, &mut |subs, e, inputslot, rti| {
                 epq.result_rti = rti;
                 crate::epq::eval_plan_qual(epq, subs, e, inputslot)
-            },
-        )
+            })?;
+            if let Some(rslot) = rslot {
+                // Row emitted from the deferred action; the loop top stays
+                // owed for the next round (mt_step returns Some here and its
+                // next call re-enters at the prologue).
+                //
+                // CAPACITY-ONE-SINK ASSUMPTION (review-flagged latent
+                // divergence): this leg leaves `loop_top_owed` set and maps
+                // the sink verdict through `push`. Under a sink that answers
+                // `NeedMore` (capacity > 1), the driver would pull the child
+                // WITHOUT a fresh loop-top prologue — diverging from mt_step
+                // and tripping `accept`'s debug_assert. Today the arm is
+                // unreachable (MERGE is never admitted — §6.T hard exclusion)
+                // and the only sink is the capacity-one RootAdapter, so the
+                // verdict is always `Full → Paused`. MUST be restructured
+                // (clear/re-arm `loop_top_owed` around a NeedMore feed)
+                // before MERGE admission or breaker-sink composition goes
+                // live.
+                let st = Self::push(out, rslot, estate)?;
+                debug_assert!(
+                    matches!(st, OpStatus::Paused),
+                    "DmlInsertOp::resume emit leg requires a capacity-one sink \
+                     (NeedMore here would pull the child with the loop top still owed)"
+                );
+                return Ok(st);
+            }
+            // Non-emitting deferred action ≡ mt_step's `continue`: loop-top
+            // P again, then the (now clear) pending re-check.
+        }
+    }
+
+    /// `mt_accept_row` over one bare child row: at most one RETURNING row
+    /// out; `None` = row consumed (pull the next). Re-arms the loop top —
+    /// NO prologue statements here (the LAW).
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(!self.loop_top_owed, "child pulled without the loop-top seams");
+        self.loop_top_owed = true;
+        let Self { mt, epq, .. } = self;
+        // The ONE epq_eval closure again — TM_Updated rechecks initiated by
+        // the delegated exec_insert/exec_update/exec_delete drive through
+        // it (EPQ LAW distinction, design doc §6).
+        let rslot =
+            ::nodemodifytable::mt_accept_row(mt, estate, tuple, &mut |subs, e, inputslot, rti| {
+                epq.result_rti = rti;
+                crate::epq::eval_plan_qual(epq, subs, e, inputslot)
+            })?;
+        match rslot {
+            None => Ok(OpStatus::NeedInput),
+            Some(rslot) => Self::push(out, rslot, estate),
+        }
+    }
+
+    /// `mt_source_exhausted` (columnar flush + AS triggers + the `mt_done`
+    /// latch), exactly once per statement — the latch check mirrors
+    /// `mt_begin`'s own and makes the possibly-repeated driver calls
+    /// idempotent (TupleOp contract).
+    fn source_exhausted(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        if !self.mt.mt_done {
+            ::nodemodifytable::mt_source_exhausted(self.mt, estate)?;
+        }
+        Ok(OpStatus::Finished)
     }
 }
 
@@ -147,9 +375,10 @@ impl<'mcx> RowSource<'mcx> for MtChildSource {
 /// caller runs the unchanged `exec_modify_table` fallback.
 ///
 /// Gate order per the module doc. The shape probe
-/// (`nodemodifytable::mt_lane_insert_refusal`) is a read-only verdict on
+/// (`nodemodifytable::mt_lane_shape_refusal`) is a read-only verdict on
 /// node state resolved at init — its refusal leaves the node untouched, so
-/// the Volcano fall-through is byte-safe trivially.
+/// the Volcano fall-through is byte-safe trivially. The UD stretch knob is
+/// read here and ONLY here, after the host knob passed (nested-knob law).
 #[inline]
 pub fn try_own_modify_table<'mcx>(
     mps: &mut ::mcx::PgBox<'mcx, crate::procnode::ModifyTablePlanState<'mcx>>,
@@ -158,10 +387,10 @@ pub fn try_own_modify_table<'mcx>(
     if !dml_enabled() {
         return Ok(None);
     }
-    // Dynamic per-call gates (the try_own_result cadence; contract §3.2).
+    // Dynamic per-call gates (the try_own_result cadence; contract §4.4).
     if estate.es_epq_active {
-        // EPQ LAW (contract §3.5): an active EvalPlanQual recheck refuses
-        // ALL dml ownership through wave 2 (lifted only by inc-5, gated on
+        // EPQ LAW (contract §4.2): an active EvalPlanQual recheck refuses
+        // ALL dml ownership through wave 3 (lifted only by inc-5, gated on
         // 100% read-side coverage).
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::Epq);
         return Ok(None);
@@ -175,9 +404,12 @@ pub fn try_own_modify_table<'mcx>(
         return Ok(None);
     }
     let node = &mut **mps;
-    // Shape gate: the inc-1 admitted set (module doc; the probe's detail
+    // Shape gate: inc-1's admitted INSERT set, widened to UPDATE/DELETE by
+    // the inc-3a stretch when the nested UD knob is on (the probe's detail
     // string carries mechanism attribution, contract §1).
-    if let Some(detail) = ::nodemodifytable::mt_lane_insert_refusal(&node.mt) {
+    if let Some(detail) =
+        ::nodemodifytable::mt_lane_shape_refusal(&node.mt, dml_ud_enabled())
+    {
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::DmlShape);
         if super::lane_trace_enabled() {
             super::lane_trace(&format!("dml: shape refused ({detail})"));
@@ -187,7 +419,7 @@ pub fn try_own_modify_table<'mcx>(
         return Ok(None);
     }
     stats::tick_owned(ShapeClass::ModifyTable);
-    super::lane_trace("dml: insert drive owned");
+    super::lane_trace("dml: modify drive owned");
     #[cfg(test)]
     DML_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
     // exec_modify_table's per-call head (the mt_begin seam), replayed here
@@ -198,9 +430,144 @@ pub fn try_own_modify_table<'mcx>(
         // mt_done: end-of-set, exactly the fallback's early return.
         return Ok(Some(None));
     }
-    // No clear-on-finish: exec_modify_table returns end-of-set without
-    // clearing any result slot.
-    let mut op = PassthroughOp;
+    // The disjoint-borrow split (LaneProjectSet precedent): the op holds
+    // mt + epq, the driver holds the subplan. No clear-on-finish:
+    // exec_modify_table returns end-of-set without clearing any result slot.
+    let crate::procnode::ModifyTablePlanState { mt, subplan, epq } = node;
+    let mut op = DmlInsertOp { mt, epq, loop_top_owed: true };
     let mut root = RootAdapter::new(None);
-    pull_step_rows(node, &mut MtChildSource, &mut op, &mut root, estate).map(Some)
+    match subplan {
+        // Lane-fed INSERT..SELECT (and, under the UD stretch, the
+        // seqscan-topped UPDATE/DELETE): the dispatch-hoisted direct feed.
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            #[cfg(test)]
+            DML_LANEFED_FOR_TESTS.fetch_add(1, Relaxed);
+            pull_step_rows(ss, &mut MtLaneFedSeqScanSource, &mut op, &mut root, estate).map(Some)
+        }
+        // Every other child shape: the bare Volcano feed (byte-identical
+        // dispatch through exec_proc_node, exactly the inc-1 statements).
+        other => pull_step_rows(other, &mut MtChildSource, &mut op, &mut root, estate).map(Some),
+    }
+}
+
+// =============================================================================
+// inc-2b: the LockRows TupleOp host.
+// =============================================================================
+
+/// Bare child feed for the LockRows TupleOp: one Volcano pull of the
+/// LockRows outer child per `next_row` (the `outer` FIELD of
+/// `LockRowsNode`, disjoint from the `state`/`epq` fields the op borrows).
+struct LockRowsChildSource;
+
+impl<'mcx> RowSource<'mcx> for LockRowsChildSource {
+    type Node = crate::procnode::PlanStateNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        crate::procnode::exec_proc_node(node, estate)
+    }
+}
+
+/// LockRows as a TupleOp (inc-2b, design doc §5): `accept` runs the
+/// `nodelockrows::lr_accept_row` seam — the exec_lock_rows loop body as a
+/// pure code move — over one bare child row: lock every rowmark, then emit
+/// the row (or the EPQ-substituted row) or skip it (`WouldBlock` /
+/// `SelfModified` / concurrent-delete / failed recheck ≡ C's `goto
+/// lnext`). The recheck driver is THE PINNED epq_eval closure shape
+/// (rowmode-tail.md §4): `|subs, e, inputslot| eval_plan_qual(epq, subs,
+/// e, inputslot)` — byte-identical to WS-L's delegation host and to the
+/// Volcano arm; `executils::EpqSubs` remains the one EPQ state store.
+struct LockRowsOp<'a, 'mcx> {
+    lr: &'a mut ::nodelockrows::LockRowsState<'mcx>,
+    epq: &'a mut crate::epq::EpqState<'mcx>,
+}
+
+impl<'mcx> TupleOp<'mcx> for LockRowsOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        let Self { lr, epq } = self;
+        let emitted =
+            ::nodelockrows::lr_accept_row(lr, estate, tuple, &mut |subs, e, inputslot| {
+                crate::epq::eval_plan_qual(epq, subs, e, inputslot)
+            })?;
+        match emitted {
+            // Row skipped (the former `continue 'lnext`): pull the next.
+            None => Ok(OpStatus::NeedInput),
+            Some(row) => Ok(match out.accept(row, estate)? {
+                SinkFeed::Full => OpStatus::Paused,
+                SinkFeed::NeedMore => OpStatus::NeedInput,
+            }),
+        }
+    }
+
+    fn resume(
+        &mut self,
+        _out: &mut dyn Sink<'mcx>,
+        _estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(false, "LockRowsOp::resume: pending() is always false");
+        Err(Box::new(PgError::error(
+            "lane-v2 LockRowsOp resumed with no pending expansion (driver contract violation)"
+                .to_string(),
+        )))
+    }
+}
+
+/// Try to let the DML lane host a LockRows pull in TupleOp form (inc-2b).
+/// `None` = refused; the caller falls through (procnode's arm order: WS-L's
+/// rowmode-tail delegation hook FIRST — its knob behavior is unchanged —
+/// then this hook, then the unchanged Volcano fallback).
+///
+/// Gate order per the wave-2 template. The LockRows class counter is
+/// SHARED (§4.4 rule 6): this hook ticks at its own verdict chokepoint;
+/// mechanism attribution ("dml-tupleop") rides the trace detail, never a
+/// second class or reason.
+#[inline]
+pub fn try_own_lock_rows_dml<'mcx>(
+    l: &mut ::mcx::PgBox<'mcx, crate::procnode::LockRowsNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !dml_enabled() {
+        return Ok(None);
+    }
+    if estate.es_epq_active {
+        // EPQ LAW (§4.2): nodes INSIDE a recheck plan are never lane-owned;
+        // a recheck INITIATED by this host's own accept path delegates
+        // through the one closure above and is byte-safe by construction.
+        stats::tick_refused(ShapeClass::LockRows, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::LockRows, RefuseReason::Backward);
+        return Ok(None);
+    }
+    if !estate.es_instrumentation.is_empty() {
+        stats::tick_refused(ShapeClass::LockRows, RefuseReason::Instrumented);
+        return Ok(None);
+    }
+    stats::tick_owned(ShapeClass::LockRows);
+    if super::lane_trace_enabled() {
+        super::lane_trace("lockrows drive owned (dml-tupleop)");
+    }
+    #[cfg(test)]
+    DML_LOCKROWS_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
+    // exec_lock_rows' per-call entry CFI, replayed so the drive below runs
+    // the identical statements the delegated/Volcano call would.
+    crate::cfi()?;
+    let crate::procnode::LockRowsNode { state, outer, epq } = &mut **l;
+    let mut op = LockRowsOp { lr: state, epq };
+    // No clear-on-finish: exec_lock_rows returns end-of-set bare.
+    let mut root = RootAdapter::new(None);
+    pull_step_rows(&mut **outer, &mut LockRowsChildSource, &mut op, &mut root, estate).map(Some)
 }
