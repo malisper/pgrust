@@ -9754,6 +9754,11 @@ mod dml_ab_wave3 {
 // sort+dedupe, and heap_fetch through the fake buffer seams are all
 // exercised. Zero scanfix-internal edits: the fixture is plan-builders +
 // registered pages only (the §1 file-table grant).
+// Relids consumed: 76001 (TidScan), 76003 (TidRangeScan), 76004
+// (SampleScan). 76002 is intentionally unconsumed — only three of the five
+// shapes carry a relation RTE (NamedTuplestoreScan and TableFuncScan
+// consume zero relids); the 76xxx band is reserved wholesale, so the gap
+// is harmless and stays (wave-5 WS-V review finding 4, cosmetic).
 mod scans_t3_am_ab {
     use super::*;
     use ::types_nodes::bitmapset::Bitmapset;
