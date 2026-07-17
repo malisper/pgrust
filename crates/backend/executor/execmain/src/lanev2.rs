@@ -37,6 +37,7 @@
 mod batch_source;
 pub mod coverage;
 mod exprkey;
+mod indexsource;
 mod router;
 mod runtime_agg;
 mod runtime_agg_sorted;
@@ -52,9 +53,12 @@ mod rowmode;
 mod stats;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use indexsource::try_own_agg_over_index_only_source;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_project_set;
+#[cfg(test)]
+pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_OWNED_FOR_TESTS};
 
