@@ -268,10 +268,19 @@ pub fn check_log_destination(newval: &str) -> PgResult<i32> {
         // pg_strcasecmp: case-insensitive even for quoted identifiers.
         if tok.eq_ignore_ascii_case("stderr") {
             newlogdest |= LOG_DESTINATION_STDERR;
-        } else if tok.eq_ignore_ascii_case("csvlog") {
-            newlogdest |= LOG_DESTINATION_CSVLOG;
-        } else if tok.eq_ignore_ascii_case("jsonlog") {
-            newlogdest |= LOG_DESTINATION_JSONLOG;
+        } else if tok.eq_ignore_ascii_case("csvlog") || tok.eq_ignore_ascii_case("jsonlog") {
+            // The write_csvlog/write_jsonlog seams are unported (no
+            // implementation exists anywhere), so accepting these values
+            // panicked inside error reporting on every log line once
+            // redirection_done — including the postmaster (seam-audit F2).
+            // Reject at check time until the writers land: the same class as
+            // "eventlog", which C only accepts #ifdef WIN32. Clean-error
+            // convention per the panicfix program.
+            return Err(PgError::error(format!(
+                "Destination \"{}\" is not supported in this build.",
+                tok.to_ascii_lowercase()
+            ))
+            .into());
         } else if tok.eq_ignore_ascii_case("syslog") {
             newlogdest |= LOG_DESTINATION_SYSLOG;
         } else {

@@ -571,6 +571,11 @@ pub fn send_message_to_server_log(edata: &PgError) {
 
     // (win32 eventlog destination intentionally not ported.)
 
+    // The CSVLOG/JSONLOG writer seams are unported and UNINSTALLED — the
+    // calls below stay as loud backstops. Unreachable in production:
+    // check_log_destination rejects csvlog/jsonlog at GUC check time until
+    // the writers land (seam-audit F2). Remove the rejection there when
+    // installing these seams.
     if config::log_destination() & LOG_DESTINATION_CSVLOG != 0 {
         if config::redirection_done() || config::am_syslogger() {
             error_small_seams::write_csvlog::call(edata);
