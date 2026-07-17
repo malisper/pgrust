@@ -29,6 +29,9 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 aio_seams = { path = "../../aio/aio_seams" }
 startup_seams = { path = "../../../postmaster/startup_seams" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
+# Plain cargo dep on the DST P1 VFS leaf crate — no cycle, hence no registry
+# seam (AGENTS.md seam doctrine; DST P1 contract §1.1).
+vfs = { path = "../vfs" }
 libc = "0.2"
 
 [dev-dependencies]
