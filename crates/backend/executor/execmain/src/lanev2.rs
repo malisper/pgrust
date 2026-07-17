@@ -52,6 +52,7 @@ mod runtime_scan;
 mod runtime_sort;
 mod push;
 mod rowmode;
+mod rowmode_tail;
 mod stats;
 mod windows;
 
@@ -62,13 +63,16 @@ pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
+pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_lock_rows, try_own_material, try_own_memoize, try_own_merge_append, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_set_op, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
 pub(crate) use windows::try_own_window_agg;
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
 pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TESTS};
 #[cfg(test)]
-pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
+pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
+#[cfg(test)]
+pub(crate) use rowmode_tail::tail_owned_probe_for_tests;
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
 #[cfg(test)]
@@ -12474,6 +12478,20 @@ pub fn try_own_unique<'mcx>(
     u: &mut crate::procnode::UniqueNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = try_own_unique_streaming(u, estate)? {
+        return Ok(Some(r));
+    }
+    // Wave-2 row-mode tail fallback (knob-gated; runs its own §3.2 gates —
+    // the streaming glue above keeps priority per the composition rule).
+    rowmode_tail::try_own_unique_tail(u, estate)
+}
+
+/// The Phase-2 streaming unique over the sort breaker. `None` = refused.
+#[inline]
+fn try_own_unique_streaming<'mcx>(
+    u: &mut crate::procnode::UniqueNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
     // Dynamic per-call gates (Unique init asserts !BACKWARD && !MARK, so a
     // non-forward pull should be impossible — gate anyway, like the sort).
     if estate.es_epq_active
@@ -12847,11 +12865,30 @@ impl<'mcx> TupleOp<'mcx> for SubqueryScanOp<'_, 'mcx> {
     }
 }
 
-/// Try to let the lane own a bare `SubqueryScan` over the sort breaker —
-/// the pass-through filter/project stream on the sorted emit. `None` =
-/// refused; `exec_scan` drives the same ScanState byte-safely.
+/// Try to let the lane own a `SubqueryScan`: FIRST the wave-4 streaming
+/// glue over the sort breaker (the batch pipeline — priority per the wave-2
+/// contract composition rule), THEN the wave-2 row-mode tail delegation
+/// (`rowmode_tail::try_own_subquery_scan_tail`, knob-gated) on glue refuse.
+/// `None` = both refused; `exec_scan` drives the same ScanState byte-safely.
+/// Class-10 accounting: the glue's per-call refusal ticks fire first; the
+/// tail's gates may tick the same reason again knob-ON (two mechanisms, two
+/// offers — see the allowlist block comment).
 #[inline]
 pub fn try_own_subquery_scan<'mcx>(
+    s: &mut ::mcx::PgBox<'mcx, crate::procnode::SubqueryScanNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = try_own_subquery_scan_glue(s, estate)? {
+        return Ok(Some(r));
+    }
+    rowmode_tail::try_own_subquery_scan_tail(&mut **s, estate)
+}
+
+/// The wave-4 streaming glue: a bare `SubqueryScan` over the sort breaker —
+/// the pass-through filter/project stream on the sorted emit. `None` =
+/// refused.
+#[inline]
+fn try_own_subquery_scan_glue<'mcx>(
     s: &mut ::mcx::PgBox<'mcx, crate::procnode::SubqueryScanNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {

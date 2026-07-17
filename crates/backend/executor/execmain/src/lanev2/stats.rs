@@ -147,9 +147,57 @@ pub(super) enum ShapeClass {
     /// NOTHING (silent at default config, zero floor drift — integration
     /// contract §2d; floor seeding is flip-time work).
     WindowAgg = 20,
+    // -----------------------------------------------------------------------
+    // Wave-2 vocabulary (THE one wave-2 vocab commit, integration contract
+    // §1 — WS-L authors, everyone consumes; nobody edits discriminants after
+    // this commit; later needs go through a reconciler amendment).
+    //
+    // Classes 21-36 are the WS-L row-mode read-side tail (rowmode_tail.rs
+    // behind the default-OFF `PGRUST_LANE_V2_ROWMODE` knob): pure delegation
+    // leaves through the row-mode host template. Tick cadence for ALL of
+    // them = the MergeJoin/WindowAgg cadence: OWNED once per drive start
+    // (each owned PG pull starts one `pull_step_rows` drive); dynamic
+    // per-call EPQ/backward/instrumented refusals only. Ticks fire ONLY
+    // knob-ON — none of these shapes has a pre-existing wholesale refuse, so
+    // knob-OFF ticks NOTHING and default-config accounting stays
+    // byte-identical by construction (§2d); floors seed at flip time.
+    //
+    // SubqueryScan REUSES class 10 (§1: mechanism attribution goes in the
+    // EngineEvent detail string, never a second class). LockRows class 36 is
+    // SHARED by WS-L's delegation hosting and WS-N's later TupleOp hosting
+    // (same rule). WindowAgg T2 REUSES class 20.
+    // -----------------------------------------------------------------------
+    FunctionScan = 21,
+    TableFuncScan = 22,
+    ValuesScan = 23,
+    SampleScan = 24,
+    TidScan = 25,
+    TidRangeScan = 26,
+    NamedTuplestoreScan = 27,
+    Material = 28,
+    CteScan = 29,
+    /// RecursiveUnion + its WorkTableScan leaves (classes 30/31) follow the
+    /// same delegation cadence; the iteration protocol stays inside the
+    /// ported `exec_recursive_union` body (the shared-slot law binds the
+    /// RowSource: es_worktable_shared take-use-put-back per call, no cached
+    /// handles or read positions across `next_row` calls — contract §3.8).
+    RecursiveUnion = 30,
+    WorkTableScan = 31,
+    Memoize = 32,
+    SetOp = 33,
+    MergeAppend = 34,
+    Unique = 35,
+    /// SHARED class (contract §1): WS-L's LockRows-without-EPQ delegation
+    /// hosting now, WS-N inc-2b's TupleOp hosting later — mechanism
+    /// attribution via the EngineEvent detail string, never a second class.
+    LockRows = 36,
+    /// RESERVED for WS-N (lanev2/dml.rs behind `PGRUST_LANE_V2_DML`):
+    /// authored here per contract §1/§6-WS-L(1) so the wave-2 vocabulary is
+    /// one commit. Ticks NOTHING until dml.rs lands.
+    ModifyTable = 37,
 }
 
-const N_CLASSES: usize = 21;
+const N_CLASSES: usize = 38;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -174,6 +222,23 @@ impl ShapeClass {
         ShapeClass::TopnEmit,
         ShapeClass::MergeJoin,
         ShapeClass::WindowAgg,
+        ShapeClass::FunctionScan,
+        ShapeClass::TableFuncScan,
+        ShapeClass::ValuesScan,
+        ShapeClass::SampleScan,
+        ShapeClass::TidScan,
+        ShapeClass::TidRangeScan,
+        ShapeClass::NamedTuplestoreScan,
+        ShapeClass::Material,
+        ShapeClass::CteScan,
+        ShapeClass::RecursiveUnion,
+        ShapeClass::WorkTableScan,
+        ShapeClass::Memoize,
+        ShapeClass::SetOp,
+        ShapeClass::MergeAppend,
+        ShapeClass::Unique,
+        ShapeClass::LockRows,
+        ShapeClass::ModifyTable,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -199,6 +264,23 @@ impl ShapeClass {
             ShapeClass::TopnEmit => "topnemit",
             ShapeClass::MergeJoin => "mergejoin",
             ShapeClass::WindowAgg => "windowagg",
+            ShapeClass::FunctionScan => "functionscan",
+            ShapeClass::TableFuncScan => "tablefuncscan",
+            ShapeClass::ValuesScan => "valuesscan",
+            ShapeClass::SampleScan => "samplescan",
+            ShapeClass::TidScan => "tidscan",
+            ShapeClass::TidRangeScan => "tidrangescan",
+            ShapeClass::NamedTuplestoreScan => "namedtuplestorescan",
+            ShapeClass::Material => "material",
+            ShapeClass::CteScan => "ctescan",
+            ShapeClass::RecursiveUnion => "recursiveunion",
+            ShapeClass::WorkTableScan => "worktablescan",
+            ShapeClass::Memoize => "memoize",
+            ShapeClass::SetOp => "setop",
+            ShapeClass::MergeAppend => "mergeappend",
+            ShapeClass::Unique => "unique",
+            ShapeClass::LockRows => "lockrows",
+            ShapeClass::ModifyTable => "modifytable",
         }
     }
 }
@@ -359,9 +441,17 @@ pub(super) enum RefuseReason {
     /// domain, or an unarmable staging prefix). Ticked once per memoized
     /// agg-lane choice; the build keeps the per-row feed byte-identically.
     RedKeyShape = 34,
+    /// The ONE new wave-2 refusal variant (integration contract §1; part of
+    /// the one wave-2 vocab commit, authored by WS-L for WS-N): DML shapes
+    /// the lane-v2 dml hosting (lanev2/dml.rs, `PGRUST_LANE_V2_DML`)
+    /// declines — triggers, cross-partition specifics, MERGE arms outside
+    /// the admitted set. RESERVED: ticks NOTHING until WS-N's dml.rs lands
+    /// (WS-L, WS-M, WS-P add ZERO reasons; the Layer-A assert reads reasons,
+    /// never adds them).
+    DmlShape = 35,
 }
 
-const N_REASONS: usize = 35;
+const N_REASONS: usize = 36;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -401,6 +491,7 @@ impl RefuseReason {
             RefuseReason::MultiKeyShape => "multikey-shape",
             RefuseReason::ExprKeyShape => "exprkey-shape",
             RefuseReason::RedKeyShape => "redkey-shape",
+            RefuseReason::DmlShape => "dml-shape",
         }
     }
 
@@ -442,6 +533,7 @@ impl RefuseReason {
             MultiKeyShape,
             ExprKeyShape,
             RedKeyShape,
+            DmlShape,
         ][i]
     }
 }
