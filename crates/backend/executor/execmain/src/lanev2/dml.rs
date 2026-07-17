@@ -303,7 +303,26 @@ impl<'mcx> TupleOp<'mcx> for DmlInsertOp<'_, 'mcx> {
                 // Row emitted from the deferred action; the loop top stays
                 // owed for the next round (mt_step returns Some here and its
                 // next call re-enters at the prologue).
-                return Self::push(out, rslot, estate);
+                //
+                // CAPACITY-ONE-SINK ASSUMPTION (review-flagged latent
+                // divergence): this leg leaves `loop_top_owed` set and maps
+                // the sink verdict through `push`. Under a sink that answers
+                // `NeedMore` (capacity > 1), the driver would pull the child
+                // WITHOUT a fresh loop-top prologue — diverging from mt_step
+                // and tripping `accept`'s debug_assert. Today the arm is
+                // unreachable (MERGE is never admitted — §6.T hard exclusion)
+                // and the only sink is the capacity-one RootAdapter, so the
+                // verdict is always `Full → Paused`. MUST be restructured
+                // (clear/re-arm `loop_top_owed` around a NeedMore feed)
+                // before MERGE admission or breaker-sink composition goes
+                // live.
+                let st = Self::push(out, rslot, estate)?;
+                debug_assert!(
+                    matches!(st, OpStatus::Paused),
+                    "DmlInsertOp::resume emit leg requires a capacity-one sink \
+                     (NeedMore here would pull the child with the loop top still owed)"
+                );
+                return Ok(st);
             }
             // Non-emitting deferred action ≡ mt_step's `continue`: loop-top
             // P again, then the (now clear) pending re-check.
