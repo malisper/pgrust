@@ -1,0 +1,51 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1u doup s1c s3sel
+step s1u: UPDATE oc SET v = v + 100 WHERE k = 1;
+step doup: INSERT INTO oc VALUES (1, 999, 'ins') ON CONFLICT (k) DO UPDATE SET v = oc.v + 1, note = 'upd' WHERE oc.v < 500 RETURNING k, v, note; <waiting ...>
+step s1c: COMMIT;
+step doup: <... completed>
+k|  v|note
+-+---+----
+1|111|upd 
+(1 row)
+
+step s3sel: SELECT k, v, note FROM oc ORDER BY k;
+k|  v|note
+-+---+----
+1|111|upd 
+(1 row)
+
+
+starting permutation: s1big doup s1c s3sel
+step s1big: UPDATE oc SET v = 1000 WHERE k = 1;
+step doup: INSERT INTO oc VALUES (1, 999, 'ins') ON CONFLICT (k) DO UPDATE SET v = oc.v + 1, note = 'upd' WHERE oc.v < 500 RETURNING k, v, note; <waiting ...>
+step s1c: COMMIT;
+step doup: <... completed>
+k|v|note
+-+-+----
+(0 rows)
+
+step s3sel: SELECT k, v, note FROM oc ORDER BY k;
+k|   v|note
+-+----+----
+1|1000|base
+(1 row)
+
+
+starting permutation: s1del doup s1c s3sel
+step s1del: DELETE FROM oc WHERE k = 1;
+step doup: INSERT INTO oc VALUES (1, 999, 'ins') ON CONFLICT (k) DO UPDATE SET v = oc.v + 1, note = 'upd' WHERE oc.v < 500 RETURNING k, v, note; <waiting ...>
+step s1c: COMMIT;
+step doup: <... completed>
+k|  v|note
+-+---+----
+1|999|ins 
+(1 row)
+
+step s3sel: SELECT k, v, note FROM oc ORDER BY k;
+k|  v|note
+-+---+----
+1|999|ins 
+(1 row)
+
