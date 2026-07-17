@@ -64,19 +64,28 @@ use super::stats::{self, RefuseReason, ShapeClass};
 /// `rowmode.rs`'s knobs for the same same-process A/B test-lever reason.
 static DML: AtomicU8 = AtomicU8::new(0);
 
-fn dml_enabled() -> bool {
+/// `pub(super)` for the combined arm gate (`lanev2::dml_active`,
+/// se2-cost-fix); `#[inline]` + `#[cold]`-outlined resolve so the
+/// per-statement modify_table arm check is one relaxed byte load + compare
+/// (the outlined shape was part of the se2-dmlcost +123 instr/INSERT).
+#[inline]
+pub(super) fn dml_enabled() -> bool {
     match DML.load(Relaxed) {
         1 => false,
         2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_DML").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            DML.store(if on { 2 } else { 1 }, Relaxed);
-            on
-        }
+        _ => dml_resolve(),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn dml_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_DML").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    DML.store(if on { 2 } else { 1 }, Relaxed);
+    on
 }
 
 /// Same-process A/B lever for the unit corpus (`crate::tests`).

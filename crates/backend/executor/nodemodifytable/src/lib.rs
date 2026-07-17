@@ -223,7 +223,10 @@ pub struct ModifyTableState<'mcx> {
 impl<'mcx> ModifyTableState<'mcx> {
     // The dispatch-current result relation (C: resultRelInfo cursor preloaded
     // from mt_lastResultIndex).
-    #[inline]
+    // inline(always): trivial accessor on the per-row insert path — the
+    // plain hint lost to the two-monomorphization caller context after the
+    // wave-2 seam split (se2-cost-fix round 2; +13 instr/row outlined).
+    #[inline(always)]
     fn rel(&self) -> &ResultRelExec<'mcx> {
         if self.insert_target_root {
             return self.root_rel();
@@ -1300,6 +1303,16 @@ pub fn exec_modify_table<'mcx>(
 /// already ran to completion (the caller returns end-of-set without touching
 /// anything else). Idempotent across pulls: `fireBSTriggers` flips off after
 /// the first call, `mt_done` short-circuits post-completion calls.
+///
+/// inline attributes on the mt_* seams (se2-cost-fix): the seam
+/// decomposition must not cost the knob-OFF Volcano arm its pre-seam
+/// codegen — the m4 fleet pair measured the outlined seams at +123
+/// instr/INSERT-statement and +55-60 instr/row (batch) against the
+/// knob-OFF==baseline letter. `#[inline(always)]` on the per-row seams
+/// restores the loop-body inlining `exec_modify_table` had when this code
+/// was its literal loop body; `#[inline]` on the per-statement seams keeps
+/// their call overhead out of the per-statement floor (±4).
+#[inline(always)]
 pub fn mt_begin<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1324,6 +1337,7 @@ pub fn mt_begin<'mcx>(
 /// the next child row is fetched (the fetched slot's datums could live
 /// there). In the lane hosting the placement is structural: `MtChildSource::
 /// next_row` (lanev2/dml.rs) calls this before pulling, never `accept`.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
 pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
     estate.reset_per_tuple_expr_context();
     mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
@@ -1333,6 +1347,7 @@ pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStat
 /// previous source row is queued (wave-2 WS-N seam `mt_pending`, contract
 /// §3.7). Only `exec_merge_matched_scan`'s concurrent-flip leg sets it; a
 /// plain INSERT/UPDATE/DELETE node never reports pending.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
 pub fn mt_pending(mt: &ModifyTableState<'_>) -> bool {
     mt.mt_merge_pending_not_matched.is_some()
 }
@@ -1368,6 +1383,7 @@ pub fn mt_resume<'mcx>(
 /// drive this exact function — `exec_modify_table` (the Volcano arm) above,
 /// and the lane host's `MtChildSource` delegation (lanev2/dml.rs) — so the
 /// statement stream is identical by construction.
+#[inline(always)] // loop composition — see mt_begin's se2-cost-fix note
 pub fn mt_step<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1405,6 +1421,7 @@ pub fn mt_step<'mcx>(
 /// EvalPlanQualSetSlot mirror through the operation dispatch, as a pure code
 /// move). `Some` = a RETURNING row to hand to the caller; `None` = the row
 /// was consumed without producing output (the caller pulls the next one).
+#[inline(always)] // per-row seam (the former loop body) — see mt_begin's note
 pub fn mt_accept_row<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1678,6 +1695,9 @@ pub fn mt_accept_row<'mcx>(
 /// code move): the pgrcolumnar statement-end flush, AFTER STATEMENT
 /// triggers, and the `mt_done` latch. Runs exactly once per statement — the
 /// latch makes every later `mt_begin` report done.
+// inline(always): the plain hint did not take (round-2 dist-prof callgrind
+// still shows both codegen copies outlined, +55/stmt) — se2-cost-fix round 3.
+#[inline(always)]
 pub fn mt_source_exhausted<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1904,6 +1924,7 @@ fn execute_attr_map_cols<'mcx>(
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
 // DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
 // first); MERGE fires per present subcommand.
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+40/stmt outlined)
 fn fire_bs_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1925,6 +1946,7 @@ fn fire_bs_triggers<'mcx>(
     Ok(())
 }
 
+#[inline(always)] // se2-cost-fix round 3: rides mt_source_exhausted's always-inline chain
 fn fire_as_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3262,6 +3284,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
 // columns on this lane (loud below), so need_projection is always false and
 // ri_newTupleSlot only exists for slot-type coercion.
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+139/stmt outlined)
 fn exec_init_insert_projection<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3386,6 +3409,12 @@ fn expr_type(node: Node<'_>) -> u32 {
 }
 
 // ExecGetInsertNewTuple (nodeModifyTable.c), no-projection arm.
+//
+// inline(always): the per-row new-tuple fetch (and its exec_copy_slot call
+// site) was inline in exec_modify_table at base; after the wave-2 seam
+// split it went outlined in BOTH monomorphizations (+51 instr/row named by
+// the se2-cost dist-prof attribution) — se2-cost-fix round 2.
+#[inline(always)]
 fn exec_get_insert_new_tuple<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,

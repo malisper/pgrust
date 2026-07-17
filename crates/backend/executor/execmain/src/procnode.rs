@@ -1532,7 +1532,7 @@ fn sample_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_sample_scan(ss, estate)? {
             return Ok(r);
         }
@@ -1548,7 +1548,7 @@ fn function_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_function_scan(fs, estate)? {
             return Ok(r);
         }
@@ -1564,7 +1564,7 @@ fn table_func_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_table_func_scan(ts, estate)? {
             return Ok(r);
         }
@@ -1580,7 +1580,7 @@ fn values_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_values_scan(vs, estate)? {
             return Ok(r);
         }
@@ -1604,7 +1604,7 @@ fn cte_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_cte_scan(cs, estate)? {
             return Ok(r);
         }
@@ -1635,7 +1635,7 @@ fn tid_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_tid_scan(ts, estate)? {
             return Ok(r);
         }
@@ -1651,7 +1651,7 @@ fn tid_range_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_tid_range_scan(ts, estate)? {
             return Ok(r);
         }
@@ -2414,7 +2414,7 @@ fn material_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Mark/restore enters through execami directly, never through
     // this hosting. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_material(m, estate)? {
             return Ok(r);
         }
@@ -2432,7 +2432,7 @@ fn memoize_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE; delegation leaf per the WS-L OQ ruling —
     // lane-owned-child composition is a ledgered later increment): falls
     // through to the UNCHANGED per-tuple path on refuse.
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_memoize(m, estate)? {
             return Ok(r);
         }
@@ -2524,7 +2524,7 @@ fn lockrows_arm<'mcx>(
     // inside; the RowSource closure boundary is the pinned WS-N inc-2b seam,
     // docs/design/rowmode-tail.md §4): falls through to the UNCHANGED
     // per-tuple path on refuse.
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_lock_rows(l, estate)? {
             return Ok(r);
         }
@@ -2585,7 +2585,7 @@ fn modify_table_arm<'mcx>(
     // seams the fallback below drives): falls through to the UNCHANGED
     // exec_modify_table on refuse. Lane logic + refuse-set live in
     // `lanev2::dml` (the merge_join_arm pattern).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::dml_active() {
         if let Some(r) = crate::lanev2::try_own_modify_table(mps, estate)? {
             return Ok(r);
         }
@@ -2638,7 +2638,7 @@ fn merge_append_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_merge_append(m, estate)? {
             return Ok(r);
         }
@@ -2673,7 +2673,7 @@ fn set_op_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_set_op(s, estate)? {
             return Ok(r);
         }
@@ -2696,7 +2696,7 @@ fn recursive_union_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE; the iteration protocol stays inside the ported
     // body — docs/design/rowmode-tail.md §3): falls through to the UNCHANGED
     // per-tuple path on refuse.
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_recursive_union(ru, estate)? {
             return Ok(r);
         }
@@ -2714,7 +2714,7 @@ fn work_table_scan_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE; shared-slot law — the body resolves rustate
     // from the estate per call): falls through to the UNCHANGED per-tuple
     // path on refuse.
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_work_table_scan(wts, estate)? {
             return Ok(r);
         }
@@ -2730,7 +2730,7 @@ fn named_tuplestore_scan_arm<'mcx>(
     // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
-    if crate::lanev2::enabled() {
+    if crate::lanev2::rowmode_tail_active() {
         if let Some(r) = crate::lanev2::try_own_named_tuplestore_scan(nts, estate)? {
             return Ok(r);
         }
