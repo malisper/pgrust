@@ -157,7 +157,8 @@ pub fn exec_init_lock_rows<'mcx>(
     Ok(LockRowsState { plan: node, lr_arowMarks, lr_epq_arowMarks, epq_subs })
 }
 
-/// `ExecLockRows`; C's goto lnext becomes the labeled outer loop.
+/// `ExecLockRows`; C's goto lnext becomes the loop over the extracted
+/// per-row body (`lr_accept_row`): pull, lock-and-judge, emit or skip.
 pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
     node: &mut LockRowsState<'mcx>,
     child: &mut C,
@@ -169,10 +170,43 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
     cfi()?;
-    'lnext: loop {
+    loop {
         let Some(slot_id) = child.exec_proc(estate)? else {
             return Ok(None);
         };
+        if let Some(out) = lr_accept_row(node, estate, slot_id, &mut epq_eval)? {
+            return Ok(Some(out));
+        }
+    }
+}
+
+/// One fetched child row through the ExecLockRows body (wave-3 WS-T seam
+/// `lr_accept_row` — the `'lnext` loop body of `exec_lock_rows` as a PURE
+/// CODE MOVE; both engines drive this exact function: the Volcano/delegation
+/// arm through the loop above, the lane's inc-2b TupleOp hosting through
+/// `LockRowsOp::accept` in execmain's lanev2/dml.rs). `Some` = the row (or
+/// its EPQ-substituted latest version) locked and emitted; `None` = the row
+/// was skipped (the former `continue 'lnext` arms: WouldBlock,
+/// SelfModified's Halloween guard, a concurrently deleted row under READ
+/// COMMITTED, or a failed EPQ recheck) and the caller pulls the next one.
+// #[inline(always)]: restore the literal loop-body codegen exec_lock_rows
+// had before the extraction (the mt_* seam se2-cost-fix precedent — the
+// knob-OFF Volcano arm must not pay for the seam decomposition).
+#[inline(always)]
+pub fn lr_accept_row<'mcx>(
+    node: &mut LockRowsState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    epq_eval: &mut impl FnMut(
+        &mut Option<EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    // The 4-space-deep block below is the former 'lnext loop body verbatim
+    // (pure code move): each `continue 'lnext` (row skipped, pull the next)
+    // is now `return Ok(None)`, the terminal emits are `Ok(Some(..))`.
+    {
         let mut epq_needed = false;
 
         for i in 0..node.lr_arowMarks.len() {
@@ -275,9 +309,9 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
             };
 
             match test {
-                TM_Result::TM_WouldBlock => continue 'lnext,
+                TM_Result::TM_WouldBlock => return Ok(None),
                 // Halloween guard: self-modified rows are skipped, not re-fetched.
-                TM_Result::TM_SelfModified => continue 'lnext,
+                TM_Result::TM_SelfModified => return Ok(None),
                 TM_Result::TM_Ok => {
                     if tmfd.traversed {
                         epq_needed = true;
@@ -296,7 +330,7 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
                     if xact_seams::isolation_uses_xact_snapshot::call() {
                         return Err(serialization_failure());
                     }
-                    continue 'lnext;
+                    return Ok(None);
                 }
                 TM_Result::TM_Invisible => {
                     return Err(internal("attempted to lock invisible tuple"))
@@ -319,12 +353,13 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
             let input =
                 node.lr_arowMarks[0].mark_slot.expect("locking mark slot made at init");
             let Some(epqslot) = epq_eval(&mut node.epq_subs, estate, input)? else {
-                continue 'lnext;
+                // Recheck says the latest version no longer passes: skip.
+                return Ok(None);
             };
             return Ok(Some(epqslot));
         }
 
-        return Ok(Some(slot_id));
+        Ok(Some(slot_id))
     }
 }
 
