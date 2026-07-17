@@ -64,9 +64,9 @@ pub(crate) use dml::try_own_modify_table;
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
-pub(crate) use rowmode::try_own_merge_join;
+pub(crate) use rowmode::merge_join_pull_verdict;
 pub(crate) use rowmode::try_own_project_set;
-pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_lock_rows, try_own_material, try_own_memoize, try_own_merge_append, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_set_op, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
+pub(crate) use rowmode_tail::{cte_scan_pull_verdict, lock_rows_pull_verdict, material_pull_verdict, memoize_pull_verdict, merge_append_pull_verdict, recursive_union_pull_verdict, set_op_pull_verdict, try_own_function_scan, try_own_named_tuplestore_scan, try_own_sample_scan, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, values_scan_pull_verdict, work_table_scan_pull_verdict};
 pub(crate) use windows::try_own_window_agg;
 pub(crate) use windows::try_own_window_agg_t2;
 // --- WS-R T2-B (wave-3) ---
@@ -12722,9 +12722,10 @@ pub fn try_own_unique<'mcx>(
     if let Some(r) = try_own_unique_streaming(u, estate)? {
         return Ok(Some(r));
     }
-    // Wave-2 row-mode tail fallback (knob-gated; runs its own §3.2 gates —
+    // Wave-2 row-mode tail fallback, SH-E verdict form (knob-gated inside;
     // the streaming glue above keeps priority per the composition rule).
-    rowmode_tail::try_own_unique_tail(u, estate)
+    rowmode_tail::unique_tail_verdict(u, estate);
+    Ok(None)
 }
 
 /// The Phase-2 streaming unique over the sort breaker. `None` = refused.
@@ -13122,7 +13123,11 @@ pub fn try_own_subquery_scan<'mcx>(
     if let Some(r) = try_own_subquery_scan_glue(s, estate)? {
         return Ok(Some(r));
     }
-    rowmode_tail::try_own_subquery_scan_tail(&mut **s, estate)
+    // Wave-2 row-mode tail fallback, SH-E verdict form (knob-gated inside):
+    // accounting only — the arm's fall-through exec_scan IS the delegated
+    // body, so refusal and admission run the same bytes.
+    rowmode_tail::subquery_scan_tail_verdict(estate);
+    Ok(None)
 }
 
 /// The wave-4 streaming glue: a bare `SubqueryScan` over the sort breaker —

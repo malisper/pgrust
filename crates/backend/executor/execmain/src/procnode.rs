@@ -1698,9 +1698,9 @@ fn values_scan_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_values_scan(vs, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict: accounting only — the call below IS the
+        // delegated body (tail-call shape preserved on both knob arms).
+        crate::lanev2::values_scan_pull_verdict(estate);
     }
     ::nodevaluesscan::exec_values_scan(vs, estate)
 }
@@ -1722,9 +1722,8 @@ fn cte_scan_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_cte_scan(cs, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::cte_scan_pull_verdict(estate);
     }
     ::nodectescan::exec_cte_scan(cs, estate)
 }
@@ -2555,9 +2554,9 @@ fn material_arm<'mcx>(
     // on refuse. Mark/restore enters through execami directly, never through
     // this hosting. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_material(m, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict: accounting only — the call below IS the
+        // delegated body (tail-call shape preserved on both knob arms).
+        crate::lanev2::material_pull_verdict(m, estate);
     }
     let m = &mut **m;
     ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
@@ -2573,9 +2572,8 @@ fn memoize_arm<'mcx>(
     // lane-owned-child composition is a ledgered later increment): falls
     // through to the UNCHANGED per-tuple path on refuse.
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_memoize(m, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::memoize_pull_verdict(m, estate);
     }
     let m = &mut **m;
     let plan = m.state.plan.plan.lefttree.expect("Memoize outer plan");
@@ -2664,18 +2662,16 @@ fn lockrows_arm<'mcx>(
     // inside; the RowSource closure boundary is the pinned WS-N inc-2b seam,
     // docs/design/rowmode-tail.md §4): falls through to the UNCHANGED
     // per-tuple path on refuse.
-    if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_lock_rows(l, estate)? {
-            return Ok(r);
-        }
-    }
+    let rowmode_admitted = crate::lanev2::rowmode_tail_active()
+        && crate::lanev2::lock_rows_pull_verdict(l, estate);
     // --- WS-T wave-3 inc-2b (LockRows TupleOp behind PGRUST_LANE_V2_DML;
-    // lanev2/dml.rs). Reached only after the rowmode-tail delegation hook
-    // above declined, so the ROWMODE knob's behavior is unchanged at both
-    // of its arms; knob-OFF cost is the same one-byte dml_active() gate the
-    // modify_table arm carries. Falls through to the UNCHANGED
+    // lanev2/dml.rs). Offered only when the rowmode-tail verdict did NOT
+    // admit — exactly the pulls the retired delegation hook fell through
+    // on, so hook priority and the ROWMODE knob's behavior are unchanged
+    // at both of its arms; knob-OFF cost is the same one-byte dml_active()
+    // gate the modify_table arm carries. Falls through to the UNCHANGED
     // exec_lock_rows on refuse. ---
-    if crate::lanev2::dml_active() {
+    if !rowmode_admitted && crate::lanev2::dml_active() {
         if let Some(r) = crate::lanev2::try_own_lock_rows_dml(l, estate)? {
             return Ok(r);
         }
@@ -2791,9 +2787,8 @@ fn merge_append_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_merge_append(m, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::merge_append_pull_verdict(m, estate);
     }
     let MergeAppendNode { state, substates, subplan_origin: _ } = &mut **m;
     ::nodemergeappend::exec_merge_append(state, estate, |e, i| {
@@ -2826,9 +2821,8 @@ fn set_op_arm<'mcx>(
     // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
     // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_set_op(s, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::set_op_pull_verdict(s, estate);
     }
     let SetOpNode { state, outer, inner } = &mut **s;
     ::nodesetop::exec_set_op(
@@ -2849,9 +2843,8 @@ fn recursive_union_arm<'mcx>(
     // body — docs/design/rowmode-tail.md §3): falls through to the UNCHANGED
     // per-tuple path on refuse.
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_recursive_union(ru, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::recursive_union_pull_verdict(ru, estate);
     }
     let RecursiveUnionNode { state, outer, inner } = &mut **ru;
     ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
@@ -2867,9 +2860,8 @@ fn work_table_scan_arm<'mcx>(
     // from the estate per call): falls through to the UNCHANGED per-tuple
     // path on refuse.
     if crate::lanev2::rowmode_tail_active() {
-        if let Some(r) = crate::lanev2::try_own_work_table_scan(wts, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::work_table_scan_pull_verdict(estate);
     }
     ::nodeworktablescan::exec_work_table_scan(wts, estate)
 }
@@ -3121,9 +3113,9 @@ fn merge_join_arm<'mcx>(
     // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
     // logic + refuse-set live in `lanev2` (the nest_loop_arm pattern).
     if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_own_merge_join(mj, estate)? {
-            return Ok(r);
-        }
+        // SH-E ownership verdict: accounting only — the call below IS the
+        // delegated body (tail-call shape preserved on both knob arms).
+        crate::lanev2::merge_join_pull_verdict(mj, estate);
     }
     let MergeJoinNode { state, outer, inner } = mj;
     ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
