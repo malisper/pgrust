@@ -3295,6 +3295,161 @@ fn mk_windowagg_pstmt_ex<'mcx>(
     pstmt.seal_ref()
 }
 
+// WindowAgg(partition by g, default frame; row_number + rank) over Sort(g)
+// over hashed Agg(count(*) group by g) over SeqScan — W1-admissible in every
+// respect EXCEPT the agg-fed sort, pinning the inc-1 STRUCTURAL refusal of
+// the hash-agg breaker feed family: its `sort_feed_if_needed` carries the
+// lane's one dynamic feed-time refuse (the agg-over-join multi-batch spill),
+// which the sticky window drive cannot host (windows.rs
+// `window_refuse_reason`; the fixed feed-refuse blocker).
+fn mk_window_over_agg_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
+    use ::types_nodes::bitmapset::Bitmapset;
+    use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+    use ::types_nodes::plannodes::{Agg, Plan, Scan, SeqScan, Sort, WindowAgg};
+    use ::types_nodes::primnodes::{Aggref, WindowFunc, OUTER_VAR};
+
+    // SeqScan (g, a).
+    let g_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let a_var = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+    let scan_tlist = NodeList::make2(
+        mcx,
+        Node::mk_target_entry(mcx, g_var, 1, Some("g"), false).unwrap(),
+        Node::mk_target_entry(mcx, a_var, 2, Some("a"), false).unwrap(),
+    )
+    .unwrap();
+    let scan = Node::mk(
+        mcx,
+        SeqScan {
+            cb_scan_cols: None,
+            scan: Scan {
+                plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                scanrelid: 1,
+            },
+        },
+    )
+    .unwrap();
+
+    // Hashed Agg: count(*) GROUP BY g — output (g int4, cnt int8).
+    let mut aggref = Node::build::<Aggref>(mcx).unwrap();
+    aggref.aggfnoid = 2803;
+    aggref.aggtype = INT8OID;
+    aggref.aggtranstype = INT8OID;
+    aggref.aggstar = true;
+    aggref.aggno = 0;
+    aggref.aggtransno = 0;
+    let mut agg_tlist = NodeList::make1(
+        mcx,
+        Node::mk_target_entry(
+            mcx,
+            Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+            1,
+            Some("g"),
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    agg_tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, aggref.seal(), 2, Some("cnt"), false).unwrap())
+        .unwrap();
+    let mut agg = Node::build::<Agg>(mcx).unwrap();
+    agg.plan.targetlist = agg_tlist;
+    agg.plan.lefttree = Some(scan);
+    agg.aggstrategy = 2;
+    agg.numCols = 1;
+    agg.grpColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    agg.grpOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    agg.grpCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    agg.numGroups = 4;
+
+    // Sort by g over the agg output.
+    let mk_out_tlist = || {
+        NodeList::make2(
+            mcx,
+            Node::mk_target_entry(
+                mcx,
+                Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap(),
+                1,
+                Some("g"),
+                false,
+            )
+            .unwrap(),
+            Node::mk_target_entry(
+                mcx,
+                Node::mk_var(mcx, OUTER_VAR, 2, INT8OID, -1, 0, 0).unwrap(),
+                2,
+                Some("cnt"),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let mut sort = Node::build::<Sort>(mcx).unwrap();
+    sort.plan.targetlist = mk_out_tlist();
+    sort.plan.lefttree = Some(agg.seal());
+    sort.numCols = 1;
+    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+    // WindowAgg: partition by g, no ORDER BY, FRAMEOPTION_DEFAULTS.
+    let mk_wfunc = |fnoid: u32| {
+        let mut w = Node::build::<WindowFunc>(mcx).unwrap();
+        w.winfnoid = fnoid;
+        w.wintype = INT8OID;
+        w.winref = 1;
+        w.seal()
+    };
+    let mut wa_tlist = mk_out_tlist();
+    wa_tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3100), 3, Some("rn"), false).unwrap())
+        .unwrap();
+    wa_tlist
+        .lappend(mcx, Node::mk_target_entry(mcx, mk_wfunc(3101), 4, Some("rank"), false).unwrap())
+        .unwrap();
+    let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
+    wa.plan.targetlist = wa_tlist;
+    wa.plan.lefttree = Some(sort.seal());
+    wa.winref = 1;
+    wa.partNumCols = 1;
+    wa.partColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+    wa.partOperators = ::mcx::slice_borrow_in(mcx, &[INT4_EQ]).unwrap();
+    wa.partCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+    wa.topWindow = true;
+
+    let rte = Node::mk(
+        mcx,
+        RangeTblEntry {
+            rtekind: RTEKind::RTE_RELATION,
+            relid,
+            relkind: ::types_rel::RELKIND_RELATION,
+            rellockmode: ::types_rel::AccessShareLock,
+            perminfoindex: 1,
+            inFromCl: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perminfo = Node::mk(
+        mcx,
+        RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+    )
+    .unwrap();
+    let mut unpruned = Bitmapset::empty();
+    unpruned.add_member(mcx, 1).unwrap();
+
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(wa.seal());
+    pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+    pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+    pstmt.unprunableRelids = unpruned;
+    pstmt.seal_ref()
+}
+
 type WinRow = (i32, i32, i64, i64, i64, i64);
 
 fn drain_window_rows<'mcx>(
@@ -4538,6 +4693,88 @@ mod windows_ab {
             (1, 20, 3, 3, 2, 40),
         ];
         assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
+    }
+
+    /// REFUSAL SHAPE (the fixed feed-refuse blocker's family): WindowAgg
+    /// over Sort over hashed Agg over SeqScan — W1-admissible in every
+    /// respect except the AGG-FED sort, which inc-1 refuses STRUCTURALLY:
+    /// the hash-agg breaker feed is the one `sort_feed_if_needed` family
+    /// with a dynamic feed-time refuse (agg-over-join multi-batch spill),
+    /// and the sticky window drive cannot host a feed verdict that can
+    /// flip (first-pull refuse stranding the admit memo; chgParam rescans
+    /// flipping a rebuilt join's nbatch). Both arms must be byte-identical
+    /// and the lane must never engage.
+    #[test]
+    fn windows_ab_agg_fed_sort_refuses() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70147;
+        // (g, a): group counts g=1 -> 2, g=2 -> 1, g=3 -> 3.
+        scanfix::register_table_2col(
+            relid,
+            &[&[(1, 10), (3, 7), (1, 20), (2, 5), (3, 8), (3, 9)]],
+        );
+        type AggWinRow = (i32, i64, i64, i64);
+        fn drain<'mcx>(
+            ps: &mut crate::procnode::PlanStateNode<'mcx>,
+            estate: &mut EStateData<'mcx>,
+        ) -> Vec<(i32, i64, i64, i64)> {
+            let mut got = Vec::new();
+            while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+                let base = estate.slot_mut(slot_id).base();
+                assert!(base.tts_isnull.iter().all(|n| !n));
+                got.push((
+                    base.tts_values[0].as_i32(),
+                    base.tts_values[1].as_i64(),
+                    base.tts_values[2].as_i64(),
+                    base.tts_values[3].as_i64(),
+                ));
+            }
+            got
+        }
+        let run = |rescan: bool| -> Vec<Vec<AggWinRow>> {
+            let pstmt = mk_window_over_agg_pstmt(leaked_mcx(), relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let ps = planstate.as_mut().unwrap();
+                let mut runs = vec![drain(ps, estate)];
+                if rescan {
+                    crate::execami::exec_re_scan(ps, estate).unwrap();
+                    runs.push(drain(ps, estate));
+                }
+                crate::exec_end_node(ps, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+                runs
+            })
+        };
+        crate::lanev2::windows_set_for_tests(false);
+        let off = run(true);
+        crate::lanev2::windows_set_for_tests(true);
+        let owned_before =
+            crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        let on = run(true);
+        let owned_after =
+            crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        crate::lanev2::windows_set_for_tests(false);
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert_eq!(
+            owned_after, owned_before,
+            "agg-fed sort shape engaged the windows lane (structural refusal broken)"
+        );
+        let want: Vec<AggWinRow> = vec![(1, 2, 1, 1), (2, 1, 1, 1), (3, 3, 1, 1)];
+        assert_eq!(off, vec![want.clone(), want], "rescan must replay identically");
         scanfix::quiesced();
     }
 
