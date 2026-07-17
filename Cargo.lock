@@ -2110,6 +2110,7 @@ dependencies = [
  "brin_tuple",
  "bufmgr_seams",
  "datum",
+ "elog_seams",
  "indexam_seams",
  "lsyscache",
  "mcx",

@@ -5,8 +5,8 @@ use ::procarray::TransactionIdIsInProgress;
 use ::snapmgr::XidInMVCCSnapshot;
 use ::tableam::TM_Result::{self, *};
 use ::types_core::xact::{
-    InvalidCommandId, InvalidTransactionId, TransactionIdFollowsOrEquals, TransactionIdIsValid,
-    TransactionIdPrecedes,
+    InvalidCommandId, InvalidTransactionId, TransactionIdFollowsOrEquals, TransactionIdIsNormal,
+    TransactionIdIsValid, TransactionIdPrecedes,
 };
 use ::types_core::{Buffer, CommandId, GlobalVisStateHandle, InvalidOid, TransactionId};
 use ::types_error::PgResult;
@@ -686,6 +686,18 @@ impl MvccXidResolve for PageMemoResolve<'_> {
 
     #[inline]
     fn did_commit(&mut self, xid: TransactionId) -> PgResult<bool> {
+        // TransactionLogFetch's permanent-xid arm, hoisted: non-normal xids
+        // resolve at the direct path's cost and stay out of the memo, whose
+        // empty slots are keyed xid == 0. A zero xid is REACHABLE here, not
+        // corruption: heap_abort_speculative (heapam.c) sets a killed
+        // speculative tuple's xmin to InvalidTransactionId without setting
+        // HEAP_XMIN_INVALID, so the next MVCC scan of the page resolves raw
+        // xmin == 0 — C's HeapTupleSatisfiesMVCC feeds it straight into
+        // TransactionIdDidCommit, whose !TransactionIdIsNormal arm answers
+        // "aborted" before touching its single-item cache (transam.c).
+        if !TransactionIdIsNormal(xid) {
+            return TransactionIdDidCommit(xid);
+        }
         let f = self.memo.get(xid);
         if f & XVM_COMMIT_VALID != 0 {
             return Ok(f & XVM_COMMITTED != 0);

@@ -94,12 +94,6 @@ impl<'mcx> HeapScanDescData<'mcx> {
     }
 }
 
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("backend-access-heap-heapam reached unported unit: {unit}")
-}
-
 fn elog_error(message: impl Into<std::string::String>) -> Box<PgError> {
     Box::new(PgError::error(message))
 }
