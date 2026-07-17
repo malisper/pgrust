@@ -622,6 +622,17 @@ fn exec_check_permissions_modified(
 /// `standard_ExecutorStart` (execMain.c).
 pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgResult<()> {
     assert!(qd.exec.is_none(), "ExecutorStart: query already started");
+    // WS-P node-census entry hook (wave-2 flip machinery, lanev2/census.rs):
+    // when PGRUST_LANE_V2_NODE_CENSUS is armed, ride WS-C's EngineEvent
+    // capture (attribution-only; emission-gate law in executils) so the
+    // ExecutorEnd census can join plan nodes to their engine verdicts.
+    // Disarmed cost: one memoized-bool load + branch (default OFF; flagged
+    // for the select1 instruction-pair fleet gate in notes/se-ws-p-flip.md).
+    // Before the skeleton probe on purpose: the flag participates in the
+    // skeleton's eflags match key like every other entry flag.
+    if crate::lanev2::census_armed() {
+        eflags |= ::types_slot::EXEC_FLAG_ENGINE_REPORT;
+    }
     #[cfg(debug_assertions)]
     if let Some(s) = &qd.snapshot {
         if snapmgr::ActiveSnapshotSet() {
@@ -1138,6 +1149,19 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
                 );
             }
         });
+    }
+    // WS-P node-census exit hook (lanev2/census.rs): with the census armed,
+    // walk the plan tree and append one TSV row per plan node, joined to the
+    // execution's EngineEvents. Before the skeleton park AND before teardown
+    // (both need the estate + planstate alive); best-effort, never a query
+    // error. Disarmed cost: one memoized-bool load + branch.
+    if crate::lanev2::census_armed() {
+        let pstmt = qd.plannedstmt();
+        if let Some(exec) = qd.exec.as_mut() {
+            exec.with_mut(|data| {
+                crate::lanev2::census_record(pstmt, &data.estate, data.planstate.as_ref());
+            });
+        }
     }
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,

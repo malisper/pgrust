@@ -35,6 +35,7 @@
 //! `SHOW ALL` row). Harness OFF arms must set `PGRUST_LANE_V2=0` explicitly.
 
 mod batch_source;
+mod census;
 pub mod coverage;
 mod express;
 mod exprkey;
@@ -55,6 +56,7 @@ mod stats;
 mod windows;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use census::{census_armed, record_execution as census_record};
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
@@ -69,6 +71,12 @@ pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TE
 pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
+#[cfg(test)]
+pub(crate) use census::{
+    attribution_for_tests as census_attribution_for_tests,
+    census_rows_for_tests,
+    planstate_kind_name_for_tests as census_planstate_kind_name_for_tests,
+};
 
 use std::sync::OnceLock;
 
