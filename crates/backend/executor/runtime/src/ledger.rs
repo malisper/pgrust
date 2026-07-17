@@ -380,6 +380,32 @@ impl AdmissionLedger {
         u32::from(t > 0 && before == t && e.advert.load(Ordering::Relaxed) != 0)
     }
 
+    /// DECLARED-BLOCKING-SECTION donation (§2.8 composition; caught by the
+    /// knob-ON suite wedging io_permit_seams_donate_core_to_standby): a
+    /// worker entering a blocking section keeps its task and pin-board
+    /// obligations but returns its WIDTH GRANT along with the execution
+    /// permit — the standby absorbing the freed core must be joinable, or
+    /// a width-saturated slot deadlocks the donation model (the blocked
+    /// worker waits on work only the refused standby can run). Accounting
+    /// IS [`AdmissionLedger::leave`] (granted −1 + the joinable-transition
+    /// wake hint, which covers standbys parked Idle after the pick filter
+    /// refused the then-saturated slot).
+    pub(crate) fn donate(&self, slot: usize) -> u32 {
+        self.leave(slot)
+    }
+
+    /// Blocking-section exit: retake the grant UNCONDITIONALLY (the permit
+    /// is already reacquired; the worker resumes mid-task and cannot
+    /// re-pick, so a refusal here would have no legal answer). May
+    /// transiently overshoot target — resolved by Yield at the next claim
+    /// boundary, the standard over-shed doctrine. No epoch re-check: the
+    /// entry cannot retire while this worker's task is unsettled
+    /// (finalization waits on its pin/marker), so the admission this grant
+    /// belongs to is still the slot's occupant.
+    pub(crate) fn rejoin(&self, slot: usize) {
+        self.entries[slot].granted.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// CLAIM-BOUNDARY decision: one Relaxed load pair (granted vs target)
     /// on the common path. Called from run_task's claim loop next to the
     /// existing is_aborted boundary check. Yield maps onto the existing

@@ -927,6 +927,14 @@ fn drive_until_stop(rt: &Runtime, worker: usize) {
 /// two workers × two concurrently-admitted RGs (targets split 1+1), probed
 /// from INSIDE the work body (the only place a violation could act), plus
 /// clean drain (admitted = granted = 0) after both completions.
+/// LOOM-FAST SIZING (≤5min budget law): both RGs single-granule AND
+/// preemption_bound 1 — the original 2-granule/bound-2 shape blew the
+/// local budget (>150s alone), and the cost lives in the two full drive
+/// loops (pick/park/publish interleavings), not the granule count. Bound 1
+/// still explores every ordering of the two workers' joins/leaves across
+/// both slots (loom branches cover all yield points; the bound only caps
+/// forced preemptions between them). Bound-2 exhaustion rides the fleet's
+/// exhaustive loom trail, not the gate.
 #[test]
 fn ledger_grants_never_exceed_core_budget() {
     struct BudgetWork {
@@ -951,17 +959,17 @@ fn ledger_grants_never_exceed_core_budget() {
     }
 
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = Some(1);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
         rt.set_ledger(true);
-        let wa = ModelWork::new(2, None);
+        let wa = ModelWork::new(1, None);
         let wb = ModelWork::new(1, None);
         let (_ha, waiter_a) = rt.submit(QuerySpec {
             query_id: 1,
             tasksets: vec![TaskSetSpec {
-                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                source: Arc::new(SyntheticMorselSource::new(1)),
                 work: Arc::new(BudgetWork {
                     inner: Arc::clone(&wa),
                     rt: Arc::clone(&rt),
@@ -1004,10 +1012,16 @@ fn ledger_grants_never_exceed_core_budget() {
 /// below its live grants; whatever the interleaving — shed at the claim
 /// boundary, re-pick onto B, or B arriving after A drained — every granule
 /// of both RGs executes exactly once and both RGs complete.
+/// LOOM-FAST SIZING (≤5min budget law): preemption_bound 1 — the narrowing
+/// needs a 2-granule incumbent (granted 2 when B admits), and that shape
+/// at bound 2 blew the local budget (>150s alone). Bound 1 still explores
+/// every ORDERING of B's admit vs A's claims/sheds (the model's subject —
+/// loom branches cover all yield points; the bound only caps forced
+/// preemptions between them). Bound-2 exhaustion rides the fleet trail.
 #[test]
 fn ledger_yield_worker_freed_repick() {
     let mut b = loom::model::Builder::new();
-    b.preemption_bound = Some(2);
+    b.preemption_bound = Some(1);
     b.max_branches = 200_000;
     b.check(|| {
         let rt = small_runtime(2, 0);
@@ -1091,5 +1105,112 @@ fn ledger_renudge_bounded_and_live() {
             "re-nudges exceed the per-recompute budget: {}",
             snap.renudges
         );
+    });
+}
+
+/// Ledger model 4: BLOCKING-SECTION DONATION liveness (§2.8 × ledger
+/// composition — the knob-ON hang WS-B's finalize caught in
+/// io_permit_seams_donate_core_to_standby): with ONE core (target 1) the
+/// incumbent enters a declared blocking section INSIDE run_morsel and
+/// spins until the peer granule runs — only the standby can run it, and
+/// only if the section donated the width grant along with the permit
+/// (otherwise the saturated slot refuses the standby's join and every
+/// thread ends up yielded/parked: loom's deadlock detector is the oracle).
+/// Sized for the loom-fast gate: 2 threads, 2 granules, preemption_bound 1
+/// (the bound-2 shape belongs to the fleet's exhaustive trail).
+#[test]
+fn ledger_blocking_section_donation_liveness() {
+    struct DonateWork {
+        inner: Arc<ModelWork>,
+        io_taken: AtomicUsize,
+        peer_ran: AtomicBool,
+    }
+    impl TaskSetWork for DonateWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if self.io_taken.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Declared blocking section on the FIRST morsel executed:
+                // wait (spin-yield: a loom scheduling point) for the peer
+                // morsel, which only the standby can run.
+                let io = runtime::blocking_io_section();
+                while !self.peer_ran.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+                drop(io);
+                self.inner.run_morsel(worker, range);
+            } else {
+                self.peer_ran.store(true, Ordering::SeqCst);
+                self.inner.run_morsel(worker, range);
+            }
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    /// Pool-loop emulation with the real permit + park discipline AND the
+    /// facade registration (mirrors pool.rs worker_loop; the
+    /// facade_standby_absorption shape).
+    fn drive_registered(rt: &Runtime, worker: usize, waiter: &CompletionWaiter) {
+        // SAFETY: the runtime outlives this drive; the permit is held
+        // across worker_step, where the facade is called.
+        let _reg = unsafe { runtime::PermitThreadReg::new(rt.execution_permits()) };
+        let mut local = rt.worker_local(worker);
+        loop {
+            if waiter.try_wait().is_some() {
+                break;
+            }
+            let epoch = rt.park_epoch();
+            rt.execution_permits().acquire();
+            let step = rt.worker_step(&mut local);
+            rt.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => thread::yield_now(),
+                Step::Idle => {
+                    if waiter.try_wait().is_some() {
+                        break;
+                    }
+                    rt.park(epoch);
+                }
+                Step::Stop => break,
+            }
+        }
+        rt.request_stop();
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        // workers=1 ⇒ ONE execution permit AND ledger target 1; standbys=1
+        // ⇒ two pool threads.
+        let rt = small_runtime(1, 1);
+        rt.set_ledger(true);
+        let inner = ModelWork::new(2, None);
+        let work = Arc::new(DonateWork {
+            inner: Arc::clone(&inner),
+            io_taken: AtomicUsize::new(0),
+            peer_ran: AtomicBool::new(false),
+        });
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 6,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive_registered(&rt1, 1, &waiter1));
+        drive_registered(&rt, 0, &waiter);
+        t.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        inner.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0, "donate/rejoin stayed balanced");
     });
 }
