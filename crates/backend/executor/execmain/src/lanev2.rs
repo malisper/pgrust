@@ -2418,9 +2418,14 @@ fn agg_hash_build_fold_feed<'mcx>(
     // lookup_hash_entry insert / compact-table pack points and str
     // transvalues at C's datumCopy-into-aggcontext points, so no staged
     // pointer outlives its batch.
+    //
+    // GROUPED small-N floor (K1 inc-1's one new policy, heap_gagg_admits):
+    // a heap grouped scan estimated under PGRUST_LANE_V2_HEAP_GAGG_FLOOR
+    // keeps SeqScanSource — the heapfeed probe's plan-time >=1k-row
+    // engagement rule (grouped crossover ~1k rows; plain stays ungated).
     use batch_source::BatchGranuleSource as _;
     if batch_source::heapfeed_v2_enabled() {
-        if ::nodeseqscan::seq_scan_is_heap(ss) {
+        if batch_source::heap_gagg_admits(ss) {
             let mut src = batch_source::HeapBatchSource::new(ss);
             let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, estate);
             let settled = src.end_claim(estate);

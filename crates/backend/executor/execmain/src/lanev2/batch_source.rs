@@ -133,6 +133,39 @@ pub(super) fn heapfeed_readahead_depth() -> u32 {
     })
 }
 
+/// `PGRUST_LANE_V2_HEAP_GAGG_FLOOR` (default 1000; K1 inc-1 — the ONE new
+/// admission policy): the grouped small-N engagement floor. Heap GROUPED
+/// feeds construct [`HeapBatchSource`] only when the scan's plan-time row
+/// estimate reaches the floor; below it the knob-ON world keeps
+/// [`SeqScanSource`] (the pre-K1 source, still seam-settled — the clear
+/// ownership law is process-static, never per-source). Probe evidence of
+/// record (origin/heapfeed, lane CLOSED): grouped engagement crossover
+/// ~1,000 rows (tie by N=100; N=1 grouped fixed cost ~6.8us). PLAIN stays
+/// ungated — it never loses more than ~2us at N=1. Env-overridable for
+/// letters; `0` disarms the floor. OnceLock (no in-process A/B: both
+/// sources run identical AM machine code today, so the floor's units are
+/// e2e/letter-grade, not corpus-grade).
+fn heap_gagg_floor() -> f64 {
+    static FLOOR: OnceLock<f64> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        parse_gagg_floor(std::env::var("PGRUST_LANE_V2_HEAP_GAGG_FLOOR").ok().as_deref())
+    })
+}
+
+/// The floor's parse half, pure for the unit corpus: unset / unparsable =
+/// the probe's 1,000-row default; `0` disarms.
+fn parse_gagg_floor(raw: Option<&str>) -> f64 {
+    raw.and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(1000.0)
+}
+
+/// The grouped feeds' heap-source admission, in one place (K1 inc-1): the
+/// AM gate + the plan-time small-N floor. False = the caller constructs
+/// [`SeqScanSource`] (byte-equivalent delegation today; the floor exists so
+/// heap-specific policy grows behind it without re-litigating admission).
+pub(super) fn heap_gagg_admits(ss: &::nodeseqscan::SeqScanState<'_>) -> bool {
+    ::nodeseqscan::seq_scan_is_heap(ss) && ss.plan_rows() >= heap_gagg_floor()
+}
+
 /// Capabilities of a granule-addressed batch source (migration-doc
 /// "capabilities" face; grows honestly per increment — no speculative
 /// flags).
@@ -681,6 +714,19 @@ mod tests {
         assert!(heapfeed_v2_enabled());
         heapfeed_set_for_tests(false);
         assert!(!heapfeed_v2_enabled());
+    }
+
+    /// The grouped small-N floor's parse contract (K1 inc-1): unset and
+    /// garbage read as the probe's 1,000-row default; explicit values win;
+    /// `0` disarms (every estimate admits).
+    #[test]
+    fn gagg_floor_parse() {
+        assert_eq!(parse_gagg_floor(None), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("banana")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("2500")), 2500.0);
+        assert_eq!(parse_gagg_floor(Some(" 64 ")), 64.0);
+        assert_eq!(parse_gagg_floor(Some("0")), 0.0);
     }
 
     /// R1 borrow discipline is COMPILE-SHAPE: accessors borrow `&self`, so
