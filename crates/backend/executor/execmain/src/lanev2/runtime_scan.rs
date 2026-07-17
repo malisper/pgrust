@@ -703,6 +703,42 @@ fn caller_c2_enabled() -> bool {
     })
 }
 
+/// Pure parse of the C3 knob value (the WS-X A/B-unit surface; the resolve
+/// below memoizes it). Exact spellings only — the C1/C2 idiom.
+#[inline]
+fn caller_c3_parse(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// `PGRUST_RUNTIME_CALLER_C3` (wave-5 R-KNOBS registry, WS-X; default
+/// OFF): rollout stage C3 — the standing_wait arm of caller-as-worker
+/// (docs/design/caller-c3.md). WAVE-5 INERT SEAM (wave-5 contract §3):
+/// resolving ON emits ONE startup-scoped log line so an armed process is
+/// identifiable, then FALLS THROUGH — the standing channel's leader
+/// posture (standing_wait's park loop) and the launched path's C1/C2
+/// caller drive stay byte- and trace-identical to knob-OFF. The live
+/// standing drive is the C3 board's own increment. NESTED under
+/// `PGRUST_RUNTIME_CALLER` like `_C2`: resolved only under
+/// `caller_enabled()`, so `_C3` alone flips nothing and CALLER-unset
+/// executes only the memoized `caller_enabled()` read already priced at
+/// this engagement chokepoint. Read once (the C1/C2 OnceLock idiom,
+/// engagement cadence — contract §0.6).
+#[cold]
+#[inline(never)]
+fn caller_c3_seam_resolve() {
+    static ON: OnceLock<bool> = OnceLock::new();
+    ON.get_or_init(|| {
+        let on = caller_c3_parse(std::env::var("PGRUST_RUNTIME_CALLER_C3").ok().as_deref());
+        if on {
+            eprintln!(
+                "[lane-v2] caller C3 (standing_wait arm) knob armed — wave-5 inert seam: \
+                 posture unchanged; live arm is the C3 board (docs/design/caller-c3.md)"
+            );
+        }
+        on
+    });
+}
+
 enum CallerDrive {
     /// The caller drove the RG to an outcome (finish_outcome decides).
     Outcome(runtime::RgOutcome),
@@ -2548,6 +2584,19 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
+        // WS-X wave-5 C3 dispatch seam (PGRUST_RUNTIME_CALLER_C3, default
+        // OFF; docs/design/caller-c3.md §4): when the C3 board lands, the
+        // leader drives THIS standing engagement as participant #0
+        // (CallerWorker over the standing channel) instead of parking in
+        // standing_wait's poll loop. This wave the arm is INERT — the
+        // resolve logs once when armed and every path proceeds unchanged.
+        // Nesting law: `_C3` is resolved only under caller_enabled(), so
+        // `_C3` alone flips nothing; CALLER-unset pays one memoized bool
+        // read at this engagement chokepoint and nothing else (§0.6).
+        if caller_enabled() {
+            caller_c3_seam_resolve();
+        }
+
         // M2 pool-binding: STANDING engagement first — no worker launch,
         // no entry task, one binder bind per participant. Fallback (gang
         // unavailable/kill-switched/all-refused/claim-deadline) leaves the
@@ -3021,4 +3070,31 @@ fn drain_rg_raw(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> b
         lane_trace("runtime-scan: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+// WS-X wave-5 (contract §9 item 3): A/B unit for the C3 knob's PURE parse —
+// no relation fixture is needed, so the reserved 82001+ fake-OID band stays
+// unused. The OnceLock resolve is deliberately NOT exercised here (env +
+// process-global memoization race under the parallel test harness); the
+// armed posture's proof channel is the OFF-vs-base pair/asm evidence in
+// notes/se-ws-x-cursors-design.md.
+#[cfg(test)]
+mod caller_c3_seam_tests {
+    use super::caller_c3_parse;
+
+    #[test]
+    fn caller_c3_parse_ab() {
+        // A arm: OFF — the default (unset) and every non-arming spelling
+        // (knobs-default-OFF law, wave-5 contract §0.5).
+        assert!(!caller_c3_parse(None));
+        assert!(!caller_c3_parse(Some("")));
+        assert!(!caller_c3_parse(Some("0")));
+        assert!(!caller_c3_parse(Some("off")));
+        assert!(!caller_c3_parse(Some("ON"))); // exact spellings only — the C1/C2 idiom
+        assert!(!caller_c3_parse(Some("true")));
+        assert!(!caller_c3_parse(Some("2")));
+        // B arm: ON — exactly the two registered spellings.
+        assert!(caller_c3_parse(Some("1")));
+        assert!(caller_c3_parse(Some("on")));
+    }
 }
