@@ -187,7 +187,14 @@ impl CallerWorker {
             rt.execution_permits().release();
             match step {
                 Step::Ran => {}
+                // Loom-aware yield (WS-S wave-3: the caller loop is now
+                // loom-modeled — loom must see the Retry spin as a
+                // scheduling point or the model livelocks; std arm is the
+                // identical production yield).
+                #[cfg(not(loom))]
                 Step::Retry => std::thread::yield_now(),
+                #[cfg(loom)]
+                Step::Retry => loom::thread::yield_now(),
                 Step::Idle => {
                     if rg.try_outcome().is_some() {
                         continue;
