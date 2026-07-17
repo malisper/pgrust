@@ -759,6 +759,10 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         es.es_crosscheck_snapshot = es_crosscheck;
         es.es_top_eflags = eflags;
         es.es_instrument = instrument;
+        // EXPLAIN (ENGINE) capture arm (single-executor Phase 0.2): false on
+        // every path but ExplainOnePlanRef with the ENGINE option, so
+        // es_engine_events stays empty everywhere else (the emission gate).
+        es.es_engine_capture = eflags & types_slot::EXEC_FLAG_ENGINE_REPORT != 0;
         es.es_jit_flags = pstmt.jitFlags;
         // C jit_compile_expr reads es_jit_flags through the PlanState parent;
         // expression compile has no estate linkage here, so the flags ride a

@@ -741,6 +741,12 @@ pub struct EStateData<'mcx> {
     // Completed outcome. Same emission-gate law as the refusals: empty on
     // every unarmed/uninstrumented path.
     pub es_runtime_ea_pipelines: PgVec<'mcx, RuntimeEaPipeline>,
+    // EXPLAIN (ENGINE) per-node engine attribution (single-executor Phase
+    // 0.2): true iff ExecutorStart saw EXEC_FLAG_ENGINE_REPORT. The emission
+    // gate is identical to the EA records above — es_engine_events stays
+    // empty on every non-ENGINE path, so default EXPLAIN output is untouched.
+    pub es_engine_capture: bool,
+    pub es_engine_events: PgVec<'mcx, EngineEvent>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
@@ -869,6 +875,36 @@ pub struct RuntimeEaRefusal {
     pub reason: &'static str,
 }
 
+/// Which engine owned a plan node's execution (the EXPLAIN (ENGINE)
+/// vocabulary; single-executor migration Phase 0.2). No row-mode variant by
+/// integration-contract ruling 1e: row-mode-hosted nodes report `Lane` with
+/// their ShapeClass name as the class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    /// Serial lane-v2 push pipeline owns the node.
+    Lane,
+    /// Volcano row spine ran it (detail carries the refusal reason, "" if
+    /// the node was never offered to a lane).
+    Spine,
+    /// Spine refusal whose reason is admission-economics-fused-drive — the
+    /// legacy fused batch arm owns the shape (displayed "spine/fused-arm").
+    FusedArm,
+    /// Morsel-runtime arm engaged (pipeline identity via RuntimeEaPipeline).
+    Runtime,
+}
+
+/// One per-node engine attribution record (EXPLAIN (ENGINE); emission-gate
+/// law identical to RuntimeEaRefusal: empty unless EXEC_FLAG_ENGINE_REPORT).
+#[derive(Clone, Copy, Debug)]
+pub struct EngineEvent {
+    pub plan_node_id: i32,
+    pub engine: EngineKind,
+    /// ShapeClass::name() / router ArmClass name — static vocabulary only.
+    pub class: &'static str,
+    /// RefuseReason::name() or an arm refuse-string; "" for owned.
+    pub detail: &'static str,
+}
+
 impl<'mcx> EStateData<'mcx> {
     /// Record a runtime-EA refusal (cold: instrumented+armed refusals only).
     /// Dedup on (node, arm): refused shapes re-walk admission per call and
@@ -890,6 +926,37 @@ impl<'mcx> EStateData<'mcx> {
             return;
         }
         self.es_runtime_ea_refusals.push(RuntimeEaRefusal { plan_node_id, arm, reason });
+    }
+
+    /// EXPLAIN (ENGINE) capture armed for this execution? Cheap enough to
+    /// gate every chokepoint's capture arm on.
+    #[inline]
+    pub fn engine_capture(&self) -> bool {
+        self.es_engine_capture
+    }
+
+    /// Record an engine attribution (cold: ENGINE-capture paths only).
+    /// Dedup on (plan_node_id, class); first record wins — it is the
+    /// memoized verdict / the admission walk's first failing gate, matching
+    /// `runtime_ea_record_refusal`'s determinism law. Linear dedup scan:
+    /// bounded by plan size × classes, ENGINE-diagnostics-only by the
+    /// emission gate.
+    #[cold]
+    pub fn engine_record(
+        &mut self,
+        plan_node_id: i32,
+        engine: EngineKind,
+        class: &'static str,
+        detail: &'static str,
+    ) {
+        if self
+            .es_engine_events
+            .iter()
+            .any(|e| e.plan_node_id == plan_node_id && e.class == class)
+        {
+            return;
+        }
+        self.es_engine_events.push(EngineEvent { plan_node_id, engine, class, detail });
     }
 
     /// `InstrCountFiltered1` (execnodes.h); idx is the node's
@@ -972,6 +1039,8 @@ impl<'mcx> EStateData<'mcx> {
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
+            es_engine_capture: false,
+            es_engine_events: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
@@ -1453,6 +1522,7 @@ const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
 const _: () = assert!(!core::mem::needs_drop::<RuntimeEaRefusal>());
 const _: () = assert!(!core::mem::needs_drop::<RuntimeEaPipeline>());
+const _: () = assert!(!core::mem::needs_drop::<EngineEvent>());
 mcx::forget_safe_struct!(
     EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked, relsubs_rowmark, origslot },
     EStateData<'_> {
@@ -1475,7 +1545,7 @@ mcx::forget_safe_struct!(
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
-        es_runtime_ea_pipelines,
+        es_runtime_ea_pipelines, es_engine_capture, es_engine_events,
         es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
         es_hash_instrumentation, es_index_instrumentation,

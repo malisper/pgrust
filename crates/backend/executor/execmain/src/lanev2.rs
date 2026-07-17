@@ -533,6 +533,97 @@ fn cb_tiny_floor() -> u64 {
 }
 
 // ===========================================================================
+// EXPLAIN (ENGINE) capture (single-executor migration Phase 0.2, WS-C inc-1).
+//
+// Every helper below runs ONLY under `estate.engine_capture()` — i.e. inside
+// an EXPLAIN (ENGINE, ANALYZE ...) execution (EXEC_FLAG_ENGINE_REPORT) — and
+// records one EngineEvent per (node, class) into es_engine_events (dedup,
+// first record wins; the emission-gate law of ea-morsels E1: no records on
+// any default path, so default EXPLAIN output stays byte-identical).
+//
+// Verdict semantics (ea-morsels E4): the reported verdict is the PRODUCTION
+// (uninstrumented) verdict where a proven ignore-instrument mirror exists
+// (seqscan/cbscan via `seq_scan_refuse_reason_ex(.., true)`; the agg hashed
+// route via the runtime-EA mirror; the sort feed via
+// `sort_refuse_reason_runtime_ea`). Where no mirror exists the OBSERVED
+// refusal is recorded and reason==Instrumented displays with the honest
+// "production engine may differ" suffix (explain/src/node.rs).
+// ===========================================================================
+
+/// FusedArm attribution is DERIVED from the refusal reason (integration
+/// contract, WS-C amendment 4): the fused drives record no ownership events.
+fn engine_kind_for_refuse(r: RefuseReason) -> ::executils::EngineKind {
+    if r == RefuseReason::AdmissionEconomicsFusedDrive {
+        ::executils::EngineKind::FusedArm
+    } else {
+        ::executils::EngineKind::Spine
+    }
+}
+
+/// Record one class verdict for a node (cold: ENGINE-capture paths only).
+/// `None` = the lane owns the shape in production; `Some(r)` = the spine
+/// (or, for the fused-drive economics reason, the legacy fused arm) owns it.
+#[cold]
+fn engine_record_verdict(
+    estate: &mut EStateData<'_>,
+    plan_node_id: i32,
+    class: ShapeClass,
+    refuse: Option<RefuseReason>,
+) {
+    match refuse {
+        None => {
+            estate.engine_record(plan_node_id, ::executils::EngineKind::Lane, class.name(), "")
+        }
+        Some(r) => estate.engine_record(
+            plan_node_id,
+            engine_kind_for_refuse(r),
+            class.name(),
+            r.name(),
+        ),
+    }
+}
+
+/// Refusal capture for the scan hooks whose reason precedes (and is
+/// independent of) the instrument gate — the observed reason IS the
+/// production verdict. `instr_idx == plan_node_id`
+/// (procnode::instrument_node), always present under ANALYZE, which the
+/// ENGINE option requires in inc-1.
+#[cold]
+fn engine_capture_scan_refused(
+    estate: &mut EStateData<'_>,
+    instr_idx: Option<u32>,
+    class: ShapeClass,
+    reason: RefuseReason,
+) {
+    if let Some(idx) = instr_idx {
+        engine_record_verdict(estate, idx as i32, class, Some(reason));
+    }
+}
+
+/// EXPLAIN (ENGINE) capture at the SeqScan/CbScan fusibility chokepoint: an
+/// observed `Instrumented` refusal (ANALYZE wraps every node; ENGINE
+/// requires ANALYZE) is re-evaluated with ONLY the instrument gate vacated —
+/// the `seq_scan_fusible_runtime_ea` mechanism, E4 — so the recorded verdict
+/// equals the production one. Every other observed reason is recorded
+/// verbatim (those gates apply identically uninstrumented). Touches neither
+/// the memoized serial verdict nor the stat counters.
+#[cold]
+fn engine_capture_seq_scan_verdict<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    class: ShapeClass,
+    observed: Option<RefuseReason>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let Some(idx) = ss.ss.instr_idx else { return Ok(()) };
+    let production = match observed {
+        Some(RefuseReason::Instrumented) => seq_scan_refuse_reason_ex(ss, estate, true)?,
+        other => other,
+    };
+    engine_record_verdict(estate, idx as i32, class, production);
+    Ok(())
+}
+
+// ===========================================================================
 // SeqScan ownership (Phase 1 first vertical slice, now push-driven). The
 // pipeline is source → filter/project operator → root pull-adapter, over the
 // same `BatchSource`-seam primitives the pull drive used
@@ -568,6 +659,14 @@ pub fn try_own_seq_scan<'mcx>(
     let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
     if STANDALONE_SCAN_NO_UPSIDE && !is_cb {
         stats::tick_refused(ShapeClass::SeqScan, RefuseReason::AdmissionEconomicsNoConsumer);
+        if estate.engine_capture() {
+            engine_capture_scan_refused(
+                estate,
+                ss.ss.instr_idx,
+                ShapeClass::SeqScan,
+                RefuseReason::AdmissionEconomicsNoConsumer,
+            );
+        }
         return Ok(None);
     }
     if is_cb {
@@ -590,14 +689,15 @@ pub fn try_own_seq_scan<'mcx>(
         };
         match ss.cb_standalone_verdict() {
             Some(false) => {
-                stats::tick_refused(
-                    ShapeClass::CbScan,
-                    if ss.cb_standalone_tiny() {
-                        RefuseReason::TinyInputFloor
-                    } else {
-                        refused_reason
-                    },
-                );
+                let r = if ss.cb_standalone_tiny() {
+                    RefuseReason::TinyInputFloor
+                } else {
+                    refused_reason
+                };
+                stats::tick_refused(ShapeClass::CbScan, r);
+                if estate.engine_capture() {
+                    engine_capture_scan_refused(estate, ss.ss.instr_idx, ShapeClass::CbScan, r);
+                }
                 return Ok(None);
             }
             Some(true) => {
@@ -619,6 +719,14 @@ pub fn try_own_seq_scan<'mcx>(
                         ss.set_cb_standalone_tiny();
                         ss.set_cb_standalone_verdict(false);
                         stats::tick_refused(ShapeClass::CbScan, RefuseReason::TinyInputFloor);
+                        if estate.engine_capture() {
+                            engine_capture_scan_refused(
+                                estate,
+                                ss.ss.instr_idx,
+                                ShapeClass::CbScan,
+                                RefuseReason::TinyInputFloor,
+                            );
+                        }
                         return Ok(None);
                     }
                 }
@@ -634,6 +742,14 @@ pub fn try_own_seq_scan<'mcx>(
                 ss.set_cb_standalone_verdict(armed);
                 if !armed {
                     stats::tick_refused(ShapeClass::CbScan, refused_reason);
+                    if estate.engine_capture() {
+                        engine_capture_scan_refused(
+                            estate,
+                            ss.ss.instr_idx,
+                            ShapeClass::CbScan,
+                            refused_reason,
+                        );
+                    }
                     return Ok(None);
                 }
             }
@@ -698,6 +814,9 @@ fn seq_scan_fusible<'mcx>(
         return Ok(v);
     }
     let refuse = seq_scan_refuse_reason(ss, estate)?;
+    if estate.engine_capture() {
+        engine_capture_seq_scan_verdict(ss, class, refuse, estate)?;
+    }
     let v = match refuse {
         None => {
             stats::tick_owned(class);
@@ -1021,6 +1140,14 @@ pub fn try_own_index_scan<'mcx>(
     // Per-PULL tick cadence (this hook runs once per exec_proc_node call).
     if STANDALONE_SCAN_NO_UPSIDE {
         stats::tick_refused(ShapeClass::IndexScan, RefuseReason::AdmissionEconomicsNoConsumer);
+        if estate.engine_capture() {
+            engine_capture_scan_refused(
+                estate,
+                is.ss.instr_idx,
+                ShapeClass::IndexScan,
+                RefuseReason::AdmissionEconomicsNoConsumer,
+            );
+        }
         return Ok(None);
     }
     if !index_scan_fusible(is, estate) {
@@ -1228,6 +1355,14 @@ pub fn try_own_index_only_scan<'mcx>(
             ShapeClass::IndexOnlyScan,
             RefuseReason::AdmissionEconomicsNoConsumer,
         );
+        if estate.engine_capture() {
+            engine_capture_scan_refused(
+                estate,
+                ios.ss.instr_idx,
+                ShapeClass::IndexOnlyScan,
+                RefuseReason::AdmissionEconomicsNoConsumer,
+            );
+        }
         return Ok(None);
     }
     if !index_only_scan_fusible(ios, estate) {
@@ -1670,6 +1805,13 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
+        // EXPLAIN (ENGINE) capture: the hashed route's production verdict
+        // through the same E4 mirror the EA walk below uses (breaker
+        // admissibility + child refuse-set with only the instrument gates
+        // vacated + the memoized production lane choice).
+        if estate.engine_capture() {
+            engine_capture_agg_over_seq_scan(agg, ss, choice, xk, estate)?;
+        }
         // EA-on-morsels (ea-morsels.md §5, inc-1b): under EXPLAIN ANALYZE
         // the scan-side fusibility memo refuses (the leader node carries an
         // instr slot), but the runtime agg sink's workers run uninstrumented
@@ -1741,6 +1883,55 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     // N+1. One qual-passing group per PG pull, in C's retrieve order.
     let mut root = RootAdapter::new(None);
     Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
+}
+
+/// EXPLAIN (ENGINE) capture for the hashed Agg-over-SeqScan route: record
+/// the PRODUCTION verdict for the AggBuild class (E4 — the same mirror walk
+/// the runtime-EA path runs under instrumentation, ending in the memoized
+/// `decide_agg_lane`, whose staging side effects the EA path already proved
+/// benign under a per-tuple fallback). `Refuse` = the legacy fused batch
+/// drive owns the shape → the derived FusedArm attribution.
+#[cold]
+fn engine_capture_agg_over_seq_scan<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    choice: &mut Option<AggLaneChoice>,
+    xk: &mut Option<Box<ExprKeyState>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let id = agg.plan.plan.plan_node_id;
+    if !::nodeagg::agg_hash_breaker_admissible(agg) {
+        engine_record_verdict(
+            estate,
+            id,
+            ShapeClass::AggBuild,
+            Some(RefuseReason::AggNotDrainable),
+        );
+        return Ok(());
+    }
+    if !seq_scan_fusible_runtime_ea(ss, estate)? {
+        engine_record_verdict(
+            estate,
+            id,
+            ShapeClass::AggBuild,
+            Some(RefuseReason::ChildScanRefused),
+        );
+        return Ok(());
+    }
+    let c = match *choice {
+        Some(c) => c,
+        None => {
+            let c = decide_agg_lane(agg, ss, xk, estate)?;
+            *choice = Some(c);
+            c
+        }
+    };
+    let refuse = match c {
+        AggLaneChoice::Refuse => Some(RefuseReason::AdmissionEconomicsFusedDrive),
+        _ => None,
+    };
+    engine_record_verdict(estate, id, ShapeClass::AggBuild, refuse);
+    Ok(())
 }
 
 /// The structural lane choice (see `AggLaneChoice`), decided once at the
@@ -5264,6 +5455,9 @@ fn sort_lane_fusible_memo<'mcx>(
             // structural verdict (a child-scan refusal's specific reason is
             // ticked under the child's class inside its fusible gate).
             let refuse = sort_refuse_reason(s, estate)?;
+            if estate.engine_capture() {
+                engine_capture_sort_verdict(s, refuse, estate)?;
+            }
             if let Some(r) = refuse {
                 stats::tick_refused(ShapeClass::SortFeed, r);
             }
@@ -5672,6 +5866,31 @@ fn sort_refuse_reason_runtime_ea<'mcx>(
         crate::procnode::PlanStateNode::Agg(_) => Ok(Some(RefuseReason::ChildNotLaneOwned)),
         _ => Ok(Some(RefuseReason::NonScanChild)),
     }
+}
+
+/// EXPLAIN (ENGINE) capture at the sort-breaker verdict: under ANALYZE the
+/// child is an `Instrumented` wrapper, so the observed serial verdict is a
+/// wrapper artifact (NonScanChild / ChildScanRefused via the child's
+/// instrument gate). Report the production verdict through
+/// `sort_refuse_reason_runtime_ea` instead (the E4 mirror; SeqScan children
+/// get the full ignore-instrument refuse-set — non-SeqScan children keep a
+/// conservative spine verdict in inc-1, ledgered).
+#[cold]
+fn engine_capture_sort_verdict<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    observed: Option<RefuseReason>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let id = s.state.plan.plan.plan_node_id;
+    let production = match observed {
+        Some(RefuseReason::NonScanChild)
+        | Some(RefuseReason::ChildScanRefused)
+        | Some(RefuseReason::ChildNotLaneOwned)
+        | Some(RefuseReason::Instrumented) => sort_refuse_reason_runtime_ea(s, estate)?,
+        other => other,
+    };
+    engine_record_verdict(estate, id, ShapeClass::SortFeed, production);
+    Ok(())
 }
 
 fn sort_refuse_reason<'mcx>(

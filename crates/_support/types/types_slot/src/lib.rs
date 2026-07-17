@@ -20,6 +20,11 @@ pub const EXEC_FLAG_BACKWARD: i32 = 0x0008;
 pub const EXEC_FLAG_MARK: i32 = 0x0010;
 pub const EXEC_FLAG_SKIP_TRIGGERS: i32 = 0x0020;
 pub const EXEC_FLAG_WITH_NO_DATA: i32 = 0x0040;
+/// pgrust-only (no C counterpart): EXPLAIN (ENGINE) — arm per-node engine
+/// attribution capture. High bit, clear of C's execnodes.h flag space
+/// (0x0001..0x0040 above). Next free pgrust eflag is 0x0002_0000 (reserved,
+/// unassigned — integration-contract R-KNOBS registry).
+pub const EXEC_FLAG_ENGINE_REPORT: i32 = 0x0001_0000;
 
 pub const TTS_FLAG_EMPTY: u16 = 1 << 1;
 pub const TTS_FLAG_SHOULDFREE: u16 = 1 << 2;
