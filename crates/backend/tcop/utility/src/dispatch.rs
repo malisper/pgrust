@@ -22,7 +22,7 @@ use crate::consts::{
     CMDTAG_ROLLBACK, COMMAND_IS_STRICTLY_READ_ONLY, COMMAND_OK_IN_PARALLEL_MODE,
     COMMAND_OK_IN_READ_ONLY_TXN, COMMAND_OK_IN_RECOVERY,
 };
-use crate::handler_gap;
+use crate::{handler_gap, handler_unsupported};
 
 // pg_authid.dat oid 4544.
 const ROLE_PG_CHECKPOINT: ::types_core::Oid = 4544;
@@ -1040,7 +1040,13 @@ fn slow_switch<'mcx>(
                             CreateCommandTag(stmt),
                         );
                     }
-                    _ => handler_gap("ProcessUtilitySlow side statements (blist/alist)"),
+                    // unported: analysis-generated substatement kinds whose
+                    // dispatch lane isn't wired yet — clean 0A000.
+                    other => {
+                        return Err(handler_unsupported(&format!(
+                            "a substatement of this DDL command ({other:?})"
+                        )))
+                    }
                 }
                 if i < stmts.len() {
                     xact::CommandCounterIncrement()?;
@@ -1466,7 +1472,12 @@ fn slow_switch<'mcx>(
                     collect_gap("CREATE TEXT SEARCH CONFIGURATION");
                     tsearchcmds::DefineTSConfiguration(mcx, stmt)?;
                 }
-                other => handler_gap(&format!("DefineStmt kind {other:?} (define lanes)")),
+                // unported: DefineStmt kinds without a define lane — 0A000.
+                other => {
+                    return Err(handler_unsupported(&format!(
+                        "CREATE for this object type ({other:?})"
+                    )))
+                }
             }
             Ok(None)
         }
@@ -1612,7 +1623,13 @@ fn slow_switch<'mcx>(
                     collect_gap("ALTER SET SCHEMA");
                     tablecmds::AlterTableNamespace(mcx, stmt)?;
                 }
-                other => handler_gap(&format!("ExecAlterObjectSchemaStmt {other:?}")),
+                // unported: ExecAlterObjectSchemaStmt object types without a
+                // ported lane — 0A000.
+                other => {
+                    return Err(handler_unsupported(&format!(
+                        "ALTER ... SET SCHEMA for this object type ({other:?})"
+                    )))
+                }
             }
             Ok(None)
         }
@@ -1855,13 +1872,19 @@ fn slow_switch<'mcx>(
                     commands_alter::ExecAlterOwnerStmt(mcx, stmt)?;
                     Ok(None)
                 }
-                _ => handler_gap("ExecAlterOwnerStmt (alter.c lane)"),
+                // unported: ExecAlterOwnerStmt object types without a ported
+                // lane — 0A000.
+                other => Err(handler_unsupported(&format!(
+                    "ALTER ... OWNER TO for this object type ({other:?})"
+                ))),
             }
         }
 
-        _ => {
-            handler_gap("ProcessUtilitySlow DDL fan-out (utility slow lane)");
-        }
+        // unported: utility statement tags with no ProcessUtilitySlow lane
+        // yet — clean 0A000 (was a user-reachable panic).
+        other => Err(handler_unsupported(&format!(
+            "this utility statement ({other:?})"
+        ))),
     }
 }
 
@@ -1979,7 +2002,12 @@ fn exec_alter_owner_non_et<'mcx>(
                 aclchk::get_rolespec_oid(stmt.newowner.expect("AlterOwnerStmt.newowner"), false)?;
             event_trigger::AlterEventTriggerOwner(mcx, name, newowner).map(|_| ())
         }
-        other => panic!("unported: ExecAlterOwnerStmt {other:?}"),
+        // unported: non-event-trigger owner lanes without a ported handler
+        // (defensive — DATABASE/TABLESPACE/EVENT TRIGGER are the grammar's
+        // non-ET forms and all three are handled above) — clean 0A000.
+        other => Err(handler_unsupported(&format!(
+            "ALTER ... OWNER TO for this object type ({other:?})"
+        ))),
     }
 }
 

@@ -1443,10 +1443,9 @@ fn FigureColnameInternal<'mcx>(node: Node<'mcx>, name: &mut Option<&'mcx str>) -
         | NodeTag::T_BoolExpr
         | NodeTag::T_NullTest
         | NodeTag::T_BooleanTest => 0,
-        other => panic!(
-            "FigureColnameInternal (parse_target.c): arm for {other:?} unported — \
-             unit backend-parser-parse-target"
-        ),
+        // C's default arm: no name suggestion ("?column?"), never an error —
+        // return 0 for any other raw node rather than panicking.
+        _ => 0,
     }
 }
 
