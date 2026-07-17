@@ -175,25 +175,13 @@ pub struct PlannerRun<'mcx> {
     /// close-out's residual bucket: operator-shape 16x, ACL mask 8x, amop
     /// probes 14x per replan). Same discipline as att_stats_memo: COST ONLY —
     /// identical seam calls and values, arena-scoped, dies with the run,
-    /// never cross-query. Struct-valued memos stay OPAQUE (NonNull) so this
-    /// _support crate takes no backend dependency; the cast pairs live only
-    /// in `planner::syscache_memo`. Scalar-valued memos store the scalar.
-    ///
-    /// opno -> arena-leaked pg_operator shape (None = operator absent).
-    pub op_shape_memo:
-        core::cell::RefCell<PgVec<'mcx, (u32, Option<core::ptr::NonNull<()>>)>>,
-    /// (relid, roleid, mask, how_all) -> pg_class_aclmask result. Planner
-    /// estimate-gating only (vardata.acl_ok); executor permission
-    /// ENFORCEMENT (ExecCheckPermissions) never reads this.
-    pub aclmask_memo: core::cell::RefCell<PgVec<'mcx, ((u32, u32, u64, bool), u64)>>,
-    /// (opno, amop purpose, opfamily) -> arena-leaked pg_amop shape
-    /// (None = operator not a member under that purpose/family).
-    pub amop_by_op_memo:
-        core::cell::RefCell<PgVec<'mcx, ((u32, u8, u32), Option<core::ptr::NonNull<()>>)>>,
-    /// (opfamily, lefttype, righttype, strategy) -> member operator oid
-    /// (InvalidOid = no member), i.e. get_opfamily_member.
-    pub amop_member_memo:
-        core::cell::RefCell<PgVec<'mcx, ((u32, u32, u32, i16), u32)>>,
+    /// never cross-query. ONE opaque pointer to a lazily arena-allocated
+    /// memo block (`planner::syscache_memo` owns the block type and the
+    /// only cast pair; this _support crate takes no backend dependency).
+    /// Lazy + single-word so planning cycles that never repeat a catalog
+    /// lookup (SELECT 1: the instr guard) pay one None store — the guard
+    /// stays EXACTLY flat (a 4-field eager form measured +19 instr/q).
+    pub syscache_memos: core::cell::Cell<Option<core::ptr::NonNull<()>>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -216,7 +204,7 @@ mcx::forget_safe_struct!(
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
         swapped_parent_subroot, m5_suppress_gather, att_stats_memo,
-        op_shape_memo, aclmask_memo, amop_by_op_memo, amop_member_memo },
+        syscache_memos },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -242,10 +230,7 @@ impl<'mcx> PlannerRun<'mcx> {
             swapped_parent_subroot: None,
             m5_suppress_gather: None,
             att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
-            op_shape_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
-            aclmask_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
-            amop_by_op_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
-            amop_member_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            syscache_memos: core::cell::Cell::new(None),
         }
     }
 
