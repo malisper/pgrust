@@ -486,3 +486,133 @@ pub fn try_own_memoize<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     drive(ShapeClass::Memoize, &mut **m, &mut MemoizeSource, estate)
 }
+
+// ===========================================================================
+// Increment 3 — SetOp / MergeAppend / Unique / LockRows-without-EPQ
+// (contract §5 Stage 3; the LockRows RowSource closure boundary is THE
+// pinned WS-N inc-2b seam — docs/design/rowmode-tail.md §4).
+// ===========================================================================
+
+/// SetOp as a delegation leaf: `exec_set_op` (hashed and sorted strategies,
+/// both children Volcano through the fetch closures — the arm's exact
+/// statements).
+struct SetOpSource;
+
+impl<'mcx> RowSource<'mcx> for SetOpSource {
+    type Node = crate::procnode::SetOpNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::SetOpNode { state, outer, inner } = node;
+        ::nodesetop::exec_set_op(
+            state,
+            estate,
+            |e| crate::procnode::exec_proc_node(outer, e),
+            |e| crate::procnode::exec_proc_node(inner, e),
+        )
+    }
+}
+
+#[inline]
+pub fn try_own_set_op<'mcx>(
+    s: &mut ::mcx::PgBox<'mcx, crate::procnode::SetOpNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::SetOp, &mut **s, &mut SetOpSource, estate)
+}
+
+/// MergeAppend as a delegation leaf: the binary-heap merge over the
+/// substates stays in `exec_merge_append`; children Volcano through the
+/// indexed fetch closure.
+struct MergeAppendSource;
+
+impl<'mcx> RowSource<'mcx> for MergeAppendSource {
+    type Node = crate::procnode::MergeAppendNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::MergeAppendNode { state, substates, subplan_origin: _ } = node;
+        ::nodemergeappend::exec_merge_append(state, estate, |e, i| {
+            crate::procnode::exec_proc_node(&mut substates[i], e)
+        })
+    }
+}
+
+#[inline]
+pub fn try_own_merge_append<'mcx>(
+    m: &mut ::mcx::PgBox<'mcx, crate::procnode::MergeAppendNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::MergeAppend, &mut **m, &mut MergeAppendSource, estate)
+}
+
+/// Unique as a delegation leaf: the previous-tuple compare state stays in
+/// `UniqueState`; the child is Volcano through the fetch closure. Reached
+/// only after the streaming unique-over-sort glue refused (composition in
+/// lanev2.rs `try_own_unique`).
+struct UniqueTailSource;
+
+impl<'mcx> RowSource<'mcx> for UniqueTailSource {
+    type Node = crate::procnode::UniqueNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::UniqueNode { state, outer } = node;
+        ::nodeunique::exec_unique(state, estate, |e| {
+            crate::procnode::exec_proc_node(outer, e)
+        })
+    }
+}
+
+/// Tail fallback for `try_own_unique` (lanev2.rs) — called ONLY after the
+/// streaming glue refused; never hooked from procnode directly.
+#[inline]
+pub(super) fn try_own_unique_tail<'mcx>(
+    u: &mut crate::procnode::UniqueNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::Unique, u, &mut UniqueTailSource, estate)
+}
+
+/// LockRows as a delegation leaf, hosted ONLY outside an active EPQ recheck
+/// (the `tail_gates` Epq refuse; EPQ law §3.5). `next_row` runs the arm's
+/// exact statements: `exec_lock_rows` over the Volcano child with the ONE
+/// `epq_eval` closure — locking (and any EPQ recheck it initiates) happens
+/// inside the delegated body, so lock-before-emit order is Volcano's own.
+/// THE CLOSURE BOUNDARY BELOW IS THE PINNED WS-N inc-2b SEAM
+/// (docs/design/rowmode-tail.md §4): WS-N's TupleOp hosting consumes the
+/// same `|subs, e, inputslot| eval_plan_qual(epq, subs, e, inputslot)`
+/// shape; changing it is a reconciler amendment.
+struct LockRowsSource;
+
+impl<'mcx> RowSource<'mcx> for LockRowsSource {
+    type Node = crate::procnode::LockRowsNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::LockRowsNode { state, outer, epq } = node;
+        ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
+            crate::epq::eval_plan_qual(epq, subs, e, inputslot)
+        })
+    }
+}
+
+#[inline]
+pub fn try_own_lock_rows<'mcx>(
+    l: &mut ::mcx::PgBox<'mcx, crate::procnode::LockRowsNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::LockRows, &mut **l, &mut LockRowsSource, estate)
+}
