@@ -131,9 +131,25 @@ pub(super) enum ShapeClass {
     /// unfiltered). Group-level effect is reported by the `counter` dump
     /// lines (`topnemit-groups-seen` / `topnemit-groups-cut`).
     TopnEmit = 18,
+    /// MergeJoin hosted as a row-mode LEAF (Phase-1 WS-G, rowmode.rs
+    /// `try_own_merge_join` behind the default-OFF `PGRUST_LANE_V2_ROWMODE`
+    /// knob; the ported FSM drives both children Volcano inside the leaf).
+    /// OWNED once per drive start (the Group cadence; each owned PG pull
+    /// starts one `pull_step_rows` drive here). Ticks fire ONLY knob-ON:
+    /// knob-OFF ticks NOTHING — there is no pre-existing MergeJoin wholesale
+    /// refuse (unlike ProjectSet), so default-config accounting is
+    /// byte-identical by construction and the class stays silent until a
+    /// flip seeds its floors (integration contract §2d).
+    MergeJoin = 19,
+    /// WindowAgg lane hosting (Phase-1 WS-H, lanev2/windows.rs behind the
+    /// default-OFF `PGRUST_LANE_V2_WINDOWS` knob). OWNED once per drive
+    /// start (the Group cadence). Ticks fire ONLY knob-ON: knob-OFF ticks
+    /// NOTHING (silent at default config, zero floor drift — integration
+    /// contract §2d; floor seeding is flip-time work).
+    WindowAgg = 20,
 }
 
-const N_CLASSES: usize = 19;
+const N_CLASSES: usize = 21;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -156,6 +172,8 @@ impl ShapeClass {
         ShapeClass::Gather,
         ShapeClass::AdaptiveTopk,
         ShapeClass::TopnEmit,
+        ShapeClass::MergeJoin,
+        ShapeClass::WindowAgg,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -179,6 +197,8 @@ impl ShapeClass {
             ShapeClass::Gather => "gather",
             ShapeClass::AdaptiveTopk => "adaptivetopk",
             ShapeClass::TopnEmit => "topnemit",
+            ShapeClass::MergeJoin => "mergejoin",
+            ShapeClass::WindowAgg => "windowagg",
         }
     }
 }
