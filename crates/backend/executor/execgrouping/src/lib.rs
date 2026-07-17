@@ -255,19 +255,6 @@ struct SimpleHashIndex {
     sizemask: u32,
     members: u64,
     grow_threshold: u64,
-    // q18fin diagnostics (PGRUST_GROUPING_PROBE_STATS): bucket inspections,
-    // grows, and restart-grows, reported by TupleHashTable::lookup. Cell so
-    // the &self find() path can count.
-    stat_probes: core::cell::Cell<u64>,
-    stat_grows: u64,
-    stat_restarts: u64,
-}
-
-/// One env probe: report per-table probe/grow counters through the server
-/// log every 2^20 lookups (q18fin leader-stall forensics).
-fn probe_stats_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PGRUST_GROUPING_PROBE_STATS").is_some())
 }
 
 impl SimpleHashIndex {
@@ -284,9 +271,6 @@ impl SimpleHashIndex {
             sizemask: (size - 1) as u32,
             members: 0,
             grow_threshold: 0,
-            stat_probes: core::cell::Cell::new(0),
-            stat_grows: 0,
-            stat_restarts: 0,
         };
         t.update_grow_threshold();
         t
@@ -320,7 +304,6 @@ impl SimpleHashIndex {
     }
 
     fn grow(&mut self, newsize: u64, entry_hash: impl Fn(u32) -> u32) {
-        self.stat_grows += 1;
         let oldsize = self.size() as u32;
         let old = core::mem::replace(
             &mut self.buckets,
@@ -377,7 +360,6 @@ impl SimpleHashIndex {
             let startelem = self.initial_bucket(hash);
             let mut curelem = startelem;
             loop {
-                self.stat_probes.set(self.stat_probes.get() + 1);
                 let occupant = self.buckets[curelem as usize];
                 if occupant == SH_EMPTY {
                     self.members += 1;
@@ -404,7 +386,6 @@ impl SimpleHashIndex {
                             && (self.members as f64 / self.size() as f64)
                                 >= SH_GROW_MIN_FILLFACTOR
                         {
-                            self.stat_restarts += 1;
                             self.grow_threshold = 0;
                             continue 'restart;
                         }
@@ -424,7 +405,6 @@ impl SimpleHashIndex {
                 if insertdist > SH_GROW_MAX_DIB
                     && (self.members as f64 / self.size() as f64) >= SH_GROW_MIN_FILLFACTOR
                 {
-                    self.stat_restarts += 1;
                     self.grow_threshold = 0;
                     continue 'restart;
                 }
@@ -442,7 +422,6 @@ impl SimpleHashIndex {
         let startelem = self.initial_bucket(hash);
         let mut curelem = startelem;
         loop {
-            self.stat_probes.set(self.stat_probes.get() + 1);
             let occupant = self.buckets[curelem as usize];
             if occupant == SH_EMPTY {
                 return Ok(None);
@@ -493,14 +472,6 @@ impl SimpleHashIndex {
 pub struct TupleHashTable<'mcx> {
     entries: PgVec<'mcx, TupleHashEntryData>,
     hashtab: SimpleHashIndex,
-    // q18fin diagnostics: lookup calls, for the probe-stats trace cadence.
-    stat_calls: u64,
-    // C hash_iv (BuildTupleHashTable use_variable_hash_iv), pre-rotated by 1
-    // for the word kernels (C's per-column `rot(hashkey,1) ^ hash` with the
-    // IV as init value; single-column => one rotate of the IV). 0 unless the
-    // table was built with use_variable_hash_iv. The Expr arm instead bakes
-    // the raw IV into tab_hash_expr as its init value (C parity).
-    hash_iv_rot: u32,
     additionalsize: usize,
     kernel: ProbeKernel,
     /// Per-key-column multi-key classification (build-time, input order).
@@ -524,29 +495,9 @@ pub fn build_tuple_hash_table<'mcx>(
     additionalsize: usize,
     use_variable_hash_iv: bool,
 ) -> PgResult<TupleHashTable<'mcx>> {
-    // C: "If parallelism is in use, even if the leader backend is performing
-    // the scan itself, we don't want to create the hashtable exactly the same
-    // way in all workers. As hashtables are iterated over in keyspace-order,
-    // doing so in all processes in the same way is likely to lead to
-    // 'unbalanced' hashtables when the table size initially is
-    // underestimated." Concretely (q18fin lane): a Finalize HashAggregate
-    // re-inserting worker partials that arrive in the workers' bucket order
-    // degenerates linear probing into ~1e5-bucket runs (measured 104e9 bucket
-    // inspections for the first 1M inserts on TPROC-H q18's 15M-group
-    // finalize) — the per-participant IV decorrelates emission order from
-    // the consumer's bucket mapping.
-    let hash_iv = if use_variable_hash_iv {
-        // -1 = the leader, as C's ParallelWorkerNumber global (uninstalled
-        // seam = no parallel substrate in this build, e.g. unit tests).
-        let worker_number = if parallel_seams::parallel_worker_number::is_installed() {
-            parallel_seams::parallel_worker_number::call()
-        } else {
-            -1
-        };
-        ::hashfn::murmurhash32(worker_number as u32)
-    } else {
-        0
-    };
+    if use_variable_hash_iv {
+        panic!("BuildTupleHashTable (execGrouping.c): parallel hash-IV arm not ported");
+    }
     debug_assert!(nbuckets > 0);
     let additionalsize = maxalign(additionalsize);
     let entrysize = core::mem::size_of::<TupleHashEntryData>() + additionalsize;
@@ -561,7 +512,7 @@ pub fn build_tuple_hash_table<'mcx>(
         hashfunctions,
         collations,
         key_col_idx,
-        hash_iv,
+        0,
     )?;
     let mut tab_eq_func = exec_build_grouping_equal(
         metacxt,
@@ -589,8 +540,6 @@ pub fn build_tuple_hash_table<'mcx>(
         // MaxAllocHugeSize bounds it.
         entries: ::mcx::vec_with_capacity_huge_in(metacxt, nbuckets)?,
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
-        stat_calls: 0,
-        hash_iv_rot: hash_iv.rotate_left(1),
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
         key_cols: key_col_idx
@@ -642,12 +591,7 @@ impl<'mcx> TupleHashTable<'mcx> {
 
     /// C `TupleHashTableHash`; the caller resets its per-tuple context.
     pub fn hash_slot(&mut self, input_slot: &mut SlotData<'mcx>) -> PgResult<u32> {
-        // NULL hashes as 0, as EEOP_HASHDATUM_FIRST does. The word kernels
-        // fold the variable hash IV as C's hash expr does for one column:
-        // `rot(hash_iv, 1) ^ hash` (a no-op when the IV is 0, the
-        // non-parallel build). The Expr arm's IV is baked into tab_hash_expr
-        // as its init value instead — do not fold it again there.
-        let iv_rot = self.hash_iv_rot;
+        // NULL hashes as 0, as EEOP_HASHDATUM_FIRST does.
         match self.kernel {
             ProbeKernel::Int2 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
@@ -657,17 +601,17 @@ impl<'mcx> TupleHashTable<'mcx> {
                     // C hashint2: hash_uint32((int32) int16-value).
                     ::hashfn::hash_bytes_uint32(key.as_i16() as i32 as u32)
                 };
-                Ok(::hashfn::murmurhash32(iv_rot ^ h))
+                Ok(::hashfn::murmurhash32(h))
             }
             ProbeKernel::Int4 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
                 let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(key.as_u32()) };
-                Ok(::hashfn::murmurhash32(iv_rot ^ h))
+                Ok(::hashfn::murmurhash32(h))
             }
             ProbeKernel::Int8 { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
                 let h = if isnull { 0 } else { ::hashfn::hash_bytes_uint32(hashint8_fold(key)) };
-                Ok(::hashfn::murmurhash32(iv_rot ^ h))
+                Ok(::hashfn::murmurhash32(h))
             }
             ProbeKernel::Text { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
@@ -676,7 +620,7 @@ impl<'mcx> TupleHashTable<'mcx> {
                 } else {
                     text_kernel_hash(key, *self.entries.allocator())?
                 };
-                Ok(::hashfn::murmurhash32(iv_rot ^ h))
+                Ok(::hashfn::murmurhash32(h))
             }
             ProbeKernel::Expr => {
                 let mut slots = EvalSlots { scan: None, inner: Some(input_slot), outer: None };
@@ -695,22 +639,6 @@ impl<'mcx> TupleHashTable<'mcx> {
         table_mcx: Option<Mcx<'_>>,
         slot_mcx: Mcx<'mcx>,
     ) -> PgResult<(Option<u32>, bool)> {
-        if probe_stats_enabled() {
-            self.stat_calls += 1;
-            if self.stat_calls & ((1 << 20) - 1) == 0 {
-                eprintln!(
-                    "grouping-probe-stats: table={:p} calls={} entries={} probes={} grows={} restarts={} buckets={} members={}",
-                    &raw const *self,
-                    self.stat_calls,
-                    self.entries.len(),
-                    self.hashtab.stat_probes.get(),
-                    self.hashtab.stat_grows,
-                    self.hashtab.stat_restarts,
-                    self.hashtab.buckets.len(),
-                    self.hashtab.members,
-                );
-            }
-        }
         let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, .. } = self;
         let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;

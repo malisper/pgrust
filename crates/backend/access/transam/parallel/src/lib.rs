@@ -1349,7 +1349,6 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
 
 pub fn init_seams() {
     parallel_seams::is_parallel_worker::set(IsParallelWorker);
-    parallel_seams::parallel_worker_number::set(ParallelWorkerNumber);
     parallel_seams::initializing_parallel_worker::set(InitializingParallelWorker);
     parallel_seams::at_eoxact_parallel::set(AtEOXact_Parallel);
     parallel_seams::at_eosubxact_parallel::set(AtEOSubXact_Parallel);
