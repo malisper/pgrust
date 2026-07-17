@@ -1132,6 +1132,23 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// WS-P armed-path body of the ExecutorEnd census hook, outlined
+/// `#[cold]`/`#[inline(never)]` (se2-cost-fix): `standard_executor_end` is
+/// `#[inline]` into two callers, and keeping this walk (plus its `with_mut`
+/// closure) inline there perturbed the DISARMED per-query codegen the
+/// select1/prepared knob-OFF pair letters pin. Never reached at default
+/// config (`census_armed()` gates the call).
+#[cold]
+#[inline(never)]
+fn census_record_at_end(qd: &mut QueryDescData) {
+    let pstmt = qd.plannedstmt();
+    if let Some(exec) = qd.exec.as_mut() {
+        exec.with_mut(|data| {
+            crate::lanev2::census_record(pstmt, &data.estate, data.planstate.as_ref());
+        });
+    }
+}
+
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
 // inline: the second caller (executor_finish_and_park's refusal arm) must not
@@ -1154,14 +1171,12 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
     // walk the plan tree and append one TSV row per plan node, joined to the
     // execution's EngineEvents. Before the skeleton park AND before teardown
     // (both need the estate + planstate alive); best-effort, never a query
-    // error. Disarmed cost: one memoized-bool load + branch.
+    // error. Disarmed cost: one memoized-byte load + branch — the armed body
+    // is `#[cold]`-outlined (se2-cost-fix): standard_executor_end inlines
+    // into two callers, and carrying the census walk inline here cost the
+    // DISARMED select1/prepared pair codegen (the +42/q history above).
     if crate::lanev2::census_armed() {
-        let pstmt = qd.plannedstmt();
-        if let Some(exec) = qd.exec.as_mut() {
-            exec.with_mut(|data| {
-                crate::lanev2::census_record(pstmt, &data.estate, data.planstate.as_ref());
-            });
-        }
+        census_record_at_end(qd);
     }
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,

@@ -76,7 +76,7 @@
 //! byte-identical in cost; the e2e sets both.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock};
 
 use ::executils::{EStateData, EngineKind};
@@ -101,13 +101,34 @@ fn census_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Census armed? One memoized-bool load + branch — the executor entry/exit
+/// Census armed? One relaxed byte load + compare — the executor entry/exit
 /// hooks gate on this (se-entrycost discipline; flagged for the select1
 /// instruction-pair fleet gate in notes/se-ws-p-flip.md).
+///
+/// se2-cost-fix: the rowmode.rs AtomicU8 tri-state idiom instead of
+/// `OnceLock<bool>` — the OnceLock fast path is an acquire state load PLUS
+/// the value load; this is one relaxed load (the env is process-static, so
+/// no ordering is needed), and the resolve path is `#[cold]`-outlined so
+/// the two per-query hook sites carry no inline slow-path code. Gate: the
+/// knob-OFF select1/prepared pair letter (se-wave2-integration.md leg 4a).
 #[inline]
 pub(crate) fn census_armed() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| census_dir().is_some())
+    // 0 = unresolved, 1 = disarmed, 2 = armed.
+    static ON: AtomicU8 = AtomicU8::new(0);
+    match ON.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            #[cold]
+            #[inline(never)]
+            fn resolve(cell: &AtomicU8) -> bool {
+                let on = census_dir().is_some();
+                cell.store(if on { 2 } else { 1 }, Relaxed);
+                on
+            }
+            resolve(&ON)
+        }
+    }
 }
 
 /// `PGRUST_LANE_V2_ASSERT_COVERED=1` — Layer-A assert mode (inc-2). Never a
