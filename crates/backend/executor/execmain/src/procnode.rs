@@ -2529,6 +2529,18 @@ fn lockrows_arm<'mcx>(
             return Ok(r);
         }
     }
+    // --- WS-T wave-3 inc-2b (LockRows TupleOp behind PGRUST_LANE_V2_DML;
+    // lanev2/dml.rs). Reached only after the rowmode-tail delegation hook
+    // above declined, so the ROWMODE knob's behavior is unchanged at both
+    // of its arms; knob-OFF cost is the same one-byte dml_active() gate the
+    // modify_table arm carries. Falls through to the UNCHANGED
+    // exec_lock_rows on refuse. ---
+    if crate::lanev2::dml_active() {
+        if let Some(r) = crate::lanev2::try_own_lock_rows_dml(l, estate)? {
+            return Ok(r);
+        }
+    }
+    // --- end WS-T wave-3 inc-2b ---
     let LockRowsNode { state, outer, epq } = &mut **l;
     ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
         crate::epq::eval_plan_qual(epq, subs, e, inputslot)

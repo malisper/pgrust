@@ -88,6 +88,13 @@ pub(crate) use census::{
     census_rows_for_tests,
     planstate_kind_name_for_tests as census_planstate_kind_name_for_tests,
 };
+// --- WS-T wave-3 (dml inc-2b/3a) ---
+pub(crate) use dml::try_own_lock_rows_dml;
+#[cfg(test)]
+pub(crate) use dml::{
+    dml_ud_set_for_tests, DML_LANEFED_FOR_TESTS, DML_LOCKROWS_OWNED_FOR_TESTS,
+};
+// --- end WS-T wave-3 ---
 
 use std::sync::OnceLock;
 
