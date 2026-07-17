@@ -4963,7 +4963,6 @@ dependencies = [
  "lsyscache",
  "mcx",
  "miscinit_seams",
- "parallel_seams",
  "types_core",
  "types_error",
  "types_fmgr",

@@ -7,12 +7,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    // ParallelWorkerNumber (parallel.h global): -1 on the leader. Consumed by
-    // execgrouping's variable hash IV (BuildTupleHashTable, execGrouping.c).
-    pub fn parallel_worker_number() -> i32
-);
-
-seam_core::seam!(
     // InitializingParallelWorker (parallel.c): true between worker start and
     // the entrypoint call.
     pub fn initializing_parallel_worker() -> bool
