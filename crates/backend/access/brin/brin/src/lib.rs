@@ -1,6 +1,7 @@
 //! brin.c: the BRIN index access method (build, insert, bitmap scan).
 //! Summarize/desummarize SQL paths and vacuum live in brin_funcs/brin_build.
-//! Loud lanes: autosummarize, parallel build, reloptions.
+//! Loud lanes: parallel build. Unsupported opclasses raise clean 0A000;
+//! autosummarize degrades to the C "request was not recorded" LOG arm.
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
@@ -27,10 +28,15 @@ use brin_pageops::{
 };
 use brin_tuple::{brin_deform_tuple, brin_form_tuple, brin_new_memtuple};
 
+// unported: user-reachable feature arms (custom opclasses) raise a clean
+// 0A000 instead of panicking; see each site's marker comment.
 #[cold]
 #[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: {what}")
+fn unsupported(what: String) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(what)
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 /// BrinGetPagesPerRange / BrinGetAutoSummarize
@@ -79,7 +85,14 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
             }
             F_BRIN_INCLUSION_OPCINFO => brin_inclusion::brin_inclusion_opcinfo(opcintype),
             F_BRIN_BLOOM_OPCINFO => brin_bloom::brin_bloom_opcinfo(opcintype),
-            other => panic!("unported: BRIN opclass with opcinfo proc {other}"),
+            // unported: opclasses beyond the four in-core families
+            // (user-reachable via CREATE INDEX ... USING brin with a custom
+            // opclass); runs at BrinDesc build, before any page mutation.
+            other => {
+                return Err(unsupported(format!(
+                    "BRIN operator class with opcInfo support function {other} is not supported"
+                )))
+            }
         };
         let mut col = col;
         col.oi_opclass_options = attoptions
@@ -120,7 +133,14 @@ pub fn brin_build_desc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<B
                         att.attstorage = types_tuple::TYPSTORAGE_PLAIN;
                         att.attcollation = 0;
                     }
-                    other => panic!("unported: BRIN stored type {other}"),
+                    // unported: stored summary types beyond the in-core
+                    // opclasses' set (only reachable through a custom opclass,
+                    // which the opcInfo arm above already rejects).
+                    other => {
+                        return Err(unsupported(format!(
+                            "BRIN summary storage type {other} is not supported"
+                        )))
+                    }
                 }
                 att.atttypid = stored_typid;
             } else {
@@ -210,8 +230,39 @@ pub fn brininsert<'mcx>(
     let mut buf: Buffer = InvalidBuffer;
 
     loop {
+        // First tuple of a new page range: ask for summarization of the
+        // previous one (C brininsert's autosummarize block).
         if autosummarize && heapBlk > 0 && heapBlk == origHeapBlk && heaptid.ip_posid == 1 {
-            unported("BRIN autosummarize (AutoVacuumRequestWork)");
+            let lastPageRange = heapBlk - 1;
+            let probecxt = MemoryContext::new_bump("brininsert autosummarize probe");
+            let mut lastPageTuple: PgVec<'_, u8> = PgVec::new_in(probecxt.mcx());
+            let got = brinGetTupleForHeapBlock(
+                idxRel,
+                revmap,
+                lastPageRange,
+                &mut buf,
+                &mut lastPageTuple,
+                BUFFER_LOCK_SHARE,
+                true,
+            )?;
+            if got.is_none() {
+                // unported: AutoVacuumRequestWork (autovacuum work-item
+                // queue). C treats an unrecorded request as best-effort and
+                // LOGs; with the queue unported every request takes that arm
+                // (recorded = false). Summarization stays available through
+                // VACUUM and brin_summarize_new_values().
+                elog_seams::ereport_msg::call(
+                    ::types_error::LOG,
+                    format!(
+                        "request for BRIN range summarization for index \"{}\" page {} was not recorded",
+                        idxRel.name(),
+                        lastPageRange
+                    ),
+                    None,
+                )?;
+            } else {
+                lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
+            }
         }
 
         let tupcxt = MemoryContext::new_bump("brininsert cxt");
@@ -703,8 +754,4 @@ fn disk_attr_for(bdesc: &BrinDesc<'_>, keyno: usize, i: usize) -> (bool, i16) {
     }
     let att = bdesc.bd_disktdesc.compact_attr(stored + i);
     (att.attbyval, att.attlen)
-}
-
-pub fn brinoptions() -> ! {
-    unported("brinoptions (reloptions lane)")
 }

@@ -2,7 +2,7 @@
 // copy_table_data + the indisclustered maintenance. VACUUM FULL enters via
 // cluster_seams::cluster_rel. Toasted tables rewrite with value-OID
 // preservation and swap toast by content (C's rd_toastoid protocol).
-use crate::{finish_heap_swap, make_new_heap, oid_key, unported};
+use crate::{finish_heap_swap, make_new_heap, oid_key};
 
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid, INDEX_RELATION_ID};
@@ -217,7 +217,8 @@ pub fn cluster_rel<'mcx>(
         };
 
         if old_heap.rd_rel.relkind == RELKIND_MATVIEW {
-            unported("cluster_rel: materialized views (RelationIsPopulated)");
+            // unported: cluster_rel materialized views (RelationIsPopulated)
+            return Err(feature_err("clustering a materialized view is not supported yet"));
         }
         debug_assert!(matches!(
             old_heap.rd_rel.relkind,
