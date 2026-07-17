@@ -184,7 +184,9 @@ pub fn lane_window_accept<'mcx>(
 ) -> PgResult<LaneAccept> {
     debug_assert!(!lane_window_emit_pending(drive), "accept while rows pend emission");
     let mcx = estate.es_query_cxt;
-    if !drive.partition_open {
+    // `partition_done` = the open partition's groups are all final (its
+    // boundary row is parked); the next accept must begin the NEW partition.
+    if !drive.partition_open || drive.partition_done {
         if drive.boundary_saved {
             // First accept of the next partition: begin it from the parked
             // row (this is where the previous partition's store contents are
