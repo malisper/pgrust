@@ -555,6 +555,16 @@ fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     if !payload.drive_at_entry {
         return Ok(());
     }
+    // WS-S C2 fault injection (test-only, default-off): the pre-hook VANISH
+    // class — exit cleanly BEFORE the ExitBump below, so this helper never
+    // bumps `exited`, never refuses, and sends no channel message (the
+    // `exited < launched` geometry c2_gang_death classifies; e2e fault legs
+    // E3/E4). The test_helper_panic sibling below cannot reach this class:
+    // it dies inside the guarded frame, where the ExitBump has already
+    // registered.
+    if super::test_helper_vanish("scan") {
+        return Ok(());
+    }
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // — including the exit-committed resume_unwind below (the leader's
     // liveness reap counts these against `launched`; m35-spill inc-2c port).
@@ -849,8 +859,16 @@ fn caller_c2_drive(
 ) -> Result<runtime::RgOutcome, Box<PgError>> {
     let launched = parallel::nworkers_launched(pcxt);
     let gang_dead = std::cell::Cell::new(false);
+    // Benign all-stopped classification is FINAL for the engagement:
+    // `exited` is monotonic and `launched` fixed, so once `exited >=
+    // launched` under all-stopped it can never later become gang death —
+    // one shared flag suppresses BOTH probes' repeat
+    // parallel_workers_all_stopped cost for the rest of a long
+    // lone-completion drive (C1's all_stopped_traced posture, restored).
+    let benign_stop = std::cell::Cell::new(false);
     let mut duty_calls = 0u32;
     let duty_gang = &gang_dead;
+    let duty_benign = &benign_stop;
     let mut duty = || -> Result<(), Box<PgError>> {
         if duty_gang.get() {
             // Set by the claim-boundary probe (which sheds, then this
@@ -861,18 +879,24 @@ fn caller_c2_drive(
         parallel::ProcessParallelMessages()?;
         duty_calls = duty_calls.wrapping_add(1);
         if duty_calls % 16 == 0
+            && !duty_benign.get()
             && parallel::parallel_workers_all_stopped(pcxt)
-            && c2_gang_death(payload.exited.load(Ordering::SeqCst), launched)
         {
-            duty_gang.set(true);
-            lane_trace("runtime-scan: caller-drive C2 gang death (duty probe) — escalating");
-            return Err(c2_gang_death_error());
+            if c2_gang_death(payload.exited.load(Ordering::SeqCst), launched) {
+                duty_gang.set(true);
+                lane_trace("runtime-scan: caller-drive C2 gang death (duty probe) — escalating");
+                return Err(c2_gang_death_error());
+            }
+            duty_benign.set(true);
+            lane_trace(
+                "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+            );
         }
         Ok(())
     };
     let mut boundary = 0u32;
-    let mut benign_traced = false;
     let claim_gang = &gang_dead;
+    let claim_benign = &benign_stop;
     let mut claim_duty = || -> bool {
         if payload.failed.load(Ordering::SeqCst) {
             // Shed at the boundary; the step loop observes the abort.
@@ -881,6 +905,7 @@ fn caller_c2_drive(
         boundary = boundary.wrapping_add(1);
         if boundary % 64 == 0
             && !claim_gang.get()
+            && !claim_benign.get()
             && parallel::parallel_workers_all_stopped(pcxt)
         {
             if c2_gang_death(payload.exited.load(Ordering::SeqCst), launched) {
@@ -892,12 +917,10 @@ fn caller_c2_drive(
                 // CallerWorker drain discipline bounds the abort.
                 return false;
             }
-            if !benign_traced {
-                benign_traced = true;
-                lane_trace(
-                    "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
-                );
-            }
+            claim_benign.set(true);
+            lane_trace(
+                "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+            );
         }
         true
     };
@@ -925,6 +948,12 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
         // inc-2: the entry task already drove this engagement — a second
         // bind+drive here would rebuild the executor against a completed
         // (or aborted) RG for nothing.
+        return;
+    }
+    // WS-S C2 fault injection: the pre-hook vanish class for the
+    // entry-drive-kill-switched mode, where THIS frame owns the ExitBump
+    // (see runtime_scan_worker_main for the geometry).
+    if super::test_helper_vanish("scan") {
         return;
     }
     // Launched-helper exit counter (see runtime_scan_worker_main): this hook
