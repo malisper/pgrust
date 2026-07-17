@@ -214,7 +214,8 @@ while IFS= read -r initfile; do
     [ "$crate" = "seams_init" ] && continue
     if grep -q "${crate}::init_seams()" "$SEAMS_INIT"; then continue; fi
     # invoked from some other production file (nested init patterns)?
-    if grep -l "${crate}::init_seams()" $(cat "$TMP/files") 2>/dev/null | grep -qv "^$d/"; then
+    if tr '\n' '\0' < "$TMP/files" | xargs -0 grep -l "${crate}::init_seams()" 2>/dev/null \
+            | grep -qv "^$d/"; then
         continue
     fi
     if allowed "crate:$crate"; then
