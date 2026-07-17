@@ -164,6 +164,80 @@ pub(crate) fn dml_active() -> bool {
     dml::dml_enabled() && enabled()
 }
 
+// ---------------------------------------------------------------------------
+// Wave-4 TIER-B default resolution (flip manifest §2; branch
+// se/wave4-flips-tierB). APPEND REGION — tierB owns this block (manifest §4
+// file-ownership table); later Tier-B rows extend it BELOW, tierA never
+// edits it.
+// ---------------------------------------------------------------------------
+
+/// Resolve a wave-4 TIER-B default-flipped knob (flip manifest §2). The
+/// precedence table, unit-tested below (`tier_b_precedence`):
+///
+///   1. The per-shape EXPLICIT knob always wins, in both directions —
+///      "flips never delete knobs": the `=1`/`on` and `=0`/`off` spellings
+///      are permanent, and a SET-but-unrecognized spelling keeps its
+///      pre-flip meaning (OFF — a typo fails safe to legacy behavior, the
+///      same `matches!(Ok("1") | Ok("on"))` parse every lanev2 knob shipped
+///      with).
+///   2. Knob UNSET: the single escape hatch `PGRUST_LANE_V2_DEFAULTS=legacy`
+///      reverts the default to its pre-wave-4 value (OFF) for EVERY Tier-B
+///      row at once (the manifest's one-lever rollback).
+///   3. Hatch absent / any other hatch value: the flipped default (ON).
+///
+/// Pure function so the precedence is unit-testable without process-global
+/// env mutation; each caller is a Tier-B-flipped knob's one-shot `#[cold]`
+/// resolve tail, which passes its own env read + `tier_b_defaults_env()` and
+/// caches the verdict in its existing AtomicU8 (the hatch itself needs no
+/// cache — it is only ever read inside those one-shot tails, never on a
+/// fast path). No refusal-vocab or census-key involvement (manifest §2).
+// The allow dies with the first Tier-B flip commit (its resolve tail is the
+// first caller); this commit lands the resolver + tests only.
+#[allow(dead_code)]
+pub(super) fn tier_b_flip_default(explicit: Option<&str>, defaults_hatch: Option<&str>) -> bool {
+    match explicit {
+        Some("1") | Some("on") => true,
+        Some(_) => false,
+        None => !matches!(defaults_hatch, Some("legacy")),
+    }
+}
+
+/// The one `PGRUST_LANE_V2_DEFAULTS` env read (flip manifest §2 — the single
+/// rollback lever for all Tier-B rows). Called only from Tier-B knobs'
+/// one-shot cold resolve tails.
+// Same transient allow as above — dies with the first flip commit.
+#[allow(dead_code)]
+pub(super) fn tier_b_defaults_env() -> Option<String> {
+    std::env::var("PGRUST_LANE_V2_DEFAULTS").ok()
+}
+
+#[cfg(test)]
+mod tier_b_tests {
+    use super::tier_b_flip_default;
+
+    /// The manifest §2 precedence table: explicit knob > hatch > new default.
+    #[test]
+    fn tier_b_precedence() {
+        // 3. Knob unset, hatch absent/other -> the flipped default (ON).
+        assert!(tier_b_flip_default(None, None));
+        assert!(tier_b_flip_default(None, Some("")));
+        assert!(tier_b_flip_default(None, Some("new")));
+        assert!(tier_b_flip_default(None, Some("Legacy"))); // exact spelling only
+        // 2. Knob unset, hatch=legacy -> the pre-wave-4 default (OFF).
+        assert!(!tier_b_flip_default(None, Some("legacy")));
+        // 1a. Explicit ON wins over the hatch.
+        assert!(tier_b_flip_default(Some("1"), Some("legacy")));
+        assert!(tier_b_flip_default(Some("on"), Some("legacy")));
+        // 1b. Explicit OFF wins over the flipped default (permanent spelling).
+        assert!(!tier_b_flip_default(Some("0"), None));
+        assert!(!tier_b_flip_default(Some("off"), Some("anything")));
+        // 1c. Set-but-unrecognized keeps its pre-flip meaning (OFF), in both
+        // hatch states — a typo never silently arms or re-arms a lane.
+        assert!(!tier_b_flip_default(Some("2"), None));
+        assert!(!tier_b_flip_default(Some("true"), Some("legacy")));
+    }
+}
+
 /// Engagement trace (verification aid, no perf path): `PGRUST_LANE_V2_TRACE=1`
 /// logs lane engagement events to stderr. Resolved once per process.
 fn lane_trace(event: &str) {
