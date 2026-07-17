@@ -1696,7 +1696,10 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
     // constructs SeqScanSource (same monomorphized drain, same machine
     // code). Knob-ON the serial scan is ONE claim: end_claim settles after
     // the drain on success AND error (zero-pins-at-settle; the drain error
-    // wins the report), before the histogram flush / phase flip.
+    // wins the report), before the histogram flush / phase flip. Strict
+    // on-error pin release is the HeapBatchSource arm's; the below-floor
+    // SeqScanSource arm clears the slot only, matching base knob-OFF (see
+    // SeqScanSource::end_claim).
     use super::batch_source::BatchGranuleSource as _;
     if super::batch_source::heapfeed_v2_enabled() {
         if super::batch_source::heap_gagg_admits(ss) {

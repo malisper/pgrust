@@ -152,10 +152,16 @@ fn heap_gagg_floor() -> f64 {
     })
 }
 
-/// The floor's parse half, pure for the unit corpus: unset / unparsable =
-/// the probe's 1,000-row default; `0` disarms.
+/// The floor's parse half, pure for the unit corpus: unset / unparsable /
+/// non-finite = the probe's 1,000-row default; `0` disarms. (Non-finite is
+/// rejected explicitly: `"NaN"`/`"inf"` parse as f64, and a NaN floor would
+/// make `plan_rows >= floor` false everywhere — silently disabling heap
+/// grouped engagement while looking like a huge floor. Garbage in behaves
+/// like the documented default instead.)
 fn parse_gagg_floor(raw: Option<&str>) -> f64 {
-    raw.and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(1000.0)
+    raw.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+        .unwrap_or(1000.0)
 }
 
 /// The grouped feeds' heap-source admission, in one place (K1 inc-1): the
@@ -383,6 +389,12 @@ impl<'mcx> BatchGranuleSource<'mcx> for SeqScanSource<'_, 'mcx> {
     }
 
     fn end_claim(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        // SCOPE (K1 inc-1 precision, for the WS-A inc-2/3 consolidation):
+        // slot clear only — no seq_scan_end_claim_release here. On a
+        // drain-ERROR path a knob-ON below-floor heap scan's rs_cbuf pin
+        // therefore rides to the abort machinery, exactly as base knob-OFF
+        // does (no regression). Strict zero-pins-at-settle-on-error holds
+        // only for the HeapBatchSource arm (its end_claim releases).
         end_claim_clear_slot(self.ss, estate)
     }
 
@@ -718,7 +730,9 @@ mod tests {
 
     /// The grouped small-N floor's parse contract (K1 inc-1): unset and
     /// garbage read as the probe's 1,000-row default; explicit values win;
-    /// `0` disarms (every estimate admits).
+    /// `0` disarms (every estimate admits). Non-finite f64 spellings
+    /// ("NaN"/"inf") are garbage too — a NaN floor would silently fail every
+    /// `plan_rows >= floor` admission.
     #[test]
     fn gagg_floor_parse() {
         assert_eq!(parse_gagg_floor(None), 1000.0);
@@ -727,6 +741,11 @@ mod tests {
         assert_eq!(parse_gagg_floor(Some("2500")), 2500.0);
         assert_eq!(parse_gagg_floor(Some(" 64 ")), 64.0);
         assert_eq!(parse_gagg_floor(Some("0")), 0.0);
+        assert_eq!(parse_gagg_floor(Some("NaN")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("nan")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("inf")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("-inf")), 1000.0);
+        assert_eq!(parse_gagg_floor(Some("infinity")), 1000.0);
     }
 
     /// R1 borrow discipline is COMPILE-SHAPE: accessors borrow `&self`, so

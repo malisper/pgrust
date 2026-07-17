@@ -2413,7 +2413,10 @@ fn agg_hash_build_fold_feed<'mcx>(
     // machine code). Knob-ON, end-of-claim ownership sits on the source
     // (trait doc): the serial scan is ONE claim, settled right here after
     // the drain — on the ERROR path too (zero-pins-at-settle; the drain
-    // error wins the report). Grouped consumers satisfy copy-at-the-
+    // error wins the report; strict on-error pin release is the
+    // HeapBatchSource arm's — the below-floor SeqScanSource arm clears the
+    // slot only, matching base knob-OFF, see SeqScanSource::end_claim).
+    // Grouped consumers satisfy copy-at-the-
     // consumer under R3v pin-holding: key bytes copy at the
     // lookup_hash_entry insert / compact-table pack points and str
     // transvalues at C's datumCopy-into-aggcontext points, so no staged
