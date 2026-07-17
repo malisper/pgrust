@@ -6,13 +6,39 @@
 #                       LEGAL for the class after its flip (the dynamic gates:
 #                       epq, backward, instrumented, ...); "-" = none.
 #
-# EMPTY BY DESIGN until the first default flip. A flip commit adds its row
-# here AND in the compiled-in ASSERT_MANIFEST (lanev2/census.rs) AND reseeds
-# the class's lane-gates floors — all in the SAME commit, both gate profiles
-# (the WS-P floors law; the census.rs `manifest_mirror_in_sync` unit pins
-# this file to the compiled manifest).
+# A flip commit adds its row here AND in the compiled-in ASSERT_MANIFEST
+# (lanev2/census.rs) AND reseeds the class's lane-gates floors — all in the
+# SAME commit, both gate profiles (the WS-P floors law; the census.rs
+# `manifest_mirror_in_sync` unit pins this file to the compiled manifest).
 #
 # Layer-A assert mode (PGRUST_LANE_V2_ASSERT_COVERED=1, dualexec/e2e channels
 # only) raises `volcano-unreachable:` (PgError XX000) when a class listed
 # here refuses with a reason outside its allowed_reasons list.
+#
+# Wave-4 rows (flip-ladder §3 rungs 1-3; the binding wave-4 flip manifest):
+#   FLIP-1 rowmode  — projectset + the 16 row-mode tail delegation classes
+#                     (dynamic host-template gates; projectset keeps its
+#                     structural child refuse + the permanent explicit-OFF
+#                     wholesale refuse; the six T3-hostable shapes keep
+#                     env-off, the per-shape SCANS_T3 force-off spelling)
+#   FLIP-2 mergejoin — pure delegation, dynamic gates only
+#   FLIP-3 windowagg — W1 dynamic gates + the W1 structural refuses (the
+#                     sticky-batch lane owns only its admitted family)
 class	allowed_reasons
+projectset	epq,backward,instrumented,scroll-mark,child-not-lane-owned,srf-set-expansion
+functionscan	epq,backward,instrumented,scroll-mark,env-off
+tablefuncscan	epq,backward,instrumented,scroll-mark,env-off
+valuesscan	epq,backward,instrumented,scroll-mark
+samplescan	epq,backward,instrumented,scroll-mark,env-off
+tidscan	epq,backward,instrumented,scroll-mark,env-off
+tidrangescan	epq,backward,instrumented,scroll-mark,env-off
+namedtuplestorescan	epq,backward,instrumented,scroll-mark,env-off
+material	epq,backward,instrumented,scroll-mark
+ctescan	epq,backward,instrumented,scroll-mark
+recursiveunion	epq,backward,instrumented,scroll-mark
+worktablescan	epq,backward,instrumented,scroll-mark
+memoize	epq,backward,instrumented,scroll-mark
+setop	epq,backward,instrumented,scroll-mark
+mergeappend	epq,backward,instrumented,scroll-mark
+unique	epq,backward,instrumented,scroll-mark
+lockrows	epq,backward,instrumented,scroll-mark

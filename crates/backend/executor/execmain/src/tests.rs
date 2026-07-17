@@ -9701,6 +9701,13 @@ mod dml_ab_wave3 {
         scanfix::register_table_2col(target, &[]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+        // Wave-4 FLIP-1: PGRUST_LANE_V2_ROWMODE is default-ON, and the
+        // lockrows_arm hook order (rowmode-tail delegation FIRST, WS-T
+        // TupleOp second) means the tail owns LockRows pulls at the new
+        // default. Pin the tail OFF so this A/B exercises the DML TupleOp
+        // hosting itself — the arm reached whenever the tail is explicitly
+        // off (the permanent `=0` spelling) or refuses dynamically.
+        crate::lanev2::rowmode_set_for_tests(false);
         crate::lanev2::dml_set_for_tests(false);
         let lr0 = lockrows_probe();
         let off = run_stmt(mk_lockrows_pstmt(leaked_mcx(), target), CmdType::CMD_SELECT);

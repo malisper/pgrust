@@ -545,11 +545,194 @@ fn append_rows(dir: &PathBuf, rows: &str) {
 /// The compiled-in flip manifest: one row per DEFAULT-FLIPPED ShapeClass,
 /// with the refusal reasons that stay LEGAL after the flip (the dynamic
 /// gates a covered class may still refuse on — EPQ, backward, instrumented,
-/// …; "reads reasons, never adds them", contract §1). EMPTY by design until
-/// the first flip commit; each flip commit adds its row HERE and mirrors it
-/// in crates/backend/executor/execmain/src/lanev2/flip-manifest.tsv (same commit as the floor reseed —
-/// the WS-P law; the `manifest_mirror_in_sync` unit pins the two together).
-pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[];
+/// …; "reads reasons, never adds them", contract §1). Each flip commit adds
+/// its row(s) HERE and mirrors them in crates/backend/executor/execmain/src/lanev2/flip-manifest.tsv
+/// (same commit as the floor reseed — the WS-P law; the
+/// `manifest_mirror_in_sync` unit pins the two together).
+///
+/// Wave-4 rows (docs/design/flip-ladder.md §3 rungs 1-3; the binding wave-4
+/// flip manifest):
+///   * FLIP-1 (rung 1, `PGRUST_LANE_V2_ROWMODE` default-on): projectset +
+///     the 16 row-mode tail delegation classes. Allowed reasons = the
+///     dynamic host-template gates (epq/backward/instrumented + the frozen
+///     scroll-mark spelling per the manifest row) plus, per class, the
+///     EXISTING class-specific reasons only: projectset keeps its
+///     structural non-childless-Result refuse (child-not-lane-owned) and
+///     its explicit-OFF wholesale refuse (srf-set-expansion — the permanent
+///     `=0` arm must stay assert-clean on diagnostics channels); the six
+///     T3-hostable shapes keep env-off (the per-shape `_SCANS_T3_<SHAPE>=0`
+///     force-off spelling, observed on the allowlist).
+///   * FLIP-2 (rung 2, `PGRUST_LANE_V2_MERGEJOIN` default-on): mergejoin —
+///     pure delegation, dynamic gates only.
+///   * FLIP-3 (rung 3, `PGRUST_LANE_V2_WINDOWS` default-on): windowagg (W1
+///     only; T2-A/T2-B defaults unchanged) — dynamic gates + the W1
+///     structural refuses (child-not-lane-owned for non-Sort/agg-fed
+///     children, shape-qual-proj for non-W1 window shapes; both stay legal
+///     post-flip — the sticky-batch lane owns only its admitted family).
+pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
+    // --- FLIP-1: rowmode (rung 1) -----------------------------------------
+    (
+        ShapeClass::ProjectSet,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::ChildNotLaneOwned,
+            RefuseReason::SrfSetExpansion,
+        ],
+    ),
+    (
+        ShapeClass::FunctionScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::TableFuncScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::ValuesScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::SampleScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::TidScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::TidRangeScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::NamedTuplestoreScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+            RefuseReason::EnvOff,
+        ],
+    ),
+    (
+        ShapeClass::Material,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::CteScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::RecursiveUnion,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::WorkTableScan,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::Memoize,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::SetOp,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::MergeAppend,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::Unique,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+    (
+        ShapeClass::LockRows,
+        &[
+            RefuseReason::Epq,
+            RefuseReason::Backward,
+            RefuseReason::Instrumented,
+            RefuseReason::ScrollMark,
+        ],
+    ),
+];
 
 /// The Layer-A tail `stats::tick_refused` calls (the one WS-P stats.rs
 /// edit). Disarmed = one memoized-bool load + branch, only on paths where
@@ -737,13 +920,44 @@ mod tests {
         assert_ne!(fnv64("SELECT 1"), fnv64("SELECT 2"));
     }
 
-    /// Empty manifest = assert mode structurally inert: no class matches, so
-    /// the check returns without raising for every (class, reason) pair.
+    /// Manifest semantics (wave-4 FLIP rows): a class OUTSIDE the manifest
+    /// never raises for any reason (assert mode is inert for unflipped
+    /// classes — the pre-flip "empty manifest never raises" property,
+    /// preserved per class); a manifest row returns for its allowed reasons
+    /// and raises `volcano-unreachable:` for a reason outside its list.
     #[test]
-    fn empty_manifest_never_raises() {
+    fn manifest_raise_semantics() {
+        let covered = |class: ShapeClass| ASSERT_MANIFEST.iter().any(|(c, _)| *c == class);
         for class in ShapeClass::ALL {
-            assert_covered_check(class, RefuseReason::Epq);
-            assert_covered_check(class, RefuseReason::EnvOff);
+            if !covered(class) {
+                assert_covered_check(class, RefuseReason::Epq);
+                assert_covered_check(class, RefuseReason::EnvOff);
+            }
+        }
+        for (class, allowed) in ASSERT_MANIFEST {
+            for r in *allowed {
+                assert_covered_check(*class, *r);
+            }
+            // Pick a reason outside the row's list (dml-shape is in no
+            // wave-4 row) and prove the raise + its dualexec-classifiable
+            // prefix (OQ10).
+            assert!(
+                !allowed.contains(&RefuseReason::DmlShape),
+                "test invariant: dml-shape must stay outside every wave-4 row"
+            );
+            let raised = std::panic::catch_unwind(|| {
+                assert_covered_check(*class, RefuseReason::DmlShape)
+            });
+            let err = raised.expect_err("covered class + unallowed reason must raise");
+            let msg = err
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            assert!(
+                msg.starts_with("volcano-unreachable:"),
+                "raise must keep the volcano-unreachable: prefix (got: {msg})"
+            );
         }
     }
 }
