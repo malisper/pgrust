@@ -66,7 +66,7 @@ pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_T
 #[cfg(test)]
 pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TESTS};
 #[cfg(test)]
-pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
+pub(crate) use rowmode::{mergejoin_set_for_tests, rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
 
