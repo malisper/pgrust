@@ -149,6 +149,14 @@ impl PinBoard {
             .is_ok()
     }
 
+    /// WS-O inc-2 debug accessor (contract adjudication "pin-board assert
+    /// — debug-only accessor approved"): worker `w`'s entry is EMPTY
+    /// (settled). Post-drive asserts and diagnostics ONLY — never a
+    /// production branch.
+    pub(crate) fn is_settled(&self, w: usize) -> bool {
+        self.entries[w].load(Ordering::SeqCst) == PIN_EMPTY
+    }
+
     /// Worker: clear own entry after finishing a task (or bailing on an
     /// invalidated slot). Returns the marked slot if a coordinator counted
     /// us — the caller owes exactly one decrement on that task set's

@@ -3486,6 +3486,20 @@ pub fn seq_scan_cb_set_granule_range<'mcx>(
     )
 }
 
+/// End-of-claim release seam (single-executor wave 2, WS-O inc-2,
+/// append-only): drop the heap scan's current page pin and reset it to the
+/// drained state (the R3 zero-pins-at-settle law; pgrcolumnar no-op below
+/// the AM dispatch). Never OPENS the scan — a scan that never opened holds
+/// nothing. Called by the knob-ON batch sources' `end_claim`, INCLUDING on
+/// error paths, so a failed claim never carries its pin into the abort
+/// drain (pin-lifetime under stealing: a re-split claim remainder changes
+/// hands with no pin left behind).
+pub fn seq_scan_end_claim_release(node: &mut SeqScanState<'_>) {
+    if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
+        ::tableam::table_scan_end_claim_release(scan);
+    }
+}
+
 /// Position the scan on the morsel claim [g0, g1) (the runtime's
 /// boundary-clamped claim contract), dispatching on the AM: pgrcolumnar
 /// absolute granules (whole granules within one row group) or heap blocks.

@@ -1251,6 +1251,17 @@ pub fn table_scan_set_morsel_range(
     }
 }
 
+/// End-of-claim pin release (single-executor wave 2, WS-O inc-2,
+/// append-only seam): heap resets to the drained state, dropping the
+/// current page pin if the claim ended early (`heap_end_claim_release` —
+/// the R3 zero-pins-at-settle law); pgrcolumnar stages no page pins — no-op.
+pub fn table_scan_end_claim_release(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_end_claim_release(h),
+        TableScanDesc::Pgrcolumnar(_) => {}
+    }
+}
+
 /// Drive-scaling observability counters of a pgrcolumnar scan (the runtime
 /// WFIN channel): (rg_switches, dict_builds, granules_scanned,
 /// windows_staged). None = heap.
