@@ -54,9 +54,10 @@ mod stats;
 pub use exprkey::ExprKeyState;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
+pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
 #[cfg(test)]
-pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_OWNED_FOR_TESTS};
+pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
 
 use std::sync::OnceLock;
 
