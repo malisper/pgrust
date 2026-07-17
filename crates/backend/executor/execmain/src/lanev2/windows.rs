@@ -67,6 +67,24 @@
 //! its admitted shapes), T2-A second on W1 refuse — so with both knobs ON,
 //! W1 drives the default-frame batch lane and T2 hosts the refused
 //! remainder; with only T2 ON the delegation hosts everything.
+//!
+//! WAVE 3 (WS-R): **T2-B** — the sealed FRAMED batch drive behind the
+//! separate `PGRUST_LANE_V2_WINDOWS_T2B` knob (wave-3 contract §2.1/§6.R; an
+//! independent flip rung; the T2-A delegation knob's behavior is unchanged
+//! at both of its arms). T2-B generalizes the W1 machine to explicit frames
+//! by driving the NODE'S OWN framed machinery over a lane-buffered partition
+//! (`nodewindowagg::lane` T2-B section): same control shape as W1
+//! (`pull_step_chain(sort, SortEmitSourceCfi, SortEmit, FramedWindowOp,
+//! RootAdapter)`, sort-over-scan feeds only), STICKY ownership with the same
+//! loud tripwire, structural admission = W1's child gates + the framed shape
+//! seal (no runCondition, no qual — the pass-through family stays on T2-A).
+//! Hook order becomes W1 → T2-B → T2-A: W1 keeps its default-frame shapes,
+//! T2-B batch-hosts the framed (and W1-refused default-frame) remainder over
+//! admitted sort feeds, T2-A delegation hosts everything else. Tick cadence:
+//! T2-B is a sticky batch drive — OWNED once per drive start (the W1
+//! cadence), refusals once per memoized verdict; the shared class stays
+//! `ShapeClass::WindowAgg` with mechanism detail "t2b-framed" (contract §1.2:
+//! zero new vocabulary).
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
@@ -147,6 +165,46 @@ pub(crate) fn windows_t2_set_for_tests(on: bool) {
 /// W1-admitted shapes).
 #[cfg(test)]
 pub(crate) static WINDOWS_T2_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `PGRUST_LANE_V2_WINDOWS_T2B` (default OFF): the wave-3 WS-R sealed framed
+/// drive (contract §2.1 — its own flip rung; the T2-A delegation knob is
+/// untouched at both arms). Same AtomicU8 + set_for_tests idiom; env-var,
+/// not GUC, per the standing `pg_settings` byte-identity discipline.
+/// OFF-first law: this single cached bool is read BEFORE any other work on
+/// the hook path; the env resolve tail is one-shot.
+static WINDOWS_T2B: AtomicU8 = AtomicU8::new(0);
+
+fn windows_t2b_enabled() -> bool {
+    match WINDOWS_T2B.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => windows_t2b_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn windows_t2b_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_WINDOWS_T2B").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    WINDOWS_T2B.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the T2-B unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn windows_t2b_set_for_tests(on: bool) {
+    WINDOWS_T2B.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Test-only engagement probe for T2-B: owned framed batch drives, per
+/// drive start (the sticky W1 cadence). Separate from both other probes so
+/// the corpus proves mechanism attribution (and non-hijack) on all sides.
+#[cfg(test)]
+pub(crate) static WINDOWS_T2B_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 #[cold]
@@ -285,10 +343,32 @@ fn engine_capture_window_verdict<'mcx>(
             ShapeClass::WindowAgg.name(),
             "w1-batch",
         ),
+        // WS-R T2-B (wave-3): a W1 SHAPE-census refuse over an admitted
+        // (fusible-Sort) child is production-owned by the framed batch
+        // drive when its knob is on and the framed seal admits — the hook
+        // order (W1 → T2-B → T2-A) makes this the next verdict in line.
+        // ChildNotLaneOwned refusals fall past T2-B too (same child gates).
+        Some(RefuseReason::ShapeQualProj)
+            if windows_t2b_enabled() && wlane::lane_framed_shape_admissible(&w.state) =>
+        {
+            engine_record_t2b_owned(estate, id)
+        }
         Some(_) if windows_t2_enabled() => engine_record_t2_owned(estate, id),
         Some(r) => super::engine_record_verdict(estate, id, ShapeClass::WindowAgg, Some(r)),
     }
     Ok(())
+}
+
+/// The T2-B Lane record with its mechanism detail (shared by the composed
+/// W1 chokepoint above and the T2-B hook's own memoized-verdict capture).
+#[cold]
+fn engine_record_t2b_owned(estate: &mut EStateData<'_>, plan_node_id: i32) {
+    estate.engine_record(
+        plan_node_id,
+        ::executils::EngineKind::Lane,
+        ShapeClass::WindowAgg.name(),
+        "t2b-framed",
+    );
 }
 
 /// The T2-A Lane record with its mechanism detail (shared by the composed
@@ -611,4 +691,327 @@ pub fn try_own_window_agg_t2<'mcx>(
     let mut op = PassthroughOp;
     let mut root = RootAdapter::new(None);
     pull_step_rows(&mut **w, &mut WindowAggRowSource, &mut op, &mut root, estate).map(Some)
+}
+
+// ===========================================================================
+// WS-R T2-B (wave-3 inc-2): the sealed FRAMED batch drive behind
+// PGRUST_LANE_V2_WINDOWS_T2B (module doc WAVE 3 paragraph). The machine
+// lives in `nodewindowagg::lane` (T2-B section); this host owns only the
+// W1-template control flow: knob gate, dynamic gates, memoized structural
+// admission, sticky drive + tripwires, the pull_step_chain over the sort
+// read-back, and the EXPLAIN (ENGINE) chokepoint capture.
+// ===========================================================================
+
+/// The framed WindowAgg as a mid-pipeline batch operator over the sorted
+/// emit: rows spool into the NODE's own partition buffer; a complete
+/// partition emits through the node's own framed evaluation (all semantics
+/// in `nodewindowagg`; the lane owns control flow only).
+struct FramedWindowOp<'a, 'mcx> {
+    state: &'a mut ::nodewindowagg::WindowAggStateData<'mcx>,
+    drive: &'a mut wlane::LaneFramedDrive,
+}
+
+impl<'mcx> FramedWindowOp<'_, 'mcx> {
+    /// Emit the spooled partition into `out` until it drains (NeedInput) or
+    /// the capacity-one root pauses the pipeline (Paused).
+    fn emit_into(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        while let Some(row) = wlane::lane_framed_emit_next(self.state, self.drive, estate)? {
+            if out.accept(row, estate)? == SinkFeed::Full {
+                return Ok(OpStatus::Paused);
+            }
+        }
+        Ok(OpStatus::NeedInput)
+    }
+}
+
+impl<'mcx> TupleOp<'mcx> for FramedWindowOp<'_, 'mcx> {
+    fn pending(&self) -> bool {
+        wlane::lane_framed_emit_pending(self.drive)
+    }
+
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        match wlane::lane_framed_accept(self.state, self.drive, estate, tuple)? {
+            wlane::LaneFramedAccept::NeedMore => Ok(OpStatus::NeedInput),
+            // A complete partition awaits: emit its first row (the root
+            // pauses per emitted row; the rest stream through resume).
+            wlane::LaneFramedAccept::PartitionReady => self.emit_into(out, estate),
+        }
+    }
+
+    fn resume(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        debug_assert!(self.pending());
+        self.emit_into(out, estate)
+    }
+
+    fn source_exhausted(
+        &mut self,
+        out: &mut dyn Sink<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<OpStatus> {
+        // Close the open partition, emit, then begin the parked final
+        // partition (if any) and repeat. Idempotent once drained: the seam
+        // marks the node Done and keeps answering false.
+        loop {
+            if wlane::lane_framed_emit_pending(self.drive)
+                && self.emit_into(out, estate)? == OpStatus::Paused
+            {
+                return Ok(OpStatus::Paused);
+            }
+            if !wlane::lane_framed_input_done(self.state, self.drive, estate)? {
+                return Ok(OpStatus::Finished);
+            }
+        }
+    }
+}
+
+/// EXPLAIN (ENGINE) capture at T2-B's memoized admission chokepoint — runs
+/// only when the W1 hook's composed chokepoint did not (W1 knob off; dedup is
+/// first-record-wins anyway). Same peel as the W1 mirror: under ANALYZE the
+/// child is an `Instrumented` wrapper, so an observed child refusal is a
+/// wrapper artifact — peel it and report the production verdict.
+#[cold]
+fn engine_capture_window_framed_verdict<'mcx>(
+    w: &mut crate::procnode::WindowAggNode<'mcx>,
+    observed: Option<RefuseReason>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let id = wlane::lane_plan_node_id(&w.state);
+    let production = match observed {
+        Some(RefuseReason::ChildNotLaneOwned) => {
+            let child = match &mut w.outer {
+                crate::procnode::PlanStateNode::Instrumented(iw) => &mut iw.inner,
+                o => o,
+            };
+            match child {
+                crate::procnode::PlanStateNode::Sort(s) => {
+                    if matches!(&*s.outer, crate::procnode::PlanStateNode::Agg(_)) {
+                        Some(RefuseReason::ChildNotLaneOwned)
+                    } else {
+                        match super::sort_refuse_reason_runtime_ea(s, estate)? {
+                            Some(_) => Some(RefuseReason::ChildNotLaneOwned),
+                            None if wlane::lane_framed_shape_admissible(&w.state) => None,
+                            None => Some(RefuseReason::ShapeQualProj),
+                        }
+                    }
+                }
+                _ => Some(RefuseReason::ChildNotLaneOwned),
+            }
+        }
+        other => other,
+    };
+    match production {
+        None => engine_record_t2b_owned(estate, id),
+        Some(_) if windows_t2_enabled() => engine_record_t2_owned(estate, id),
+        Some(r) => super::engine_record_verdict(estate, id, ShapeClass::WindowAgg, Some(r)),
+    }
+    Ok(())
+}
+
+/// Try to let the T2-B framed batch lane own a `WindowAgg` over the sort
+/// breaker. `Some` = the lane drove this call; `None` = refused (the caller
+/// falls through — to T2-A when that knob is on, ultimately to the unchanged
+/// `exec_window_agg`). `window_agg_arm` runs this hook SECOND, after W1 and
+/// before T2-A, so a W1-owned pull never reaches here and a T2-B-owned pull
+/// never reaches the delegation.
+///
+/// Template = `try_own_window_agg` verbatim (the sticky W1 law): knob FIRST
+/// (OFF = zero lane code, zero ticks), sticky-drive tripwires, dynamic
+/// per-call EPQ/backward gates, memoized structural admission with capture
+/// + refusal accounting at the verdict chokepoint, then the sticky drive.
+#[inline]
+pub fn try_own_window_agg_t2b<'mcx>(
+    w: &mut ::mcx::PgBox<'mcx, crate::procnode::WindowAggNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !windows_t2b_enabled() {
+        // Knob OFF: zero lane code, zero ticks (no pre-existing WindowAgg
+        // refuse class — default accounting stays byte-identical).
+        return Ok(None);
+    }
+    let w = &mut **w;
+    if w.lane_framed.is_some() {
+        // STICKY: the lane owns this node's whole (re)scan life. A dynamic
+        // gate flipping here is structurally unreachable (row-marks gate) —
+        // fail LOUD, never silently wrong (module doc).
+        if estate.es_epq_active {
+            return Err(sticky_tripwire("es_epq_active"));
+        }
+        if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+            return Err(sticky_tripwire("scan direction"));
+        }
+        return framed_drive(w, estate).map(Some);
+    }
+    // Dynamic per-call gates, pre-ownership. NB: with the W1 knob ALSO on,
+    // W1's hook has already ticked these reasons this pull — the shared
+    // class counts once per HOOK by design (module doc; mechanism
+    // attribution rides the detail string, never the counters).
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Epq);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Backward);
+        return Ok(None);
+    }
+    // Structural admission, memoized on the node (T2-B's own memo — W1's
+    // verdict is a different census); refusal accounting ticks exactly here,
+    // once per memoized verdict. Either verdict is final (the sticky law).
+    let admit = match w.lane_framed_admit {
+        Some(v) => v,
+        None => {
+            let refuse = window_framed_refuse_reason(w, estate)?;
+            if estate.engine_capture() {
+                engine_capture_window_framed_verdict(w, refuse, estate)?;
+            }
+            if let Some(r) = refuse {
+                stats::tick_refused(ShapeClass::WindowAgg, r);
+            }
+            let v = refuse.is_none();
+            w.lane_framed_admit = Some(v);
+            v
+        }
+    };
+    if !admit {
+        return Ok(None);
+    }
+    framed_drive_first(w, estate)
+}
+
+/// Structural refuse-set for the T2-B framed admission: W1's child-side
+/// gates verbatim (row marks = EPQ's substrate; Sort child; the agg-fed
+/// dynamic-feed family refused structurally; the shared fusible-sort memo)
+/// with the W1 function/frame census replaced by the framed seal (no
+/// runCondition, no qual — pass-through family stays on T2-A delegation).
+/// Reasons restricted to the frozen vocabulary (contract §1.2: no new
+/// RefuseReason; ShapeQualProj carries the seal refusals).
+fn window_framed_refuse_reason<'mcx>(
+    w: &mut crate::procnode::WindowAggNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<RefuseReason>> {
+    if !estate.es_rowmarks.is_empty() {
+        return Ok(Some(RefuseReason::Epq));
+    }
+    let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
+        // Presorted-index window plans (no Sort) and instrumented trees
+        // (EXPLAIN ANALYZE wraps every node) land here, like W1.
+        return Ok(Some(RefuseReason::ChildNotLaneOwned));
+    };
+    // SCAN-FED SORTS ONLY, exactly W1's law (see window_refuse_reason): the
+    // agg-fed family carries the lane's ONE dynamic feed-time refuse, which
+    // sticky ownership cannot host. Same structural refuse, same ledger
+    // (notes/se-ws-h-windows.md TODO 16 covers re-admission for both).
+    if matches!(&*s.outer, crate::procnode::PlanStateNode::Agg(_)) {
+        return Ok(Some(RefuseReason::ChildNotLaneOwned));
+    }
+    if !super::sort_lane_fusible_memo(s, estate)? {
+        return Ok(Some(RefuseReason::ChildNotLaneOwned));
+    }
+    if !wlane::lane_framed_shape_admissible(&w.state) {
+        return Ok(Some(RefuseReason::ShapeQualProj));
+    }
+    if !wlane::lane_window_fresh(&w.state) {
+        return Ok(Some(RefuseReason::Epq));
+    }
+    Ok(None)
+}
+
+/// First owned pull: run the sort feed (refusing ownership on its dynamic
+/// feed-time refuse, before any window-side effect beyond the byte-inert
+/// `all_first` arm), then create the sticky framed drive and stream.
+fn framed_drive_first<'mcx>(
+    w: &mut crate::procnode::WindowAggNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // exec_window_agg's entry interrupt gate (conditional, C's macro).
+    if ::init_small::globals::InterruptPending() {
+        ::postgres_seams::check_for_interrupts::call()?;
+    }
+    // The all_first arm: calculate_frame_offsets — for framed shapes this
+    // EVALUATES the start/end offset expressions (unlike W1's no-offset
+    // shapes), exactly exec_window_agg's entry order; a feed-time refuse
+    // below still falls back byte-identically (the row engine's own entry
+    // re-runs nothing: all_first flipped, offsets computed once either way).
+    wlane::lane_window_begin(&mut w.state, estate)?;
+    {
+        let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
+            unreachable!("memoized framed admission requires a Sort child")
+        };
+        let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+        debug_assert!(!sstate.sort_done(), "fresh window node over a fed sort");
+        if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+            // Feed-time refuse before any lane tuple: the Volcano fallback
+            // resumes byte-identically. UNREACHABLE for this admission
+            // (scan-fed sorts only), kept live as defense-in-depth exactly
+            // like W1's drive_first — and the refusal MUST flip the memo
+            // (a stranded admit=true would hijack a row-engine-fed node on
+            // the next pull; the fixed W1 inc-1 blocker).
+            w.lane_framed_admit = Some(false);
+            return Ok(None);
+        }
+    }
+    // One OWNED tick per drive start (the sticky batch cadence: the
+    // underlying sort-feed event; a rescan re-feeds and re-ticks).
+    stats::tick_owned(ShapeClass::WindowAgg);
+    super::lane_trace("windows drive armed (T2-B framed over sort breaker)");
+    w.lane_framed = Some(wlane::LaneFramedDrive::new());
+    framed_drive(w, estate).map(Some)
+}
+
+/// One owned pull: resume/stream through the chain driver (the W1 drive
+/// shape with the framed op).
+fn framed_drive<'mcx>(
+    w: &mut crate::procnode::WindowAggNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<ExecSlotId>> {
+    #[cfg(test)]
+    WINDOWS_T2B_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
+    // exec_window_agg's entry interrupt gate + drained guard.
+    if ::init_small::globals::InterruptPending() {
+        ::postgres_seams::check_for_interrupts::call()?;
+    }
+    if wlane::lane_window_done(&w.state) {
+        return Ok(None);
+    }
+    // Rescan re-entry: re-run the all_first arm (offset re-evaluation — a
+    // chgParam rescan can change offset Params) and re-feed the sort.
+    wlane::lane_window_begin(&mut w.state, estate)?;
+    let crate::procnode::PlanStateNode::Sort(s) = &mut w.outer else {
+        unreachable!("lane-owned WindowAgg lost its Sort child")
+    };
+    let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
+    if !sstate.sort_done() {
+        // Post-rescan re-feed; a feed-time refuse is unreachable BY
+        // CONSTRUCTION (scan-fed sorts only — W1's drive() argument holds
+        // verbatim). The loud tripwire stays as defense-in-depth.
+        if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+            return Err(sticky_tripwire("sort feed verdict"));
+        }
+        stats::tick_owned(ShapeClass::WindowAgg);
+    }
+    let mut op = FramedWindowOp {
+        state: &mut w.state,
+        drive: w.lane_framed.as_mut().expect("sticky framed drive exists"),
+    };
+    let mut root = RootAdapter::new(None);
+    pull_step_chain(
+        sstate,
+        &mut super::SortEmitSourceCfi,
+        &mut super::SortEmit,
+        &mut op,
+        &mut root,
+        estate,
+    )
 }

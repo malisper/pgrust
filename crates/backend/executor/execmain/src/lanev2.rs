@@ -68,6 +68,9 @@ pub(crate) use rowmode::try_own_project_set;
 pub(crate) use rowmode_tail::{try_own_cte_scan, try_own_function_scan, try_own_lock_rows, try_own_material, try_own_memoize, try_own_merge_append, try_own_named_tuplestore_scan, try_own_recursive_union, try_own_sample_scan, try_own_set_op, try_own_table_func_scan, try_own_tid_range_scan, try_own_tid_scan, try_own_values_scan, try_own_work_table_scan};
 pub(crate) use windows::try_own_window_agg;
 pub(crate) use windows::try_own_window_agg_t2;
+// --- WS-R T2-B (wave-3) ---
+pub(crate) use windows::try_own_window_agg_t2b;
+// --- end WS-R T2-B ---
 #[cfg(test)]
 pub(crate) use dml::{dml_set_for_tests, DML_OWNED_FOR_TESTS, DML_SHAPE_REFUSED_FOR_TESTS};
 #[cfg(test)]
@@ -82,6 +85,10 @@ pub(crate) use rowmode_tail::tail_owned_probe_for_tests;
 pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use windows::{windows_t2_set_for_tests, WINDOWS_T2_OWNED_FOR_TESTS};
+// --- WS-R T2-B (wave-3) ---
+#[cfg(test)]
+pub(crate) use windows::{windows_t2b_set_for_tests, WINDOWS_T2B_OWNED_FOR_TESTS};
+// --- end WS-R T2-B ---
 #[cfg(test)]
 pub(crate) use census::{
     attribution_for_tests as census_attribution_for_tests,
