@@ -951,7 +951,7 @@ fn framed_drive_first<'mcx>(
         };
         let crate::procnode::SortNode { state: sstate, outer: souter, outer_desc, .. } = s;
         debug_assert!(!sstate.sort_done(), "fresh window node over a fed sort");
-        if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+        if !super::sort_feed_if_needed(sstate, souter, outer_desc, None, estate)? {
             // Feed-time refuse before any lane tuple: the Volcano fallback
             // resumes byte-identically. UNREACHABLE for this admission
             // (scan-fed sorts only), kept live as defense-in-depth exactly
@@ -996,7 +996,7 @@ fn framed_drive<'mcx>(
         // Post-rescan re-feed; a feed-time refuse is unreachable BY
         // CONSTRUCTION (scan-fed sorts only — W1's drive() argument holds
         // verbatim). The loud tripwire stays as defense-in-depth.
-        if !super::sort_feed_if_needed(sstate, &mut **souter, outer_desc, None, estate)? {
+        if !super::sort_feed_if_needed(sstate, souter, outer_desc, None, estate)? {
             return Err(sticky_tripwire("sort feed verdict"));
         }
         stats::tick_owned(ShapeClass::WindowAgg);
