@@ -228,6 +228,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // EXPLAIN (ENGINE) (single-executor Phase 0.2): per-node engine
+    // attribution records — (engine, class, detail) triples. None = none
+    // (records exist ONLY under EXEC_FLAG_ENGINE_REPORT — the same
+    // emission-gate law as the EA records above, keeping default EXPLAIN
+    // output byte-identical).
+    pub fn query_desc_engine_events(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(types_core::instrument::EngineKindWire, &'static str, &'static str)>>
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,
