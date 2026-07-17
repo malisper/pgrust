@@ -1,0 +1,37 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1u1 s2pass s1c s3sel
+step s1u1: UPDATE storm_idx SET b = b + 100 WHERE a = 1;
+step s2pass: UPDATE storm_idx SET b = b + 1 WHERE a = 1 RETURNING a, b; <waiting ...>
+step s1c: COMMIT;
+step s2pass: <... completed>
+a|  b
+-+---
+1|111
+(1 row)
+
+step s3sel: SELECT a, b FROM storm_idx ORDER BY a, b;
+a|  b
+-+---
+1|111
+2| 20
+(2 rows)
+
+
+starting permutation: s1u1 s1move s2pass s1c s3sel
+step s1u1: UPDATE storm_idx SET b = b + 100 WHERE a = 1;
+step s1move: UPDATE storm_idx SET a = 3 WHERE a = 1;
+step s2pass: UPDATE storm_idx SET b = b + 1 WHERE a = 1 RETURNING a, b; <waiting ...>
+step s1c: COMMIT;
+step s2pass: <... completed>
+a|b
+-+-
+(0 rows)
+
+step s3sel: SELECT a, b FROM storm_idx ORDER BY a, b;
+a|  b
+-+---
+2| 20
+3|110
+(2 rows)
+

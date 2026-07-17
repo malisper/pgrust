@@ -1,0 +1,25 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1u1 s1u2 ref s1c
+step s1u1: UPDATE rm_t SET v = v + 100 WHERE k = 1;
+step s1u2: UPDATE rm_t SET v = v + 1000 WHERE k = 1;
+step ref: SELECT rm_t.k, rm_t.v, rm_s.tag FROM rm_t JOIN rm_s ON rm_s.k = rm_t.k WHERE rm_t.k = 1 FOR UPDATE OF rm_t; <waiting ...>
+step s1c: COMMIT;
+step ref: <... completed>
+k|   v|tag
+-+----+---
+1|1110|one
+(1 row)
+
+
+starting permutation: s1u1 s1u2 copy s1c
+step s1u1: UPDATE rm_t SET v = v + 100 WHERE k = 1;
+step s1u2: UPDATE rm_t SET v = v + 1000 WHERE k = 1;
+step copy: SELECT rm_t.k, rm_t.v, vs.tag FROM rm_t JOIN (VALUES (1, 'v-one'), (2, 'v-two')) AS vs(k, tag) ON vs.k = rm_t.k WHERE rm_t.k = 1 FOR UPDATE OF rm_t; <waiting ...>
+step s1c: COMMIT;
+step copy: <... completed>
+k|   v|tag  
+-+----+-----
+1|1110|v-one
+(1 row)
+

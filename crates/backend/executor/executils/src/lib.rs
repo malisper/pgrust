@@ -838,6 +838,14 @@ pub enum EpqRowMarkFetch {
     Copy { whole_attno: i16 },
 }
 
+/// The ONE EPQ state store: C `EPQState`'s relsubs_* arrays, held by the
+/// EPQ owner (ModifyTable/LockRows) and swapped into `EStateData::es_epq`
+/// only for a recheck's duration — nested EPQ is safe because each owner
+/// holds its own copy (no child EState; the shared-estate capture-model
+/// decision and the field-by-field C mapping live in
+/// docs/design/lane-epq.md §3/§4). WS-U wave-5: shape FROZEN — inc-5's
+/// lane-hosted rechecks consume these same fields as captured-singleton
+/// source state; no WS extends this struct during the migration.
 pub struct EpqSubs<'mcx> {
     pub relsubs_slot: PgVec<'mcx, Option<ExecSlotId>>,
     pub relsubs_done: PgVec<'mcx, bool>,

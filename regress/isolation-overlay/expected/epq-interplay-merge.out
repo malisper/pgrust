@@ -1,0 +1,54 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1u1 s1u2 merge s1c s3sel
+step s1u1: UPDATE mt SET v = v + 100 WHERE k = 1;
+step s1u2: UPDATE mt SET v = v + 1000 WHERE k = 1;
+step merge: 
+ MERGE INTO mt t USING ms s ON t.k = s.k
+ WHEN MATCHED AND t.v < 500 THEN UPDATE SET v = t.v + s.delta, s = 'matched-low'
+ WHEN MATCHED THEN UPDATE SET s = 'matched-high'
+ WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.delta, 'inserted');
+ <waiting ...>
+step s1c: COMMIT;
+step merge: <... completed>
+step s3sel: SELECT k, v, s FROM mt ORDER BY k;
+k|   v|s           
+-+----+------------
+1|1110|matched-high
+(1 row)
+
+
+starting permutation: s1move merge s1c s3sel
+step s1move: UPDATE mt SET k = 9 WHERE k = 1;
+step merge: 
+ MERGE INTO mt t USING ms s ON t.k = s.k
+ WHEN MATCHED AND t.v < 500 THEN UPDATE SET v = t.v + s.delta, s = 'matched-low'
+ WHEN MATCHED THEN UPDATE SET s = 'matched-high'
+ WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.delta, 'inserted');
+ <waiting ...>
+step s1c: COMMIT;
+step merge: <... completed>
+step s3sel: SELECT k, v, s FROM mt ORDER BY k;
+k| v|s       
+-+--+--------
+1| 5|inserted
+9|10|a       
+(2 rows)
+
+
+starting permutation: s1del merge s1c s3sel
+step s1del: DELETE FROM mt WHERE k = 1;
+step merge: 
+ MERGE INTO mt t USING ms s ON t.k = s.k
+ WHEN MATCHED AND t.v < 500 THEN UPDATE SET v = t.v + s.delta, s = 'matched-low'
+ WHEN MATCHED THEN UPDATE SET s = 'matched-high'
+ WHEN NOT MATCHED THEN INSERT VALUES (s.k, s.delta, 'inserted');
+ <waiting ...>
+step s1c: COMMIT;
+step merge: <... completed>
+step s3sel: SELECT k, v, s FROM mt ORDER BY k;
+k|v|s       
+-+-+--------
+1|5|inserted
+(1 row)
+

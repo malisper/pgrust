@@ -14171,3 +14171,131 @@ fn test_helper_vanish(arm: &str) -> bool {
     })
 }
 // --- end WS-S wave-3 ---
+
+// ===== WAVE-5 APPEND REGION — do not edit above =====
+// Sub-regions in fixed order U, V, W, X (wave-5 contract §2). lanev2.rs
+// appends are the FALLBACK placement (knob-resolve/admission shims whose
+// vocabulary is lanev2-private); module-local placement is preferred.
+
+// --- WS-U wave-5 (EPQ inc-1: PGRUST_LANE_V2_EPQ, refuse-all admission) --------
+
+use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
+/// `PGRUST_LANE_V2_EPQ` (default OFF; wave-5 contract §3 + §6.3): EPQ
+/// inc-1's structure-first knob. ON runs the recheck admission WALK below,
+/// which REFUSES every shape through the existing `epq` refusal carrier —
+/// zero ownership, zero behavior delta (the recheck stays the Volcano
+/// drive at both arms; admission widening is inc-5's, gated on WS-P's
+/// 100% read-side coverage census). NEVER default during migration.
+/// Same AtomicU8 idiom as `dml.rs`'s knobs (OFF-first relaxed byte load,
+/// `#[cold]`-outlined resolve, same-process test lever) — placed here and
+/// not in epq.rs because the tick vocabulary (`ShapeClass`/`RefuseReason`)
+/// is lanev2-private (§2's shim fallback).
+static EPQ_LANE: AtomicU8 = AtomicU8::new(0);
+
+/// One relaxed byte load + compare on the OFF arm; called ONLY at the
+/// recheck-initiation chokepoint in `crate::epq::eval_plan_qual` (never
+/// per row, never per batch — SE2-COST §0.6 idiom).
+#[inline]
+pub(crate) fn epq_lane_enabled() -> bool {
+    match EPQ_LANE.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => epq_lane_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn epq_lane_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_EPQ").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    EPQ_LANE.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn epq_lane_set_for_tests(on: bool) {
+    EPQ_LANE.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Test-only refusal probe: recheck admission-walk refusals ticked by
+/// `epq_recheck_refuse_all` (the unit corpus proves ON ticks and OFF ticks
+/// NOTHING without a stats-env dump).
+#[cfg(test)]
+pub(crate) static EPQ_ADMISSION_REFUSED_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Wave-5 inc-1 admission structure (contract §6.3): walk the recheck plan
+/// exactly as `crate::epq::check_epq_plan` admits it and REFUSE every
+/// mappable shape via the existing `epq` carrier — the per-node skeleton
+/// inc-5 will widen into real verdicts. Mints nothing: node tags without a
+/// ShapeClass (Limit / Hash / BitmapIndexScan glue) tick nothing (vocab
+/// law §0.7 — no new classes, no new reasons). `#[cold]`: reachable only
+/// knob-ON at recheck initiation.
+#[cold]
+#[inline(never)]
+pub(crate) fn epq_recheck_refuse_all(plan: Option<::types_nodes::Node<'_>>) {
+    let Some(plan) = plan else { return };
+    if let Some(class) = epq_recheck_shape_class(plan) {
+        stats::tick_refused(class, RefuseReason::Epq);
+        #[cfg(test)]
+        EPQ_ADMISSION_REFUSED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(ap) = plan.as_append() {
+        for child in ap.appendplans.iter() {
+            epq_recheck_refuse_all(Some(child));
+        }
+    }
+    if let Some(p) = plan.as_plan() {
+        if let Some(l) = p.lefttree {
+            epq_recheck_refuse_all(Some(l));
+        }
+        if let Some(r) = p.righttree {
+            epq_recheck_refuse_all(Some(r));
+        }
+    }
+}
+
+/// The check_epq_plan whitelist tags -> their EXISTING engagement classes
+/// (reuse only; the unmappable glue tags return None and tick nothing).
+fn epq_recheck_shape_class(plan: ::types_nodes::Node<'_>) -> Option<ShapeClass> {
+    use ::types_nodes::NodeTag as T;
+    Some(match plan.node_tag() {
+        T::T_SeqScan => ShapeClass::SeqScan,
+        T::T_IndexScan => ShapeClass::IndexScan,
+        T::T_IndexOnlyScan => ShapeClass::IndexOnlyScan,
+        T::T_BitmapHeapScan => ShapeClass::BitmapHeapScan,
+        T::T_TidScan => ShapeClass::TidScan,
+        T::T_TidRangeScan => ShapeClass::TidRangeScan,
+        T::T_NestLoop => ShapeClass::NestLoop,
+        T::T_MergeJoin => ShapeClass::MergeJoin,
+        T::T_HashJoin => ShapeClass::Join,
+        T::T_Sort => ShapeClass::SortFeed,
+        T::T_Material => ShapeClass::Material,
+        T::T_Result => ShapeClass::ResultNode,
+        T::T_ValuesScan => ShapeClass::ValuesScan,
+        T::T_CteScan => ShapeClass::CteScan,
+        T::T_SubqueryScan => ShapeClass::SubqueryScan,
+        T::T_FunctionScan => ShapeClass::FunctionScan,
+        T::T_Append => ShapeClass::Append,
+        T::T_LockRows => ShapeClass::LockRows,
+        _ => return None,
+    })
+}
+// --- end WS-U wave-5 ----------------------------------------------------------
+
+// --- WS-V wave-5 sub-region (reserved) ----------------------------------------
+// --- end WS-V wave-5 ----------------------------------------------------------
+
+// --- WS-W (wave-5): OC admission test lever (the admission entry itself is
+// dml.rs-local per §2's preference; this is the unit-corpus re-export only).
+#[cfg(test)]
+pub(crate) use dml::dml_oc_set_for_tests;
+// --- end WS-W (wave-5) ---
+
+// --- WS-X wave-5 sub-region (reserved) ----------------------------------------
+// --- end WS-X wave-5 ----------------------------------------------------------
