@@ -34,12 +34,22 @@
 //! LEAF (`MergeJoinRowSource` → `PassthroughOp` → `RootAdapter` under
 //! `pull_step_rows`) — a pure delegation to the ported
 //! `::nodemergejoin::exec_merge_join` FSM with both children Volcano-driven
-//! inside it, behind the SAME knob (integration contract §1: no new knob in
-//! inc-1; a per-shape sub-gate is a ledgered flip-blocker — see
-//! docs/design/mergejoin-decision.md and notes/se-ws-g-mergejoin.md). Unlike
-//! ProjectSet, MergeJoin has no pre-existing wholesale refuse, so the
-//! knob-OFF path here ticks NOTHING (default accounting byte-identical by
-//! construction, `mergejoin` class silent at default config per §2d).
+//! inside it (see docs/design/mergejoin-decision.md and
+//! notes/se-ws-g-mergejoin.md). Unlike ProjectSet, MergeJoin has no
+//! pre-existing wholesale refuse, so the knob-OFF path here ticks NOTHING
+//! (default accounting byte-identical by construction, `mergejoin` class
+//! silent at default config per §2d).
+//!
+//! Wave 2 (WS-L, the knob-split commit ruled in the wave-2 integration
+//! contract §2): MergeJoin hosting moves OUT of `PGRUST_LANE_V2_ROWMODE`
+//! behind its own `PGRUST_LANE_V2_MERGEJOIN` gate. This adjudicates WS-P OQ5
+//! and unblocks flip-ladder rung 3 (the 2026-07-12 microbench measured a
+//! 1.10x kernel-less-admission tax on merge-join-agg, the WS-G L1
+//! flip-blocker — the split lets the tail flip without shipping that tax).
+//! `PGRUST_LANE_V2_ROWMODE` keeps ProjectSet + the wave-2 16-shape
+//! delegation tail (rowmode_tail.rs); no per-shape sub-knobs within the
+//! tail (per-shape bisect is test-side only, the
+//! `ROWMODE_TAIL_OWNED_FOR_TESTS` probe array).
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
@@ -59,7 +69,9 @@ use super::stats::{self, RefuseReason, ShapeClass};
 /// doc).
 static ROWMODE: AtomicU8 = AtomicU8::new(0);
 
-fn rowmode_enabled() -> bool {
+/// `pub(super)` per the wave-2 contract §3.4 (visibility change owned by
+/// WS-L): rowmode_tail.rs gates its 16 delegation shapes on the same knob.
+pub(super) fn rowmode_enabled() -> bool {
     match ROWMODE.load(Relaxed) {
         1 => false,
         2 => true,
@@ -74,10 +86,37 @@ fn rowmode_enabled() -> bool {
     }
 }
 
+/// `PGRUST_LANE_V2_MERGEJOIN` (default OFF): the wave-2 knob-split gate for
+/// the WS-G MergeJoin row-mode hosting (contract §2 — facility-level knob,
+/// granted; same AtomicU8 idiom as `ROWMODE` for the same test-lever
+/// reason).
+static MERGEJOIN: AtomicU8 = AtomicU8::new(0);
+
+fn mergejoin_enabled() -> bool {
+    match MERGEJOIN.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_MERGEJOIN").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
 /// Same-process A/B lever for the unit corpus (`crate::tests`).
 #[cfg(test)]
 pub(crate) fn rowmode_set_for_tests(on: bool) {
     ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Same-process A/B lever for the mergejoin unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn mergejoin_set_for_tests(on: bool) {
+    MERGEJOIN.store(if on { 2 } else { 1 }, Relaxed);
 }
 
 /// Test-only engagement probe: owned row-mode drives, per pull (the unit
@@ -261,15 +300,17 @@ impl<'mcx> RowSource<'mcx> for MergeJoinRowSource {
 /// Try to let the row-mode lane host a MergeJoin (both children Volcano).
 /// `None` = refused; the caller runs the unchanged `exec_merge_join`.
 ///
-/// Gates, in the `try_own_project_set` order: the rowmode knob FIRST — and
-/// unlike ProjectSet, knob-OFF ticks NOTHING (there is no pre-existing
-/// MergeJoin wholesale refuse, so default-config accounting stays
-/// byte-identical trivially; integration contract §2d) — then the dynamic
-/// per-call EPQ / backward / instrumented gates. No shape gate: increment-1
-/// admits every plan the FSM itself admits (the hosting is jointype-agnostic
-/// delegation). No extra prologue either: `exec_merge_join` runs its own
-/// entry CFI + per-tuple reset as the FSM body's first statements, so the
-/// wrapper adds no calls the Volcano drive would not make.
+/// Gates, in the `try_own_project_set` order: the `PGRUST_LANE_V2_MERGEJOIN`
+/// knob FIRST (the wave-2 knob-split — see the module doc; before the split
+/// this read the facility-wide rowmode knob) — and unlike ProjectSet,
+/// knob-OFF ticks NOTHING (there is no pre-existing MergeJoin wholesale
+/// refuse, so default-config accounting stays byte-identical trivially;
+/// integration contract §2d) — then the dynamic per-call EPQ / backward /
+/// instrumented gates. No shape gate: increment-1 admits every plan the FSM
+/// itself admits (the hosting is jointype-agnostic delegation). No extra
+/// prologue either: `exec_merge_join` runs its own entry CFI + per-tuple
+/// reset as the FSM body's first statements, so the wrapper adds no calls
+/// the Volcano drive would not make.
 ///
 /// OWNED tick cadence: once per drive start (each owned PG pull starts one
 /// `pull_step_rows` drive over the per-call-reassembled pipeline; the
@@ -279,7 +320,7 @@ pub fn try_own_merge_join<'mcx>(
     mj: &mut crate::procnode::MergeJoinNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    if !rowmode_enabled() {
+    if !mergejoin_enabled() {
         return Ok(None);
     }
     // Dynamic per-call gates (the try_own_result cadence).
