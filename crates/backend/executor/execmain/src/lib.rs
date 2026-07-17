@@ -34,6 +34,7 @@ pub use execmain::{
     tap_executor_finish_leave, tap_executor_run, tap_executor_run_leave, tap_executor_start,
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
+pub use lanev2::coverage::{LANEV2_BUILTINS, PGRUST_FOID_RANGE};
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;
@@ -69,6 +70,7 @@ pub fn init_seams() {
     execmain_seams::query_desc_runtime_ea_pipeline::set(
         querydesc::query_desc_runtime_ea_pipeline_seam,
     );
+    execmain_seams::query_desc_engine_events::set(querydesc::query_desc_engine_events_seam);
     execmain_seams::query_desc_foreign_explain::set(querydesc::query_desc_foreign_explain_seam);
     execmain_seams::query_desc_prune_result::set(querydesc::query_desc_prune_result_seam);
     execmain_seams::query_desc_rti_unpruned::set(querydesc::query_desc_rti_unpruned_seam);

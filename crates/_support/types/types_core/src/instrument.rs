@@ -161,6 +161,26 @@ pub struct RuntimeEaPipeline {
     pub morsel_max_ns: u64,
 }
 
+/// EXPLAIN (ENGINE) wire vocabulary (pgrust-fast single-executor Phase 0.2;
+/// no C counterpart): which engine owned a plan node's execution. Mirror of
+/// `executils::EngineKind` — the seam crate cannot depend on executils, so
+/// this repr(u8) twin rides the seam (`query_desc_engine_events`), the same
+/// home as `RuntimeEaPipeline`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKindWire {
+    /// Serial lane-v2 push pipeline owns the node (production verdict).
+    Lane = 0,
+    /// Volcano row spine runs it (detail carries the refusal reason; "" if
+    /// the node was never offered to a lane).
+    Spine = 1,
+    /// Spine refusal whose reason is admission-economics-fused-drive — the
+    /// legacy fused batch arm owns the shape (displayed "spine/fused-arm").
+    FusedArm = 2,
+    /// Morsel-runtime arm engaged (pipeline identity via RuntimeEaPipeline).
+    Runtime = 3,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TuplesortMethod {
     #[default]
