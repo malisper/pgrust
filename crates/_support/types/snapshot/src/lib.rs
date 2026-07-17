@@ -135,6 +135,10 @@ impl XidVisMemo {
 
     #[inline]
     pub fn merge(&mut self, xid: TransactionId, flags: u8) {
+        // Keys must be nonzero: xids[i] == 0 marks an empty slot. Resolvers
+        // hoist non-normal xids before the memo (a raw xmin of 0 is a real
+        // on-disk state — heap_abort_speculative leaves xmin invalid without
+        // the HEAP_XMIN_INVALID hint; see PageMemoResolve::did_commit).
         debug_assert!(xid != 0);
         for i in 0..Self::N {
             if self.xids[i] == xid {
