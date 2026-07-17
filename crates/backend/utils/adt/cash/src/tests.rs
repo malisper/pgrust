@@ -12,7 +12,7 @@ fn parse(s: &str) -> Cash {
 
 fn out(value: Cash) -> String {
     let mut buf = [0u8; CASH_OUT_BUFLEN];
-    let len = cash_out_into(value, &mut buf);
+    let len = cash_out_into(value, &mut buf).unwrap();
     String::from_utf8(buf[..len].to_vec()).unwrap()
 }
 
