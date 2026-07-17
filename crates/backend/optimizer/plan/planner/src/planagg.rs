@@ -165,17 +165,6 @@ fn build_minmax_path<'mcx>(
     nulls_first: bool,
 ) -> PgResult<bool> {
     let mcx = run.mcx;
-    // C copyObject's the parse and IncrementVarSublevelsUp(1,1); with no
-    // uplevel Vars the bump is a no-op, so the cells-copy with shared nodes
-    // is C-equal. A correlated parse would need real bumping - loud.
-    if run.root.query_level != 1 {
-        let probe = Node::mk(mcx, crate::subselect::query_cells_copy(mcx, run.parse())?)?;
-        assert!(
-            !vars::contain_uplevel_vars(probe)?,
-            "IncrementVarSublevelsUp (rewriteManip.c): minmax rewrite of a \
-             correlated subquery; outer-Var bumping unported"
-        );
-    }
     let target = *run.root.expr_node(mminfo.target);
     // Deep copy per C (planagg.c:353 copyObject): the probe planning
     // scribbles in place (reduce_outer_joins' nullingrels strip, RTE jointype
@@ -183,6 +172,13 @@ fn build_minmax_path<'mcx>(
     // tree leaves the second pass with stripped quals under an unreduced
     // jointree ("wrong varnullingrels" in setrefs).
     let deep = rewrite_manip::copy_query_node(mcx, run.parse())?;
+    // IncrementVarSublevelsUp((Node *) parse, 1, 1) (planagg.c): the clone
+    // becomes a subquery, so outer references (a correlated minmax rewrite)
+    // now live one level higher. At query_level 1 no Var can carry
+    // varlevelsup > 0, so the walk is skipped to keep that path unchanged.
+    if run.root.query_level != 1 {
+        rewrite_manip::IncrementVarSublevelsUp(deep, 1, 1)?;
+    }
     let mut subparse =
         crate::subselect::query_cells_copy(mcx, deep.as_query().expect("Query round trip"))?;
 
