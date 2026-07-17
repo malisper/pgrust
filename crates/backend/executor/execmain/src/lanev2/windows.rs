@@ -98,10 +98,12 @@ use super::push::{
 };
 use super::stats::{self, RefuseReason, ShapeClass};
 
-/// `PGRUST_LANE_V2_WINDOWS` (default OFF): 0 = unresolved (read env on first
-/// use), 1 = OFF, 2 = ON. AtomicU8 + set_for_tests so the unit corpus can
-/// A/B both paths in one process (the rowmode idiom); env-var, not GUC, per
-/// the standing `pg_settings` byte-identity discipline.
+/// `PGRUST_LANE_V2_WINDOWS` (default ON since wave-4 FLIP-3 — flip-ladder
+/// rung 3; explicit `=0`/`off` is the permanent kill switch; `_T2`/`_T2B`
+/// defaults unchanged): 0 = unresolved (read env on first use), 1 = OFF,
+/// 2 = ON. AtomicU8 + set_for_tests so the unit corpus can A/B both paths
+/// in one process (the rowmode idiom); env-var, not GUC, per the standing
+/// `pg_settings` byte-identity discipline.
 static WINDOWS: AtomicU8 = AtomicU8::new(0);
 
 fn windows_enabled() -> bool {
@@ -109,9 +111,13 @@ fn windows_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let on = matches!(
+            // WAVE-4 FLIP-3 (flip-ladder rung 3; wave4-flip-manifest A3):
+            // default ON — W1 only. `_T2`/`_T2B` defaults UNCHANGED (T2-A is
+            // Tier-B, T2-B is Tier-C). `=0`/`off` stays the permanent kill
+            // switch (G4 restores today's bytes and ticks).
+            let on = !matches!(
                 std::env::var("PGRUST_LANE_V2_WINDOWS").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             );
             WINDOWS.store(if on { 2 } else { 1 }, Relaxed);
             on
