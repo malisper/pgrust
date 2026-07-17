@@ -39,6 +39,8 @@ use ::types_tuple::TupleDescData;
 
 pub fn init_seams() {}
 
+pub mod lane;
+
 #[cfg(test)]
 mod tests;
 
@@ -2692,36 +2694,7 @@ impl<'mcx> WindowAggStateData<'mcx> {
         }
 
         if self.currentpos == 0 {
-            // C resets the aggcontext via the restart path; internal states
-            // and saved by-ref results from the previous partition die here.
-            let mut an = self.agg_node.expect("aggs imply agg_node");
-            // SAFETY: sole access path to the node during the reset.
-            unsafe { an.as_mut() }.reset();
-            for aggno in 0..self.trans_init.len() {
-                let init = self.trans_init[aggno];
-                // C initialize_aggregate: by-ref initvals datumCopy into the
-                // aggcontext (transfns mutate the transvalue in place).
-                let value = if !init.isnull && !self.trans_byval[aggno] {
-                    // SAFETY: node-lifetime initval datum; agg_node is live.
-                    unsafe {
-                        ::execexpr::agg_datum_copy(
-                            an.as_ref().aggcontext(),
-                            init.value,
-                            self.trans_typlen[aggno],
-                        )?
-                    }
-                } else {
-                    init.value
-                };
-                // SAFETY: aggno < the pergroup array's once-allocated length.
-                unsafe {
-                    self.pergroup_base.as_ptr().add(aggno).write(AggPerGroup {
-                        trans_value: value,
-                        trans_value_is_null: init.isnull,
-                        no_trans_value: init.isnull,
-                    });
-                }
-            }
+            self.default_agg_partition_init()?;
         }
 
         // Advance until a row past the current peer group (or partition end).
@@ -2778,9 +2751,56 @@ impl<'mcx> WindowAggStateData<'mcx> {
             self.agg_row_valid = false;
         }
 
-        // finalize + save for frame reuse; by-ref saves copy into the
-        // aggcontext (C's datumCopy — the per-tuple result memory resets
-        // before the next row's projection).
+        // finalize + save for frame reuse (shared with the lane's per-group
+        // close — see `default_agg_finalize_save`).
+        self.default_agg_finalize_save(estate)
+    }
+
+    // The partition-restart arm of `eval_windowaggregates_default` (the
+    // currentpos == 0 block), extracted verbatim so the lane's per-partition
+    // begin (lane.rs) shares it: reset the aggcontext, then re-initialize
+    // every pergroup transvalue from its initval.
+    fn default_agg_partition_init(&mut self) -> PgResult<()> {
+        // C resets the aggcontext via the restart path; internal states
+        // and saved by-ref results from the previous partition die here.
+        let mut an = self.agg_node.expect("aggs imply agg_node");
+        // SAFETY: sole access path to the node during the reset.
+        unsafe { an.as_mut() }.reset();
+        for aggno in 0..self.trans_init.len() {
+            let init = self.trans_init[aggno];
+            // C initialize_aggregate: by-ref initvals datumCopy into the
+            // aggcontext (transfns mutate the transvalue in place).
+            let value = if !init.isnull && !self.trans_byval[aggno] {
+                // SAFETY: node-lifetime initval datum; agg_node is live.
+                unsafe {
+                    ::execexpr::agg_datum_copy(
+                        an.as_ref().aggcontext(),
+                        init.value,
+                        self.trans_typlen[aggno],
+                    )?
+                }
+            } else {
+                init.value
+            };
+            // SAFETY: aggno < the pergroup array's once-allocated length.
+            unsafe {
+                self.pergroup_base.as_ptr().add(aggno).write(AggPerGroup {
+                    trans_value: value,
+                    trans_value_is_null: init.isnull,
+                    no_trans_value: init.isnull,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    // The finalize tail of `eval_windowaggregates_default`, extracted
+    // verbatim so the lane's per-group close (lane.rs) shares it: finalize
+    // each aggregate from its pergroup state, write the per-tuple result to
+    // ecxt_aggvalues, and save a frame-reuse copy (by-ref results datumCopy
+    // into the aggcontext — the per-tuple result memory resets before the
+    // next row's projection).
+    fn default_agg_finalize_save(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
         let per_tuple = estate.ecxt(self.ps_ExprContext).per_tuple_mcx();
         let mut an = self.agg_node.expect("aggs imply agg_node");
         // SAFETY: the node outlives the loop; no other path touches it here.
