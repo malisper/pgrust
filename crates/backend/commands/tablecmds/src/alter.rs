@@ -977,7 +977,13 @@ fn ATPrepCmd<'mcx>(
         AlterTableType::AT_GenericOptions | AlterTableType::AT_AlterColumnGenericOptions => {
             AT_PASS_MISC
         }
-        other => unported(&format!("ATPrepCmd {other:?}")),
+        // unported: remaining ATPrepCmd subcommand arms
+        _ => {
+            return Err(Box::new(
+                PgError::new(ERROR, "this form of ALTER TABLE is not supported yet".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ))
+        }
     };
     wqueue[tabidx].subcmds[pass].lappend(mcx, cnode)?;
     Ok(())
@@ -4800,7 +4806,17 @@ fn ATExecAddConstraint<'mcx>(
             mcx, wqueue, rel, constr, recurse, &old_desc, lockmode,
         );
     }
-    unported(&format!("ATExecAddConstraint {:?}", constr.contype));
+    // unported: ATExecAddConstraint non-FOREIGN constraint types
+    // (CHECK/NOT NULL ALTER lane)
+    let _ = constr.contype;
+    Err(Box::new(
+        PgError::new(
+            ERROR,
+            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+                .to_string(),
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
 // ATExecAddInherit / ATExecDropInherit exec wrappers; the catalog work lives

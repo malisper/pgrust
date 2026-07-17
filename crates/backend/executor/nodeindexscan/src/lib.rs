@@ -10,11 +10,11 @@ extern crate alloc;
 
 use ::datum::Datum;
 use ::execexpr::{
-    exec_eval_expr, exec_init_expr, exec_init_qual, exec_qual, EvalSlots, ExprState, ParamBind,
+    exec_eval_expr, EvalSlots, ExprState, ParamBind,
     INDEX_VAR,
 };
 use ::execscan::{ScanNode, ScanState};
-use ::executils::{EStateData, EcxtId, ExecSlotId};
+use ::executils::{exec_recheck_qual_and_reset, EStateData, EcxtId, ExecSlotId};
 use ::heaptuple::HeapTuple;
 use ::indexam::{
     index_beginscan, index_close, index_endscan, index_getnext_slot, index_getnext_tid,
@@ -144,17 +144,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
         slot: ExecSlotId,
     ) -> PgResult<bool> {
         let ecxt = self.ss.ps_ExprContext;
-        estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
-        let passes = {
-            let mut slots = EvalSlots {
-                scan: Some(estate.slot_mut(slot)),
-                inner: None,
-                outer: None,
-            };
-            exec_qual(self.indexqualorig.as_deref_mut(), &mut slots)?
-        };
-        estate.ecxt_mut(ecxt).reset();
-        Ok(passes)
+        exec_recheck_qual_and_reset(self.indexqualorig.as_deref_mut(), estate, ecxt, slot)
     }
 
     /// `IndexNext`; `IndexNextWithReorder` when ORDER BY keys exist (C
@@ -190,16 +180,12 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
             // (ExecQualAndReset shape). Btree never sets xs_recheck.
             if scandesc.xs_recheck {
                 let ecxt = self.ss.ps_ExprContext;
-                estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
-                let passes = {
-                    let mut slots = EvalSlots {
-                        scan: Some(estate.slot_mut(slot_id)),
-                        inner: None,
-                        outer: None,
-                    };
-                    exec_qual(self.indexqualorig.as_deref_mut(), &mut slots)?
-                };
-                estate.ecxt_mut(ecxt).reset();
+                let passes = exec_recheck_qual_and_reset(
+                    self.indexqualorig.as_deref_mut(),
+                    estate,
+                    ecxt,
+                    slot_id,
+                )?;
                 if !passes {
                     continue;
                 }
@@ -332,16 +318,12 @@ impl<'mcx> IndexScanState<'mcx> {
                     estate.instr_set_index_nsearches(plan_node_id, n);
                 }
                 if scandesc.xs_recheck {
-                    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot_id);
-                    let passes = {
-                        let mut slots = EvalSlots {
-                            scan: Some(estate.slot_mut(slot_id)),
-                            inner: None,
-                            outer: None,
-                        };
-                        exec_qual(indexqualorig.as_deref_mut(), &mut slots)?
-                    };
-                    estate.ecxt_mut(ecxt).reset();
+                    let passes = exec_recheck_qual_and_reset(
+                        indexqualorig.as_deref_mut(),
+                        estate,
+                        ecxt,
+                        slot_id,
+                    )?;
                     if !passes {
                         check_for_interrupts()?;
                         continue;
@@ -366,7 +348,12 @@ impl<'mcx> IndexScanState<'mcx> {
                     // SAFETY: the per-tuple context object outlives the plan
                     // (reset-only).
                     unsafe { expr.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
-                    let nd = {
+                    let nd = if expr.has_subplan() {
+                        // C ExecEvalExpr recurses into ExecEvalSubPlan; pump
+                        // the EEOP_SUBPLAN suspension through the estate's
+                        // subplan driver instead (ecxt_scantuple bound above).
+                        ::executils::exec_eval_expr_with_subplans(expr, estate, ecxt)?
+                    } else {
                         let mut slots = EvalSlots {
                             scan: Some(estate.slot_mut(slot_id)),
                             inner: None,
@@ -565,7 +552,7 @@ pub fn exec_init_index_scan_rel<'mcx>(
     };
     execscan::exec_assign_scan_projection_info(mcx, estate, &mut ss, &node.scan.plan.targetlist)?;
     let params = estate.param_bind();
-    let (qual, indexqualorig, iss_ScanKeys, orderby_keys, runtime_keys) =
+    let (qual, indexqualorig, iss_ScanKeys, iss_OrderBy, runtime_keys) =
         ::executils::with_subplan_compile_env(estate, |env| -> PgResult<_> {
             let qual = ::execexpr::exec_init_qual_subplans(mcx, &node.scan.plan.qual, params, env)?;
             let indexqualorig =
@@ -578,17 +565,19 @@ pub fn exec_init_index_scan_rel<'mcx>(
             let orderby_keys = exec_index_build_scan_keys(
                 mcx, &index_rel, &node.indexorderby, params, true, &mut runtime_keys, env,
             )?;
-            Ok((qual, indexqualorig, scan_keys, orderby_keys, runtime_keys))
+            // orderbyorig re-evaluation (xs_recheckorderby) can carry the
+            // same SubPlans the runtime keys do — compile under the env.
+            let orderby = if orderby_keys.is_empty() {
+                None
+            } else {
+                Some(::mcx::alloc_in(
+                    mcx,
+                    init_orderby_state(mcx, node, params, orderby_keys, env)?,
+                )?)
+            };
+            Ok((qual, indexqualorig, scan_keys, orderby, runtime_keys))
         })?;
     ss.qual = qual;
-    let iss_OrderBy = if orderby_keys.is_empty() {
-        None
-    } else {
-        Some(::mcx::alloc_in(
-            mcx,
-            init_orderby_state(mcx, node, params, orderby_keys)?,
-        )?)
-    };
     // C keeps ps_ExprContext as the standard econtext and gives runtime keys
     // their own, reset per rescan.
     let iss_Runtime = if runtime_keys.is_empty() {
@@ -633,6 +622,7 @@ fn init_orderby_state<'mcx>(
     node: &IndexScan<'mcx>,
     params: ParamBind<'mcx>,
     orderby_keys: PgVec<'mcx, ScanKeyData>,
+    sub: Option<::execexpr::SubplanCompileEnv>,
 ) -> PgResult<OrderByState<'mcx>> {
     let n = orderby_keys.len();
     debug_assert_eq!(n, node.indexorderbyops.len());
@@ -654,7 +644,8 @@ fn init_orderby_state<'mcx>(
         typlens.push(typlen);
         typbyvals.push(typbyval);
         orderbyorig.push(
-            exec_init_expr(mcx, Some(orderbyexpr), params)?.expect("orderby expr compiles"),
+            ::execexpr::exec_init_expr_subplans(mcx, Some(orderbyexpr), params, sub)?
+                .expect("orderby expr compiles"),
         );
     }
     let mut values: PgVec<'mcx, Datum> = PgVec::new_in(mcx);
@@ -1126,12 +1117,22 @@ pub fn exec_index_eval_runtime_keys<'mcx>(
             rk.key_expr
                 .arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx())
         };
-        let mut slots = EvalSlots {
-            scan: None,
-            inner: None,
-            outer: None,
+        let nd = if rk.key_expr.has_subplan() {
+            // A correlated SubPlan pushed into an Index Cond (min-subquery
+            // runtime key, HammerDB TPROC-C DELIVERY): C's ExecEvalExpr
+            // recurses into ExecEvalSubPlan; the decomposed interpreter must
+            // pump the EEOP_SUBPLAN suspension through the estate's subplan
+            // driver instead. The runtime econtext carries no scan/inner/
+            // outer tuples, matching the plain arm's all-None slots.
+            ::executils::exec_eval_expr_with_subplans(&mut rk.key_expr, estate, ecxt)?
+        } else {
+            let mut slots = EvalSlots {
+                scan: None,
+                inner: None,
+                outer: None,
+            };
+            exec_eval_expr(&mut rk.key_expr, &mut slots)?
         };
-        let nd = exec_eval_expr(&mut rk.key_expr, &mut slots)?;
         let key = if rk.orderby {
             &mut orderby_keys[rk.scan_key]
         } else {

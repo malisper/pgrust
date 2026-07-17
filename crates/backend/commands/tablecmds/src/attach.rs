@@ -24,10 +24,6 @@ use types_rel::{
 
 use crate::alter::{attname_lookup, oid_scankey, AlteredTableInfo};
 
-fn unported(what: &str) -> ! {
-    panic!("unported: tablecmds attach {what}")
-}
-
 fn err(msg: String, sqlstate: types_error::SqlState) -> Box<PgError> {
     Box::new(PgError::new(ERROR, msg).with_sqlstate(sqlstate))
 }
@@ -124,7 +120,13 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
 
     match attachrel.rd_rel.relkind {
         RELKIND_RELATION | RELKIND_PARTITIONED_TABLE | types_rel::RELKIND_FOREIGN_TABLE => {}
-        other => unported(&format!("ATTACH PARTITION of relkind {}", other as char)),
+        // unported: ATTACH PARTITION of remaining relkinds
+        _ => {
+            return Err(err(
+                "ATTACH PARTITION for this type of relation is not supported yet".to_string(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ))
+        }
     }
     if !aclchk::object_ownercheck(
         types_core::RELATION_RELATION_ID,
