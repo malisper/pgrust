@@ -13,6 +13,7 @@ guc = { path = "../../utils/misc/guc" }
 types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }
+fd = { path = "../../storage/file/fd" }
 miscinit = { path = "../../utils/init/miscinit" }
 runtime = { path = "../../executor/runtime" }
 bgjobs = { path = "../bgjobs" }
