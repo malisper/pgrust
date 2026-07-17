@@ -42,6 +42,7 @@
 
 mod blocking;
 mod clock;
+mod ledger;
 mod lifecycle;
 mod morsel;
 mod rg;
@@ -52,6 +53,8 @@ mod stats;
 mod sync;
 mod taskset;
 
+#[cfg(not(loom))]
+mod caller;
 #[cfg(not(loom))]
 mod io;
 #[cfg(not(loom))]
@@ -64,6 +67,7 @@ use std::sync::Arc;
 
 pub use blocking::{blocking_io_section, BlockingIoSection, PermitThreadReg};
 pub use clock::{Clock, MonotonicClock, VirtualClock};
+pub use ledger::{ArrivalNudge, ClaimVerdict, LedgerBudgets, LedgerSnapshot, WidthRequest};
 pub use lifecycle::{
     ForeignParticipationDisabled, Generation, LifecycleState, ParticipantOwner, QueryTaskLifecycle,
     TaskHandle, TaskLifecycle, TaskParticipant,
@@ -83,6 +87,8 @@ pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
 
+#[cfg(not(loom))]
+pub use caller::CallerWorker;
 #[cfg(not(loom))]
 pub use pool::WorkerPool;
 
@@ -234,7 +240,7 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -250,8 +256,60 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit`] carrying an explicit [`WidthRequest`] (WS-B
+    /// admission ledger, single-executor Phase 0.1). [`QuerySpec`] stays
+    /// literally source-compatible (the integration-train law above) — new
+    /// entries carry the width beside the spec; existing entries pass the
+    /// no-information request. The request is ledger policy only: with the
+    /// PGRUST_RUNTIME_LEDGER_V2 switch OFF (the default) it is recorded
+    /// nowhere and behavior is byte-identical to [`Runtime::submit`].
+    pub fn submit_with_width(
+        &self,
+        spec: QuerySpec,
+        width: WidthRequest,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width));
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit_pinned_with_affinity`] carrying an explicit
+    /// [`WidthRequest`] — see [`Runtime::submit_with_width`].
+    pub fn submit_pinned_with_width(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+        width: WidthRequest,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width));
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// WS-B ledger-policy toggle (tests / A-B). Production default is the
+    /// PGRUST_RUNTIME_LEDGER_V2 kill switch, read once at construction —
+    /// DEFAULT OFF at this increment. Toggle before submitting.
+    pub fn set_ledger(&self, on: bool) {
+        self.sched.set_ledger(on);
+    }
+
+    pub fn ledger_enabled(&self) -> bool {
+        self.sched.ledger_enabled()
+    }
+
+    /// Admission-ledger instrument readback (tests / diagnostics).
+    pub fn ledger_snapshot(&self) -> LedgerSnapshot {
+        self.sched.ledger.snapshot()
+    }
+
+    /// WS-B test hook (the set_decay_quantum_ns precedent): per-instance
+    /// JOIN threshold so deterministic tests exercise sub-threshold
+    /// admission. Production keeps PGRUST_RUNTIME_LEDGER_JOIN_US (default
+    /// 0 = inert until the calibration lane lands a measured value).
+    pub fn set_ledger_join_threshold_ns(&self, ns: u64) {
+        self.sched.ledger.set_join_threshold_ns(ns);
     }
 
     /// M5-4 stride toggle (tests / A-B arms). Production default is the
@@ -315,7 +373,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -344,7 +402,7 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 

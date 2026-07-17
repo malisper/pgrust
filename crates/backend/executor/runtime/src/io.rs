@@ -104,6 +104,10 @@ fn io_permit_release() -> bool {
     }
     let released = WORKER_RT.with(|c| match &*c.borrow() {
         Some(rt) => {
+            // Grant follows permit (§2.8 × ledger composition): donate the
+            // width grant FIRST so a standby woken by the permit release
+            // finds the slot joinable (no-op under knob OFF / off-task).
+            crate::sched::ledger_donate_current();
             rt.execution_permits().release();
             true
         }
@@ -130,6 +134,9 @@ fn io_permit_reacquire() {
             .execution_permits()
             .acquire();
     });
+    // Grant follows permit: retake the width grant only once the permit is
+    // back (transient over-target resolves via Yield; no-op under knob OFF).
+    crate::sched::ledger_restore_current();
     IN_IO_SECTION.set(false);
     PERMIT_HELD.set(true);
 }
