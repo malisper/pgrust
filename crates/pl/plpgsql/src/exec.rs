@@ -306,7 +306,14 @@ impl Drop for SimpleExpr {
         // teardown never runs them (FuncFrame::new_in's contract; the
         // memleak4 estate-reset lesson).
         self.state.release_frames();
-        plancache::ReleaseCachedPlan(self.cplan);
+        // A FATAL mid-evaluation unwinds a stack-held (taken-out) state
+        // AFTER proc_exit's callbacks force-cleared the plancache
+        // (ReleaseAllCachedPlansAtExit); releasing then would be a
+        // stale-handle panic INSIDE the unwind (abort). The thread is
+        // exiting — the pin bookkeeping is already gone with the cache.
+        if !elog::config::proc_exit_inprogress() {
+            plancache::ReleaseCachedPlan(self.cplan);
+        }
     }
 }
 
@@ -1259,17 +1266,27 @@ impl<'a> Estate<'a> {
             SimpleTake::Ready(se) => se,
             SimpleTake::Skip | SimpleTake::Build { .. } => return Ok(None),
         };
-        if !plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan)? {
+        // Every exit below must restore the InUse slot (an error leaving it
+        // InUse would silently demote this expression to SPI forever).
+        match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
+            Ok(true) => self.eval_simple_taken(expr, se).map(Some),
             // C's replan arm resets to "not simple" and rebuilds in place
             // (pl_exec.c:6072-6142); here the slow path redetermines after
             // the ensure_plan probe has had its chance to re-prepare with
             // fresh hook tables.
-            let plan = se.plan;
-            drop(se);
-            put_simple(expr.expr_id, plan, SimpleState::Unknown);
-            return Ok(None);
+            Ok(false) => {
+                let plan = se.plan;
+                drop(se);
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                Ok(None)
+            }
+            Err(e) => {
+                let plan = se.plan;
+                drop(se);
+                put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                Err(e)
+            }
         }
-        self.eval_simple_taken(expr, se).map(Some)
     }
 
     // exec_eval_simple_expr; Ok(None) = not simple, take the SPI path.
@@ -1285,8 +1302,17 @@ impl<'a> Estate<'a> {
             // recursion/error quarantine (expr_simple_in_use, :6042).
             SimpleTake::Skip => return Ok(None),
             SimpleTake::Ready(se) => {
-                if plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan)? {
-                    return self.eval_simple_taken(expr, se).map(Some);
+                match plancache::CachedPlanIsSimplyValid(se.psrc, se.cplan) {
+                    Ok(true) => return self.eval_simple_taken(expr, se).map(Some),
+                    Ok(false) => {}
+                    Err(e) => {
+                        // Restore the slot (an error leaving InUse would
+                        // demote this expression to SPI forever).
+                        let plan = se.plan;
+                        drop(se);
+                        put_simple(expr.expr_id, plan, SimpleState::Unknown);
+                        return Err(e);
+                    }
                 }
                 // Invalidated since the fast path last saw it (or the fast
                 // path just parked it): release and redetermine — C's
