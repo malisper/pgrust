@@ -201,3 +201,7 @@ procarray_seams = { path = "../../storage/ipc/procarray_seams" }
 # xlog-active probe the nbtree read path consults.
 types_nbtree = { path = "../../../_support/types/types_nbtree" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+# WS-N dml A/B corpus (tests::dml_ab): CheckValidResultRel's replica-identity
+# probe on the fake result relation.
+execreplication_seams = { path = "../execreplication_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }
