@@ -2226,11 +2226,17 @@ fn window_agg_arm<'mcx>(
     w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2 dispatch hook (Phase-1 windows lane, default-OFF
-    // PGRUST_LANE_V2_WINDOWS). On refuse this falls through to the UNCHANGED
-    // path below; lane logic + refuse-sets live in `lanev2::windows`.
+    // Lane-executor-v2 dispatch hooks (both default-OFF; on refuse each
+    // falls through — ultimately to the UNCHANGED path below). First the
+    // Phase-1 W1 batch lane (PGRUST_LANE_V2_WINDOWS, sticky owner of its
+    // admitted shapes), then the wave-2 WS-M second hook: T2-A row-mode
+    // delegation (PGRUST_LANE_V2_WINDOWS_T2, per-pull, hosts everything W1
+    // refused). Lane logic + refuse-sets live in `lanev2::windows`.
     if crate::lanev2::enabled() {
         if let Some(r) = crate::lanev2::try_own_window_agg(w, estate)? {
+            return Ok(r);
+        }
+        if let Some(r) = crate::lanev2::try_own_window_agg_t2(w, estate)? {
             return Ok(r);
         }
     }
