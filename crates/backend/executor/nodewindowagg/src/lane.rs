@@ -850,7 +850,19 @@ pub fn lane_framed_emit_next<'mcx>(
 /// Rescan hook: forget the phase; the node-side machine is reset by
 /// `exec_rescan_window_agg` (release_partition + first_part invalidation),
 /// which the execami arms already run before this.
-pub fn lane_framed_reset(drive: &mut LaneFramedDrive) {
+///
+/// One node-side flag is the LANE's to reset: `more_partitions`.
+/// `exec_rescan_window_agg` never touches it because the Volcano arm always
+/// overwrites it (begin_partition's fetch-None arm / spool_tuples) before
+/// its one read — but `lane_framed_input_done`'s parked-partition branch
+/// reads it FIRST, so a stale `true` from a drive abandoned mid-partition
+/// with a parked boundary row (e.g. under LIMIT/LATERAL) would resurrect
+/// that branch after the rescan cleared `first_part_valid`: a debug_assert
+/// panic in debug, the framed-fetch tripwire PgError in release, where
+/// Volcano returns zero rows on an empty re-feed. Clearing it here restores
+/// Volcano's empty-rescan behavior exactly (wave-3 review finding 1).
+pub fn lane_framed_reset(state: &mut WindowAggStateData<'_>, drive: &mut LaneFramedDrive) {
+    state.more_partitions = false;
     drive.emitting = false;
     drive.advance = false;
 }
