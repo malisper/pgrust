@@ -3018,9 +3018,9 @@ mod ledger_tests {
         assert_eq!(l.snapshot().renudges, 5);
     }
 
-    /// Unmanaged slots (never admitted: DAG fan-out siblings, knob toggle
-    /// windows) fail OPEN at every entry point, and their join/leave
-    /// accounting stays balanced.
+    /// Unmanaged slots (no admitted entry: DAG fan-out siblings, knob
+    /// toggle windows) fail OPEN at every entry point, and their
+    /// join/leave accounting stays balanced.
     #[test]
     fn unmanaged_slots_fail_open() {
         let l = AdmissionLedger::new(4, budgets(2));
@@ -3030,6 +3030,24 @@ mod ledger_tests {
         assert!(!l.renudge(3));
         assert!(l.try_join(3));
         assert_eq!(l.leave(3), 0);
+    }
+
+    /// Regression (caught by the knob-ON DAG suite): a RETIRED slot that a
+    /// DAG fan-out later publishes into WITHOUT a fresh admission must
+    /// fail open like any unmanaged slot — keying "unmanaged" off the
+    /// epoch word left the reused slot filtered/refused forever.
+    #[test]
+    fn retired_slot_reuse_fails_open() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(2));
+        assert!(l.try_join(0));
+        assert_eq!(l.leave(0), 0);
+        l.retire(0);
+        assert!(l.wants_workers(0), "retired slot must not stay filtered");
+        assert!(l.advertises(0));
+        assert!(l.try_join(0), "fan-out occupant of a retired slot must be joinable");
+        assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
+        assert_eq!(l.leave(0), 0);
     }
 
     /// Seeded-PRNG randomized invariants (no property-test dep exists in

@@ -190,9 +190,11 @@ struct EntryWords {
     /// Current allowed width; 0 = not admitted. granted<=target is advisory
     /// (transient overshoot resolves via Yield at the next claim boundary).
     target: AtomicU32,
-    /// Admission epoch: 0 = never admitted (unmanaged, every entry point
-    /// fails open); bumped at admit — try_join re-reads it around the
-    /// granted CAS to bound stale joins across slot reuse.
+    /// Admission epoch, bumped at admit — try_join re-reads it around the
+    /// granted CAS to bound stale joins across an admission boundary. The
+    /// UNMANAGED marker is `target == 0` (no admitted entry), NOT this
+    /// word: a retired slot keeps a nonzero epoch, and a DAG fan-out may
+    /// publish into it without a fresh admission — it must fail open.
     epoch: AtomicU32,
     /// Remaining bounded re-nudges this recompute window.
     renudge_left: AtomicU32,
@@ -316,15 +318,17 @@ impl AdmissionLedger {
 
     /// A worker joins slot's task set (evaluated before run_task). False =
     /// the grant would exceed target or the epoch moved — re-pick. CAS on
-    /// granted only; no lock. Unmanaged slots (epoch 0: DAG fan-out
-    /// siblings, knob toggles) fail OPEN but still count the worker, so a
-    /// later admission's words start coherent with reality.
+    /// granted only; no lock. Unmanaged slots (target 0 = no admitted
+    /// entry: DAG fan-out siblings, retired-then-reused slots, knob
+    /// toggles) fail OPEN but still count the worker, so a later
+    /// admission's words start coherent with reality.
     pub(crate) fn try_join(&self, slot: usize) -> bool {
         let e = &self.entries[slot];
         let epoch = e.epoch.load(Ordering::Relaxed);
         let mut g = e.granted.load(Ordering::Relaxed);
         loop {
-            if epoch != 0 && g >= e.target.load(Ordering::Relaxed) {
+            let t = e.target.load(Ordering::Relaxed);
+            if t != 0 && g >= t {
                 return false;
             }
             match e.granted.compare_exchange_weak(
@@ -428,22 +432,25 @@ impl AdmissionLedger {
     /// Pick filter composed into pick_slot's stride scan: advertised and
     /// granted < target. Relaxed/advisory — a stale true resolves through
     /// try_join and the slot word into Retry, like every pick input.
-    /// Unmanaged slots (epoch 0) fail open.
+    /// Unmanaged slots (target 0 = no admitted entry — including a RETIRED
+    /// slot a DAG fan-out later publishes into without a fresh admission)
+    /// fail open, or the reused slot would be filtered forever.
     pub(crate) fn wants_workers(&self, slot: usize) -> bool {
         let e = &self.entries[slot];
-        if e.epoch.load(Ordering::Relaxed) == 0 {
+        let t = e.target.load(Ordering::Relaxed);
+        if t == 0 {
             return true;
         }
-        e.advert.load(Ordering::Relaxed) != 0
-            && e.granted.load(Ordering::Relaxed) < e.target.load(Ordering::Relaxed)
+        e.advert.load(Ordering::Relaxed) != 0 && e.granted.load(Ordering::Relaxed) < t
     }
 
     /// Whether publications into `slot` are pool-visible (set_active +
-    /// publish wake). Unmanaged slots fail open — DAG fan-out siblings and
-    /// knob-toggle windows behave exactly as before.
+    /// publish wake). Unmanaged slots (target 0) fail open — DAG fan-out
+    /// siblings, retired-then-reused slots, and knob-toggle windows behave
+    /// exactly as before.
     pub(crate) fn advertises(&self, slot: usize) -> bool {
         let e = &self.entries[slot];
-        e.epoch.load(Ordering::Relaxed) == 0 || e.advert.load(Ordering::Relaxed) != 0
+        e.target.load(Ordering::Relaxed) == 0 || e.advert.load(Ordering::Relaxed) != 0
     }
 
     pub fn snapshot(&self) -> LedgerSnapshot {
