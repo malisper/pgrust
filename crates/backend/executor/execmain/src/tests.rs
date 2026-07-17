@@ -5512,7 +5512,11 @@ mod mergejoin_rowmode_ab {
     /// MJExamineQuals' get_op_opfamily_properties probes (strategy 3 =
     /// BTEqualStrategyNumber / COMPARE_EQ). install_seams covers the rest
     /// (btsortsupport via lookup_pg_amproc, operator shape, type shapes).
-    fn install_mj_seams() {
+    // pub(super): the WS-L rowmode_tail_ab corpus reuses this fixture + the
+    // plan builder below for its MergeJoin-over-tail-owned-Material
+    // mark/restore leg (the blocking inc-1 composition proof) — the WS-G
+    // KNOB-visibility precedent, test-file-only.
+    pub(super) fn install_mj_seams() {
         // The process-shared pg_amop strategy installer (express_ab needs
         // the same seam; seams are set-once). MJExamineQuals only probes
         // INT4_EQ in INTEGER_BTREE_FAM → strategy 3, which the shared
@@ -5522,7 +5526,7 @@ mod mergejoin_rowmode_ab {
 
     /// Which mark/restore-capable wrapper shields the inner scan.
     #[derive(Clone, Copy, PartialEq)]
-    enum Inner {
+    pub(super) enum Inner {
         /// Material over the inner seqscan (order-preserving; exercises the
         /// mj_ExtraMarks cadence — ExecInitMergeJoin sets it for a Material
         /// inner without REWIND).
@@ -5535,7 +5539,7 @@ mod mergejoin_rowmode_ab {
     /// MergeJoin(mergeclause: outer.c1 = inner.c1) over two fake-heap
     /// seqscans, the inner behind a mark/restore-capable wrapper — the plan
     /// shape the planner emits for a merge join with a pre-sorted outer.
-    fn mk_mergejoin_pstmt<'mcx>(
+    pub(super) fn mk_mergejoin_pstmt<'mcx>(
         mcx: ::mcx::Mcx<'mcx>,
         outer_relid: u32,
         inner_relid: u32,
@@ -5996,6 +6000,198 @@ mod mergejoin_rowmode_ab {
         }
         crate::lanev2::mergejoin_set_for_tests(false);
         drop(guard);
+        scanfix::quiesced();
+    }
+}
+
+// ===========================================================================
+// WS-L wave-2 row-mode tail — A/B unit corpus (lanev2/rowmode_tail.rs behind
+// PGRUST_LANE_V2_ROWMODE; contract §5 Stage 1+). Chunk 1: Material
+// delegation with rescan + the BLOCKING mergejoin-over-material mark/restore
+// composition leg (contract §6-WS-L(4)) with BOTH knobs on. Per-shape
+// engagement is asserted through the ratified ROWMODE_TAIL_OWNED_FOR_TESTS
+// probe array (contract §3.4), never the shared stats counters.
+// ===========================================================================
+mod rowmode_tail_ab {
+    use super::*;
+
+    fn tail_probe(name: &str) -> u64 {
+        crate::lanev2::tail_owned_probe_for_tests(name)
+    }
+
+    fn row(vals: &[i32]) -> Vec<Option<i32>> {
+        vals.iter().map(|&v| Some(v)).collect()
+    }
+
+    /// Material over a fake-heap seqscan, projecting both columns through
+    /// OUTER_VAR — the bare shape the tail hosts as a delegation leaf.
+    fn mk_material_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        relid: u32,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{Material, Plan, Scan, SeqScan};
+        use ::types_nodes::primnodes::OUTER_VAR;
+
+        let scan_tlist = {
+            let a = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, 1, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+        let mat_tlist = {
+            let a = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut mat = Node::build::<Material>(mcx).unwrap();
+        mat.plan.targetlist = mat_tlist;
+        mat.plan.lefttree = Some(scan);
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perm = Node::mk(
+            mcx,
+            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mat.seal());
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perm).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    // Material delegation A/B: knob OFF then ON over the same plan, two
+    // passes (pass 2 = rescan → tuplestore re-read), byte-equal rows; the
+    // OFF arm must not move the Material probe, the ON arm must.
+    #[test]
+    fn material_tail_ab_with_rescan() {
+        install_seams();
+        scanfix::install();
+        let relid: u32 = 73021;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (2, 20), (3, 30)]]);
+        let expected = vec![row(&[1, 10]), row(&[2, 20]), row(&[3, 30])];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::rowmode_set_for_tests(false);
+        let probe_before_off = tail_probe("material");
+        let off = drain_wide_rows_nullable(mk_material_pstmt(leaked_mcx(), relid), 2, 2);
+        assert_eq!(
+            tail_probe("material"),
+            probe_before_off,
+            "knob OFF must never engage the tail"
+        );
+
+        crate::lanev2::rowmode_set_for_tests(true);
+        let probe_before_on = tail_probe("material");
+        let on = drain_wide_rows_nullable(mk_material_pstmt(leaked_mcx(), relid), 2, 2);
+        let probe_after_on = tail_probe("material");
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert_eq!(off, vec![expected.clone(), expected]);
+        assert!(
+            probe_after_on > probe_before_on,
+            "ON arm never engaged the Material tail drive"
+        );
+        scanfix::quiesced();
+    }
+
+    // THE BLOCKING inc-1 composition leg (contract §6-WS-L(4)): MergeJoin
+    // hosted behind PGRUST_LANE_V2_MERGEJOIN over a Material inner hosted
+    // behind PGRUST_LANE_V2_ROWMODE. Duplicate outer keys force
+    // EXEC_MJ_TESTOUTER restores: the FSM's mark/restore calls enter the
+    // Material node through execami DIRECTLY while the tail owns its pulls —
+    // rows must equal the both-knobs-off oracle, replay row included.
+    #[test]
+    fn mj_over_tail_material_mark_restore_ab() {
+        install_seams();
+        mergejoin_rowmode_ab::install_mj_seams();
+        scanfix::install();
+        let outer: u32 = 73023;
+        let inner: u32 = 73024;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (2, 21), (4, 40)]]);
+        scanfix::register_table_2col(inner, &[&[(2, 200), (2, 201), (3, 300), (5, 500)]]);
+        let expected = vec![
+            row(&[2, 20, 2, 200]),
+            row(&[2, 20, 2, 201]),
+            row(&[2, 21, 2, 200]), // <- replay after restore
+            row(&[2, 21, 2, 201]),
+        ];
+        let mk = move |mcx| {
+            mergejoin_rowmode_ab::mk_mergejoin_pstmt(
+                mcx,
+                outer,
+                inner,
+                ::types_nodes::JoinType::JOIN_INNER,
+                mergejoin_rowmode_ab::Inner::Material,
+            )
+        };
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::mergejoin_set_for_tests(false);
+        crate::lanev2::rowmode_set_for_tests(false);
+        let off = drain_wide_rows_nullable(mk(leaked_mcx()), 4, 2);
+
+        crate::lanev2::mergejoin_set_for_tests(true);
+        crate::lanev2::rowmode_set_for_tests(true);
+        let mat_before = tail_probe("material");
+        let mj_before = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let on = drain_wide_rows_nullable(mk(leaked_mcx()), 4, 2);
+        let mat_after = tail_probe("material");
+        let mj_after = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
+            .load(std::sync::atomic::Ordering::Relaxed);
+        crate::lanev2::mergejoin_set_for_tests(false);
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+
+        assert_eq!(off, on, "both-knobs-on must equal the both-off oracle");
+        assert_eq!(off, vec![expected.clone(), expected]);
+        assert!(mj_after > mj_before, "MergeJoin hosting never engaged");
+        assert!(mat_after > mat_before, "Material tail hosting never engaged under the MJ inner");
         scanfix::quiesced();
     }
 }
