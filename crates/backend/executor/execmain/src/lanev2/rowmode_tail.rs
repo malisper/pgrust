@@ -173,7 +173,10 @@ pub(super) fn try_own_subquery_scan_tail<'mcx>(
 
 /// FunctionScan as a delegation leaf: `exec_function_scan` (SRF
 /// materialize/value-per-call protocols run inside it, state node-resident).
-struct FunctionScanSource;
+/// `pub(super)`: the wave-3 WS-Q source form (tail_source.rs) reuses THIS
+/// body — statement-identity between the two hosting forms by construction
+/// (same for the five other T3 shapes below).
+pub(super) struct FunctionScanSource;
 
 impl<'mcx> RowSource<'mcx> for FunctionScanSource {
     type Node = ::nodefunctionscan::FunctionScanState<'mcx>;
@@ -192,11 +195,16 @@ pub fn try_own_function_scan<'mcx>(
     fs: &mut ::mcx::PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Wave-3 WS-Q: source form FIRST (the upgrade, `PGRUST_LANE_V2_SCANS_T3`);
+    // delegation under `PGRUST_LANE_V2_ROWMODE` is the rollback semantics.
+    if let Some(r) = super::tail_source::try_own_function_scan_t3(&mut **fs, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::FunctionScan, &mut **fs, &mut FunctionScanSource, estate)
 }
 
 /// TableFuncScan (XMLTABLE/JSON_TABLE) as a delegation leaf.
-struct TableFuncScanSource;
+pub(super) struct TableFuncScanSource;
 
 impl<'mcx> RowSource<'mcx> for TableFuncScanSource {
     type Node = ::nodetablefuncscan::TableFuncScanState<'mcx>;
@@ -215,6 +223,9 @@ pub fn try_own_table_func_scan<'mcx>(
     ts: &mut ::mcx::PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = super::tail_source::try_own_table_func_scan_t3(&mut **ts, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::TableFuncScan, &mut **ts, &mut TableFuncScanSource, estate)
 }
 
@@ -245,7 +256,7 @@ pub fn try_own_values_scan<'mcx>(
 /// SampleScan as a delegation leaf (TSM method calls stay inside the ported
 /// body; the EPQ arm inside `exec_sample_scan` is unreachable through this
 /// hosting — the Epq gate refused first — and delegated verbatim anyway).
-struct SampleScanSource;
+pub(super) struct SampleScanSource;
 
 impl<'mcx> RowSource<'mcx> for SampleScanSource {
     type Node = ::nodesamplescan::SampleScanState<'mcx>;
@@ -264,12 +275,15 @@ pub fn try_own_sample_scan<'mcx>(
     ss: &mut ::mcx::PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = super::tail_source::try_own_sample_scan_t3(&mut **ss, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::SampleScan, &mut **ss, &mut SampleScanSource, estate)
 }
 
 /// TidScan as a delegation leaf (`WHERE ctid = ...` / `= ANY(...)` /
 /// CURRENT OF; the tid-list build + heap fetches stay in the ported body).
-struct TidScanSource;
+pub(super) struct TidScanSource;
 
 impl<'mcx> RowSource<'mcx> for TidScanSource {
     type Node = ::nodetidscan::TidScanState<'mcx>;
@@ -288,11 +302,14 @@ pub fn try_own_tid_scan<'mcx>(
     ts: &mut ::nodetidscan::TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = super::tail_source::try_own_tid_scan_t3(ts, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::TidScan, ts, &mut TidScanSource, estate)
 }
 
 /// TidRangeScan as a delegation leaf (ctid range bounds inside the body).
-struct TidRangeScanSource;
+pub(super) struct TidRangeScanSource;
 
 impl<'mcx> RowSource<'mcx> for TidRangeScanSource {
     type Node = ::nodetidrangescan::TidRangeScanState<'mcx>;
@@ -311,6 +328,9 @@ pub fn try_own_tid_range_scan<'mcx>(
     ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = super::tail_source::try_own_tid_range_scan_t3(ts, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::TidRangeScan, ts, &mut TidRangeScanSource, estate)
 }
 
@@ -318,7 +338,7 @@ pub fn try_own_tid_range_scan<'mcx>(
 /// leaf. The mutation that PRODUCES the named store is out of lane scope
 /// (dualexec-strict cannot dual-execute it); the read leg proves via the
 /// serial e2e (contract cross-cutting law: honest-gap flag at boards).
-struct NamedTuplestoreScanSource;
+pub(super) struct NamedTuplestoreScanSource;
 
 impl<'mcx> RowSource<'mcx> for NamedTuplestoreScanSource {
     type Node = ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>;
@@ -337,6 +357,9 @@ pub fn try_own_named_tuplestore_scan<'mcx>(
     nts: &mut ::mcx::PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    if let Some(r) = super::tail_source::try_own_named_tuplestore_scan_t3(&mut **nts, estate)? {
+        return Ok(Some(r));
+    }
     drive(ShapeClass::NamedTuplestoreScan, &mut **nts, &mut NamedTuplestoreScanSource, estate)
 }
 

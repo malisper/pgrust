@@ -7753,3 +7753,351 @@ mod dml_ab {
         scanfix::quiesced();
     }
 }
+
+// ============================================================================
+// --- WS-Q wave-3 append region (se/wave3-refusals) --------------------------
+// scans_t3_ab — the T3 SOURCE-form A/B unit corpus (wave-3 contract §6.Q;
+// lanev2/tail_source.rs behind PGRUST_LANE_V2_SCANS_T3).
+//
+// Every A/B runs the SAME plan knob-OFF (oracle) then knob-ON and demands
+// byte-identical rows plus MECHANISM-attributed engagement (the T3 probe
+// arrays — the delegation tail's probe must NOT move when the source form
+// owned the pull). Knob mutation serializes on the shared rowmode_ab::KNOB
+// mutex (wave-2 precedent 3: one lock per process-global knob family).
+// Fake-oid band 76001+ is WS-Q's (contract §3.3); the boarded units consume
+// none of it (the FunctionScan fixtures have no relation RTE) — recorded in
+// notes/se-ws-q-refusals.md. The five other shapes' A/B coverage rides
+// scripts/dualexec/corpus-scans-t3.sql + scripts/lane-scans-t3-e2e.sh (the
+// wave-2 WS-L split: units where hand-built plans are cheap, corpus + e2e
+// for the AM-backed shapes).
+// ============================================================================
+mod scans_t3_ab {
+    use super::*;
+    use ::types_nodes::parsenodes::RangeTblFunction;
+    use ::types_nodes::plannodes::{FunctionScan as FunctionScanPlan, Plan, Scan, Sort};
+    use ::types_nodes::primnodes::{FuncExpr, OUTER_VAR};
+
+    const F_GENERATE_SERIES_INT4: u32 = 1067;
+    const F_GENERATE_SERIES_STEP_INT4: u32 = 1066;
+
+    fn mk_gs_expr<'mcx>(mcx: ::mcx::Mcx<'mcx>, lo: i32, hi: i32, step: Option<i32>) -> Node<'mcx> {
+        let mut fe = Node::build::<FuncExpr>(mcx).unwrap();
+        fe.funcid = if step.is_some() { F_GENERATE_SERIES_STEP_INT4 } else { F_GENERATE_SERIES_INT4 };
+        fe.funcresulttype = INT4OID;
+        fe.funcretset = true;
+        let mut args =
+            NodeList::make2(mcx, mk_int4_const(mcx, lo), mk_int4_const(mcx, hi)).unwrap();
+        if let Some(s) = step {
+            args.lappend(mcx, mk_int4_const(mcx, s)).unwrap();
+        }
+        fe.args = args;
+        fe.seal()
+    }
+
+    /// A bare `FunctionScan` over generate_series — the top-ranked T3 shape
+    /// (inc-0 census), tlist = the scan's own column. No relation RTE: the
+    /// ported init/exec bodies never consult the range table for a
+    /// function RTE, so the fixture needs no rtable (the rowmode_ab no-FROM
+    /// pattern).
+    fn mk_fscan_node<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        lo: i32,
+        hi: i32,
+        step: Option<i32>,
+    ) -> Node<'mcx> {
+        let scan_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let scan_tle = Node::mk_target_entry(mcx, scan_var, 1, Some("g"), false).unwrap();
+        let mut rtf = Node::build::<RangeTblFunction>(mcx).unwrap();
+        rtf.funcexpr = Some(mk_gs_expr(mcx, lo, hi, step));
+        rtf.funccolcount = 1;
+        Node::mk(
+            mcx,
+            FunctionScanPlan {
+                scan: Scan {
+                    plan: Plan {
+                        targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
+                        ..Default::default()
+                    },
+                    scanrelid: 1,
+                },
+                functions: NodeList::make1(mcx, rtf.seal()).unwrap(),
+                funcordinality: false,
+            },
+        )
+        .unwrap()
+    }
+
+    fn mk_fscan_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        lo: i32,
+        hi: i32,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mk_fscan_node(mcx, lo, hi, None));
+        pstmt.seal_ref()
+    }
+
+    /// Sort over a DESCENDING generate_series — the §6.Q inc-final
+    /// composition shape: the memoized sort verdict must admit the T3
+    /// child and the breaker feed must drain it (input 10,7,4,1 → output
+    /// 1,4,7,10, so an unsorted pass-through cannot fake a pass).
+    fn mk_sort_over_fscan_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>) -> &'mcx PlannedStmt<'mcx> {
+        let outer_v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+        let outer_tle = Node::mk_target_entry(mcx, outer_v, 1, Some("g"), false).unwrap();
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.targetlist = NodeList::make1(mcx, outer_tle).unwrap();
+        sort.plan.lefttree = Some(mk_fscan_node(mcx, 10, 1, Some(-3)));
+        sort.numCols = 1;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(sort.seal());
+        pstmt.seal_ref()
+    }
+
+    /// Drain to completion collecting column-1 int4s; `rescan_after` fires
+    /// one `exec_re_scan` mid-stream (the delegation-cadence replay probe).
+    fn drain_g(
+        pstmt: &'static PlannedStmt<'static>,
+        rescan_after: Option<usize>,
+    ) -> Vec<i32> {
+        with_exec_data(pstmt, |data, pstmt| {
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            let mut out = Vec::new();
+            let mut rescan = rescan_after;
+            loop {
+                if rescan == Some(out.len()) {
+                    rescan = None;
+                    exec_re_scan(&mut ps, &mut data.estate).unwrap();
+                }
+                match exec_proc_node(&mut ps, &mut data.estate).unwrap() {
+                    Some(slot_id) => {
+                        let mut isnull = false;
+                        let v = exectuples::slot_getattr(
+                            data.estate.slot_mut(slot_id),
+                            1,
+                            &mut isnull,
+                        );
+                        assert!(!isnull);
+                        out.push(v.as_i32());
+                    }
+                    None => break,
+                }
+            }
+            crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+            out
+        })
+    }
+
+    fn t3_probe(name: &str) -> u64 {
+        crate::lanev2::t3_owned_probe_for_tests(name)
+    }
+
+    fn t3_sort_probe(name: &str) -> u64 {
+        crate::lanev2::t3_sort_child_probe_for_tests(name)
+    }
+
+    fn tail_probe(name: &str) -> u64 {
+        crate::lanev2::tail_owned_probe_for_tests(name)
+    }
+
+    /// The per-shape force-off mask default-arms every T3 shape and the
+    /// same-process levers roundtrip (the §2.1 per-shape-knob-before-A/B
+    /// rule's unit face).
+    #[test]
+    fn t3_shape_mask_levers_roundtrip() {
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        for cls in [
+            "functionscan",
+            "tablefuncscan",
+            "samplescan",
+            "tidscan",
+            "tidrangescan",
+            "namedtuplestorescan",
+        ] {
+            crate::lanev2::scans_t3_shape_set_for_tests(cls, false);
+            crate::lanev2::scans_t3_shape_set_for_tests(cls, true);
+        }
+        crate::lanev2::scans_t3_set_for_tests(true);
+        crate::lanev2::scans_t3_set_for_tests(false);
+        drop(guard);
+    }
+
+    /// Standalone source-form A/B (+ mid-stream rescan): knob OFF = Volcano
+    /// oracle; knob ON = the batch-size-1 source drive owns every pull and
+    /// the delegation tail's probe does NOT move (mechanism attribution).
+    #[test]
+    fn functionscan_t3_source_ab_with_rescan() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::scans_t3_set_for_tests(false);
+        let t3_before_off = t3_probe("functionscan");
+        let off = drain_g(mk_fscan_pstmt(leaked_mcx(), 1, 5), Some(3));
+        assert_eq!(
+            t3_probe("functionscan"),
+            t3_before_off,
+            "knob OFF must never engage the T3 source form"
+        );
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        let t3_before_on = t3_probe("functionscan");
+        let tail_before_on = tail_probe("functionscan");
+        let on = drain_g(mk_fscan_pstmt(leaked_mcx(), 1, 5), Some(3));
+        let t3_after_on = t3_probe("functionscan");
+        let tail_after_on = tail_probe("functionscan");
+        crate::lanev2::scans_t3_set_for_tests(false);
+        drop(guard);
+
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        assert_eq!(off, vec![1, 2, 3, 1, 2, 3, 4, 5], "rescan replay from row 3");
+        assert!(t3_after_on > t3_before_on, "ON arm never engaged the T3 source drive");
+        assert_eq!(
+            tail_after_on, tail_before_on,
+            "the delegation tail must not tick when the source form owns"
+        );
+    }
+
+    /// Per-shape force-off under an armed facility knob: T3 stays out, the
+    /// ROWMODE delegation fallback owns instead (rollback semantics), rows
+    /// byte-identical.
+    #[test]
+    fn functionscan_t3_force_off_falls_back_to_delegation() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::scans_t3_set_for_tests(false);
+        crate::lanev2::rowmode_set_for_tests(false);
+        let off = drain_g(mk_fscan_pstmt(leaked_mcx(), 2, 6), None);
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        crate::lanev2::rowmode_set_for_tests(true);
+        crate::lanev2::scans_t3_shape_set_for_tests("functionscan", false);
+        let t3_before = t3_probe("functionscan");
+        let tail_before = tail_probe("functionscan");
+        let on = drain_g(mk_fscan_pstmt(leaked_mcx(), 2, 6), None);
+        let t3_after = t3_probe("functionscan");
+        let tail_after = tail_probe("functionscan");
+        crate::lanev2::scans_t3_shape_set_for_tests("functionscan", true);
+        crate::lanev2::scans_t3_set_for_tests(false);
+        crate::lanev2::rowmode_set_for_tests(false);
+        drop(guard);
+
+        assert_eq!(off, on, "force-off arm must equal the oracle");
+        assert_eq!(off, vec![2, 3, 4, 5, 6]);
+        assert_eq!(t3_after, t3_before, "forced-off shape must not source-drive");
+        assert!(tail_after > tail_before, "delegation fallback never engaged");
+    }
+
+    /// inc-final COMPOSITION: Sort over a T3 FunctionScan child. Knob ON,
+    /// the memoized sort verdict admits the child (T3 sort-child probe
+    /// moves) and the breaker feed drains the batch-size-1 source — output
+    /// equals the Volcano oracle, sorted (input arrives descending, so a
+    /// non-sorting fake cannot pass). A mid-stream `exec_re_scan` (after 2
+    /// rows) exercises the Sort-over-T3 rescan cadence explicitly: the
+    /// replay must restart the sorted stream from the top on BOTH arms
+    /// (review finding #4's implicit-coverage gap, made direct).
+    #[test]
+    fn sort_over_functionscan_t3_composition_ab() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::scans_t3_set_for_tests(false);
+        let off = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), Some(2));
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        let child_before = t3_sort_probe("functionscan");
+        let on = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), Some(2));
+        let child_after = t3_sort_probe("functionscan");
+        crate::lanev2::scans_t3_set_for_tests(false);
+        drop(guard);
+
+        assert_eq!(off, on, "sort-over-T3 knob OFF vs ON must be identical");
+        assert_eq!(
+            off,
+            vec![1, 4, 1, 4, 7, 10],
+            "descending feed must come back sorted, replayed from the top after rescan"
+        );
+        assert!(
+            child_after > child_before,
+            "ON arm never admitted the T3 sort child (composition did not engage)"
+        );
+    }
+
+    /// EPQ law (§4.2) direct unit: `es_epq_active` is the FIRST dynamic
+    /// gate after the knob gates — an EPQ-flagged estate must be refused
+    /// to the incumbent BEFORE any scan work (T3 probe untouched; the
+    /// delegation tail — knob OFF here — must not tick either). The gate is
+    /// per-pull: dropping the flag re-admits and the SAME node source-drives
+    /// to completion. Direct-hook probe form: the express
+    /// `express_epq_pull_refused_dynamically` precedent (a full EPQ pull
+    /// can't run in this harness; the refusal must happen before it would
+    /// matter).
+    #[test]
+    fn functionscan_t3_epq_pull_refused_dynamically() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        let pstmt = mk_fscan_pstmt(leaked_mcx(), 1, 4);
+        with_exec_data(pstmt, |data, pstmt| {
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            data.estate.es_epq_active = true;
+            let t3_before = t3_probe("functionscan");
+            let tail_before = tail_probe("functionscan");
+            {
+                let crate::procnode::PlanStateNode::FunctionScan(fs) = &mut ps else {
+                    panic!("fscan plan did not init a FunctionScan node")
+                };
+                let r = crate::lanev2::try_own_function_scan(fs, &mut data.estate).unwrap();
+                assert!(r.is_none(), "EPQ pull must be refused to the incumbent");
+            }
+            assert_eq!(
+                t3_probe("functionscan"),
+                t3_before,
+                "EPQ pull must not be T3-source-owned"
+            );
+            assert_eq!(
+                tail_probe("functionscan"),
+                tail_before,
+                "EPQ pull must not fall through into the delegation tail"
+            );
+            data.estate.es_epq_active = false;
+            let mut out = Vec::new();
+            while let Some(slot_id) = exec_proc_node(&mut ps, &mut data.estate).unwrap() {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(
+                    data.estate.slot_mut(slot_id),
+                    1,
+                    &mut isnull,
+                );
+                assert!(!isnull);
+                out.push(v.as_i32());
+            }
+            assert_eq!(out, vec![1, 2, 3, 4]);
+            assert!(
+                t3_probe("functionscan") > t3_before,
+                "post-EPQ pulls must re-engage the T3 source drive"
+            );
+            crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+        });
+        crate::lanev2::scans_t3_set_for_tests(false);
+        drop(guard);
+    }
+}
+// --- end WS-Q wave-3 append region ------------------------------------------
