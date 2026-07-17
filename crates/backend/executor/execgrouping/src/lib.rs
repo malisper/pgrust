@@ -84,6 +84,15 @@ impl TupleHashEntryData {
         self.first_tuple = tuple;
     }
 
+    /// Restamp the stored hash — the table-handoff export rebases the HANDED
+    /// COPY of an entry onto the leader's IV=0 mapping
+    /// ([`TupleHashTable::hash_to_iv0`]); never call on an entry still owned
+    /// by a live table (its bucket index is a function of the stored hash).
+    #[inline]
+    pub fn set_hash(&mut self, hash: u32) {
+        self.hash = hash;
+    }
+
     /// Assemble an entry outside the table — the lane compact-table handoff
     /// export (nodeagg::merge): `tuple` is a handed-buffer image laid out
     /// exactly like a relocated table entry (`[additionalsize][tuple]`),
@@ -501,6 +510,10 @@ pub struct TupleHashTable<'mcx> {
     // table was built with use_variable_hash_iv. The Expr arm instead bakes
     // the raw IV into tab_hash_expr as its init value (C parity).
     hash_iv_rot: u32,
+    // The raw (unrotated) IV, kept for hash_to_iv0's rebase: the Expr arm's
+    // chain rotates the IV once per key column, so stripping it needs
+    // rot(iv, ncols), not the word kernels' rot(iv, 1).
+    hash_iv: u32,
     additionalsize: usize,
     kernel: ProbeKernel,
     /// Per-key-column multi-key classification (build-time, input order).
@@ -520,7 +533,7 @@ pub fn build_tuple_hash_table<'mcx>(
     eqfuncoids: &[Oid],
     hashfunctions: &[Oid],
     collations: &[Oid],
-    mut nbuckets: usize,
+    nbuckets: usize,
     additionalsize: usize,
     use_variable_hash_iv: bool,
 ) -> PgResult<TupleHashTable<'mcx>> {
@@ -547,6 +560,37 @@ pub fn build_tuple_hash_table<'mcx>(
     } else {
         0
     };
+    build_tuple_hash_table_with_iv(
+        metacxt,
+        input_desc,
+        key_col_idx,
+        eqfuncoids,
+        hashfunctions,
+        collations,
+        nbuckets,
+        additionalsize,
+        hash_iv,
+    )
+}
+
+/// [`build_tuple_hash_table`] with the participant IV supplied explicitly
+/// instead of derived from ParallelWorkerNumber. Production goes through the
+/// seam-derived wrapper; this entry exists so units can build tables at
+/// chosen distinct IVs (the parallel_worker_number seam is process-global,
+/// so a test cannot impersonate several participants through it).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn build_tuple_hash_table_with_iv<'mcx>(
+    metacxt: Mcx<'mcx>,
+    input_desc: &Rc<TupleDescData<'mcx>>,
+    key_col_idx: &[i16],
+    eqfuncoids: &[Oid],
+    hashfunctions: &[Oid],
+    collations: &[Oid],
+    mut nbuckets: usize,
+    additionalsize: usize,
+    hash_iv: u32,
+) -> PgResult<TupleHashTable<'mcx>> {
     debug_assert!(nbuckets > 0);
     let additionalsize = maxalign(additionalsize);
     let entrysize = core::mem::size_of::<TupleHashEntryData>() + additionalsize;
@@ -591,6 +635,7 @@ pub fn build_tuple_hash_table<'mcx>(
         hashtab: SimpleHashIndex::with_nelements(nbuckets),
         stat_calls: 0,
         hash_iv_rot: hash_iv.rotate_left(1),
+        hash_iv,
         additionalsize,
         kernel: ProbeKernel::select(key_col_idx, eqfuncoids, hashfunctions, collations),
         key_cols: key_col_idx
@@ -1047,6 +1092,43 @@ impl<'mcx> TupleHashTable<'mcx> {
             e.key = Datum::from_usize((new_tuple.as_ptr() as usize).wrapping_add(off));
         }
         e.set_tuple(new_tuple);
+    }
+
+    /// True when this table was built with `use_variable_hash_iv` and drew a
+    /// nonzero participant IV (every parallel participant except C's quirk
+    /// worker 0, whose murmurhash32(0) == 0).
+    #[inline]
+    pub fn has_variable_iv(&self) -> bool {
+        self.hash_iv != 0
+    }
+
+    /// Rebase a hash THIS table computed (stored entry hash / `hash_slot` /
+    /// `hash_staged` output) onto the IV=0 mapping — the value an
+    /// identical-kernel table built WITHOUT `use_variable_hash_iv` computes
+    /// for the same key. Identity for IV=0 tables.
+    ///
+    /// This is exact, not approximate: the IV enters every kernel linearly
+    /// before the murmur finalizer. Word kernels compute
+    /// `fmix(rot(iv,1) ^ keyhash)`; the Expr arm's chain is
+    /// `h0 = iv; h_i = rot(h_{i-1},1) ^ d_i` — rot/xor commute, so after n
+    /// columns the IV's contribution is exactly `rot(iv, n)` xored into the
+    /// pre-finalizer value (NULL columns contribute d_i = 0 but still
+    /// rotate; n = 0 degenerates to the raw IV, matching the IV=0 build's
+    /// constant 0). fmix32 is a bijection, so: un-finalize, strip
+    /// `rot(iv, ncols)`, re-finalize.
+    ///
+    /// Consumer: the parallel-finalize table handoff (nodeagg::merge). Its
+    /// bucket merge compares STORED hashes across participant tables and the
+    /// finalize's own (IV=0) table — C never does that (tuple funnel +
+    /// leader re-hash), so C keeps per-worker mappings end-to-end while the
+    /// byref face must normalize at the install boundary.
+    #[inline]
+    pub fn hash_to_iv0(&self, h: u32) -> u32 {
+        if self.hash_iv == 0 {
+            return h;
+        }
+        let iv_contrib = self.hash_iv.rotate_left(self.key_cols.len() as u32);
+        ::hashfn::murmurhash32(::hashfn::murmurhash32_inverse(h) ^ iv_contrib)
     }
 
     /// True when this table's probe kernel supports the lane-v2 K2 staged
