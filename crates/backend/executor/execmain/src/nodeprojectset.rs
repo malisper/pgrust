@@ -191,7 +191,10 @@ pub fn exec_init_project_set<'mcx>(
     })
 }
 
-/// `ExecProjectSet` (nodeProjectSet.c).
+/// `ExecProjectSet` (nodeProjectSet.c): the per-call prologue (CFI + entry
+/// per-tuple reset), then the SAME body the lane's row-mode face drives —
+/// `LaneProjectSet::resume_expansion` for a pending expansion,
+/// `LaneProjectSet::accept` per child row (one body, two faces).
 pub fn exec_project_set<'mcx>(
     node: &mut ProjectSetState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -200,30 +203,105 @@ pub fn exec_project_set<'mcx>(
     let ecxt = node.ps.ps_ExprContext.expect("ProjectSetState without ExprContext");
     estate.reset_expr_context(ecxt);
 
-    if node.pending_srf_tuples && exec_project_srf(node, estate, true)? {
-        return Ok(node.ps.ps_ResultTupleSlot);
+    let (mut view, outer) = lane_project_set_split(node);
+    if view.pending() {
+        if let Some(slot) = view.resume_expansion(estate)? {
+            return Ok(Some(slot));
+        }
     }
 
     loop {
-        let Some(outer_slot) = exec_proc_node(&mut node.outer, estate)? else {
+        let Some(outer_slot) = exec_proc_node(outer, estate)? else {
             return Ok(None);
         };
-        estate.ecxt_mut(ecxt).ecxt_outertuple = Some(outer_slot);
-        if exec_project_srf(node, estate, false)? {
-            return Ok(node.ps.ps_ResultTupleSlot);
+        if let Some(slot) = view.accept(estate, outer_slot)? {
+            return Ok(Some(slot));
+        }
+    }
+}
+
+// ===========================================================================
+// Lane-executor-v2 row-mode seams (lanev2/rowmode.rs). `LaneProjectSet` is
+// the lane's disjoint-borrow view over ProjectSetState — everything except
+// `outer` — so a row-mode driver can hold the op view and the child node
+// simultaneously (the SortNode-destructure precedent). The methods below ARE
+// `exec_project_set`'s own body (the Volcano face above calls the same
+// functions): all SRF cross-call state (`pending_srf_tuples`, `args_valid`,
+// `elemdone`, `result_store`) stays the node's own C state, so a Volcano
+// fallback at any PG call boundary sees exactly the state its own next call
+// expects. Reset cadence contract (by-ref SRF datums live in per-tuple
+// memory): the ENTRY reset belongs to the caller's per-call prologue
+// (`exec_project_set` above; `try_own_project_set` replays it), covering
+// C's continuing-call entry reset; `accept` runs the loop-bottom reset only
+// after a non-producing row, exactly as the Volcano loop does.
+// ===========================================================================
+
+/// Split a ProjectSetState into (op view, child node).
+pub(crate) fn lane_project_set_split<'a, 'mcx>(
+    node: &'a mut ProjectSetState<'mcx>,
+) -> (LaneProjectSet<'a, 'mcx>, &'a mut PgBox<'mcx, PlanStateNode<'mcx>>) {
+    let ProjectSetState { ps, outer, elems, elemdone, pending_srf_tuples } = node;
+    (LaneProjectSet { base: ps, elems, elemdone, pending: pending_srf_tuples }, outer)
+}
+
+/// The disjoint-borrow op view (everything but `outer`); `Elem` stays
+/// private to this module.
+pub(crate) struct LaneProjectSet<'a, 'mcx> {
+    base: &'a mut PlanStateBase<'mcx>,
+    elems: &'a mut PgVec<'mcx, Elem<'mcx>>,
+    elemdone: &'a mut PgVec<'mcx, ExprDoneCond>,
+    pending: &'a mut bool,
+}
+
+impl<'mcx> LaneProjectSet<'_, 'mcx> {
+    /// C's `pending_srf_tuples` — a half-emitted expansion exists.
+    pub(crate) fn pending(&self) -> bool {
+        *self.pending
+    }
+
+    /// `exec_project_set`'s loop body over ONE staged child row: set
+    /// `ecxt_outertuple`, `ExecProjectSRF(continuing=false)`; on no-row the
+    /// loop-bottom per-tuple ctx reset runs before returning `None` (the
+    /// caller feeds the next child row).
+    pub(crate) fn accept(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+        outer: ExecSlotId,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let ecxt = self.base.ps_ExprContext.expect("ProjectSetState without ExprContext");
+        estate.ecxt_mut(ecxt).ecxt_outertuple = Some(outer);
+        if exec_project_srf(self, estate, false)? {
+            return Ok(self.base.ps_ResultTupleSlot);
         }
         estate.reset_expr_context(ecxt);
+        Ok(None)
+    }
+
+    /// `exec_project_set`'s continuing arm: `ExecProjectSRF(continuing=true)`
+    /// after the caller's per-call prologue reset (= the entry reset of C's
+    /// continuing call). `None` = expansion done (the caller feeds the next
+    /// child row, with NO intervening reset — C falls straight into its
+    /// child-pull loop).
+    pub(crate) fn resume_expansion(
+        &mut self,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        debug_assert!(*self.pending);
+        if exec_project_srf(self, estate, true)? {
+            return Ok(self.base.ps_ResultTupleSlot);
+        }
+        Ok(None)
     }
 }
 
 /// `ExecProjectSRF` (nodeProjectSet.c): true iff a row was stored.
 fn exec_project_srf<'mcx>(
-    node: &mut ProjectSetState<'mcx>,
+    node: &mut LaneProjectSet<'_, 'mcx>,
     estate: &mut EStateData<'mcx>,
     continuing: bool,
 ) -> PgResult<bool> {
-    let ecxt = node.ps.ps_ExprContext.expect("ProjectSetState without ExprContext");
-    let result = node.ps.ps_ResultTupleSlot.expect("ProjectSetState without result slot");
+    let ecxt = node.base.ps_ExprContext.expect("ProjectSetState without ExprContext");
+    let result = node.base.ps_ResultTupleSlot.expect("ProjectSetState without result slot");
     // C runs pending initplans lazily inside ExecEvalExpr (ExecEvalParamExec,
     // execExprInterp.c); the SRF args' and scalar elems' $n params resolve
     // here instead (execscan note).
@@ -247,10 +325,10 @@ fn exec_project_srf<'mcx>(
     }
     let per_tuple: NonNull<MemoryContext> =
         NonNull::from(estate.ecxt(ecxt).per_tuple_mcx().context());
-    node.pending_srf_tuples = false;
-    let elems = &mut node.elems;
-    let elemdone = &mut node.elemdone;
-    let pending = &mut node.pending_srf_tuples;
+    *node.pending = false;
+    let elems = &mut *node.elems;
+    let elemdone = &mut *node.elemdone;
+    let pending = &mut *node.pending;
     with_eval_slots(estate, ecxt, Some(result), |slots, rslot, mcx| {
         let rslot = rslot.expect("result slot provided");
         exectuples::exec_clear_tuple(rslot, mcx);
