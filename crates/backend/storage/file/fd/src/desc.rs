@@ -9,8 +9,10 @@ use ::types_storage::{Dir, DirEnt, FD_MINFREE};
 use crate::vfd::{self, get_errno, loc, set_errno, with_fd, FdState};
 
 pub(crate) enum AllocatedHandle {
+    // DST P1 carve-out: buffered stdio streams (AllocateFile fopen) and pipes
+    // (OpenPipeStream popen) stay posix-only in P1 — out of Vfs scope.
     File(StdFile),
-    Dir(Option<std::fs::ReadDir>),
+    Dir(Option<vfs::VfsDirIter>),
     RawFd(OwnedFd),
     Pipe(PipeHandle),
 }
@@ -89,9 +91,9 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
     });
     match desc.desc {
         AllocatedHandle::File(file) => {
+            // Live descriptor released from its guard; closed once here.
             let raw = file.into_raw_fd();
-            // SAFETY: live descriptor released from its guard; closed once here.
-            unsafe { libc::close(raw) }
+            vfs::close(raw)
         }
         AllocatedHandle::Pipe(pipe) => pclose(pipe),
         AllocatedHandle::Dir(dir) => {
@@ -100,9 +102,9 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
         }
         AllocatedHandle::RawFd(file) => {
             crate::pgaio_closing_fd_if_engine_present(file.as_raw_fd());
+            // Live descriptor released from its guard; closed once here.
             let raw = file.into_raw_fd();
-            // SAFETY: live descriptor released from its guard; closed once here.
-            unsafe { libc::close(raw) }
+            vfs::close(raw)
         }
     }
 }
@@ -227,8 +229,8 @@ pub fn CloseTransientFile(fd_to_close: i32) -> i32 {
         .finish(loc("CloseTransientFile"));
 
     crate::pgaio_closing_fd_if_engine_present(fd_to_close);
-    // SAFETY: caller asserts ownership of this descriptor, as in C.
-    unsafe { libc::close(fd_to_close) }
+    // Caller asserts ownership of this descriptor, as in C.
+    vfs::close(fd_to_close)
 }
 
 // C contract: table index >= 0, or -1 with errno set on popen failure.
@@ -333,8 +335,9 @@ pub fn AllocateDir(dirname: &str) -> PgResult<Option<Dir>> {
 
     with_fd(vfd::ReleaseLruFiles)?;
 
+    let cdir = vfd::cpath(dirname);
     loop {
-        match std::fs::read_dir(dirname) {
+        match vfs::read_dir(&cdir) {
             Ok(iter) => {
                 let create_subid = current_subid();
                 return with_fd(|fd| {
@@ -344,8 +347,7 @@ pub fn AllocateDir(dirname: &str) -> PgResult<Option<Dir>> {
                     )))
                 });
             }
-            Err(e) => {
-                let en = e.raw_os_error().unwrap_or(0);
+            Err(en) => {
                 if en == libc::EMFILE || en == libc::ENFILE {
                     set_errno(en);
                     out_of_fds_log()?;
@@ -389,12 +391,10 @@ pub fn ReadDirExtended(
     });
 
     match next {
-        Some(Ok(entry)) => Ok(Some(DirEnt {
-            d_name: entry.file_name().to_string_lossy().into_owned(),
-        })),
-        Some(Err(e)) => {
+        Some(Ok(d_name)) => Ok(Some(DirEnt { d_name })),
+        Some(Err(en)) => {
             ereport(elevel)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .with_saved_errno(en)
                 .errcode_for_file_access()
                 .errmsg(format!("could not read directory \"{dirname}\": %m"))
                 .finish(loc("ReadDirExtended"))?;
@@ -478,6 +478,9 @@ pub fn with_allocated_dir(
     Ok(last)
 }
 
+// DST P1 carve-out: the buffered-stream (fopen) plane stays posix-only in P1;
+// stdio is permanently out of Vfs scope (contract §1.1). Allowlist row
+// retained under the P0 fencing lint.
 fn open_stdio(name: &str, mode: &str) -> Result<StdFile, i32> {
     use std::fs::OpenOptions;
 
@@ -552,6 +555,8 @@ pub fn with_allocated_stdio<R>(index: i32, f: impl FnOnce(&mut StdFile) -> R) ->
 }
 
 // Raw kernel fd behind a transient-file value (fstat-style callers).
+// Raw-fd escape hatch (DST P1 contract §1.1 carve-out): the returned kernel
+// descriptor bypasses the VFS. Sim-scope callers must not use it.
 pub fn TransientFileRawFd(fd_value: i32) -> Option<RawFd> {
     with_fd(|fd| {
         fd.allocated_descs.iter().rev().flatten().find_map(|d| match &d.desc {

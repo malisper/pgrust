@@ -20,27 +20,21 @@ fn vfd_raw(fd: &FdState, file: i32) -> RawFd {
 }
 
 fn pg_preadv(fd: RawFd, iov: &mut [IoSliceMut<'_>], offset: i64) -> isize {
-    // SAFETY: IoSliceMut is ABI-compatible with iovec; fd is live.
-    unsafe {
-        libc::preadv(
-            fd,
-            iov.as_mut_ptr().cast::<libc::iovec>(),
-            iov.len() as libc::c_int,
-            offset as libc::off_t,
-        )
-    }
+    // SAFETY: IoSliceMut is ABI-compatible with iovec; fd is live; the base
+    // pointers are valid for writes of their lengths (the vfs caller
+    // contract).
+    let iov_c = unsafe {
+        std::slice::from_raw_parts(iov.as_ptr().cast::<libc::iovec>(), iov.len())
+    };
+    vfs::preadv(fd, iov_c, offset as libc::off_t)
 }
 
 fn pg_pwritev(fd: RawFd, iov: &[IoSlice<'_>], offset: i64) -> isize {
     // SAFETY: IoSlice is ABI-compatible with iovec; fd is live.
-    unsafe {
-        libc::pwritev(
-            fd,
-            iov.as_ptr().cast::<libc::iovec>(),
-            iov.len() as libc::c_int,
-            offset as libc::off_t,
-        )
-    }
+    let iov_c = unsafe {
+        std::slice::from_raw_parts(iov.as_ptr().cast::<libc::iovec>(), iov.len())
+    };
+    vfs::pwritev(fd, iov_c, offset as libc::off_t)
 }
 
 pub fn PathNameOpenFile(file_name: &str, file_flags: i32) -> PgResult<File> {
@@ -97,9 +91,9 @@ pub fn FileClose(file: File) -> PgResult<()> {
             let handle = fd.vfd_cache[file as usize].fd.take().unwrap();
             crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
+            // Live descriptor released from its guard; closed once here.
             let raw = handle.into_raw_fd();
-            // SAFETY: live descriptor released from its guard; closed once here.
-            let failed = unsafe { libc::close(raw) } != 0;
+            let failed = vfs::close(raw) != 0;
             let en = get_errno();
 
             fd.nfile -= 1;
@@ -144,16 +138,14 @@ pub fn FileClose(file: File) -> PgResult<()> {
         let name = file_name.expect("FD_DELETE_AT_CLOSE on unnamed VFD");
         let path = cpath(&name);
 
-        // SAFETY: NUL-terminated path; statbuf is a valid out-param.
-        let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
-        let stat_errno = if unsafe { libc::stat(path.as_ptr(), &mut statbuf) } != 0 {
+        let mut statbuf = vfs::FileInfo::zeroed();
+        let stat_errno = if vfs::stat(&path, &mut statbuf) != 0 {
             get_errno()
         } else {
             0
         };
 
-        // SAFETY: NUL-terminated path.
-        if unsafe { libc::unlink(path.as_ptr()) } != 0 {
+        if vfs::unlink(&path) != 0 {
             ereport(LOG)
                 .with_saved_errno(get_errno())
                 .errcode_for_file_access()
@@ -162,7 +154,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
         }
 
         if stat_errno == 0 {
-            crate::temp::ReportTemporaryFileUsage(&name, statbuf.st_size as u64)?;
+            crate::temp::ReportTemporaryFileUsage(&name, statbuf.size as u64)?;
         } else {
             ereport(LOG)
                 .with_saved_errno(stat_errno)
@@ -193,14 +185,14 @@ pub fn FilePrefetch(file: File, offset: i64, amount: i64, wait_event_info: u32) 
         return Ok(rc);
     }
 
+    // The posix_fadvise vs F_RDADVISE split lives inside PosixVfs; the
+    // per-platform return-convention mapping (Linux: positive errno with an
+    // EINTR retry; macOS: -1/errno) stays here, C-shaped.
     #[cfg(target_os = "linux")]
     {
         loop {
             waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
-            // SAFETY: `raw` is the open VFD's descriptor.
-            let rc = unsafe {
-                libc::posix_fadvise(raw, offset, amount, libc::POSIX_FADV_WILLNEED)
-            };
+            let rc = vfs::fadvise_willneed(raw, offset, amount);
             waitevent_seams::pgstat_report_wait_end::call();
             if rc == libc::EINTR {
                 continue;
@@ -210,18 +202,8 @@ pub fn FilePrefetch(file: File, offset: i64, amount: i64, wait_event_info: u32) 
     }
     #[cfg(target_os = "macos")]
     {
-        #[repr(C)]
-        struct Radvisory {
-            ra_offset: libc::off_t,
-            ra_count: libc::c_int,
-        }
-        let ra = Radvisory {
-            ra_offset: offset as libc::off_t,
-            ra_count: amount as libc::c_int,
-        };
         waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
-        // SAFETY: `raw` is the open VFD's descriptor; F_RDADVISE reads `ra`.
-        let rc = unsafe { libc::fcntl(raw, libc::F_RDADVISE, &ra) };
+        let rc = vfs::fadvise_willneed(raw, offset, amount);
         waitevent_seams::pgstat_report_wait_end::call();
         if rc != -1 {
             Ok(0)
@@ -548,10 +530,7 @@ pub fn FileFallocate(file: File, offset: i64, amount: i64, wait_event_info: u32)
 
         loop {
             waitevent_seams::pgstat_report_wait_start::call(wait_event_info);
-            // SAFETY: `raw` is the open VFD's descriptor.
-            let rc = unsafe {
-                libc::posix_fallocate(raw, offset as libc::off_t, amount as libc::off_t)
-            };
+            let rc = vfs::fallocate(raw, offset as libc::off_t, amount as libc::off_t);
             waitevent_seams::pgstat_report_wait_end::call();
 
             if rc == 0 {
@@ -587,8 +566,7 @@ pub fn FileSize(file: File) -> PgResult<i64> {
         return Ok(-1);
     }
 
-    // SAFETY: `raw` is the open VFD's descriptor.
-    Ok(unsafe { libc::lseek(raw, 0, libc::SEEK_END) } as i64)
+    Ok(vfs::file_size(raw) as i64)
 }
 
 pub fn FileTruncate(file: File, offset: i64, wait_event_info: u32) -> PgResult<i32> {
@@ -639,6 +617,10 @@ pub(crate) fn file_path_name_lossy(file: File) -> String {
     })
 }
 
+// Raw-fd escape hatch (DST P1 contract §1.1 carve-out): the returned kernel
+// descriptor bypasses the VFS. Sim-scope callers must not use it — anything
+// that has to run under the deterministic-sim harness goes through the
+// File* APIs instead.
 pub fn FileGetRawDesc(file: File) -> PgResult<i32> {
     let file = file.0;
     with_fd(|fd| {
