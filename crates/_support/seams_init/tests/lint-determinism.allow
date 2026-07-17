@@ -1,0 +1,317 @@
+# lint-determinism.allow — the DST P0 determinism-fencing ratchet ledger.
+# Companion: crates/_support/seams_init/tests/lint-determinism.sh. Precedent: lint-seam-installs.allow.
+# Authority: docs/design/dst-and-wasm.md (branch docs/dst-wasm-scoping @
+# 0d76f50dd), P0 phasing row + s3.3 blocking census.
+#
+# SEED: 2026-07-17 census regeneration @ origin/main 3fee87ff096c —
+# cfg(test)-stripped, prod-only, a strictly tighter ledger than the doc's
+# planning numbers (667 fs / 199 time). Seeded totals: fs 276 sites/64 files,
+# time 230/46, rand 4/1, spawn 11/7, env 283/87, blocking 46/12.
+# (Known census deltas, all explained: aio_uring's 6 fs + 4 time census sites
+# sit inside #[cfg(all(test, target_os = "linux"))] and are correctly
+# excluded here; spawn +1 = the dshash bench-rig, ledgered not hidden; rand
+# ledgers only the raw-entropy internals of pg_strong_random — callers of
+# pg_strong_random ARE the sanctioned route (s2.3) and are never flagged.)
+#
+# ROW FORMAT (tab-separated):
+#   <category>\t<file>\t<max-sites>[\t<annotation>]
+# <max-sites> is the file's site budget: matching production source lines
+# the lint tolerates. Categories: fs time rand spawn env blocking.
+#
+# THE RATCHET LAW:
+#   * budgets may only SHRINK; rows may only be DELETED;
+#   * a NEW row (or a raised budget) requires a review marker in the
+#     annotation column — "DST-REVIEW(<who>): <why>" — which the lint
+#     recognizes and surfaces as a NOTE on every run so train diffs carry
+#     the exception visibly. Never add an unmarked row: the fix for a new
+#     raw site is routing it through its category's sanctioned surface
+#     (fs: fd/vfd Vfs choke s2.1; time: WaiterClock/timestamp_seams s2.2;
+#     rand: pg_strong_random s2.3; spawn: launch_backend spawner seam s3.3;
+#     env: knobs registry s2.5; blocking: Waiter/eventcount per the
+#     runtime/src/rg.rs precedent s3.3).
+#   * rows whose sites vanished (WARN(stale-allowlist)) are deleted, and
+#     shrink warnings (WARN(shrink-budget)) are honored by lowering budgets.
+#
+# The fs section is grouped per crate with per-crate subtotals so the P1-VFS
+# lanes can retire whole sections as each wave lands (s2.1 wiring order:
+# fd/vfd -> transam_xlog remnants -> pgrcolumnar CbIo fence -> long tail).
+#
+# REGENERATION (audit/reseed under explicit charter ONLY — regen resurrects
+# deleted rows and drops annotations, which the ratchet law forbids as a
+# routine operation):
+#     crates/_support/seams_init/tests/lint-determinism.sh --regen > crates/_support/seams_init/tests/lint-determinism.allow
+#
+# SE delta: scripts/lint-determinism.se-delta.md (reference only; applied by
+# the single-executor reconciler when SE lands, NOT enforced on main).
+
+
+# ==== fs ====
+# --- crates/_support/test_boot (3 sites) ---
+fs	crates/_support/test_boot/src/lib.rs	3	test-support crate (census-flagged allowlist candidate)
+# --- crates/backend/access/pgrcolumnar (43 sites) ---
+fs	crates/backend/access/pgrcolumnar/src/loadsort.rs	10
+fs	crates/backend/access/pgrcolumnar/src/part_cache.rs	3
+fs	crates/backend/access/pgrcolumnar/src/reader.rs	9
+fs	crates/backend/access/pgrcolumnar/src/segfile.rs	14
+fs	crates/backend/access/pgrcolumnar/src/writer.rs	7
+# --- crates/backend/access/transam/transam_xlog (15 sites) ---
+fs	crates/backend/access/transam/transam_xlog/src/backup.rs	3
+fs	crates/backend/access/transam/transam_xlog/src/removal.rs	4
+fs	crates/backend/access/transam/transam_xlog/src/startup.rs	4
+fs	crates/backend/access/transam/transam_xlog/src/write.rs	4
+# --- crates/backend/access/transam/xlogarchive (20 sites) ---
+fs	crates/backend/access/transam/xlogarchive/src/lib.rs	20
+# --- crates/backend/access/transam/xlogrecovery (3 sites) ---
+fs	crates/backend/access/transam/xlogrecovery/src/lib.rs	3
+# --- crates/backend/backup/basebackup (2 sites) ---
+fs	crates/backend/backup/basebackup/src/lib.rs	2
+# --- crates/backend/commands/copy (6 sites) ---
+fs	crates/backend/commands/copy/src/from.rs	1
+fs	crates/backend/commands/copy/src/parallel.rs	4
+fs	crates/backend/commands/copy/src/to.rs	1
+# --- crates/backend/commands/dbcommands (10 sites) ---
+fs	crates/backend/commands/dbcommands/src/alterdb.rs	2
+fs	crates/backend/commands/dbcommands/src/createdb.rs	2
+fs	crates/backend/commands/dbcommands/src/lib.rs	6
+# --- crates/backend/commands/extension (7 sites) ---
+fs	crates/backend/commands/extension/src/control.rs	5
+fs	crates/backend/commands/extension/src/create.rs	1
+fs	crates/backend/commands/extension/src/graph.rs	1
+# --- crates/backend/commands/tablespace (16 sites) ---
+fs	crates/backend/commands/tablespace/src/lib.rs	16
+# --- crates/backend/executor/execmain (7 sites) ---
+fs	crates/backend/executor/execmain/src/lanev2/router.rs	3
+fs	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
+fs	crates/backend/executor/execmain/src/lanev2/stats.rs	3
+# --- crates/backend/executor/nodeagg (1 sites) ---
+fs	crates/backend/executor/nodeagg/src/lib.rs	1
+# --- crates/backend/libpq/be_secure_openssl (1 sites) ---
+fs	crates/backend/libpq/be_secure_openssl/src/lib.rs	1
+# --- crates/backend/libpq/hba (1 sites) ---
+fs	crates/backend/libpq/hba/src/token.rs	1
+# --- crates/backend/postmaster/pgarch (4 sites) ---
+fs	crates/backend/postmaster/pgarch/src/lib.rs	4
+# --- crates/backend/postmaster/postmaster (7 sites) ---
+fs	crates/backend/postmaster/postmaster/src/main_entry.rs	7
+# --- crates/backend/postmaster/syslogger (4 sites) ---
+fs	crates/backend/postmaster/syslogger/src/lib.rs	4
+# --- crates/backend/postmaster/walsummarizer (2 sites) ---
+fs	crates/backend/postmaster/walsummarizer/src/lib.rs	2
+# --- crates/backend/replication/logical/reorderbuffer (5 sites) ---
+fs	crates/backend/replication/logical/reorderbuffer/src/startup.rs	4
+fs	crates/backend/replication/logical/reorderbuffer/src/visibility.rs	1
+# --- crates/backend/replication/logical/snapbuild (3 sites) ---
+fs	crates/backend/replication/logical/snapbuild/src/lib.rs	3
+# --- crates/backend/replication/slot (1 sites) ---
+fs	crates/backend/replication/slot/src/lib.rs	1
+# --- crates/backend/storage/file/fd (24 sites) ---
+fs	crates/backend/storage/file/fd/src/copydir.rs	7	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1)
+fs	crates/backend/storage/file/fd/src/desc.rs	5	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1)
+fs	crates/backend/storage/file/fd/src/reinit.rs	1	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1)
+fs	crates/backend/storage/file/fd/src/sync.rs	8	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1)
+fs	crates/backend/storage/file/fd/src/temp.rs	3	SANCTIONED: fd/vfd choke internals (P1 wave-1, s2.1)
+# --- crates/backend/timezone/pgtz (2 sites) ---
+fs	crates/backend/timezone/pgtz/src/lib.rs	2
+# --- crates/backend/tsearch/ts_locale (1 sites) ---
+fs	crates/backend/tsearch/ts_locale/src/public.rs	1
+# --- crates/backend/utils/activity/pgstat (7 sites) ---
+fs	crates/backend/utils/activity/pgstat/src/file.rs	7
+# --- crates/backend/utils/adt/adt_misc (5 sites) ---
+fs	crates/backend/utils/adt/adt_misc/src/builtins.rs	5
+# --- crates/backend/utils/adt/dbsize (5 sites) ---
+fs	crates/backend/utils/adt/dbsize/src/builtins.rs	5
+# --- crates/backend/utils/adt/genfile (8 sites) ---
+fs	crates/backend/utils/adt/genfile/src/builtins.rs	7
+fs	crates/backend/utils/adt/genfile/src/lib.rs	1
+# --- crates/backend/utils/cache/relcache (12 sites) ---
+fs	crates/backend/utils/cache/relcache/src/initfile.rs	12
+# --- crates/backend/utils/init/miscinit (15 sites) ---
+fs	crates/backend/utils/init/miscinit/src/lockfile.rs	14
+fs	crates/backend/utils/init/miscinit/src/process.rs	1
+# --- crates/backend/utils/init/postinit (1 sites) ---
+fs	crates/backend/utils/init/postinit/src/lib.rs	1
+# --- crates/backend/utils/misc/conffiles (2 sites) ---
+fs	crates/backend/utils/misc/conffiles/src/lib.rs	2
+# --- crates/backend/utils/misc/guc (2 sites) ---
+fs	crates/backend/utils/misc/guc/src/select.rs	2
+# --- crates/backend/utils/misc/guc_file (1 sites) ---
+fs	crates/backend/utils/misc/guc_file/src/lib.rs	1
+# --- crates/backend/utils/misc/guc_funcs (5 sites) ---
+fs	crates/backend/utils/misc/guc_funcs/src/alter_system.rs	5
+# --- crates/backend/utils/misc/tzparser (2 sites) ---
+fs	crates/backend/utils/misc/tzparser/src/lib.rs	2
+# --- crates/backend/utils/time/snapmgr (6 sites) ---
+fs	crates/backend/utils/time/snapmgr/src/lib.rs	6
+# --- crates/bin/waldesc (2 sites) ---
+fs	crates/bin/waldesc/src/main.rs	2
+# --- crates/common/controldata_utils (3 sites) ---
+fs	crates/common/controldata_utils/src/lib.rs	3
+# --- crates/contrib/file_fdw (3 sites) ---
+fs	crates/contrib/file_fdw/src/lib.rs	3
+# --- crates/contrib/pg_stat_statements (8 sites) ---
+fs	crates/contrib/pg_stat_statements/src/store.rs	8
+# --- crates/contrib/unaccent (1 sites) ---
+fs	crates/contrib/unaccent/src/lib.rs	1
+
+# ==== time ====
+time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	bench-rig crate, not server prod
+time	crates/backend/access/heap/vacuumlazy/src/lib.rs	3	semantic: vacuum cost delay; P2 reroute set (s2.2)
+time	crates/backend/access/heap/vacuumlazy/src/morsels.rs	16	semantic: vacuum cost delay; P2 reroute set (s2.2)
+time	crates/backend/access/nbtree/nbtree/src/utils.rs	2
+time	crates/backend/access/pgrcolumnar/src/loadsort.rs	2
+time	crates/backend/access/pgrcolumnar/src/part_cache.rs	2
+time	crates/backend/access/pgrcolumnar/src/reader.rs	2
+time	crates/backend/access/pgrcolumnar/src/writer.rs	8
+time	crates/backend/access/transam/parallel/src/lib.rs	2
+time	crates/backend/access/transam/transam_xlog/src/backup.rs	3
+time	crates/backend/commands/analyze/src/lib.rs	9
+time	crates/backend/commands/copy/src/parallel.rs	23
+time	crates/backend/commands/explain/src/lib.rs	3
+time	crates/backend/commands/prepare/src/lib.rs	2
+time	crates/backend/commands/vacuum/src/lib.rs	5	semantic: vacuum cost delay; P2 reroute set (s2.2)
+time	crates/backend/executor/execexpr/src/jit.rs	2
+time	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	34	telemetry Instant spans; doc s2.2 marks these for the lint allowlist
+time	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	4	telemetry Instant spans (s2.2)
+time	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	6	telemetry Instant spans (s2.2)
+time	crates/backend/executor/instrument/src/lib.rs	4
+time	crates/backend/executor/lanestitch/src/lib.rs	4
+time	crates/backend/executor/nodeagg/src/merge.rs	3
+time	crates/backend/executor/nodeagg/src/sink.rs	2
+time	crates/backend/executor/nodeagg/src/spankey.rs	4
+time	crates/backend/executor/runtime/src/clock.rs	3	runtime clock plumbing (s2.2)
+time	crates/backend/executor/runtime/src/lib.rs	4	telemetry; runtime is a sanctioned blocking hub (s2.2/s3.3)
+time	crates/backend/lib/dshash/bench/rig/src/main.rs	11	bench-rig crate, not server prod
+time	crates/backend/postmaster/bgjobs/src/lib.rs	8
+time	crates/backend/postmaster/bgworker/src/lib.rs	2
+time	crates/backend/postmaster/checkpointer/src/lib.rs	4	doc-named P2 reroute: SystemTime/pacing (s2.2)
+time	crates/backend/postmaster/pgarch/src/lib.rs	2
+time	crates/backend/postmaster/postmaster/src/serverloop.rs	2	doc-named P2 reroute: postmaster state machine (s2.2)
+time	crates/backend/postmaster/postmaster/src/statemachine.rs	2	doc-named P2 reroute: postmaster state machine (s2.2)
+time	crates/backend/postmaster/walsummarizer/src/lib.rs	1
+time	crates/backend/storage/lmgr/condition_variable/src/lib.rs	3	clock-adjacent wait-deadline surface
+time	crates/backend/tcop/postgres/src/lib.rs	2
+time	crates/backend/tcop/postgres/src/stmt_trace.rs	3
+time	crates/backend/utils/activity/pgstat/src/lib.rs	4
+time	crates/backend/utils/cache/relcache/src/initfile.rs	6
+time	crates/backend/utils/error/elog/src/report.rs	2	doc-named P2 reroute: elog timestamps (s2.2)
+time	crates/backend/utils/init/postinit/src/lib.rs	2
+time	crates/backend/utils/misc/guc/src/layers.rs	2
+time	crates/backend/utils/misc/guc/src/store.rs	6
+time	crates/backend/utils/misc/timeout/src/lib.rs	5	P2 target: timer-thread deadlines onto the virtual clock (s2.2)
+time	crates/common/controldata_utils/src/lib.rs	2	doc-named P2 reroute: controldata (s2.2)
+time	crates/contrib/uuid_ossp/src/lib.rs	2
+
+# ==== rand ====
+rand	crates/port/pg_strong_random/src/lib.rs	4	SANCTIONED: the entropy funnel internals (s2.3); pg_strong_random callers are never flagged
+
+# ==== spawn ====
+spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 spawner-seam violator (s3.3)
+spawn	crates/backend/access/pgrcolumnar/src/writer.rs	1	P3 spawner-seam violator (s3.3)
+spawn	crates/backend/executor/runtime/src/pool.rs	1	default-spawner arm; production uses spawn_with via launch_backend rtpool
+spawn	crates/backend/lib/dshash/bench/rig/src/main.rs	1	bench-rig crate, not server prod
+spawn	crates/backend/postmaster/bgjobs/src/lib.rs	1	dispatcher; already takes an injected spawner (s3.3)
+spawn	crates/backend/postmaster/launch_backend/src/lib.rs	5	SANCTIONED: the spawn door (s3.3)
+spawn	crates/backend/utils/misc/timeout/src/lib.rs	1	P3 spawner-seam violator: timer thread (s3.3)
+
+# ==== env ====
+env	crates/_support/jit_deform/src/lib.rs	1
+env	crates/_support/pgrust/trace/src/lib.rs	1
+env	crates/backend/access/heap/vacuumlazy/src/morsels.rs	5
+env	crates/backend/access/index/indexam/src/lib.rs	2
+env	crates/backend/access/pgrcolumnar/src/condcache.rs	1
+env	crates/backend/access/pgrcolumnar/src/part_cache.rs	3
+env	crates/backend/access/pgrcolumnar/src/reader.rs	4
+env	crates/backend/access/pgrcolumnar/src/scan.rs	7
+env	crates/backend/access/pgrcolumnar/src/segfile.rs	1
+env	crates/backend/access/pgrcolumnar/src/writer.rs	7
+env	crates/backend/access/table/tableam/src/lib.rs	1
+env	crates/backend/access/transam/parallel/src/lib.rs	2
+env	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
+env	crates/backend/access/transam/parallel/src/standing.rs	1
+env	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
+env	crates/backend/commands/analyze/src/lib.rs	2
+env	crates/backend/commands/copy/src/parallel.rs	14
+env	crates/backend/commands/extension/src/control.rs	1
+env	crates/backend/commands/seclabel/src/lib.rs	1
+env	crates/backend/executor/execexpr/src/compile.rs	1
+env	crates/backend/executor/execexpr/src/jit.rs	2
+env	crates/backend/executor/execmain/src/execmain.rs	1
+env	crates/backend/executor/execmain/src/execparallel.rs	3
+env	crates/backend/executor/execmain/src/lanev2.rs	30
+env	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
+env	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	29
+env	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	2
+env	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
+env	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	7
+env	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	5
+env	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
+env	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	10
+env	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	3
+env	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+env	crates/backend/executor/laneexec/src/dicteval.rs	1
+env	crates/backend/executor/lanestitch/src/lib.rs	1
+env	crates/backend/executor/lanestitch/src/stitch.rs	2
+env	crates/backend/executor/lanetable/src/lib.rs	2
+env	crates/backend/executor/nodeagg/src/codedgroup.rs	3
+env	crates/backend/executor/nodeagg/src/compact.rs	3
+env	crates/backend/executor/nodeagg/src/distinctset.rs	2
+env	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
+env	crates/backend/executor/nodeagg/src/lib.rs	3
+env	crates/backend/executor/nodeagg/src/merge.rs	4
+env	crates/backend/executor/nodeagg/src/pardistinct.rs	4
+env	crates/backend/executor/nodeagg/src/sink.rs	4
+env	crates/backend/executor/nodeagg/src/spankey.rs	2
+env	crates/backend/executor/nodeseqscan/src/lib.rs	5
+env	crates/backend/executor/runtime/src/lib.rs	3
+env	crates/backend/executor/runtime/src/sched.rs	11
+env	crates/backend/executor/runtime/src/sizing.rs	1
+env	crates/backend/executor/tqueue/src/lib.rs	1
+env	crates/backend/libpq/auth_scram/src/lib.rs	1
+env	crates/backend/optimizer/path/costsize/src/gucs.rs	3
+env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+env	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
+env	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	1
+env	crates/backend/postmaster/autovacuum/src/launcher.rs	1
+env	crates/backend/postmaster/autovacuum/src/worker.rs	1
+env	crates/backend/postmaster/bgjobs/src/lib.rs	2
+env	crates/backend/postmaster/bgworker/src/lib.rs	1
+env	crates/backend/postmaster/launch_backend/src/lib.rs	4
+env	crates/backend/postmaster/postmaster/src/main_entry.rs	1
+env	crates/backend/storage/aio/aio_uring/src/lib.rs	1
+env	crates/backend/storage/ipc/procarray/src/lib.rs	1
+env	crates/backend/storage/ipc/shm_mq/src/stall.rs	2
+env	crates/backend/storage/ipc/waiter/src/lib.rs	2
+env	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
+env	crates/backend/tcop/postgres/src/simple_query.rs	2
+env	crates/backend/tcop/postgres/src/stmt_trace.rs	1
+env	crates/backend/test_regress/src/lib.rs	1
+env	crates/backend/timezone/pgtz/src/lib.rs	1
+env	crates/backend/tsearch/ts_locale/src/public.rs	1
+env	crates/backend/utils/adt/adt_date/src/builtins.rs	1
+env	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	1
+env	crates/backend/utils/cache/relcache/src/initfile.rs	1
+env	crates/backend/utils/init/init_small/src/wretain.rs	1
+env	crates/backend/utils/init/miscinit/src/lockfile.rs	1
+env	crates/backend/utils/init/postinit/src/lib.rs	2
+env	crates/backend/utils/misc/guc/src/layers.rs	3
+env	crates/backend/utils/misc/guc/src/select.rs	1
+env	crates/backend/utils/misc/guc/src/store.rs	8
+env	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	4
+env	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	2
+env	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	6
+env	crates/backend/utils/misc/tzparser/src/lib.rs	2
+env	crates/port/pg_path/src/lib.rs	1
+
+# ==== blocking ====
+blocking	crates/backend/access/index/relscan/src/parallel.rs	3	P3 violator: btree parallel-scan Condvar (s3.3)
+blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	5	P3: readahead channels (s3.3)
+blocking	crates/backend/access/pgrcolumnar/src/writer.rs	3	P3: stitch-pool channels (s3.3)
+blocking	crates/backend/access/transam/parallel/src/lib.rs	3	P3: parallel error-queue channels (s3.3)
+blocking	crates/backend/access/transam/parallel/src/standing.rs	4	P3 violator: gang Condvar onto Waiter (s3.3)
+blocking	crates/backend/commands/copy/src/parallel.rs	2	P3: parallel-COPY work/result channels (s3.3)
+blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	P3 violator: 10ms cv poll, invisible to the virtual clock (s3.3)
+blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
+blocking	crates/backend/executor/runtime/src/sync.rs	6	SANCTIONED hub (s3.3)
+blocking	crates/backend/postmaster/launch_backend/src/lib.rs	5	P3: standby handoff channels, BOTH pairs incl. lines 759/760 uncited by the doc (s3.3)
+blocking	crates/backend/storage/ipc/waiter/src/lib.rs	6	SANCTIONED hub: the parking hub (s3.3)
+blocking	crates/backend/utils/misc/timeout/src/lib.rs	3	P3 violator: timer deadline Condvar (s2.2/s3.3)
