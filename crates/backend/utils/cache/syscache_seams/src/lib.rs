@@ -1031,6 +1031,20 @@ pub struct PgStatisticBundle<'mcx> {
     pub slots: PgVec<'mcx, PgStatisticSlotData<'mcx>>,
 }
 
+// The planner's per-cycle attribute-stats memo (replanfix2 T1) arena-leaks
+// bundles via mcx::forget_box_in: drops reclaim only arena bytes (PgVecs and
+// OnceCell contents are all mcx-backed), so forgetting them loses nothing
+// beyond the arena the planning cycle resets anyway.
+mcx::forget_safe_struct!(
+    PgStatisticSlotImages<'_> { valuetype, values_image, numbers_image },
+    PgStatisticSlotData<'_> { kind, staop, stacoll, mcx, key, images, values, numbers },
+    PgStatisticBundle<'_> { stanullfrac, stawidth, stadistinct, slots },
+);
+
+// The planner's per-cycle syscache memos (syscache-memo lane) arena-leak
+// these Copy PODs the same way; !needs_drop is the whole proof.
+mcx::forget_safe_nodrop!(PgOperatorShape, PgAmopShape);
+
 seam_core::seam!(
     // SearchSysCache3(STATRELATTINH) + full slot decode (the planner's
     // examine_variable keeps the C statsTuple pinned; here the decode-once

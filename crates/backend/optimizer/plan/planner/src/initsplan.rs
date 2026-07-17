@@ -2212,7 +2212,8 @@ fn check_mergejoinable(run: &mut PlannerRun<'_>, rinfo: RinfoId) -> PgResult<()>
     };
     let (opno, args0) = (o.opno, o.args.nth(0));
     let lefttype = crate::costsize::expr_type_typmod(args0).0;
-    if lsyscache::op_mergejoinable(opno, lefttype)? && !clauses::contain_volatile_functions(clause)?
+    if crate::syscache_memo::op_mergejoinable(run, opno, lefttype)?
+        && !clauses::contain_volatile_functions(clause)?
     {
         let fams = lsyscache::get_mergejoin_opfamilies(run.mcx, opno)?;
         run.root.rinfo_mut(rinfo).mergeopfamilies = fams;

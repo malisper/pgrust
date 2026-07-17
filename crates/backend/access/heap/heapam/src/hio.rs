@@ -11,7 +11,6 @@ use ::types_storage::bufpage::{
 };
 use ::types_tuple::{HeapTupleData, InvalidOffsetNumber, ItemPointerSet};
 
-use crate::unported;
 
 // Aliases of TABLE_INSERT_* (heapam.h): options pass through tableam unmapped.
 pub const HEAP_INSERT_SKIP_FSM: i32 = 0x0002;

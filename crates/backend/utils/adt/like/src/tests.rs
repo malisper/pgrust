@@ -220,12 +220,13 @@ fn like_escape_conversion() {
 }
 
 #[test]
-fn mb_encoding_arm_is_loud() {
+fn mb_encoding_arm_is_clean_feature_error() {
     mbutils::SetDatabaseEncoding(wchar::PG_EUC_JP).unwrap();
-    let r = std::panic::catch_unwind(|| textlike(b"a", b"a", C));
+    let r = textlike(b"a", b"a", C);
     utf8();
-    let msg = *r.unwrap_err().downcast::<String>().unwrap();
-    assert!(msg.contains("MB_MatchText"), "{msg}");
+    let err = r.unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(err.message().contains("not yet implemented"), "{}", err.message());
 }
 
 #[test]
