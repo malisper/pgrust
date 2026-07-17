@@ -474,11 +474,23 @@ pub(super) fn stats_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Record an OWNED decision for `class`. One cached load + branch when
-/// accounting is disarmed.
+/// The no-dump-dir arming env for the pgrust_lane_coverage view (WS-C,
+/// single-executor Phase 0.2): `PGRUST_LANE_V2_COVERAGE=1` arms the ticks
+/// without arming the TSV dump-on-exit (which still requires the dir).
+/// Counters stay opt-in because the index/IOS/bitmap classes tick per pull;
+/// always-on is a ledgered measurement (WS-C inc-2).
+pub(super) fn coverage_armed() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Record an OWNED decision for `class`. One cached load + branch (per arm
+/// switch) when accounting is disarmed.
 #[inline]
 pub(super) fn tick_owned(class: ShapeClass) {
-    if stats_dir().is_none() {
+    if !armed() {
         return;
     }
     OWNED[class as usize].fetch_add(1, Relaxed);
@@ -488,18 +500,64 @@ pub(super) fn tick_owned(class: ShapeClass) {
 /// Record a REFUSED decision for `class` with its reason.
 #[inline]
 pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
-    if stats_dir().is_none() {
+    if !armed() {
         return;
     }
     REFUSED[class as usize][reason as usize].fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
-/// Accounting armed? Callers may gate row-counting work (a per-batch
-/// popcount) on this before calling `tick_topkcut_rows`.
+/// Accounting armed (either the TSV dump dir or the coverage-view env)?
+/// Callers may gate row-counting work (a per-batch popcount) on this before
+/// calling `tick_topkcut_rows`.
 #[inline]
 pub(super) fn armed() -> bool {
-    stats_dir().is_some()
+    stats_dir().is_some() || coverage_armed()
+}
+
+// ---------------------------------------------------------------------------
+// Coverage-view snapshot accessors (lanev2/coverage.rs): relaxed loads of the
+// process-cumulative counters, enumerated from the vocabulary tables above —
+// the classifier source of truth, never a hand-written list. Counts derive
+// from N_CLASSES/N_REASONS (integration contract R-VOCAB: no literals).
+// ---------------------------------------------------------------------------
+
+pub(super) const fn n_classes() -> usize {
+    N_CLASSES
+}
+
+#[cfg(test)]
+pub(super) const fn n_reasons() -> usize {
+    N_REASONS
+}
+
+/// Every refusal-reason display name, by index (the full frozen vocabulary;
+/// the derived-count tests' enumeration source).
+#[cfg(test)]
+pub(super) fn reason_names() -> Vec<&'static str> {
+    (0..N_REASONS).map(|i| RefuseReason::from_index(i).name()).collect()
+}
+
+/// Every (class, owned-count) cell, zeros included.
+pub(super) fn owned_snapshot() -> Vec<(ShapeClass, u64)> {
+    ShapeClass::ALL
+        .iter()
+        .map(|&c| (c, OWNED[c as usize].load(Relaxed)))
+        .collect()
+}
+
+/// Every nonzero (class, reason, count) refusal cell.
+pub(super) fn refused_snapshot() -> Vec<(ShapeClass, RefuseReason, u64)> {
+    let mut v = Vec::new();
+    for class in ShapeClass::ALL {
+        for (i, cell) in REFUSED[class as usize].iter().enumerate() {
+            let n = cell.load(Relaxed);
+            if n > 0 {
+                v.push((class, RefuseReason::from_index(i), n));
+            }
+        }
+    }
+    v
 }
 
 /// Record one zone-adaptive top-N demotion (ambiguous boundary tie →
