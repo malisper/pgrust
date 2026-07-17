@@ -1020,7 +1020,12 @@ fn process_owned_by<'mcx>(
         }
     } else {
         if nnames > 3 {
-            unported("OWNED BY with catalog-qualified name");
+            // unported: OWNED BY with a catalog-qualified name
+            // (makeRangeVarFromNameList catalog arm)
+            return Err(err(
+                "OWNED BY with a catalog-qualified table name is not supported yet".to_string(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
         let mut parts = [""; 3];
         for (i, n) in owned_by.iter().enumerate() {

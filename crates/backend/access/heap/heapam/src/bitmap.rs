@@ -7,7 +7,7 @@
 use tidbitmap::{TbmIterator, TIDBitmap, TBM_MAX_TUPLES_PER_PAGE};
 
 use crate::{
-    heap_hot_search_buffer, store_ctup_into_slot, unported, HeapScanDescData,
+    heap_hot_search_buffer, store_ctup_into_slot, HeapScanDescData,
     HeapCheckForSerializableConflictOut,
 };
 use ::bufmgr_seams::BufferPin;
@@ -188,8 +188,16 @@ fn bitmap_next_block(
             if valid {
                 scan.rs_vistuples[ntup as usize] = offnum;
                 ntup += 1;
+                // PredicateLockTID (predicate.c): per-tuple SIREAD lock under
+                // lossy pages (C heapam_scan_bitmap_next_block); the exact-TID
+                // branch takes it inside heap_hot_search_buffer.
                 if serializable {
-                    unported("predicate PredicateLockTID under bitmap lossy pages (SSI lane)");
+                    predicate_seams::predicate_lock_tid::call(
+                        relation,
+                        ItemPointerData::new(blockno, offnum),
+                        snapshot,
+                        loctup.t_data().xmin(),
+                    )?;
                 }
             }
             HeapCheckForSerializableConflictOut(valid, relation, &mut loctup, buffer, snapshot)?;
