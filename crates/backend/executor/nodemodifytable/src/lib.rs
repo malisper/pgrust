@@ -1287,35 +1287,139 @@ pub fn exec_modify_table<'mcx>(
         u32,
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if mt.mt_done {
+    if !mt_begin(mt, estate, outer_instr_idx)? {
         return Ok(None);
+    }
+    mt_step(mt, estate, &mut fetch_outer, &mut epq_eval)
+}
+
+/// The per-call head of `exec_modify_table` (wave-2 WS-N seam `mt_begin`,
+/// integration contract §3.7 — a pure code move of the pre-loop statements):
+/// the node-done check, the EXPLAIN-ANALYZE outer-instrument carry, and the
+/// once-per-statement BEFORE STATEMENT trigger firing. `Ok(false)` = the node
+/// already ran to completion (the caller returns end-of-set without touching
+/// anything else). Idempotent across pulls: `fireBSTriggers` flips off after
+/// the first call, `mt_done` short-circuits post-completion calls.
+pub fn mt_begin<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_instr_idx: Option<u32>,
+) -> PgResult<bool> {
+    if mt.mt_done {
+        return Ok(false);
     }
     mt.outer_instr_idx = outer_instr_idx;
     if mt.fireBSTriggers {
         fire_bs_triggers(mt, estate)?;
         mt.fireBSTriggers = false;
     }
+    Ok(true)
+}
 
+/// The loop-top per-row reset of `exec_modify_table` (wave-2 WS-N seam
+/// `mt_row_prologue`, contract §3.7): the per-tuple expr-context reset plus
+/// the node's index-expression eval-context reset. Contract LAW (§3.7): this
+/// runs BEFORE the child pull — the per-tuple context may hold by-ref datums
+/// the PREVIOUS row's processing produced, and the reset must not run after
+/// the next child row is fetched (the fetched slot's datums could live
+/// there). In the lane hosting the placement is structural: `MtChildSource::
+/// next_row` (lanev2/dml.rs) calls this before pulling, never `accept`.
+pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
+    estate.reset_per_tuple_expr_context();
+    mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
+}
+
+/// Whether a deferred MERGE ... WHEN NOT MATCHED [BY TARGET] action from the
+/// previous source row is queued (wave-2 WS-N seam `mt_pending`, contract
+/// §3.7). Only `exec_merge_matched_scan`'s concurrent-flip leg sets it; a
+/// plain INSERT/UPDATE/DELETE node never reports pending.
+pub fn mt_pending(mt: &ModifyTableState<'_>) -> bool {
+    mt.mt_merge_pending_not_matched.is_some()
+}
+
+/// Run the deferred MERGE NOT MATCHED action (wave-2 WS-N seam `mt_resume`,
+/// contract §3.7 — the loop-top pending arm of `exec_modify_table`, C
+/// nodeModifyTable.c 4200-4218, as a pure code move): it targets the node's
+/// toplevel result relation and runs BEFORE the next source row is fetched.
+/// The caller runs `mt_row_prologue` first (the C loop-top order).
+pub fn mt_resume<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    let pending = mt
+        .mt_merge_pending_not_matched
+        .take()
+        .expect("mt_resume called without a pending MERGE action");
+    mt.cur = 0;
+    mt.last_result_oid = 0;
+    exec_merge_not_matched(mt, estate, pending, epq_eval)
+}
+
+/// One `exec_modify_table` call's worth of the ModifyTable loop, composed
+/// from the wave-2 WS-N seams (contract §3.7): per row, `mt_row_prologue` →
+/// the `mt_pending`/`mt_resume` deferred-MERGE arm → child pull →
+/// `mt_accept_row`; on child exhaustion, `mt_source_exhausted`. BOTH engines
+/// drive this exact function — `exec_modify_table` (the Volcano arm) above,
+/// and the lane host's `MtChildSource` delegation (lanev2/dml.rs) — so the
+/// statement stream is identical by construction.
+pub fn mt_step<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    fetch_outer: &mut impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
     loop {
-        estate.reset_per_tuple_expr_context();
-        mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
+        mt_row_prologue(mt, estate);
 
-        // A deferred MERGE ... WHEN NOT MATCHED [BY TARGET] action from the
-        // previous source row runs before fetching the next one (C 4200-4218);
-        // it targets the node's toplevel result relation.
-        if let Some(pending) = mt.mt_merge_pending_not_matched.take() {
-            mt.cur = 0;
-            mt.last_result_oid = 0;
-            if let Some(rslot) = exec_merge_not_matched(mt, estate, pending, &mut epq_eval)? {
+        if mt_pending(mt) {
+            if let Some(rslot) = mt_resume(mt, estate, epq_eval)? {
                 return Ok(Some(rslot));
             }
             continue;
         }
 
         let Some(plan_slot) = fetch_outer(estate)? else {
-            break;
+            mt_source_exhausted(mt, estate)?;
+            return Ok(None);
         };
 
+        if let Some(rslot) = mt_accept_row(mt, estate, plan_slot, epq_eval)? {
+            return Ok(Some(rslot));
+        }
+    }
+}
+
+/// Process one fetched source row (wave-2 WS-N seam `mt_accept_row`,
+/// contract §3.7 — the loop body of `exec_modify_table` from the
+/// EvalPlanQualSetSlot mirror through the operation dispatch, as a pure code
+/// move). `Some` = a RETURNING row to hand to the caller; `None` = the row
+/// was consumed without producing output (the caller pulls the next one).
+pub fn mt_accept_row<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    // The 4-space-deep block below is the loop body verbatim (pure code
+    // move): a former `continue` (row consumed, pull the next) is now
+    // `return Ok(None)`, the `return Ok(Some(..))`s are unchanged.
+    {
         // C EvalPlanQualSetSlot: the EPQ rowmark fetch reads this row's junk
         // ctid/wholerow columns to re-return the source rel's tuple.
         mt.epq_origslot = Some(plan_slot);
@@ -1343,11 +1447,12 @@ pub fn exec_modify_table<'mcx>(
                     mt.cur = 0;
                     mt.last_result_oid = 0;
                     if let Some(rslot) =
-                        exec_merge(mt, estate, plan_slot, None, None, &mut epq_eval)?
+                        exec_merge(mt, estate, plan_slot, None, None, &mut *epq_eval)?
                     {
                         return Ok(Some(rslot));
                     }
-                    continue;
+                    // Former loop `continue`: the row is consumed.
+                    return Ok(None);
                 }
                 return Err(Box::new(PgError::error("tableoid is NULL".to_string())));
             }
@@ -1363,7 +1468,7 @@ pub fn exec_modify_table<'mcx>(
                     exec_init_insert_projection(mt, estate)?;
                 }
                 let slot = exec_get_insert_new_tuple(mt, estate, plan_slot)?;
-                let result = exec_insert(mt, estate, slot, &mut epq_eval)?;
+                let result = exec_insert(mt, estate, slot, &mut *epq_eval)?;
                 if let Some(rslot) = result {
                     if mt.rel().project_returning.is_some() {
                         let old = mt.oc_old_slot.take();
@@ -1461,7 +1566,7 @@ pub fn exec_modify_table<'mcx>(
                 }
                 fetch_old_row_version(mt, estate, &tupleid)?;
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                match exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)? {
+                match exec_update(mt, estate, &mut tupleid, slot, &mut *epq_eval)? {
                     UpdateResult::NotModified => {}
                     UpdateResult::Modified => {
                         if mt.rel().project_returning.is_some() {
@@ -1527,7 +1632,7 @@ pub fn exec_modify_table<'mcx>(
             CmdType::CMD_DELETE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
                 let modified =
-                    exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false, None, None)?;
+                    exec_delete(mt, estate, &mut tupleid, &mut *epq_eval, false, None, None)?;
                 if modified && mt.rel().project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(
@@ -1555,7 +1660,7 @@ pub fn exec_modify_table<'mcx>(
                     mt.last_result_oid = 0;
                 }
                 if let Some(rslot) =
-                    exec_merge(mt, estate, plan_slot, tupleid, oldtup, &mut epq_eval)?
+                    exec_merge(mt, estate, plan_slot, tupleid, oldtup, &mut *epq_eval)?
                 {
                     return Ok(Some(rslot));
                 }
@@ -1563,7 +1668,20 @@ pub fn exec_modify_table<'mcx>(
             other => panic!("ExecModifyTable (nodeModifyTable.c): {other:?} arm not ported"),
         }
     }
+    // The row was consumed without producing a RETURNING row (the former
+    // loop-bottom fall-through).
+    Ok(None)
+}
 
+/// The child-exhausted epilogue of `exec_modify_table` (wave-2 WS-N seam
+/// `mt_source_exhausted`, contract §3.7 — the post-loop statements as a pure
+/// code move): the pgrcolumnar statement-end flush, AFTER STATEMENT
+/// triggers, and the `mt_done` latch. Runs exactly once per statement — the
+/// latch makes every later `mt_begin` report done.
+pub fn mt_source_exhausted<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
     // pgrcolumnar statement-end flush: single-tuple inserts buffer in the AM's
     // per-statement ingest writer (pgrcolumnar::tuple_insert; RG-sized seals
@@ -1581,7 +1699,60 @@ pub fn exec_modify_table<'mcx>(
     }
     fire_as_triggers(mt, estate)?;
     mt.mt_done = true;
-    Ok(None)
+    Ok(())
+}
+
+/// Wave-2 WS-N inc-1 lane-admission probe (lanev2/dml.rs, behind
+/// `PGRUST_LANE_V2_DML`): `None` = the shape the DML lane hosts this
+/// increment — a single-result-relation plain-table INSERT with no triggers,
+/// no ON CONFLICT, no partition routing / inherited root, and at most
+/// trivial (no OLD/NEW alias) RETURNING. `Some(detail)` = the `DmlShape`
+/// refusal with its mechanism-attribution detail string (integration
+/// contract §1: attribution rides the detail string, never a second class).
+///
+/// Lives here (not in the lane) because the verdict reads private node
+/// state; it is a read-only probe — calling it changes nothing, so a refusal
+/// falls through to the unchanged Volcano arm byte-safely. The admitted set
+/// widens in later increments (docs/design/lane-dml-epq.md ladder); every
+/// widening deletes a `Some` arm here and its allowlist row together.
+pub fn mt_lane_insert_refusal(mt: &ModifyTableState<'_>) -> Option<&'static str> {
+    match mt.operation {
+        CmdType::CMD_INSERT => {}
+        CmdType::CMD_UPDATE => return Some("update"),
+        CmdType::CMD_DELETE => return Some("delete"),
+        CmdType::CMD_MERGE => return Some("merge"),
+        _ => return Some("unknown-operation"),
+    }
+    if mt.plan.onConflictAction
+        != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+    {
+        return Some("on-conflict");
+    }
+    // rootRelation > 0 = partitioned or inherited target: INSERT routes
+    // through the root (`root` is Some); >1 result rels never happens for
+    // INSERT but is refused defensively with the same detail.
+    if mt.root.is_some() || mt.rels.len() != 1 {
+        return Some("partition-routing");
+    }
+    let rel = &mt.rels[0];
+    // Views (INSTEAD OF triggers / auto-updatable), foreign tables,
+    // matviews, partitioned roots reached without `root`: not plain heaps.
+    if rel.relkind != RELKIND_RELATION {
+        return Some("target-not-plain-table");
+    }
+    // ANY triggers on the target (row or statement, before/after/instead):
+    // inc-1 is INSERT-without-triggers by charter.
+    if rel.trigdesc.is_some() {
+        return Some("triggers");
+    }
+    // RETURNING is admitted (contract §6-WS-N(1)); the OLD/NEW-alias form
+    // (RETURNING OLD.*, NEW.*) is the non-trivial carve-out this increment.
+    if let Some(st) = rel.project_returning.as_deref() {
+        if st.has_old() || st.has_new() {
+            return Some("returning-old-new");
+        }
+    }
+    None
 }
 
 // ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols unioned with the
