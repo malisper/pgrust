@@ -368,3 +368,121 @@ pub fn try_own_material<'mcx>(
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     drive(ShapeClass::Material, &mut **m, &mut MaterialSource, estate)
 }
+
+// ===========================================================================
+// Increment 2 — the recursive-CTE machinery + Memoize (contract §5 Stage 2;
+// iteration protocol + shared-slot law: docs/design/rowmode-tail.md §3).
+// ===========================================================================
+
+/// CteScan as a delegation leaf: `exec_cte_scan` resolves the CTE-shared
+/// tuplestore state per call (take-use-put-back inside the ported body —
+/// the shared-slot law holds because this source holds NOTHING).
+struct CteScanSource;
+
+impl<'mcx> RowSource<'mcx> for CteScanSource {
+    type Node = ::nodectescan::CteScanState<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        ::nodectescan::exec_cte_scan(node, estate)
+    }
+}
+
+#[inline]
+pub fn try_own_cte_scan<'mcx>(
+    cs: &mut ::mcx::PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::CteScan, &mut **cs, &mut CteScanSource, estate)
+}
+
+/// RecursiveUnion as a delegation leaf. The whole iteration protocol —
+/// working/intermediate table swap, dedup hash, and the `WorkTableShared`
+/// TAKE/PUT around every child call (so descendant WorkTableScans reach it)
+/// — is `exec_recursive_union`'s own body; both children stay Volcano
+/// inside it. A tail-owned WorkTableScan in the recursive term is an
+/// INDEPENDENT nested single-pull drive (no shared driver state — the
+/// nested-drive validation of the inc-2 corpus).
+struct RecursiveUnionSource;
+
+impl<'mcx> RowSource<'mcx> for RecursiveUnionSource {
+    type Node = crate::procnode::RecursiveUnionNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let crate::procnode::RecursiveUnionNode { state, outer, inner } = node;
+        ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
+    }
+}
+
+#[inline]
+pub fn try_own_recursive_union<'mcx>(
+    ru: &mut ::mcx::PgBox<'mcx, crate::procnode::RecursiveUnionNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::RecursiveUnion, &mut **ru, &mut RecursiveUnionSource, estate)
+}
+
+/// WorkTableScan as a delegation leaf: `exec_work_table_scan` resolves its
+/// `rustate` from `estate.worktable_shared_slot(wtParam)` per call (the
+/// entry its RecursiveUnion put back before pulling — shared-slot law).
+struct WorkTableScanSource;
+
+impl<'mcx> RowSource<'mcx> for WorkTableScanSource {
+    type Node = ::nodeworktablescan::WorkTableScanState<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        ::nodeworktablescan::exec_work_table_scan(node, estate)
+    }
+}
+
+#[inline]
+pub fn try_own_work_table_scan<'mcx>(
+    wts: &mut ::mcx::PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::WorkTableScan, &mut **wts, &mut WorkTableScanSource, estate)
+}
+
+/// Memoize as a delegation leaf (the WS-L OQ ruling: the delegation leaf
+/// satisfies the wave-2 charter; lane-owned-child composition is a ledgered
+/// later increment). `next_row` replays `memoize_arm`'s fallback statements
+/// exactly: rebuild the `MemoizeOuter` view (deferred child-rescan replay —
+/// C's outerPlan->chgParam cadence) fresh per call, then `exec_memoize`.
+struct MemoizeSource;
+
+impl<'mcx> RowSource<'mcx> for MemoizeSource {
+    type Node = crate::procnode::MemoizeNode<'mcx>;
+
+    fn next_row(
+        &mut self,
+        node: &mut Self::Node,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<Option<ExecSlotId>> {
+        let plan = node.state.plan.plan.lefttree.expect("Memoize outer plan");
+        let mut outer = crate::procnode::MemoizeOuter {
+            node: &mut node.outer,
+            plan,
+            chg: &mut node.outer_chg,
+        };
+        ::nodememoize::exec_memoize(&mut node.state, &mut outer, estate)
+    }
+}
+
+#[inline]
+pub fn try_own_memoize<'mcx>(
+    m: &mut ::mcx::PgBox<'mcx, crate::procnode::MemoizeNode<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    drive(ShapeClass::Memoize, &mut **m, &mut MemoizeSource, estate)
+}
