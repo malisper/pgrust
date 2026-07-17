@@ -38,6 +38,65 @@ pub struct GatherState<'mcx> {
     // for the child; consumed at the leader's next local pull, after
     // ExecParallelReinitialize.
     pub outer_chg: Bitmapset<'mcx>,
+    // WS-O (wave 2): the gang's admission-ledger width lease
+    // (PGRUST_RUNTIME_LEDGER_GATHER; None on every fail-open path — knob
+    // off, no runtime, ledger off, lease cap). Held launch → workers-done;
+    // dropped (retired) in exec_shutdown_gather_workers.
+    width_lease: Option<runtime::ParallelWidthLease>,
+}
+
+/// `PGRUST_RUNTIME_LEDGER_GATHER` (wave-2 R-KNOBS registry, WS-O; default
+/// OFF): Gather/GatherMerge launch width rides an admission-ledger width
+/// lease. REQUIRES the ledger (`PGRUST_RUNTIME_LEDGER_V2`) — with the
+/// ledger off (or no runtime, or the 64-lease cap) the seam FAILS OPEN to
+/// today's launch exactly. Read once.
+pub(crate) fn ledger_gather_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_LEDGER_GATHER").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// The launch-width seam (WS-O inc-1b, both gather nodes): lease external
+/// width for the gang and clamp the context's launch count to the grant
+/// through C's own lower-the-launch mechanism
+/// (`ReinitializeParallelWorkers` / `nworkers_to_launch`) — DSM and queue
+/// sizing stay at plan width, only fewer workers launch, exactly the
+/// C-parity "launched < planned" shape every reader already handles.
+/// Grant 0 launches NOTHING: the leader's local scan (`need_to_scan_locally`)
+/// IS the serial path the lease API demands. None = fail-open: the launch
+/// count is untouched (no configuration can have clamped it earlier — the
+/// knob and runtime presence are process-static, and a cap refusal leaves
+/// the count at the previous startup's value only if THAT startup leased,
+/// so the fail-open arm restores the plan width defensively).
+pub(crate) fn lease_gather_width(
+    pcxt: parallel::ParallelContextId,
+    num_workers: i32,
+) -> Option<runtime::ParallelWidthLease> {
+    if !ledger_gather_enabled() {
+        return None;
+    }
+    let rt = runtime::global()?;
+    if !rt.ledger_enabled() {
+        return None;
+    }
+    let lease = rt.lease_parallel_width(num_workers.max(0) as u32);
+    let clamp = lease
+        .as_ref()
+        .map_or(num_workers, |l| l.granted().min(i32::MAX as u32) as i32);
+    parallel::ReinitializeParallelWorkers(pcxt, clamp);
+    lease
+}
+
+/// Post-launch settle: charge only the gang's ACTIVE width (launched may
+/// be below the grant — registration slots, bgworker limits).
+pub(crate) fn settle_gather_width(
+    lease: &mut Option<runtime::ParallelWidthLease>,
+    launched: i32,
+) {
+    if let Some(l) = lease.as_mut() {
+        l.settle(launched.max(0) as u32);
+    }
 }
 
 pub(crate) fn leader_participation() -> bool {
@@ -111,6 +170,7 @@ pub fn exec_init_gather<'mcx>(
         fair_stride: 0,
         stride_rem: 0,
         outer_chg: Bitmapset::empty(),
+        width_lease: None,
     })
 }
 
@@ -136,8 +196,14 @@ fn gather_startup<'mcx>(
             Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gather.initParam)?,
         }
         let pei = node.pei.as_mut().expect("just initialized");
+        // WS-O width lease (default-OFF knob; every fail-open path leaves
+        // the launch untouched). Acquired per startup — a rescan relaunch
+        // re-leases against the headroom of ITS moment.
+        debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
+        node.width_lease = lease_gather_width(pei.pcxt, gather.num_workers);
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
+        settle_gather_width(&mut node.width_lease, node.nworkers_launched);
         execparallel::account_workers(estate, pei.pcxt);
 
         if node.nworkers_launched > 0 {
@@ -346,6 +412,8 @@ pub fn exec_shutdown_gather_workers(node: &mut GatherState<'_>) -> PgResult<()> 
     if let Some(pei) = node.pei.as_mut() {
         exec_parallel_finish(pei)?;
     }
+    // WS-O: gang done — retire the width lease (drop returns the width).
+    node.width_lease = None;
     Ok(())
 }
 
@@ -396,10 +464,10 @@ pub(crate) fn apply_pending_outer_chg<'mcx>(
     crate::execami::exec_re_scan_chg_forced(outer, outer_plan, estate, &chg)
 }
 
-// pei/reader are droppy owners (Arc/Mutex/queue handles), released by
-// ExecShutdownGather and release_owned.
+// pei/reader/width_lease are droppy owners (Arc/Mutex/queue/lease handles),
+// released by ExecShutdownGather and release_owned.
 ::mcx::forget_safe_struct!(
     GatherState<'_> { plan, ps, initialized, need_to_scan_locally, tuples_needed,
         funnel_slot, nworkers_launched, nreaders, nextreader, fair_stride,
-        stride_rem, outer_chg; pei, reader },
+        stride_rem, outer_chg; pei, reader, width_lease },
 );
