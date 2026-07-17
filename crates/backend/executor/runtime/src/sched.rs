@@ -827,6 +827,36 @@ impl Scheduler {
         self.ledger_on.load(Ordering::Relaxed)
     }
 
+    /// WS-O external width lease (ledger.rs "External width entries"):
+    /// admit a non-pool parallel gang. None ⇔ ledger OFF or the 64-entry
+    /// cap — FAIL-OPEN, the caller keeps today's uncapped path. The grant
+    /// may be 0 (the caller must have a serial path). Takes ledger.inner
+    /// ALONE — never called under the membership lock (lock-order note in
+    /// the ledger module doc).
+    pub(crate) fn lease_external_width(&self, requested: u32) -> Option<(usize, u32)> {
+        if !self.ledger_on.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.ledger.admit_external(requested)
+    }
+
+    /// Settle an external entry to its ACTIVE width; widened pool targets
+    /// wake parked workers (the retire wake discipline). NOT gated on
+    /// ledger_on: a live entry must stay settleable across a test toggle.
+    pub(crate) fn settle_external_width(&self, id: usize, active: u32) {
+        if self.ledger.settle_external(id, active) > 0 {
+            self.park.wake_all();
+        }
+    }
+
+    /// Retire an external entry (lease drop), waking parked workers when
+    /// pool targets widen. NOT gated on ledger_on (as settle).
+    pub(crate) fn retire_external_width(&self, id: usize) {
+        if self.ledger.retire_external(id) > 0 {
+            self.park.wake_all();
+        }
+    }
+
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
     pub(crate) fn clock_now_ns(&self) -> u64 {
         self.clock.now_ns()

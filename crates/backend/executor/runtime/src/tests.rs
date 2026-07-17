@@ -3608,3 +3608,153 @@ mod ledger_tests {
         assert_eq!(snap.granted_total, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// WS-O (wave 2) — ledger EXTERNAL face + ParallelWidthLease (append-only
+// module per the shared-file rule; nothing above is edited).
+// ---------------------------------------------------------------------------
+mod ledger_external_tests {
+    use super::*;
+    use crate::ledger::{AdmissionLedger, MAX_EXTERNAL_ENTRIES};
+
+    fn budgets(cores: u32) -> LedgerBudgets {
+        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+    }
+
+    fn req(ceiling: u32) -> WidthRequest {
+        WidthRequest::unbounded(ceiling)
+    }
+
+    /// HEADROOM-ONLY GRANTS: an empty box grants min(requested, cores); a
+    /// pool-saturated box grants 0 (the serial-path law); the grant is
+    /// charged so a second gang sees the reduced headroom.
+    #[test]
+    fn external_grants_are_headroom_only() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (a, granted_a) = l.admit_external(6).unwrap();
+        assert_eq!(granted_a, 6, "empty box: min(requested, cores)");
+        let (b, granted_b) = l.admit_external(6).unwrap();
+        assert_eq!(granted_b, 2, "second gang sees the first one's charge");
+        let snap = l.snapshot();
+        assert_eq!(snap.external_admitted, 2);
+        assert_eq!(snap.external_granted, 8);
+        assert_eq!(snap.external_active, 8);
+        l.retire_external(a);
+        l.retire_external(b);
+        assert_eq!(l.snapshot().external_admitted, 0);
+
+        // Pool-saturated box: an unbounded pool entry targets the whole
+        // budget — the gang's grant is 0 and the caller must go serial.
+        let l = AdmissionLedger::new(4, budgets(8));
+        l.admit(0, req(16));
+        assert_eq!(l.debug_words(0).1, 8);
+        let (_, granted) = l.admit_external(4).unwrap();
+        assert_eq!(granted, 0, "no headroom: grant 0, caller's serial path");
+    }
+
+    /// RECOMPUTE PARTICIPATION: external active width comes off the top of
+    /// the pool budget; retire/settle return it (and the pool target
+    /// re-widens). The liveness floor holds at zero budget.
+    #[test]
+    fn external_width_enters_the_recompute() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (id, granted) = l.admit_external(6).unwrap();
+        assert_eq!(granted, 6);
+        l.admit(0, req(16));
+        assert_eq!(l.debug_words(0).1, 2, "pool target = cores - external active");
+        // Gang launched only 3 of its 6: settle releases the parked width.
+        assert_eq!(l.settle_external(id, 3), 1, "pool target widened -> wake hint");
+        assert_eq!(l.debug_words(0).1, 5);
+        // Gang exits: full width back to the pool.
+        assert_eq!(l.retire_external(id), 1);
+        assert_eq!(l.debug_words(0).1, 8);
+
+        // Zero budget still floors pool targets at 1 (no-wedge law).
+        let l = AdmissionLedger::new(4, budgets(2));
+        let (_, g) = l.admit_external(2).unwrap();
+        assert_eq!(g, 2);
+        l.admit(0, req(4));
+        assert_eq!(l.debug_words(0).1, 1, "liveness floor beats the external charge");
+    }
+
+    /// CAP, FAIL-OPEN: the 65th concurrent entry is refused (None — the
+    /// caller keeps today's path); the refusal is counted; retiring one
+    /// entry reopens admission (slab index reuse).
+    #[test]
+    fn external_cap_fails_open() {
+        let l = AdmissionLedger::new(4, budgets(1024));
+        let ids: Vec<usize> =
+            (0..MAX_EXTERNAL_ENTRIES).map(|_| l.admit_external(1).unwrap().0).collect();
+        assert!(l.admit_external(1).is_none(), "past the cap: fail-open");
+        assert_eq!(l.snapshot().external_cap_refusals, 1);
+        l.retire_external(ids[7]);
+        let (reused, _) = l.admit_external(1).expect("slab slot reopened");
+        assert_eq!(reused, 7, "retired slab index is reused");
+        for id in ids.into_iter().filter(|&i| i != 7) {
+            l.retire_external(id);
+        }
+        l.retire_external(reused);
+        assert_eq!(l.snapshot().external_admitted, 0);
+    }
+
+    /// The Runtime RAII lease: ledger OFF -> None (fail-open); ON -> a
+    /// lease whose drop retires the entry; settle tracks ACTIVE width
+    /// within the frozen grant. End-to-end against a live pool: a leased
+    /// gang narrows a pool RG's target and the run still completes.
+    #[test]
+    fn parallel_width_lease_raii() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(false);
+        assert!(rt.lease_parallel_width(2).is_none(), "ledger OFF: fail-open, no lease");
+
+        rt.set_ledger(true);
+        {
+            let mut lease = rt.lease_parallel_width(8).expect("ledger ON grants a lease");
+            assert_eq!(lease.granted(), 2, "headroom = the whole 2-core budget");
+            assert_eq!(rt.ledger_snapshot().external_active, 2);
+            lease.settle(1);
+            assert_eq!(rt.ledger_snapshot().external_active, 1);
+
+            // A pool RG under the gang's charge: narrowed but live.
+            let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+            let work = SyntheticWork::new(64, None, 0);
+            let (_h, waiter) =
+                rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(64))));
+            assert_eq!(waiter.wait(), RgOutcome::Completed);
+            work.assert_all_executed_once();
+            pool.shutdown();
+        }
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.external_admitted, 0, "lease drop retired the entry");
+        assert_eq!(snap.external_active, 0);
+    }
+
+    /// Grant-may-be-0 through the Runtime face: a saturated pool yields a
+    /// zero-width lease (Some, not None — the caller must go serial, not
+    /// uncapped), and dropping it is clean.
+    #[test]
+    fn zero_grant_lease_is_some() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(4, None, 0);
+        let (_h, _waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(4))));
+        // The admitted pool entry targets both cores: zero headroom.
+        let lease = rt.lease_parallel_width(4).expect("cap not reached: Some");
+        assert_eq!(lease.granted(), 0, "saturated box: grant 0 (serial path law)");
+        drop(lease);
+        assert_eq!(rt.ledger_snapshot().external_admitted, 0);
+    }
+}

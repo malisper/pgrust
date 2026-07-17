@@ -304,6 +304,27 @@ impl Runtime {
         self.sched.ledger.snapshot()
     }
 
+    /// WS-O (wave 2): lease EXTERNAL parallel width for a non-pool gang
+    /// (Gather's bgworker helpers) through the admission ledger's external
+    /// face. `requested` is denominated in WORKERS — the LEADER IS NOT
+    /// COUNTED (inc-1 C parity; parallel_leader_participation rides free).
+    ///
+    /// None = FAIL-OPEN: the ledger is OFF (`PGRUST_RUNTIME_LEDGER_V2`
+    /// unset / per-instance toggle off) or the 64-entry external cap is
+    /// full — the caller keeps today's uncapped launch path exactly.
+    ///
+    /// Some(lease): launch at most [`ParallelWidthLease::granted`] workers.
+    /// **The grant MAY BE 0 — the caller MUST have a serial path** (e.g.
+    /// Gather's leader-local scan). The grant is a HEADROOM-ONLY, FROZEN
+    /// ceiling (ledger.rs module doc); after launching, call
+    /// [`ParallelWidthLease::settle`] with the live worker count so parked
+    /// gang width is released (granted counts ACTIVE width — the
+    /// composition rule). Dropping the lease retires the entry.
+    pub fn lease_parallel_width(self: &Arc<Self>, requested: u32) -> Option<ParallelWidthLease> {
+        let (id, granted) = self.sched.lease_external_width(requested)?;
+        Some(ParallelWidthLease { rt: Arc::clone(self), id, granted })
+    }
+
     /// WS-B test hook (the set_decay_quantum_ns precedent): per-instance
     /// JOIN threshold so deterministic tests exercise sub-threshold
     /// admission. Production keeps PGRUST_RUNTIME_LEDGER_JOIN_US (default
@@ -688,6 +709,44 @@ impl Runtime {
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
+}
+
+/// RAII width lease for an EXTERNAL parallel gang (WS-O wave 2; see
+/// [`Runtime::lease_parallel_width`]). Holds one ledger external entry:
+/// the grant is a frozen headroom-only ceiling ([`ParallelWidthLease::granted`]
+/// may be 0 — the caller must have a serial path); [`ParallelWidthLease::settle`]
+/// tracks the ACTIVE width within it; drop retires the entry and returns
+/// the width to the pool.
+pub struct ParallelWidthLease {
+    rt: Arc<Runtime>,
+    id: usize,
+    granted: u32,
+}
+
+impl ParallelWidthLease {
+    /// The frozen grant ceiling (workers; the leader is not counted).
+    /// **May be 0 — the caller MUST have a serial path.**
+    pub fn granted(&self) -> u32 {
+        self.granted
+    }
+
+    /// Record the gang's ACTIVE width (launched/live workers ≤ granted;
+    /// parked workers hold no grant). Callable repeatedly — launch,
+    /// rescan relaunch, partial exit.
+    pub fn settle(&mut self, active: u32) {
+        debug_assert!(
+            active <= self.granted,
+            "settling above the frozen grant ({active} > {})",
+            self.granted
+        );
+        self.rt.sched.settle_external_width(self.id, active.min(self.granted));
+    }
+}
+
+impl Drop for ParallelWidthLease {
+    fn drop(&mut self) {
+        self.rt.sched.retire_external_width(self.id);
+    }
 }
 
 /// RAII lease of one external pin-board lane (see
