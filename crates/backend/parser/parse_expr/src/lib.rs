@@ -2722,20 +2722,13 @@ pub fn sql_fn_post_column_ref<'mcx>(
     let param = parser_small1::sql_fn_make_param(mcx, &state, paramno, ptype, location)?;
     let Some(subfield) = subfield else { return Ok(Some(param)) };
     // C routes through ParseFuncOrColumn(fn = NULL): composite projection,
-    // else function attribute notation, else NULL.
+    // else attribute-notation function call (p.upper => upper(p)), else
+    // NULL — a None falls back to the caller's column-not-found report.
     match parse_func::ParseComplexProjection(mcx, pstate, subfield, param, location)? {
         Some(node) => Ok(Some(node)),
         None => {
-            if !catalog_namespace::FuncnameGetCandidates(mcx, &[subfield], 1, &[], false, false)?
-                .is_empty()
-            {
-                panic!(
-                    "sql_fn_post_column_ref (functions.c): attribute-notation function \
-                     call on a SQL-function parameter unported — reuse \
-                     attribute_notation_func_call once closure-batch-3 lands"
-                );
-            }
-            Ok(None)
+            let last_srf = pstate.p_last_srf;
+            attribute_notation_func_call(mcx, pstate, subfield, param, last_srf, location)
         }
     }
 }

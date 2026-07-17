@@ -11,7 +11,8 @@ use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid, INT2OID, INT4OID, INT8OID, NAMEDATALEN};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_UNDEFINED_SCHEMA, ERROR,
 };
 use types_nodes::rawnodes::{
     ColumnDef, Constraint, ConstrType, CreateSeqStmt, CreateStmt, IndexElem, IndexStmt, SortByDir,
@@ -46,6 +47,29 @@ fn type_is_only_a_shell(name: &str) -> Box<PgError> {
     )
 }
 
+// Clean 0A000 for unported-feature lanes (user-reachable stubs must raise,
+// not panic); errposition attaches when the surrounding code has a pstate.
+#[cold]
+#[inline(never)]
+fn unported_feature_at(
+    pstate: Option<&parser_small1::ParseState<'_, '_>>,
+    location: i32,
+    what: &str,
+) -> Box<PgError> {
+    let mut e = Box::new(
+        PgError::new(ERROR, format!("{what} is not supported yet"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    );
+    if let Some(ps) = pstate {
+        let pos =
+            parser_small1::parser_errposition(ps, location, mbutils::GetDatabaseEncoding());
+        if pos > 0 {
+            e.cursor_position = Some(pos);
+        }
+    }
+    e
+}
+
 // typenameTypeIdAndMod (parse_type.c); pstate feeds errposition around the
 // typmodin call (C's setup_parser_errposition_callback).
 pub fn typenameTypeIdAndMod<'mcx>(
@@ -72,7 +96,13 @@ fn typename_type_id_and_mod<'mcx>(
     tn: &TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
     if tn.pct_type || tn.setof {
-        unported("LookupTypeName %TYPE / SETOF");
+        // unported: C's LookupTypeName resolves %TYPE to the referenced
+        // column's type and ignores SETOF here; clean 0A000 until ported.
+        return Err(unported_feature_at(
+            pstate,
+            tn.location,
+            "%TYPE and SETOF type references",
+        ));
     }
     if tn.names.is_nil() {
         // LookupTypeName pre-resolved arm (makeTypeNameFromOid; LIKE / OF type).
@@ -139,14 +169,19 @@ pub fn typenameTypeId<'mcx>(
     tn: &TypeName<'_>,
 ) -> PgResult<Oid> {
     if tn.pct_type || tn.setof {
-        unported("LookupTypeName %TYPE / SETOF");
+        // unported: C's LookupTypeName resolves %TYPE to the referenced
+        // column's type and ignores SETOF here; clean 0A000 until ported.
+        return Err(unported_feature_at(
+            pstate,
+            tn.location,
+            "%TYPE and SETOF type references",
+        ));
     }
     if tn.names.is_nil() || tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
     }
     let (typoid, typname) = resolveTypeNames(mcx, tn)?;
-    let not_exist = |typname: &str| {
-        let mut e = type_does_not_exist(typname);
+    let at_tn = |mut e: Box<PgError>| {
         if let Some(ps) = pstate {
             let pos =
                 parser_small1::parser_errposition(ps, tn.location, mbutils::GetDatabaseEncoding());
@@ -156,6 +191,7 @@ pub fn typenameTypeId<'mcx>(
         }
         e
     };
+    let not_exist = |typname: &str| at_tn(type_does_not_exist(typname));
     if typoid == InvalidOid {
         return Err(not_exist(typname));
     }
@@ -170,7 +206,9 @@ pub fn typenameTypeId<'mcx>(
     };
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
-        _ => unported("shell types (typisdefined = false)"),
+        // unported: C's typenameTypeId path (typenameType) raises exactly
+        // this shell-type error; the shell-type USE lanes stay unported.
+        _ => return Err(at_tn(type_is_only_a_shell(typname))),
     }
     Ok(typoid)
 }
@@ -187,7 +225,14 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     missing_ok: bool,
 ) -> PgResult<Oid> {
     if tn.pct_type || tn.setof {
-        unported("LookupTypeName %TYPE / SETOF");
+        // unported: C's LookupTypeName resolves %TYPE to the referenced
+        // column's type and ignores SETOF here; clean 0A000 until ported
+        // (reachable via CREATE AGGREGATE/OPERATOR argument types).
+        return Err(unported_feature_at(
+            None,
+            tn.location,
+            "%TYPE and SETOF type references",
+        ));
     }
     if tn.names.is_nil() || tn.typeOid != InvalidOid {
         unported("pre-resolved TypeName.typeOid lane");
@@ -210,7 +255,10 @@ pub fn LookupTypeNameOidExtended<'mcx>(
     };
     match syscache_seams::pg_type_isdefined::call(typoid)? {
         Some(true) => {}
-        _ => unported("shell types (typisdefined = false)"),
+        // unported: C's LookupTypeNameOid returns shell types (their DDL
+        // consumers accept them); pgrust's shell-type USE lanes are
+        // unported, so raise the typenameType-shaped error cleanly.
+        _ => return Err(type_is_only_a_shell(typname)),
     }
     Ok(typoid)
 }
@@ -1502,10 +1550,15 @@ pub fn transformCreateStmt<'mcx>(
         let nspid =
             if probe { nspid } else { RangeVarGetCreationNamespace(mcx, relation)? };
         if lsyscache::get_relname_relid(relname, nspid)? != InvalidOid {
-            // checkMembershipInCurrentExtension only bites inside an
-            // extension script (needs getObjectDescription for its report).
+            // unported: checkMembershipInCurrentExtension only bites inside
+            // an extension script (needs getObjectDescription for its
+            // report); clean 0A000 until that lane is ported.
             if pg_depend::creating_extension() {
-                unported("CREATE TABLE IF NOT EXISTS inside an extension script");
+                return Err(unported_feature_at(
+                    None,
+                    -1,
+                    "CREATE TABLE IF NOT EXISTS inside an extension script",
+                ));
             }
             elog_seams::ereport::call(
                 PgError::new(
@@ -2601,7 +2654,7 @@ fn leak_str(s: PgString<'_>) -> &str {
 }
 
 // generateSerialExtraStmts, CREATE TABLE + ALTER serial/identity arms
-// (SEQUENCE NAME/LOGGED/UNLOGGED options are loud). rel = C's cxt->rel
+// (SEQUENCE NAME/LOGGED/UNLOGGED options ported). rel = C's cxt->rel
 // (ALTER TABLE: namespace/persistence/owner come from the existing table);
 // col_exists routes the OWNED BY AlterSeqStmt to blist (AT_AddIdentity).
 // Takes the node handle only: it mutates the ColumnDef (identitySequence), so
@@ -2617,19 +2670,45 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
     col_exists: bool,
     cxt: &mut CreateStmtCxt<'mcx>,
 ) -> PgResult<(&'mcx str, &'mcx str)> {
+    // C strips the non-CREATE-SEQUENCE options (SEQUENCE NAME, LOGGED/
+    // UNLOGGED) from the list before handing it to CREATE SEQUENCE (they'd
+    // be redundant there), erroring on duplicates (errorConflictingDefElem;
+    // no pstate here, so no errposition — C attaches cxt->pstate's).
+    let conflicting = || -> Box<PgError> {
+        Box::new(
+            PgError::new(ERROR, "conflicting or redundant options".to_string())
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+        )
+    };
+    let mut name_el: Option<&DefElem<'mcx>> = None;
+    // Some(true) = UNLOGGED, Some(false) = LOGGED.
+    let mut logged_el_unlogged: Option<bool> = None;
+    let mut filtered = NodeList::nil();
     for opt in seqoptions.iter() {
         let defel = opt.as_variant::<DefElem>().expect("DefElem in seqoptions");
         match defel.defname {
-            Some("sequence_name") => unported("identity SEQUENCE NAME option"),
-            Some("logged") | Some("unlogged") => unported("identity LOGGED/UNLOGGED options"),
-            _ => {}
+            Some("sequence_name") => {
+                if name_el.is_some() {
+                    return Err(conflicting());
+                }
+                name_el = Some(defel);
+            }
+            Some(d @ ("logged" | "unlogged")) => {
+                if logged_el_unlogged.is_some() {
+                    return Err(conflicting());
+                }
+                logged_el_unlogged = Some(d == "unlogged");
+            }
+            _ => filtered.lappend(mcx, opt)?,
         }
     }
+    let seqoptions = filtered;
+
     let snamespaceid = match rel {
         Some(r) => r.rd_rel.relnamespace,
         None => RangeVarGetCreationNamespace(mcx, relation)?,
     };
-    let snamespace = leak_str(
+    let snamespace_default = leak_str(
         lsyscache::get_namespace_name(mcx, snamespaceid)?
             .unwrap_or_else(|| panic!("cache lookup failed for namespace {snamespaceid}")),
     );
@@ -2639,7 +2718,64 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
         .expect("ColumnDef")
         .colname
         .expect("ColumnDef.colname");
-    let sname = leak_str(ChooseRelationName(mcx, relname, Some(colname), "seq", snamespaceid)?);
+    // SEQUENCE NAME picks the user-specified name (C's
+    // makeRangeVarFromNameList arm: only schema+name are consumed — a
+    // catalog part is dropped; unqualified names take the table's
+    // namespace); otherwise generate one with ChooseRelationName.
+    let (snamespace, sname) = if let Some(nel) = name_el {
+        let names = nel
+            .arg
+            .expect("SEQUENCE NAME arg")
+            .as_list()
+            .expect("SEQUENCE NAME is a name list");
+        let parts: Vec<&str> = names
+            .iter()
+            .map(|n| n.as_string().expect("qualified name component is a String node").sval)
+            .collect();
+        let (nschema, nname) = match parts.as_slice() {
+            [r] => (None, *r),
+            [s, r] => (Some(*s), *r),
+            [_catalog, s, r] => (Some(*s), *r),
+            _ => {
+                return Err(Box::new(
+                    PgError::new(
+                        ERROR,
+                        format!(
+                            "improper qualified name (too many dotted names): {}",
+                            parts.join(".")
+                        ),
+                    )
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                ))
+            }
+        };
+        (nschema.unwrap_or(snamespace_default), nname)
+    } else {
+        let sname =
+            leak_str(ChooseRelationName(mcx, relname, Some(colname), "seq", snamespaceid)?);
+        (snamespace_default, sname)
+    };
+
+    // C: the sequence copies the table's persistence, LOGGED/UNLOGGED
+    // override it (rejected on TEMP tables).
+    let mut seqpersistence =
+        rel.map_or(relation.relpersistence, |r| r.rd_rel.relpersistence);
+    if let Some(unlogged) = logged_el_unlogged {
+        if seqpersistence == types_core::RELPERSISTENCE_TEMP {
+            return Err(Box::new(
+                PgError::new(
+                    ERROR,
+                    "cannot set logged status of a temporary sequence".to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_TABLE_DEFINITION),
+            ));
+        }
+        seqpersistence = if unlogged {
+            types_core::RELPERSISTENCE_UNLOGGED
+        } else {
+            types_core::RELPERSISTENCE_PERMANENT
+        };
+    }
 
     let seq_rv = Node::mk_mut(
         mcx,
@@ -2648,8 +2784,7 @@ pub(crate) fn generateSerialExtraStmts<'mcx>(
             schemaname: Some(snamespace),
             relname: Some(sname),
             inh: true,
-            relpersistence: rel
-                .map_or(relation.relpersistence, |r| r.rd_rel.relpersistence),
+            relpersistence: seqpersistence,
             alias: None,
             location: -1,
         },
@@ -3117,7 +3252,15 @@ pub fn transformAlterTableCmd<'mcx>(
                 other => unported(&format!("transformTableConstraint {other:?} arm")),
             }
         }
-        other => unported(&format!("transformAlterTableStmt {other:?} arm")),
+        // unported: subcommands whose transformAlterTableStmt analysis isn't
+        // wired yet; clean 0A000 (the panic was user-reachable).
+        other => {
+            return Err(unported_feature_at(
+                None,
+                -1,
+                &format!("this ALTER TABLE subcommand ({other:?})"),
+            ))
+        }
     }
     cxt.ckconstraints = ckconstraints;
     cxt.nnconstraints = nnconstraints;
