@@ -569,14 +569,6 @@ fn append_rows(dir: &PathBuf, rows: &str) {
 ///     structural refuses (child-not-lane-owned for non-Sort/agg-fed
 ///     children, shape-qual-proj for non-W1 window shapes; both stay legal
 ///     post-flip — the sticky-batch lane owns only its admitted family).
-///
-/// SE4-GATES UN-FLIP rider (2026-07-17): the FLIP-1/FLIP-2 DEFAULTS were
-/// un-flipped (perf verdict, notes/se-wave4-flips.md) but their manifest
-/// rows STAY — the rows are knob-robust: at knob-OFF the covered classes
-/// tick nothing (the assert tail only fires on lane refusals), and the
-/// explicit-ON arms keep the same allowed-reasons contract. Rows key the
-/// FLIP LADDER's coverage claim, not the current default; they are ready
-/// as-is for a re-flip.
 pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
     // --- FLIP-1: rowmode (rung 1) -----------------------------------------
     (
