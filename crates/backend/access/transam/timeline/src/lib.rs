@@ -551,6 +551,9 @@ pub fn init_seams() {
     s::find_newest_timeline::set(|start_tli| {
         findNewestTimeLine(start_tli, archive_recovery_requested())
     });
+    s::exists_timeline_history::set(|probe_tli| {
+        existsTimeLineHistory(probe_tli, archive_recovery_requested())
+    });
     s::write_timeline_history::set(|new_tli, parent_tli, switchpoint, reason| {
         writeTimeLineHistory(
             new_tli,

@@ -333,6 +333,7 @@ pub const DYNAMIC_SHARED_MEMORY_CONTROL_LOCK: usize = 34;
 pub const REPLICATION_SLOT_ALLOCATION_LOCK: usize = 36;
 pub const REPLICATION_SLOT_CONTROL_LOCK: usize = 37;
 pub const COMMIT_TS_LOCK: usize = 39;
+pub const REPLICATION_ORIGIN_LOCK: usize = 40;
 pub const MULTI_XACT_TRUNCATION_LOCK: usize = 41;
 pub const XACT_TRUNCATION_LOCK: usize = 44;
 pub const WRAP_LIMITS_VACUUM_LOCK: usize = 46;

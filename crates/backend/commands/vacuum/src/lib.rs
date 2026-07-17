@@ -1052,7 +1052,7 @@ pub fn vac_update_relstats(
     frozenxid: ::types_core::TransactionId,
     minmulti: MultiXactId,
     in_outer_xact: bool,
-) -> PgResult<()> {
+) -> PgResult<(bool, bool)> {
     let relid = relation.rd_id;
     let cx = ::mcx::MemoryContext::new("vac_update_relstats");
     let mcx = cx.mcx();
@@ -1123,6 +1123,7 @@ pub fn vac_update_relstats(
     // (corruption) is overwritten with a WARNING; same for relminmxid.
     let oldfrozenxid = getattr(old, Anum_pg_class_relfrozenxid, desc).as_u32();
     let mut futurexid = false;
+    let mut frozenxid_updated = false;
     if TransactionIdIsNormal(frozenxid) && oldfrozenxid != frozenxid {
         let mut update = false;
         if TransactionIdPrecedes(oldfrozenxid, frozenxid) {
@@ -1133,11 +1134,13 @@ pub fn vac_update_relstats(
         }
         if update {
             set(Anum_pg_class_relfrozenxid, ::datum::Datum::from_u32(frozenxid), &mut values, &mut replaces, &mut dirty);
+            frozenxid_updated = true;
         }
     }
 
     let oldminmulti = getattr(old, Anum_pg_class_relminmxid, desc).as_u32();
     let mut futuremxid = false;
+    let mut minmulti_updated = false;
     if MultiXactIdIsValid(minmulti) && oldminmulti != minmulti {
         let mut update = false;
         if MultiXactIdPrecedes(oldminmulti, minmulti) {
@@ -1148,6 +1151,7 @@ pub fn vac_update_relstats(
         }
         if update {
             set(Anum_pg_class_relminmxid, ::datum::Datum::from_u32(minmulti), &mut values, &mut replaces, &mut dirty);
+            minmulti_updated = true;
         }
     }
 
@@ -1178,7 +1182,7 @@ pub fn vac_update_relstats(
             ))
             .finish(loc("vac_update_relstats"))?;
     }
-    Ok(())
+    Ok((frozenxid_updated, minmulti_updated))
 }
 
 pub fn vac_update_datfrozenxid(mcx: Mcx<'_>) -> PgResult<()> {
