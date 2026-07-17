@@ -492,13 +492,23 @@ pub fn BuildIndexValueDescription<'mcx>(
     Ok(Some(buf))
 }
 
+// unported: needs tableam table_index_delete_tuples / heapam
+// heap_index_delete_tuples (callers hash/gist LP_DEAD reuse). A clean 0A000
+// instead of a panic: both callers reach this before any page or WAL
+// mutation, so the error unwind is safe and only fails the triggering DML
+// statement.
 pub fn index_compute_xid_horizon_for_tuples(
     _irel: &Relation<'_>,
     _hrel: &Relation<'_>,
     _ibuf: types_core::primitive::Buffer,
     _itemnos: &[types_core::primitive::OffsetNumber],
 ) -> PgResult<TransactionId> {
-    unported("index_compute_xid_horizon_for_tuples (needs tableam table_index_delete_tuples / heapam heap_index_delete_tuples; callers hash/gist)")
+    Err(Box::new(
+        PgError::error(
+            "reuse of dead index entries is not supported (index_compute_xid_horizon_for_tuples unported)",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
 // idxkey[i].sk_attno = j+1 where key[i].sk_attno == indkey[j].

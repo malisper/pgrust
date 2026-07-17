@@ -46,3 +46,18 @@ pub(crate) fn payload_gap(func: &str, node: &str) -> ! {
 pub(crate) fn handler_gap(what: &str) -> ! {
     panic!("standard_ProcessUtility (utility.c): {what} not ported")
 }
+
+// Clean 0A000 for unported-feature utility lanes: user-reachable statement
+// shapes whose handler isn't ported must raise, not panic (utility dispatch
+// is unwind-safe here; the connection survives and later statements work).
+#[cold]
+#[inline(never)]
+pub(crate) fn handler_unsupported(what: &str) -> Box<types_error::PgError> {
+    Box::new(
+        ::elog::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("{what} is not supported yet"))
+            .into_error()
+            .with_error_location(loc("standard_ProcessUtility")),
+    )
+}

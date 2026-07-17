@@ -68,7 +68,8 @@ pub(crate) fn conninfo_parse<'mcx>(
     conninfo: &str,
 ) -> Result<PgVec<'mcx, (usize, PgString<'mcx>)>, String> {
     if recognized_connection_string(conninfo) {
-        panic!("unported: conninfo URI parse (postgresql:// connection strings)");
+        // unported: conninfo URI parse (postgresql:// connection strings)
+        return Err("URI-format connection strings are not supported yet".to_string());
     }
 
     let mut opts: PgVec<'mcx, (usize, PgString<'mcx>)> = PgVec::new_in(mcx);
@@ -212,7 +213,8 @@ pub(crate) fn walrcv_connect(mcx: Mcx<'_>, conninfo: &str) -> Result<(), String>
         let port = port.as_str();
         if !port.is_empty() {
             if port.contains(',') {
-                panic!("unported: multi-host conninfo port list");
+                // unported: multi-host conninfo port list
+                return Err("connecting to multiple hosts is not supported yet".to_string());
             }
             match parse_int_param(port) {
                 None => {
@@ -227,7 +229,8 @@ pub(crate) fn walrcv_connect(mcx: Mcx<'_>, conninfo: &str) -> Result<(), String>
             }
         }
     }
-    panic!("unported: libpqwalreceiver real connect");
+    // unported: libpqwalreceiver real connect
+    Err("connections to a publisher are not supported yet".to_string())
 }
 
 fn parse_int_param(value: &str) -> Option<i32> {
