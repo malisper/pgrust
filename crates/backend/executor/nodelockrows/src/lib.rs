@@ -41,7 +41,8 @@ pub struct ExecAuxRowMark {
 pub struct LockRowsState<'mcx> {
     pub plan: &'mcx LockRows<'mcx>,
     pub lr_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
-    /// C's EvalPlanQualInit aux list; read only by epq's loud origslot arm.
+    /// C's EvalPlanQualInit aux list: non-locked rels' junk-attr re-fetch
+    /// marks, installed into relsubs_rowmark when an EPQ recheck fires.
     pub lr_epq_arowMarks: PgVec<'mcx, ExecAuxRowMark>,
     /// This node's C EPQState.relsubs_* (execmain swaps them live per run).
     pub epq_subs: Option<EpqSubs<'mcx>>,
@@ -314,8 +315,29 @@ pub fn exec_lock_rows<'mcx, C: LockRowsChild<'mcx>>(
         }
 
         if epq_needed {
-            // Locked latest versions already sit in the EPQ test slots;
-            // non-locked-rel origslot re-fetch is the epq module's loud arm.
+            // Locked latest versions already sit in the EPQ test slots.
+            // C EvalPlanQualStart's relsubs_rowmark loop + EvalPlanQualSetSlot:
+            // every non-locked rel must re-return the row it contributed to
+            // THIS join output (junk ctid/wholerow re-fetch) — rescanning it
+            // re-emits all rows, and a parameterized-inner recheck then
+            // consumes the locked rel's test tuple at the wrong outer row and
+            // silently skips the row (epqjoin lane).
+            {
+                let subs = node
+                    .epq_subs
+                    .as_mut()
+                    .expect("locking mark slot made at init created the subs");
+                for aerm in node.lr_epq_arowMarks.iter() {
+                    let fetch = if aerm.wholeAttNo > 0 {
+                        ::executils::EpqRowMarkFetch::Copy { whole_attno: aerm.wholeAttNo }
+                    } else {
+                        debug_assert!(aerm.ctidAttNo > 0);
+                        ::executils::EpqRowMarkFetch::Reference { ctid_attno: aerm.ctidAttNo }
+                    };
+                    subs.relsubs_rowmark[(aerm.rti - 1) as usize] = Some(fetch);
+                }
+                subs.origslot = Some(slot_id);
+            }
             let input =
                 node.lr_arowMarks[0].mark_slot.expect("locking mark slot made at init");
             let Some(epqslot) = epq_eval(&mut node.epq_subs, estate, input)? else {

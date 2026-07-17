@@ -4,7 +4,7 @@
 #![allow(non_snake_case)]
 
 use ::execexpr::exec_init_qual;
-use ::execscan::{exec_scan_extended, ScanNode, ScanState};
+use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::Mcx;
 use ::types_error::PgResult;
@@ -51,6 +51,10 @@ pub fn exec_named_tuplestore_scan<'mcx>(
     node: &mut NamedTuplestoreScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // C ExecScan reads es_epq_active per call (see nodefunctionscan).
+    if estate.es_epq_active {
+        return exec_scan_epq(node, estate);
+    }
     match (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some()) {
         (false, false) => exec_scan_extended::<_, false, false>(node, estate),
         (true, false) => exec_scan_extended::<_, true, false>(node, estate),
