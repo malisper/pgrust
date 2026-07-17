@@ -152,7 +152,13 @@ pub fn heap_vacuum_rel<'mcx>(
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
     if params.options & VACOPT_VERBOSE != 0 {
-        unported("heap_vacuum_rel: VERBOSE instrumentation");
+        // unported: VERBOSE instrumentation lane. Clean 0A000 instead of a
+        // panic; fires before any vacuum work begins, so the statement fails
+        // and the session survives.
+        return Err(Box::new(
+            ::types_error::PgError::error("VACUUM (VERBOSE) is not supported")
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     debug_assert!(params.index_cleanup != VacOptValue::Unspecified);
     debug_assert!(!matches!(params.truncate, VacOptValue::Unspecified | VacOptValue::Auto));
@@ -1720,12 +1726,6 @@ pub fn init_seams() {
         }
         heap_vacuum_rel(mcx, rel, params, bstrategy)
     });
-}
-
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("unported callee reached from vacuumlazy.c: {unit}");
 }
 
 mod morsels;
