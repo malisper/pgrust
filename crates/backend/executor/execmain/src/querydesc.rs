@@ -379,6 +379,42 @@ pub(crate) fn query_desc_runtime_ea_pipeline_seam(
     })
 }
 
+/// EXPLAIN (ENGINE) attribution records for one node (single-executor Phase
+/// 0.2). None = nothing recorded — the EXEC_FLAG_ENGINE_REPORT emission gate
+/// in data form. The executils EngineKind is converted to its types_core
+/// wire twin here (the seam crate cannot depend on executils).
+pub(crate) fn query_desc_engine_events_seam(
+    h: QueryDescHandle,
+    plan_node_id: i32,
+) -> Option<Vec<(types_core::instrument::EngineKindWire, &'static str, &'static str)>> {
+    use types_core::instrument::EngineKindWire;
+    with_qd(h, |qd| {
+        let exec = qd.exec.as_mut()?;
+        exec.with_mut(|d| {
+            let v: Vec<(EngineKindWire, &'static str, &'static str)> = d
+                .estate
+                .es_engine_events
+                .iter()
+                .filter(|e| e.plan_node_id == plan_node_id)
+                .map(|e| {
+                    let kind = match e.engine {
+                        ::executils::EngineKind::Lane => EngineKindWire::Lane,
+                        ::executils::EngineKind::Spine => EngineKindWire::Spine,
+                        ::executils::EngineKind::FusedArm => EngineKindWire::FusedArm,
+                        ::executils::EngineKind::Runtime => EngineKindWire::Runtime,
+                    };
+                    (kind, e.class, e.detail)
+                })
+                .collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        })
+    })
+}
+
 pub(crate) fn query_desc_prune_result_seam(
     h: QueryDescHandle,
     part_prune_index: i32,
