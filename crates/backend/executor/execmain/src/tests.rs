@@ -5713,15 +5713,17 @@ mod mergejoin_rowmode_ab {
         install_mj_seams();
         scanfix::install();
         let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
-        crate::lanev2::rowmode_set_for_tests(false);
+        // Wave-2 knob split: MergeJoin hosting now gates on
+        // PGRUST_LANE_V2_MERGEJOIN, not the rowmode facility knob.
+        crate::lanev2::mergejoin_set_for_tests(false);
         let off = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
-        crate::lanev2::rowmode_set_for_tests(true);
+        crate::lanev2::mergejoin_set_for_tests(true);
         let owned_before = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
             .load(std::sync::atomic::Ordering::Relaxed);
         let on = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
         let owned_after = crate::lanev2::ROWMODE_MJ_OWNED_FOR_TESTS
             .load(std::sync::atomic::Ordering::Relaxed);
-        crate::lanev2::rowmode_set_for_tests(false);
+        crate::lanev2::mergejoin_set_for_tests(false);
         drop(guard);
         assert_eq!(off, on, "knob OFF vs ON must be identical");
         assert!(
@@ -5961,7 +5963,7 @@ mod mergejoin_rowmode_ab {
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
         for on in [false, true] {
-            crate::lanev2::rowmode_set_for_tests(on);
+            crate::lanev2::mergejoin_set_for_tests(on);
             let pstmt = mk_mergejoin_pstmt(
                 leaked_mcx(),
                 outer,
@@ -5992,7 +5994,7 @@ mod mergejoin_rowmode_ab {
                 estate.exec_close_range_table_relations().unwrap();
             });
         }
-        crate::lanev2::rowmode_set_for_tests(false);
+        crate::lanev2::mergejoin_set_for_tests(false);
         drop(guard);
         scanfix::quiesced();
     }
