@@ -71,7 +71,9 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
-use super::batch_source::{BatchGranuleSource, SeqScanSource};
+use super::batch_source::{
+    heapfeed_v2_enabled, require_bridge, BatchGranuleSource, HeapBatchSource, SeqScanSource,
+};
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
@@ -423,63 +425,53 @@ impl RuntimeScanShared {
                     // outcome is discarded).
                     let ea = self.instr.is_some();
                     let mut tally = EaRowTally::default();
-                    let mut src = SeqScanSource::new(&mut *ss);
-                    let mut segs = match self.map.get() {
-                        Some(map) => map.segments(range.start..range.end),
-                        None => runtime::Segments::whole(range.start..range.end),
+                    let map = self.map.get().map(|m| &**m);
+                    let interrupted = || {
+                        self.failed.load(Ordering::SeqCst)
+                            || self
+                                .rg
+                                .get()
+                                .and_then(|w| w.upgrade())
+                                .is_some_and(|rg| rg.is_aborted())
                     };
-                    while let Some(seg) = segs.next() {
-                        src.position(estate, seg)?;
-                        match mode {
-                            DriveMode::Fold => {
-                                if ea {
-                                    super::agg_plain_fold_drain_ea(
-                                        &mut aps.agg,
-                                        src.scan_mut(),
-                                        estate,
-                                        &mut tally,
-                                    )?
-                                } else {
-                                    super::agg_plain_fold_drain(
-                                        &mut aps.agg,
-                                        src.scan_mut(),
-                                        estate,
-                                    )?
-                                }
-                            }
-                            DriveMode::Census => census_drain(
-                                &mut aps.agg,
-                                src.scan_mut(),
-                                estate,
-                                ea.then_some(&mut tally),
-                            )?,
-                            // rowdrive direct-drive modes (car 1/car 2):
-                            // heap-only admission (no payload map; EA
-                            // refuses heap at admission), so the
-                            // segmentation loop degenerates to one
-                            // positioned range for these arms and no tally
-                            // is ever needed.
-                            DriveMode::StorelessCount => {
-                                storeless_count_drain(&mut aps.agg, src.scan_mut(), estate)?
-                            }
-                            DriveMode::PerRowFold => {
-                                perrow_fold_drain(&mut aps.agg, src.scan_mut(), estate)?
-                            }
-                            // Dispatched to runtime_bitmap::drain_claim
-                            // before this match (BitmapHeapScan outer).
-                            DriveMode::BitmapPerRow => {
-                                unreachable!("bitmap arm returns above")
-                            }
-                        }
-                        if segs.more()
-                            && (self.failed.load(Ordering::SeqCst)
-                                || self
-                                    .rg
-                                    .get()
-                                    .and_then(|w| w.upgrade())
-                                    .is_some_and(|rg| rg.is_aborted()))
-                        {
-                            break;
+                    // Phase-1 source selection (WS-K): heap claims ride the
+                    // dedicated HeapBatchSource iff PGRUST_LANE_V2_HEAPFEED
+                    // is on (advisory readahead depth inside position());
+                    // the knob-OFF world — and every pgrcolumnar claim —
+                    // constructs SeqScanSource exactly as before. Knob-ON,
+                    // end-of-claim ownership moves to the source: ONE
+                    // end_claim per claim after the segment loop (the
+                    // drains skip their inline clear under the same
+                    // process-static knob — single owner, trait doc).
+                    if heapfeed_v2_enabled() && ::nodeseqscan::seq_scan_is_heap(ss) {
+                        let mut src = HeapBatchSource::new(&mut *ss);
+                        drive_claim_segments(
+                            &mut src,
+                            &mut aps.agg,
+                            estate,
+                            mode,
+                            ea,
+                            &mut tally,
+                            map,
+                            range.start..range.end,
+                            interrupted,
+                        )?;
+                        src.end_claim(estate)?;
+                    } else {
+                        let mut src = SeqScanSource::new(&mut *ss);
+                        drive_claim_segments(
+                            &mut src,
+                            &mut aps.agg,
+                            estate,
+                            mode,
+                            ea,
+                            &mut tally,
+                            map,
+                            range.start..range.end,
+                            interrupted,
+                        )?;
+                        if heapfeed_v2_enabled() {
+                            src.end_claim(estate)?;
                         }
                     }
                     // EA-on-morsels: fold this claim into the worker's
@@ -1318,28 +1310,97 @@ fn drive_mode(
     }
 }
 
+/// One claimed granule range through the storage seam, generic over the
+/// batch source (Phase-1 WS-K): segment the claim (epoch-integral for
+/// pgrcolumnar; heap has no interior boundaries — `Segments::whole`),
+/// position, drain per DriveMode. Monomorphizes per source type: the
+/// SeqScanSource instantiation is the pre-genericization machine code
+/// (#[inline] delegation throughout — the WS-A code-shape-neutral law).
+/// `interrupted` is the between-segments abort check (cancel observability
+/// stays at epoch grain, exactly the pre-extraction loop).
+#[allow(clippy::too_many_arguments)]
+fn drive_claim_segments<'mcx, S, F>(
+    src: &mut S,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mode: DriveMode,
+    ea: bool,
+    tally: &mut EaRowTally,
+    map: Option<&runtime::GranuleMap>,
+    range: runtime::MorselRange,
+    interrupted: F,
+) -> PgResult<()>
+where
+    S: BatchGranuleSource<'mcx>,
+    F: Fn() -> bool,
+{
+    let mut segs = match map {
+        Some(map) => map.segments(range.start..range.end),
+        None => runtime::Segments::whole(range.start..range.end),
+    };
+    while let Some(seg) = segs.next() {
+        src.position(estate, seg)?;
+        match mode {
+            DriveMode::Fold => {
+                if ea {
+                    super::agg_plain_fold_drain_ea(agg, src, estate, &mut *tally)?
+                } else {
+                    super::agg_plain_fold_drain(agg, src, estate)?
+                }
+            }
+            DriveMode::Census => {
+                census_drain(agg, src, estate, ea.then_some(&mut *tally))?
+            }
+            // rowdrive direct-drive modes (car 1/car 2): heap-only
+            // admission (no payload map; EA refuses heap at admission), so
+            // the segmentation loop degenerates to one positioned range
+            // for these arms and no tally is ever needed.
+            DriveMode::StorelessCount => storeless_count_drain(agg, src, estate)?,
+            DriveMode::PerRowFold => perrow_fold_drain(agg, src, estate)?,
+            // Dispatched to runtime_bitmap::drain_claim before this
+            // helper's call site (BitmapHeapScan outer).
+            DriveMode::BitmapPerRow => {
+                unreachable!("bitmap arm returns above")
+            }
+        }
+        if segs.more() && interrupted() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// The census morsel drain: the fold drain's structure specialized to
 /// count-only plans (no residuals, no guards, no lane reads, no str-mm
 /// memos) with a graceful no-SoA/no-bitmap fallback. Byte-identity: the
 /// same rows pass the same qual — the staged bitmap IS the kernel qual's
-/// verdict (fallback rows re-check per row through `seq_scan_batch_emit`,
+/// verdict (fallback rows re-check per row through the source's `emit`,
 /// exactly the fold drain's discipline) — and a CountStar transition's
 /// whole effect is one increment per surviving row, which `fold_batch`
 /// applies as a popcount over the same selection.
-fn census_drain<'mcx>(
+fn census_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
     mut tally: Option<&mut EaRowTally>,
 ) -> PgResult<()> {
     debug_assert!(::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| p.cols.is_empty() && p.resid.is_empty() && !p.guarded));
+    // Scan-invariant qual presence (a plan-fixed field), hoisted once
+    // through the bridge; the knob decides end-of-claim clear ownership
+    // (process-static — trait-doc single-owner rules).
+    let no_qual = require_bridge(src)?.ss.qual.is_none();
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1350,10 +1411,10 @@ fn census_drain<'mcx>(
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
         let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
         let fast = {
-            let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+            let sel = src.qual_sel();
             let bitmap_qual = sel.is_some();
-            match ::nodeseqscan::seq_scan_batch_soa(ss) {
-                Some(soa) if bitmap_qual || ss.ss.qual.is_none() => {
+            match src.batch_soa() {
+                Some(soa) if bitmap_qual || no_qual => {
                     let fb = soa.fallback_words();
                     for w in 0..nwords {
                         rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
@@ -1380,7 +1441,7 @@ fn census_drain<'mcx>(
                 while bits != 0 {
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
-                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if let Some(slot) = src.emit(estate, i)? {
                         if let Some(t) = tally.as_deref_mut() {
                             t.survived += 1;
                         }
@@ -1390,8 +1451,7 @@ fn census_drain<'mcx>(
             }
             if rows[..nwords].iter().any(|w| *w != 0) {
                 let aggcx = ::nodeagg::agg_aggcontext(agg);
-                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .expect("checked above: SoA staged");
+                let soa = src.batch_soa().expect("checked above: SoA staged");
                 let plan =
                     ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
                 // SAFETY: pergroup_base is the node's once-allocated
@@ -1416,13 +1476,13 @@ fn census_drain<'mcx>(
             // bits are definitive rejections).
             let skip = {
                 let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                src.skip_sel().map(|s| {
                     w[..s.len()].copy_from_slice(s);
                     w
                 })
             };
             ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                if let Some(slot) = src.emit(estate, i)? {
                     if let Some(t) = tally.as_deref_mut() {
                         t.survived += 1;
                     }
@@ -1445,19 +1505,24 @@ fn census_drain<'mcx>(
 /// Byte-identity: a count's transvalue composes by addition over any claim
 /// partition (order-insensitive-exact); visibility is per tuple, identical
 /// per page regardless of which worker visits it.
-fn storeless_count_drain<'mcx>(
+fn storeless_count_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(::nodeagg::agg_plain_count_star_shape(agg));
-    debug_assert!(ss.ss.qual.is_none());
+    debug_assert!(src.seq_scan_bridge().is_none_or(|ss| ss.ss.qual.is_none()));
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1476,18 +1541,23 @@ fn storeless_count_drain<'mcx>(
 /// Byte-identity: identical per-row qual verdicts and transition programs
 /// per page regardless of which worker visits it; partials are the
 /// classified fold plan's order-insensitive-exact export.
-fn perrow_fold_drain<'mcx>(
+fn perrow_fold_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(agg_runtime_partial_admissible(agg));
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1495,16 +1565,16 @@ fn perrow_fold_drain<'mcx>(
         // RowFeed arm staged one): a cleared skip-sel bit is a row the emit
         // rejects with no observable effect — same rows, same order, same
         // errors; the per-filtered-row emit call collapses to one word test
-        // per 64 rows. Words snapshotted (the emit re-borrows the scan).
+        // per 64 rows. Words snapshotted (the emit re-borrows the source).
         let skip = {
             let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-            ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+            src.skip_sel().map(|s| {
                 w[..s.len()].copy_from_slice(s);
                 w
             })
         };
         ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-            if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+            if let Some(slot) = src.emit(estate, i)? {
                 ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
             }
             Ok(())

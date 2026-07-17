@@ -101,6 +101,9 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
+# WS-K heap batch-source readahead: execmain sees bufmgr ONLY through the
+# seam crate (prefetch_buffer, advisory).
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
