@@ -16,11 +16,25 @@
 # here refuses with a reason outside its allowed_reasons list.
 #
 # Wave-4 rows (flip-ladder §3 rungs 1-3; the binding wave-4 flip manifest):
-#   FLIP-1 rowmode  — projectset + the 16 row-mode tail delegation classes
-#                     (dynamic host-template gates; projectset keeps its
-#                     structural child refuse + the permanent explicit-OFF
-#                     wholesale refuse; the six T3-hostable shapes keep
-#                     env-off, the per-shape SCANS_T3 force-off spelling)
+#   FLIP-1 rowmode  — projectset + 16 of the 17 row-mode tail delegation
+#                     classes (dynamic host-template gates; projectset keeps
+#                     its structural child refuse + the permanent
+#                     explicit-OFF wholesale refuse; the six T3-hostable
+#                     shapes keep env-off, the per-shape SCANS_T3 force-off
+#                     spelling).
+#                     G2 OMISSIONS, BY DESIGN (ledgered,
+#                     notes/se-wave4-tierA.md): subqueryscan — the 17th tail
+#                     class — flips with rung 1 (tail e2e asserts its ON-arm
+#                     ownership; local floor ratcheted 4 -> 29000) but gets
+#                     NO row: it is a MIXED-HOST class — the pre-existing
+#                     master-knob (PGRUST_LANE_V2) wave-4 glue also ticks
+#                     SubqueryScan refusals with open-ended child-derived
+#                     reasons (scan_child_fusible), so any closed
+#                     allowed_reasons list would false-raise in assert mode;
+#                     its row lands with the master-knob flip, when that
+#                     reason set closes. `result` gets no row because it is
+#                     master-knob-gated, not ROWMODE-gated — genuinely not a
+#                     flipped class this wave.
 #   FLIP-2 mergejoin — pure delegation, dynamic gates only
 #   FLIP-3 windowagg — W1 dynamic gates + the W1 structural refuses (the
 #                     sticky-batch lane owns only its admitted family)
