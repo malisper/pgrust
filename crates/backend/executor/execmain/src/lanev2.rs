@@ -88,11 +88,6 @@ pub(crate) use census::{
     census_rows_for_tests,
     planstate_kind_name_for_tests as census_planstate_kind_name_for_tests,
 };
-// --- WS-S wave-3 (caller C2) — append-only region ---
-#[cfg(test)]
-pub(crate) use runtime_scan::c2_gang_death as caller_c2_gang_death_for_tests;
-// --- end WS-S wave-3 ---
-
 use std::sync::OnceLock;
 
 use ::executils::{EStateData, ExecSlotId};
@@ -13912,3 +13907,31 @@ pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     }
     Ok(Some(::nodeagg::agg_plain_adopt_merged(agg, estate, merged)?))
 }
+
+// --- WS-S wave-3 (caller C2) — append-only region ---
+
+#[cfg(test)]
+pub(crate) use runtime_scan::c2_gang_death as caller_c2_gang_death_for_tests;
+
+/// WS-S C2 fault injection (test-only, default-off — dead unless the env
+/// var is set at server start): `PGRUST_TEST_HELPER_VANISH=<arm>[,<arm>...]`
+/// (or `all`) makes every LAUNCHED helper of the named arm(s) exit CLEANLY
+/// before its ExitBump registration — the pre-hook VANISH class (no
+/// `exited` bump, no refusal tick, no channel message; the post-Terminate
+/// death / init-path panic-to-ERROR geometry) that `c2_gang_death`
+/// classifies as gang death. Distinct from `test_helper_panic`, which dies
+/// IN-hook (payload.fail runs and the drive frame's ExitBump still fires —
+/// the accounted class): this knob is the only injection that reaches the
+/// C2 inc-2 escalation wiring end-to-end (scripts/lane-caller-c2-e2e.sh
+/// fault legs E3/E4). Resolved once per process.
+fn test_helper_vanish(arm: &str) -> bool {
+    static KNOB: OnceLock<Option<String>> = OnceLock::new();
+    let Some(v) = KNOB.get_or_init(|| std::env::var("PGRUST_TEST_HELPER_VANISH").ok()) else {
+        return false;
+    };
+    v.split(',').any(|a| {
+        let a = a.trim();
+        a == "all" || a.eq_ignore_ascii_case(arm)
+    })
+}
+// --- end WS-S wave-3 ---
