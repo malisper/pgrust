@@ -36,6 +36,7 @@
 
 mod batch_source;
 pub mod coverage;
+mod dml;
 mod express;
 mod exprkey;
 mod indexsource;
@@ -55,12 +56,15 @@ mod stats;
 mod windows;
 
 pub use exprkey::ExprKeyState;
+pub(crate) use dml::try_own_modify_table;
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
 pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
 pub(crate) use windows::try_own_window_agg;
+#[cfg(test)]
+pub(crate) use dml::{dml_set_for_tests, DML_OWNED_FOR_TESTS, DML_SHAPE_REFUSED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
