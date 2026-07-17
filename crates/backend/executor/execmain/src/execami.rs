@@ -115,6 +115,11 @@ pub fn exec_re_scan<'mcx>(
         // (always, until the Param lanes land).
         PlanStateNode::WindowAgg(w) => {
             ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
+            // Lane-v2 sticky drive: forget the partition machine (the memoized
+            // admission verdict stands — ownership is per-(re)scan-life).
+            if let Some(d) = w.lane.as_mut() {
+                ::nodewindowagg::lane::lane_window_reset(d);
+            }
             exec_re_scan(&mut w.outer, estate)
         }
         PlanStateNode::Material(m) => {
@@ -480,6 +485,11 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::WindowAgg(w) => {
             ::nodewindowagg::exec_rescan_window_agg(&mut w.state, estate);
+            // Lane-v2 sticky drive: forget the partition machine (see the
+            // chgParam-free arm).
+            if let Some(d) = w.lane.as_mut() {
+                ::nodewindowagg::lane::lane_window_reset(d);
+            }
             exec_re_scan_with_chg(&mut w.outer, base.lefttree.expect("WindowAgg outer plan"), estate, chg)?;
         }
         PlanStateNode::Material(m) => {

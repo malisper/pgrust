@@ -52,6 +52,7 @@ mod runtime_sort;
 mod push;
 mod rowmode;
 mod stats;
+mod windows;
 
 pub use exprkey::ExprKeyState;
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
@@ -59,12 +60,15 @@ pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_merge_join;
 pub(crate) use rowmode::try_own_project_set;
+pub(crate) use windows::try_own_window_agg;
 #[cfg(test)]
 pub(crate) use express::{express_set_for_tests, EXPRESS_OFF, EXPRESS_OWNED_FOR_TESTS, EXPRESS_POINT, EXPRESS_STRUCTURED};
 #[cfg(test)]
 pub(crate) use indexsource::{indexsource_set_for_tests, INDEXSOURCE_OWNED_FOR_TESTS};
 #[cfg(test)]
 pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_MJ_OWNED_FOR_TESTS, ROWMODE_OWNED_FOR_TESTS};
+#[cfg(test)]
+pub(crate) use windows::{windows_set_for_tests, WINDOWS_OWNED_FOR_TESTS};
 
 use std::sync::OnceLock;
 
