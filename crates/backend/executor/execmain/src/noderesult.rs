@@ -121,13 +121,16 @@ pub fn exec_result<'mcx>(
 
 /// `exec_result`'s childless (no-FROM) body, one pull's worth: entry CFI →
 /// one-time gate → per-call ctx reset → drained guard → mark done + project
-/// — the statement stream `try_own_result`'s inline childless arm ran before
-/// the row-mode facility factored it here (a code MOVE; `try_own_result`
-/// keeps its stats ticks around the call), shared with the row-mode
-/// `ResultRowSource` face (`lanev2::rowmode`). `exec_result` itself keeps its
-/// two-arm body above — same seams (`lane_result_gate`/`lane_result_project`),
-/// same state (`rs_checkqual`/`rs_done`), so a Volcano fallback at any call
-/// boundary is byte-safe.
+/// — the row-mode `ResultRowSource` face's copy (`lanev2::rowmode`).
+/// `try_own_result`'s childless arm keeps its own INLINE duplicate of these
+/// statements (the integration contract's pre-approved entry-cost fallback,
+/// se-entrycost: outlining the select1 hot path's body cost it entry
+/// instructions); the two bodies MUST stay statement-identical — the
+/// rowmode_ab childless-Result seam corpus pins both knob positions.
+/// `exec_result` itself keeps its two-arm body above — same seams
+/// (`lane_result_gate`/`lane_result_project`), same state
+/// (`rs_checkqual`/`rs_done`), so a Volcano fallback at any call boundary is
+/// byte-safe.
 #[inline]
 pub(crate) fn lane_result_childless_next<'mcx>(
     node: &mut ResultState<'mcx>,

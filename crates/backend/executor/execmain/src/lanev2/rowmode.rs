@@ -75,8 +75,10 @@ pub(crate) static ROWMODE_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// The childless Result plan as a row-mode source: delegates to
-/// `noderesult::lane_result_childless_next` — one statement stream, two
-/// faces (`try_own_result`'s inline arm is the other caller).
+/// `noderesult::lane_result_childless_next`. `try_own_result`'s childless
+/// arm carries an inline duplicate of the same statement stream (the
+/// contract's pre-approved entry-cost fallback, se-entrycost) — the two
+/// bodies must stay statement-identical.
 struct ResultRowSource;
 
 impl<'mcx> RowSource<'mcx> for ResultRowSource {

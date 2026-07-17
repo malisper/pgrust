@@ -12648,17 +12648,31 @@ pub fn try_own_result<'mcx>(
         None => {
             // The no-FROM row: exec_result's childless body, statement for
             // statement (entry CFI → one-time gate → per-call ctx reset →
-            // drained guard → mark done + project the single row) — the
-            // shared `noderesult::lane_result_childless_next` seam, also the
-            // row-mode `ResultRowSource` face (rowmode.rs).
+            // drained guard → mark done + project the single row). INLINE by
+            // contract: this is the select1 hot path, and the WS-E code move
+            // to `noderesult::lane_result_childless_next` cost it entry
+            // instructions (se-entrycost) — the integration contract
+            // pre-approves keeping this arm as an inline duplicate of that
+            // seam (the row-mode `ResultRowSource` face keeps the outlined
+            // copy; the two bodies MUST stay statement-identical —
+            // rowmode_ab::childless_result_seam_knob_positions pins both).
+            crate::cfi()?;
             // One OWNED tick per lane-owned Result execution: the call that
             // consumes the gate and/or emits; the drained tail calls after it
-            // don't re-tick. (Stats stay at this call site so the seam is a
-            // pure code move of the select1 hot path's body.)
+            // don't re-tick.
             if rs.rs_checkqual || !rs.rs_done {
                 stats::tick_owned(ShapeClass::ResultNode);
             }
-            Ok(Some(crate::noderesult::lane_result_childless_next(rs, estate)?))
+            if rs.rs_checkqual && !crate::noderesult::lane_result_gate(rs, estate)? {
+                return Ok(Some(None));
+            }
+            let ecxt = rs.ps.ps_ExprContext.expect("ResultState without ExprContext");
+            estate.reset_expr_context(ecxt);
+            if rs.rs_done {
+                return Ok(Some(None));
+            }
+            rs.rs_done = true;
+            Ok(Some(Some(crate::noderesult::lane_result_project(&mut rs.ps, estate)?)))
         }
         Some(crate::procnode::PlanStateNode::Sort(_)) => {
             // Child admission BEFORE any state effect. (Instrumented trees
