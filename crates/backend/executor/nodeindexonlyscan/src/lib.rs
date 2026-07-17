@@ -57,6 +57,11 @@ pub struct IndexOnlyScanState<'mcx> {
     // call (`index_only_scan_batch_next` returns 0 or 1), so it carries no
     // state across the Volcano boundary.
     batch_allowed: bool,
+    // Planner row estimate (plan.plan_rows), retained for the lane index
+    // source's admission floor (single-executor WS-F; contract Q6: the floor
+    // input is the planner estimate — force-plan compatible). Read through
+    // `index_only_scan_plan_rows`; never consulted by the executor itself.
+    plan_rows: f64,
 }
 
 impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
@@ -522,6 +527,7 @@ pub fn exec_init_index_only_scan_rel<'mcx>(
         ioss_ParallelAware: node.scan.plan.parallel_aware,
         // Default refuse; `exec_init_index_only_scan` sets it from eflags.
         batch_allowed: false,
+        plan_rows: node.scan.plan.plan_rows,
     })
 }
 
@@ -756,8 +762,55 @@ pub fn exec_index_only_scan_initialize_worker<'mcx>(
 const _: () = assert!(!core::mem::needs_drop::<ScanDirection>());
 mcx::forget_safe_struct!(
     IndexOnlyScanState<'_> { ss, ioss_TableSlot, ioss_PlanNodeId, ioss_ParallelAware, ioss_IndexOid,
-        batch_allowed;
+        batch_allowed, plan_rows;
         recheckqual, ioss_ScanDesc, ioss_RelationDesc, ioss_ScanKeys,
         ioss_OrderByKeys, ioss_NameCStringAttNums, ioss_Runtime, ioss_OrderDir,
         ioss_VMBuffer },
 );
+
+// ============================================================================
+// Lane index-source seams (single-executor Phase 1, WS-F — APPEND-ONLY).
+// Consumed by execmain::lanev2::indexsource's `IndexOnlyScanSource`
+// (`BatchGranuleSource` over this node). Nothing below is reached on any
+// default path: the callers sit behind `PGRUST_LANE_V2_INDEXSOURCE`
+// (default OFF).
+// ============================================================================
+
+/// Planner row estimate for the lane admission floor (contract Q6:
+/// `plan.rows` is the floor input; force-plan compatible).
+#[inline]
+pub fn index_only_scan_plan_rows(node: &IndexOnlyScanState<'_>) -> f64 {
+    node.plan_rows
+}
+
+/// Leaf-page UPPER-BOUND estimate for the lane source's pacing granule map:
+/// total blocks of the INDEX relation (>= leaf pages — the metapage and
+/// internal pages are counted too). Correctness never rides on this number
+/// (pacing only; the drive runs to the AM's own exhaustion), so the smgr
+/// snapshot being stale against concurrent extension is fine. `None` = no
+/// open index relation (parked skeleton) — the caller refuses, fail-closed.
+pub fn index_only_scan_leaf_estimate(node: &IndexOnlyScanState<'_>) -> PgResult<Option<u64>> {
+    let Some(index_rel) = node.ioss_RelationDesc.as_ref() else {
+        return Ok(None);
+    };
+    let nblocks = ::bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+        index_rel,
+        ::types_core::ForkNumber::MAIN_FORKNUM,
+    )?;
+    Ok((nblocks > 0).then_some(nblocks as u64))
+}
+
+/// End-of-claim slot hygiene for the lane source (ownership ABI R3:
+/// zero pins held from the claim at settle). The scan slot is virtual and
+/// the table slot was already cleared per heap fallback fetch
+/// (`index_only_scan_batch_next`), so both clears are pin-free and
+/// idempotent; the VM buffer pin is node-lifetime (like the seq scan's
+/// cached pins) and is NOT released here.
+pub fn index_only_scan_end_claim<'mcx>(
+    node: &mut IndexOnlyScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    let mcx = estate.es_query_cxt;
+    exectuples::exec_clear_tuple(estate.slot_mut(node.ss.ss_ScanTupleSlot), mcx);
+    exectuples::exec_clear_tuple(estate.slot_mut(node.ioss_TableSlot), mcx);
+}

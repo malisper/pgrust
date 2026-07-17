@@ -1728,6 +1728,16 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // WS-F (single-executor Phase 1): the fused drive below,
+                // routed through the BatchGranuleSource storage seam —
+                // behind PGRUST_LANE_V2_INDEXSOURCE (default OFF; knob-OFF
+                // cost = one cached-bool test). Refuses fall through to the
+                // UNCHANGED fused/per-tuple paths, byte-identically.
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_index_only_source(agg, &mut **ios, estate)?
+                {
+                    return Ok(r);
+                }
             }
             if agg_fusible_common(agg, estate)
                 && ios.ss.qual.is_none()
