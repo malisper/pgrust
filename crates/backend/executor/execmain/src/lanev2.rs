@@ -2406,12 +2406,76 @@ fn agg_hash_build_fold_feed<'mcx>(
     stage_slot: &mut Option<ExecSlotId>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // K1 inc-1 source selection (the plain feed's Phase-1 pattern): heap
+    // scans ride the dedicated HeapBatchSource iff PGRUST_LANE_V2_HEAPFEED
+    // is on; everything else — and the whole knob-OFF world — constructs
+    // SeqScanSource exactly as before (same monomorphized drain, same
+    // machine code). Knob-ON, end-of-claim ownership sits on the source
+    // (trait doc): the serial scan is ONE claim, settled right here after
+    // the drain — on the ERROR path too (zero-pins-at-settle; the drain
+    // error wins the report). Grouped consumers satisfy copy-at-the-
+    // consumer under R3v pin-holding: key bytes copy at the
+    // lookup_hash_entry insert / compact-table pack points and str
+    // transvalues at C's datumCopy-into-aggcontext points, so no staged
+    // pointer outlives its batch.
+    use batch_source::BatchGranuleSource as _;
+    if batch_source::heapfeed_v2_enabled() {
+        if ::nodeseqscan::seq_scan_is_heap(ss) {
+            let mut src = batch_source::HeapBatchSource::new(ss);
+            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, estate);
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
+        } else {
+            let mut src = batch_source::SeqScanSource::new(ss);
+            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, estate);
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
+        }
+    } else {
+        agg_hash_build_fold_drain(
+            agg,
+            &mut batch_source::SeqScanSource::new(ss),
+            stage_slot,
+            estate,
+        )?;
+    }
+    // Combine-before-finish (delegated; the Stage-4 seam): spill finish +
+    // merge handoff, then the phase flip — AFTER the claim settle (the
+    // zero-pins-at-settle law precedes the spill/merge work).
+    ::nodeagg::agg_hash_build_combine(agg, estate)?;
+    ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// The hashed build feed's drain half (K1 inc-1 — the exact
+/// `agg_plain_fold_drain_impl` treatment): generic over the storage seam's
+/// batch source. Staged reads ride the trait's read face
+/// (`batch_soa`/`skip_sel`/`lane_sel`/`emit`); the columnar-only branches
+/// (dict-group col peek, str-mm dict-code memos) are caps-gated; branches
+/// driving the shared kernel helpers (K2 probe, mk packed table, the
+/// arrival-probe row loop) reach the hosted scan through the transitional
+/// `seq_scan_bridge` — both scan implementors host a SeqScan, and WS-A
+/// inc-2 deletes the bridge. Both instantiations monomorphize to #[inline]
+/// delegation — the SeqScanSource instantiation is the pre-genericization
+/// machine code (WS-A code-shape-neutral law).
+fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    src: &mut S,
+    stage_slot: &mut Option<ExecSlotId>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let caps = src.capabilities();
+    // Scan-invariant end-of-scan clear ownership (process-static —
+    // trait-doc single-owner rules): knob-OFF the drain clears inline
+    // exactly as before; knob-ON the feed wrapper's end_claim owns it.
+    let clear_inline = !batch_source::heapfeed_v2_enabled();
     // K2 admission for the scan feed, decided once per build (mirrors the
     // joined-row feed's `staged_feed_shape` mode choice): unguarded, fully
     // admitted (no residual transitions), single kernel-hostable grouping
     // key, with the key and every spill-replay column staged in the armed
     // SoA lanes. `None` = the per-row arrival probe (byte-identical).
-    let k2 = scan_k2_shape(agg, ss, estate);
+    let k2 = scan_k2_shape(agg, batch_source::require_bridge(src)?, estate);
     // Stage-2.2 compact-table arming, per build, on top of the K2 shape
     // (nodeagg::compact module doc: int-width key kernel, AGGSPLIT_SIMPLE,
     // not spill-eligible by estimate; runtime backstop migrates to the C
@@ -2434,13 +2498,23 @@ fn agg_hash_build_fold_feed<'mcx>(
     // opted into dict lanes by `try_arm_cb_dictgroup`. Dict-answered windows
     // take the per-epoch code-grouping path inside `scan_k2_batch`; Raw
     // windows keep the Raw keys path — both through the same global table.
-    let dictgroup = k2
-        .as_ref()
-        .map_or(false, |s| ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) == Some(s.key_col));
+    let dictgroup = match &k2 {
+        // Columnar-only peek (caps-gated bridge): heap sources never
+        // publish a dict-group column.
+        Some(s) if caps.dict_codes => {
+            ::nodeseqscan::seq_scan_batch_dictgroup_col(batch_source::require_bridge(src)?)
+                == Some(s.key_col)
+        }
+        _ => false,
+    };
     let mut dgs = DictGroupScratch::default();
     // Packed multi-key admission + compact arm (multikey spike): only for
     // shapes the single-key K2 machinery does not own.
-    let mk = if k2.is_none() { scan_mk_shape(agg, ss, estate) } else { None };
+    let mk = if k2.is_none() {
+        scan_mk_shape(agg, batch_source::require_bridge(src)?, estate)
+    } else {
+        None
+    };
     let mut mks = MkScratch::default();
     trace_feed(if mk.is_some() {
         "agg-over-seqscan: staged fold feed engaged (multi-key packed)"
@@ -2465,7 +2539,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         debug_assert!(
             plan.vguards.is_empty()
                 || lanefold_varlane_col(plan).is_some()
-                || ::nodeseqscan::seq_scan_batch_soa(ss).is_some(),
+                || src.batch_soa().is_some(),
             "multi-varlena fold without the cbstore staging armed"
         );
         lanefold_varlane_col(plan)
@@ -2475,7 +2549,8 @@ fn agg_hash_build_fold_feed<'mcx>(
     // completing deform fills it for survivor windows) — no varkey remap.
     // The lane fills lazily, so the guard proof below must restrict itself
     // to the selection bitmap (unselected cells may be stale pointers).
-    let lane_owned = ::nodeseqscan::seq_scan_batch_lane_armed(ss);
+    let lane_owned =
+        ::nodeseqscan::seq_scan_batch_lane_armed(batch_source::require_bridge(src)?);
     let vremap = if lane_owned { None } else { vcol };
     // Str MIN/MAX dict-code memo (lane-v2-dictminmax): plan columns == scan
     // columns on this feed (identity map). Codes collect per batch; the
@@ -2485,19 +2560,23 @@ fn agg_hash_build_fold_feed<'mcx>(
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
         mm_str_cols(plan, Some)
     };
-    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+    if !mm_cols.is_empty() && caps.dict_codes {
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_scratch = ::lanefold::StrMmScratch::default();
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
     let mut k2s = ScanK2Scratch::default();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of scan: drop the scan slot's buffer pin (SeqScanSource
-            // end-of-stream parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of scan: drop the scan slot's buffer pin
+                // (SeqScanSource end-of-stream parity). Knob-ON this moves
+                // to the source's end_claim.
+                let ss = batch_source::require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -2511,8 +2590,7 @@ fn agg_hash_build_fold_feed<'mcx>(
         {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
             if plan.guarded {
-                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .expect("guarded fold plans read lane columns");
+                let soa = src.batch_soa().expect("guarded fold plans read lane columns");
                 let nwords = (n as usize).div_ceil(64);
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
                 // Proof domain: every staged non-fallback row — a superset of
@@ -2522,7 +2600,7 @@ fn agg_hash_build_fold_feed<'mcx>(
                 // domain must intersect the selection bitmap: unselected
                 // cells may be stale pointers, and the fold touches only
                 // selected rows anyway (requal survivors ⊆ selected bits).
-                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                match src.lane_sel() {
                     Some(sel) if lane_owned => {
                         for ((r, fb), s) in
                             rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
@@ -2574,13 +2652,13 @@ fn agg_hash_build_fold_feed<'mcx>(
             mm_scratch.invalidate();
             let skip = {
                 let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                src.skip_sel().map(|s| {
                     w[..s.len()].copy_from_slice(s);
                     w
                 })
             };
             ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                if let Some(slot) = src.emit(estate, i)? {
                     ::nodeagg::agg_hash_build_accept(agg, estate, slot)?;
                 }
                 Ok(())
@@ -2594,12 +2672,13 @@ fn agg_hash_build_fold_feed<'mcx>(
         // arrival probe wholesale (both modes probe in row order, so a
         // per-batch mode choice preserves the global insertion sequence).
         if let Some(shape) = &k2 {
-            let all_lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+            let all_lane = src
+                .batch_soa()
                 .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
             if all_lane {
                 scan_k2_batch(
                     agg,
-                    ss,
+                    batch_source::require_bridge(src)?,
                     shape,
                     stage_slot,
                     &mut k2s,
@@ -2627,11 +2706,20 @@ fn agg_hash_build_fold_feed<'mcx>(
         // holds every group; there is no multi-key staged C probe).
         if let Some(shape) = &mk {
             if ::nodeagg::agg_hash_compact_armed(agg) {
-                let all_lane = ::nodeseqscan::seq_scan_batch_soa(ss)
+                let all_lane = src
+                    .batch_soa()
                     .is_some_and(|soa| soa.fallback_words().iter().all(|&w| w == 0));
                 if all_lane {
                     if scan_mk_batch(
-                        agg, ss, shape, &mut mks, &mut idxs, &mut groups, n, None, estate,
+                        agg,
+                        batch_source::require_bridge(src)?,
+                        shape,
+                        &mut mks,
+                        &mut idxs,
+                        &mut groups,
+                        n,
+                        None,
+                        estate,
                     )? {
                         // As the K2 arm: the mk fold bypassed the memo.
                         mm_scratch.invalidate();
@@ -2649,19 +2737,23 @@ fn agg_hash_build_fold_feed<'mcx>(
         // re-checked per-row inside the emit) — same rows, same ascending
         // order as the full walk, whose emit would have bit-tested each row
         // anyway. Non-kernel quals keep the full per-row walk.
-        if ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss) {
-            while let Some(i) = ::nodeseqscan::seq_scan_batch_next_selected(ss) {
-                agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
-            }
-        } else {
-            for i in 0..n {
-                agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
+        {
+            let ss = batch_source::require_bridge(src)?;
+            if ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss) {
+                while let Some(i) = ::nodeseqscan::seq_scan_batch_next_selected(ss) {
+                    agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
+                }
+            } else {
+                for i in 0..n {
+                    agg_fold_feed_row(agg, ss, estate, &mut idxs, &mut groups, i)?;
+                }
             }
         }
         // Fallback rows advanced str transitions through the full per-row
         // accept above — drop every memo before this batch's fold.
         if !mm_cols.is_empty()
-            && ::nodeseqscan::seq_scan_batch_soa(ss)
+            && src
+                .batch_soa()
                 .is_some_and(|soa| soa.fallback_words().iter().any(|&w| w != 0))
         {
             mm_scratch.invalidate();
@@ -2673,8 +2765,14 @@ fn agg_hash_build_fold_feed<'mcx>(
         // `check_guards` above; dict-code views satisfy the col_codes
         // contract (`seq_scan_batch_dict_codes`); the rest is
         // `agg_fold_staged`'s per-feed contract.
-        collect_mm_codes(ss, &mm_cols, &mut mm_codes);
-        match (::nodeseqscan::seq_scan_batch_soa(ss), vremap) {
+        if caps.dict_codes {
+            collect_mm_codes(batch_source::require_bridge(src)?, &mm_cols, &mut mm_codes);
+        } else {
+            // Heap sources certify no dict windows; the memo list still
+            // resets per batch (CodesCols reads it).
+            mm_codes.clear();
+        }
+        match (src.batch_soa(), vremap) {
             (Some(soa), Some(cix)) => unsafe {
                 agg_fold_staged_mm(
                     agg,
@@ -2701,10 +2799,7 @@ fn agg_hash_build_fold_feed<'mcx>(
             }
         }
     }
-    // Combine-before-finish (delegated; the Stage-4 seam): spill finish +
-    // merge handoff, then the phase flip.
-    ::nodeagg::agg_hash_build_combine(agg, estate)?;
-    ::nodeagg::agg_hash_build_finish(agg, estate)
+    Ok(())
 }
 
 /// One staged row of the fold build feed: the per-row emit (per-tuple ctx
