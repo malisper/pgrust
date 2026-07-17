@@ -54,7 +54,7 @@ pub(crate) use router::engine_runtime_active;
 pub(crate) use router::query_start as router_query_start;
 pub(crate) use rowmode::try_own_project_set;
 #[cfg(test)]
-pub(crate) use rowmode::rowmode_set_for_tests;
+pub(crate) use rowmode::{rowmode_set_for_tests, ROWMODE_OWNED_FOR_TESTS};
 
 use std::sync::OnceLock;
 
