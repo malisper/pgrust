@@ -449,6 +449,17 @@ impl<'a, 'mcx> HeapBatchSource<'a, 'mcx> {
     pub(super) fn new(ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>) -> Self {
         debug_assert!(heapfeed_v2_enabled(), "HeapBatchSource is knob-gated");
         debug_assert!(::nodeseqscan::seq_scan_is_heap(ss));
+        // WS-O inc-2 pool-thread visibility audit (enforcement half; the
+        // audit record is notes/se-ws-o-gather-ledger.md): heap page MVCC
+        // (page_collect_tuples) resolves against the thread's ACTIVE
+        // snapshot — every claim-driving thread must be session-bound
+        // (leader, C1 caller) or binder-bound (launched/standing helpers)
+        // BEFORE any batch stages. Raw pool threads never reach this
+        // constructor (pinned RGs are invisible to the pool pick, rg.rs).
+        debug_assert!(
+            ::snapmgr::ActiveSnapshotSet(),
+            "heap batch source on a thread without an active snapshot"
+        );
         HeapBatchSource { ss, readahead: heapfeed_readahead_depth() }
     }
 }
@@ -503,10 +514,16 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
     }
 
     fn end_claim(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
-        // Mid-claim-abort rs_cbuf release deliberately NOT taken here:
-        // teardown releases it exactly as today (byte-path conservatism;
-        // contract ruling WS-K Q3 — the R3 tightening is a ledgered later
-        // increment).
+        // WS-O inc-2 (supersedes the WS-K Q3 deferral — this IS the
+        // ledgered later increment): the R3 zero-pins-at-settle
+        // tightening. Release rs_cbuf and reset the scan to the drained
+        // state, so a claim that ends EARLY (drain error, abort between
+        // segments, shed) holds zero pins at settle — pin-lifetime under
+        // stealing (R6): a re-split claim remainder changes hands with no
+        // staged state AND no pin left behind by the previous claimer. A
+        // normally-drained claim already released on the n == 0 advance
+        // (the release below is idempotent).
+        ::nodeseqscan::seq_scan_end_claim_release(self.ss);
         end_claim_clear_slot(self.ss, estate)
     }
 

@@ -443,9 +443,15 @@ impl RuntimeScanShared {
                     // end_claim per claim after the segment loop (the
                     // drains skip their inline clear under the same
                     // process-static knob — single owner, trait doc).
+                    // WS-O inc-2 claim-settle guard (both arms): end_claim
+                    // runs on the ERROR path too — a failed claim must not
+                    // carry its page pin into the abort drain (the R3
+                    // zero-pins-at-settle law; the drive error wins the
+                    // report, the settle error is surfaced only when the
+                    // drive itself succeeded).
                     if heapfeed_v2_enabled() && ::nodeseqscan::seq_scan_is_heap(ss) {
                         let mut src = HeapBatchSource::new(&mut *ss);
-                        drive_claim_segments(
+                        let drove = drive_claim_segments(
                             &mut src,
                             &mut aps.agg,
                             estate,
@@ -455,11 +461,13 @@ impl RuntimeScanShared {
                             map,
                             range.start..range.end,
                             interrupted,
-                        )?;
-                        src.end_claim(estate)?;
+                        );
+                        let settled = src.end_claim(estate);
+                        drove?;
+                        settled?;
                     } else {
                         let mut src = SeqScanSource::new(&mut *ss);
-                        drive_claim_segments(
+                        let drove = drive_claim_segments(
                             &mut src,
                             &mut aps.agg,
                             estate,
@@ -469,10 +477,11 @@ impl RuntimeScanShared {
                             map,
                             range.start..range.end,
                             interrupted,
-                        )?;
-                        if heapfeed_v2_enabled() {
-                            src.end_claim(estate)?;
-                        }
+                        );
+                        let settled =
+                            if heapfeed_v2_enabled() { src.end_claim(estate) } else { Ok(()) };
+                        drove?;
+                        settled?;
                     }
                     // EA-on-morsels: fold this claim into the worker's
                     // cumulative instrument partial and export by OVERWRITE
@@ -616,6 +625,10 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
         return Ok(());
     }
     let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    // WS-O inc-2 pin-board assert (debug-only accessor, contract-approved):
+    // a drive that returned settled its pin — anything else is a stranded
+    // finalization obligation.
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after entry drive");
     emit_wfin("entry", lane.ordinal(), &local, &rg);
     // Teardown mode per drive_bound: self-error takes the release path;
     // the abort discipline is the transaction-level Err below (the hook
@@ -764,6 +777,8 @@ fn helper_drive_lazy(
         });
     });
     let _outcome = payload.rt.drive_pinned(&mut local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after lazy drive");
     parallel::gtrace("w.qtb.body.end");
     emit_wfin("bound", lane.ordinal(), &local, rg);
     let ctx = LAZY_CTX
@@ -870,6 +885,8 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after bound drive");
     emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
