@@ -3157,6 +3157,19 @@ fn mk_windowagg_pstmt<'mcx>(
     relid: u32,
     with_order_by: bool,
 ) -> &'mcx PlannedStmt<'mcx> {
+    mk_windowagg_pstmt_ex(mcx, relid, with_order_by, None, true)
+}
+
+// The parameterized variant (windows_ab refusal shapes): `frame_options` =
+// Some(bits) overrides FRAMEOPTION_DEFAULTS; `with_sort` = false plans the
+// WindowAgg straight over the SeqScan (the presorted-plan shape).
+fn mk_windowagg_pstmt_ex<'mcx>(
+    mcx: ::mcx::Mcx<'mcx>,
+    relid: u32,
+    with_order_by: bool,
+    frame_options: Option<i32>,
+    with_sort: bool,
+) -> &'mcx PlannedStmt<'mcx> {
     use ::types_nodes::bitmapset::Bitmapset;
     use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan, Sort, WindowAgg};
@@ -3185,14 +3198,19 @@ fn mk_windowagg_pstmt<'mcx>(
     )
     .unwrap();
 
-    let mut sort = Node::build::<Sort>(mcx).unwrap();
-    sort.plan.targetlist = mk_tlist(OUTER_VAR);
-    sort.plan.lefttree = Some(scan);
-    sort.numCols = 2;
-    sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
-    sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
-    sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
-    sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
+    let child = if with_sort {
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.targetlist = mk_tlist(OUTER_VAR);
+        sort.plan.lefttree = Some(scan);
+        sort.numCols = 2;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16, 2]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT, INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32, 0]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false, false]).unwrap();
+        sort.seal()
+    } else {
+        scan
+    };
 
     let mk_wfunc = |fnoid: u32, winagg: bool| {
         let mut w = Node::build::<WindowFunc>(mcx).unwrap();
@@ -3229,7 +3247,10 @@ fn mk_windowagg_pstmt<'mcx>(
 
     let mut wa = Node::build::<WindowAgg>(mcx).unwrap();
     wa.plan.targetlist = tlist;
-    wa.plan.lefttree = Some(sort.seal());
+    wa.plan.lefttree = Some(child);
+    if let Some(fo) = frame_options {
+        wa.frameOptions = fo;
+    }
     wa.winref = 1;
     wa.partNumCols = 1;
     wa.partColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
@@ -4303,5 +4324,241 @@ mod rowmode_ab {
         }
         crate::lanev2::rowmode_set_for_tests(false);
         drop(guard);
+    }
+}
+
+
+// =============================================================================
+// WindowAgg lane A/B corpus (lanev2/windows.rs, PGRUST_LANE_V2_WINDOWS):
+// the W1 shape — WindowAgg(FRAMEOPTION_DEFAULTS, row_number/rank/dense_rank/
+// sum) over Sort over SeqScan — driven knob OFF (the unchanged
+// exec_window_agg pull loop) vs knob ON (the lane's group-at-a-time machine
+// over the sort breaker) in one process: same rows, same rescan behavior,
+// and the ON arm must actually engage (sticky drive). The classic
+// wrong-results traps are pinned: peer rows (ties) under the default frame
+// step running aggregates by PEER GROUP (every tie member sees the whole
+// group's sum), rank jumps by peer-group size while dense_rank steps by 1.
+// NULL-key ordering and spill-sized partitions ride the dualexec corpus
+// (scripts/dualexec/corpus-windows.sql) — the scanfix fixture is
+// non-null int4 only. Two-server byte-compare = scripts/lane-windows-e2e.sh.
+//
+// Locking: the scanfix TEST_LOCK serializes every scanfix-fixture test, and
+// the knob flips happen strictly inside it — no other test can ever observe
+// the process-global knob ON.
+// =============================================================================
+mod windows_ab {
+    use super::*;
+
+    fn run_window(pstmt: &'static PlannedStmt<'static>, rescan: bool) -> Vec<Vec<WinRow>> {
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            let mut runs = vec![drain_window_rows(ps, estate)];
+            if rescan {
+                crate::execami::exec_re_scan(ps, estate).unwrap();
+                runs.push(drain_window_rows(ps, estate));
+            }
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            runs
+        })
+    }
+
+    /// One A/B round over an already-registered relid: knob OFF then knob ON
+    /// (fresh plan state per arm), demand identical runs. `expect_engaged`
+    /// additionally demands the ON arm drove the lane (the sticky drive) —
+    /// refusal shapes pass `false` and demand it did NOT. Caller holds the
+    /// scanfix TEST_LOCK.
+    fn ab(
+        relid: u32,
+        with_order_by: bool,
+        rescan: bool,
+        expect_engaged: bool,
+    ) -> Vec<Vec<WinRow>> {
+        ab_mk(|mcx| mk_windowagg_pstmt(mcx, relid, with_order_by), rescan, expect_engaged)
+    }
+
+    fn ab_mk(
+        mk: impl Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        rescan: bool,
+        expect_engaged: bool,
+    ) -> Vec<Vec<WinRow>> {
+        crate::lanev2::windows_set_for_tests(false);
+        let off = run_window(mk(leaked_mcx()), rescan);
+        crate::lanev2::windows_set_for_tests(true);
+        let owned_before =
+            crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        let on = run_window(mk(leaked_mcx()), rescan);
+        let owned_after =
+            crate::lanev2::WINDOWS_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+        crate::lanev2::windows_set_for_tests(false);
+        assert_eq!(off, on, "knob OFF vs ON must be identical");
+        if expect_engaged {
+            assert!(owned_after > owned_before, "ON arm never engaged the windows lane");
+        } else {
+            assert_eq!(owned_after, owned_before, "refusal shape engaged the windows lane");
+        }
+        off
+    }
+
+    /// Ties + rank gaps + peer-group aggregate stepping, multi-partition,
+    /// including a whole-partition tie (g=2) and a single-row partition
+    /// (g=3). The peer-group trap: rows (1,10),(1,10) both see sum=20 (the
+    /// whole peer group), then (1,20) sees rank 3 (gap) / dense 2 (no gap).
+    #[test]
+    fn windows_ab_rank_family_and_sum_ties() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70140;
+        scanfix::register_table_2col(
+            relid,
+            &[&[(2, 5), (1, 10), (3, 7), (1, 20)], &[(2, 5), (1, 10), (2, 5)]],
+        );
+        let runs = ab(relid, true, false, true);
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 20),
+            (1, 10, 2, 1, 1, 20),
+            (1, 20, 3, 3, 2, 40),
+            (2, 5, 1, 1, 1, 15),
+            (2, 5, 2, 1, 1, 15),
+            (2, 5, 3, 1, 1, 15),
+            (3, 7, 1, 1, 1, 7),
+        ];
+        assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
+    }
+
+    /// No ORDER BY: one peer group per partition — rank/dense stay 1 and the
+    /// default frame is the whole partition.
+    #[test]
+    fn windows_ab_no_order_by_whole_partition() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70141;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (2, 5), (1, 20), (2, 6)]]);
+        let runs = ab(relid, false, false, true);
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 30),
+            (1, 20, 2, 1, 1, 30),
+            (2, 5, 1, 1, 1, 11),
+            (2, 6, 2, 1, 1, 11),
+        ];
+        assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
+    }
+
+    /// Rescan replays identically under the sticky drive (the drive is reset
+    /// by ExecReScanWindowAgg's lane hook, the sort re-feeds, ownership
+    /// persists per-(re)scan-life).
+    #[test]
+    fn windows_ab_rescan_replays() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70142;
+        scanfix::register_table_2col(relid, &[&[(2, 1), (1, 3), (1, 3), (2, 2)]]);
+        let runs = ab(relid, true, true, true);
+        assert_eq!(runs[0], runs[1], "rescan must replay the first run exactly");
+        scanfix::quiesced();
+    }
+
+    /// Empty input: zero rows, node drains, no hoist, no panic — both arms.
+    #[test]
+    fn windows_ab_empty_input() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70143;
+        scanfix::register_table_2col(relid, &[]);
+        let runs = ab(relid, true, false, true);
+        assert_eq!(runs, vec![Vec::<WinRow>::new()]);
+        scanfix::quiesced();
+    }
+
+    /// Every row its own partition: partition-boundary parking on every
+    /// accept (the boundary_saved lane path), single-row groups.
+    #[test]
+    fn windows_ab_single_row_partitions() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70144;
+        scanfix::register_table_2col(relid, &[&[(3, 1), (1, 2), (2, 3)]]);
+        let runs = ab(relid, true, false, true);
+        let want: Vec<WinRow> = vec![
+            (1, 2, 1, 1, 1, 2),
+            (2, 3, 1, 1, 1, 3),
+            (3, 1, 1, 1, 1, 1),
+        ];
+        assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
+    }
+
+    /// REFUSAL SHAPE: a non-default frame (ROWS UNBOUNDED PRECEDING..CURRENT
+    /// ROW) — the framed row engine owns it in both arms (note the sum now
+    /// steps per ROW through the tie, not per peer group), and the lane must
+    /// not engage (ShapeQualProj).
+    #[test]
+    fn windows_ab_framed_refuses() {
+        use ::types_nodes::rawnodes::{
+            FRAMEOPTION_END_CURRENT_ROW, FRAMEOPTION_NONDEFAULT, FRAMEOPTION_ROWS,
+            FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+        };
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70145;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (1, 10), (1, 20)]]);
+        let fo = FRAMEOPTION_NONDEFAULT
+            | FRAMEOPTION_ROWS
+            | FRAMEOPTION_START_UNBOUNDED_PRECEDING
+            | FRAMEOPTION_END_CURRENT_ROW;
+        let runs = ab_mk(
+            |mcx| mk_windowagg_pstmt_ex(mcx, relid, true, Some(fo), true),
+            false,
+            false,
+        );
+        // ROWS frame: the tie rows see per-row running sums (10, 20), unlike
+        // the default frame's peer-group 20/20 — the framed lane's own
+        // semantics, identical in both arms.
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 10),
+            (1, 10, 2, 1, 1, 20),
+            (1, 20, 3, 3, 2, 40),
+        ];
+        assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
+    }
+
+    /// REFUSAL SHAPE: no Sort child (WindowAgg straight over the scan, the
+    /// presorted-plan shape) — ChildNotLaneOwned; the row engine owns both
+    /// arms. Input registered pre-sorted so the window semantics are sane.
+    #[test]
+    fn windows_ab_no_sort_child_refuses() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 70146;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (1, 10), (2, 5)]]);
+        let runs =
+            ab_mk(|mcx| mk_windowagg_pstmt_ex(mcx, relid, true, None, false), false, false);
+        let want: Vec<WinRow> = vec![
+            (1, 10, 1, 1, 1, 20),
+            (1, 10, 2, 1, 1, 20),
+            (2, 5, 1, 1, 1, 5),
+        ];
+        assert_eq!(runs, vec![want]);
+        scanfix::quiesced();
     }
 }
