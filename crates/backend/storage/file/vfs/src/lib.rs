@@ -104,6 +104,11 @@ const _: () = assert!(
 
 /// Stat result, plain-typed. `mode` is `st_mode` widened to u32 (mode_t is u16
 /// on macOS).
+///
+/// Contract v1.1 (additive revision, WS-B request): `dev`/`ino` carry the
+/// (st_dev, st_ino) identity vocabulary the part-cache staleness rule and the
+/// SegMap::open_shared registry key speak. Construct via [`FileInfo::zeroed`]
+/// (or struct-update from it) so additive revisions stay non-breaking.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FileInfo {
     pub size: i64,
@@ -111,11 +116,13 @@ pub struct FileInfo {
     pub nlink: u64,
     pub mtime_sec: i64,
     pub mtime_nsec: i64,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 impl FileInfo {
     pub const fn zeroed() -> Self {
-        FileInfo { size: 0, mode: 0, nlink: 0, mtime_sec: 0, mtime_nsec: 0 }
+        FileInfo { size: 0, mode: 0, nlink: 0, mtime_sec: 0, mtime_nsec: 0, dev: 0, ino: 0 }
     }
 
     #[inline]

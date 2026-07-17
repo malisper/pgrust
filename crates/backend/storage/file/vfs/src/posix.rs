@@ -339,5 +339,7 @@ fn file_info_from_stat(st: &libc::stat) -> FileInfo {
         nlink: st.st_nlink as u64,
         mtime_sec: st.st_mtime as i64,
         mtime_nsec: st.st_mtime_nsec as i64,
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
     }
 }
