@@ -53,7 +53,9 @@ mod stats;
 mod sync;
 mod taskset;
 
-#[cfg(not(loom))]
+// WS-S wave-3: caller.rs is loom-modeled from C2 on (the parked-drive
+// liveness model) — the module is loom-clean (ParkLot/Semaphore come from
+// the sync shim; the Retry yield is cfg-switched) and no longer gated.
 mod caller;
 #[cfg(not(loom))]
 mod io;
@@ -87,7 +89,6 @@ pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
 
-#[cfg(not(loom))]
 pub use caller::CallerWorker;
 #[cfg(not(loom))]
 pub use pool::WorkerPool;
