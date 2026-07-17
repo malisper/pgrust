@@ -54,6 +54,38 @@ impl CallerWorker {
         self.lane.ordinal()
     }
 
+    /// C1 (wave 2, WS-O): [`CallerWorker::drive_with_duty`] plus a LIGHT
+    /// claim-boundary duty installed for the drive's extent (sched.rs
+    /// CALLER_DUTY): `claim_duty` runs at EVERY claim boundary of tasks
+    /// this caller executes — return false to end the current task at the
+    /// boundary (the Budget path) and fall back to the step loop, where
+    /// the full error-carrying `duty` runs. The light duty must be CHEAP
+    /// and non-erroring (flag checks, bounded liveness probes — the gang
+    /// all-stopped detection lives here per the contract adjudication);
+    /// error semantics stay with `duty`.
+    pub fn drive_with_duties(
+        &mut self,
+        rt: &Runtime,
+        rg: &RgHandle,
+        duty: &mut dyn FnMut() -> Result<(), Box<PgError>>,
+        claim_duty: &mut dyn FnMut() -> bool,
+    ) -> Result<RgOutcome, Box<PgError>> {
+        // SAFETY (CallerDutyCtx contract): the pointer is consumed only by
+        // run_task on THIS thread while the guard lives, and the guard
+        // (unwind-safe RAII) drops before this frame returns — the &mut
+        // borrow never escapes the drive. The transmute erases ONLY the
+        // reference lifetime (identical fat-pointer layout); the guard's
+        // scope is what makes the erasure sound.
+        let duty_ptr: *mut (dyn FnMut() -> bool + 'static) = unsafe {
+            core::mem::transmute::<
+                *mut (dyn FnMut() -> bool + '_),
+                *mut (dyn FnMut() -> bool + 'static),
+            >(claim_duty as *mut _)
+        };
+        let _duty_ctx = crate::sched::CallerDutyCtx::set(duty_ptr);
+        self.drive_with_duty(rt, rg, duty)
+    }
+
     /// Drive the caller's own RG on the session thread, running `duty` at
     /// every step boundary and Idle transition. Err from duty aborts the
     /// RG and DRAINS it before returning (the drain_rg discipline: the
@@ -106,6 +138,12 @@ impl CallerWorker {
                 Step::Stop => unreachable!("pinned steps do not observe stop"),
             }
         };
+        // WS-O inc-2 pin-board assert (debug-only accessor): a drive that
+        // returned settled the caller's pin.
+        debug_assert!(
+            rt.debug_pin_settled(&self.local),
+            "caller pin unsettled after its drive"
+        );
         match failed {
             Some(e) => Err(e),
             None => Ok(outcome),

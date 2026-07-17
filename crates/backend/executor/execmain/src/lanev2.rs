@@ -3153,14 +3153,21 @@ fn agg_plain_fold_feed<'mcx>(
     // settled right here after the drain.
     use batch_source::BatchGranuleSource as _;
     if batch_source::heapfeed_v2_enabled() {
+        // WS-O inc-2 claim-settle guard (the serial scan is ONE claim):
+        // end_claim runs on the drain's ERROR path too — zero pins at
+        // settle; the drain error wins the report.
         if ::nodeseqscan::seq_scan_is_heap(ss) {
             let mut src = batch_source::HeapBatchSource::new(ss);
-            agg_plain_fold_drain(agg, &mut src, estate)?;
-            return src.end_claim(estate);
+            let drove = agg_plain_fold_drain(agg, &mut src, estate);
+            let settled = src.end_claim(estate);
+            drove?;
+            return settled;
         }
         let mut src = batch_source::SeqScanSource::new(ss);
-        agg_plain_fold_drain(agg, &mut src, estate)?;
-        return src.end_claim(estate);
+        let drove = agg_plain_fold_drain(agg, &mut src, estate);
+        let settled = src.end_claim(estate);
+        drove?;
+        return settled;
     }
     agg_plain_fold_drain(agg, &mut batch_source::SeqScanSource::new(ss), estate)
 }

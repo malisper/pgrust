@@ -85,6 +85,9 @@ pub struct GatherMergeState<'mcx> {
     // C outerPlan->chgParam: deferred-rescan set from ExecReScanGatherMerge;
     // consumed at the leader's next local pull, after ExecParallelReinitialize.
     pub outer_chg: ::types_nodes::bitmapset::Bitmapset<'mcx>,
+    // WS-O (wave 2): the gang's admission-ledger width lease (see
+    // nodegather::lease_gather_width; None on every fail-open path).
+    width_lease: Option<runtime::ParallelWidthLease>,
 }
 
 /// `ExecInitGatherMerge` + `gather_merge_setup` (nodeGatherMerge.c).
@@ -172,6 +175,7 @@ pub fn exec_init_gather_merge<'mcx>(
         gm_heap,
         tuple_buffers,
         outer_chg: ::types_nodes::bitmapset::Bitmapset::empty(),
+        width_lease: None,
     })
 }
 
@@ -232,8 +236,14 @@ pub(crate) fn gather_merge_ensure_launched<'mcx>(
             Some(pei) => exec_parallel_reinitialize(outer, estate, pei, &gm.initParam)?,
         }
         let pei = node.pei.as_mut().expect("just initialized");
+        // WS-O width lease (default-OFF knob; fail-open paths leave the
+        // launch untouched) — the Gather seam, shared.
+        debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
+        node.width_lease =
+            crate::nodegather::lease_gather_width(pei.pcxt, gm.num_workers);
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
+        crate::nodegather::settle_gather_width(&mut node.width_lease, node.nworkers_launched);
         execparallel::account_workers(estate, pei.pcxt);
 
         if node.nworkers_launched > 0 {
@@ -539,6 +549,8 @@ pub fn exec_shutdown_gather_merge_workers(node: &mut GatherMergeState<'_>) -> Pg
     if let Some(pei) = node.pei.as_mut() {
         exec_parallel_finish(pei)?;
     }
+    // WS-O: gang done — retire the width lease (drop returns the width).
+    node.width_lease = None;
     Ok(())
 }
 
@@ -589,11 +601,11 @@ pub fn exec_rescan_gather_merge<'mcx>(
 
 const _: () = assert!(!core::mem::needs_drop::<SortSupport>());
 
-// pei/reader/tuple_buffers are droppy owners, released by
+// pei/reader/tuple_buffers/width_lease are droppy owners, released by
 // ExecShutdownGatherMerge and release_owned.
 ::mcx::forget_safe_struct!(
     GatherMergeState<'_> { plan, ps, initialized, gm_initialized,
         need_to_scan_locally, tuples_needed, nworkers_launched, nreaders,
         gm_nkeys, gm_slots, worker_slots, gm_heap, outer_chg;
-        pei, reader, gm_sortkeys, tuple_buffers },
+        pei, reader, gm_sortkeys, tuple_buffers, width_lease },
 );

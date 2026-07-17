@@ -443,9 +443,15 @@ impl RuntimeScanShared {
                     // end_claim per claim after the segment loop (the
                     // drains skip their inline clear under the same
                     // process-static knob — single owner, trait doc).
+                    // WS-O inc-2 claim-settle guard (both arms): end_claim
+                    // runs on the ERROR path too — a failed claim must not
+                    // carry its page pin into the abort drain (the R3
+                    // zero-pins-at-settle law; the drive error wins the
+                    // report, the settle error is surfaced only when the
+                    // drive itself succeeded).
                     if heapfeed_v2_enabled() && ::nodeseqscan::seq_scan_is_heap(ss) {
                         let mut src = HeapBatchSource::new(&mut *ss);
-                        drive_claim_segments(
+                        let drove = drive_claim_segments(
                             &mut src,
                             &mut aps.agg,
                             estate,
@@ -455,11 +461,13 @@ impl RuntimeScanShared {
                             map,
                             range.start..range.end,
                             interrupted,
-                        )?;
-                        src.end_claim(estate)?;
+                        );
+                        let settled = src.end_claim(estate);
+                        drove?;
+                        settled?;
                     } else {
                         let mut src = SeqScanSource::new(&mut *ss);
-                        drive_claim_segments(
+                        let drove = drive_claim_segments(
                             &mut src,
                             &mut aps.agg,
                             estate,
@@ -469,10 +477,11 @@ impl RuntimeScanShared {
                             map,
                             range.start..range.end,
                             interrupted,
-                        )?;
-                        if heapfeed_v2_enabled() {
-                            src.end_claim(estate)?;
-                        }
+                        );
+                        let settled =
+                            if heapfeed_v2_enabled() { src.end_claim(estate) } else { Ok(()) };
+                        drove?;
+                        settled?;
                     }
                     // EA-on-morsels: fold this claim into the worker's
                     // cumulative instrument partial and export by OVERWRITE
@@ -616,6 +625,10 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
         return Ok(());
     }
     let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    // WS-O inc-2 pin-board assert (debug-only accessor, contract-approved):
+    // a drive that returned settled its pin — anything else is a stranded
+    // finalization obligation.
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after entry drive");
     emit_wfin("entry", lane.ordinal(), &local, &rg);
     // Teardown mode per drive_bound: self-error takes the release path;
     // the abort discipline is the transaction-level Err below (the hook
@@ -647,6 +660,109 @@ fn entry_drive_enabled() -> bool {
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_ENTRY_DRIVE").map_or(true, |v| v.trim() != "0")
     })
+}
+
+/// `PGRUST_RUNTIME_CALLER` (wave-2 R-KNOBS registry, WS-O part-4; default
+/// OFF): rollout stage C1 — the session thread drives its own LAUNCHED
+/// runtime-scan RG as a caller-worker (runtime::CallerWorker) instead of
+/// submit-and-park, deliberately reversing the §2.5 law under the
+/// admission ledger's accounting posture. C1 covers THIS arm only; C2-C4
+/// (leader counting reconciliation, liveness escalation, further arms)
+/// are one board each per the rollout ladder. Read once.
+fn caller_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CALLER").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+enum CallerDrive {
+    /// The caller drove the RG to an outcome (finish_outcome decides).
+    Outcome(runtime::RgOutcome),
+    /// A duty or teardown error; the RG is already complete (the
+    /// CallerWorker abort+drain discipline ran inside the drive).
+    Error(Box<PgError>),
+    /// Caller participation unavailable (lanes exhausted / leader exec
+    /// build failed): fall back to the submit-and-park loop, fail-closed.
+    Unavailable,
+}
+
+/// WS-O part-4 C1: drive the launched engagement's RG on the SESSION
+/// thread. The leader is one more external participant: its own worker
+/// executor (build_worker_exec on the already-bound session thread), its
+/// own leased pin-board lane, partials/instr exports keyed by that lane's
+/// ordinal — the ordinary combine picks them up. Duties carry the park
+/// loop's obligations:
+///   - STEP cadence (error-carrying): CFI + ProcessParallelMessages —
+///     helper-channel errors and cancels abort + drain through the
+///     CallerWorker discipline and surface here. HONEST LIMIT (C1): while
+///     the caller is PARKED at Idle (stragglers finishing), the duty does
+///     not pump — cancel/message latency in that window is bounded by the
+///     next publish/completion wake, not the latch. The C2 design note
+///     owns latch-integrated parking.
+///   - CLAIM cadence (the C1 claim-boundary hook, contract adjudication:
+///     all-stopped detection rides THIS hook): a payload-failed check
+///     sheds the current task at the boundary, and a BOUNDED (1-in-64)
+///     all-stopped probe traces gang death. C1 posture on detection:
+///     KEEP DRIVING — the caller itself completes the remaining granules
+///     (the launched loop's reap exists because NOBODY could step a
+///     pinned RG; with the caller driving, someone always can). C2
+///     escalates this to a liveness decision.
+fn caller_drive_launched(
+    rt: &Arc<runtime::Runtime>,
+    payload: &Arc<RuntimeScanShared>,
+    pcxt: parallel::ParallelContextId,
+    rg: &runtime::RgHandle,
+) -> CallerDrive {
+    let Some(mut cw) = runtime::CallerWorker::enter(rt) else {
+        lane_trace("runtime-scan: caller lanes exhausted, parking instead");
+        return CallerDrive::Unavailable;
+    };
+    if let Err(e) = build_worker_exec(payload) {
+        // Clean build failure (qd released inside): the helpers alone
+        // drive the RG, exactly as knob-OFF.
+        lane_trace(&format!("runtime-scan: caller exec build failed ({e}), parking instead"));
+        return CallerDrive::Unavailable;
+    }
+    // The leader participates: count it so finish_outcome's
+    // nobody-participated fallback cannot discard a leader-driven result.
+    payload.started.fetch_add(1, Ordering::SeqCst);
+    lane_trace("runtime-scan: caller-drive engaged");
+
+    let mut duty = || -> Result<(), Box<PgError>> {
+        ::postgres_seams::check_for_interrupts::call()?;
+        parallel::ProcessParallelMessages()?;
+        Ok(())
+    };
+    let mut boundary = 0u32;
+    let mut all_stopped_traced = false;
+    let mut claim_duty = || -> bool {
+        if payload.failed.load(Ordering::SeqCst) {
+            // Shed at the boundary; the step loop observes the abort.
+            return false;
+        }
+        boundary = boundary.wrapping_add(1);
+        if boundary % 64 == 0
+            && !all_stopped_traced
+            && parallel::parallel_workers_all_stopped(pcxt)
+        {
+            all_stopped_traced = true;
+            lane_trace("runtime-scan: caller-drive sees all helpers stopped (continuing alone)");
+        }
+        true
+    };
+    let drove = cw.drive_with_duties(rt, rg, &mut duty, &mut claim_duty);
+
+    // Leader executor teardown, ALWAYS (the helper discipline: clean
+    // finish on success, release when this executor may be mid-batch).
+    let self_errored = WORKER_EXEC
+        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let teardown = teardown_worker_exec(drove.is_ok() && !self_errored);
+    match (drove, teardown) {
+        (Ok(outcome), Ok(())) => CallerDrive::Outcome(outcome),
+        (Ok(_), Err(te)) => CallerDrive::Error(te),
+        (Err(e), _) => CallerDrive::Error(e),
+    }
 }
 
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker
@@ -764,6 +880,8 @@ fn helper_drive_lazy(
         });
     });
     let _outcome = payload.rt.drive_pinned(&mut local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after lazy drive");
     parallel::gtrace("w.qtb.body.end");
     emit_wfin("bound", lane.ordinal(), &local, rg);
     let ctx = LAZY_CTX
@@ -870,6 +988,8 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after bound drive");
     emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
@@ -2275,6 +2395,31 @@ fn engage_ceremony<'mcx>(
         lane_trace(&format!(
             "runtime-scan: engaged dop={launched} granules={total_granules}"
         ));
+
+        // WS-O part-4 C1 (PGRUST_RUNTIME_CALLER, default OFF): the leader
+        // DRIVES its own RG as a caller-worker instead of parking — it
+        // builds a worker executor on the session thread (already bound:
+        // live transaction, active snapshot) and claims granules like any
+        // participant, pumping the park loop's obligations as duties.
+        // Fail-closed on lane exhaustion or a leader exec-build failure:
+        // fall through to the submit-and-park loop below unchanged.
+        if caller_enabled() {
+            match caller_drive_launched(rt, payload, pcxt, &rg) {
+                CallerDrive::Outcome(outcome) => {
+                    emit_lfin(rt, "caller", &rg, total_granules, nrgs, payload);
+                    return finish_outcome(payload, outcome);
+                }
+                CallerDrive::Error(e) => {
+                    // The drive completed the RG (abort + drain ride the
+                    // CallerWorker discipline); abort/drain here are
+                    // idempotent no-ops kept for path symmetry.
+                    rg.abort();
+                    drain_rg(rt, payload, &rg);
+                    return Err(e);
+                }
+                CallerDrive::Unavailable => {}
+            }
+        }
 
         // Submit-and-park: completion poll + parallel-message drain + CFI +
         // bounded latch quantum (the WaitForParallelWorkersToFinish shape —

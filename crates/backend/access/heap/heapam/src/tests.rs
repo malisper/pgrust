@@ -1810,3 +1810,51 @@ fn logical_update_full_replident_logs_flags_and_old_tuple() {
     assert_eq!(i32::from_ne_bytes(regs[0].1[6..10].try_into().unwrap()), 2);
     quiesced();
 }
+
+// WS-O inc-2 (single-executor wave 2): heap_end_claim_release — the R3
+// zero-pins-at-settle seam. A claim ended EARLY (mid-batch) drops its page
+// pin and resets to the drained state; the release is idempotent on a
+// drained claim; the scan repositions and drains normally afterwards.
+#[test]
+fn end_claim_release_drops_midclaim_pin_and_repositions() {
+    install_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(
+        oid,
+        (0..3)
+            .map(|i| build_page(&[Item::Tuple(tuple_image(10, 0, i as i32))], true))
+            .collect(),
+    );
+    let rel = test_relation(mcx, oid);
+    let mut scan = begin_seqscan(mcx, &rel, mvcc_snapshot(mcx));
+
+    // Claim [0, 3): stage one page batch and STOP (the early-end shape —
+    // drain error / abort between segments / shed).
+    heap_set_block_range(&mut scan, 0, 3).unwrap();
+    assert_eq!(heap_getnextpagebatch(&mut scan).unwrap(), 1);
+    assert!(scan.rs_cbuf.is_some(), "mid-claim: the staged page is pinned");
+    heap_end_claim_release(&mut scan);
+    assert!(scan.rs_cbuf.is_none(), "end_claim released the pin");
+    assert!(!scan.rs_inited, "drained/un-inited state restored");
+    with_fake(|f| assert!(f.pins.iter().all(|p| *p == 0), "zero pins at settle"));
+    // Idempotent on the (now) drained claim.
+    heap_end_claim_release(&mut scan);
+
+    // The next claim positions and drains exactly as before.
+    heap_set_block_range(&mut scan, 0, 3).unwrap();
+    let mut ntuples = 0u32;
+    loop {
+        let n = heap_getnextpagebatch(&mut scan).unwrap();
+        if n == 0 {
+            break;
+        }
+        ntuples += n;
+    }
+    assert_eq!(ntuples, 3, "full drain after the released claim");
+
+    heap_endscan(scan).unwrap();
+    quiesced();
+}
