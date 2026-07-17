@@ -124,6 +124,42 @@ thread_local! {
     /// PERMIT_SEM), sound under loom.
     static LEDGER_GRANT: std::cell::Cell<Option<(*const Scheduler, usize)>> =
         const { std::cell::Cell::new(None) };
+    /// WS-O C1 (wave 2): the caller-as-worker CLAIM-BOUNDARY duty hook —
+    /// a LIGHT duty pumped inside run_task's claim loop while the SESSION
+    /// thread drives its own RG (installed for the drive's extent by
+    /// [`crate::CallerWorker::drive_with_duties`], RAII-cleared by
+    /// [`CallerDutyCtx`]). Returning false ends the current task at the
+    /// boundary (the TaskEnd::Budget path — the ledger-Yield shape) and
+    /// control returns to the caller's STEP loop, where the full
+    /// error-carrying duty runs. The light hook is where the gang
+    /// all-stopped detection lives (contract adjudication: duty cadence
+    /// alone is insufficient for C2 liveness — claim cadence bounds
+    /// detection latency to one claim, not one task). Empty on pool
+    /// workers and non-caller externals: one TL read per claim boundary.
+    /// Same thread_local! block as LEDGER_GRANT (no TLS-census delta).
+    static CALLER_DUTY: std::cell::Cell<Option<*mut dyn FnMut() -> bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// RAII for CALLER_DUTY: cleared even if the drive frame unwinds (the
+/// GrantCtx pattern).
+pub(crate) struct CallerDutyCtx;
+
+impl CallerDutyCtx {
+    /// SAFETY contract (upheld by caller.rs): `duty` must outlive the
+    /// returned guard, the guard must not escape the caller's drive frame,
+    /// and the pointer is dereferenced only from THIS thread inside
+    /// run_task's claim loop while the guard lives.
+    pub(crate) fn set(duty: *mut (dyn FnMut() -> bool)) -> CallerDutyCtx {
+        CALLER_DUTY.with(|c| c.set(Some(duty)));
+        CallerDutyCtx
+    }
+}
+
+impl Drop for CallerDutyCtx {
+    fn drop(&mut self) {
+        CALLER_DUTY.with(|c| c.set(None));
+    }
 }
 
 /// RAII for LEDGER_GRANT: cleared even if the task body unwinds.
@@ -1625,6 +1661,19 @@ impl Scheduler {
                     if ts.rg.is_aborted() {
                         end = TaskEnd::Exhausted;
                         break;
+                    }
+                    // WS-O C1 claim-boundary duty hook (None on every pool
+                    // worker: one TL read). False = end this task at the
+                    // boundary (`end` is already TaskEnd::Budget) and fall
+                    // back to the caller's step loop, where the full
+                    // error-carrying duty runs.
+                    if let Some(duty) = CALLER_DUTY.with(std::cell::Cell::get) {
+                        // SAFETY: installed only for the extent of the
+                        // caller's drive frame on this thread (CallerDutyCtx
+                        // RAII; see its SAFETY contract).
+                        if !unsafe { (*duty)() } {
+                            break;
+                        }
                     }
                     // WS-B ledger claim-boundary verdict (knob-gated; OFF =
                     // one cached-bool branch). Yield — an arrival narrowed
