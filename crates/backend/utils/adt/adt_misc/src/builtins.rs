@@ -805,7 +805,12 @@ fn jit_provider_init() -> PgResult<bool> {
         JIT_PROVIDER_FAILED_LOADING.set(true);
         return Ok(false);
     }
-    panic!("pg_jit_available: JIT provider shlib present at {path} but provider loading is unported");
+    // unported: JIT provider loading (jit.c provider_init). C returns false
+    // when the provider fails to load; an unloadable provider is the same
+    // observable state, so report JIT as unavailable (loud once via the
+    // failed-loading latch, matching C's one-shot probe).
+    JIT_PROVIDER_FAILED_LOADING.set(true);
+    Ok(false)
 }
 
 // misc.c LOG_METAINFO_DATAFILE, relative to the data directory (backend cwd).

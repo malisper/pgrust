@@ -11,7 +11,6 @@ use types_rel::{
     NoLock, Relation, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
-use crate::unported;
 
 const MaxHeapAttributeNumber: usize = 1600;
 
@@ -1022,7 +1021,13 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     if parent_rel.rd_rel.relkind != RELKIND_RELATION
         && parent_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
     {
-        unported("ATExecAddInherit: parent relkind outside table/partitioned");
+        // unported: ATExecAddInherit parent relkinds outside table/partitioned
+        return Err(Box::new(
+            PgError::error(
+                "ALTER TABLE ... INHERIT for this type of parent relation is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     let parent_name = parent_rel.name().to_string();
     let child_name = child_rel.name().to_string();

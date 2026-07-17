@@ -14,12 +14,6 @@ use types_rel::AccessExclusiveLock;
 
 const PROKIND_AGGREGATE: i8 = b'a' as i8;
 
-#[cold]
-#[inline(never)]
-fn unported(what: &str) -> ! {
-    panic!("unported: dropcmds.c {what}")
-}
-
 fn notice(msg: String) -> PgResult<()> {
     elog_seams::ereport_msg::call(NOTICE, msg, None)
 }
@@ -323,7 +317,15 @@ fn does_not_exist_skipping(objtype: ObjectType, object: Node<'_>) -> PgResult<()
                 }
             }
         }
-        other => unported(&format!("does_not_exist_skipping {other:?}")),
+        // unported: does_not_exist_skipping remaining object-type arms
+        _ => {
+            return Err(Box::new(
+                types_error::PgError::error(
+                    "DROP ... IF EXISTS is not supported yet for this type of object",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ))
+        }
     };
     notice(msg)
 }

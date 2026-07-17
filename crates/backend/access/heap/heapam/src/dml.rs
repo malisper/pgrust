@@ -35,7 +35,7 @@ use ::types_tuple::{
 use ::xloginsert_seams::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use crate::hio::{RelationGetBufferForTuple, RelationPutHeapTuple, HEAP_INSERT_SPECULATIVE};
-use crate::{unported, HeapTupleHeaderGetUpdateXid, MultiXactIdGetUpdateXid};
+use crate::{HeapTupleHeaderGetUpdateXid, MultiXactIdGetUpdateXid};
 use heapam_visibility_seams as hv_seam;
 
 pub const XLOG_HEAP_INSERT: u8 = 0x00;

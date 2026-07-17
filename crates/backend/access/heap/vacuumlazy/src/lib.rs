@@ -2046,12 +2046,6 @@ fn vacuum_verbose_msg(
         ))
 }
 
-#[cold]
-#[inline(never)]
-fn unported(unit: &'static str) -> ! {
-    panic!("unported callee reached from vacuumlazy.c: {unit}");
-}
-
 mod morsels;
 
 #[cfg(test)]

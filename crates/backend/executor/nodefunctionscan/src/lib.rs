@@ -7,7 +7,7 @@ use alloc::rc::Rc;
 
 use ::datum::NullableDatum;
 use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots, ExprState};
-use ::execscan::{exec_scan_extended, ScanNode, ScanState};
+use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
@@ -190,6 +190,14 @@ pub fn exec_function_scan<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // C ExecScan reads es_epq_active per call: under an EvalPlanQual recheck
+    // the fetch substitutes this rel's marked original row (relsubs_rowmark
+    // wholerow junk) instead of re-running the function — re-emitting all
+    // rows lets a parameterized-inner join consume the target's test tuple
+    // at the wrong outer row and silently skip the row (epqjoin lane).
+    if estate.es_epq_active {
+        return exec_scan_epq(node, estate);
+    }
     match (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some()) {
         (false, false) => exec_scan_extended::<_, false, false>(node, estate),
         (true, false) => exec_scan_extended::<_, true, false>(node, estate),
