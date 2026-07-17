@@ -113,6 +113,64 @@ pub(crate) fn stride_for(priority: u32) -> u64 {
     STRIDE1 / priority.max(1) as u64
 }
 
+thread_local! {
+    /// (scheduler, slot) while THIS thread is inside a ledger-JOINED
+    /// `run_task` (set by `run_task_admitted`, cleared by [`GrantCtx`]'s
+    /// drop — unwind-safe). Consulted by the declared-blocking-section
+    /// entry points (io.rs permit seams, blocking.rs facade) so the width
+    /// grant is donated and retaken ALONGSIDE the execution permit; empty
+    /// on non-worker threads and under knob OFF, where both entry points
+    /// no-op. Plain per-thread state (same pattern as blocking.rs's
+    /// PERMIT_SEM), sound under loom.
+    static LEDGER_GRANT: std::cell::Cell<Option<(*const Scheduler, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// RAII for LEDGER_GRANT: cleared even if the task body unwinds.
+struct GrantCtx;
+
+impl GrantCtx {
+    fn set(sched: &Scheduler, slot: usize) -> GrantCtx {
+        LEDGER_GRANT.with(|c| c.set(Some((sched as *const Scheduler, slot))));
+        GrantCtx
+    }
+}
+
+impl Drop for GrantCtx {
+    fn drop(&mut self) {
+        LEDGER_GRANT.with(|c| c.set(None));
+    }
+}
+
+/// Blocking-section entry (§2.8 composition): donate the current task's
+/// width grant along with the execution permit — the standby absorbing the
+/// freed core must be joinable or a width-saturated slot deadlocks the
+/// donation (ledger.rs `donate` doc). Called by io.rs `io_permit_release`
+/// and blocking.rs `blocking_io_section` BEFORE the permit release; no-op
+/// unless this thread is inside a ledger-joined task.
+pub(crate) fn ledger_donate_current() {
+    if let Some((sched, slot)) = LEDGER_GRANT.with(std::cell::Cell::get) {
+        // SAFETY: set only for the extent of run_task_admitted on this
+        // thread; the scheduler (owned by the Runtime the worker loop
+        // holds) outlives every task run.
+        let sched = unsafe { &*sched };
+        if sched.ledger.donate(slot) > 0 {
+            sched.park.wake_all();
+        }
+    }
+}
+
+/// Blocking-section exit: retake the grant (permit already reacquired by
+/// the caller — grant follows permit, in both directions). Transient
+/// overshoot over target resolves via Yield at the next claim boundary.
+pub(crate) fn ledger_restore_current() {
+    if let Some((sched, slot)) = LEDGER_GRANT.with(std::cell::Cell::get) {
+        // SAFETY: as in ledger_donate_current.
+        let sched = unsafe { &*sched };
+        sched.ledger.rejoin(slot);
+    }
+}
+
 /// M5-4 kill switch: `PGRUST_RUNTIME_STRIDE=0` restores the M0 FIFO
 /// lowest-index pick (byte-identical to the pre-M5-4 scheduler). Default ON.
 /// Read once; tests toggle per-instance via [`crate::Runtime::set_stride`].
@@ -1224,6 +1282,10 @@ impl Scheduler {
         if ledger_on && !self.ledger.try_join(ts.slot) {
             return Step::Retry;
         }
+        // Publish the grant for the declared-blocking-section entry points
+        // (§2.8 composition): a task body that donates its execution permit
+        // must donate its width grant with it (ledger_donate_current).
+        let _grant = if ledger_on { Some(GrantCtx::set(self, ts.slot)) } else { None };
         let end = self.run_task(local, ts);
         if ledger_on {
             // WORKER-FREED RE-PICK: this worker re-picks on its own; the

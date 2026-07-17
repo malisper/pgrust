@@ -3211,6 +3211,79 @@ mod ledger_tests {
         pool.shutdown();
     }
 
+    /// Regression (the knob-ON sweep WEDGED here — the hang that stalled
+    /// inc-1's finalize; io_permit_seams_donate_core_to_standby is the
+    /// seam-path twin): a worker inside a DECLARED BLOCKING SECTION
+    /// donates its execution permit, but the ledger still counted its
+    /// grant, so the width-saturated slot (target 1 at workers=1) refused
+    /// the standby that must run the peer granule — deadlock. Grant now
+    /// follows permit (donate/rejoin): with ONE core and ONE standby,
+    /// granule 1 can only run while granule 0's holder sits inside the
+    /// section, so this test deadlocks if the composition breaks again.
+    #[test]
+    fn ledger_blocking_section_donates_grant() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1, // one execution permit => ledger target 1
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+
+        struct SectionWork {
+            inner: Arc<SyntheticWork>,
+            tx: Mutex<std::sync::mpsc::Sender<()>>,
+            rx: Mutex<std::sync::mpsc::Receiver<()>>,
+            blocked_once: AtomicBool,
+        }
+        impl TaskSetWork for SectionWork {
+            fn run_morsel(&self, worker: usize, range: MorselRange) {
+                if range.start == 0 && !self.blocked_once.swap(true, Ordering::SeqCst) {
+                    let section = crate::blocking_io_section();
+                    // Donated: the peer granule must be claimable by the
+                    // standby on the freed core AND joinable in the ledger.
+                    self.rx
+                        .lock()
+                        .unwrap()
+                        .recv()
+                        .expect("peer granule must run while we block");
+                    drop(section);
+                } else {
+                    self.tx.lock().unwrap().send(()).unwrap();
+                }
+                self.inner.run_morsel(worker, range);
+            }
+            fn finalize(&self) {
+                self.inner.finalize();
+            }
+        }
+
+        let inner = SyntheticWork::new(2, None, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let work = Arc::new(SectionWork {
+            inner: Arc::clone(&inner),
+            tx: Mutex::new(tx),
+            rx: Mutex::new(rx),
+            blocked_once: AtomicBool::new(false),
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 77,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work,
+                deps: vec![],
+            }],
+        });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+        inner.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0, "donate/rejoin stayed balanced");
+    }
+
     /// Sub-JOIN_THRESHOLD submission end-to-end: invisible to the pool
     /// pick (Idle for a pool-local), zero wakes (park epoch unchanged),
     /// and the CALLER drives it to completion through the CallerWorker

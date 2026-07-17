@@ -2,9 +2,9 @@
 //! WS-B): the session thread as worker #0 — it leases an external pin-board
 //! lane and drives its OWN resource group through the ordinary pinned-step
 //! machinery, pumping a caller-supplied DUTY (CFI + ProcessParallelMessages
-//! + latch quantum — the pieces of the arms' bespoke wait loops the runtime
-//! crate cannot depend on, injected as a callback per the ratified contract
-//! shape 1d) between steps and at Idle transitions.
+//! plus the latch quantum — the pieces of the arms' bespoke wait loops the
+//! runtime crate cannot depend on, injected as a callback per the ratified
+//! contract shape 1d) between steps and at Idle transitions.
 //!
 //! THIS REVERSES THE RATIFIED §2.5 LAW (rg.rs: leaders submit-and-park, NO
 //! leader execution) — deliberately, and only as a compiling skeleton:
