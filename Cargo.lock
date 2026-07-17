@@ -10590,6 +10590,7 @@ dependencies = [
  "types_portal",
  "types_rel",
  "types_tuple",
+ "vars",
 ]
 
 [[package]]
