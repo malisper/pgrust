@@ -223,7 +223,10 @@ pub struct ModifyTableState<'mcx> {
 impl<'mcx> ModifyTableState<'mcx> {
     // The dispatch-current result relation (C: resultRelInfo cursor preloaded
     // from mt_lastResultIndex).
-    #[inline]
+    // inline(always): trivial accessor on the per-row insert path — the
+    // plain hint lost to the two-monomorphization caller context after the
+    // wave-2 seam split (se2-cost-fix round 2; +13 instr/row outlined).
+    #[inline(always)]
     fn rel(&self) -> &ResultRelExec<'mcx> {
         if self.insert_target_root {
             return self.root_rel();
@@ -1919,6 +1922,7 @@ fn execute_attr_map_cols<'mcx>(
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
 // DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
 // first); MERGE fires per present subcommand.
+#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
 fn fire_bs_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1940,6 +1944,7 @@ fn fire_bs_triggers<'mcx>(
     Ok(())
 }
 
+#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
 fn fire_as_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3277,6 +3282,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
 // columns on this lane (loud below), so need_projection is always false and
 // ri_newTupleSlot only exists for slot-type coercion.
+#[inline] // se2-cost-fix round 2: outlined after the mt_* seam re-inline (was inline at base)
 fn exec_init_insert_projection<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3401,6 +3407,12 @@ fn expr_type(node: Node<'_>) -> u32 {
 }
 
 // ExecGetInsertNewTuple (nodeModifyTable.c), no-projection arm.
+//
+// inline(always): the per-row new-tuple fetch (and its exec_copy_slot call
+// site) was inline in exec_modify_table at base; after the wave-2 seam
+// split it went outlined in BOTH monomorphizations (+51 instr/row named by
+// the se2-cost dist-prof attribution) — se2-cost-fix round 2.
+#[inline(always)]
 fn exec_get_insert_new_tuple<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
