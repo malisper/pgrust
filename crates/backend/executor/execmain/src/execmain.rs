@@ -297,6 +297,14 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
     Ok(parked)
 }
 
+// Retained-executor arena cap (see the growth-bound comment below): generous
+// vs a healthy parkable estate (Result/Limit/scan trees measure <100KB), so
+// only pathological per-execution growth trips it. 256KiB caps worst-case
+// retention at PARKED_PORTAL_MAX+1 shells per backend while keeping the
+// rebuild amortization negligible (a 600B/exec grower rebuilds every ~400
+// executions).
+const SKELETON_RETAIN_MAX_BYTES: usize = 256 * 1024;
+
 // replanfix increment-1 kill switch: PGRUST_EXEC_SKELETON_CUSTOM_GATE=0
 // restores the pre-gate behavior (custom plans pay skeleton-candidate
 // ceremony at executor start). Latched once per process.
@@ -330,6 +338,19 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
         return Ok(None);
     }
     let Some(exec) = qd.exec.as_mut() else { return Ok(None) };
+    // Retention growth bound: a parked estate's bump arena is never reset
+    // while the skeleton lives (the planstate is allocated in it), so any
+    // per-execution allocation routed through es_query_cxt accumulates
+    // across reuses. C frees the ExecutorState on every execution; retention
+    // is only sound if the arena stays at its post-first-execution size.
+    // Statements whose executions grow the arena (e.g. PL/pgSQL function
+    // calls: SELECT f(...) under a generic plan — the TPROC-C P1 leak,
+    // notes/memleak-tpcc-lane.md) get their executor torn down on the normal
+    // reset/recycle path once the arena crosses the cap; non-growing
+    // statements (point selects) park forever and pay only this load+cmp.
+    if exec.context().used() > SKELETON_RETAIN_MAX_BYTES {
+        return Ok(None);
+    }
     exec.with_mut(|data| -> PgResult<Option<i32>> {
         let ExecData { estate, planstate } = data;
         let eligible = planstate.is_some()
