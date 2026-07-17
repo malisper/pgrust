@@ -8004,8 +8004,10 @@ mod scans_t3_ab {
     /// the memoized sort verdict admits the child (T3 sort-child probe
     /// moves) and the breaker feed drains the batch-size-1 source — output
     /// equals the Volcano oracle, sorted (input arrives descending, so a
-    /// non-sorting fake cannot pass). Second drain pass proves the sorted
-    /// read-back cadence over the same node.
+    /// non-sorting fake cannot pass). A mid-stream `exec_re_scan` (after 2
+    /// rows) exercises the Sort-over-T3 rescan cadence explicitly: the
+    /// replay must restart the sorted stream from the top on BOTH arms
+    /// (review finding #4's implicit-coverage gap, made direct).
     #[test]
     fn sort_over_functionscan_t3_composition_ab() {
         install_seams();
@@ -8013,21 +8015,89 @@ mod scans_t3_ab {
         let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
 
         crate::lanev2::scans_t3_set_for_tests(false);
-        let off = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), None);
+        let off = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), Some(2));
 
         crate::lanev2::scans_t3_set_for_tests(true);
         let child_before = t3_sort_probe("functionscan");
-        let on = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), None);
+        let on = drain_g(mk_sort_over_fscan_pstmt(leaked_mcx()), Some(2));
         let child_after = t3_sort_probe("functionscan");
         crate::lanev2::scans_t3_set_for_tests(false);
         drop(guard);
 
         assert_eq!(off, on, "sort-over-T3 knob OFF vs ON must be identical");
-        assert_eq!(off, vec![1, 4, 7, 10], "descending feed must come back sorted");
+        assert_eq!(
+            off,
+            vec![1, 4, 1, 4, 7, 10],
+            "descending feed must come back sorted, replayed from the top after rescan"
+        );
         assert!(
             child_after > child_before,
             "ON arm never admitted the T3 sort child (composition did not engage)"
         );
+    }
+
+    /// EPQ law (§4.2) direct unit: `es_epq_active` is the FIRST dynamic
+    /// gate after the knob gates — an EPQ-flagged estate must be refused
+    /// to the incumbent BEFORE any scan work (T3 probe untouched; the
+    /// delegation tail — knob OFF here — must not tick either). The gate is
+    /// per-pull: dropping the flag re-admits and the SAME node source-drives
+    /// to completion. Direct-hook probe form: the express
+    /// `express_epq_pull_refused_dynamically` precedent (a full EPQ pull
+    /// can't run in this harness; the refusal must happen before it would
+    /// matter).
+    #[test]
+    fn functionscan_t3_epq_pull_refused_dynamically() {
+        install_seams();
+        rowmode_ab::install_rowmode_seams();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::scans_t3_set_for_tests(true);
+        let pstmt = mk_fscan_pstmt(leaked_mcx(), 1, 4);
+        with_exec_data(pstmt, |data, pstmt| {
+            let mut ps = exec_init_node(pstmt.planTree, &mut data.estate, 0)
+                .unwrap()
+                .unwrap();
+            data.estate.es_epq_active = true;
+            let t3_before = t3_probe("functionscan");
+            let tail_before = tail_probe("functionscan");
+            {
+                let crate::procnode::PlanStateNode::FunctionScan(fs) = &mut ps else {
+                    panic!("fscan plan did not init a FunctionScan node")
+                };
+                let r = crate::lanev2::try_own_function_scan(fs, &mut data.estate).unwrap();
+                assert!(r.is_none(), "EPQ pull must be refused to the incumbent");
+            }
+            assert_eq!(
+                t3_probe("functionscan"),
+                t3_before,
+                "EPQ pull must not be T3-source-owned"
+            );
+            assert_eq!(
+                tail_probe("functionscan"),
+                tail_before,
+                "EPQ pull must not fall through into the delegation tail"
+            );
+            data.estate.es_epq_active = false;
+            let mut out = Vec::new();
+            while let Some(slot_id) = exec_proc_node(&mut ps, &mut data.estate).unwrap() {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(
+                    data.estate.slot_mut(slot_id),
+                    1,
+                    &mut isnull,
+                );
+                assert!(!isnull);
+                out.push(v.as_i32());
+            }
+            assert_eq!(out, vec![1, 2, 3, 4]);
+            assert!(
+                t3_probe("functionscan") > t3_before,
+                "post-EPQ pulls must re-engage the T3 source drive"
+            );
+            crate::exec_end_node(&mut ps, &mut data.estate).unwrap();
+        });
+        crate::lanev2::scans_t3_set_for_tests(false);
+        drop(guard);
     }
 }
 // --- end WS-Q wave-3 append region ------------------------------------------
