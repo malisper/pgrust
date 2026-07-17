@@ -61,12 +61,13 @@ use super::push::{
 };
 use super::stats::{self, RefuseReason, ShapeClass};
 
-/// `PGRUST_LANE_V2_ROWMODE` (default OFF): the Phase-0 row-mode facility
-/// gate. 0 = unresolved (read env on first use), 1 = OFF, 2 = ON. An
-/// AtomicU8 rather than the OnceLock idiom so the seams unit tests can A/B
-/// both paths in one process (`rowmode_set_for_tests`); env-var (not GUC)
-/// per the standing `pg_settings` byte-identity discipline (lanev2 module
-/// doc).
+/// `PGRUST_LANE_V2_ROWMODE` (default ON since wave-4 FLIP-1 — flip-ladder
+/// rung 1; explicit `=0`/`off` is the permanent kill switch): the Phase-0
+/// row-mode facility gate. 0 = unresolved (read env on first use), 1 = OFF,
+/// 2 = ON. An AtomicU8 rather than the OnceLock idiom so the seams unit
+/// tests can A/B both paths in one process (`rowmode_set_for_tests`);
+/// env-var (not GUC) per the standing `pg_settings` byte-identity
+/// discipline (lanev2 module doc).
 static ROWMODE: AtomicU8 = AtomicU8::new(0);
 
 /// `pub(super)` per the wave-2 contract §3.4 (visibility change owned by
@@ -89,9 +90,13 @@ pub(super) fn rowmode_enabled() -> bool {
 #[cold]
 #[inline(never)]
 fn rowmode_resolve() -> bool {
-    let on = matches!(
+    // WAVE-4 FLIP-1 (flip-ladder rung 1; wave4-flip-manifest A1): default ON.
+    // The flip changes ONLY this default read — the explicit-OFF spelling
+    // (`=0`/`off`) is permanent and restores today's bytes AND ticks (G4);
+    // the knob itself never dies (flips never delete knobs).
+    let on = !matches!(
         std::env::var("PGRUST_LANE_V2_ROWMODE").as_deref(),
-        Ok("1") | Ok("on")
+        Ok("0") | Ok("off")
     );
     ROWMODE.store(if on { 2 } else { 1 }, Relaxed);
     on
