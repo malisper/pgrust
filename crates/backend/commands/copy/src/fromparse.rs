@@ -74,16 +74,6 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 }
                 Ok(n)
             }
-            CopySrc::Callback { .. } => {
-                // Split borrows: the callback writes straight into raw_buf.
-                let CopyFromState { src, raw_buf, raw_reached_eof, .. } = self;
-                let CopySrc::Callback { cb } = src else { unreachable!() };
-                let n = cb(&mut raw_buf[at..at + maxread], minread)?;
-                if n == 0 {
-                    *raw_reached_eof = true;
-                }
-                Ok(n)
-            }
             CopySrc::Frontend { .. } => {
                 // SAFETY: dst aliases raw_buf, which the frontend reader
                 // never touches through self (it reads src's msgbuf and the
@@ -144,9 +134,6 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             CopySrc::Frontend { .. } => {
                 let len = dst.len();
                 self.copy_read_frontend_into(dst, len)
-            }
-            CopySrc::Callback { .. } => {
-                unreachable!("callback sources are refused at parallel admission")
             }
             CopySrc::Chunk(_) => unreachable!("chunk sources never feed the segmentator"),
         }

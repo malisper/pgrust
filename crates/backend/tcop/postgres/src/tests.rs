@@ -115,18 +115,13 @@ fn process_interrupts_cancel_holdoff_rearms() {
 }
 
 #[test]
-fn recovery_conflict_arm_is_handled() {
-    // PORTED (t25 car-10, recovery-t24-merge): ProcessRecoveryConflictInterrupts
-    // is real — the arm SERVICES the conflict signal instead of panicking
-    // loudly (the pre-port stub assertion this test used to pin). Outside
-    // recovery/transaction state (this unit environment) C resolves the
-    // conflict as a no-op: no panic, clean return, interrupt consumed.
+fn recovery_conflict_arm_is_loud() {
     install_test_seams();
     HandleRecoveryConflictInterrupt(5);
     assert!(init_small::globals::InterruptPending());
-    check_for_interrupts()
-        .expect("ported recovery-conflict arm must service the interrupt cleanly");
-    assert!(!init_small::globals::InterruptPending());
+    let outcome = std::panic::catch_unwind(check_for_interrupts);
+    let msg = *outcome.unwrap_err().downcast::<String>().unwrap();
+    assert!(msg.contains("ProcessRecoveryConflictInterrupts"));
 }
 
 #[test]

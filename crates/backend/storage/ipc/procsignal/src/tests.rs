@@ -404,11 +404,8 @@ fn thread_signal_rejects_unrenderable_signals() {
     setup();
     let _guard = serial();
     assert_eq!(SendThreadSignal(-1010, libc::SIGTERM), -1);
-    // SIGKILL renders via SendThreadKill (crash-test kill-9 bit) -- delivered
-    // like any pend, so an unknown pid is ESRCH, not a panic.
-    assert_eq!(SendThreadSignal(1010, libc::SIGKILL), -1);
-    let stop = std::panic::catch_unwind(|| SendThreadSignal(1010, libc::SIGSTOP));
-    assert!(stop.is_err());
+    let kill = std::panic::catch_unwind(|| SendThreadSignal(1010, libc::SIGKILL));
+    assert!(kill.is_err());
 }
 
 #[test]

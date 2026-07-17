@@ -104,47 +104,6 @@ pub struct OutputPluginCallbacks {
     pub streaming_requested: bool,
 }
 
-// C's ctx->out is a StringInfo carrying either textual (test_decoding) or
-// binary (pgoutput 'w'-payload) data. A String can't hold arbitrary bytes, so
-// the buffer is a Vec<u8> with the String-flavored methods the textual
-// plugins use; binary writers (logicalproto) reach the Vec directly.
-#[derive(Default)]
-pub struct OutBuf {
-    buf: Vec<u8>,
-}
-
-impl OutBuf {
-    pub fn clear(&mut self) {
-        self.buf.clear();
-    }
-    pub fn len(&self) -> usize {
-        self.buf.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.buf
-    }
-    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
-        &mut self.buf
-    }
-    pub fn push_str(&mut self, s: &str) {
-        self.buf.extend_from_slice(s.as_bytes());
-    }
-    pub fn push(&mut self, c: char) {
-        let mut b = [0u8; 4];
-        self.buf.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
-    }
-}
-
-impl core::fmt::Write for OutBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.buf.extend_from_slice(s.as_bytes());
-        Ok(())
-    }
-}
-
 pub type LogicalOutputPluginWriterWrite =
     fn(&mut OutputPluginContext, XLogRecPtr, TransactionId, bool) -> PgResult<()>;
 pub type LogicalOutputPluginWriterPrepareWrite = LogicalOutputPluginWriterWrite;
@@ -162,7 +121,7 @@ pub struct OutputPluginContext {
     pub prepare_write: Option<LogicalOutputPluginWriterPrepareWrite>,
     pub write: Option<LogicalOutputPluginWriterWrite>,
     pub update_progress: Option<LogicalOutputPluginWriterUpdateProgress>,
-    pub out: OutBuf,
+    pub out: String,
     pub output_plugin_private: usize,
     pub output_writer_private: usize,
     pub accept_writes: bool,
@@ -224,20 +183,7 @@ pub fn CheckLogicalDecodingRequirements() -> PgResult<()> {
     }
 
     if transam_xlog::RecoveryInProgress() {
-        // Logical decoding on standby is allowed when the primary runs
-        // wal_level >= logical (GetActiveWalLevelOnStandby =
-        // ControlFile->wal_level; xlog.c). Race notes as in C: rechecked at
-        // slot creation and at decoding startup, and XLOG_PARAMETER_CHANGE
-        // invalidates existing logical slots on a wal_level drop.
-        if transam_xlog::GetActiveWalLevelOnStandby() < transam_xlog::WAL_LEVEL_LOGICAL {
-            ereport(ERROR)
-                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-                .errmsg(
-                    "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server",
-                )
-                .finish(loc("CheckLogicalDecodingRequirements"))?;
-            unreachable!();
-        }
+        unported("CheckLogicalDecodingRequirements: logical decoding on standby");
     }
     Ok(())
 }
@@ -270,9 +216,8 @@ fn StartupDecodingContext(
     }
 
     if !xact::IsTransactionOrTransactionBlock() {
-        // Walsender path (logical.c:199): the slot enforces our xmin, so
-        // announce this backend as skippable for horizon computation.
-        procarray::ProcSetStatusFlagInLogicalDecoding()?;
+        // C marks MyProc PROC_IN_LOGICAL_DECODING here (walsender path).
+        unported("StartupDecodingContext outside a transaction (walsender)");
     }
 
     let reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
@@ -304,7 +249,7 @@ fn StartupDecodingContext(
         prepare_write,
         write: do_write,
         update_progress,
-        out: OutBuf::default(),
+        out: String::new(),
         output_plugin_private: 0,
         output_writer_private: 0,
         accept_writes: false,
@@ -490,23 +435,8 @@ pub fn CreateDecodingContext(
         unreachable!();
     }
 
-    // Slots being synced from the primary can't be used for decoding (they
-    // are for use after failover) — but the slot sync machinery itself may
-    // advance their LSNs (update_local_synced_slot).
-    if transam_xlog::RecoveryInProgress()
-        && slot.data.get().synced != 0
-        && !slot::syncing_replication_slots()
-    {
-        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
-        ereport(ERROR)
-            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
-            .errmsg(format!(
-                "cannot use replication slot \"{name}\" for logical decoding"
-            ))
-            .errdetail("This replication slot is being synchronized from the primary server.")
-            .errhint("Specify another replication slot.")
-            .finish(loc("CreateDecodingContext"))?;
-        unreachable!();
+    if transam_xlog::RecoveryInProgress() && slot.data.get().synced != 0 {
+        unported("CreateDecodingContext: synced slot on standby");
     }
 
     debug_assert!(slot.data.get().invalidated == RS_INVAL_NONE);

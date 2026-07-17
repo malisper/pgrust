@@ -381,38 +381,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      argument as slot 15 (vacuumlazy morsels.rs WORKER_CX): full-
     //      identity parallel helpers, no cross-thread access, no retained
     //      session state.
-    // 492, re-pinned at t25 car-10 (recovery-t24-merge boarded): +14, ALL
-    // one class — C per-PROCESS function-statics of the replication/
-    // recovery machinery become per-THREAD TLS on the thread model, owned
-    // by DEDICATED background threads (startup, walreceiver, walsender,
-    // logical apply/tablesync workers, slotsync) that never host a swapped
-    // session; no envelope capture/restore applies. Deliberately
-    // non-session TLS, no SESSION_ENVELOPE_MANIFEST rows:
-    //   20. transam/xlogrecovery/src/targets.rs (x2) — recovery-target
-    //      bookkeeping of the startup thread.
-    //   21. transam/xlogrecovery/src/lib.rs (+1) — startup-thread replay
-    //      state beside the existing slot.
-    //   22. replication/logical/relation/src/lib.rs — apply-worker
-    //      relation-map cache.
-    //   23. replication/logical/worker/src/lib.rs — apply-worker state
-    //      (worker.c per-process statics).
-    //   24. replication/logical/worker/src/tablesync.rs — tablesync-worker
-    //      state.
-    //   25. replication/origin/src/lib.rs — session_replication_origin
-    //      analog on the apply thread.
-    //   26. replication/slot/src/lib.rs (+1) — per-thread acquired-slot
-    //      pointer (MyReplicationSlot analog).
-    //   27. replication/slotsync/src/lib.rs — slotsync-worker state.
-    //   28. replication/syncrep/src/lib.rs — walsender syncrep queue state.
-    //   29. replication/walreceiver/src/lib.rs — walreceiver-thread state.
-    //   30. replication/walsender/src/logical_stream.rs — per-walsender
-    //      logical-stream state (incl. the WalFlushPacing analog of C's
-    //      function-static).
-    //   31. storage/ipc/procarray/src/known_assigned.rs — startup-thread
-    //      KnownAssignedXids bookkeeping.
-    //   32. contrib/pgoutput/src/lib.rs — pgoutput per-decoder context on
-    //      the walsender thread.
-    assert_eq!(count_tree(crates), 492, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    assert_eq!(count_tree(crates), 478, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

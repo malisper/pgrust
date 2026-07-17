@@ -228,19 +228,8 @@ pub fn restoreTwoPhaseData() -> PgResult<()> {
 /// `PrescanPreparedTransactions(NULL, NULL)`: the oldest valid prepared XID
 /// (or nextXid when none).
 pub fn PrescanPreparedTransactions() -> PgResult<TransactionId> {
-    Ok(prescan_prepared_transactions_impl()?.0)
-}
-
-/// `PrescanPreparedTransactions(&xids, &nxids)`: also collects the valid
-/// prepared-xact XIDs for the hot-standby fake running-xacts snapshot.
-pub fn PrescanPreparedTransactionsXids() -> PgResult<(TransactionId, Vec<TransactionId>)> {
-    prescan_prepared_transactions_impl()
-}
-
-fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<TransactionId>)> {
     let orig_next = orig_next_xid();
     let mut result = orig_next;
-    let mut xids: Vec<TransactionId> = Vec::new();
 
     let st = TwoPhaseState();
     lock_twophase_state(LW_EXCLUSIVE);
@@ -260,11 +249,8 @@ fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<Transact
                 false,
                 true,
             )?;
-            if buf.is_some() {
-                if TransactionIdPrecedes(xid, result) {
-                    result = xid;
-                }
-                xids.push(xid);
+            if buf.is_some() && TransactionIdPrecedes(xid, result) {
+                result = xid;
             }
             i += 1;
         }
@@ -272,41 +258,7 @@ fn prescan_prepared_transactions_impl() -> PgResult<(TransactionId, Vec<Transact
     })();
     unlock_twophase_state();
     inner?;
-    Ok((result, xids))
-}
-
-/// `TwoPhaseGetXidByVirtualXID(vxid, &have_more)` (twophase.c:852).
-pub fn TwoPhaseGetXidByVirtualXID(
-    proc_number: ::types_core::ProcNumber,
-    lxid: u32,
-) -> PgResult<(TransactionId, bool)> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let mut result = ::types_core::InvalidTransactionId;
-    let mut have_more = false;
-
-    let st = TwoPhaseState();
-    lock_twophase_state(lwlock::LW_SHARED);
-    for i in 0..st.num_prep_xacts.get() {
-        let g = st.gxact(st.prep_xact(i));
-        if !g.valid.get() {
-            continue;
-        }
-        let proc = lmgr_proc::GetPGProcByNumber(g.pgprocno.get());
-        // Startup process sets proc->vxid.procNumber to INVALID_PROC_NUMBER,
-        // so redo-restored gxacts never match (C asserts !inredo on match).
-        if proc.vxid.procNumber.load(Relaxed) == proc_number
-            && proc.vxid.lxid.load(Relaxed) == lxid
-        {
-            debug_assert!(!g.inredo.get());
-            if result != ::types_core::InvalidTransactionId {
-                have_more = true;
-                break;
-            }
-            result = g.xid.get();
-        }
-    }
-    unlock_twophase_state();
-    Ok((result, have_more))
+    Ok(result)
 }
 
 /// `StandbyRecoverPreparedTransactions`: pg_subtrans setup during hot standby.
@@ -387,8 +339,8 @@ pub fn RecoverPreparedTransactions() -> PgResult<()> {
                 &twophase_rmgr::twophase_recover_callbacks,
             )?;
 
-            if xlogutils::InHotStandby() {
-                standby_seams::standby_release_lock_tree::call(xid, &subxids)?;
+            if xlogutils::standby_state() == xlogutils::HotStandbyState::STANDBY_SNAPSHOT_READY {
+                panic!("RecoverPreparedTransactions: StandbyReleaseLockTree unported (hot standby)");
             }
 
             PostPrepare_Twophase();

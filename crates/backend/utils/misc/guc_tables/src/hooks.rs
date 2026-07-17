@@ -114,7 +114,6 @@ pub static check_wal_buffers: GucIntCheckHook = GucSlot::new("check_wal_buffers"
 pub static check_wal_consistency_checking: GucStringCheckHook = GucSlot::new("check_wal_consistency_checking");
 pub static check_wal_segment_size: GucIntCheckHook = GucSlot::new("check_wal_segment_size");
 pub static show_archive_command: GucShowHook = GucSlot::new("show_archive_command");
-pub static show_data_checksums: GucShowHook = GucSlot::new("show_data_checksums");
 pub static show_data_directory_mode: GucShowHook = GucSlot::new("show_data_directory_mode");
 pub static show_in_hot_standby: GucShowHook = GucSlot::new("show_in_hot_standby");
 pub static show_log_file_mode: GucShowHook = GucSlot::new("show_log_file_mode");
