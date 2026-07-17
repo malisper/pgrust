@@ -732,6 +732,11 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::ScrollMark,
         ],
     ),
+    // --- FLIP-2: mergejoin (rung 2) ----------------------------------------
+    (
+        ShapeClass::MergeJoin,
+        &[RefuseReason::Epq, RefuseReason::Backward, RefuseReason::Instrumented],
+    ),
 ];
 
 /// The Layer-A tail `stats::tick_refused` calls (the one WS-P stats.rs
