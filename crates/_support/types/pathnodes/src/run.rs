@@ -171,6 +171,29 @@ pub struct PlannerRun<'mcx> {
     /// cross-query state.
     pub att_stats_memo:
         core::cell::RefCell<PgVec<'mcx, ((u32, i16, bool), Option<core::ptr::NonNull<()>>)>>,
+    /// Per-planning-cycle syscache memos (syscache-memo lane; the replanfix2
+    /// close-out's residual bucket: operator-shape 16x, ACL mask 8x, amop
+    /// probes 14x per replan). Same discipline as att_stats_memo: COST ONLY —
+    /// identical seam calls and values, arena-scoped, dies with the run,
+    /// never cross-query. Struct-valued memos stay OPAQUE (NonNull) so this
+    /// _support crate takes no backend dependency; the cast pairs live only
+    /// in `planner::syscache_memo`. Scalar-valued memos store the scalar.
+    ///
+    /// opno -> arena-leaked pg_operator shape (None = operator absent).
+    pub op_shape_memo:
+        core::cell::RefCell<PgVec<'mcx, (u32, Option<core::ptr::NonNull<()>>)>>,
+    /// (relid, roleid, mask, how_all) -> pg_class_aclmask result. Planner
+    /// estimate-gating only (vardata.acl_ok); executor permission
+    /// ENFORCEMENT (ExecCheckPermissions) never reads this.
+    pub aclmask_memo: core::cell::RefCell<PgVec<'mcx, ((u32, u32, u64, bool), u64)>>,
+    /// (opno, amop purpose, opfamily) -> arena-leaked pg_amop shape
+    /// (None = operator not a member under that purpose/family).
+    pub amop_by_op_memo:
+        core::cell::RefCell<PgVec<'mcx, ((u32, u8, u32), Option<core::ptr::NonNull<()>>)>>,
+    /// (opfamily, lefttype, righttype, strategy) -> member operator oid
+    /// (InvalidOid = no member), i.e. get_opfamily_member.
+    pub amop_member_memo:
+        core::cell::RefCell<PgVec<'mcx, ((u32, u32, u32, i16), u32)>>,
 }
 
 // A run is forgotten at the planner boundary (mcx reset reclaims), never
@@ -192,7 +215,8 @@ mcx::forget_safe_struct!(
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
-        swapped_parent_subroot, m5_suppress_gather, att_stats_memo },
+        swapped_parent_subroot, m5_suppress_gather, att_stats_memo,
+        op_shape_memo, aclmask_memo, amop_by_op_memo, amop_member_memo },
 );
 
 impl<'mcx> PlannerRun<'mcx> {
@@ -218,6 +242,10 @@ impl<'mcx> PlannerRun<'mcx> {
             swapped_parent_subroot: None,
             m5_suppress_gather: None,
             att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            op_shape_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            aclmask_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            amop_by_op_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
+            amop_member_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
         }
     }
 

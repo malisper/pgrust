@@ -134,6 +134,13 @@ pub(crate) fn opproc_for(operator: Oid) -> PgResult<FmgrInfo> {
     fmgr_core::fmgr_info(opcode)
 }
 
+/// opproc_for through the per-cycle operator-shape memo (syscache-memo
+/// lane) for the replan-hot selectivity paths that have the run at hand.
+pub(crate) fn opproc_for_run(run: &PlannerRun<'_>, operator: Oid) -> PgResult<FmgrInfo> {
+    let opcode = crate::syscache_memo::get_opcode(run, operator)?;
+    fmgr_core::fmgr_info(opcode)
+}
+
 // Armed frame: comparison procs detoast short/packed args into `mcx`
 // (C's DatumGetNumeric detoast lands in the planner context).
 pub(crate) fn op_test(
@@ -289,7 +296,7 @@ pub fn scalarineqsel_wrapper<'mcx>(
         return Ok(0.0);
     }
     if !varonleft {
-        operator = lsyscache::get_commutator(operator)?;
+        operator = crate::syscache_memo::get_commutator(run, operator)?;
         if operator == 0 {
             return Ok(DEFAULT_INEQ_SEL);
         }
@@ -359,7 +366,7 @@ fn scalarineqsel<'mcx>(
         return Ok(DEFAULT_INEQ_SEL);
     }
     let stanullfrac = vardata.nullfrac();
-    let mut opproc = opproc_for(operator)?;
+    let mut opproc = opproc_for_run(run, operator)?;
 
     let (mcv_selec, sumcommon) =
         mcv_selectivity(run, vardata, &mut opproc, collation, constval, true)?;
@@ -1687,7 +1694,9 @@ pub fn all_rows_selectable<'mcx>(
         return Ok(false);
     }
 
-    if aclchk_seams::pg_class_aclmask::call(rte.relid, userid, adt_acl::ACL_SELECT, false)? != 0 {
+    if crate::syscache_memo::class_aclmask(run, rte.relid, userid, adt_acl::ACL_SELECT, false)?
+        != 0
+    {
         return Ok(true);
     }
 
@@ -1795,11 +1804,14 @@ pub(crate) fn var_eq_const<'mcx>(
     {
         1.0 / run.root.rel(vardata.rel.unwrap()).tuples
     } else if vardata.stats.is_some()
-        && statistic_proc_security_check(vardata, lsyscache::get_opcode(oproid)?)?
+        && statistic_proc_security_check(
+            vardata,
+            crate::syscache_memo::get_opcode(run, oproid)?,
+        )?
     {
         match vardata.slot(STATISTIC_KIND_MCV, 0) {
             Some(sslot) => {
-                let mut eqproc = opproc_for(oproid)?;
+                let mut eqproc = opproc_for_run(run, oproid)?;
                 let mut matched = None;
                 for (i, &v) in sslot.values()?.iter().enumerate() {
                     if op_test(run.mcx, &mut eqproc, collation, v, constval, varonleft)? {
@@ -2565,8 +2577,11 @@ fn btcostestimate(
                 other => panic!("btcostestimate (selfuncs.c): indexqual {other:?}; M2 lane"),
             };
             if clause_op != 0 {
-                let op_strategy =
-                    lsyscache::get_op_opfamily_strategy(clause_op, opfamilies[indexcol as usize])?;
+                let op_strategy = crate::syscache_memo::get_op_opfamily_strategy(
+                    run,
+                    clause_op,
+                    opfamilies[indexcol as usize],
+                )?;
                 debug_assert!(op_strategy != 0);
                 if op_strategy == lsyscache::BTEqualStrategyNumber as i32 {
                     eq_qual_here = true;
@@ -2644,7 +2659,8 @@ fn btcostestimate(
             (indexoid, 1, false)
         };
         if let Some(bundle) = get_att_stats(run, stat_relid, stat_attno, stat_inh)? {
-            let sortop = lsyscache::get_opfamily_member(
+            let sortop = crate::syscache_memo::get_opfamily_member(
+                run,
                 opfamily0,
                 opcintype0,
                 opcintype0,
