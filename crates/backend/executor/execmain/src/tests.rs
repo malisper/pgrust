@@ -7498,3 +7498,255 @@ mod windows_t2_ab {
         scanfix::quiesced();
     }
 }
+
+// ===========================================================================
+// Wave-2 WS-N inc-1: DML lane A/B corpus (lanev2/dml.rs try_own_modify_table
+// behind PGRUST_LANE_V2_DML). Fake-oid band 74001+ (this module's claim per
+// the Phase-1 integration precedent — fixture oid bands are a shared
+// namespace).
+//
+// SCOPE HONESTY (contract cross-cutting law: mutation-class shapes prove via
+// serial e2e): the in-process fixtures are READ-ONLY fake heaps — the write
+// seams (bufmgr dirty path, WAL, xact) are deliberately absent, and
+// importing nodemodifytable's write fixture here would collide with
+// scanfix's set-once read seams (the composition hazard the integration
+// record documents). These units therefore prove the HOST — gate order,
+// knob-OFF silence, engagement, DmlShape refusal accounting, end-of-set
+// parity — on ZERO-ROW insert plans (empty source ⇒ no write path is ever
+// entered, on either engine). Real-write parity (rows, WAL, command tags,
+// RETURNING) is scripts/lane-dml-e2e.sh + scripts/dualexec/corpus-dml-insert
+// .sql (post-mutation content SELECTs per the silent-row-loss law) plus the
+// nodemodifytable integration suite run knob-ON (notes/se-ws-n-dml-inc1.md).
+// ===========================================================================
+mod dml_ab {
+    use super::*;
+
+    /// Serializes this module's tests: they mutate the process-global DML
+    /// knob and read the shared engagement/refusal probe deltas.
+    static KNOB: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// CheckValidResultRel probes replica identity on the result relation;
+    /// the fixture has no publications, so every command is valid. Shared
+    /// set-once installer (integration-record precedent: any module needing
+    /// this seam MUST come through here).
+    fn install_replica_identity_seam() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            execreplication_seams::check_cmd_replica_identity::set(|_mcx, _rel, _cmd| Ok(()));
+            // exec_get_range_table_relation's lock-held debug probe: the
+            // fixture's fake result relation carries no real lock table.
+            lmgr_seams::check_relation_locked_by_me::set(|_relid, _mode, _orstronger| true);
+        });
+    }
+
+    /// `INSERT INTO target SELECT c1, c2 FROM source` — the planner's
+    /// INSERT..SELECT plan shape: `ModifyTable(INSERT)` over a SeqScan;
+    /// rtable = [result rel (RowExclusiveLock, INSERT perms), source rel
+    /// (AccessShareLock, SELECT perms)]. `on_conflict_nothing` decorates the
+    /// same plan with ONCONFLICT_NOTHING (arbiter-less DO NOTHING) for the
+    /// DmlShape refusal leg.
+    fn mk_insert_select_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        target: u32,
+        source: u32,
+        on_conflict_nothing: bool,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{ModifyTable, Plan, Scan, SeqScan};
+
+        let scan_tlist = {
+            let a = Node::mk_var(mcx, 2, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, 2, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan { targetlist: scan_tlist, ..Default::default() },
+                    scanrelid: 2,
+                },
+            },
+        )
+        .unwrap();
+
+        let mut mt = Node::build::<ModifyTable>(mcx).unwrap();
+        // No RETURNING: the node's own targetlist stays nil (setrefs leaves
+        // it empty for plain DML).
+        mt.plan.lefttree = Some(scan);
+        mt.operation = CmdType::CMD_INSERT;
+        mt.canSetTag = true;
+        mt.nominalRelation = 1;
+        mt.resultRelations = ::types_nodes::IntList::make1(mcx, 1).unwrap();
+        if on_conflict_nothing {
+            mt.onConflictAction =
+                ::types_nodes::OnConflictAction::ONCONFLICT_NOTHING as u32;
+        }
+
+        let result_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: target,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::RowExclusiveLock,
+                perminfoindex: 1,
+                inFromCl: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let source_rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid: source,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 2,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let insert_perm = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid: target,
+                requiredPerms: ::types_nodes::parsenodes::ACL_INSERT,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let select_perm = Node::mk(
+            mcx,
+            RTEPermissionInfo {
+                relid: source,
+                requiredPerms: ::types_nodes::parsenodes::ACL_SELECT,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut rtable = NodeList::make1(mcx, result_rte).unwrap();
+        rtable.lappend(mcx, source_rte).unwrap();
+        let mut perms = NodeList::make1(mcx, insert_perm).unwrap();
+        perms.lappend(mcx, select_perm).unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+        unpruned.add_member(mcx, 2).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_INSERT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mt.seal());
+        pstmt.rtable = rtable;
+        pstmt.permInfos = perms;
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Drive the INSERT plan to completion (exec_proc_node until None — the
+    /// ExecutePlan cadence for a RETURNING-less DML) and return
+    /// es_processed. Both knob arms run these identical statements.
+    fn run_insert(pstmt: &'static PlannedStmt<'static>) -> u64 {
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_INSERT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            while exec_proc_node(ps, estate).unwrap().is_some() {}
+            let processed = estate.es_processed;
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            processed
+        })
+    }
+
+    fn probes() -> (u64, u64) {
+        (
+            crate::lanev2::DML_OWNED_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed),
+            crate::lanev2::DML_SHAPE_REFUSED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Knob OFF vs ON over the admitted INSERT..SELECT shape (empty source):
+    /// identical end-of-set behavior, es_processed 0 on both arms; the OFF
+    /// arm ticks NOTHING (no pre-existing ModifyTable wholesale refuse —
+    /// contract §2d) and the ON arm engages the DML drive.
+    #[test]
+    fn dml_ab_insert_select_owned() {
+        install_seams();
+        scanfix::install();
+        install_replica_identity_seam();
+        let target: u32 = 74001;
+        let source: u32 = 74002;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::dml_set_for_tests(false);
+        let (owned0, refused0) = probes();
+        let off = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
+        let (owned1, refused1) = probes();
+        assert_eq!(off, 0);
+        assert_eq!(owned1, owned0, "knob OFF must not own");
+        assert_eq!(refused1, refused0, "knob OFF must tick NOTHING (contract §2d)");
+
+        crate::lanev2::dml_set_for_tests(true);
+        let on = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
+        let (owned2, refused2) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(on, off, "knob OFF vs ON must behave identically");
+        assert!(owned2 > owned1, "ON arm never engaged the DML drive");
+        assert_eq!(refused2, refused1, "the admitted shape must not tick DmlShape");
+
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// The DmlShape refusal leg: the SAME plan decorated with an
+    /// arbiter-less ON CONFLICT DO NOTHING must refuse loudly under the ON
+    /// knob (owned stays flat, DmlShape ticks) and fall through to the
+    /// unchanged Volcano arm.
+    #[test]
+    fn dml_ab_on_conflict_refuses_dml_shape() {
+        install_seams();
+        scanfix::install();
+        install_replica_identity_seam();
+        let target: u32 = 74003;
+        let source: u32 = 74004;
+        scanfix::register_table_2col(target, &[]);
+        scanfix::register_table_2col(source, &[]);
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        crate::lanev2::dml_set_for_tests(true);
+        let (owned0, refused0) = probes();
+        let n = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, true));
+        let (owned1, refused1) = probes();
+        crate::lanev2::dml_set_for_tests(false);
+        assert_eq!(n, 0);
+        assert_eq!(owned1, owned0, "ON CONFLICT must not be owned in inc-1");
+        assert!(refused1 > refused0, "ON CONFLICT must tick DmlShape");
+
+        drop(guard);
+        scanfix::quiesced();
+    }
+}
