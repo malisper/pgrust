@@ -5997,3 +5997,274 @@ mod mergejoin_rowmode_ab {
         scanfix::quiesced();
     }
 }
+
+// ---------------------------------------------------------------------------
+// WS-P node census (wave-2 flip machinery; lanev2/census.rs). Fixture oid
+// band: 74001+ (fixture bands are a shared namespace — phase-1 integration
+// precedent: 70xxx shared/windows, 71xxx/72xxx express, 73001-73012
+// mergejoin).
+// ---------------------------------------------------------------------------
+mod census_tests {
+    use super::*;
+
+    /// A census-shaped runnable fixture: Limit(0) <- Sort(1) <- SeqScan(2),
+    /// with plan_node_ids ASSIGNED (the shared mk_* fixtures leave every id
+    /// 0; the census join and the instrumented-universe cross-check need
+    /// the real dense ids setrefs would assign).
+    fn mk_census_sort_limit_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        relid: u32,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{Limit, Plan, Scan, SeqScan, Sort};
+        use ::types_nodes::primnodes::OUTER_VAR;
+
+        let scan_var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+        let scan_tle = Node::mk_target_entry(mcx, scan_var, 1, Some("a"), false).unwrap();
+        let scan = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan {
+                    plan: Plan {
+                        plan_node_id: 2,
+                        targetlist: NodeList::make1(mcx, scan_tle).unwrap(),
+                        ..Default::default()
+                    },
+                    scanrelid: 1,
+                },
+            },
+        )
+        .unwrap();
+
+        let outer_tle = |mcx| {
+            let v = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make1(mcx, Node::mk_target_entry(mcx, v, 1, Some("a"), false).unwrap())
+                .unwrap()
+        };
+
+        let mut sort = Node::build::<Sort>(mcx).unwrap();
+        sort.plan.plan_node_id = 1;
+        sort.plan.targetlist = outer_tle(mcx);
+        sort.plan.lefttree = Some(scan);
+        sort.numCols = 1;
+        sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+        sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+        sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+        let sort = sort.seal();
+
+        let mut limit = Node::build::<Limit>(mcx).unwrap();
+        limit.plan.plan_node_id = 0;
+        limit.plan.targetlist = outer_tle(mcx);
+        limit.plan.lefttree = Some(sort);
+        limit.limitCount = Some(
+            Node::mk_const(mcx, INT8OID, -1, 0, 8, Datum::from_i64(2), false, true).unwrap(),
+        );
+        let tree = limit.seal();
+
+        let rte = Node::mk(
+            mcx,
+            RangeTblEntry {
+                rtekind: RTEKind::RTE_RELATION,
+                relid,
+                relkind: ::types_rel::RELKIND_RELATION,
+                rellockmode: ::types_rel::AccessShareLock,
+                perminfoindex: 1,
+                inFromCl: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let perminfo = Node::mk(
+            mcx,
+            RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+        )
+        .unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(tree);
+        pstmt.rtable = NodeList::make1(mcx, rte).unwrap();
+        pstmt.permInfos = NodeList::make1(mcx, perminfo).unwrap();
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// Walker vs EXPLAIN's traversal, generic-edge shape: the lefttree chain
+    /// visits every node exactly once, parent-first, with the census kind
+    /// vocabulary.
+    #[test]
+    fn census_walk_visits_lefttree_chain_once_each() {
+        install_seams();
+        let mcx = leaked_mcx();
+        let pstmt = mk_census_sort_limit_pstmt(mcx, 74001);
+        let rows = crate::lanev2::census_rows_for_tests(pstmt);
+        assert_eq!(rows, vec![(0, "limit"), (1, "sort"), (2, "seqscan")]);
+    }
+
+    /// Walker vs EXPLAIN's traversal, righttree + Hash: a HashJoin subtree
+    /// counts the Hash node (EXPLAIN prints it; the census denominator keeps
+    /// it — its lane story rides the join flip, docs/design/flip-ladder.md).
+    #[test]
+    fn census_walk_counts_hash_under_hashjoin() {
+        install_seams();
+        let mcx = leaked_mcx();
+        use ::types_nodes::plannodes::{Hash, HashJoin, Plan, Scan, SeqScan};
+
+        let mk_scan = |id: i32| {
+            Node::mk(
+                mcx,
+                SeqScan {
+                    cb_scan_cols: None,
+                    scan: Scan {
+                        plan: Plan { plan_node_id: id, ..Default::default() },
+                        scanrelid: 1,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let mut hash = Node::build::<Hash>(mcx).unwrap();
+        hash.plan.plan_node_id = 2;
+        hash.plan.lefttree = Some(mk_scan(3));
+        let hash = hash.seal();
+        let mut hj = Node::build::<HashJoin>(mcx).unwrap();
+        hj.join.plan.plan_node_id = 0;
+        hj.join.plan.lefttree = Some(mk_scan(1));
+        hj.join.plan.righttree = Some(hash);
+        let tree = hj.seal();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.planTree = Some(tree);
+        let pstmt = pstmt.seal_ref();
+
+        let rows = crate::lanev2::census_rows_for_tests(pstmt);
+        assert_eq!(
+            rows,
+            vec![(0, "hashjoin"), (1, "seqscan"), (2, "hash"), (3, "seqscan")]
+        );
+    }
+
+    /// Walker vs EXPLAIN's traversal, member-list edge: Append's children
+    /// come from appendplans (no lefttree).
+    #[test]
+    fn census_walk_visits_append_member_list() {
+        install_seams();
+        let mcx = leaked_mcx();
+        use ::types_nodes::plannodes::{Append, Plan, Scan, SeqScan};
+
+        let mk_scan = |id: i32| {
+            Node::mk(
+                mcx,
+                SeqScan {
+                    cb_scan_cols: None,
+                    scan: Scan {
+                        plan: Plan { plan_node_id: id, ..Default::default() },
+                        scanrelid: 1,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let mut append = Node::build::<Append>(mcx).unwrap();
+        append.plan.plan_node_id = 0;
+        append.appendplans = NodeList::make2(mcx, mk_scan(1), mk_scan(2)).unwrap();
+        let tree = append.seal();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.planTree = Some(tree);
+        let pstmt = pstmt.seal_ref();
+
+        let rows = crate::lanev2::census_rows_for_tests(pstmt);
+        assert_eq!(rows, vec![(0, "append"), (1, "seqscan"), (2, "seqscan")]);
+    }
+
+    /// OQ1 cross-check against the init_plan/EXPLAIN universe: an
+    /// INSTRUMENTED execution allocates one es_instrumentation slot per plan
+    /// node keyed by plan_node_id (the exact ids EXPLAIN's walker visits);
+    /// the census walker must count the same universe. Also pins the live
+    /// root cross-check: the exhaustive planstate classifier and the plan-
+    /// tree classifier agree through the Instrumented wrapper.
+    #[test]
+    fn census_count_matches_instrumented_universe() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 74002;
+        scanfix::register_table(relid, &[&[3, 1, 2]]);
+        let pstmt = mk_census_sort_limit_pstmt(mcx, relid);
+
+        let census_rows = crate::lanev2::census_rows_for_tests(pstmt);
+        assert_eq!(census_rows.len(), 3);
+        let mut ids: Vec<i32> = census_rows.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1, 2], "census ids must be the dense plan ids");
+
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_instrument = ::types_core::instrument::INSTRUMENT_ROWS;
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            assert_eq!(
+                crate::lanev2::census_planstate_kind_name_for_tests(ps),
+                "limit",
+                "planstate root classifies as the plan-tree root (Instrumented-transparent)"
+            );
+            while exec_proc_node(ps, estate).unwrap().is_some() {}
+            assert_eq!(
+                estate.es_instrumentation.len(),
+                census_rows.len(),
+                "census universe == instrumented plan-node universe"
+            );
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+
+    /// Engine attribution: the strongest per-node claim wins (lane >
+    /// runtime > fused-arm > spine); nodes without events are "none".
+    #[test]
+    fn census_attribution_prefers_lane_claims() {
+        install_seams();
+        let mcx = leaked_mcx();
+        let pstmt = mk_select1_pstmt(mcx, None);
+        with_exec_data(pstmt, |data, _pstmt| {
+            let estate = &mut data.estate;
+            estate.engine_record(0, ::executils::EngineKind::Spine, "sortfeed", "epq");
+            estate.engine_record(0, ::executils::EngineKind::Lane, "aggbuild", "");
+            estate.engine_record(1, ::executils::EngineKind::FusedArm, "aggbuild",
+                "admission-economics-fused-drive");
+            let (engine, class, detail) = crate::lanev2::census_attribution_for_tests(estate, 0);
+            assert_eq!((engine, class, detail), ("lane", "aggbuild", ""));
+            let (engine, class, detail) = crate::lanev2::census_attribution_for_tests(estate, 1);
+            assert_eq!(
+                (engine, class, detail),
+                ("fused-arm", "aggbuild", "admission-economics-fused-drive")
+            );
+            assert_eq!(
+                crate::lanev2::census_attribution_for_tests(estate, 9),
+                ("none", "", "")
+            );
+        });
+    }
+}
