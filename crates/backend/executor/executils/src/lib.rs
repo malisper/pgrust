@@ -742,10 +742,12 @@ pub struct EStateData<'mcx> {
     // every unarmed/uninstrumented path.
     pub es_runtime_ea_pipelines: PgVec<'mcx, RuntimeEaPipeline>,
     // EXPLAIN (ENGINE) per-node engine attribution (single-executor Phase
-    // 0.2): true iff ExecutorStart saw EXEC_FLAG_ENGINE_REPORT. The emission
-    // gate is identical to the EA records above — es_engine_events stays
-    // empty on every non-ENGINE path, so default EXPLAIN output is untouched.
-    pub es_engine_capture: bool,
+    // 0.2): records exist iff ExecutorStart saw EXEC_FLAG_ENGINE_REPORT —
+    // `engine_capture()` derives that directly from `es_top_eflags` (stored
+    // unconditionally anyway), so the executor entry path never tests the
+    // flag (se-entrycost). The emission gate is identical to the EA records
+    // above — es_engine_events stays empty on every non-ENGINE path, so
+    // default EXPLAIN output is untouched.
     pub es_engine_events: PgVec<'mcx, EngineEvent>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
@@ -928,11 +930,14 @@ impl<'mcx> EStateData<'mcx> {
         self.es_runtime_ea_refusals.push(RuntimeEaRefusal { plan_node_id, arm, reason });
     }
 
-    /// EXPLAIN (ENGINE) capture armed for this execution? Cheap enough to
-    /// gate every chokepoint's capture arm on.
+    /// EXPLAIN (ENGINE) capture armed for this execution? Derived from
+    /// `es_top_eflags` (the one word ExecutorStart stores regardless), so
+    /// arming costs the default executor entry path zero instructions
+    /// (se-entrycost); the flag test runs only at the lanev2 verdict
+    /// chokepoints that gate their capture arm on this.
     #[inline]
     pub fn engine_capture(&self) -> bool {
-        self.es_engine_capture
+        self.es_top_eflags & ::types_slot::EXEC_FLAG_ENGINE_REPORT != 0
     }
 
     /// Record an engine attribution (cold: ENGINE-capture paths only).
@@ -1039,7 +1044,6 @@ impl<'mcx> EStateData<'mcx> {
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
-            es_engine_capture: false,
             es_engine_events: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
@@ -1545,7 +1549,7 @@ mcx::forget_safe_struct!(
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
-        es_runtime_ea_pipelines, es_engine_capture, es_engine_events,
+        es_runtime_ea_pipelines, es_engine_events,
         es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
         es_hash_instrumentation, es_index_instrumentation,
