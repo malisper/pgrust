@@ -185,15 +185,7 @@ pub(crate) fn flush_subscription(
 }
 
 pub(crate) fn drop_entry(key: PgStat_HashKey) {
-    let mut store = SHARED_STATS.lock().unwrap();
-    let existed = store.remove(&key).is_some();
-    // pgstat_drop_entry (pgstat_shmem.c:1027): database stats contain other
-    // stats — dropping the database entry also drops every entry of that
-    // dboid (pgstat_drop_database_and_contents). C only cascades when the
-    // shared entry was found; mirror that.
-    if existed && key.kind == PGSTAT_KIND_DATABASE {
-        store.retain(|k, _| k.dboid != key.dboid);
-    }
+    SHARED_STATS.lock().unwrap().remove(&key);
 }
 
 // pgstat_copy_relation_stats' shared-entry copy.

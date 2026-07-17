@@ -29,7 +29,7 @@ pub use oncommit::{
     register_on_commit_action, remove_on_commit_action, AtEOSubXact_on_commit_actions,
     AtEOXact_on_commit_actions, PreCommit_on_commit_actions,
 };
-pub use truncate::{ExecuteTruncate, ExecuteTruncateGuts};
+pub use truncate::ExecuteTruncate;
 
 pub fn init_seams() {
     tablecmds_seams::rename_relation_internal::set(RenameRelationInternal);

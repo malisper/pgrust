@@ -23,7 +23,6 @@ adt_regproc = { path = "../../../utils/adt/regproc" }
 detoast = { path = "../../../access/common/detoast" }
 inval = { path = "../../../utils/cache/inval" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
-xlogrecovery_seams = { path = "../../../access/transam/xlogrecovery_seams" }
 xlogreader = { path = "../../../access/transam/xlogreader" }
 slot = { path = "../../slot" }
 logical = { path = "../logical" }

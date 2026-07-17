@@ -288,15 +288,8 @@ pub use dbcopy::CreateAndCopyRelationData;
 pub use drop_buffers::DropDatabaseBuffers;
 pub use write::FlushDatabaseBuffers;
 
-// HoldingBufferPinThatDelaysRecovery (bufmgr.c:5822): are we holding a pin on
-// the buffer the Startup process is waiting for? bufid may already be cleared
-// (slow wake / spurious interrupt): do nothing then.
-pub fn HoldingBufferPinThatDelaysRecovery() -> bool {
-    let bufid = lmgr_proc::GetStartupBufferPinWaitBufId();
-    if bufid < 0 {
-        return false;
-    }
-    privref::GetPrivateRefCount(bufid + 1) > 0
+unported! {
+    fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
 }
 
 pub use read::{PrefetchBuffer, PrefetchBufferResult, PrefetchOutcome, PrefetchSharedBuffer};
