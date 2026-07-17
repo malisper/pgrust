@@ -194,11 +194,41 @@ fn install_seams() {
 }
 
 const INT4_EQ: u32 = 96;
+const INT4_GT: u32 = 521;
 const INTEGER_HASH_FAM: u32 = 1977;
 const HASH_AM: u32 = 405;
 const F_HASHINT4: u32 = 450;
 const F_INT4EQ: u32 = 65;
 const F_BTINT4CMP: u32 = 351;
+
+/// Shared `lookup_pg_amop_by_operator` strategy seam for the fake int4
+/// btree opfamily (1976). Seams are process-global and set-once, so every
+/// test module that needs a pg_amop strategy row MUST come through here —
+/// express_ab's scan-key probes (INT4_EQ → BTEqual=3, INT4_GT → BTGreater=5)
+/// and mergejoin_rowmode_ab's MJExamineQuals probe (INT4_EQ → 3) both do.
+/// (Phase-1 integration glue: pre-merge each branch installed its own copy;
+/// composed in one test binary the second install panicked "seam installed
+/// twice".)
+fn install_amop_strategy_seam() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
+            assert_eq!(purpose, b's');
+            assert_eq!(opfamily, INTEGER_BTREE_FAM);
+            let strategy = match opno {
+                INT4_EQ => 3,
+                INT4_GT => 5,
+                _ => return Ok(None),
+            };
+            Ok(Some(syscache_seams::PgAmopShape {
+                amopstrategy: strategy,
+                amopsortfamily: 0,
+                amoplefttype: INT4OID,
+                amoprighttype: INT4OID,
+            }))
+        });
+    });
+}
 
 fn mk_int4_const(mcx: ::mcx::Mcx<'_>, v: i32) -> Node<'_> {
     Node::mk_const(mcx, INT4OID, -1, 0, 4, Datum::from_i32(v), false, true).unwrap()
@@ -5073,26 +5103,10 @@ mod express_ab {
     const F_INT4GT: u32 = 147;
 
     fn install_express_seams() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            // Scan-key strategy lookup for the fake int4 btree opfamily
-            // (nodeindexscan tests' seam, verbatim).
-            syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
-                assert_eq!(purpose, b's');
-                assert_eq!(opfamily, 1976);
-                let strategy = match opno {
-                    INT4_EQ => 3,
-                    OP_INT4GT => 5,
-                    _ => return Ok(None),
-                };
-                Ok(Some(syscache_seams::PgAmopShape {
-                    amopstrategy: strategy,
-                    amopsortfamily: 0,
-                    amoplefttype: INT4OID,
-                    amoprighttype: INT4OID,
-                }))
-            });
-        });
+        // Scan-key strategy lookup for the fake int4 btree opfamily: the
+        // process-shared installer (mergejoin_rowmode_ab needs the same
+        // seam; seams are set-once).
+        install_amop_strategy_seam();
     }
 
     /// The point key's right-hand side: a Const (the `k = 20` literal probe)
@@ -5499,18 +5513,11 @@ mod mergejoin_rowmode_ab {
     /// BTEqualStrategyNumber / COMPARE_EQ). install_seams covers the rest
     /// (btsortsupport via lookup_pg_amproc, operator shape, type shapes).
     fn install_mj_seams() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            syscache_seams::lookup_pg_amop_by_operator::set(|opno, purpose, opfamily| {
-                Ok((opno == INT4_EQ && purpose == b's' && opfamily == INTEGER_BTREE_FAM)
-                    .then_some(syscache_seams::PgAmopShape {
-                        amopstrategy: 3,
-                        amopsortfamily: 0,
-                        amoplefttype: INT4OID,
-                        amoprighttype: INT4OID,
-                    }))
-            });
-        });
+        // The process-shared pg_amop strategy installer (express_ab needs
+        // the same seam; seams are set-once). MJExamineQuals only probes
+        // INT4_EQ in INTEGER_BTREE_FAM → strategy 3, which the shared
+        // handler serves identically to the pre-merge module-local copy.
+        install_amop_strategy_seam();
     }
 
     /// Which mark/restore-capable wrapper shields the inner scan.
@@ -5735,8 +5742,8 @@ mod mergejoin_rowmode_ab {
     // rescan pass through exec_rescan_merge_join under the hook.
     #[test]
     fn mj_ab_inner_join_dup_outer_material_inner_mark_restore() {
-        let outer: u32 = 71001;
-        let inner: u32 = 71002;
+        let outer: u32 = 73001;
+        let inner: u32 = 73002;
         scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (2, 21), (4, 40)]]);
         scanfix::register_table_2col(inner, &[&[(2, 200), (2, 201), (3, 300), (5, 500)]]);
         let expected = vec![
@@ -5768,8 +5775,8 @@ mod mergejoin_rowmode_ab {
     // EXEC_FLAG_MARK, both knob positions.
     #[test]
     fn mj_ab_inner_join_dup_outer_sort_inner() {
-        let outer: u32 = 71003;
-        let inner: u32 = 71004;
+        let outer: u32 = 73003;
+        let inner: u32 = 73004;
         scanfix::register_table_2col(outer, &[&[(1, 10), (3, 30), (3, 31)]]);
         scanfix::register_table_2col(inner, &[&[(5, 500), (3, 300), (1, 100)]]);
         let expected = vec![
@@ -5800,8 +5807,8 @@ mod mergejoin_rowmode_ab {
     // merge-only-plannable shape the hosting exists for.
     #[test]
     fn mj_ab_full_join_fills_both_sides() {
-        let outer: u32 = 71005;
-        let inner: u32 = 71006;
+        let outer: u32 = 73005;
+        let inner: u32 = 73006;
         scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (6, 60)]]);
         scanfix::register_table_2col(inner, &[&[(2, 200), (3, 300)]]);
         let n = || None::<i32>;
@@ -5833,8 +5840,8 @@ mod mergejoin_rowmode_ab {
     // (never-matched outers) over the same tables, one rescan pass each.
     #[test]
     fn mj_ab_left_semi_anti_joins() {
-        let outer: u32 = 71007;
-        let inner: u32 = 71008;
+        let outer: u32 = 73007;
+        let inner: u32 = 73008;
         scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
         scanfix::register_table_2col(inner, &[&[(2, 200), (2, 201), (4, 400)]]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -5898,8 +5905,8 @@ mod mergejoin_rowmode_ab {
     // Empty inner: LEFT null-extends every outer; INNER emits nothing.
     #[test]
     fn mj_ab_empty_inner() {
-        let outer: u32 = 71009;
-        let inner: u32 = 71010;
+        let outer: u32 = 73009;
+        let inner: u32 = 73010;
         scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20)]]);
         scanfix::register_table_2col(inner, &[]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -5947,8 +5954,8 @@ mod mergejoin_rowmode_ab {
         install_seams();
         install_mj_seams();
         scanfix::install();
-        let outer: u32 = 71011;
-        let inner: u32 = 71012;
+        let outer: u32 = 73011;
+        let inner: u32 = 73012;
         scanfix::register_table_2col(outer, &[&[(1, 10), (2, 20), (3, 30)]]);
         scanfix::register_table_2col(inner, &[&[(1, 100), (2, 200), (3, 300)]]);
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
