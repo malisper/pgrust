@@ -3118,7 +3118,24 @@ fn agg_plain_fold_feed<'mcx>(
     // initialize_aggregates (delegated): fresh initval pergroups; a rescan
     // re-enters here with agg_done cleared.
     ::nodeagg::agg_plain_build_begin(agg, estate)?;
-    agg_plain_fold_drain(agg, ss, estate)
+    // Phase-1 source selection (WS-K): heap scans ride the dedicated
+    // HeapBatchSource iff PGRUST_LANE_V2_HEAPFEED is on; everything else —
+    // and the whole knob-OFF world — constructs SeqScanSource exactly as
+    // before (same monomorphized drain). Knob-ON, end-of-claim ownership
+    // sits on the source (trait doc): the serial scan is ONE claim,
+    // settled right here after the drain.
+    use batch_source::BatchGranuleSource as _;
+    if batch_source::heapfeed_v2_enabled() {
+        if ::nodeseqscan::seq_scan_is_heap(ss) {
+            let mut src = batch_source::HeapBatchSource::new(ss);
+            agg_plain_fold_drain(agg, &mut src, estate)?;
+            return src.end_claim(estate);
+        }
+        let mut src = batch_source::SeqScanSource::new(ss);
+        agg_plain_fold_drain(agg, &mut src, estate)?;
+        return src.end_claim(estate);
+    }
+    agg_plain_fold_drain(agg, &mut batch_source::SeqScanSource::new(ss), estate)
 }
 
 /// The fold feed's drain half (split out for the runtime morsel drive,
@@ -3129,33 +3146,43 @@ fn agg_plain_fold_feed<'mcx>(
 /// Byte-path-identical to the pre-split body (pure extraction; the EA=false
 /// instantiation compiles every tally out — the serial machine code is the
 /// pre-split machine code).
-fn agg_plain_fold_drain<'mcx>(
+fn agg_plain_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    agg_plain_fold_drain_impl::<false>(agg, ss, estate, &mut Default::default())
+    agg_plain_fold_drain_impl::<S, false>(agg, src, estate, &mut Default::default())
 }
 
 /// EA-on-morsels drain (docs/design/ea-morsels.md §2): identical fold, plus
 /// the row-funnel tally — window-grain popcounts on the bitmap paths, a
 /// per-survivor increment where a per-row emit already happened. Runtime
-/// workers only; never on a serial path.
-pub(super) fn agg_plain_fold_drain_ea<'mcx>(
+/// workers only; never on a serial path. (Private, not pub(super): the one
+/// external caller is the child module runtime_scan, which sees the
+/// parent's private items — and the trait bound is lanev2-private.)
+fn agg_plain_fold_drain_ea<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
     tally: &mut runtime_instr::EaRowTally,
 ) -> PgResult<()> {
-    agg_plain_fold_drain_impl::<true>(agg, ss, estate, tally)
+    agg_plain_fold_drain_impl::<S, true>(agg, src, estate, tally)
 }
 
-fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
+/// Phase-1 (WS-K): generic over the storage seam's batch source — staged
+/// reads ride the trait's read face; the columnar-only branches (str-mm
+/// dict-code memos, the footer-meta arm) and the two remaining
+/// scan-invariant peeks (qual presence, the knob-OFF inline clear) ride the
+/// caps-gated `seq_scan_bridge`. Both instantiations monomorphize to
+/// #[inline] delegation — the SeqScanSource instantiation is the
+/// pre-genericization machine code (WS-A code-shape-neutral law).
+fn agg_plain_fold_drain_impl<'mcx, S: batch_source::BatchGranuleSource<'mcx>, const EA: bool>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
     tally: &mut runtime_instr::EaRowTally,
 ) -> PgResult<()> {
+    let caps = src.capabilities();
     let has_resid =
         ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.resid.is_empty());
     // Str MIN/MAX dict-code side channel (lane-v2-dictminmax; identity plan→
@@ -3164,24 +3191,39 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
         let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
         mm_str_cols(plan, Some)
     };
-    if !mm_cols.is_empty() && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+    if !mm_cols.is_empty() && caps.dict_codes {
         trace_feed("fold str min/max dict-code memo armed");
     }
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
+    // Scan-invariant qual presence (a plan-fixed field), hoisted once
+    // through the bridge; the knob decides end-of-claim clear ownership
+    // (process-static — trait-doc single-owner rules).
+    let no_qual = batch_source::require_bridge(src)?.ss.qual.is_none();
+    let clear_inline = !batch_source::heapfeed_v2_enabled();
     // Footer-stat meta arm (serial drains only; the EA tally is a runtime
     // channel and runtime claims are granule-ranged, which the scan-side
     // peek refuses anyway — the structural gate keeps the funnel exact).
-    let mut meta_arm = if EA { None } else { plain_fold_meta_arm(agg, ss, estate) };
+    // Caps-gated: zone/footer peeks are a pgrcolumnar capability
+    // (plain_fold_meta_arm's own is_pgrcolumnar gate, lifted to the seam).
+    let mut meta_arm = if EA || !caps.zone_maps {
+        None
+    } else {
+        plain_fold_meta_arm(agg, batch_source::require_bridge(src)?, estate)
+    };
     loop {
         if let Some(arm) = meta_arm.as_mut() {
-            agg_plain_fold_meta_units(agg, ss, estate, arm)?;
+            agg_plain_fold_meta_units(agg, batch_source::require_bridge(src)?, estate, arm)?;
         }
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of scan: drop the scan slot's buffer pin (SeqScanSource
-            // end-of-stream parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of scan: drop the scan slot's buffer pin
+                // (SeqScanSource end-of-stream parity). Knob-ON this moves
+                // to the source's end_claim.
+                let ss = batch_source::require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -3196,15 +3238,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
         {
             let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
             if plan.guarded {
-                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .expect("plain fold plans read lane columns");
+                let soa = src.batch_soa().expect("plain fold plans read lane columns");
                 let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
                 // Proof domain: under the PREWHERE lane the staged columns
                 // fill lazily (survivor windows only), so intersect the
                 // selection bitmap — the fold touches only selected rows
                 // (requal survivors ⊆ selected bits); unselected cells may be
                 // stale pointers (vguard columns via the virtual prefix).
-                match ::nodeseqscan::seq_scan_batch_lane_sel(ss) {
+                match src.lane_sel() {
                     Some(sel) => {
                         for ((r, fb), s) in
                             rows[..nwords].iter_mut().zip(soa.fallback_words()).zip(sel)
@@ -3243,13 +3284,13 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             // same survived tally (skipped rows emit None).
             let skip = {
                 let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                src.skip_sel().map(|s| {
                     w[..s.len()].copy_from_slice(s);
                     w
                 })
             };
             ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                if let Some(slot) = src.emit(estate, i)? {
                     if EA {
                         tally.survived += 1;
                     }
@@ -3260,14 +3301,13 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             continue;
         }
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
-        let bitmap_qual = ::nodeseqscan::seq_scan_batch_qual_sel(ss).is_some();
-        if !has_resid && (bitmap_qual || ss.ss.qual.is_none()) {
+        let bitmap_qual = src.qual_sel().is_some();
+        if !has_resid && (bitmap_qual || no_qual) {
             let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
             {
-                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .expect("plain fold plans read lane columns");
+                let soa = src.batch_soa().expect("plain fold plans read lane columns");
                 let fb = soa.fallback_words();
-                let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+                let sel = src.qual_sel();
                 for w in 0..nwords {
                     rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
                     fallback[w] = fb[w];
@@ -3286,7 +3326,7 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
                 while bits != 0 {
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
-                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if let Some(slot) = src.emit(estate, i)? {
                         if EA {
                             tally.survived += 1;
                         }
@@ -3301,20 +3341,19 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             // identical).
             let skip = {
                 let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                src.skip_sel().map(|s| {
                     w[..s.len()].copy_from_slice(s);
                     w
                 })
             };
             ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? else {
+                let Some(slot) = src.emit(estate, i)? else {
                     return Ok(());
                 };
                 if EA {
                     tally.survived += 1;
                 }
-                if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.is_fallback(i))
-                {
+                if src.batch_soa().is_some_and(|soa| soa.is_fallback(i)) {
                     ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
                 } else {
                     rows[(i / 64) as usize] |= 1u64 << (i % 64);
@@ -3331,9 +3370,14 @@ fn agg_plain_fold_drain_impl<'mcx, const EA: bool>(
             // Str MIN/MAX dict-code views for this batch (lane-v2-
             // dictminmax): the ungrouped fold's batch winner becomes an
             // integer code scan — no scratch (fold_batch needs no memo).
-            collect_mm_codes(ss, &mm_cols, &mut mm_codes);
-            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                .expect("plain fold plans read lane columns");
+            // Caps-gated (dict codes are a pgrcolumnar capability): heap
+            // never publishes codes and `mm_codes`' only writer is this
+            // call, so skipping keeps it empty — identical to today's
+            // per-column None answers.
+            if caps.dict_codes {
+                collect_mm_codes(batch_source::require_bridge(src)?, &mm_cols, &mut mm_codes);
+            }
+            let soa = src.batch_soa().expect("plain fold plans read lane columns");
             // SAFETY: pergroup_base is the node's once-allocated single-group
             // pergroup array covering every transno (initialize_aggregates
             // just wrote it); selected rows are non-fallback, carrying valid

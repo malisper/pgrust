@@ -146,6 +146,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PrefetchBuffer (bufmgr read.rs): ADVISORY block prefetch — true =
+    // I/O issued or the block is already cached, false = nothing issued
+    // (temp/direct-I/O/missing). Never changes what a later read returns;
+    // errors are the read path's own. Consumer: the lane executor's heap
+    // batch source claim-window readahead (WS-K, PGRUST_LANE_V2_HEAPFEED_
+    // READAHEAD) — execmain sees bufmgr only through this crate.
+    pub fn prefetch_buffer<'a, 'mcx>(
+        rel: &'a types_rel::RelationData<'mcx>,
+        forknum: ForkNumber,
+        blkno: BlockNumber,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     pub fn buffer_get_block_number(buffer: Buffer) -> BlockNumber
 );
 
