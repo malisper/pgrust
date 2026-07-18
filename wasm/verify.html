@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>pgrust verify</title></head>
+<body><pre id="out">starting…</pre>
+<script type="module">
+// Headless-verification harness: boots two queries through the SAME worker the
+// real app uses, and writes a machine-readable result to document.title +
+// console so a headless driver can scrape it.
+const out = document.getElementById('out');
+function log(s){ out.textContent += '\n' + s; console.log('[VERIFY] ' + s); }
+
+const params = new URLSearchParams(window.location.search);
+const assetEncoding = params.get('assetEncoding');
+const workerUrl = assetEncoding
+  ? `./worker.js?assetEncoding=${encodeURIComponent(assetEncoding)}`
+  : './worker.js';
+const worker = new Worker(workerUrl, { type: 'module' });
+const queries = [
+  'SELECT 1;',
+  "SELECT * FROM (VALUES (1,'a'),(2,'b')) v(i,t);",
+];
+let idx = 0;
+const results = [];
+
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m.type === 'status') log('status: ' + m.text);
+  else if (m.type === 'ready') { log('READY'); runNext(); }
+  else if (m.type === 'result') {
+    log('RESULT q' + idx + ' exit=' + m.exitCode + ' ms=' + m.ms);
+    log('STDOUT<<<' + m.stdout + '>>>');
+    results.push(m.stdout);
+    idx++;
+    if (idx < queries.length) runNext();
+    else finish();
+  }
+  else if (m.type === 'error') { log('ERROR: ' + m.message); document.title = 'VERIFY_FAIL'; }
+};
+function runNext(){ log('running q' + idx + ': ' + queries[idx]); worker.postMessage({ type:'run', sql: queries[idx] }); }
+function finish(){
+  const okSelect1 = results[0] && results[0].includes('?column? = "1"');
+  const okValues = results[1] && results[1].includes('= "1"') && results[1].includes('= "a"') && results[1].includes('= "2"') && results[1].includes('= "b"');
+  log('CHECK select1=' + okSelect1 + ' values=' + okValues);
+  document.title = (okSelect1 && okValues) ? 'VERIFY_PASS' : 'VERIFY_FAIL';
+  log(document.title);
+}
+</script>
+</body></html>
