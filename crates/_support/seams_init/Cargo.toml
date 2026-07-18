@@ -104,6 +104,8 @@ be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
 pqcomm = { path = "../../backend/libpq/pqcomm" }
+pqcomm_simnet = { path = "../../backend/libpq/pqcomm_simnet" }
+pqcomm_stdio = { path = "../../backend/libpq/pqcomm_stdio" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }
@@ -308,3 +310,8 @@ ts_cache = { path = "../../backend/utils/cache/ts_cache" }
 statistics = { path = "../../backend/statistics/statistics" }
 stats_import = { path = "../../backend/statistics/stats_import" }
 typecmds = { path = "../../backend/commands/typecmds" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

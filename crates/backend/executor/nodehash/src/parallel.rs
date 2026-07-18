@@ -77,6 +77,11 @@ pub struct HashMemoryChunkHdr {
     next: *mut HashMemoryChunkHdr,
 }
 
+// wasm32: 4-byte usize/pointer fields pack the header under the 64-bit
+// constant; all offset arithmetic uses HASH_CHUNK_HEADER_SIZE (not
+// size_of), so layout stays self-consistent — the pin documents the
+// native cost shape only.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<HashMemoryChunkHdr>() == HASH_CHUNK_HEADER_SIZE);
 
 fn chunk_layout(maxlen: usize) -> core::alloc::Layout {

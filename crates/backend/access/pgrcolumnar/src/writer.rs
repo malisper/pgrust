@@ -256,8 +256,13 @@ impl CodecCtx {
     pub(crate) fn compress(&self, codec: Codec, data: &[u8]) -> Vec<u8> {
         match codec {
             Codec::Lz4 => lz4_flex::compress(data),
+            #[cfg(not(target_family = "wasm"))]
             Codec::Zstd => zstd::bulk::compress(data, self.zstd_level)
                 .expect("cbstore: zstd compress failed"),
+            // wasm32: zstd-sys links C and has no wasm build; the codec
+            // picker never selects Zstd on this target (see pick()).
+            #[cfg(target_family = "wasm")]
+            Codec::Zstd => panic!("cbstore: ZSTD codec is not supported on wasm32-wasip1"),
             Codec::None => unreachable!("cbstore: compress with Codec::None"),
         }
     }
@@ -275,9 +280,11 @@ impl CodecCtx {
             CodecChoice::Lz4 => {
                 wins(lz4_flex::compress(sample).len()).then_some(Codec::Lz4)
             }
+            #[cfg(not(target_family = "wasm"))]
             CodecChoice::Zstd => {
                 wins(self.compress(Codec::Zstd, sample).len()).then_some(Codec::Zstd)
             }
+            #[cfg(not(target_family = "wasm"))]
             CodecChoice::Auto => {
                 let lz4 = lz4_flex::compress(sample).len();
                 let zst = self.compress(Codec::Zstd, sample).len();
@@ -294,6 +301,14 @@ impl CodecCtx {
                 } else {
                     Some(Codec::Zstd)
                 }
+            }
+            // wasm32: no zstd build (zstd-sys links C); Zstd/Auto degrade to
+            // the LZ4-only decision so cbstore writes stay functional and
+            // wasm-written tables remain readable on every target.
+            #[cfg(target_family = "wasm")]
+            CodecChoice::Zstd | CodecChoice::Auto => {
+                let _ = narrow_hot;
+                wins(lz4_flex::compress(sample).len()).then_some(Codec::Lz4)
             }
         }
     }

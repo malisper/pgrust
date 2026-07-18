@@ -84,6 +84,12 @@ struct CSnapBuildOnDisk {
     builder: CSnapBuild,
 }
 
+// wasm32: CSnapBuild embeds raw pointers (serialized as garbage, fixed up on
+// read — C's own shape), so the on-disk layout is pointer-width-dependent and
+// these 64-bit pins cannot hold on a 32-bit target. A wasm-written snapshot
+// file is therefore NOT byte-compatible with a native one (C-on-32-bit has
+// the same property); logical decoding is not on the wasm ladder.
+#[cfg(not(target_family = "wasm"))]
 const _: () = {
     use core::mem::{offset_of, size_of};
     assert!(size_of::<CSnapBuild>() == SIZEOF_SNAP_BUILD);

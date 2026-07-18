@@ -300,3 +300,26 @@ pub fn EndCriticalSection() {
 pub fn InterruptsCanBeProcessed() -> bool {
     InterruptHoldoffCount() == 0 && CritSectionCount() == 0 && QueryCancelHoldoffCount() == 0
 }
+
+/// `getpid()` / `std::process::id()` with wasm and sim arms. WASI has no
+/// process ids (std::process::id PANICS there); the instance is the only
+/// process that can exist, so a fixed synthetic pid stands in. 1 is C's
+/// classic "the only process" number; nonzero matters (0/negative are
+/// sentinel words in the lockfile/procsignal vocabularies).
+///
+/// Under `--cfg pgrust_sim` the OS pid is ambient entropy: it reaches the
+/// wire (BackendKeyData) and file names (xlogtemp), and the P4 sim-net
+/// determinism gate byte-compares both across runs — the sim node is one
+/// process, so the same fixed synthetic pid stands in (P2 seeded-RNG law
+/// applied to the one non-RNG identity source).
+#[inline]
+pub fn process_id() -> u32 {
+    #[cfg(not(any(target_family = "wasm", pgrust_sim)))]
+    {
+        std::process::id()
+    }
+    #[cfg(any(target_family = "wasm", pgrust_sim))]
+    {
+        1
+    }
+}

@@ -728,7 +728,7 @@ fn dump() {
         "counter\trefsort-demoted\t{}\n",
         REFSORT_DEMOTED.load(Relaxed)
     ));
-    let pid = std::process::id();
+    let pid = init_small::globals::process_id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(
         ".lane-v2-stats.{pid}.{:?}.tmp",

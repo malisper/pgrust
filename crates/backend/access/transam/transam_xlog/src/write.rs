@@ -206,7 +206,10 @@ fn XLogFileInitInternal(
         }
     }
 
-    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", std::process::id());
+    // Merge composition (dst/p4-simnet): p5's wasm-safe process_id seam
+    // (std::process::id aborts on wasm32-wasip1) + substrate's vfs-routed
+    // unlink.
+    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id());
     let _ = fd::pg_unlink(&tmppath);
 
     let f = fd::BasicOpenFile(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;
