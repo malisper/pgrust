@@ -1,11 +1,38 @@
 use std::cell::Cell;
+#[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
 
 use core::ffi::c_int;
+#[cfg(not(target_family = "wasm"))]
 use libc::{
     SIGABRT, SIGALRM, SIGBUS, SIGCONT, SIGFPE, SIGILL, SIGQUIT, SIGSEGV, SIGSYS, SIGTERM, SIGTRAP,
 };
+#[cfg(not(target_family = "wasm"))]
 pub use libc::sigset_t;
+
+// wasm32: WASI p1 has no signals and its libc crate exposes neither sigset_t
+// nor SIG* numbers. The mask bookkeeping is kept (callers read the sets);
+// sigset_t is a 64-entry bitmask and the numbers are the Linux/wasi-libc
+// values. install_mask is a no-op — there is no kernel mask to install.
+#[cfg(target_family = "wasm")]
+pub type sigset_t = u64;
+#[cfg(target_family = "wasm")]
+mod wasm_signums {
+    use core::ffi::c_int;
+    pub const SIGILL: c_int = 4;
+    pub const SIGTRAP: c_int = 5;
+    pub const SIGABRT: c_int = 6;
+    pub const SIGBUS: c_int = 7;
+    pub const SIGFPE: c_int = 8;
+    pub const SIGSEGV: c_int = 11;
+    pub const SIGALRM: c_int = 14;
+    pub const SIGTERM: c_int = 15;
+    pub const SIGCONT: c_int = 18;
+    pub const SIGSYS: c_int = 31;
+    pub const SIGQUIT: c_int = 3;
+}
+#[cfg(target_family = "wasm")]
+use wasm_signums::*;
 
 pub fn init_seams() {}
 
@@ -114,6 +141,7 @@ pub fn unblock_sig_add(signal: c_int) {
     MASKS.set(masks);
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn install_mask(set: &sigset_t) {
     // Must be pthread_sigmask: Darwin sigprocmask from a secondary thread
     // blocks process-directed delivery process-wide (a backend thread's
@@ -124,6 +152,12 @@ fn install_mask(set: &sigset_t) {
     }
 }
 
+// wasm32: no kernel signal mask exists; the bookkeeping sets above are the
+// only state.
+#[cfg(target_family = "wasm")]
+fn install_mask(_set: &sigset_t) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn empty_signal_set() -> sigset_t {
     let mut set = MaybeUninit::<sigset_t>::uninit();
     // SAFETY: sigemptyset fully initializes the set before assume_init.
@@ -132,6 +166,12 @@ fn empty_signal_set() -> sigset_t {
     unsafe { set.assume_init() }
 }
 
+#[cfg(target_family = "wasm")]
+fn empty_signal_set() -> sigset_t {
+    0
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn full_signal_set() -> sigset_t {
     let mut set = MaybeUninit::<sigset_t>::uninit();
     // SAFETY: sigfillset fully initializes the set before assume_init.
@@ -140,21 +180,44 @@ fn full_signal_set() -> sigset_t {
     unsafe { set.assume_init() }
 }
 
+#[cfg(target_family = "wasm")]
+fn full_signal_set() -> sigset_t {
+    !0
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn add_signal(set: &mut sigset_t, signal: c_int) {
     // SAFETY: `set` is a valid, initialized sigset_t.
     let rc = unsafe { libc::sigaddset(set, signal) };
     debug_assert_eq!(rc, 0);
 }
 
+#[cfg(target_family = "wasm")]
+fn add_signal(set: &mut sigset_t, signal: c_int) {
+    *set |= 1u64 << (signal as u32 & 63);
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn delete_signal(set: &mut sigset_t, signal: c_int) {
     // SAFETY: `set` is a valid, initialized sigset_t.
     let rc = unsafe { libc::sigdelset(set, signal) };
     debug_assert_eq!(rc, 0);
 }
 
+#[cfg(target_family = "wasm")]
+fn delete_signal(set: &mut sigset_t, signal: c_int) {
+    *set &= !(1u64 << (signal as u32 & 63));
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn signal_set_contains(set: &sigset_t, signal: c_int) -> bool {
     // SAFETY: `set` is a valid, initialized sigset_t.
     unsafe { libc::sigismember(set, signal) == 1 }
+}
+
+#[cfg(target_family = "wasm")]
+fn signal_set_contains(set: &sigset_t, signal: c_int) -> bool {
+    *set & (1u64 << (signal as u32 & 63)) != 0
 }
 
 #[cfg(test)]

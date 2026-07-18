@@ -528,11 +528,20 @@ fn pclose(mut pipe: PipeHandle) -> i32 {
     drop(pipe.stdin.take());
     match pipe.child.wait() {
         Ok(status) => {
-            use std::os::unix::process::ExitStatusExt;
             if let Some(code) = status.code() {
                 (code & 0xff) << 8
             } else {
-                status.signal().unwrap_or(0) & 0x7f
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    status.signal().unwrap_or(0) & 0x7f
+                }
+                // wasm32: WASI has no processes/signals; unreachable (the
+                // popen arm can never spawn), keep the C -1 failure word.
+                #[cfg(target_family = "wasm")]
+                {
+                    -1
+                }
             }
         }
         Err(_) => -1,
