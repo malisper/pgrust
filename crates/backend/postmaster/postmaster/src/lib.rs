@@ -795,4 +795,5 @@ pub fn init_seams() {
     postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(libc::SIGUSR1));
     postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(libc::SIGHUP));
     postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
+    postmaster_seams::set_pg_start_time::set(main_entry::set_pg_start_time);
 }
