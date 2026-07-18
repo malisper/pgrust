@@ -31,7 +31,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+
+use pgsync::{Mutex, OnceLock};
 
 use elog::ereport;
 use mcx::{vec_from_elem_in, Mcx, MemoryContext, PgVec};
@@ -1302,10 +1304,17 @@ fn merge_sorted_runs(
         arena: Vec<u8>,
         lens: Vec<u32>,
     }
-    let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<Batch>(nenc + 1);
-    let work_rx = Mutex::new(work_rx);
+    // permit-s4 row 5 (dst-p3-scheduler §3): both channels ride
+    // pgsync::mailbox — work bounded at EXACTLY nenc+1 (the pump/encoder
+    // blocking pattern is part of the abort topology), done unbounded. The
+    // old shape wrapped one mpsc Receiver in a Mutex shared by every
+    // encoder, which parked in `recv` INSIDE the guard — the known live
+    // recv-under-mutex token-holder wedge (census §"Lock waits"). The
+    // mailbox is MPMC by construction: receivers are shared by CLONING and
+    // every park runs with the queue lock released (the mailbox law).
+    let (work_tx, work_rx) = pgsync::mailbox::<Batch>(Some(nenc + 1));
     let (done_tx, done_rx) =
-        std::sync::mpsc::channel::<(u64, PgResult<pgrcolumnar::EncodedRg>)>();
+        pgsync::mailbox::<(u64, PgResult<pgrcolumnar::EncodedRg>)>(None);
     let abort = std::sync::atomic::AtomicBool::new(false);
 
     let key_w = sort.key_w;
@@ -1316,7 +1325,7 @@ fn merge_sorted_runs(
 
     let (n_rows, batches) = std::thread::scope(|scope| {
         for _ in 0..nenc {
-            let rx = &work_rx;
+            let rx = work_rx.clone();
             let tx = done_tx.clone();
             let plan = Arc::clone(&shared.plan);
             scope.spawn(move || {
@@ -1326,11 +1335,10 @@ fn merge_sorted_runs(
                 let mut values = vec![::datum::Datum::null(); ncols];
                 let isnull = vec![false; ncols];
                 loop {
-                    let b = {
-                        let g = rx.lock().unwrap_or_else(|p| p.into_inner());
-                        g.recv()
-                    };
-                    let Ok(b) = b else { break };
+                    // Parks with the mailbox lock RELEASED; None = the pump
+                    // dropped its sender (end of input / error / abort) and
+                    // the queue is drained.
+                    let Some(b) = rx.recv() else { break };
                     let r = catch_unwind(AssertUnwindSafe(
                         || -> PgResult<pgrcolumnar::EncodedRg> {
                             let mut enc =
@@ -1365,6 +1373,10 @@ fn merge_sorted_runs(
             });
         }
         drop(done_tx); // encoder clones remain; done_rx closes when they exit
+        // The encoder clones are the only work receivers now: if the pool
+        // exits early, the pump's send observes the closed receive side
+        // (Err) exactly as mpsc's disconnected SendError did.
+        drop(work_rx);
 
         // PUMP: owns the RunMerge and the work sender; exits (dropping the
         // sender) at end of input, on error, or on the leader's abort flag.
@@ -1460,7 +1472,7 @@ fn merge_sorted_runs(
 
         // LEADER: ordered commits off the done channel.
         let mut pending: BTreeMap<u64, pgrcolumnar::EncodedRg> = BTreeMap::new();
-        for (idx, r) in done_rx.iter() {
+        while let Some((idx, r)) = done_rx.recv() {
             if let Err(e) = postgres_seams::check_for_interrupts::call() {
                 if first_err.is_none() {
                     first_err = Some(e);

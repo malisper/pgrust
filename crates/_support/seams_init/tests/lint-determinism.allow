@@ -397,7 +397,7 @@ blocking	crates/backend/access/transam/parallel/src/standing.rs	4	CONVERTED (per
 blocking	crates/backend/access/transam/transam_xlog/src/startup.rs	1
 blocking	crates/backend/access/transam/transam_xlog/src/write.rs	1
 blocking	crates/backend/access/transam/xlogutils/src/lib.rs	1
-blocking	crates/backend/commands/copy/src/parallel.rs	3	P3: parallel-COPY work/result channels (s3.3)
+blocking	crates/backend/commands/copy/src/parallel.rs	1	CONVERTED-row-5 (permit-s4): work/done channels now pgsync::mailbox (recv-under-mutex KILLED structurally); remaining site = the row-6 drain_rg timed sleep L1574 (stays a sleep by design, retires with the sleep family)
 blocking	crates/backend/commands/vacuum/src/lib.rs	1
 blocking	crates/backend/executor/execmain/src/execparallel.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
@@ -609,7 +609,6 @@ rawsync	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 rawsync	crates/backend/catalog/pg_constraint/src/lib.rs	1
 rawsync	crates/backend/commands/analyze/src/lib.rs	2
 rawsync	crates/backend/commands/commands_async/src/queue.rs	1
-rawsync	crates/backend/commands/copy/src/parallel.rs	3
 rawsync	crates/backend/commands/seclabel/src/lib.rs	1
 rawsync	crates/backend/commands/vacuum/src/lib.rs	1
 rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1
