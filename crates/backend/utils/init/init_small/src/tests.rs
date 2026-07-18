@@ -311,4 +311,37 @@ mod wretain_state {
         assert!(!wretain::warm_claim());
         assert!(!wretain::confirm_parked());
     }
+
+    // Uncommitted-catalog taint (the rolled-back-TRUNCATE parallel-scan
+    // locator fix): set when a task binds a leader transaction with
+    // unbroadcast invalidation messages; must survive park + the next
+    // begin_task (the poison lives in the thread's caches, not the task) and
+    // clear only via claim-side blanket invalidation or retirement.
+    // Runs on its own #[test] thread, so TLS starts fresh.
+    #[test]
+    fn caches_taint_lifecycle() {
+        assert!(!wretain::caches_tainted());
+
+        wretain::begin_task(true);
+        wretain::note_caches_tainted();
+        wretain::request_park(1);
+        wretain::note_proc_retained();
+        wretain::note_sinval_retained();
+        assert!(wretain::confirm_parked());
+        assert!(wretain::caches_tainted());
+
+        // Warm claim: taint still standing — the consumer must blanket.
+        wretain::begin_task(true);
+        assert!(wretain::warm_claim());
+        assert!(wretain::caches_tainted());
+
+        // The blanket ran: trustworthy again.
+        wretain::clear_caches_taint();
+        assert!(!wretain::caches_tainted());
+
+        // Retirement drops the mark with the identity.
+        wretain::note_caches_tainted();
+        wretain::clear_identity();
+        assert!(!wretain::caches_tainted());
+    }
 }

@@ -67,6 +67,23 @@ fn inject(point: QueryTaskFaultPoint) -> PgResult<()> {
     }
 }
 
+/// Claim-side invalidation for a parked helper adopting a leader transaction:
+/// the cheap drain is only sound while this thread's caches carry no
+/// uncommitted-catalog poison from an earlier full-worker task
+/// (`wretain::caches_tainted`, set when that task bound a transaction with
+/// unbroadcast invalidation messages that may since have aborted — aborts
+/// broadcast nothing). The binding itself refuses pending-invals targets
+/// (`validate`), so no NEW taint can arise on this path.
+fn accept_invals_or_flush_taint() -> PgResult<()> {
+    if init_small::wretain::caches_tainted() {
+        inval::local::InvalidateSystemCaches()?;
+        init_small::wretain::clear_caches_taint();
+    } else {
+        inval::local::AcceptInvalidationMessages()?;
+    }
+    Ok(())
+}
+
 pub(super) fn with_query_task_binding<T>(
     shared: &Arc<ParallelShared>,
     body: impl FnOnce() -> PgResult<T>,
@@ -258,7 +275,7 @@ impl QueryTaskBindingGuard {
             guard.snapshot_pushed = true;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindActiveSnapshot)?;
-            inval::local::AcceptInvalidationMessages()?;
+            accept_invals_or_flush_taint()?;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
@@ -485,7 +502,7 @@ impl QueryTaskBindingGuard {
             self.snapshot_pushed = true;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindActiveSnapshot)?;
-            inval::local::AcceptInvalidationMessages()?;
+            accept_invals_or_flush_taint()?;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
