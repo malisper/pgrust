@@ -2,6 +2,7 @@
 
 pub mod budget;
 pub mod generator;
+pub mod knobs;
 pub mod noise;
 pub mod prodreg;
 pub mod profile;

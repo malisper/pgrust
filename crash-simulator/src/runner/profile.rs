@@ -38,6 +38,11 @@ pub struct Profile {
     /// against the `gen::prodreg` registry. Never set in battery profiles.
     #[serde(default)]
     pub test_disable_productions: Vec<String>,
+    /// H6 planner-knob swarm block (see `gen::knobs`): per-seed sampled
+    /// planner-GUC sets appended to the arm-set pool. Seed-deterministic
+    /// (same seed + profile bytes = same knob sets).
+    #[serde(default)]
+    pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
     pub background_policy: BackgroundPolicy,
     pub steps_min: u32,
     pub steps_max: u32,
@@ -141,11 +146,19 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     // A weighted 'arm' kind with no arm sets can never emit a step — the
     // generator would draw it forever without making progress (infinite
     // loop when 'arm' is the only weighted kind). Reject at validation.
-    if p.statement_weights.get("arm").copied().unwrap_or(0) > 0 && p.arm_sets.is_empty() {
+    // H6: a `planner_knobs` block guarantees per-seed sampled sets, so it
+    // also satisfies the arm requirement.
+    if p.statement_weights.get("arm").copied().unwrap_or(0) > 0
+        && p.arm_sets.is_empty()
+        && p.planner_knobs.is_none()
+    {
         return Err(format!(
             "profile '{}': statement kind 'arm' is weighted but arm_sets is empty (no arm can be generated)",
             p.name
         ));
+    }
+    if let Some(k) = &p.planner_knobs {
+        crate::gen::knobs::validate(k, &p.name)?;
     }
     if p.steps_min == 0 || p.steps_min > p.steps_max {
         return Err(format!("profile '{}': bad steps range", p.name));

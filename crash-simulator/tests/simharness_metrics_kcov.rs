@@ -45,6 +45,7 @@ fn battery_gen_profile(name: &str) -> GenProfile {
         property_weights: BTreeMap::new(),
         float_lenient: false,
         test_disable_productions: Vec::new(),
+        planner_knobs: None,
     }
 }
 

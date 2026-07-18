@@ -458,9 +458,12 @@ pub fn gate_reason(def_: &ProdDef, p: &GenProfile) -> Option<String> {
         Gate::WDml => closed(w.dml > 0, "statement_weights.dml=0"),
         Gate::WQuery => closed(w.query > 0, "statement_weights.query=0"),
         Gate::WTx => closed(w.tx > 0, "statement_weights.tx=0"),
+        // H6: a `planner_knobs` block guarantees sampled arm sets per seed
+        // (the sampler never returns an empty pool), so arms are generatable
+        // even with `arm_sets` empty.
         Gate::WArm => closed(
-            w.arm > 0 && !p.arm_sets.is_empty(),
-            "statement_weights.arm=0 or arm_sets empty",
+            w.arm > 0 && (!p.arm_sets.is_empty() || p.planner_knobs.is_some()),
+            "statement_weights.arm=0, or arm_sets empty with no planner_knobs",
         ),
         Gate::WFault => {
             if w.fault == 0 {
@@ -505,9 +508,12 @@ pub fn gate_reason(def_: &ProdDef, p: &GenProfile) -> Option<String> {
             w.query > 0 && p.table_shape.min_cols == 0,
             "fires only when a table can have zero payload columns (min_cols=0)",
         ),
+        // H6: sampled planner-knob sets are non-empty by construction (the
+        // sampler's empty-set guard), so `planner_knobs` also opens apply-set.
         Gate::NonEmptyArmSet => closed(
-            w.arm > 0 && p.arm_sets.iter().any(|s| !s.is_empty()),
-            "no non-empty arm set in profile",
+            w.arm > 0
+                && (p.arm_sets.iter().any(|s| !s.is_empty()) || p.planner_knobs.is_some()),
+            "no non-empty arm set in profile (and no planner_knobs sampler)",
         ),
         Gate::TwoPayloadCols => closed(
             w.query > 0 && p.table_shape.max_cols >= 2,
