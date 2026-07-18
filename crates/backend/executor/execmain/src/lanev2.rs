@@ -2429,14 +2429,19 @@ fn agg_hash_build_fold_feed<'mcx>(
     use batch_source::BatchGranuleSource as _;
     if batch_source::heapfeed_v2_enabled() {
         if batch_source::heap_gagg_admits(ss) {
+            // K1 inc-2 (wave-9 WS-AH): late materialization engages only on
+            // this arm — HEAPFEED ∧ K1_LATEMAT ∧ gagg-admits (rail F: the
+            // below-floor and knob-OFF worlds stay byte-untouched); the
+            // per-build shape admission runs inside the drain.
+            let latemat = batch_source::k1_latemat_enabled();
             let mut src = batch_source::HeapBatchSource::new(ss);
-            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, estate);
+            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, latemat, estate);
             let settled = src.end_claim(estate);
             drove?;
             settled?;
         } else {
             let mut src = batch_source::SeqScanSource::new(ss);
-            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, estate);
+            let drove = agg_hash_build_fold_drain(agg, &mut src, stage_slot, false, estate);
             let settled = src.end_claim(estate);
             drove?;
             settled?;
@@ -2446,6 +2451,7 @@ fn agg_hash_build_fold_feed<'mcx>(
             agg,
             &mut batch_source::SeqScanSource::new(ss),
             stage_slot,
+            false,
             estate,
         )?;
     }
@@ -2471,6 +2477,7 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     src: &mut S,
     stage_slot: &mut Option<ExecSlotId>,
+    latemat: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let caps = src.capabilities();
@@ -2574,6 +2581,19 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     let mut mm_scratch = ::lanefold::StrMmScratch::default();
     let mut mm_codes: Vec<(u16, ::exectuples::SoaDictLane)> = Vec::new();
     let mut k2s = ScanK2Scratch::default();
+    // K1 inc-2 late-materialization arm (wave-9 WS-AH), decided once per
+    // build AFTER the K2/mk shape census: staging narrows to {qual clause
+    // cols ∪ the feed's key cols} and `latemat_cols` (the deferred prefix
+    // columns) complete per batch for qual survivors only. `None` = today's
+    // full staging bytes (the knob-OFF world takes the `!latemat` branch
+    // without touching the node). Guarded/vguard plans refuse NAMED
+    // (rail G, `k1-latemat-guard-cols`); shapes without a stated key set
+    // (per-row arrival builds) keep today's staging silently.
+    let latemat_cols: Option<Vec<u16>> = if latemat {
+        scan_k1_latemat_arm(batch_source::require_bridge(src)?, agg, k2.as_ref(), mk.as_ref())
+    } else {
+        None
+    };
     loop {
         let n = src.next_batch(estate)?;
         if n == 0 {
@@ -2588,6 +2608,26 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
+        // K1 inc-2 completion (pass B): fill the deferred prefix columns for
+        // this batch's qual survivors off the still-pinned page BEFORE any
+        // consumer — probes, folds, spill replays, and the emit's prefix
+        // publish all read completed cells (rail S holds by construction:
+        // completion precedes the in-order probe, so spill-mode replays read
+        // live cells; the compact backstop migration reads the compact
+        // table's own arena, never the SoA). The whole-qual kernel bitmap IS
+        // the survivor set on this admission (no requal tail); forced-
+        // fallback bits OR'd into it are harmless (kind-0 rows only fill).
+        if let Some(cols) = &latemat_cols {
+            let nwords = (n as usize).div_ceil(64);
+            let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+            match src.qual_sel() {
+                Some(s) => sel[..nwords].copy_from_slice(&s[..nwords]),
+                // Belt: an armed narrowing without a staged verdict fails
+                // open to completing every row (never a stale cell).
+                None => sel[..nwords].fill(u64::MAX),
+            }
+            src.complete_deform(estate, cols, &sel[..nwords])?;
+        }
         // Guarded plans (int2-Var OpExpr admissions): prove the batch before
         // any fold. The proof runs over every staged non-fallback row — a
         // superset of the rows the fold will touch — so a Pass is sound and a
@@ -4369,6 +4409,56 @@ fn scan_k2_shape<'mcx>(
         .map(|(c, _)| c as u16)
         .collect();
     Some(ScanK2 { key_col, needed, natts })
+}
+
+/// K1 inc-2 late-materialization admission for the grouped heap drain
+/// (wave-9 WS-AH, contract §2), decided once per build after the K2/mk
+/// shape census. `Some(cols)` = the staging narrowed to {qual clause cols ∪
+/// key cols} and `cols` is the deferred completion set the drain passes to
+/// `complete_deform` per batch; `None` = today's full staging bytes.
+///
+/// Rails (each refusal NAMED through the laneexec funnel):
+/// - G: guarded / vguard-bearing fold plans refuse (`k1-latemat-guard-cols`)
+///   — their whole-batch proof reads every staged non-fallback row's cells;
+/// - J + shape: the nodeseqscan arm refuses no-qual/requal/qual-col-only
+///   stagings (`k1-latemat-no-qual` — those shapes keep today's single JIT
+///   full deform) and every non-plain-kernel staging (`k1-latemat-shape`);
+/// - key set: K2 single key or the mk packed component atts — the mk
+///   numeric packability pre-check reads its component lanes WHOLE-batch,
+///   so component atts must stage eagerly. Builds with neither shape (the
+///   per-row arrival probe) keep today's staging silently (no profitable
+///   narrowing exists: the emit publishes every prefix column per row).
+fn scan_k1_latemat_arm<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    agg: &::nodeagg::AggStateData<'mcx>,
+    k2: Option<&ScanK2>,
+    mk: Option<&ScanMk>,
+) -> Option<Vec<u16>> {
+    // Per-build re-decision: never inherit a previous build's narrowing.
+    ::nodeseqscan::seq_scan_k1_latemat_disarm(ss);
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    if plan.guarded || !plan.vguards.is_empty() {
+        ::laneexec::log_refused("k1-latemat-guard-cols");
+        return None;
+    }
+    let mut keys: Vec<u16> = Vec::new();
+    if let Some(s) = k2 {
+        keys.push(s.key_col);
+    } else if let Some(m) = mk {
+        keys.extend(m.shape.comps.iter().map(|c| c.att));
+    } else {
+        return None;
+    }
+    match ::nodeseqscan::seq_scan_k1_latemat_arm(ss, &keys) {
+        Ok(cols) => {
+            trace_feed("k1 late-mat staging engaged (deform narrowed to qual+key cols)");
+            Some(cols)
+        }
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            None
+        }
+    }
 }
 
 /// Survivor collection for the deferred-probe batch arms (K2 / dict-group /
