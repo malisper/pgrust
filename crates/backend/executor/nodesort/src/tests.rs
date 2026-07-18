@@ -702,3 +702,183 @@ fn for_each_put_matches_plain_loop_on_set_bits() {
         assert_eq!(all, (pos..n).collect::<Vec<_>>());
     }
 }
+
+// --- WS-AD wave-8: randomAccess lane-feed delegation units -----------------
+// Acceptance ladder 2 (the delegation unit): a lane-leg feed
+// (sort_lane_begin/put/finish) of a randomAccess node leaves the ROW-PATH
+// Tuplesort as the ONE read-back face (`sort_lane_readback_delegated`), and
+// every random-access read — rescan replay, mark/restore, backward — runs
+// on it interchangeably with `exec_sort` over the same node state (the
+// production fallback the direction gate lands on). The backward leg is
+// proven differentially against a pure-`exec_sort` control node driven by
+// the identical read script, so no read semantics are assumed.
+
+/// The lane feed legs, exactly as the breaker drives them: begin → per-row
+/// put → finish (performsort + phase flip).
+fn lane_feed(
+    node: &mut SortState<'static>,
+    estate: &mut EStateData<'static>,
+    desc: &Rc<TupleDescData<'static>>,
+    feed: &mut Feed,
+) {
+    sort_lane_begin(node, desc.clone()).unwrap();
+    while let Some(id) = feed.fetch(estate).unwrap() {
+        sort_lane_put(node, estate, id).unwrap();
+    }
+    sort_lane_finish(node, estate).unwrap();
+}
+
+fn slot_row(
+    estate: &mut EStateData<'static>,
+    id: ExecSlotId,
+    natts: i32,
+) -> Vec<Option<i32>> {
+    let slot = estate.slot_mut(id);
+    (1..=natts)
+        .map(|a| {
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(slot, a, &mut isnull);
+            if isnull { None } else { Some(v.as_i32()) }
+        })
+        .collect()
+}
+
+/// One forward read on the LANE emit face (`sort_lane_next` — what the
+/// breaker's Source serves per pull).
+fn lane_next_row(
+    node: &mut SortState<'static>,
+    estate: &mut EStateData<'static>,
+    natts: i32,
+) -> Option<Vec<Option<i32>>> {
+    sort_lane_next(node, estate)
+        .unwrap()
+        .map(|id| slot_row(estate, id, natts))
+}
+
+/// One read on the ROW-PATH face (`exec_sort` over a drained feed closure —
+/// the fallback every non-forward pull takes), in direction `dir`.
+fn row_path_read(
+    node: &mut SortState<'static>,
+    estate: &mut EStateData<'static>,
+    desc: &Rc<TupleDescData<'static>>,
+    dir: ::types_scan::sdir::ScanDirection,
+    natts: i32,
+) -> Option<Vec<Option<i32>>> {
+    estate.es_direction = dir;
+    let got = exec_sort(node, estate, desc.clone(), |_| Ok(None)).unwrap();
+    estate.es_direction = ::types_scan::sdir::ForwardScanDirection;
+    got.map(|id| slot_row(estate, id, natts))
+}
+
+#[test]
+fn lane_feed_random_access_delegates_and_rescan_replays() {
+    let rows = vec![vec![Some(3)], vec![Some(1)], vec![Some(2)]];
+    let (mut node, mut estate, desc, mut feed) = setup(1, rows, EXEC_FLAG_REWIND);
+    assert!(node.randomAccess);
+    // RA side-memo roundtrip (the bare-hook verdict store).
+    assert_eq!(sort_lane_ra_fusible(&node), None);
+    sort_lane_ra_fusible_set(&mut node, true);
+    assert_eq!(sort_lane_ra_fusible(&node), Some(true));
+
+    lane_feed(&mut node, &mut estate, &desc, &mut feed);
+    // The one read-back face is the row-path Tuplesort (no substituted
+    // lane emit face) — randomAccess reads are sound exactly here.
+    assert!(sort_lane_readback_delegated(&node));
+
+    // Forward drain on the lane face.
+    let sorted = vec![vec![Some(1)], vec![Some(2)], vec![Some(3)]];
+    let mut out = Vec::new();
+    while let Some(r) = lane_next_row(&mut node, &mut estate, 1) {
+        out.push(r);
+    }
+    assert_eq!(out, sorted);
+
+    // Rewind: the randomAccess arm preserves the tuplesort (no re-sort, no
+    // child rescan) and the ROW-PATH drain replays it — cross-face
+    // byte-identity over the same node state.
+    let need_outer = exec_rescan_sort(&mut node, &mut estate).unwrap();
+    assert!(!need_outer);
+    assert!(sort_lane_readback_delegated(&node));
+    let replay = drain(&mut node, &mut estate, &desc, &mut feed);
+    assert_eq!(replay, sorted);
+}
+
+#[test]
+fn lane_feed_random_access_mark_restore_delegates() {
+    let rows = vec![vec![Some(2)], vec![Some(3)], vec![Some(1)]];
+    let (mut node, mut estate, desc, mut feed) =
+        setup(1, rows, ::types_slot::EXEC_FLAG_MARK);
+    assert!(node.randomAccess);
+    lane_feed(&mut node, &mut estate, &desc, &mut feed);
+    assert!(sort_lane_readback_delegated(&node));
+
+    // Read 1 on the lane face, mark, read 2 and 3, restore: the mark/
+    // restore protocol operates on the delegated tuplesort directly, and
+    // the post-restore read resumes at the marked position on the ROW-PATH
+    // face (cross-face), then the lane face continues in step.
+    assert_eq!(lane_next_row(&mut node, &mut estate, 1), Some(vec![Some(1)]));
+    exec_sort_mark_pos(&mut node).unwrap();
+    assert_eq!(lane_next_row(&mut node, &mut estate, 1), Some(vec![Some(2)]));
+    assert_eq!(lane_next_row(&mut node, &mut estate, 1), Some(vec![Some(3)]));
+    exec_sort_restr_pos(&mut node).unwrap();
+    assert_eq!(
+        row_path_read(&mut node, &mut estate, &desc, ::types_scan::sdir::ForwardScanDirection, 1),
+        Some(vec![Some(2)])
+    );
+    assert_eq!(lane_next_row(&mut node, &mut estate, 1), Some(vec![Some(3)]));
+    assert_eq!(lane_next_row(&mut node, &mut estate, 1), None);
+}
+
+#[test]
+fn lane_feed_random_access_backward_matches_row_path() {
+    use ::types_scan::sdir::{BackwardScanDirection, ForwardScanDirection};
+    let rows = vec![vec![Some(3)], vec![Some(1)], vec![Some(2)]];
+    // Lane-fed node: forward reads on the lane face, backward reads on the
+    // row-path fallback (exactly production: the direction gate refuses
+    // non-forward pulls and exec_sort drains the same tuplesort).
+    let (mut lane, mut lane_es, desc, mut lane_feed_rows) =
+        setup(1, rows.clone(), EXEC_FLAG_REWIND);
+    lane_feed(&mut lane, &mut lane_es, &desc, &mut lane_feed_rows);
+    // Control node: built and read entirely by exec_sort.
+    let (mut ctl, mut ctl_es, ctl_desc, mut ctl_feed) = setup(1, rows, EXEC_FLAG_REWIND);
+
+    // Script: F F F B B F — no EOF crossing, so every step returns a row.
+    let script = [
+        (ForwardScanDirection, true),
+        (ForwardScanDirection, true),
+        (ForwardScanDirection, true),
+        (BackwardScanDirection, false),
+        (BackwardScanDirection, false),
+        (ForwardScanDirection, true),
+    ];
+    let mut lane_out = Vec::new();
+    let mut ctl_out = Vec::new();
+    for (dir, forward) in script {
+        let lane_row = if forward {
+            lane_next_row(&mut lane, &mut lane_es, 1)
+        } else {
+            row_path_read(&mut lane, &mut lane_es, &desc, dir, 1)
+        };
+        lane_out.push(lane_row);
+        ctl_es.es_direction = dir;
+        let got = exec_sort(&mut ctl, &mut ctl_es, ctl_desc.clone(), |es| {
+            ctl_feed.fetch(es)
+        })
+        .unwrap();
+        ctl_out.push(got.map(|id| slot_row(&mut ctl_es, id, 1)));
+        ctl_es.es_direction = ForwardScanDirection;
+    }
+    // Differential: the mixed-face lane read script byte-matches the pure
+    // row-path control at every step.
+    assert_eq!(lane_out, ctl_out);
+    // And the concrete C semantics, pinned: 1,2,3 then back to 2,1, then 2.
+    let expect: Vec<Option<Vec<Option<i32>>>> = vec![
+        Some(vec![Some(1)]),
+        Some(vec![Some(2)]),
+        Some(vec![Some(3)]),
+        Some(vec![Some(2)]),
+        Some(vec![Some(1)]),
+        Some(vec![Some(2)]),
+    ];
+    assert_eq!(lane_out, expect);
+}
