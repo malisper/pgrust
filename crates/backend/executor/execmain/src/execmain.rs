@@ -1058,7 +1058,30 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         crate::lanev2::cursor_park_resume(planstate, estate)?;
     }
     // --- end WS-AI wave-9 -------------------------------------------------------
-    // --- WS-AJ wave-9 sub-region (reserved) -------------------------------------
+    // --- WS-AJ wave-9 sub-region (SPI Stage-A seam, se/spi-stage-a; lane-spi.md
+    // §1/§3) -----------------------------------------------------------------------
+    // Per-run SPI emission budget, written UNCONDITIONALLY like the WS-AI
+    // field above it (None on knob-OFF / tcount-0 / non-SPI-dest runs, which
+    // answer at the callee's first tests; the None overwrite means no stale
+    // budget survives an error unwind or estate reuse). `_SPI_pquery`'s
+    // tcount-limited run is the ONLY producer of a count-limited
+    // `CommandDest::Spi` run (spi/src/execute.rs:562), so the dest compare
+    // IS the seam-visible SPI signal — no SPI-layer code change (design §3
+    // Stage A). The install runs the NAMED SPI-admission classifier
+    // (refusals tick the ShapeClass::Spi taxonomy, knob-ON only); the
+    // budgeted run's STOP-ONLY settle sits below the drive loop (WS-AJ
+    // block beside the WS-AI park walker). Knob-OFF cost, per RUN and never
+    // per tuple: the eager argument set (one `mydest` enum match + the
+    // direction compare) plus the callee's count/select/dest register
+    // tests; the knob cell loads only for count-limited SPI-dest SELECTs.
+    estate.es_spi_run_budget = crate::lanev2::spi_run_budget_install(
+        operation == CmdType::CMD_SELECT,
+        dest.mydest() == ::types_dest::CommandDest::Spi,
+        ::types_scan::sdir::ScanDirectionIsForward(direction),
+        number_tuples,
+        use_parallel_mode,
+        estate.es_top_eflags,
+    );
     // --- end WS-AJ wave-9 -------------------------------------------------------
     if use_parallel_mode {
         enter_parallel_mode_outlined();
@@ -1116,6 +1139,21 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         }
     }
     // --- end WS-AI wave-9.5 -----------------------------------------------------
+    // --- WS-AJ wave-9.5 (SPI Stage-A): the STOP-ONLY settle point. A budgeted
+    // (tcount-limited SPI-statement) run that stops here retires lane-staged
+    // claims through the same claim-release chain the cursor walker owns —
+    // BEFORE executor_finish/end return control toward the plancache release
+    // points (lane-spi.md INVARIANT 5; post-t26 release-point map in
+    // notes/se-wave9-aj.md §11.3) — and ticks the spi-plan-refused roll-up
+    // when the plan carried no lane engagement. NO park flag is armed:
+    // `_SPI_pquery` never resumes a stopped run (the spi_inc1_aj_w9
+    // STOP-ONLY pins). Knob-OFF / tcount-0 / non-SPI runs read one None and
+    // skip (per-run cost only, never per-tuple). EPQ law shared with the
+    // WS-AI walker (the walk refuses under es_epq_active).
+    if estate.es_spi_run_budget.is_some() {
+        crate::lanev2::spi_run_settle(planstate, estate);
+    }
+    // --- end WS-AJ wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
     }
