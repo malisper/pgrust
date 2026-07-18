@@ -14402,3 +14402,11 @@ pub(crate) use dml::dml_oc_set_for_tests;
 
 // --- WS-X wave-5 sub-region (reserved) ----------------------------------------
 // --- end WS-X wave-5 ----------------------------------------------------------
+
+// --- WS-Y wave-7 (EPQ inc-5 rungs Y0-Y2; contract §1) ---------------------------
+// The lane-side EPQ module: Y0 captured-singleton source (dark). Mounted
+// here because the vocabulary it composes with (the BatchGranuleSource
+// seam, and from Y1 on ShapeClass/RefuseReason) is lanev2-private (§2
+// shim-fallback precedent, wave-5).
+pub(crate) mod epq;
+// --- end WS-Y wave-7 ------------------------------------------------------------
