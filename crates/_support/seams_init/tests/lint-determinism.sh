@@ -273,6 +273,23 @@ FNR == 1 {
         print "once\t" rel
     if (line ~ /thread::scope/)
         print "scope\t" rel
+
+    # ---- rawsync (permit-s1 WS-SYNC; permit-scheduler.md s2 + contract s2.5) ----
+    # Raw sync TYPE imports/paths outside pgsync: std::sync Mutex/RwLock/
+    # Condvar/Barrier/Once/OnceLock/mpsc (single paths, inline paths, and
+    # use-group imports), parking_lot, crossbeam sync/channel. LEXICAL, one
+    # row per file — the deliberately-unlinted lock-WAIT reasoning (see the
+    # header) is about call sites; the single-lock-library rule makes the
+    # TYPE import checkable. Arc/Weak/atomic stay std by crate law and are
+    # NOT flagged. crates/_support/pgsync is the sanctioned home (the only
+    # cfg site) and is excluded by path.
+    if (rel !~ /^crates\/_support\/pgsync\//) {
+        if (line ~ /(^|[^A-Za-z0-9_])std::sync::(OnceLock|Once|Mutex|RwLock|Condvar|Barrier|mpsc)($|[^A-Za-z0-9_])/ \
+            || line ~ /use[ \t]+std::sync::\{[^}]*(OnceLock|Once|Mutex|RwLock|Condvar|Barrier|mpsc)/ \
+            || line ~ /(^|[^A-Za-z0-9_])parking_lot::/ \
+            || line ~ /crossbeam_channel|crossbeam::channel|crossbeam::sync|crossbeam_utils::sync/)
+            print "rawsync\t" rel
+    }
 }
 END { if (rel != "" && (inblk || skip > 0)) print "poison\t" rel }
 AWK
@@ -289,7 +306,7 @@ if [ "$MODE" = "regen" ]; then
     echo "# only under explicit charter — the ratchet law says rows only die)."
     echo "# Row format (tab-separated): <category>\t<file>\t<max-sites>[\t<annotation>]"
     awk -F'\t' '$1 == "poison" { printf "# SCAN-POISON: %s — scanner state still open at EOF; counts below may be incomplete\n", $2 }' "$TMP/scan"
-    for cat in fs time rand spawn env blocking join barrier once scope; do
+    for cat in fs time rand spawn env blocking join barrier once scope rawsync; do
         echo ""
         echo "# ==== $cat ===="
         if [ "$cat" = "fs" ]; then
@@ -327,7 +344,7 @@ awk -F'\t' -v out="$TMP/allow" '
     /^[ \t]*(#|$)/ { next }
     {
         cat = $1; path = $2; budget = $3; annot = (NF >= 4 ? $4 : "")
-        if (cat !~ /^(fs|time|rand|spawn|env|blocking|join|barrier|once|scope)$/ || path == "" \
+        if (cat !~ /^(fs|time|rand|spawn|env|blocking|join|barrier|once|scope|rawsync)$/ || path == "" \
             || budget !~ /^[0-9]+$/ || budget + 0 < 1) {
             printf "CONFIG-ERROR: malformed allowlist row (%s:%d): %s\n", FILENAME, FNR, $0
             err = 1; next
@@ -366,6 +383,7 @@ ALLOWBASE=$(basename "$ALLOWLIST")
         guide["barrier"]  = "use pg_barrier::Barrier (Waiter-backed, rides the C1/C9 chokes) — a raw std::sync::Barrier wait wedges the sim watchdog-invisibly (dst-p3-scheduler.md #3 row 18)"
         guide["once"]     = "classify the init closure in the P3 row-19 once-ledger: pure/env-read closures get a proof row; choke-crossing closures hoist to boot or convert to a Waiter-backed once-guard (dst-p3-scheduler.md #3 row 19)"
         guide["scope"]    = "register the gang: ScopeEnter/ScopeExit + route scoped children through sim_scope_spawn (dst-p3-scheduler.md #3 row 15)"
+        guide["rawsync"]  = "import the type from pgsync, THE single lock library (permit-scheduler.md #2: call sites carry no world cfg; pgsync is the only cfg site)"
         viol = 0; warn = 0
     }
     $1 == "A" { budget[$2 "\t" $3] = $4 + 0; annot[$2 "\t" $3] = $5; next }
@@ -408,7 +426,7 @@ ALLOWBASE=$(basename "$ALLOWLIST")
             warn++
         }
         print viol "\t" warn > counts
-        norder = split("fs time rand spawn env blocking join barrier once scope", ord, " ")
+        norder = split("fs time rand spawn env blocking join barrier once scope rawsync", ord, " ")
         for (i = 1; i <= norder; i++) {
             cat = ord[i]
             printf "%s: %d sites / %d files (allowlist %d/%d)\n", \

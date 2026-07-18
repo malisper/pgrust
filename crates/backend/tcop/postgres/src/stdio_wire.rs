@@ -61,6 +61,18 @@ pub(crate) fn stdio_wire_main_inner(
     argv: &[String],
     username: &str,
 ) -> PgResult<core::convert::Infallible> {
+    // Mechanical split (PERMIT-S1 WS-DEMO): boot half + session half compose
+    // to the original body VERBATIM. The sim-net two-session mode runs the
+    // boot half once on the main thread and the session half once per
+    // session thread; this single-session path is unchanged.
+    stdio_wire_boot_half(argv, username)?;
+    stdio_wire_session_half()
+}
+
+// The boot ladder half: everything through set_pg_start_time. Process-wide
+// state (shmem analogs, GUC store, lockfile, control file) — run ONCE per
+// process, on the thread that owns the boot.
+pub(crate) fn stdio_wire_boot_half(argv: &[String], username: &str) -> PgResult<()> {
     assert!(!init_small::globals::IsUnderPostmaster());
 
     // ---- PostgresSingleUserMain's boot ladder (single_user.rs), verbatim
@@ -112,9 +124,15 @@ pub(crate) fn stdio_wire_main_inner(
     fd::set_max_safe_fds()?;
 
     postmaster_seams::set_pg_start_time::call(timestamp_seams::get_current_timestamp::call());
+    Ok(())
+}
 
-    // ---- The wire session half (BackendMain's order: connection first,
-    // InitProcess second).
+// ---- The wire session half (BackendMain's order: connection first,
+// InitProcess second). Backend-local: safe to run on a spawned session
+// thread whose thread-local globals were snapshotted from the booted thread
+// (sim_net.rs two-session mode); the transport provider state it reaches is
+// itself thread-local.
+pub(crate) fn stdio_wire_session_half() -> PgResult<core::convert::Infallible> {
     {
         let startup = mcx::MemoryContext::new("WireStartup");
         backend_startup::wire_session_initialize(startup.mcx())?;

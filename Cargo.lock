@@ -7730,6 +7730,7 @@ dependencies = [
  "miscinit",
  "parallel",
  "pgarch",
+ "pgsync",
  "pmchild_seams",
  "postinit",
  "postmaster_seams",
@@ -11957,6 +11958,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgsync"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "pg_clock",
+ "pg_strong_random",
+]
+
+[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
@@ -12512,6 +12522,7 @@ dependencies = [
  "aio_seams",
  "analyze_seams",
  "async_seams",
+ "auth_seams",
  "autovacuum_seams",
  "backend_progress_seams",
  "backend_startup",
@@ -12576,6 +12587,7 @@ dependencies = [
  "pg_strong_random",
  "pgstat",
  "pgstat_seams",
+ "pgsync",
  "pgtz",
  "plancache",
  "planner",
@@ -14531,6 +14543,7 @@ dependencies = [
  "loom",
  "parallel",
  "pg_clock",
+ "pgsync",
  "postgres_seams",
  "types_error",
  "waiter",
@@ -18630,6 +18643,7 @@ dependencies = [
  "libc",
  "loom",
  "pg_clock",
+ "pgsync",
 ]
 
 [[package]]
