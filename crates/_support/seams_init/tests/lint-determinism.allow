@@ -215,7 +215,7 @@ fs	crates/contrib/unaccent/src/lib.rs	1
 # --- crates/port/pg_path (5 sites) ---
 fs	crates/port/pg_path/src/lib.rs	5
 # --- crates/port/pg_strong_random (4 sites) ---
-fs	crates/port/pg_strong_random/src/lib.rs	4
+fs	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): path-only move lib.rs->os.rs with the sanctioned entropy funnel internals (s2.3, dev-urandom fd); budget unchanged, ratchet-neutral — flagged per s4.2 (WS-RNG's one out-of-category touch)
 
 # ==== time ====
 time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	BENCH-RIG: bench-rig crate, not server prod
@@ -255,7 +255,7 @@ time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1	INFRA-telemetry
 time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
 
 # ==== rand ====
-rand	crates/port/pg_strong_random/src/lib.rs	4	SANCTIONED: the entropy funnel internals (s2.3); pg_strong_random callers are never flagged
+rand	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): SANCTIONED entropy funnel internals (s2.3) — OsEntropy getentropy+urandom moved verbatim from lib.rs behind the EntropySource seam (P2); pg_strong_random callers are never flagged
 
 # ==== spawn ====
 spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 spawner-seam violator (s3.3)
@@ -357,6 +357,7 @@ env	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	6
 env	crates/backend/utils/misc/tzparser/src/lib.rs	2
 env	crates/port/pg_clock/src/sim.rs	2	DST-REVIEW(ws-clk): PGRUST_SIM_CLOCK_MODE/PGRUST_SIM_WALL_BASE readers, cfg(pgrust_sim)-only (no product reader); absorbed by the s2.5 knobs-registry charter
 env	crates/port/pg_path/src/lib.rs	1
+env	crates/port/pg_strong_random/src/sim.rs	1	DST-REVIEW(ws-rng): PGRUST_SIM_SEED knob read (R-KNOBS, s2.3); pgrust_sim-cfg-only — no product reader exists; retires onto the P2 knobs-registry charter when that lands
 
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
