@@ -165,6 +165,112 @@ pub(crate) fn k1_latemat_set_for_tests(on: bool) {
     K1_LATEMAT.store(if on { 2 } else { 1 }, Relaxed);
 }
 
+// --- K1-F2 selectivity gate (SE9-GATES item 2 charter) ----------------------
+//
+// The AH letter read CROSSOVER, not WIN: late materialization is profitable
+// at LOW qual selectivity (gsel1 −3.71%, gsel10 −4.96% B/A) and LOSES at
+// high (gsel50 +0.59%, gsel90 +3.76%) — staging cost paid, round-trip not
+// saved. Uniform admission would eat the high-selectivity loss, so
+// K1_LATEMAT stayed default-OFF. This gate admits late-mat only where the
+// PLAN-TIME qual-selectivity estimate says it wins: the planner already
+// divided these numbers — `Plan.plan_rows` on the SeqScan node is
+// clamp(clauselist_selectivity × rel->tuples), and rel->tuples is
+// `estimate_rel_size`'s heap arm (tableam::table_relation_estimate_size).
+// We recompute the DENOMINATOR with the planner's own math (same reltuples/
+// relpages density × current nblocks — one seam call per BUILD, never
+// per-row) and gate on the quotient. Admission policy only: results are
+// byte-identical either way (the dualexec matrix pins both arms).
+
+/// `PGRUST_LANE_V2_K1_SEL_THRESHOLD` (K1-F2; R-KNOBS registry spelling):
+/// max admitted qual-selectivity estimate, a fraction of the scan's
+/// estimated input rows. Default = the measured local crossover with margin
+/// (see notes/se-k1-f2.md §3; the AH fleet letter's win envelope is ≤10%,
+/// the loss onset ≥50%). `>= 1` disables the gate (the ungated letter arm);
+/// `0` refuses every sel-gated admission (kill lever — plan_rows clamps to
+/// ≥ 1 row, so no estimate reads exactly 0).
+fn k1_sel_threshold() -> f64 {
+    static THR: OnceLock<f64> = OnceLock::new();
+    *THR.get_or_init(|| {
+        parse_k1_sel_threshold(std::env::var("PGRUST_LANE_V2_K1_SEL_THRESHOLD").ok().as_deref())
+    })
+}
+
+/// The threshold's parse half, pure for the unit corpus: unset / unparsable
+/// / non-finite / negative = the default; explicit values win (values > 1
+/// mean "admit everything" — the letter arms' ungated spelling). Non-finite
+/// is rejected explicitly (the gagg-floor NaN lesson: `sel <= NaN` is false
+/// everywhere — a silent full disarm that looks like a huge threshold).
+fn parse_k1_sel_threshold(raw: Option<&str>) -> f64 {
+    const K1_SEL_THRESHOLD_DEFAULT: f64 = 0.20;
+    raw.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite() && *f >= 0.0)
+        .unwrap_or(K1_SEL_THRESHOLD_DEFAULT)
+}
+
+/// The gate's pure half (unit corpus): the plan-time qual-selectivity
+/// estimate from the two numbers the planner divided, or None when the
+/// denominator carries no information (empty / never-analyzed estimate).
+/// The quotient caps at 1.0: `plan_rows` is clamped to ≥ 1 and the exec-time
+/// denominator can lag the plan-time one, so raw quotients may exceed 1.
+fn k1_sel_estimate(plan_rows: f64, tuples: f64) -> Option<f64> {
+    if !(tuples > 0.0) || !plan_rows.is_finite() {
+        return None;
+    }
+    Some((plan_rows / tuples).min(1.0))
+}
+
+/// K1-F2 selectivity admission for the late-mat arms (both grouped drains
+/// call this AFTER the rail-G guard check, BEFORE the nodeseqscan arm).
+/// Refusals NAMED for the laneexec funnel:
+/// - `k1-latemat-selectivity` — the estimate exceeds the threshold (the
+///   letter's high-selectivity loss envelope; full staging wins there);
+/// - `k1-latemat-sel-unknown` — no usable estimate (never-analyzed relation
+///   — the planner used the plancat data-width density fallback this seam
+///   cannot reach — an empty estimate, or the size seam errored). Unknown
+///   fails CLOSED: an unproven selectivity keeps today's full-staging bytes.
+pub(super) fn k1_latemat_sel_admits(
+    ss: &::nodeseqscan::SeqScanState<'_>,
+) -> Result<(), &'static str> {
+    let Some(rel) = ss.ss.ss_currentRelation.as_ref() else {
+        return Err("k1-latemat-sel-unknown");
+    };
+    // Pre-empt the density fallback (`get_rel_data_width` lives in the
+    // planner's plancat; estimate_rel_size takes it only when reltuples < 0
+    // or relpages == 0 on a non-empty relation): those relations have no
+    // planner-grade estimate reachable here.
+    if rel.rd_rel.reltuples < 0.0 || rel.rd_rel.relpages <= 0 {
+        return Err("k1-latemat-sel-unknown");
+    }
+    let mut pages: ::types_core::BlockNumber = 0;
+    let mut tuples = 0.0f64;
+    let mut allvisfrac = 0.0f64;
+    // The plancat estimate_rel_size heap-arm constants (fidelity only: the
+    // density-fallback closure that reads them is pre-empted above).
+    const HEAP_OVERHEAD_BYTES_PER_TUPLE: usize = 24 + 4;
+    const HEAP_USABLE_BYTES_PER_PAGE: usize = 8192 - 24;
+    if ::tableam::table_relation_estimate_size(
+        rel,
+        HEAP_OVERHEAD_BYTES_PER_TUPLE,
+        HEAP_USABLE_BYTES_PER_PAGE,
+        |_| unreachable!("density fallback pre-empted by the reltuples/relpages check"),
+        None,
+        &mut pages,
+        &mut tuples,
+        &mut allvisfrac,
+    )
+    .is_err()
+    {
+        // A size-seam error refuses the OPTIMIZATION only; if the relation
+        // is genuinely unreadable the scan itself reports it.
+        return Err("k1-latemat-sel-unknown");
+    }
+    match k1_sel_estimate(ss.plan_rows(), tuples) {
+        Some(sel) if sel <= k1_sel_threshold() => Ok(()),
+        Some(_) => Err("k1-latemat-selectivity"),
+        None => Err("k1-latemat-sel-unknown"),
+    }
+}
+
 // --- end WS-AH wave-9 sub-region -------------------------------------------
 
 /// `PGRUST_LANE_V2_HEAP_GAGG_FLOOR` (default 1000; K1 inc-1 — the ONE new
@@ -831,6 +937,47 @@ mod tests {
         assert_eq!(parse_gagg_floor(Some("inf")), 1000.0);
         assert_eq!(parse_gagg_floor(Some("-inf")), 1000.0);
         assert_eq!(parse_gagg_floor(Some("infinity")), 1000.0);
+    }
+
+    /// K1-F2 threshold parse contract: unset and garbage read as the
+    /// default; explicit values win; values > 1 = the ungated letter arm;
+    /// `0` = the kill lever; non-finite and negative spellings are garbage
+    /// (the gagg-floor NaN lesson — `sel <= NaN` is false everywhere).
+    #[test]
+    fn k1_sel_threshold_parse() {
+        let d = parse_k1_sel_threshold(None);
+        assert!(d > 0.0 && d < 0.5, "default must sit below the measured crossover: {d}");
+        assert_eq!(parse_k1_sel_threshold(Some("")), d);
+        assert_eq!(parse_k1_sel_threshold(Some("banana")), d);
+        assert_eq!(parse_k1_sel_threshold(Some("0.35")), 0.35);
+        assert_eq!(parse_k1_sel_threshold(Some(" 0.1 ")), 0.1);
+        assert_eq!(parse_k1_sel_threshold(Some("0")), 0.0);
+        assert_eq!(parse_k1_sel_threshold(Some("1")), 1.0);
+        assert_eq!(parse_k1_sel_threshold(Some("2.5")), 2.5);
+        assert_eq!(parse_k1_sel_threshold(Some("-0.1")), d);
+        assert_eq!(parse_k1_sel_threshold(Some("NaN")), d);
+        assert_eq!(parse_k1_sel_threshold(Some("inf")), d);
+        assert_eq!(parse_k1_sel_threshold(Some("-inf")), d);
+    }
+
+    /// K1-F2 estimate math: the planner's quotient, capped at 1.0; empty
+    /// or degenerate denominators carry no information (None → the
+    /// `k1-latemat-sel-unknown` refusal, fail-closed).
+    #[test]
+    fn k1_sel_estimate_math() {
+        assert_eq!(k1_sel_estimate(5000.0, 50000.0), Some(0.1));
+        assert_eq!(k1_sel_estimate(45000.0, 50000.0), Some(0.9));
+        // plan_rows clamps to >= 1; a lagging exec-time denominator caps.
+        assert_eq!(k1_sel_estimate(1.0, 1.0), Some(1.0));
+        assert_eq!(k1_sel_estimate(2000.0, 1000.0), Some(1.0));
+        assert_eq!(k1_sel_estimate(1.0, 0.0), None);
+        assert_eq!(k1_sel_estimate(1.0, -1.0), None);
+        assert_eq!(k1_sel_estimate(1.0, f64::NAN), None);
+        assert_eq!(k1_sel_estimate(f64::NAN, 1000.0), None);
+        // Threshold-boundary discipline: admit at <=, refuse above.
+        let thr = parse_k1_sel_threshold(None);
+        assert!(k1_sel_estimate(thr * 50000.0, 50000.0).unwrap() <= thr);
+        assert!(k1_sel_estimate(thr * 50000.0 + 500.0, 50000.0).unwrap() > thr);
     }
 
     /// R1 borrow discipline is COMPILE-SHAPE: accessors borrow `&self`, so
