@@ -70,3 +70,4 @@ windowagg	epq,backward,instrumented,child-not-lane-owned,shape-qual-proj
 # wave-7 B1 1/6: functionscan source form default-ON (rides merged row)
 # wave-7 B1 2/6: tablefuncscan source form default-ON (rides merged row)
 # wave-7 B1 3/6: samplescan source form default-ON (rides merged row)
+# wave-7 B1 4/6: tidscan source form default-ON (rides merged row)
