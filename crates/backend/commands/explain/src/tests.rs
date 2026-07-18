@@ -433,6 +433,12 @@ fn make_portal(mcx: Mcx<'_>) -> Portal<'_> {
         portalPos: 0,
         creation_time: 0,
         visible: false,
+        // WS-CA wave-10 (cursors inc-2): mechanical literal completion only.
+        cursorStoreArmed: false,
+        cursorStore: TuplestoreHandle::NULL,
+        cursorFillExhausted: false,
+        currentOfEligible: None,
+        cursorTidStore: TuplestoreHandle::NULL,
     })
 }
 

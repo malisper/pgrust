@@ -157,6 +157,29 @@ pub struct PortalData<'mcx> {
 
     pub creation_time: TimestampTz,
     pub visible: bool,
+
+    // --- WS-CA wave-10 (cursors inc-2, contract §1/§4; fields granted by
+    // name in the contract §8 WS-CA row). The portal-boundary cursor store:
+    // SCROLL cursors are served from a lazy-materialized spill-armed
+    // tuplestore; operators only ever run forward.
+    /// Decided once at PortalStart: knob-ON && CURSOR_OPT_SCROLL &&
+    /// PORTAL_ONE_SELECT. Armed portals never set
+    /// EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD on the child (contract §3.1).
+    pub cursorStoreArmed: bool,
+    /// The §1.1 store for SCROLL-without-HOLD (inter_xact=false; dies at
+    /// PortalDrop). SCROLL+HOLD portals use `holdStore` instead (created at
+    /// first fill demand, PortalCreateHoldStore shape — contract §1.1).
+    pub cursorStore: TuplestoreHandle,
+    /// §2.2: the executor returned short (or a count-0 drain ran); fill_to
+    /// never touches the executor again once set.
+    pub cursorFillExhausted: bool,
+    /// §4 CURRENT-OF eligibility, probed once at first fill (None = not yet
+    /// probed; Some(false) = scan-state resolution can never find a row).
+    pub currentOfEligible: Option<bool>,
+    /// §4.2 hidden (tableoid, ctid) row-identity sidecar, eligible plans
+    /// only; row index == store row index; spill-armed like the store.
+    pub cursorTidStore: TuplestoreHandle,
+    // --- end WS-CA wave-10 ---
 }
 
 // C Portal alias: shared interior-mutable handle (cf. types_rel Relation);
