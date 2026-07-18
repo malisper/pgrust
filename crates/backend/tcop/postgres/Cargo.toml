@@ -67,6 +67,18 @@ ipc = { path = "../../storage/ipc/ipc" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 postinit = { path = "../../utils/init/postinit" }
 miscinit = { path = "../../utils/init/miscinit" }
+# single_user.rs (PostgresSingleUserMain boot sequence)
+guc_seams = { path = "../../utils/misc/guc_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+pmchild_seams = { path = "../../postmaster/pmchild_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+fd = { path = "../../storage/file/fd" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 backend_startup = { path = "../backend_startup" }
 types_guc = { path = "../../../_support/types/types_guc" }
 

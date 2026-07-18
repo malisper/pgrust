@@ -147,22 +147,57 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             panic!("GucInfoMain unported: unit backend-utils-misc-help-config")
         }
         DispatchOption::Single => {
-            // PostgresSingleUserMain is unported (backend-tcop-postgres
-            // single-user arm). --single is the documented disaster-recovery
-            // entry point, so refuse cleanly at startup instead of
-            // panicking: an operator mid-recovery must see a message and
-            // exit(1), not an abort with a backtrace (panicfix-bgaudit).
-            elog::write_stderr(
-                "single-user mode (--single) is not supported yet by this server.\n\
-                 Start the server normally and connect with a client instead.\n",
-            );
-            std::process::exit(1);
+            // main.c:222: PostgresSingleUserMain(argc, argv,
+            // strdup(get_user_name_or_exit(progname))). Exits the process.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_single_user_main::call(argv, &username)
         }
         DispatchOption::Postmaster => postmaster::PostmasterMain(argv),
     }
 }
 
 fn startup_hacks(_progname: &str) {}
+
+// get_user_name_or_exit (src/common/username.c:74): effective user's
+// pw_name, or print the lookup error and exit(1).
+fn get_user_name_or_exit(progname: &str) -> String {
+    // SAFETY: geteuid never fails; getpwuid returns a static-storage struct
+    // (single-threaded startup, per C's use) or NULL with errno set.
+    let (user_id, pw) = unsafe {
+        let uid = libc::geteuid();
+        set_errno_zero();
+        (uid, libc::getpwuid(uid))
+    };
+    if pw.is_null() {
+        let err = std::io::Error::last_os_error();
+        let detail = if err.raw_os_error().unwrap_or(0) != 0 {
+            err.to_string()
+        } else {
+            "user does not exist".to_string()
+        };
+        elog::write_stderr(&format!(
+            "{progname}: could not look up effective user ID {user_id}: {detail}\n"
+        ));
+        std::process::exit(1);
+    }
+    // SAFETY: non-NULL passwd from getpwuid has a NUL-terminated pw_name.
+    unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn set_errno_zero() {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // SAFETY: __error returns this thread's valid errno location.
+    unsafe {
+        *libc::__error() = 0;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    // SAFETY: __errno_location returns this thread's valid errno location.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+}
 
 pub fn help(progname: &str) -> String {
     let mut s = String::with_capacity(2048);

@@ -23,6 +23,7 @@ use ::types_portal::Portal;
 use ::types_slot::SlotData;
 use ::types_tuple::TupleDescData;
 
+pub mod debugtup;
 pub mod printsimple;
 
 #[cfg(test)]
