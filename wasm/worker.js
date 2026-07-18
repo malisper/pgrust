@@ -22,7 +22,7 @@
 // snapshots and quota failures degrade to a fresh datadir / persistence-off
 // with a status message — never a wedged page.
 import { run, Vfs } from './pgrust-wasi.js';
-import { formatRun, normalizeSingleUserInput } from './format.js';
+import { decodeUtf8Chunks, formatRun, normalizeSingleUserInput } from './format.js';
 import { WireSession, WireSessionDead, jspiSupported, parseMessage } from './wiresession.js';
 import { openOpfsStore, loadLatestSnapshot, saveSnapshot, clearSnapshots } from './snapshot.js';
 
@@ -139,10 +139,11 @@ async function runPreparedSql(sql) {
     onStdout: (b) => outChunks.push(b),
     onStderr: (b) => errChunks.push(b),
   });
-  const dec = new TextDecoder();
+  // Streaming decode: a multi-byte UTF-8 character (e.g. Chinese) can be split
+  // across two output chunks; one-shot per-chunk decoding garbles it (#34).
   return {
-    stdout: outChunks.map((b) => dec.decode(b)).join(''),
-    stderr: errChunks.map((b) => dec.decode(b)).join(''),
+    stdout: decodeUtf8Chunks(outChunks),
+    stderr: decodeUtf8Chunks(errChunks),
     exitCode: result.exitCode,
   };
 }
@@ -189,10 +190,11 @@ function summarizeWire(msgs) {
 async function wireQuery(sql) {
   sessionStderr = [];
   const msgs = await session.query(sql);
-  const dec = new TextDecoder();
+  // Streaming decode (#34 class): a multi-byte UTF-8 character can be split
+  // across two stderr chunks; one-shot per-chunk decoding garbles it.
   return {
     wire: summarizeWire(msgs),
-    stderr: sessionStderr.map((b) => dec.decode(b)).join(''),
+    stderr: decodeUtf8Chunks(sessionStderr),
   };
 }
 
