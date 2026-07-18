@@ -470,6 +470,44 @@ fn allocate_file_stdio_modes() {
     assert_eq!(vfd::get_errno(), libc::ENOENT);
 }
 
+// DST P1 Ruling 3 Class C regression — the SIM_FD_BASE tripwire that caught
+// the FreeDesc misroute, made permanent. AllocateFile mints its fd posix-side
+// (open_stdio, the fopen carve-out of contract §1.1), so FreeDesc must close
+// it posix-side; routing it through vfs::close makes SimVfs EBADF the foreign
+// fd (below SIM_FD_BASE), FreeFile report -1, and the posix fd leak. The
+// OpenTransientFile RawFd arm is vfs-minted and correctly stays on vfs::close.
+#[cfg(pgrust_sim)]
+#[test]
+fn allocate_file_stdio_free_closes_posix_side_not_vfs() {
+    use std::os::fd::AsRawFd;
+
+    setup();
+    let dir = scratch_dir("stdio_sim_tripwire");
+    let path = format!("{dir}/s");
+
+    let idx = crate::desc::AllocateFile(&path, "w").unwrap();
+    assert!(idx >= 0);
+    let raw = crate::desc::with_allocated_stdio(idx, |f| f.as_raw_fd()).unwrap();
+    assert!(
+        raw < vfs::sim::SIM_FD_BASE,
+        "stdio fd must be posix-minted (carve-out), got sim-domain fd {raw}"
+    );
+
+    // A vfs::close misroute EBADFs inside SimVfs and surfaces here as -1.
+    assert_eq!(
+        crate::desc::FreeFile(idx).unwrap(),
+        0,
+        "FreeDesc routed a posix-minted stdio fd through vfs::close"
+    );
+
+    // And the posix-side close really happened (pre-fix the fd leaked).
+    assert_eq!(
+        unsafe { libc::fcntl(raw, libc::F_GETFD) },
+        -1,
+        "posix fd {raw} leaked: still open after FreeFile"
+    );
+}
+
 
 // Test-process-global: resowner seams install once (seam_core forbids
 // reinstall); every test that needs an owner goes through here.
@@ -642,4 +680,94 @@ fn allocated_desc_indices_stable_across_out_of_order_free() {
 
     crate::desc::FreeFile(b).unwrap();
     with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
+}
+
+// DST P1 inc-4 fence assert: the spill/temp plane (tuplestore, tuplesort,
+// sharedtuplestore, sort_storage, spillset, nodehash) had ZERO raw fs sites
+// at the P1 census and must stay that way — all of its IO rides the fd File*
+// APIs (and therefore the VFS). A hit here means a raw syscall or std::fs
+// call crept into a sim-scoped spill path; route it through fd instead.
+#[test]
+fn dst_p1_spill_crates_have_zero_raw_fs_sites() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let spill_crates = [
+        "backend/utils/sort/tuplestore",
+        "backend/utils/sort/tuplesort",
+        "backend/utils/sort/sharedtuplestore",
+        "backend/utils/sort/sort_storage",
+        "backend/executor/spillset",
+        "backend/executor/nodehash",
+    ];
+    let needles = [
+        "std::fs::",
+        "libc::open",
+        "libc::close",
+        "libc::read",
+        "libc::write",
+        "libc::pread",
+        "libc::pwrite",
+        "libc::preadv",
+        "libc::pwritev",
+        "libc::stat",
+        "libc::fstat",
+        "libc::lstat",
+        "libc::unlink",
+        "libc::rename",
+        "libc::mkdir",
+        "libc::rmdir",
+        "libc::lseek",
+        "libc::ftruncate",
+        "libc::truncate",
+        "libc::fsync",
+        "libc::fdatasync",
+        "libc::fallocate",
+        "libc::readlink",
+        "libc::access",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for krate in spill_crates {
+        let src = root.join(krate).join("src");
+        assert!(src.is_dir(), "spill-fence census: missing {src:?}");
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read spill crate src") {
+                let path = entry.expect("dirent").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // Prod sites only: test scaffolding may build fixture dirs.
+                let p = path.to_string_lossy().into_owned();
+                if p.ends_with("/tests.rs") || p.contains("/tests/") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                for (lineno, line) in text.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    for needle in needles {
+                        if code.contains(needle) {
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                lineno + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "raw fs sites appeared in the fenced spill/temp crates:\n{}",
+        offenders.join("\n")
+    );
 }

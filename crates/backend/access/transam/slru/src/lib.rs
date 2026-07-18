@@ -736,7 +736,7 @@ pub fn SimpleLruDoesPhysicalPageExist(ctl: &SlruCtlData, pageno: i64) -> PgResul
         );
     }
 
-    let endpos = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+    let endpos = vfs::file_size(fd) as i64;
     if endpos < 0 {
         let en = current_errno();
         // C unwinds with the transient fd open; fd.c's abort cleanup owns it.
@@ -796,14 +796,10 @@ fn SlruPhysicalReadPage(
     set_errno(0);
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_SLRU_READ);
     // SAFETY: the slot's BLCKSZ bytes are ours per the buffer-lock protocol.
-    let nread = unsafe {
-        libc::pread(
-            fd,
-            ctl.shared.pages.page_ptr(slotno).cast(),
-            BLCKSZ,
-            offset as libc::off_t,
-        )
+    let page = unsafe {
+        core::slice::from_raw_parts_mut(ctl.shared.pages.page_ptr(slotno), BLCKSZ)
     };
+    let nread = vfs::pread(fd, page, offset as libc::off_t);
     if nread != BLCKSZ as isize {
         waitevent_seams::pgstat_report_wait_end::call();
         let en = if nread < 0 { current_errno() } else { 0 };
@@ -898,14 +894,10 @@ fn SlruPhysicalWritePage(
     set_errno(0);
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_SLRU_WRITE);
     // SAFETY: the slot's bytes are stable under the caller's buffer lock.
-    let nwritten = unsafe {
-        libc::pwrite(
-            fd,
-            shared.pages.page_ptr(slotno).cast_const().cast(),
-            BLCKSZ,
-            offset as libc::off_t,
-        )
+    let page = unsafe {
+        core::slice::from_raw_parts(shared.pages.page_ptr(slotno).cast_const(), BLCKSZ)
     };
+    let nwritten = vfs::pwrite(fd, page, offset as libc::off_t);
     if nwritten != BLCKSZ as isize {
         waitevent_seams::pgstat_report_wait_end::call();
         // If write didn't set errno, assume the problem is no disk space.
@@ -1273,9 +1265,7 @@ fn SlruInternalDeleteSegment(ctl: &SlruCtlData, segno: i64) -> PgResult<()> {
         .errmsg_internal(format!("removing file \"{path}\""))
         .finish(loc("SlruInternalDeleteSegment"))?;
     // SAFETY: SlruPath keeps a NUL-terminated buffer (as_c_ptr invariant).
-    unsafe {
-        libc::unlink(path.as_c_ptr().cast());
-    }
+    vfs::unlink(unsafe { core::ffi::CStr::from_ptr(path.as_c_ptr().cast()) });
     Ok(())
 }
 

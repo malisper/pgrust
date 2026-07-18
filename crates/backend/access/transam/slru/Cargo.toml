@@ -19,6 +19,9 @@ lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 file_seams = { path = "../../../storage/file/file_seams" }
+# DST P1: the SLRU transient-fd data plane rides the Vfs trait directly
+# (plain dep on the leaf vfs crate; opens stay on file_seams).
+vfs = { path = "../../../storage/file/vfs" }
 sync_seams = { path = "../../../storage/sync/sync_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 transam_xlog_seams = { path = "../transam_xlog_seams" }

@@ -4203,8 +4203,10 @@ version = "0.0.0"
 dependencies = [
  "crc32c",
  "elog",
+ "libc",
  "types_core",
  "types_error",
+ "vfs",
 ]
 
 [[package]]
@@ -5626,6 +5628,7 @@ dependencies = [
  "types_error",
  "types_resowner",
  "types_storage",
+ "vfs",
  "waitevent_seams",
  "xact_seams",
 ]
@@ -11636,6 +11639,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "vfs",
  "xact_seams",
  "zstd",
 ]
@@ -15111,6 +15115,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "vfs",
  "waitevent_seams",
  "xlogutils_seams",
 ]
@@ -16561,6 +16566,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "fd",
+ "guc_tables",
  "init_small_seams",
  "ipc_seams",
  "libc",
@@ -18182,6 +18188,13 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vfs"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "visibilitymap"
