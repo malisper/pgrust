@@ -77,6 +77,11 @@ SELECT 'pg' || 'rust' AS name, upper('postgres in rust') AS shout, regexp_replac
 SELECT data ->> 'name' AS name, (data ->> 'stars')::int AS stars FROM (VALUES ('{"name":"pgrust","stars":4200}'::jsonb)) AS repos(data);
 SELECT n, n * n AS square, sum(n * n) OVER (ORDER BY n) AS running_sum FROM generate_series(1, 8) AS n;
 WITH RECURSIVE fib(i, a, b) AS ( SELECT 1, 0::bigint, 1::bigint UNION ALL SELECT i + 1, b, a + b FROM fib WHERE i < 15 ) SELECT i, a AS fib FROM fib;
+CREATE TABLE measurement (city text, logdate date, peaktemp int) PARTITION BY RANGE (logdate);
+CREATE TABLE measurement_2024 PARTITION OF measurement FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+CREATE TABLE measurement_2025 PARTITION OF measurement FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+INSERT INTO measurement VALUES ('sf', '2024-06-01', 30), ('nyc', '2025-06-01', 33);
+SELECT tableoid::regclass AS part, city, logdate, peaktemp FROM measurement ORDER BY logdate;
 SELECT no_such_column FROM wb_tenk;
 SELECT 1 / 0 AS boom;
 INSERT INTO wb_tenk VALUES (0, 99, 'dup', 0);
@@ -125,6 +130,12 @@ grep -q 'checkpoint complete' "$WORK/wasm.err" \
 if grep -q 'panicked' "$WORK/wasm.err"; then
     miss "wasm: panic lines in stderr"
 fi
+# WASM-PARTFIX regression: declarative partitioning (relpartbound node-string
+# round trip; a pointer-width _outDatum emission dies here on wasm32).
+grep -q 'bad integer token' "$WORK/wasm.err" \
+    && miss "wasm: readfuncs datum-width regression (bad integer token)"
+grep -q 'part = "measurement_2025"' "$WORK/wasm.out" \
+    || miss "wasm: partitioned insert did not route to measurement_2025"
 
 echo "=== worker-model persistence (fresh instance, same long-lived Vfs) ==="
 PGRUST_WEB_DIR="$WEB" node --input-type=module - "$WORK/assets" <<'EOF' > "$WORK/persist.out" 2> "$WORK/persist.err"

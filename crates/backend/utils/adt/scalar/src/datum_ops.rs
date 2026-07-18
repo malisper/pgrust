@@ -190,7 +190,9 @@ pub fn datum_serialize<'mcx>(
         return Ok(());
     }
     if typbyval {
-        let raw = value.as_usize() as u64;
+        // Full 8-byte Datum word (SIZEOF_DATUM pinned to 8 on every target);
+        // as_usize() would truncate the high half on wasm32.
+        let raw = value.as_u64();
         return vec_append_bytes(out, &raw.to_ne_bytes());
     }
     if !eoh.is_null() {
@@ -223,7 +225,8 @@ pub fn datum_restore<'mcx>(mcx: Mcx<'mcx>, cursor: &mut &[u8]) -> PgResult<(Datu
                 cursor[..8].try_into().expect("datum_restore: short by-val payload"),
             );
             *cursor = &cursor[8..];
-            Ok((Datum::from_usize(raw as usize), false))
+            // from_u64: `raw as usize` would truncate the word on wasm32.
+            Ok((Datum::from_u64(raw), false))
         }
         n => {
             assert!(n > 0, "datum_restore: corrupt header {n}");
