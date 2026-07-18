@@ -10,6 +10,10 @@
 # spans REPL lines — a temp table created in one statement is read in later
 # ones, a prepared statement EXECUTEs lines later, BEGIN/UPDATE/ROLLBACK
 # spans three statements — plus error-then-recovery inside the one session.
+# The tail is the reviewer's adversarial leg (promoted from the inc1 review's
+# one-off battery): savepoints, aborted-transaction `Z E` state across lines
+# ("current transaction is aborted" on the follow-up), duplicate-key error +
+# ROLLBACK TO SAVEPOINT recovery, a second transaction, DEALLOCATE ALL.
 # The wasm arm is INTERACTIVE (each Q sent only after the previous
 # ReadyForQuery; the guest suspends on its blocking stdin read in between),
 # exercising the exact suspend/resume path the browser REPL uses.
@@ -89,6 +93,26 @@ SELECT v AS after_rollback FROM wt_tmp WHERE k = 4
 SELECT no_such FROM wt_tmp
 EXECUTE getv(2)
 SELECT 'alive after error' AS marker
+CREATE TEMP TABLE adv (k int4 PRIMARY KEY, v text)
+INSERT INTO adv VALUES (1, 'one'), (2, 'two')
+BEGIN
+SAVEPOINT sp1
+UPDATE adv SET v = 'ONE' WHERE k = 1
+SELECT 1/0
+SELECT 'dead in aborted tx' AS probe
+ROLLBACK TO SAVEPOINT sp1
+SELECT v AS after_sp_rollback FROM adv WHERE k = 1
+INSERT INTO adv VALUES (1, 'dup')
+ROLLBACK TO SAVEPOINT sp1
+COMMIT
+SELECT k, v FROM adv ORDER BY k
+BEGIN
+CREATE TEMP TABLE adv2 (x int4)
+INSERT INTO adv2 VALUES (7)
+COMMIT
+SELECT x FROM adv2
+DEALLOCATE ALL
+SELECT 'end of adversarial battery' AS fin
 SQL
 
 echo "=== assets: wasm/build.sh (initdb + pack) ==="
@@ -145,6 +169,16 @@ grep -q '^D v4$'                     "$WORK/wasm.transcript" || miss "post-ROLLB
 grep -q 'no_such'                    "$WORK/wasm.transcript" || miss "ERROR message missing"
 grep -q '^D v2$'                     "$WORK/wasm.transcript" || miss "EXECUTE after error missing (session did not recover)"
 grep -q '^D alive after error$'      "$WORK/wasm.transcript" || miss "post-error marker row missing"
+# Adversarial leg (promoted from the inc1 review battery).
+grep -q '^Z E$'                      "$WORK/wasm.transcript" || miss "aborted-transaction ReadyForQuery state (Z E) never observed"
+grep -q 'current transaction is aborted' "$WORK/wasm.transcript" || miss "follow-up-in-aborted-txn error missing"
+grep -q '^D one$'                    "$WORK/wasm.transcript" || miss "ROLLBACK TO SAVEPOINT did not undo the update"
+grep -q 'duplicate key value'        "$WORK/wasm.transcript" || miss "duplicate-key error missing"
+grep -q '^D 1|one$'                  "$WORK/wasm.transcript" || miss "post-COMMIT savepoint-battery row 1 wrong (rolled-back update leaked?)"
+grep -q '^D 2|two$'                  "$WORK/wasm.transcript" || miss "post-COMMIT savepoint-battery row 2 missing"
+grep -q '^D 7$'                      "$WORK/wasm.transcript" || miss "second-transaction temp-table row missing"
+grep -q '^C DEALLOCATE ALL$'         "$WORK/wasm.transcript" || miss "DEALLOCATE ALL tag missing"
+grep -q '^D end of adversarial battery$' "$WORK/wasm.transcript" || miss "adversarial-battery fin row missing"
 grep -q '^=== exit 0$'               "$WORK/wasm.transcript" || miss "wasm exit nonzero"
 
 if grep -q 'panicked' "$WORK/wasm.err"; then
