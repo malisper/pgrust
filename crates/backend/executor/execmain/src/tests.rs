@@ -11074,6 +11074,11 @@ mod epq_capture_w7 {
             assert_eq!(p.second_batch, 0, "drained after the handout");
             assert!(p.done_latched, "relsubs_done latched at the handout (exactly-once)");
             assert!(p.reemit_refused, "emit after end_claim = loud PgError, never a panic");
+            assert!(
+                p.empty_claim_refused,
+                "empty claim window (0..0) refuses loudly — only the exact \
+                 singleton window positions (wave-7 review finding 3)"
+            );
 
             // Latched rel: a fresh source constructs (slot still parked)
             // but stages nothing — the done latch IS source exhaustion.
