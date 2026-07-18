@@ -15,7 +15,8 @@
 #             (sanctioned surface: the fd/vfd layer — the P1 Vfs choke, §2.1)
 #   time      SystemTime / Instant / UNIX_EPOCH / .elapsed( / duration_since,
 #             plus libc::clock_gettime / gettimeofday / time
-#             (sanctioned: waiter::clock::WaiterClock + timestamp_seams, §2.2)
+#             (sanctioned: pg_clock (s2.2, the P2 authority) + the waiter
+#             park hook + the timestamp_seams API shell)
 #   rand      raw OS entropy: getrandom/getentropy/urandom, rand::/OsRng/
 #             StdRng/thread_rng/from_entropy (bare-name patterns, so
 #             libc::getrandom / libc::getentropy are caught too). Calls to
@@ -301,7 +302,7 @@ ALLOWBASE=$(basename "$ALLOWLIST")
 | awk -F'\t' -v allowbase="$ALLOWBASE" -v counts="$TMP/counts" -v summ="$TMP/summ" '
     BEGIN {
         guide["fs"]       = "route it through the fd/vfd layer (the P1 Vfs choke, docs/design/dst-and-wasm.md #2.1)"
-        guide["time"]     = "route it through waiter::clock::WaiterClock / timestamp_seams (dst-and-wasm.md #2.2)"
+        guide["time"]     = "route it through pg_clock (dst-and-wasm.md #2.2: mono_ns/wall_* leaf API; the waiter park hook and timestamp_seams API shell delegate to it)"
         guide["rand"]     = "route it through pg_strong_random (dst-and-wasm.md #2.3)"
         guide["spawn"]    = "route it through launch_backend'"'"'s spawner seam (dst-and-wasm.md #3.3)"
         guide["env"]      = "route it through the knobs registry (dst-and-wasm.md #2.5)"

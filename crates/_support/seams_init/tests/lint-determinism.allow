@@ -218,40 +218,40 @@ fs	crates/port/pg_path/src/lib.rs	5
 fs	crates/port/pg_strong_random/src/lib.rs	4
 
 # ==== time ====
-time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	bench-rig crate, not server prod
+time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	BENCH-RIG: bench-rig crate, not server prod
 time	crates/backend/access/heap/vacuumlazy/src/morsels.rs	16	INFRA-telemetry: scan-phase clock.{source,rounds,finalize,merge,ceremony}_ns counters + vtrace spans; MIXED erratum (b) resolved — no semantic deadlines here (cost-delay pacing lives in commands/vacuum, routed P2)
-time	crates/backend/access/pgrcolumnar/src/loadsort.rs	2
-time	crates/backend/access/pgrcolumnar/src/part_cache.rs	2
-time	crates/backend/access/pgrcolumnar/src/reader.rs	2
-time	crates/backend/access/pgrcolumnar/src/writer.rs	8
-time	crates/backend/access/transam/parallel/src/lib.rs	2
-time	crates/backend/commands/analyze/src/lib.rs	9
-time	crates/backend/commands/copy/src/parallel.rs	23
-time	crates/backend/commands/explain/src/lib.rs	3
-time	crates/backend/commands/prepare/src/lib.rs	2
-time	crates/backend/executor/execexpr/src/jit.rs	2
-time	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	34	telemetry Instant spans; doc s2.2 marks these for the lint allowlist
-time	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	4	telemetry Instant spans (s2.2)
+time	crates/backend/access/pgrcolumnar/src/loadsort.rs	2	INFRA-telemetry: phase counters
+time	crates/backend/access/pgrcolumnar/src/part_cache.rs	2	INFRA-telemetry: phase counters
+time	crates/backend/access/pgrcolumnar/src/reader.rs	2	INFRA-telemetry: phase counters
+time	crates/backend/access/pgrcolumnar/src/writer.rs	8	INFRA-telemetry: phase counters
+time	crates/backend/access/transam/parallel/src/lib.rs	2	TRACE-ONLY-gtrace
+time	crates/backend/commands/analyze/src/lib.rs	9	INFRA-telemetry
+time	crates/backend/commands/copy/src/parallel.rs	23	INFRA-telemetry: load-phase spans
+time	crates/backend/commands/explain/src/lib.rs	3	BOUNDARY-masked, routable: planning-duration fields (smoke field allowlist)
+time	crates/backend/commands/prepare/src/lib.rs	2	BOUNDARY-masked, routable
+time	crates/backend/executor/execexpr/src/jit.rs	2	INFRA-telemetry
+time	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	34	INFRA-telemetry: Instant spans; doc s2.2 marks these for the lint allowlist
+time	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	4	INFRA-telemetry: Instant spans (s2.2)
 time	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	4	INFRA-telemetry: ea_epoch spans; erratum (a) fixed — the 2 standing-claim-deadline sites were SEMANTIC and are routed (P2)
-time	crates/backend/executor/instrument/src/lib.rs	4
-time	crates/backend/executor/lanestitch/src/lib.rs	4
-time	crates/backend/executor/nodeagg/src/merge.rs	3
-time	crates/backend/executor/nodeagg/src/sink.rs	2
-time	crates/backend/executor/nodeagg/src/spankey.rs	4
-time	crates/backend/executor/runtime/src/lib.rs	4	telemetry; runtime is a sanctioned blocking hub (s2.2/s3.3)
-time	crates/backend/lib/dshash/bench/rig/src/main.rs	11	bench-rig crate, not server prod
-time	crates/backend/postmaster/bgworker/src/lib.rs	2
-time	crates/backend/postmaster/syslogger/src/lib.rs	1
+time	crates/backend/executor/instrument/src/lib.rs	4	BOUNDARY-masked, routable: EXPLAIN ANALYZE actual-time anchors (smoke field allowlist)
+time	crates/backend/executor/lanestitch/src/lib.rs	4	INFRA-telemetry
+time	crates/backend/executor/nodeagg/src/merge.rs	3	INFRA-telemetry: spans
+time	crates/backend/executor/nodeagg/src/sink.rs	2	INFRA-telemetry: spans
+time	crates/backend/executor/nodeagg/src/spankey.rs	4	INFRA-telemetry: spans
+time	crates/backend/executor/runtime/src/lib.rs	4	INFRA-telemetry; runtime is a sanctioned blocking hub (s2.2/s3.3)
+time	crates/backend/lib/dshash/bench/rig/src/main.rs	11	BENCH-RIG: bench-rig crate, not server prod
+time	crates/backend/postmaster/bgworker/src/lib.rs	2	TRACE-ONLY-gtrace
+time	crates/backend/postmaster/syslogger/src/lib.rs	1	INFRA-telemetry: logfile-name stamps; cheap to route later, not now
 time	crates/backend/postmaster/walsummarizer/src/lib.rs	1	P1-VFS-lane: file-mtime duration_since, virtualizes via SimVfs metadata (census note (d)); retention-cutoff site routed (P2)
 time	crates/backend/tcop/postgres/src/lib.rs	1	INFRA-telemetry: ShowUsage rusage/gettimeofday; the private get_current_timestamp duplicate deduped onto timestamp_seams (census (c), P2)
-time	crates/backend/tcop/postgres/src/stmt_trace.rs	3
-time	crates/backend/utils/activity/pgstat/src/lib.rs	4
-time	crates/backend/utils/adt/pg_locale/src/locale_time.rs	1
-time	crates/backend/utils/cache/relcache/src/initfile.rs	6
-time	crates/backend/utils/init/postinit/src/lib.rs	2
-time	crates/backend/utils/misc/guc/src/layers.rs	2
-time	crates/backend/utils/misc/guc/src/store.rs	6
-time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1
+time	crates/backend/tcop/postgres/src/stmt_trace.rs	3	INFRA-telemetry
+time	crates/backend/utils/activity/pgstat/src/lib.rs	4	BOUNDARY-masked, routable: stats snapshot timestamps (smoke field allowlist)
+time	crates/backend/utils/adt/pg_locale/src/locale_time.rs	1	INFRA-telemetry: locale boot probe
+time	crates/backend/utils/cache/relcache/src/initfile.rs	6	INFRA-telemetry
+time	crates/backend/utils/init/postinit/src/lib.rs	2	TRACE-ONLY-gtrace
+time	crates/backend/utils/misc/guc/src/layers.rs	2	INFRA-telemetry
+time	crates/backend/utils/misc/guc/src/store.rs	6	INFRA-telemetry
+time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1	INFRA-telemetry
 time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
 
 # ==== rand ====
