@@ -974,10 +974,53 @@ fn show_tcp_user_timeout() -> String {
 /// Install the socket-half seams and this file's GUC slots. Kept apart from
 /// [`crate::init_seams`]: test binaries that stub the transport install that
 /// one alone.
+///
+/// P4 split (wasm-net-seam worklog §8 pin): the listen/accept pair moved
+/// HERE from `crate::init_seams` — the postmaster-side transport half is
+/// provider-owned exactly like the per-connection half, so a SimNet
+/// provider can install its own virtual accept pair into the same
+/// set-once slots.
 pub fn init_socket_seams() {
     pqcomm_seams::pq_init::set(pq_init);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
     be_secure_seams::set_port_noblock::set(set_port_noblock);
+
+    pqcomm_seams::accept_connection::set(|server_fd| {
+        let mut cs = types_startup::ClientSocket {
+            sock: types_core::PGINVALID_SOCKET,
+            raddr: ip::SockAddr::zeroed(),
+        };
+        if AcceptConnection(server_fd, &mut cs) == types_core::STATUS_OK {
+            Ok(cs)
+        } else {
+            Err(Box::new(types_error::PgError::new(
+                types_error::LOG,
+                "could not accept new connection",
+            )))
+        }
+    });
+    pqcomm_seams::listen_server_port::set(
+        |hostname, port, unix_socket_dir, listen_sockets, max_listen| {
+            let family =
+                if unix_socket_dir.is_some() { ip::sys::AF_UNIX } else { ip::sys::AF_UNSPEC };
+            let status = ListenServerPort(
+                family,
+                hostname,
+                port,
+                unix_socket_dir,
+                listen_sockets,
+                max_listen,
+            )?;
+            if status == types_core::STATUS_OK {
+                Ok(())
+            } else {
+                Err(Box::new(types_error::PgError::new(
+                    types_error::WARNING,
+                    "could not create listen socket",
+                )))
+            }
+        },
+    );
 
     init_socket_gucs();
 }
