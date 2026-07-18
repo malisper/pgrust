@@ -7,12 +7,20 @@
 //! installed ([`hooks::installed`] = None) every op degrades to the plain
 //! std call — today's sim binaries are byte-for-byte unaffected.
 //!
-//! Soundness of the enqueue-then-park protocol: under the permit exactly one
-//! thread is runnable, and a wrapper enqueues itself BEFORE it parks
-//! (`block_on`), with no other thread able to run in between — so a notify
-//! or unlock can never race into the gap (no lost wakes by construction).
-//! Blocking ops are predicate loops around `block_on`: a spurious permit
-//! grant re-checks and re-parks.
+//! Soundness of the wait protocol (CHECK-BEFORE-PARK): a `wake` targeting a
+//! thread that is not parked (e.g. one preempted at a seeded `touch`) may be
+//! DROPPED by the scheduler, so a wrapper must never park unless its wait
+//! predicate still holds. Every blocking op is a predicate loop that checks
+//! its wait condition IMMEDIATELY BEFORE `block_on`/`timed_park`, with no
+//! hook call between the check and the park (the caller holds the permit
+//! across that gap, so no waker can run in it), and every waker falsifies
+//! the predicate (removes the wakee from the wait list) BEFORE its `wake`
+//! fires. This matters concretely for Condvar waits: the guard drop between
+//! enqueue and park embeds unlock hooks (pick/wake/touch — a preemption
+//! point), so a notify can consume the enqueued waiter before it ever
+//! parks; check-before-park turns that into an immediate return instead of
+//! a lost wake (adversarial-review finding BLOCKING-1, 2026-07-18). A
+//! spurious permit grant re-checks and re-parks.
 //!
 //! Composites (Barrier / Once / OnceLock / mpsc — and lib.rs's Semaphore /
 //! ParkLot) are built OVER the wrapped Mutex/Condvar, so their blocking is
@@ -275,14 +283,21 @@ impl Condvar {
                 // permit, so no notifier can run in the gap.
                 self.waiters.enqueue(v);
                 let lock = guard.lock;
+                // The guard drop embeds unlock hooks (pick/wake/touch — a
+                // preemption point): a notifier may run, and consume this
+                // waiter, BEFORE the first park; its wake would then target
+                // a runnable thread and be dropped. Check-before-park.
                 drop(guard); // sim unlock: seeded next-holder wake + touch
                 loop {
-                    h.block_on(site, OpClass::CondWait);
-                    // Consumed by a notify pick (no longer queued) => woken.
-                    // Still queued => spurious grant; re-park.
+                    // Consumed by a notify pick (no longer queued) => woken,
+                    // possibly before we ever parked. Still queued =>
+                    // (re-)park. No hook sits between this check and
+                    // `block_on`, and the permit is held across the gap, so
+                    // no notify can land in it.
                     if !still_queued(&self.waiters, v) {
                         break;
                     }
+                    h.block_on(site, OpClass::CondWait);
                 }
                 lock.lock_at(site)
             }
@@ -316,18 +331,33 @@ impl Condvar {
                 let v = h.current_vpid();
                 self.waiters.enqueue(v);
                 let lock = guard.lock;
+                // Same check-before-park protocol as `wait` (the guard drop
+                // is a preemption point; see there).
                 drop(guard);
                 let deadline = h.now_ns().saturating_add(dur.as_nanos() as u64);
                 let timed_out = loop {
-                    let remaining = deadline.saturating_sub(h.now_ns());
-                    let expired = h.timed_park(site, Duration::from_nanos(remaining));
-                    if !still_queued(&self.waiters, v) {
-                        break false; // notify pick consumed us
+                    let now = h.now_ns();
+                    if now >= deadline {
+                        // Deadline reached before (re-)parking: leave the
+                        // queue. cancel = false means a notify already
+                        // consumed us — the queue is the truth, not the
+                        // clock: report notified.
+                        break self.waiters.cancel(v);
                     }
-                    if expired || h.now_ns() >= deadline {
+                    if !still_queued(&self.waiters, v) {
+                        break false; // notify pick consumed us (maybe pre-park)
+                    }
+                    // No hook sits between the check above and this park
+                    // (permit held across the gap): no notify can land in it.
+                    let expired = h.timed_park(site, Duration::from_nanos(deadline - now));
+                    if !still_queued(&self.waiters, v) {
+                        break false; // notified (even if the clock also expired)
+                    }
+                    if expired {
                         self.waiters.cancel(v);
                         break true;
                     }
+                    // Spurious grant before the deadline: re-check, re-park.
                 };
                 match lock.lock_at(site) {
                     Ok(g) => Ok((g, WaitTimeoutResult(timed_out))),

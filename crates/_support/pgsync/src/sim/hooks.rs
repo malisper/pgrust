@@ -26,9 +26,22 @@
 //!   permit (i.e. after some `wake(vpid)` named it, or — for `timed_park` —
 //!   after the virtual deadline). Wrappers call it in a PREDICATE LOOP and
 //!   re-check their condition on return, so a spurious grant is safe.
-//! - Under the permit there is exactly one runnable thread: a wrapper that
-//!   enqueues itself and THEN parks cannot lose a wake (no other thread runs
-//!   in the gap).
+//! - Permit transfer happens ONLY at `block_on` / `timed_park` (parks) and,
+//!   optionally + seeded, at `touch` (preemption). The query hooks
+//!   (`pick_waiter`, `current_vpid`, `now_ns`) and `wake` never yield the
+//!   permit.
+//! - `wake(vpid)` MAY BE DROPPED when the target is not parked (e.g. it was
+//!   preempted at a `touch` and is already runnable). Wrappers therefore use
+//!   CHECK-BEFORE-PARK: a waker falsifies the wait predicate (removes the
+//!   wakee from the wait list) BEFORE calling `wake`, and a waiter re-checks
+//!   its predicate immediately before every park, with no hook call in the
+//!   check→park gap (the permit is held across it, so no waker can run
+//!   there). NOTE this corrects the originally pinned claim that
+//!   enqueue-then-park alone cannot lose a wake — false when a hook sits in
+//!   the gap (Condvar's unlock does; adversarial review BLOCKING-1,
+//!   2026-07-18). Doc-only correction by WS-SYNC; the trait surface is
+//!   unchanged and the wording matches the WS-CORE scheduler's shipped
+//!   behavior (wake on a runnable slot is a no-op).
 //! - `timed_park` returns `true` when the virtual deadline expired (the
 //!   caller decides timeout vs notified by consulting its wait list).
 //! - `pick_waiter(site, n)` returns an index in `0..n` drawn from

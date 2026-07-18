@@ -39,9 +39,11 @@ aio_seams = { path = "../../storage/aio/aio_seams" }
 # Loom is cfg-gated, not feature-gated, so release binaries can never link
 # it: build the models with
 #   RUSTFLAGS="--cfg loom" cargo test -p runtime --test loom --release
-# Post-pgsync note: src/ no longer touches loom directly (pgsync is the only
-# cfg site); this row survives solely for tests/loom.rs model Builders and
-# migrates at the loom-breadth reconciliation (tests/loom.rs is fenced).
+# Post-pgsync note: sync-TYPE selection lives in pgsync, but this row is
+# still LOAD-BEARING FOR src/: rg.rs keeps its pre-existing cfg(loom) wait()
+# polyfill (loom::thread::yield_now; outside the s1 §2.4 migration scope).
+# tests/loom.rs model Builders also use it; the loom-breadth reconciliation
+# migrates the fenced models (tests/loom.rs is fenced).
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
