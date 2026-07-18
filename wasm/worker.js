@@ -8,7 +8,7 @@
 // next Run boots over the mutated datadir and sees them — REPL-style state.
 // `reset` rebuilds the VFS from the pristine packed image (fresh initdb'd dir).
 import { run, Vfs } from './pgrust-wasi.js';
-import { formatRun, normalizeSingleUserInput } from './format.js';
+import { decodeUtf8Chunks, formatRun, normalizeSingleUserInput } from './format.js';
 
 let wasmModule = null;
 let baseImage = null;     // immutable packed file bytes (the pristine template)
@@ -104,10 +104,11 @@ async function runPreparedSql(sql) {
     onStdout: (b) => outChunks.push(b),
     onStderr: (b) => errChunks.push(b),
   });
-  const dec = new TextDecoder();
+  // Streaming decode: a multi-byte UTF-8 character (e.g. Chinese) can be split
+  // across two output chunks; one-shot per-chunk decoding garbles it (#34).
   return {
-    stdout: outChunks.map((b) => dec.decode(b)).join(''),
-    stderr: errChunks.map((b) => dec.decode(b)).join(''),
+    stdout: decodeUtf8Chunks(outChunks),
+    stderr: decodeUtf8Chunks(errChunks),
     exitCode: result.exitCode,
   };
 }

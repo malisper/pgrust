@@ -185,6 +185,25 @@ export function stripLogPrefix(line) {
   return line.replace(LOG_LINE_PREFIX_RE, '');
 }
 
+// decodeUtf8Chunks — join a list of UTF-8 byte chunks into one string.
+//
+// The wasm module's stdout/stderr arrive as raw byte chunks whose boundaries
+// fall wherever the guest's write() calls happen — which can be in the MIDDLE
+// of a multi-byte UTF-8 character (Chinese text is 3 bytes per character, for
+// example). Decoding each chunk with its own one-shot TextDecoder turns such
+// a split character into U+FFFD replacement garbage (public issue #34: garbled
+// Chinese column headers on the web demo). A single decoder in streaming mode
+// ({stream: true}) instead carries the trailing partial character over to the
+// next chunk; the final argument-less decode() flushes anything left over at
+// end-of-stream (an incomplete trailing sequence then becomes U+FFFD, which is
+// the correct lossy behavior for genuinely truncated output).
+export function decodeUtf8Chunks(chunks) {
+  const dec = new TextDecoder();
+  let out = '';
+  for (const b of chunks) out += dec.decode(b, { stream: true });
+  return out + dec.decode();
+}
+
 // formatRun — produce the full block a Run should show: the formatted table /
 // command output, PLUS any ERROR/WARNING/NOTICE lines (the single-user backend
 // writes these to STDERR, so a failing query otherwise renders as blank). This
