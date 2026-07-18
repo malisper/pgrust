@@ -239,11 +239,18 @@ pub(crate) fn gather_merge_ensure_launched<'mcx>(
         // WS-O width lease (default-OFF knob; fail-open paths leave the
         // launch untouched) — the Gather seam, shared.
         debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
-        node.width_lease =
+        let (lease, face) =
             crate::nodegather::lease_gather_width(pei.pcxt, gm.num_workers);
+        node.width_lease = lease;
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
         crate::nodegather::settle_gather_width(&mut node.width_lease, node.nworkers_launched);
+        crate::nodegather::mirror_gather_width(
+            face,
+            gm.num_workers,
+            &node.width_lease,
+            node.nworkers_launched,
+        );
         execparallel::account_workers(estate, pei.pcxt);
 
         if node.nworkers_launched > 0 {

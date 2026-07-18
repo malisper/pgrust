@@ -43,6 +43,40 @@
 mod blocking;
 mod clock;
 mod ledger;
+
+/// PHASE3-CLOSE WS-WIDTH: whether non-pool gangs (Gather/GatherMerge
+/// bgworker gangs now; index gangs / CREATE INDEX / vacuum's parallel
+/// index phase later, per morsel-runtime-v2 §4) lease width from the
+/// admission ledger's pool face. Resolved by [`gang_width_face`] — ONE
+/// OnceLock read (§2.6 knob-OFF budget pin: the gather startup path costs
+/// ONE OnceLock bool read knob-OFF). The WS-O external arm and its knob
+/// were retired by the W4 audited removal (the knob died with the body;
+/// see notes/se-p3close-width.md §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GangWidthFace {
+    /// Knob off (the stock default): no lease, today's launch.
+    Off,
+    /// `PGRUST_RUNTIME_WIDTH_UNIFIED` — unified pool-face gang entries
+    /// (requires `PGRUST_RUNTIME_LEDGER_V2` downstream; the fail-open
+    /// ladder: face off / no runtime / ledger off / capacity exhausted →
+    /// stock launch byte-exactly).
+    Unified,
+}
+
+/// The one process-static gang-knob resolve (see [`GangWidthFace`]).
+pub fn gang_width_face() -> GangWidthFace {
+    static KNOB: std::sync::OnceLock<GangWidthFace> = std::sync::OnceLock::new();
+    *KNOB.get_or_init(|| {
+        if matches!(
+            std::env::var("PGRUST_RUNTIME_WIDTH_UNIFIED").as_deref(),
+            Ok("1") | Ok("on")
+        ) {
+            GangWidthFace::Unified
+        } else {
+            GangWidthFace::Off
+        }
+    })
+}
 mod lifecycle;
 mod morsel;
 mod rg;
@@ -305,14 +339,18 @@ impl Runtime {
         self.sched.ledger.snapshot()
     }
 
-    /// WS-O (wave 2): lease EXTERNAL parallel width for a non-pool gang
-    /// (Gather's bgworker helpers) through the admission ledger's external
-    /// face. `requested` is denominated in WORKERS — the LEADER IS NOT
-    /// COUNTED (inc-1 C parity; parallel_leader_participation rides free).
+    /// Lease parallel width for a non-pool gang (Gather's bgworker
+    /// helpers) through the admission ledger. `requested` is denominated
+    /// in WORKERS — the LEADER IS NOT COUNTED (C parity;
+    /// parallel_leader_participation rides free). THE STABLE CALLER FACE
+    /// (PHASE3-CLOSE §2.1): backed by a unified pool-face gang entry
+    /// (frozen, non-shedding, charged by the ONE recompute) — the ONLY
+    /// leased path since the W4 removal of the WS-O external face.
     ///
     /// None = FAIL-OPEN: the ledger is OFF (`PGRUST_RUNTIME_LEDGER_V2`
-    /// unset / per-instance toggle off) or the 64-entry external cap is
-    /// full — the caller keeps today's uncapped launch path exactly.
+    /// unset / per-instance toggle off) or the gang capacity (64) is
+    /// exhausted — the caller keeps today's uncapped launch path exactly
+    /// (never block, never error).
     ///
     /// Some(lease): launch at most [`ParallelWidthLease::granted`] workers.
     /// **The grant MAY BE 0 — the caller MUST have a serial path** (e.g.
@@ -322,7 +360,7 @@ impl Runtime {
     /// gang width is released (granted counts ACTIVE width — the
     /// composition rule). Dropping the lease retires the entry.
     pub fn lease_parallel_width(self: &Arc<Self>, requested: u32) -> Option<ParallelWidthLease> {
-        let (id, granted) = self.sched.lease_external_width(requested)?;
+        let (id, granted) = self.sched.lease_gang_width(requested)?;
         Some(ParallelWidthLease { rt: Arc::clone(self), id, granted })
     }
 
@@ -721,12 +759,13 @@ fn sched_park(sched: &sched::Scheduler, seen: u64) {
     sched.park.park(seen);
 }
 
-/// RAII width lease for an EXTERNAL parallel gang (WS-O wave 2; see
-/// [`Runtime::lease_parallel_width`]). Holds one ledger external entry:
-/// the grant is a frozen headroom-only ceiling ([`ParallelWidthLease::granted`]
-/// may be 0 — the caller must have a serial path); [`ParallelWidthLease::settle`]
-/// tracks the ACTIVE width within it; drop retires the entry and returns
-/// the width to the pool.
+/// RAII width lease for a non-pool parallel gang (WS-O wave 2, retargeted
+/// by PHASE3-CLOSE WS-WIDTH; see [`Runtime::lease_parallel_width`]).
+/// Holds one unified pool-face gang entry: the grant is a frozen
+/// headroom-only ceiling ([`ParallelWidthLease::granted`] may be 0 — the
+/// caller must have a serial path); [`ParallelWidthLease::settle`] tracks
+/// the ACTIVE width within it; drop retires the entry and returns the
+/// width to the pool.
 pub struct ParallelWidthLease {
     rt: Arc<Runtime>,
     id: usize,
@@ -740,6 +779,13 @@ impl ParallelWidthLease {
         self.granted
     }
 
+    /// Engine-of-record for the §2.4 width mirror (post-W4 there is one
+    /// leased engine; "fail-open" is the no-lease arm, printed by the
+    /// mirror itself).
+    pub fn engine(&self) -> &'static str {
+        "unified"
+    }
+
     /// Record the gang's ACTIVE width (launched/live workers ≤ granted;
     /// parked workers hold no grant). Callable repeatedly — launch,
     /// rescan relaunch, partial exit.
@@ -749,13 +795,13 @@ impl ParallelWidthLease {
             "settling above the frozen grant ({active} > {})",
             self.granted
         );
-        self.rt.sched.settle_external_width(self.id, active.min(self.granted));
+        self.rt.sched.settle_gang_width(self.id, active.min(self.granted));
     }
 }
 
 impl Drop for ParallelWidthLease {
     fn drop(&mut self) {
-        self.rt.sched.retire_external_width(self.id);
+        self.rt.sched.retire_gang_width(self.id);
     }
 }
 
