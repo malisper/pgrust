@@ -1276,21 +1276,39 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     snapmgr::RestoreTransactionSnapshot(tsource, shared.parallel_leader_proc_number)?;
     snapmgr::PushActiveSnapshot(&asnapshot)?;
 
-    if init_small::wretain::warm_claim() && !shared.leader_pending_invals {
+    if init_small::wretain::warm_claim()
+        && !shared.leader_pending_invals
+        && !init_small::wretain::caches_tainted()
+    {
         // Retention warm claim: caches were drained against the shared queue
         // at InitPostgres (postinit warm arm); a second cheap drain here
         // covers messages that arrived since. C's blanket invalidation is
         // only needed for a fresh process's incidentally-mistimed cache
         // loads — or for the leader's own uncommitted DDL, which forces the
-        // fallback arm below.
+        // fallback arm below (both for THIS task's binding and, via the
+        // taint, for a PREVIOUS task's: see note_caches_tainted below).
         gtrace("w.retain.inval.begin");
         inval::local::AcceptInvalidationMessages()?;
         gtrace("w.retain.inval.drained");
     } else {
         gtrace("w.cold.inval.begin");
         inval::local::InvalidateSystemCaches()?;
+        init_small::wretain::clear_caches_taint();
     }
     gtrace("w.inval.done");
+    if shared.leader_pending_invals {
+        // This task binds a transaction with unbroadcast (uncommitted-DDL)
+        // invalidation messages: cache entries built during it hold
+        // uncommitted catalog state. If that transaction ABORTS, no sinval
+        // traffic ever corrects them — C's per-query worker process dies
+        // here, and parallel.c:1513 blankets every fresh start — so a
+        // retained thread must re-run the blanket at its next claim instead
+        // of trusting the drain. Without this, a rolled-back TRUNCATE left a
+        // parked worker's relcache pointing at the aborted relfilelocator,
+        // tripping table_beginscan_parallel's locator assert (tableam.c:172
+        // parity) on the next parallel scan of that table.
+        init_small::wretain::note_caches_tainted();
+    }
 
     // A retained thread keeps its previous task's session GUCs (a C worker
     // is a fresh process; RestoreGUCState overlays postmaster state only);

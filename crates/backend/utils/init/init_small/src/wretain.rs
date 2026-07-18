@@ -48,6 +48,21 @@ thread_local! {
     // re-enter proc_exit and run later callbacks without the park arm).
     static RETAINED_PROC: Cell<bool> = const { Cell::new(false) };
     static RETAINED_SINVAL: Cell<bool> = const { Cell::new(false) };
+    // This thread's caches were (re)built while bound to a leader transaction
+    // holding UNBROADCAST invalidation messages (leader_pending_invals =
+    // uncommitted DDL): entries loaded during that task reflect uncommitted
+    // catalog state. If that transaction later ABORTS, no sinval traffic ever
+    // corrects them — an aborted transaction broadcasts nothing, because in
+    // C every backend that could have cached its uncommitted state is dead by
+    // then (parallel workers are per-query processes; parallel.c runs
+    // InvalidateSystemCaches() on every fresh start). A retained thread
+    // outlives the query, so the poison survives the abort: shipped instance,
+    // the tableam.c:172 locator assert (table_beginscan_parallel) tripping on
+    // a worker whose relcache still held a rolled-back TRUNCATE's
+    // relfilelocator. Survives begin_task/confirm_parked; cleared only when a
+    // claim-side blanket InvalidateSystemCaches actually runs (or the
+    // identity retires).
+    static CACHES_TAINTED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn begin_task(candidate: bool) {
@@ -127,6 +142,23 @@ pub fn confirm_parked() -> bool {
     parked
 }
 
+/// The current task bound a transaction with unbroadcast invalidation
+/// messages (leader_pending_invals): cache entries built from here on may
+/// hold uncommitted catalog state that an abort will never invalidate.
+pub fn note_caches_tainted() {
+    CACHES_TAINTED.set(true);
+}
+
+pub fn caches_tainted() -> bool {
+    CACHES_TAINTED.get()
+}
+
+/// A claim-side blanket InvalidateSystemCaches ran: the poison (if any) is
+/// flushed and the warm drain is trustworthy again.
+pub fn clear_caches_taint() {
+    CACHES_TAINTED.set(false);
+}
+
 pub fn set_retained_db(dboid: Oid) {
     RETAINED_DB.set(dboid);
 }
@@ -147,4 +179,5 @@ pub fn clear_identity() {
     CANDIDATE.set(false);
     WARM_CLAIM.set(false);
     PARKING.set(false);
+    CACHES_TAINTED.set(false);
 }
