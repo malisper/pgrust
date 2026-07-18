@@ -856,6 +856,115 @@ pub(super) fn pull_step_point<'mcx, S: RowSource<'mcx>>(
     src.next_row(node, estate)
 }
 
+// --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) ------
+//
+// §1's budget-N emit sink, substrate half. `ExecutorRun(Forward, N)` installs
+// a per-run emission budget on the ESTATE (`es_cursor_run_budget`): the run
+// seam (`execmain.rs::execute_plan`) computes it here and writes the field
+// UNCONDITIONALLY at run entry, so the budget is per-run by construction,
+// nested-ExecutorRun-safe (SPI inside a FETCH runs on its own estate) and
+// unwind-safe with no guard. Estate-resident rather than thread_local by
+// the TLS-census-zero law (contract §8 law 8; the session TLS census pin
+// stays 479) — and it is the shape C itself uses for per-run state
+// (es_direction/es_processed).
+//
+// ENFORCEMENT HONESTY (recorded, not hidden): the capacity-one `RootAdapter`
+// already pauses the pipeline after EVERY emitted tuple (`SinkFeed::Full` →
+// `OpStatus::Paused`, position node-resident), and the run loop above
+// (`execute_plan`'s `number_tuples` check — C's own ExecutePlan enforcement)
+// stops the drive at exactly N pulls. Budget-zero ⇒ Paused is therefore
+// STRUCTURAL today: no per-accept budget decrement is wired in inc-1
+// (a per-tuple field test on the knob-OFF hot path would break the
+// instruction-invisibility law for zero behavior). The installed budget is
+// the cross-module signal the park/settle glue (§2, inc-1b) and the
+// single-executor push-drive endgame read; when the emit face is driven as
+// a push sink (capacity > 1), the decrement moves INTO `RootAdapter::accept`
+// and this field is its source of truth.
+//
+// §3 serial law (the ported execmain.rs:978 gate — `use_parallel_mode` only
+// when `!already_executed && count == 0`): every count-limited run is DOP-1
+// caller-as-worker. `cursor_run_budget_install` is FAIL-CLOSED on a parallel
+// run (returns None, arming nothing) — a suspended portal can never park a
+// gang because a budgeted run never has one. FETCH_ALL first runs
+// (count == 0) install no budget and keep C's parallel eligibility; a
+// count-0 run never suspends mid-gang (it runs to exhaustion inside one
+// ExecutorRun). The unit pins live in `crate::tests` (WS-AI wave-9 region).
+
+use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
+/// `PGRUST_LANE_V2_CURSORS` (default OFF; R-KNOBS registry spelling): the
+/// forward-pull cursor gate. OFF = the run seam installs no budget and every
+/// byte of the run path behaves as today (the install call short-circuits on
+/// `count == 0` before reaching this cell, so simple-query runs never even
+/// load it). ON = count-limited forward SELECT runs carry a per-run emission
+/// budget for the cursor machinery to read. AtomicU8 + `_set_for_tests`
+/// idiom (heapfeed precedent, batch_source.rs).
+static CURSORS: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn cursors_v2_enabled() -> bool {
+    match CURSORS.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_CURSORS").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            CURSORS.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn cursors_set_for_tests(on: bool) {
+    CURSORS.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// The run seam's install half (`execute_plan`, once per ExecutorRun):
+/// computes the value of `es_cursor_run_budget` for this run —
+/// `Some(count)` iff this run is a knob-ON, count-limited, forward SELECT:
+/// the §3.1 count-exact suspension shape. The caller writes the result to
+/// the estate UNCONDITIONALLY (a None overwrites any stale value, so an
+/// estate re-run after an error can never inherit a budget). Gate order is
+/// the cost order: `count == 0` (every simple-protocol run) answers with
+/// one register test before the knob cell is ever loaded.
+///
+/// FAIL-CLOSED serial-law arm: `use_parallel_mode` is false for every
+/// count-limited run by the ported :978 gate; if that gate ever regressed,
+/// this returns None (no cursor machinery over a gang, ever) rather than
+/// asserting — the corpus batteries would then read the missing engagement
+/// loudly instead of a debug-only crash.
+pub(crate) fn cursor_run_budget_install(
+    is_select: bool,
+    forward: bool,
+    count: u64,
+    use_parallel_mode: bool,
+) -> Option<u64> {
+    if count == 0 || !is_select || !forward {
+        return None;
+    }
+    if !cursors_v2_enabled() {
+        return None;
+    }
+    if use_parallel_mode {
+        // Unreachable by the :978 gate (count != 0 forces serial); the
+        // fail-closed refusal IS the §3 pin at this seam.
+        return None;
+    }
+    Some(count)
+}
+
+/// The read half for lane-side consumers (the §2 park/settle glue, inc-1b):
+/// the emission budget of the current run, None outside a budgeted one.
+#[allow(dead_code)] // first non-test consumer = the inc-1b park walker
+pub(crate) fn cursor_run_budget(estate: &::executils::EStateData<'_>) -> Option<u64> {
+    estate.es_cursor_run_budget
+}
+
+// --- end WS-AI wave-9 ----------------------------------------------------------
+
 // =============================================================================
 // Row-mode driver mechanics (pull_step_rows over stub source/op): the driver
 // contract itself — resume-before-produce ordering, Paused-then-Finished,

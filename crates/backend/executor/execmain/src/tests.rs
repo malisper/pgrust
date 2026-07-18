@@ -11490,5 +11490,166 @@ mod rowchain_wave9_ag {
 }
 // --- end WS-AG (wave-9) ------------------------------------------------------
 // --- WS-AH (wave-9): reserved ---
-// --- WS-AI (wave-9): reserved ---
+// --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) -------
+// Unit pins for the §1 budget-N emit-sink substrate: the run-seam budget
+// install gates (incl. the §3 serial-law fail-closed arm), the estate-
+// resident install + None-overwrite law, count-exact stop, and forward
+// resume across two count-limited `execute_plan` drives on one ExecData —
+// the portal FETCH cadence at the unit level, byte-compared against the
+// knob-OFF oracle. Serialization: the exec-fixture test holds
+// scanfix::TEST_LOCK for its full span (wave-2 precedent-3); the knob
+// lever is set explicitly at every test start (process-global static).
+mod cursors_wave9 {
+    use super::*;
+
+    /// The install gate is the §3.1 count-exact suspension shape and
+    /// nothing else: knob-ON AND count != 0 AND forward AND SELECT AND
+    /// serial. The `use_parallel_mode` arm is the §3 serial-law pin at
+    /// this seam — FAIL-CLOSED (no budget over a gang, ever), unreachable
+    /// in production by the ported execmain.rs:978 gate (count != 0
+    /// forces serial).
+    #[test]
+    fn cursors_w9_budget_gate_semantics() {
+        let install = crate::lanev2::cursor_run_budget_install;
+
+        // Knob OFF (default posture): nothing installs, any shape.
+        crate::lanev2::cursors_set_for_tests(false);
+        assert_eq!(install(true, true, 92001, false), None, "knob-OFF installs nothing");
+        assert_eq!(install(true, true, 1, false), None);
+
+        // Knob ON: exactly the count-limited forward serial SELECT shape.
+        crate::lanev2::cursors_set_for_tests(true);
+        assert_eq!(install(true, true, 92001, false), Some(92001), "the §3.1 shape installs");
+        assert_eq!(install(true, true, 0, false), None, "count-0 (FETCH_ALL) never installs");
+        assert_eq!(install(false, true, 92001, false), None, "non-SELECT never installs");
+        assert_eq!(install(true, false, 92001, false), None, "non-forward never installs");
+        assert_eq!(
+            install(true, true, 92001, true),
+            None,
+            "serial-law pin: a parallel run NEVER carries a budget (fail-closed)"
+        );
+
+        crate::lanev2::cursors_set_for_tests(false);
+    }
+
+    /// The run seam writes `es_cursor_run_budget` UNCONDITIONALLY at every
+    /// `execute_plan` entry: a knob-ON count-2 drive installs Some(2),
+    /// stops count-exact, and the SAME ExecData resumes forward from the
+    /// node-resident position on the next drive (the portal FETCH cadence);
+    /// the count-0 follow-up run overwrites the budget to None (no stale
+    /// budget survives). Rows across both drives are byte-identical to the
+    /// knob-OFF oracle pair below (fail-open discipline: the budget is a
+    /// signal, never a semantics change).
+    #[test]
+    fn cursors_w9_budgeted_run_installs_stops_exact_and_resumes() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        // Two knob arms over the identical table shape (band-92001 relids).
+        let mut arm_rows: Vec<Vec<i32>> = Vec::new();
+        for (arm_on, relid) in [(false, 92001u32), (true, 92002u32)] {
+            crate::lanev2::cursors_set_for_tests(arm_on);
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                assert_eq!(
+                    data.estate.es_cursor_run_budget, None,
+                    "fresh estate carries no budget"
+                );
+
+                let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+                let h = tuplestore::hold::register(store);
+                let mut dr = tstore_receiver::tstore_create_DR();
+                tstore_receiver::set_params(&mut dr, h, false);
+                let mut dest = DestReceiver::Tuplestore(dr);
+
+                // Drive 1: FETCH 2 (count-limited forward SELECT, serial).
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    2,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 2, "count-exact stop");
+                assert_eq!(
+                    crate::lanev2::cursor_run_budget(&data.estate),
+                    if arm_on { Some(2) } else { None },
+                    "budget installed iff knob-ON (read through the consumer face)"
+                );
+
+                // Drive 2: FETCH ALL (count 0) resumes from the node-resident
+                // position and overwrites the budget to None on BOTH arms.
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    0,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 3, "resume served the remainder");
+                assert_eq!(
+                    data.estate.es_cursor_run_budget, None,
+                    "count-0 run overwrote the budget (no stale Some survives)"
+                );
+
+                let read_cx: &'static MemoryContext =
+                    Box::leak(Box::new(MemoryContext::new("read")));
+                let mut slot = exectuples::make_tuple_table_slot(
+                    read_cx.mcx(),
+                    ::types_slot::TupleSlotKind::MinimalTuple,
+                    Some(desc.clone()),
+                );
+                loop {
+                    let got = tuplestore::hold::with_store(h, |ts| {
+                        ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+                    })
+                    .unwrap();
+                    if !got {
+                        break;
+                    }
+                    let mut isnull = false;
+                    let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+                    assert!(!isnull);
+                    rows.push(v.as_i32());
+                }
+                tuplestore::hold::end(h);
+
+                let ExecData { estate, planstate } = data;
+                crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "both drives together read the whole table");
+            arm_rows.push(rows);
+        }
+        assert_eq!(arm_rows[0], arm_rows[1], "knob arms byte-identical (fail-open law)");
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+}
+// --- end WS-AI wave-9 -----------------------------------------------------------
 // --- WS-AJ (wave-9): reserved ---

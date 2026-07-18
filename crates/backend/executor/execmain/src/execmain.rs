@@ -1024,6 +1024,28 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     let planstate = planstate.as_mut().expect("ExecutorRun without a plan state");
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
+    // === wave-9 shared-file marker (contract §7; sub-regions AG, AH, AI, AJ) ===
+    // (the execute_plan run seam — the §6 shared AI/AJ region; all four labels
+    // per the §7 protocol so the integrator splice is purely mechanical)
+    // --- WS-AG wave-9 sub-region (reserved) ------------------------------------
+    // --- end WS-AG wave-9 -------------------------------------------------------
+    // --- WS-AH wave-9 sub-region (reserved) ------------------------------------
+    // --- end WS-AH wave-9 -------------------------------------------------------
+    // --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) ---
+    // Per-run emission budget, written UNCONDITIONALLY like es_direction
+    // above it (None on knob-OFF and count-0 runs, which answer at the
+    // callee's first test; a None overwrite means no stale budget survives
+    // an error unwind or estate reuse). See lanev2/push.rs WS-AI region for
+    // the gate + serial law.
+    estate.es_cursor_run_budget = crate::lanev2::cursor_run_budget_install(
+        operation == CmdType::CMD_SELECT,
+        ::types_scan::sdir::ScanDirectionIsForward(direction),
+        number_tuples,
+        use_parallel_mode,
+    );
+    // --- end WS-AI wave-9 -------------------------------------------------------
+    // --- WS-AJ wave-9 sub-region (reserved) -------------------------------------
+    // --- end WS-AJ wave-9 -------------------------------------------------------
     if use_parallel_mode {
         enter_parallel_mode_outlined();
     }
