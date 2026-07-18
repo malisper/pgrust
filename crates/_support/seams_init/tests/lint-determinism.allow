@@ -395,7 +395,7 @@ blocking	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
 blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	P3 violator: 10ms cv poll, invisible to the virtual clock (s3.3)
 blocking	crates/backend/executor/runtime/src/lib.rs	1
 blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
-blocking	crates/backend/executor/runtime/src/sync.rs	6	SANCTIONED hub (s3.3)
+blocking	crates/backend/executor/runtime/src/sync.rs	1	SANCTIONED hub (s3.3); pgsync facade since permit-s1
 blocking	crates/backend/libpq/pqcomm/src/socket.rs	1
 blocking	crates/backend/postmaster/autovacuum/src/launcher.rs	3
 blocking	crates/backend/postmaster/autovacuum/src/worker.rs	1
@@ -408,7 +408,7 @@ blocking	crates/backend/postmaster/syslogger/src/lib.rs	1
 blocking	crates/backend/postmaster/walwriter/src/lib.rs	1
 blocking	crates/backend/storage/ipc/procarray/src/lib.rs	1
 blocking	crates/backend/storage/ipc/standby/src/recovery.rs	3
-blocking	crates/backend/storage/ipc/waiter/src/lib.rs	6	SANCTIONED hub: the parking hub (s3.3)
+blocking	crates/backend/storage/ipc/waiter/src/lib.rs	5	SANCTIONED hub: the parking hub (s3.3); mod sync = pgsync facade since permit-s1
 blocking	crates/backend/storage/ipc/waiteventset/src/wasm_stub.rs	1	DST-REVIEW(p4-simnet): wasm/p5-boot time-only WES backend (thread::sleep = poll_oneoff clock; wasm32-wasip1 has no threads to wake it) — never compiled on native/sim targets; P3 scheduler owns the real conversion
 blocking	crates/backend/storage/lmgr/lmgr/src/lib.rs	2
 blocking	crates/backend/tcop/backend_startup/src/lib.rs	1
@@ -547,3 +547,173 @@ scope	crates/backend/access/pgrcolumnar/src/scan.rs	1	P3 row 15 gang L2682
 scope	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15 gang L1317 (design cited L1303 pre-compose); joins bounded by row-5 abort topology
 scope	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18 gangs L2678 + L2916 (the raw-merge claim gang the first census pass missed)
 scope	crates/backend/executor/nodeagg/src/pardistinct.rs	2	P3 row 15 gangs L1827/L1973
+
+# ==================== PERMIT-S1-SYNC ====================
+# pgsync's own arms (the single-cfg-site crate; permit-scheduler.md s2,
+# permit-s1 contract s2.5 scanner trap: cfg(pgrust_sim)/cfg(loom) arms are
+# scanner-visible and carry review rows here).
+barrier	crates/_support/pgsync/src/loom_world.rs	1	DST-REVIEW(ws-sync): loom's own checked Barrier re-export line — the loom-world arm of the sanctioned library
+blocking	crates/_support/pgsync/src/lib.rs	4	DST-REVIEW(ws-sync): Semaphore/ParkLot composites absorbed verbatim from runtime/src/sync.rs (the sanctioned hub bodies moved here)
+blocking	crates/_support/pgsync/src/loom_world.rs	4	DST-REVIEW(ws-sync): loom Condvar/mpsc re-export lines (loom-world arm)
+blocking	crates/_support/pgsync/src/native.rs	2	DST-REVIEW(ws-sync): std Condvar/mpsc pub-use re-export lines (native arm is re-exports only)
+blocking	crates/_support/pgsync/src/sim_world.rs	23	DST-REVIEW(ws-sync): the sim wrappers themselves — std primitives + permit bookkeeping; every wait here IS the hooked interception point
+join	crates/_support/pgsync/src/sim_world.rs	1	DST-REVIEW(ws-sync): JoinHandle::join delegation AFTER the hooked done-flag park; residual OS join is bounded teardown
+once	crates/_support/pgsync/src/sim_world.rs	3	DST-REVIEW(ws-sync): OnceLock/Once composite METHOD DEFINITIONS (get_or_init/call_once name-based matches); losers park via the hooked Condvar
+spawn	crates/_support/pgsync/src/sim_world.rs	2	DST-REVIEW(ws-sync): sim thread::Builder wrapper over std Builder — registers children via hooks (synthetic vpid range); the spawn door stays the sanctioned product path
+# ---- rawsync census seed (generated from --regen at the migration tip; ----
+# ---- runtime + waiter carry NO rows = the ratchet's first tightening  ----
+rawsync	crates/_support/jit_deform/src/lib.rs	1
+rawsync	crates/_support/pgrust/trace/src/lib.rs	1
+rawsync	crates/_support/seams_init/src/lib.rs	1
+rawsync	crates/_support/test_boot/src/lib.rs	1
+rawsync	crates/backend/access/common/syncscan/src/lib.rs	1
+rawsync	crates/backend/access/common/tidstore/src/lib.rs	1
+rawsync	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
+rawsync	crates/backend/access/index/relscan/src/parallel.rs	1
+rawsync	crates/backend/access/nbtree/nbtree/src/utils.rs	1
+rawsync	crates/backend/access/pgrcolumnar/src/condcache.rs	1
+rawsync	crates/backend/access/pgrcolumnar/src/loadsort.rs	5
+rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
+rawsync	crates/backend/access/pgrcolumnar/src/reader.rs	9
+rawsync	crates/backend/access/pgrcolumnar/src/scan.rs	4
+rawsync	crates/backend/access/pgrcolumnar/src/segfile.rs	3
+rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	7
+rawsync	crates/backend/access/transam/clog/src/lib.rs	1
+rawsync	crates/backend/access/transam/commit_ts/src/lib.rs	1
+rawsync	crates/backend/access/transam/multixact/src/lib.rs	1
+rawsync	crates/backend/access/transam/parallel/src/lib.rs	6
+rawsync	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
+rawsync	crates/backend/access/transam/parallel/src/standing.rs	1
+rawsync	crates/backend/access/transam/subtrans/src/lib.rs	1
+rawsync	crates/backend/access/transam/transam_xlog/src/ctl.rs	1
+rawsync	crates/backend/access/transam/twophase/src/state.rs	1
+rawsync	crates/backend/access/transam/varsup/src/lib.rs	1
+rawsync	crates/backend/access/transam/xlogprefetcher/src/lib.rs	1
+rawsync	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
+rawsync	crates/backend/catalog/pg_constraint/src/lib.rs	1
+rawsync	crates/backend/commands/analyze/src/lib.rs	2
+rawsync	crates/backend/commands/commands_async/src/queue.rs	1
+rawsync	crates/backend/commands/copy/src/parallel.rs	3
+rawsync	crates/backend/commands/seclabel/src/lib.rs	1
+rawsync	crates/backend/commands/vacuum/src/lib.rs	1
+rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1
+rawsync	crates/backend/executor/execexpr/src/jit.rs	3
+rawsync	crates/backend/executor/execmain/src/execmain.rs	1
+rawsync	crates/backend/executor/execmain/src/execparallel.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2.rs	3
+rawsync	crates/backend/executor/execmain/src/lanev2/exprkey.rs	2
+rawsync	crates/backend/executor/execmain/src/lanev2/router.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+rawsync	crates/backend/executor/instrument/src/lib.rs	1
+rawsync	crates/backend/executor/laneexec/src/dicteval.rs	1
+rawsync	crates/backend/executor/lanestitch/src/lib.rs	1
+rawsync	crates/backend/executor/lanestitch/src/stitch.rs	1
+rawsync	crates/backend/executor/lanetable/src/lib.rs	3
+rawsync	crates/backend/executor/nodeagg/src/codedgroup.rs	3
+rawsync	crates/backend/executor/nodeagg/src/compact.rs	3
+rawsync	crates/backend/executor/nodeagg/src/distinctset.rs	2
+rawsync	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
+rawsync	crates/backend/executor/nodeagg/src/lib.rs	3
+rawsync	crates/backend/executor/nodeagg/src/merge.rs	5
+rawsync	crates/backend/executor/nodeagg/src/pardistinct.rs	5
+rawsync	crates/backend/executor/nodeagg/src/sink.rs	4
+rawsync	crates/backend/executor/nodeagg/src/spankey.rs	2
+rawsync	crates/backend/executor/nodeappend/src/lib.rs	1
+rawsync	crates/backend/executor/nodebitmapheapscan/src/lib.rs	1
+rawsync	crates/backend/executor/nodehash/src/parallel.rs	1
+rawsync	crates/backend/executor/nodeseqscan/src/lib.rs	5
+rawsync	crates/backend/executor/tqueue/src/lib.rs	1
+rawsync	crates/backend/lib/dshash/bench/rig/src/main.rs	1
+rawsync	crates/backend/lib/radixtree/src/lib.rs	1
+rawsync	crates/backend/libpq/be_secure_openssl/src/lib.rs	1
+rawsync	crates/backend/libpq/hba/src/lib.rs	2
+rawsync	crates/backend/nodes/tidbitmap/src/lib.rs	1
+rawsync	crates/backend/optimizer/path/costsize/src/gucs.rs	3
+rawsync	crates/backend/optimizer/plan/planner/src/fdwplan.rs	1
+rawsync	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+rawsync	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
+rawsync	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
+rawsync	crates/backend/port/pg_sema/src/lib.rs	1
+rawsync	crates/backend/postmaster/autovacuum/src/shmem.rs	1
+rawsync	crates/backend/postmaster/auxjob/src/lib.rs	1
+rawsync	crates/backend/postmaster/bgjobs/src/lib.rs	1
+rawsync	crates/backend/postmaster/bgworker/src/lib.rs	2
+rawsync	crates/backend/postmaster/bgwriter/src/job.rs	1
+rawsync	crates/backend/postmaster/checkpointer/src/lib.rs	1
+rawsync	crates/backend/postmaster/launch_backend/src/lib.rs	11
+rawsync	crates/backend/postmaster/pgarch/src/lib.rs	1
+rawsync	crates/backend/postmaster/pmchild/src/lib.rs	1
+rawsync	crates/backend/postmaster/postmaster/src/lib.rs	2
+rawsync	crates/backend/postmaster/syslogger/src/lib.rs	1
+rawsync	crates/backend/postmaster/walsummarizer/src/lib.rs	1
+rawsync	crates/backend/postmaster/walwriter/src/job.rs	1
+rawsync	crates/backend/replication/slot/src/lib.rs	1
+rawsync	crates/backend/replication/walsender/src/lib.rs	1
+rawsync	crates/backend/storage/aio/aio_uring/src/lib.rs	1
+rawsync	crates/backend/storage/buffer/bufmgr/src/freelist.rs	1
+rawsync	crates/backend/storage/ipc/dsm_core/src/dsm_impl.rs	1
+rawsync	crates/backend/storage/ipc/dsm_registry/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/latch/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/pg_barrier/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/pmsignal/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/procarray/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/procsignal/src/lib.rs	1
+rawsync	crates/backend/storage/ipc/shm_mq/src/stall.rs	1
+rawsync	crates/backend/storage/ipc/shmem/src/lib.rs	1
+rawsync	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
+rawsync	crates/backend/storage/lmgr/lmgr_proc/src/lib.rs	1
+rawsync	crates/backend/storage/lmgr/lock/src/shared.rs	1
+rawsync	crates/backend/storage/lmgr/lwlock/src/lib.rs	1
+rawsync	crates/backend/storage/lmgr/predicate/src/engine.rs	1
+rawsync	crates/backend/storage/lmgr/predicate/src/serial.rs	1
+rawsync	crates/backend/tcop/postgres/src/stmt_trace.rs	1
+rawsync	crates/backend/test_regress/src/lib.rs	2
+rawsync	crates/backend/timezone/pgtz/src/lib.rs	1
+rawsync	crates/backend/tsearch/ts_locale/src/public.rs	1
+rawsync	crates/backend/utils/activity/backend_status/src/lib.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/archiver.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/bgwriter.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/checkpointer.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/io.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/lib.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/shmem.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/slru.rs	1
+rawsync	crates/backend/utils/activity/pgstat/src/wal.rs	1
+rawsync	crates/backend/utils/activity/waitevent/src/custom.rs	1
+rawsync	crates/backend/utils/adt/adt_date/src/builtins.rs	1
+rawsync	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	1
+rawsync	crates/backend/utils/adt/float/src/funcs.rs	1
+rawsync	crates/backend/utils/adt/geo/src/tests_full.rs	1
+rawsync	crates/backend/utils/adt/pg_locale/src/icu_ffi.rs	1
+rawsync	crates/backend/utils/adt/xml/src/libxml.rs	1
+rawsync	crates/backend/utils/cache/relcache/src/initfile.rs	1
+rawsync	crates/backend/utils/cache/typcache_seams/src/lib.rs	1
+rawsync	crates/backend/utils/error/elog/src/syslog.rs	1
+rawsync	crates/backend/utils/fmgr/dfmgr/src/lib.rs	1
+rawsync	crates/backend/utils/init/init_small/src/wretain.rs	1
+rawsync	crates/backend/utils/init/miscinit/src/preload.rs	1
+rawsync	crates/backend/utils/init/postinit/src/lib.rs	2
+rawsync	crates/backend/utils/misc/guc/src/layers.rs	2
+rawsync	crates/backend/utils/misc/guc/src/store.rs	1
+rawsync	crates/backend/utils/misc/guc_tables/src/backing.rs	1
+rawsync	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	5
+rawsync	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	3
+rawsync	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	8
+rawsync	crates/backend/utils/misc/guc_tables/src/slots.rs	1
+rawsync	crates/backend/utils/misc/timeout/src/lib.rs	1
+rawsync	crates/backend/utils/misc/tzparser/src/lib.rs	1
+rawsync	crates/backend/utils/sort/sharedtuplestore/src/lib.rs	1
+rawsync	crates/contrib/pg_stat_statements/src/lib.rs	1
+rawsync	crates/contrib/pgcrypto/src/crypt/cryptdes.rs	1
+rawsync	crates/port/crc32c/src/lib.rs	1
+rawsync	crates/port/pg_clock/src/sim.rs	1
+rawsync	crates/port/pg_strong_random/src/sim.rs	1
+# ================== end PERMIT-S1-SYNC ==================
