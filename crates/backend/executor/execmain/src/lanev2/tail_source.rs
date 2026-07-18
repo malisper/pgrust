@@ -246,7 +246,7 @@ impl T3Shape {
             T3Shape::SampleScan => true,    // B1 per-shape commit 3/6 — FLIPPED
             T3Shape::TidScan => true,       // B1 per-shape commit 4/6 — FLIPPED
             T3Shape::NamedTuplestoreScan => true, // B1 per-shape commit 5/6 — FLIPPED
-            T3Shape::TidRangeScan => false, // B1 per-shape commit 6/6
+            T3Shape::TidRangeScan => true,  // B1 per-shape commit 6/6 — FLIPPED
         }
     }
 }
@@ -726,7 +726,7 @@ mod flip_ledger_tests {
             (T3Shape::SampleScan, true),
             (T3Shape::TidScan, true),
             (T3Shape::NamedTuplestoreScan, true),
-            (T3Shape::TidRangeScan, false),
+            (T3Shape::TidRangeScan, true),
         ];
         for (shape, flipped) in expected {
             assert_eq!(

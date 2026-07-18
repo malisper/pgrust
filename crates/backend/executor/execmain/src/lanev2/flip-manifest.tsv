@@ -72,3 +72,4 @@ windowagg	epq,backward,instrumented,child-not-lane-owned,shape-qual-proj
 # wave-7 B1 3/6: samplescan source form default-ON (rides merged row)
 # wave-7 B1 4/6: tidscan source form default-ON (rides merged row)
 # wave-7 B1 5/6: namedtuplestorescan source form default-ON (rides merged row)
+# wave-7 B1 6/6: tidrangescan source form default-ON (rides merged row) — ladder COMPLETE
