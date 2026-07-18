@@ -9,6 +9,7 @@ name = "uuid_ossp"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../port/pg_clock" }
 datum = { path = "../../_support/types/datum" }
 types_error = { path = "../../_support/types/types_error" }
 types_fmgr = { path = "../../_support/types/fmgr" }
