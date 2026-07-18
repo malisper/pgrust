@@ -17,6 +17,8 @@ pub mod single_user;
 pub mod stdio_wire;
 #[cfg(pgrust_sim)]
 mod sim_net;
+#[cfg(pgrust_sim)]
+mod sim_sched_demo;
 pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]

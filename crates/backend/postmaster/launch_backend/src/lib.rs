@@ -438,10 +438,27 @@ pub fn postmaster_child_launch(
         guc::store::capture_nondefault_variables()
     };
 
+    // PERMIT-S1 (WS-CORE, contract §3.1): the spawn door registers the
+    // child's permit-scheduler slot BEFORE the OS spawn, keyed by the
+    // reserved vpid (reserve_child_pid pids are positive: the u32 cast is
+    // lossless and stays below the synthetic ranges). No-op unless
+    // PGRUST_SIM_SCHED=1 under `pgrust_sim`.
+    #[cfg(pgrust_sim)]
+    let sim_sched_slot =
+        pgsync::sim::spawn_door::register_child(child_pid as u32, kind.name);
+
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
         .stack_size(child_thread_stack_size())
         .spawn(move || {
+            // PERMIT-S1: bind this thread to its slot and park until the
+            // first permit grant. Declared FIRST so its Drop — the teardown
+            // epilogue (teardown hooks inside the final quantum, deregister,
+            // join-wake, handoff) — runs LAST, after every TLS-owning guard
+            // below has dropped inside the final quantum (TLS-teardown
+            // rule 1, design §3).
+            #[cfg(pgrust_sim)]
+            let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
             // Thread-scoped (a retained thread reuses its slot across tasks):
             // the local latch slab slot returns on every thread exit —
             // announce fallthrough and panic unwind alike.
