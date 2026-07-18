@@ -66,11 +66,19 @@ pub struct TableShape {
     pub min_cols: u32,
     pub max_cols: u32,
     pub col_types: ColTypeWeights,
+    /// H6: cap on set-based bulk-insert sizes (the cardinality lever). The
+    /// runner-side profile's `table_shape.rows_max` maps here.
+    pub rows_max: u32,
 }
 
 impl Default for TableShape {
     fn default() -> Self {
-        TableShape { min_cols: 2, max_cols: 5, col_types: ColTypeWeights::default() }
+        TableShape {
+            min_cols: 2,
+            max_cols: 5,
+            col_types: ColTypeWeights::default(),
+            rows_max: 400,
+        }
     }
 }
 
@@ -121,6 +129,12 @@ pub struct GenProfile {
     /// determinism is preserved honestly. Never set in battery profiles.
     #[serde(default)]
     pub test_disable_productions: Vec<String>,
+    /// H6 planner-knob swarm block (see `gen::knobs`): when present, the
+    /// generator samples per-seed planner-GUC sets and appends them to the
+    /// arm-set pool. Sampling reads the generator's one seeded stream, so
+    /// determinism law A3 holds: same seed + profile => same knobs.
+    #[serde(default)]
+    pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
 }
 
 impl GenProfile {

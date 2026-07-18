@@ -65,7 +65,38 @@ pub struct Table {
     pub cols: Vec<Col>,
     /// Monotonic insert-key counter (keys unique per table by construction).
     pub next_key: i64,
-    pub n_indexes: u32,
+    /// Secondary indexes created on this table by the generator (H6: DROP
+    /// INDEX needs a name; queries bias toward indexed columns; the implicit
+    /// PK index is not listed).
+    pub indexes: Vec<IndexDef>,
+}
+
+/// A generator-created secondary index.
+#[derive(Debug, Clone)]
+pub struct IndexDef {
+    pub name: String,
+    /// Plain single/multi-column key columns; empty for expression indexes.
+    pub cols: Vec<String>,
+}
+
+/// A file_fdw foreign table the generator has set up (H6 state arm). The
+/// backing CSV lives in the server's data directory under `csv_name`, written
+/// by a `COPY ... TO` step; each engine leg writes its own copy of the same
+/// deterministic bytes.
+#[derive(Debug, Clone)]
+pub struct ForeignTable {
+    pub name: String,
+    /// Payload columns after the leading `id bigint`.
+    pub cols: Vec<Col>,
+    /// Row count in the backing CSV.
+    pub rows: u64,
+    /// Absolute CSV path (`/tmp/simharness_fdw_<seed>_<name>.csv`). COPY TO
+    /// requires an absolute path; the seed tag keeps concurrent campaigns
+    /// from clobbering each other, and the seed is part of plan identity so
+    /// the bytes stay a pure function of seed+profile+generator. Both legs
+    /// write the same deterministic bytes to the same path — reads always
+    /// see identical content on both legs.
+    pub csv_name: String,
 }
 
 impl Table {
@@ -78,9 +109,29 @@ impl Table {
 pub struct SchemaState {
     /// Live tables only (drops remove).
     tables: Vec<Table>,
+    /// Live file_fdw foreign tables (H6; separate from `tables` so ordinary
+    /// DML/joins never address a read-only foreign table).
+    foreign: Vec<ForeignTable>,
+    /// file_fdw extension created this plan (transactional, snapshotted).
+    fdw_extension: bool,
+    /// file_fdw server created this plan (transactional, snapshotted).
+    fdw_server: bool,
     next_table: u32,
     next_index: u32,
     next_rename: u32,
+    next_foreign: u32,
+    /// The plan's seed (set once at generator construction; not part of any
+    /// snapshot). Used only to tag foreign-table CSV paths.
+    plan_seed: u64,
+}
+
+/// Transaction-visible schema snapshot (see [`SchemaState::snapshot`]).
+#[derive(Debug, Clone)]
+pub struct SchemaSnapshot {
+    tables: Vec<Table>,
+    foreign: Vec<ForeignTable>,
+    fdw_extension: bool,
+    fdw_server: bool,
 }
 
 impl SchemaState {
@@ -97,7 +148,7 @@ impl SchemaState {
             c = c.union(Caps::MULTIPLE_TABLES);
         }
         for t in &self.tables {
-            if t.n_indexes > 0 {
+            if !t.indexes.is_empty() {
                 c = c.union(Caps::HAS_INDEX);
             }
             for col in &t.cols {
@@ -153,7 +204,7 @@ impl SchemaState {
             cur_name: birth,
             cols,
             next_key: 1,
-            n_indexes: 0,
+            indexes: Vec::new(),
         });
         self.tables.len() - 1
     }
@@ -183,17 +234,84 @@ impl SchemaState {
     /// must revert with it or every later statement addresses tables the
     /// server rolled away — 42P01/25P02 storms).
     ///
-    /// The global name counters (`next_table` / `next_index` / `next_rename`)
-    /// are deliberately NOT part of the snapshot: identifiers stay monotonic
-    /// across rollbacks, so a name is never reused. A rolled-back name is free
-    /// on the server (skipping it is always valid SQL), and birth ids stay
-    /// unique plan-wide, which the table-dependency API relies on.
-    pub fn snapshot_tables(&self) -> Vec<Table> {
-        self.tables.clone()
+    /// The global name counters (`next_table` / `next_index` / `next_rename`
+    /// / `next_foreign`) are deliberately NOT part of the snapshot:
+    /// identifiers stay monotonic across rollbacks, so a name is never
+    /// reused. A rolled-back name is free on the server (skipping it is
+    /// always valid SQL), and birth ids stay unique plan-wide, which the
+    /// table-dependency API relies on.
+    ///
+    /// H6: the snapshot also covers the fdw state — CREATE EXTENSION /
+    /// CREATE SERVER / CREATE FOREIGN TABLE are all transactional in
+    /// PostgreSQL, so they revert with a ROLLBACK. (The CSV written by the
+    /// `COPY ... TO` step does NOT revert — a data-directory file with no
+    /// foreign table over it is harmless, and re-setup uses IF NOT EXISTS.)
+    pub fn snapshot(&self) -> SchemaSnapshot {
+        SchemaSnapshot {
+            tables: self.tables.clone(),
+            foreign: self.foreign.clone(),
+            fdw_extension: self.fdw_extension,
+            fdw_server: self.fdw_server,
+        }
     }
 
-    /// Restore the tx-visible state captured by [`snapshot_tables`].
-    pub fn restore_tables(&mut self, tables: Vec<Table>) {
-        self.tables = tables;
+    /// Restore the tx-visible state captured by [`snapshot`].
+    pub fn restore(&mut self, snap: SchemaSnapshot) {
+        self.tables = snap.tables;
+        self.foreign = snap.foreign;
+        self.fdw_extension = snap.fdw_extension;
+        self.fdw_server = snap.fdw_server;
+    }
+
+    // -- H6 foreign-table state ops (file_fdw) ------------------------------
+
+    pub fn foreign_tables(&self) -> &[ForeignTable] {
+        &self.foreign
+    }
+
+    pub fn fdw_extension_created(&self) -> bool {
+        self.fdw_extension
+    }
+
+    pub fn fdw_server_created(&self) -> bool {
+        self.fdw_server
+    }
+
+    pub fn mark_fdw_extension(&mut self) {
+        self.fdw_extension = true;
+    }
+
+    pub fn mark_fdw_server(&mut self) {
+        self.fdw_server = true;
+    }
+
+    pub fn set_plan_seed(&mut self, seed: u64) {
+        self.plan_seed = seed;
+    }
+
+    /// Register a new foreign table shape (fixed simple payload: one int, one
+    /// text column — deterministic, matched by the CSV writer in gen::noise).
+    pub fn create_foreign_table(&mut self, rows: u64) -> &ForeignTable {
+        self.next_foreign += 1;
+        let name = format!("ft{}", self.next_foreign);
+        let csv_name = format!("/tmp/simharness_fdw_{}_{name}.csv", self.plan_seed);
+        self.foreign.push(ForeignTable {
+            name,
+            cols: vec![
+                Col { name: "a".into(), ty: ColType::Int },
+                Col { name: "b".into(), ty: ColType::Text },
+            ],
+            rows,
+            csv_name,
+        });
+        self.foreign.last().expect("just pushed")
+    }
+
+    pub fn pick_foreign(&self, rng: &mut dyn RngCore) -> Option<&ForeignTable> {
+        if self.foreign.is_empty() {
+            return None;
+        }
+        let i = range_incl(rng, 0, self.foreign.len() as u64 - 1) as usize;
+        Some(&self.foreign[i])
     }
 }

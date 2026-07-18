@@ -58,12 +58,43 @@ pub const DDL_CREATE_TABLE: &str = "ddl:create-table";
 pub const DDL_CREATE_INDEX: &str = "ddl:create-index";
 pub const DDL_RENAME_TABLE: &str = "ddl:rename-table";
 pub const DDL_DROP_TABLE: &str = "ddl:drop-table";
+// H6 state arm: index-shape diversity + statistics + foreign-data state ops.
+// "State op" = a DDL step whose point is to change what plans the planner can
+// pick for LATER queries (an index, fresh statistics, a foreign table), not
+// to be interesting by itself.
+pub const DDL_CREATE_INDEX_MULTI: &str = "ddl:create-index-multi";
+pub const DDL_CREATE_INDEX_EXPR: &str = "ddl:create-index-expr";
+pub const DDL_CREATE_INDEX_PARTIAL: &str = "ddl:create-index-partial";
+pub const DDL_CREATE_INDEX_BRIN: &str = "ddl:create-index-brin";
+pub const DDL_DROP_INDEX: &str = "ddl:drop-index";
+pub const DDL_ANALYZE: &str = "ddl:analyze";
+/// BitmapAnd substrate chain: two single-column indexes on one table +
+/// ANALYZE emitted as one decision (first statement traces this node; the
+/// second and third trace ddl:create-index / ddl:analyze).
+pub const DDL_INDEX_PAIR: &str = "ddl:index-pair";
+// file_fdw foreign-table setup chain. One generator decision emits the whole
+// chain as consecutive DDL steps (extension -> server -> csv COPY -> foreign
+// table); each emitted statement gets its own trace node so statement/trace
+// alignment holds. Later picks in the same plan skip the stages the session
+// already has (IF NOT EXISTS keeps the SQL idempotent across seeds).
+pub const DDL_FDW_EXTENSION: &str = "ddl:fdw-extension";
+pub const DDL_FDW_SERVER: &str = "ddl:fdw-server";
+pub const DDL_FDW_COPY: &str = "ddl:fdw-copy";
+pub const DDL_FDW_TABLE: &str = "ddl:fdw-table";
 
 // dml variants
 pub const DML_INSERT: &str = "dml:insert";
 pub const DML_UPDATE: &str = "dml:update";
 pub const DML_DELETE: &str = "dml:delete";
 pub const DML_TRUNCATE: &str = "dml:truncate";
+/// H6: key-addressed MERGE (semantically a guarded UPDATE/DELETE — the
+/// ledger-understood subset is preserved; ModifyTable Merge species reaches
+/// the census through the DML explain gate).
+pub const DML_MERGE: &str = "dml:merge";
+/// H6 state arm: set-based INSERT ... SELECT over generate_series — the
+/// cardinality lever (tiny/medium/larger tables make the planner cross its
+/// seq-scan-vs-index cost thresholds).
+pub const DML_BULK_INSERT: &str = "dml:bulk-insert";
 
 // query variants (gen_query)
 pub const Q_FULL_ORDERED: &str = "q:full-ordered";
@@ -80,6 +111,82 @@ pub const Q_SCALAR_CALL: &str = "q:scalar-call";
 pub const Q_INNER_JOIN: &str = "q:inner-join";
 pub const Q_LEFT_JOIN_COALESCE: &str = "q:left-join-coalesce";
 pub const Q_OJ_NEST_COALESCE: &str = "q:oj-nest-coalesce";
+// H6 state arm: query shapes that pay off once the state ops above ran.
+/// ORDER BY <payload-col>, id — with an index on the payload column this is
+/// the Incremental Sort elicitation shape (index gives the prefix order).
+pub const Q_ORDER_PREFIX: &str = "q:order-prefix";
+/// WHERE a = k1 AND b = k2 — with two single-column indexes + ANALYZE'd
+/// stats this is the BitmapAnd elicitation shape.
+pub const Q_TWO_COL_EQ: &str = "q:two-col-eq";
+/// SELECT <col> ... WHERE <col> ... — projection covered by a single-column
+/// index: the Index Only Scan elicitation shape.
+pub const Q_COVERED_SELECT: &str = "q:covered-select";
+/// SELECT over a file_fdw foreign table — the Foreign Scan elicitation shape.
+pub const Q_FOREIGN_SCAN: &str = "q:foreign-scan";
+
+// H6 grammar-arm query variants. Each name is one gen_query alternative;
+// sub-variant nodes (children) follow each family below. All are plain
+// differential reads (compared DUT-vs-C like every noise query — the H4
+// join pattern: no ledger modeling, `ledger_op: None` when substituted
+// into property noise slots).
+pub const Q_EXISTS_SEMI: &str = "q:exists-semi";
+pub const Q_NOT_EXISTS_ANTI: &str = "q:not-exists-anti";
+pub const Q_IN_SUBQ: &str = "q:in-subq";
+pub const Q_SCALAR_SUBQ: &str = "q:scalar-subq";
+pub const Q_CTE_MATERIALIZED: &str = "q:cte-materialized";
+pub const Q_CTE_RECURSIVE: &str = "q:cte-recursive";
+pub const Q_SETOP: &str = "q:setop";
+pub const Q_UNION_ALL_TOPK: &str = "q:union-all-topk";
+pub const Q_HAVING: &str = "q:having";
+pub const Q_GROUP_NOAGG: &str = "q:group-noagg";
+pub const Q_DISTINCT: &str = "q:distinct";
+pub const Q_DISTINCT_ON: &str = "q:distinct-on";
+pub const Q_GROUPING_SETS: &str = "q:grouping-sets";
+pub const Q_WINDOW: &str = "q:window";
+pub const Q_VALUES_SCAN: &str = "q:values-scan";
+pub const Q_SUBQUERY_SCAN: &str = "q:subquery-scan";
+pub const Q_PROJECT_SET: &str = "q:project-set";
+pub const Q_RESULT: &str = "q:result";
+pub const Q_TID: &str = "q:tid";
+pub const Q_TABLESAMPLE: &str = "q:tablesample";
+pub const Q_JSON_TABLE: &str = "q:json-table";
+pub const Q_FULL_JOIN: &str = "q:full-join";
+pub const Q_OR_QUAL: &str = "q:or-qual";
+pub const Q_FOR_UPDATE: &str = "q:for-update";
+
+// scalar-subquery arms
+pub const SSQ_CORRELATED_COUNT: &str = "ssq:correlated-count";
+pub const SSQ_INITPLAN_MAX: &str = "ssq:initplan-max";
+
+// set-operation arms
+pub const SO_UNION: &str = "so:union";
+pub const SO_UNION_ALL: &str = "so:union-all";
+pub const SO_INTERSECT: &str = "so:intersect";
+pub const SO_EXCEPT: &str = "so:except";
+
+// grouping-sets arms
+pub const GS_ROLLUP: &str = "gs:rollup";
+pub const GS_CUBE: &str = "gs:cube";
+pub const GS_SETS: &str = "gs:sets";
+
+// window-function arms
+pub const W_ROW_NUMBER: &str = "w:row-number";
+pub const W_RANK: &str = "w:rank";
+pub const W_SUM_OVER: &str = "w:sum-over";
+pub const W_SUM_PARTITION: &str = "w:sum-partition";
+
+// result-plan arms
+pub const RES_NO_FROM: &str = "res:no-from";
+pub const RES_WHERE_FALSE: &str = "res:where-false";
+pub const RES_MINMAX: &str = "res:minmax";
+
+// tid arms
+pub const TID_POINT: &str = "tid:point";
+pub const TID_RANGE: &str = "tid:range";
+
+// tablesample arms
+pub const SMP_BERNOULLI: &str = "smp:bernoulli";
+pub const SMP_SYSTEM: &str = "smp:system";
 
 // srf-unnest element types
 pub const SRF_INT: &str = "srf:int";
@@ -153,6 +260,13 @@ pub enum Gate {
     ColsCanBeEmpty,
     /// apply-set needs at least one NON-EMPTY arm set in the profile.
     NonEmptyArmSet,
+    /// needs a table that can have >= 2 payload columns (two-col shapes).
+    TwoPayloadCols,
+    /// DDL-side two-column requirement (the index-pair chain).
+    DdlTwoCols,
+    /// foreign-table read: needs both query and ddl weighted (the foreign
+    /// table only exists after the DDL-side fdw setup chain ran).
+    ForeignScan,
 }
 
 #[derive(Debug, Clone)]
@@ -191,11 +305,24 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         def(DDL_CREATE_INDEX, Some(STMT_DDL), WDdl, false),
         def(DDL_RENAME_TABLE, Some(STMT_DDL), WDdl, false),
         def(DDL_DROP_TABLE, Some(STMT_DDL), WDdl, false),
+        // H6 state ops
+        def(DDL_CREATE_INDEX_MULTI, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_EXPR, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_PARTIAL, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_BRIN, Some(STMT_DDL), WDdl, false),
+        def(DDL_DROP_INDEX, Some(STMT_DDL), WDdl, false),
+        def(DDL_ANALYZE, Some(STMT_DDL), WDdl, false),
+        def(DDL_INDEX_PAIR, Some(STMT_DDL), DdlTwoCols, false),
+        def(DDL_FDW_EXTENSION, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_SERVER, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_COPY, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_TABLE, Some(STMT_DDL), WDdl, false),
         // dml
         def(DML_INSERT, Some(STMT_DML), WDml, false),
         def(DML_UPDATE, Some(STMT_DML), WDml, false),
         def(DML_DELETE, Some(STMT_DML), WDml, false),
         def(DML_TRUNCATE, Some(STMT_DML), WDml, false),
+        def(DML_BULK_INSERT, Some(STMT_DML), WDml, false),
         // query variants
         def(Q_FULL_ORDERED, Some(STMT_QUERY), WQuery, false),
         def(Q_COUNT_STAR, Some(STMT_QUERY), WQuery, false),
@@ -211,6 +338,66 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         def(Q_INNER_JOIN, Some(STMT_QUERY), WQuery, false),
         def(Q_LEFT_JOIN_COALESCE, Some(STMT_QUERY), WQuery, false),
         def(Q_OJ_NEST_COALESCE, Some(STMT_QUERY), WQuery, false),
+        // H6 grammar-arm variants (all plain differential reads)
+        def(Q_EXISTS_SEMI, Some(STMT_QUERY), WQuery, false),
+        def(Q_NOT_EXISTS_ANTI, Some(STMT_QUERY), WQuery, false),
+        def(Q_IN_SUBQ, Some(STMT_QUERY), WQuery, false),
+        def(Q_SCALAR_SUBQ, Some(STMT_QUERY), WQuery, false),
+        def(Q_CTE_MATERIALIZED, Some(STMT_QUERY), WQuery, false),
+        def(Q_CTE_RECURSIVE, Some(STMT_QUERY), WQuery, false),
+        def(Q_SETOP, Some(STMT_QUERY), WQuery, false),
+        def(Q_UNION_ALL_TOPK, Some(STMT_QUERY), WQuery, false),
+        def(Q_HAVING, Some(STMT_QUERY), WQuery, false),
+        def(Q_GROUP_NOAGG, Some(STMT_QUERY), WQuery, false),
+        def(Q_DISTINCT, Some(STMT_QUERY), WQuery, false),
+        def(Q_DISTINCT_ON, Some(STMT_QUERY), WQuery, false),
+        def(Q_GROUPING_SETS, Some(STMT_QUERY), WQuery, false),
+        def(Q_WINDOW, Some(STMT_QUERY), WQuery, false),
+        def(Q_VALUES_SCAN, Some(STMT_QUERY), WQuery, false),
+        def(Q_SUBQUERY_SCAN, Some(STMT_QUERY), WQuery, false),
+        def(Q_PROJECT_SET, Some(STMT_QUERY), WQuery, false),
+        def(Q_RESULT, Some(STMT_QUERY), WQuery, false),
+        def(Q_TID, Some(STMT_QUERY), WQuery, false),
+        def(Q_TABLESAMPLE, Some(STMT_QUERY), WQuery, false),
+        def(Q_JSON_TABLE, Some(STMT_QUERY), WQuery, false),
+        def(Q_FULL_JOIN, Some(STMT_QUERY), WQuery, false),
+        def(Q_OR_QUAL, Some(STMT_QUERY), WQuery, false),
+        def(Q_FOR_UPDATE, Some(STMT_QUERY), WQuery, false),
+        // scalar-subquery arms
+        def(SSQ_CORRELATED_COUNT, Some(Q_SCALAR_SUBQ), WQuery, false),
+        def(SSQ_INITPLAN_MAX, Some(Q_SCALAR_SUBQ), WQuery, false),
+        // set-operation arms
+        def(SO_UNION, Some(Q_SETOP), WQuery, false),
+        def(SO_UNION_ALL, Some(Q_SETOP), WQuery, false),
+        def(SO_INTERSECT, Some(Q_SETOP), WQuery, false),
+        def(SO_EXCEPT, Some(Q_SETOP), WQuery, false),
+        // grouping-sets arms
+        def(GS_ROLLUP, Some(Q_GROUPING_SETS), WQuery, false),
+        def(GS_CUBE, Some(Q_GROUPING_SETS), WQuery, false),
+        def(GS_SETS, Some(Q_GROUPING_SETS), WQuery, false),
+        // window-function arms
+        def(W_ROW_NUMBER, Some(Q_WINDOW), WQuery, false),
+        def(W_RANK, Some(Q_WINDOW), WQuery, false),
+        def(W_SUM_OVER, Some(Q_WINDOW), WQuery, false),
+        def(W_SUM_PARTITION, Some(Q_WINDOW), WQuery, false),
+        // result-plan arms
+        def(RES_NO_FROM, Some(Q_RESULT), WQuery, false),
+        def(RES_WHERE_FALSE, Some(Q_RESULT), WQuery, false),
+        def(RES_MINMAX, Some(Q_RESULT), WQuery, false),
+        // tid arms
+        def(TID_POINT, Some(Q_TID), WQuery, false),
+        def(TID_RANGE, Some(Q_TID), WQuery, false),
+        // tablesample arms
+        def(SMP_BERNOULLI, Some(Q_TABLESAMPLE), WQuery, false),
+        def(SMP_SYSTEM, Some(Q_TABLESAMPLE), WQuery, false),
+        // dml explain-census target (H6: EXPLAIN'd plan-only on the DUT;
+        // execution is the ordinary differential DML compare)
+        def(DML_MERGE, Some(STMT_DML), WDml, false),
+        // H6 state-arm query shapes
+        def(Q_ORDER_PREFIX, Some(STMT_QUERY), WQuery, false),
+        def(Q_TWO_COL_EQ, Some(STMT_QUERY), TwoPayloadCols, false),
+        def(Q_COVERED_SELECT, Some(STMT_QUERY), WQuery, false),
+        def(Q_FOREIGN_SCAN, Some(STMT_QUERY), ForeignScan, false),
         // srf element types
         def(SRF_INT, Some(Q_SRF_UNNEST), WQuery, false),
         def(SRF_TEXT, Some(Q_SRF_UNNEST), WQuery, false),
@@ -271,9 +458,12 @@ pub fn gate_reason(def_: &ProdDef, p: &GenProfile) -> Option<String> {
         Gate::WDml => closed(w.dml > 0, "statement_weights.dml=0"),
         Gate::WQuery => closed(w.query > 0, "statement_weights.query=0"),
         Gate::WTx => closed(w.tx > 0, "statement_weights.tx=0"),
+        // H6: a `planner_knobs` block guarantees sampled arm sets per seed
+        // (the sampler never returns an empty pool), so arms are generatable
+        // even with `arm_sets` empty.
         Gate::WArm => closed(
-            w.arm > 0 && !p.arm_sets.is_empty(),
-            "statement_weights.arm=0 or arm_sets empty",
+            w.arm > 0 && (!p.arm_sets.is_empty() || p.planner_knobs.is_some()),
+            "statement_weights.arm=0, or arm_sets empty with no planner_knobs",
         ),
         Gate::WFault => {
             if w.fault == 0 {
@@ -318,9 +508,25 @@ pub fn gate_reason(def_: &ProdDef, p: &GenProfile) -> Option<String> {
             w.query > 0 && p.table_shape.min_cols == 0,
             "fires only when a table can have zero payload columns (min_cols=0)",
         ),
+        // H6: sampled planner-knob sets are non-empty by construction (the
+        // sampler's empty-set guard), so `planner_knobs` also opens apply-set.
         Gate::NonEmptyArmSet => closed(
-            w.arm > 0 && p.arm_sets.iter().any(|s| !s.is_empty()),
-            "no non-empty arm set in profile",
+            w.arm > 0
+                && (p.arm_sets.iter().any(|s| !s.is_empty()) || p.planner_knobs.is_some()),
+            "no non-empty arm set in profile (and no planner_knobs sampler)",
+        ),
+        Gate::TwoPayloadCols => closed(
+            w.query > 0 && p.table_shape.max_cols >= 2,
+            "needs a table with >= 2 payload columns (table_shape.max_cols < 2)",
+        ),
+        Gate::DdlTwoCols => closed(
+            w.ddl > 0 && p.table_shape.max_cols >= 2,
+            "needs ddl weighted AND a table with >= 2 payload columns",
+        ),
+        Gate::ForeignScan => closed(
+            w.query > 0 && w.ddl > 0,
+            "needs statement_weights.query>0 AND ddl>0 (foreign table comes from \
+             the DDL-side fdw setup chain)",
         ),
     }
 }
