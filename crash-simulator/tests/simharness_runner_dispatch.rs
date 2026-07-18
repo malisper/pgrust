@@ -369,7 +369,7 @@ fn reconnect_server_restarts_and_resyncs_both_legs() {
     };
     let mut dut = MockSession::dead_until_reconnect("dut"); // old conn dead = real restart
     let mut cpg = MockSession::ok("cpg");
-    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![] };
+    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![], ..ExecOptions::default() };
     let report = execute_plan(
         &plan,
         &mut dut,
@@ -397,7 +397,7 @@ fn reconnect_server_noop_restart_is_refused_p1() {
     };
     let mut dut = MockSession::ok("dut"); // old conn still answers = no-op restart
     let mut cpg = MockSession::ok("cpg");
-    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![] };
+    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![], ..ExecOptions::default() };
     let report = execute_plan(
         &plan,
         &mut dut,
@@ -445,4 +445,65 @@ fn dut_connection_lost_is_rust_crash_p1() {
     let f = report.failure.expect("crash failure");
     assert_eq!(f.class, "rust-crash");
     assert_eq!(f.sev, "P1");
+}
+
+// ---------------------------------------------------------------- H2 seam
+
+/// H2 FaultDriver seam: with a driver that ARMS (mock installer), a reserved
+/// fault tag no longer refuses — the run continues, the census records
+/// `fault-armed`, and the plan's later steps execute.
+#[test]
+fn reserved_fault_tag_arms_via_fault_driver_and_run_continues() {
+    use simharness::runner::faultdriver::{
+        map_fault_step, FaultDriver, FaultDriverError, FaultPlanSpec,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct ArmingDriver {
+        installed: Rc<RefCell<Vec<FaultPlanSpec>>>,
+    }
+    impl FaultDriver for ArmingDriver {
+        fn name(&self) -> &'static str {
+            "mock-installer"
+        }
+        fn map(
+            &self,
+            fault: &FaultPoint,
+            plan_seed: u64,
+            step_idx: usize,
+        ) -> Result<FaultPlanSpec, FaultDriverError> {
+            map_fault_step(fault, plan_seed, step_idx)
+        }
+        fn arm(&self, spec: &FaultPlanSpec) -> Result<(), FaultDriverError> {
+            self.installed.borrow_mut().push(spec.clone());
+            Ok(())
+        }
+    }
+
+    let installed = Rc::new(RefCell::new(Vec::new()));
+    let plan = Plan {
+        header: header(37),
+        steps: vec![
+            Step::Fault(FaultPoint::TornWrite),
+            Step::Query(sql("SELECT 1", Mark::Read)), // MUST still run
+        ],
+    };
+    let mut dut = MockSession::ok("dut");
+    let opts = ExecOptions {
+        fault_driver: Box::new(ArmingDriver { installed: Rc::clone(&installed) }),
+        ..ExecOptions::default()
+    };
+    let report =
+        execute_plan(&plan, &mut dut, None, &BasicCheckEval, &BasicDiffClassifier, &opts);
+    assert!(report.failure.is_none(), "{:?}", report.failure);
+    assert_eq!(report.class_counts.get("fault-armed"), Some(&1));
+    assert_eq!(dut.calls, vec!["SELECT 1".to_string()], "later steps run after arming");
+    let specs = installed.borrow();
+    assert_eq!(specs.len(), 1, "exactly one fault plan installed");
+    // The installed spec is the deterministic mapping for (plan seed, step 0).
+    assert_eq!(
+        specs[0],
+        map_fault_step(&FaultPoint::TornWrite, plan.header.seed, 0).unwrap()
+    );
 }

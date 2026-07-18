@@ -174,6 +174,8 @@ pub fn wart_counter(id: &str) -> String {
 ///   - `dispatch-refusal`         mutation-split law would be violated
 ///   - `fault-reserved-refused`   reserved fault tag reached execution (H4)
 ///   - `fault-restart-noop`       restart_cmd exited 0 but the DUT survived
+///   - `fault-armed`              a FaultDriver mapped+armed a reserved tag
+///                                (H2 seam; only a non-NoOp driver mints it)
 pub fn harness_class_severity(class: &str) -> Option<Severity> {
     if class.starts_with("wart:") {
         return Some(Severity::Fine);
@@ -183,6 +185,7 @@ pub fn harness_class_severity(class: &str) -> Option<Severity> {
         "err-uncompared"
         | "fault-skipped-no-restart-cmd"
         | "fault-restart-cmd-failed"
+        | "fault-armed"
         | "floor-skipped-no-instrument"
         | "skipped-no-hook" => Severity::Fine,
         _ => return None,
