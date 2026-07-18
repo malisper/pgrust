@@ -1247,11 +1247,19 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
             for ti in &tablespaces {
                 let linkloc = data_path(&format!("{PG_TBLSPC_DIR}/{}", ti.oid));
                 let _ = std::fs::remove_file(&linkloc);
-                if std::os::unix::fs::symlink(&ti.path, &linkloc).is_err() {
+                // wasm32: std exposes no symlink creation on wasi (unix::fs
+                // is absent; wasi::fs's is unstable) — refuse with the C
+                // error shape (52 = WASI ENOSYS), the tablespace wasm arm's
+                // convention. tablespace_map restores are unsupported there.
+                #[cfg(target_family = "wasm")]
+                let link_result: std::io::Result<()> =
+                    Err(std::io::Error::from_raw_os_error(52));
+                #[cfg(not(target_family = "wasm"))]
+                let link_result = std::os::unix::fs::symlink(&ti.path, &linkloc);
+                if let Err(e) = link_result {
                     { ereport(ERROR)
                         .errmsg(format!(
-                            "could not create symbolic link \"{linkloc}\": {}",
-                            std::io::Error::last_os_error()
+                            "could not create symbolic link \"{linkloc}\": {e}"
                         ))
                         .finish(loc("InitWalRecovery"))?; unreachable!() }
                 }
