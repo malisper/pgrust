@@ -274,6 +274,7 @@ time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1
 time	crates/backend/utils/misc/timeout/src/lib.rs	5	P2 target: timer-thread deadlines onto the virtual clock (s2.2)
 time	crates/common/controldata_utils/src/lib.rs	2	doc-named P2 reroute: controldata (s2.2)
 time	crates/contrib/uuid_ossp/src/lib.rs	2
+time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
 
 # ==== rand ====
 rand	crates/port/pg_strong_random/src/lib.rs	4	SANCTIONED: the entropy funnel internals (s2.3); pg_strong_random callers are never flagged
@@ -376,6 +377,7 @@ env	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	4
 env	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	2
 env	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	6
 env	crates/backend/utils/misc/tzparser/src/lib.rs	2
+env	crates/port/pg_clock/src/sim.rs	2	DST-REVIEW(ws-clk): PGRUST_SIM_CLOCK_MODE/PGRUST_SIM_WALL_BASE readers, cfg(pgrust_sim)-only (no product reader); absorbed by the s2.5 knobs-registry charter
 env	crates/port/pg_path/src/lib.rs	1
 
 # ==== blocking ====
